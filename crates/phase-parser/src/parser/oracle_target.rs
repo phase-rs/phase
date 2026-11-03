@@ -23781,8 +23781,6 @@ mod tests {
     /// would pass a single-case test and fail here.
     #[test]
     fn mana_value_suffix_fixed_parity_binds_printed_parity() {
-        use crate::types::ability::Parity;
-
         for (input, expected) in [
             ("with an even mana value", Parity::Even),
             ("with an odd mana value", Parity::Odd),
@@ -23813,8 +23811,6 @@ mod tests {
     /// tracked-set reference would be lost.
     #[test]
     fn mana_value_suffix_fixed_parity_leaves_trailing_clause() {
-        use crate::types::ability::Parity;
-
         let mut ctx = ParseContext::default();
         let input = "with an even mana value from among the milled cards";
         let (prop, consumed) =

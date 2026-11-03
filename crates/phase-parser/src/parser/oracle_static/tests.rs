@@ -8,8 +8,8 @@ use super::*;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
     CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageKindFilter,
-    Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
+    Duration, Effect, FilterProp, ObjectProperty, ObjectScope, Parity, ParitySource, PlayerFilter,
+    PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
     SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
@@ -24849,8 +24849,6 @@ fn cant_cast_spells_with_even_mana_values() {
     // `None` and falls through to PROHIBITED — so Void Winnower stopped
     // opponents from casting every spell in the game. Asserting the filter is
     // the whole point of this test; do not weaken it back to a mode check.
-    use crate::types::ability::{Parity, ParitySource};
-
     let def = parse_static_line("Your opponents can't cast spells with even mana values.").unwrap();
     assert_eq!(
         def.mode,
@@ -24879,8 +24877,6 @@ fn cant_cast_spells_with_odd_mana_values() {
     // card uses it today, but the parity must be read from the text rather than
     // defaulted — a head that hardcoded `Even` would pass the sibling test
     // above and silently invert this one.
-    use crate::types::ability::{Parity, ParitySource};
-
     let def = parse_static_line("Your opponents can't cast spells with odd mana values.").unwrap();
     assert_eq!(
         def.mode,

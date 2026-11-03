@@ -1,5 +1,6 @@
 use super::super::engine::apply_as_current;
 use super::*;
+use crate::game::scenario::{GameScenario, P0, P1};
 use crate::game::zones;
 use crate::game::zones::create_object;
 use crate::parser::oracle::parse_oracle_text;
@@ -62787,9 +62788,6 @@ fn split_source_tap_cost_legs_takes_every_tap_and_untap_leg_in_order() {
 /// prohibition is half the curve, not all of it) and the even one must not.
 #[test]
 fn void_winnower_runtime_blocks_only_even_mana_value_opponent_spells() {
-    use crate::game::casting::can_cast_object_now;
-    use crate::game::scenario::{GameScenario, P0, P1};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     // P1 holds priority so the gate is evaluating a real decision point for the
@@ -62865,9 +62863,6 @@ fn void_winnower_runtime_blocks_only_even_mana_value_opponent_spells() {
 /// a filter attached with the player axis dropped.
 #[test]
 fn void_winnower_runtime_does_not_block_its_own_controller() {
-    use crate::game::casting::can_cast_object_now;
-    use crate::game::scenario::{GameScenario, P0};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_creature_from_oracle(
