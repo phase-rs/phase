@@ -1921,6 +1921,40 @@ impl ResolutionStack {
         Ok(())
     }
 
+    /// R4b elimination seam: mutably visit the staged BatchDelivery owner when
+    /// it is the stack top or the immediate parent of a top `PostReplacement`
+    /// delivery child. Deliberately bounded: no search for a buried batch frame.
+    pub(crate) fn visit_staged_batch_mut(
+        &mut self,
+        mut visit: impl FnMut(&mut PendingBatchDeliveries),
+    ) -> bool {
+        let Some(top) = self.frames.top() else {
+            return false;
+        };
+        match self.frames.get(top) {
+            Some(ResolutionFrame::BatchDelivery(batch)) if batch.staged.is_some() => {
+                if let Some(ResolutionFrame::BatchDelivery(frame)) = self.frames.get_mut(top) {
+                    visit(frame);
+                    return true;
+                }
+                false
+            }
+            Some(ResolutionFrame::PostReplacement(_)) => {
+                let Some(below) = self.frames.below(top) else {
+                    return false;
+                };
+                match self.frames.get_mut(below) {
+                    Some(ResolutionFrame::BatchDelivery(frame)) if frame.staged.is_some() => {
+                        visit(frame);
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// Mutably accesses a BatchDelivery owner while its exact active
     /// PostReplacement child finishes an as-enters copy choice. This fixed
     /// parent/child relation lets the copy-choice path record the resumed zone

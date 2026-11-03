@@ -2664,6 +2664,45 @@ pub(crate) fn reorder_within_library(
     crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
 }
 
+/// CR 401.4 + CR 101.4: the insertion index for one member of a private
+/// owner-arranged Library Top/Bottom group. The tail-insertion form never uses
+/// a fixed base: `move_to_library_at_index` first removes a library-origin
+/// member, so `library_len_after_current_removal` is exactly the length the
+/// index applies to. A `Top` member goes after every already-delivered
+/// lower-rank member; a `Bottom` member goes at the tail minus every
+/// already-delivered higher-rank member. By induction the delivered members
+/// stay sorted at their anchored end after every insertion.
+///
+/// `delivered_ranks` are the final-order ranks of this group's members that
+/// have already been delivered; `rank` is this member's final-order rank.
+pub(crate) fn arranged_library_slot(
+    library_len_after_current_removal: usize,
+    delivered_ranks: impl Iterator<Item = usize>,
+    rank: usize,
+    position: &crate::types::ability::LibraryPosition,
+) -> usize {
+    let delivered_ranks: Vec<usize> = delivered_ranks.collect();
+    match position {
+        crate::types::ability::LibraryPosition::Top => delivered_ranks
+            .iter()
+            .filter(|other| **other < rank)
+            .count(),
+        crate::types::ability::LibraryPosition::Bottom => library_len_after_current_removal
+            .saturating_sub(
+                delivered_ranks
+                    .iter()
+                    .filter(|other| **other > rank)
+                    .count(),
+            ),
+        // Only Top/Bottom members are grouped; anything else keeps the ordinary
+        // placement arm and never calls this helper.
+        _ => {
+            debug_assert!(false, "arranged_library_slot is only for Top/Bottom groups");
+            0
+        }
+    }
+}
+
 /// Move an object to a specific position in its owner's library (top or bottom), emitting a ZoneChanged event.
 /// Convention: library[0] = top of library.
 pub fn move_to_library_position(
@@ -4933,6 +4972,249 @@ mod tests {
         assert_eq!(
             state.players[0].library.iter().copied().collect::<Vec<_>>(),
             [second, third, first]
+        );
+    }
+
+    /// R4b S2 slot unit: `Top` counts already-delivered lower ranks, `Bottom`
+    /// subtracts already-delivered higher ranks from the post-removal length.
+    #[test]
+    fn arranged_library_slot_counts_delivered_ranks_at_the_anchored_end() {
+        use crate::types::ability::LibraryPosition;
+        assert_eq!(
+            arranged_library_slot(5, [2usize, 4].into_iter(), 3, &LibraryPosition::Top),
+            1
+        );
+        assert_eq!(
+            arranged_library_slot(5, [0usize, 1].into_iter(), 2, &LibraryPosition::Bottom),
+            5
+        );
+        assert_eq!(
+            arranged_library_slot(0, std::iter::empty(), 0, &LibraryPosition::Bottom),
+            0
+        );
+    }
+
+    fn deliver_grouped(
+        state: &mut GameState,
+        final_order: &[ObjectId],
+        announcement: &[ObjectId],
+        position: &crate::types::ability::LibraryPosition,
+        owner: PlayerId,
+        events: &mut Vec<GameEvent>,
+    ) {
+        let mut delivered: Vec<usize> = Vec::new();
+        for id in announcement {
+            let rank = final_order
+                .iter()
+                .position(|entry| entry == id)
+                .expect("announcement member is in the final order");
+            let in_library = state
+                .objects
+                .get(id)
+                .is_some_and(|object| object.zone == Zone::Library)
+                && state.library_of(owner).contains(id);
+            let len_after_removal = state.library_of(owner).len() - usize::from(in_library);
+            let slot =
+                arranged_library_slot(len_after_removal, delivered.iter().copied(), rank, position);
+            move_to_library_at_index(state, *id, Some(slot), events);
+            delivered.push(rank);
+        }
+    }
+
+    /// R4b S2a (F1 control): a nonidentity Bottom permutation of three
+    /// library-origin cards reproduces the pre-R4b append-after-removal order,
+    /// emits no `ZoneChanged`, and never bumps an incarnation.
+    #[test]
+    fn arranged_bottom_slot_reproduces_library_origin_append_order() {
+        use crate::types::ability::LibraryPosition;
+        let mut state = setup();
+        let sentinel = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sentinel".to_string(),
+            Zone::Library,
+        );
+        let c0 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "C0".into(),
+            Zone::Library,
+        );
+        let c1 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "C1".into(),
+            Zone::Library,
+        );
+        let c2 = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "C2".into(),
+            Zone::Library,
+        );
+        state.players[0].library = crate::im::vector![sentinel, c0, c1, c2];
+        let incarnation_before = state.objects[&c0].incarnation;
+        let epoch_before = state.library_knowledge_epoch(PlayerId(0));
+
+        // Submitted permutation [C1, C2, C0]; announcement/request order
+        // [C2, C0, C1] is different, so a fixed-base formula would fail.
+        let mut events = Vec::new();
+        deliver_grouped(
+            &mut state,
+            &[c1, c2, c0],
+            &[c2, c0, c1],
+            &LibraryPosition::Bottom,
+            PlayerId(0),
+            &mut events,
+        );
+
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [sentinel, c1, c2, c0],
+            "the submitted tail replaces the legacy block, with the sentinel at the same index"
+        );
+        assert!(events.is_empty(), "library reorders emit no ZoneChanged");
+        assert_eq!(
+            state.objects[&c0].incarnation, incarnation_before,
+            "a within-library reorder must not bump the incarnation"
+        );
+        assert!(
+            state.zone_changes_this_turn.is_empty(),
+            "a within-library reorder does not enter the zone-change ledger"
+        );
+        let _ = epoch_before;
+    }
+
+    /// R4b S2b (F1 control): a mixed cross-zone/library-origin Bottom group
+    /// reproduces the plan's replacement-origin trace and the request-origin
+    /// twin. Library-origin members emit no `ZoneChanged`; cross-zone members
+    /// emit exactly one each.
+    #[test]
+    fn arranged_bottom_slot_handles_mixed_cross_zone_and_library_origin_members() {
+        use crate::types::ability::LibraryPosition;
+        let mut state = setup();
+        let p = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P".into(),
+            Zone::Library,
+        );
+        let l2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "L2".into(),
+            Zone::Library,
+        );
+        let l1 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "L1".into(),
+            Zone::Library,
+        );
+        state.players[0].library = crate::im::vector![p, l2, l1];
+        let x0 = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "X0".into(),
+            Zone::Graveyard,
+        );
+        let x2 = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "X2".into(),
+            Zone::Graveyard,
+        );
+
+        let mut events = Vec::new();
+        deliver_grouped(
+            &mut state,
+            &[x0, l1, x2],
+            &[l1, x0, x2],
+            &LibraryPosition::Bottom,
+            PlayerId(0),
+            &mut events,
+        );
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [p, l2, x0, l1, x2],
+            "the mixed trace is the submitted tail"
+        );
+        let moved: Vec<ObjectId> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(moved, [x0, x2], "library-origin L1 emits no ZoneChanged");
+    }
+
+    /// R4b S2b request-origin twin: the derived (announcement) order equals the
+    /// pre-R4b append-after-removal result and needs no prompt.
+    #[test]
+    fn arranged_bottom_slot_reproduces_request_origin_announcement_order() {
+        use crate::types::ability::LibraryPosition;
+        let mut state = setup();
+        let p = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P".into(),
+            Zone::Library,
+        );
+        let l2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "L2".into(),
+            Zone::Library,
+        );
+        let l1 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "L1".into(),
+            Zone::Library,
+        );
+        state.players[0].library = crate::im::vector![p, l2, l1];
+        let x2 = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "X2".into(),
+            Zone::Graveyard,
+        );
+        let x0 = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "X0".into(),
+            Zone::Graveyard,
+        );
+
+        let announcement = [x2, l1, x0];
+        let mut events = Vec::new();
+        deliver_grouped(
+            &mut state,
+            &announcement,
+            &announcement,
+            &LibraryPosition::Bottom,
+            PlayerId(0),
+            &mut events,
+        );
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [p, l2, x2, l1, x0],
+            "a request-origin group keeps the legacy append-after-removal order"
         );
     }
 

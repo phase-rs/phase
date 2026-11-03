@@ -56519,3 +56519,75 @@ mod object_sweep_sharing_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod r4b_staged_occurrence_pins {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::{LogicalZoneChangeTerminalOutcome, ZoneChangeRecord};
+    use crate::types::identifiers::CardId;
+    use crate::types::zones::Zone;
+
+    /// R4b T1: an `Arranging`/`Approving` pause appends no occurrence. An
+    /// approval-time `ZoneChanged` from an unrelated object stays in the
+    /// caller's buffer and is never attributed to the batch's
+    /// `all_origin_occurrences`.
+    #[test]
+    fn staged_approval_pause_retains_no_occurrence_for_unrelated_events() {
+        let mut state = GameState::new_two_player(42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Staged A".to_string(),
+            Zone::Battlefield,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Staged B".to_string(),
+            Zone::Battlefield,
+        );
+        let unrelated = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Unrelated".to_string(),
+            Zone::Battlefield,
+        );
+        let mut group = allocate_logical_zone_change_group(&mut state, &[a, b]);
+        assert_eq!(group.prospective_battlefield_members.len(), 2);
+
+        let unrelated_event = GameEvent::ZoneChanged {
+            object_id: unrelated,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                unrelated,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        };
+        let caller_events = vec![unrelated_event.clone()];
+
+        // The staged Approving pause passes an empty slice: no member has been
+        // delivered yet.
+        append_and_collect_logical_zone_trigger_segment(&mut state, &mut group, &[])
+            .expect("an empty approval-time segment is valid");
+        assert!(
+            group.all_origin_occurrences.is_empty(),
+            "an approval pause appends no occurrence"
+        );
+        assert!(group
+            .terminal_outcomes
+            .iter()
+            .all(|outcome| matches!(outcome, LogicalZoneChangeTerminalOutcome::Pending)));
+        mark_logical_zone_events_consumed_before_priority(&mut state, &group, &caller_events);
+        assert!(
+            group.all_origin_occurrences.is_empty(),
+            "the unrelated event is never attributed to the batch"
+        );
+    }
+}

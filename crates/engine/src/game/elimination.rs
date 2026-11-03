@@ -696,6 +696,20 @@ pub(crate) fn eliminate_players(
             debug_assert!(false, "team tap payment elimination resume failed: {error}");
         }
 
+        // CR 800.4a + CR 101.4: a staged batch's surviving members, groups and
+        // prompt are reconciled after every departure sweep and before the
+        // generic dead-actor repoint, which would otherwise strand a
+        // batch-owned arrangement prompt or drop a surviving delivery.
+        if let Err(error) =
+            super::zone_pipeline::reconcile_staged_batch_after_departure(state, events)
+        {
+            tracing::error!(%error, "staged batch delivery was not reconciled after a departure");
+            debug_assert!(
+                false,
+                "staged batch delivery was not reconciled after a departure: {error}"
+            );
+        }
+
         if let Some(waiting_pid) = state.waiting_for.acting_player() {
             if !players::is_alive(state, waiting_pid) {
                 let next = players::next_player(state, waiting_pid);
@@ -1212,6 +1226,11 @@ fn abandon_pending_zone_change_member_for_player_left(
             pending
                 .requests
                 .retain(|request| request.object_id != identity.object_id);
+            crate::game::zone_pipeline::prune_staged_member_for_player_left(
+                pending,
+                identity,
+                leaving_player,
+            );
             if pending.paused_current.as_ref().is_some_and(|paused| {
                 paused.member == identity && paused.terminal_completion.is_none()
             }) {
@@ -1225,6 +1244,33 @@ fn abandon_pending_zone_change_member_for_player_left(
             }
         })
         .expect("elimination visits only an identified component delivery pair");
+    {
+        // R4b: an approved member's delivery pause buries the staged owner
+        // below a top `PostReplacement` child; the pair visitor above only
+        // reaches the top batch, so visit that exact parent too.
+        state.resolution_stack.visit_staged_batch_mut(|pending| {
+            pending.remaining.retain(|id| *id != identity.object_id);
+            pending
+                .requests
+                .retain(|request| request.object_id != identity.object_id);
+            crate::game::zone_pipeline::prune_staged_member_for_player_left(
+                pending,
+                identity,
+                leaving_player,
+            );
+            if pending.paused_current.as_ref().is_some_and(|paused| {
+                paused.member == identity && paused.terminal_completion.is_none()
+            }) {
+                canceled_pauses.push(
+                    pending
+                        .paused_current
+                        .take()
+                        .expect("checked paused delivery is present")
+                        .expected_event,
+                );
+            }
+        });
+    }
 
     for expected_event in canceled_pauses {
         if state
@@ -5455,5 +5501,186 @@ mod tests {
             "under reversed turn order the departed recipient re-points backward \
              through seating (the next player in TURN order), not seat-forward"
         );
+    }
+}
+
+#[cfg(test)]
+mod r4b_staged_elimination_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{DigRestSplitScope, ExileConcealment, LibraryPosition};
+    use crate::types::game_state::{
+        BatchDeliveryStage, MassLibraryOrderBatch, MassLibraryOrderMember, PendingBatchDeliveries,
+        PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest, StagedArrangementStatus,
+        StagedBatchDelivery, StagedBatchMember, StagedBatchMemberState, StagedLibraryArrangement,
+        WaitingFor, ZoneDeliveryExileTracking,
+    };
+    use crate::types::identifiers::{
+        CardId, LogicalZoneChangeGroupId, ObjectId, ObjectIncarnationRef,
+    };
+    use crate::types::proposed_event::ProposedEvent;
+    use crate::types::zones::EtbTapState;
+    use crate::types::zones::Zone;
+    use std::collections::HashSet;
+
+    fn member(state: &GameState, id: ObjectId, index: u32) -> StagedBatchMember {
+        let object = &state.objects[&id];
+        StagedBatchMember {
+            announcement_index: index,
+            request: PendingBatchZoneMoveRequest {
+                object_id: id,
+                destination: Zone::Library,
+                cause: PendingBatchZoneChangeCause::Effect { source: id },
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_transformed: false,
+                controller_override: None,
+                enter_with_counters: Vec::new(),
+                face_down_profile: None,
+                chain_referent: Default::default(),
+                attach_to: None,
+                performed_by: None,
+                library_placement: None,
+                exile_duration: None,
+                exile_controller: None,
+                exile_tracking: ZoneDeliveryExileTracking::None,
+                replacement_applied: HashSet::new(),
+                face_down_in_exile: ExileConcealment::Public,
+            },
+            identity: ObjectIncarnationRef::from_object(object),
+            owner: object.owner,
+            state: StagedBatchMemberState::Approved,
+            approved_event: Some(ProposedEvent::zone_change(
+                id,
+                Zone::Library,
+                Zone::Library,
+                None,
+            )),
+            pending_outcome: None,
+            terminal: None,
+        }
+    }
+
+    #[test]
+    fn a_departed_owner_prunes_staged_members_groups_and_prompt_then_settles() {
+        let mut state = GameState::new_two_player(42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Staged A".to_string(),
+            Zone::Library,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Staged B".to_string(),
+            Zone::Library,
+        );
+        let group = crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[]);
+        let group_id: LogicalZoneChangeGroupId = group.logical_group_id;
+        let members = vec![member(&state, a, 0), member(&state, b, 1)];
+        let arrangements = vec![StagedLibraryArrangement {
+            position: LibraryPosition::Bottom,
+            batch: MassLibraryOrderBatch {
+                owner: PlayerId(0),
+                arranger: None,
+                members: members
+                    .iter()
+                    .map(|member| MassLibraryOrderMember {
+                        identity: member.identity,
+                        origin: Zone::Library,
+                    })
+                    .collect(),
+            },
+            status: StagedArrangementStatus::Offered,
+        }];
+        let staged = StagedBatchDelivery {
+            stage: BatchDeliveryStage::Arranging,
+            cursor: 2,
+            members,
+            arrangements,
+            arrangement_cursor: 0,
+        };
+        state.push_batch_delivery(PendingBatchDeliveries {
+            component_delivery_parent: None,
+            logical_zone_change_group: group,
+            paused_current: None,
+            remaining: Vec::new(),
+            destination: Zone::Library,
+            source_id: None,
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: vec![a, b],
+            zone_change_record_start: state.zone_changes_this_turn.len(),
+            deferred_events: Vec::new(),
+            staged: Some(staged),
+        });
+        state.waiting_for = WaitingFor::new_dig_rest_split_for_batch(
+            PlayerId(0),
+            PlayerId(0),
+            vec![a, b],
+            0,
+            DigRestSplitScope::OrderOnly,
+            None,
+            group_id,
+        );
+
+        for id in [a, b] {
+            let identity = ObjectIncarnationRef::from_object(&state.objects[&id]);
+            let mut owner = state
+                .resolution_stack
+                .take_active_batch_delivery()
+                .unwrap()
+                .unwrap();
+            crate::game::zone_pipeline::prune_staged_member_for_player_left(
+                &mut owner,
+                identity,
+                PlayerId(0),
+            );
+            let staged = owner.staged.as_ref().unwrap();
+            let pruned = staged
+                .members
+                .iter()
+                .find(|member| member.identity == identity)
+                .unwrap();
+            assert_eq!(pruned.state, StagedBatchMemberState::Abandoned);
+            assert_eq!(
+                staged.arrangement_cursor,
+                staged.arrangements.len(),
+                "a culled group is no longer a live prompt"
+            );
+            assert!(
+                staged.arrangements.iter().all(|arrangement| arrangement
+                    .batch
+                    .members
+                    .iter()
+                    .all(|member| member.identity != identity)),
+                "the departed member is culled from every group"
+            );
+            state.resolution_stack.park_batch_owner(owner).unwrap();
+        }
+
+        assert!(state
+            .active_batch_delivery()
+            .unwrap()
+            .staged
+            .as_ref()
+            .unwrap()
+            .arrangements
+            .is_empty());
+        let mut events = Vec::new();
+        crate::game::zone_pipeline::reconcile_staged_batch_after_departure(&mut state, &mut events)
+            .expect("departure reconciliation succeeds");
+        assert!(
+            state.active_batch_delivery().is_none(),
+            "the abandoned staged batch settles rather than stranding"
+        );
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 }

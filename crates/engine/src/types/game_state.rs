@@ -6821,26 +6821,15 @@ impl PendingBatchDeliveries {
             Self::validate_staged_member(member)?;
         }
 
-        // `requests`/`remaining` are exactly the not-yet-consulted suffix, in
-        // announcement order. `attempted` is the whole original cohort.
-        let first_unconsulted = members
+        // `requests`/`remaining` are exactly the not-yet-consulted members in
+        // announcement order. A member abandoned because its owner left the
+        // game is neither consulted nor delivered, so it is excluded from both
+        // without shifting the frozen announcement indices. `attempted` is the
+        // whole original cohort.
+        let unconsulted: Vec<&StagedBatchMember> = members
             .iter()
-            .position(|member| member.state == StagedBatchMemberState::Unconsulted);
-        let unconsulted = match first_unconsulted {
-            Some(start) => {
-                let suffix = &members[start..];
-                if suffix
-                    .iter()
-                    .any(|member| member.state != StagedBatchMemberState::Unconsulted)
-                {
-                    return Err(
-                        "staged batch has an unconsulted member after a consulted one".to_string(),
-                    );
-                }
-                suffix
-            }
-            None => &members[members.len()..],
-        };
+            .filter(|member| member.state == StagedBatchMemberState::Unconsulted)
+            .collect();
         let expected_requests: Vec<&PendingBatchZoneMoveRequest> =
             unconsulted.iter().map(|member| &member.request).collect();
         if self.requests.len() != expected_requests.len()
@@ -6966,7 +6955,10 @@ impl PendingBatchDeliveries {
                             "an unconsulted staged member precedes the approval cursor".to_string()
                         );
                     }
-                    if index > staged.cursor && !unconsulted {
+                    if index > staged.cursor
+                        && !unconsulted
+                        && member.state != StagedBatchMemberState::Abandoned
+                    {
                         return Err(
                             "a consulted staged member follows the approval cursor".to_string()
                         );
@@ -7039,8 +7031,9 @@ impl PendingBatchDeliveries {
                 }) {
                     return Err("a staged arrangement is still pending at delivery".to_string());
                 }
-                // A delivery pause captures the cursor member and already has
-                // its terminal classification.
+                // A delivery pause captures the cursor member. Its terminal may
+                // still be absent while a component expansion's child batch owns
+                // the delivery; the child handback records it on resume.
                 if let Some(paused) = &self.paused_current {
                     let Some(member) = members.get(staged.cursor) else {
                         return Err("a staged batch paused past its member cohort".to_string());
@@ -7048,11 +7041,6 @@ impl PendingBatchDeliveries {
                     if paused.member != member.identity {
                         return Err("a staged delivery pause does not capture the cursor member"
                             .to_string());
-                    }
-                    if paused.terminal_completion.is_none() {
-                        return Err(
-                            "a staged delivery pause has no terminal classification".to_string()
-                        );
                     }
                 }
             }

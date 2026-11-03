@@ -12,8 +12,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     CounterCostRootSubtree, DeferredLifeCostResume, GameState, PendingCostMoveResume,
-    PendingCounterPostAction, PendingReplacement, TokenEntryEventEmission, UnrepresentablePolicy,
-    WaitingFor,
+    PendingCounterPostAction, PendingReplacement, StagedMemberOutcome, TokenEntryEventEmission,
+    UnrepresentablePolicy, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -425,6 +425,13 @@ fn handle_replacement_choice_inner(
                 },
             )
     });
+    // CR 101.4 + CR 616.1: a staged member's consultation result is retained by
+    // the same owner that parked it — never delivered here. The shared helper
+    // matches the exact parked boundary, so a changed proposal or incarnation
+    // cannot be consumed as this member's approval.
+    let staged_approval_owner = parked_zone_change_delivery
+        .as_ref()
+        .and_then(|parked| crate::game::zone_pipeline::staged_approval_owner(state, parked));
     let parked_phase_begin = state
         .pending_replacement
         .as_ref()
@@ -488,6 +495,24 @@ fn handle_replacement_choice_inner(
                 //     is restored structurally inside the shared delivery for
                 //     `Stack → Battlefield` events (`CastLinkSnapshot`).
                 event @ ProposedEvent::ZoneChange { .. } => {
+                    // CR 101.4 + CR 616.1: staged approval retains the exact
+                    // final event; delivery happens only after every member has
+                    // been consulted.
+                    if let Some((group, fresh)) = staged_approval_owner {
+                        if fresh {
+                            if let Some(waiting) =
+                                crate::game::zone_pipeline::record_staged_batch_consultation_result(
+                                    state,
+                                    group,
+                                    StagedMemberOutcome::Approved(event),
+                                    events,
+                                )
+                            {
+                                return Ok(waiting);
+                            }
+                        }
+                        return Ok(state.waiting_for.clone());
+                    }
                     let (object_id, to, cause, discard_frame) = match &event {
                         ProposedEvent::ZoneChange {
                             object_id,
@@ -1629,6 +1654,24 @@ fn handle_replacement_choice_inner(
             ))
         }
         super::replacement::ReplacementResult::Prevented => {
+            // CR 101.4 + CR 614.5: a staged prevention is a retained terminal
+            // (or a `PreventedWithChild` while its own child prompt is live),
+            // never an immediate delivery or logical-group recording.
+            if let Some((group, fresh)) = staged_approval_owner {
+                if fresh {
+                    if let Some(waiting) =
+                        crate::game::zone_pipeline::record_staged_batch_consultation_result(
+                            state,
+                            group,
+                            StagedMemberOutcome::Prevented,
+                            events,
+                        )
+                    {
+                        return Ok(waiting);
+                    }
+                }
+                return Ok(state.waiting_for.clone());
+            }
             if let Some(paused) = parked_zone_change_delivery.as_ref() {
                 state.capture_paused_zone_change_delivery(
                     paused.member,

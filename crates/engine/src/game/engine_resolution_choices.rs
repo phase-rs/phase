@@ -4652,19 +4652,29 @@ pub(super) fn handle_resolution_choice(
                         .to_string(),
                 ));
             };
-            // R4b types stage: only the dig-route `Requests` arm is wired. A
-            // batch-owned arrangement prompt is never published in production
-            // yet (no staged payload is created at this stage), so answering
-            // one means a hand-built or corrupt state. Fail safe without
-            // touching the cards rather than inventing a delivery path.
-            let LibraryPlacementContinuation::Requests(completion) = continuation else {
-                debug_assert!(
-                    false,
-                    "batch-owned library arrangement submission is not implemented yet"
-                );
-                return Err(EngineError::InvalidAction(
-                    "batch-owned library arrangement is not implemented".to_string(),
-                ));
+            // CR 401.4 + CR 101.4: a batch-owned arrangement prompt names the
+            // exact staged batch that owns the completion. Its submission is
+            // validated against that batch and stored privately; the dig route
+            // (`Requests`) keeps its existing deferred tail.
+            let completion = match continuation {
+                LibraryPlacementContinuation::ApprovedBatch { logical_group_id } => {
+                    crate::game::zone_pipeline::submit_staged_batch_arrangement(
+                        state,
+                        logical_group_id,
+                        split_player,
+                        library_owner,
+                        &cards,
+                        top_count,
+                        scope,
+                        &arrangement,
+                        events,
+                    )
+                    .map_err(EngineError::InvalidAction)?;
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        state.waiting_for.clone(),
+                    ));
+                }
+                LibraryPlacementContinuation::Requests(completion) => completion,
             };
             // Total: `top_count` was clamped to `cards.len()` at park time and
             // `arrangement` was just proven to be a permutation of `cards`.
