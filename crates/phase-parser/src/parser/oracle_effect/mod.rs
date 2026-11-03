@@ -48901,9 +48901,12 @@ fn parse_effect_chain_ir_body(
             // from, so "put those cards …" reads them out of the library. A bare
             // reveal is still a reveal `Dig` with no kept-card destination here;
             // assembly demotes it to `RevealTop` later.
+            // CR 701.20e: looking at a card follows the same rules as revealing
+            // it, so a bare look-only `Dig` also leaves its cards in the library.
+            // Without this a following "put those cards into your graveyard"
+            // falls back to the impulse exile origin and moves nothing.
             Effect::RevealTop { .. }
             | Effect::Dig {
-                reveal: true,
                 destination: None,
                 keep_count: None,
                 ..

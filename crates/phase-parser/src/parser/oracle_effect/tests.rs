@@ -96234,3 +96234,52 @@ fn put_those_cards_with_a_rest_clause_keeps_the_dig_partition() {
         other => panic!("expected Effect::Dig, got {other:?}"),
     }
 }
+
+/// CR 701.20e + CR 701.20b: a bare look leaves its cards in the library, so a
+/// following "put those cards into your graveyard" must lower to a whole-set
+/// move that reads the looked-at set out of the LIBRARY. The tracked-set mass
+/// move otherwise falls back to the impulse exile origin and moves nothing.
+/// No printed card pairs a bare look with this clause, so the text is the
+/// minimal shape of the class.
+#[test]
+fn put_those_cards_into_the_graveyard_after_a_look_reads_the_library() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Look at the top three cards of your library. Put those cards into your graveyard.",
+        "Grim Tally",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let root = parsed.abilities.first().expect("one spell ability");
+    let Effect::Dig {
+        rest_destination, ..
+    } = &*root.effect
+    else {
+        panic!("the look lowers to a Dig, got {:?}", root.effect);
+    };
+    assert_eq!(
+        *rest_destination, None,
+        "the whole-set move is not a remainder of the look"
+    );
+    let sub = root.sub_ability.as_deref().expect("the put clause follows");
+    match &*sub.effect {
+        Effect::ChangeZoneAll {
+            origin,
+            destination,
+            target,
+            ..
+        } => {
+            assert_eq!(
+                *origin,
+                Some(Zone::Library),
+                "looked-at cards stay in the library"
+            );
+            assert_eq!(*destination, Zone::Graveyard);
+            assert!(
+                matches!(target, TargetFilter::TrackedSet { .. }),
+                "\"those cards\" names the looked-at set, got {target:?}"
+            );
+        }
+        other => panic!("expected a whole-set ChangeZoneAll, got {other:?}"),
+    }
+}

@@ -613,3 +613,63 @@ its owner's hand. Otherwise, draw three cards.";
     );
     assert!(st.players[0].graveyard.is_empty());
 }
+
+/// CR 701.20e + CR 608.2c — the graveyard destination of the same whole-set
+/// boundary. Looking at a card leaves it where it is (CR 701.20e follows
+/// CR 701.20b), so "put those cards into your graveyard" after a bare look must
+/// read the looked-at cards out of the LIBRARY.
+///
+/// No printed card pairs a bare look with this clause (Covenant of Minds reveals
+/// and gives the choice to an opponent), so the text below is the minimal shape
+/// of that class. Before the fix the move defaulted to the impulse exile origin,
+/// scanned exile, and moved nothing.
+#[test]
+fn put_those_cards_into_the_graveyard_after_a_look_moves_every_looked_at_card() {
+    const LOOK_THEN_GRAVEYARD: &str =
+        "Look at the top three cards of your library. Put those cards into your graveyard.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut builder =
+        scenario.add_spell_to_hand_from_oracle(P0, "Grim Tally", false, LOOK_THEN_GRAVEYARD);
+    builder.with_mana_cost(ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 0,
+    });
+    let spell_id = builder.id();
+    let mut runner = scenario.build();
+
+    let looked_at: Vec<ObjectId> = (0..3)
+        .map(|index| add_library_card(&mut runner, &format!("Looked {index}"), false))
+        .collect();
+    let deeper = add_library_card(&mut runner, "Deeper", false);
+    add_mana(&mut runner, ManaType::Blue, 1);
+
+    let outcome = runner.cast(spell_id).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the spell resolves fully, got {:?}",
+        outcome.final_waiting_for()
+    );
+
+    let st = runner.state();
+    assert!(st.stack.is_empty(), "stack: {:?}", st.stack);
+    assert!(
+        st.players[0].mana_pool.is_empty(),
+        "the {{U}} cost was paid"
+    );
+    for card in &looked_at {
+        assert_eq!(
+            st.objects[card].zone,
+            Zone::Graveyard,
+            "{} was looked at, so \"those cards\" moves it",
+            st.objects[card].name
+        );
+    }
+    assert_eq!(
+        st.objects[&deeper].zone,
+        Zone::Library,
+        "the card below the looked-at window is never touched"
+    );
+    assert_eq!(library_ids(&runner), vec![deeper]);
+}
