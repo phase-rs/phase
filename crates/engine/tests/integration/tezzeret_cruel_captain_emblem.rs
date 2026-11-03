@@ -136,6 +136,9 @@ fn emblem_animates_each_targeted_artifact_and_it_can_attack() {
         .ok();
     loop {
         pass_until_trigger_target(&mut runner);
+        // The emblem's only trigger is "at the beginning of combat on your turn" (CR 603.2b), so
+        // a prompt belonging to P1 must not satisfy this test.
+        assert_eq!(runner.state().active_player, P0);
         if runner.state().turn_number > turn {
             break;
         }
