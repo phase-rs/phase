@@ -1981,11 +1981,15 @@ fn def_tree_has_conditional_mana_spell_grant(def: &AbilityDefinition) -> bool {
     {
         return true;
     }
+    // CR 106.6: "If that mana is spent on/to cast [a filter] spell, …" is the
+    // spend event gating a rider carried on the mana unit itself — represented
+    // by the grant's restriction/filter, not a swallowed condition.
     if let Effect::Mana { grants, .. } = &*def.effect {
         if grants.iter().any(|grant| {
             matches!(
                 grant,
                 crate::types::mana::ManaSpellGrant::AddKeywordUntilEndOfTurn { .. }
+                    | crate::types::mana::ManaSpellGrant::EntersWithCounters { .. }
             )
         }) {
             return true;
@@ -10650,6 +10654,56 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 !has_swallowed_detector(&parsed, "Optional_YouMay"),
                 "{name} must account for its printed 'you may' through the mana-spend grant's \
                  ability; warnings: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// CR 106.6 + CR 614.1c: the leading "If this/that mana is spent …" of an
+    /// entry-counter mana rider is the spend event the `EntersWithCounters`
+    /// grant's filter represents, not a swallowed `Condition_If` (Biophagus,
+    /// Animal Attendant, Guildmages' Forum — verbatim Oracle text).
+    #[test]
+    fn mana_entry_counter_grant_if_is_evidence() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "Genomic Enhancement — {T}: Add one mana of any color. If this mana is spent \
+                 to cast a creature spell, that creature enters with an additional +1/+1 \
+                 counter on it.",
+                "Biophagus",
+                &["Creature"],
+            ),
+            (
+                "{T}: Add one mana of any color. If that mana is spent to cast a non-Human \
+                 creature spell, that creature enters with an additional +1/+1 counter on it.",
+                "Animal Attendant",
+                &["Creature"],
+            ),
+            (
+                "{T}: Add {C}.\n{1}, {T}: Add one mana of any color. If that mana is spent on \
+                 a multicolored creature spell, that creature enters with an additional +1/+1 \
+                 counter on it.",
+                "Guildmages' Forum",
+                &["Land"],
+            ),
+        ];
+        for (oracle, name, types) in cases {
+            let parsed = parse_named(oracle, name, types);
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name} reach guard: production parse must contain zero Unimplemented: {parsed:#?}"
+            );
+            assert!(
+                unit_has_effect(&parsed, &|effect: &Effect| matches!(
+                    effect,
+                    Effect::Mana { grants, .. }
+                        if matches!(grants.as_slice(), [ManaSpellGrant::EntersWithCounters { .. }])
+                )),
+                "{name} reach guard: the EntersWithCounters grant must be present"
+            );
+            assert!(
+                !has_swallowed_detector(&parsed, "Condition_If"),
+                "{name} must account for its printed 'if' through the mana grant; warnings: {:?}",
                 parsed.parse_warnings
             );
         }

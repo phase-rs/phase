@@ -2533,34 +2533,82 @@ fn parse_conditional_cant_be_countered_grant(lower: &str) -> Option<ManaSpellGra
     })
 }
 
+/// CR 106.6: The opening of an additional effect on the spell a mana unit is
+/// spent to cast. The active ("if you spend this mana to cast"), passive
+/// ("if this/that mana is spent to cast"), and "spent on" phrasings all name
+/// the same per-unit spend event.
+fn parse_if_mana_is_spent_to_cast(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), tag("if you spend this mana to cast ")),
+        value(
+            (),
+            (
+                tag("if "),
+                alt((tag("this"), tag("that"))),
+                tag(" mana is spent to cast "),
+            ),
+        ),
+        parse_if_that_mana_is_spent_on,
+    ))
+    .parse(input)
+}
+
 /// CR 106.6a + CR 614.1c: Parse mana whose spent-mana replacement effect has
-/// a counter-bearing battlefield entry result (Opal Palace class).
+/// a counter-bearing battlefield entry result:
+/// - "If you spend this mana to cast your commander, it enters with a number of
+///   additional +1/+1 counters on it equal to …" (Opal Palace)
+/// - "If this mana is spent to cast a creature spell, that creature enters with
+///   an additional +1/+1 counter on it." (Biophagus; Animal Attendant's
+///   "that mana … non-Human creature spell")
+/// - "If that mana is spent on a multicolored creature spell, that creature
+///   enters with an additional +1/+1 counter on it." (Guildmages' Forum)
 fn parse_conditional_enters_with_counters_grant(lower: &str) -> Option<ManaSpellGrant> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("if you spend this mana to cast ")
-        .parse(lower)
-        .ok()?;
+    let (rest, ()) = parse_if_mana_is_spent_to_cast(lower).ok()?;
     let (rest, filter_text) = terminated(
-        take_until::<_, _, OracleError<'_>>(", it enters with a number of additional "),
-        tag(", it enters with a number of additional "),
+        take_until::<_, _, OracleError<'_>>(", "),
+        tag::<_, _, OracleError<'_>>(", "),
     )
     .parse(rest)
     .ok()?;
     let filter = parse_spend_trigger_filter(filter_text.trim())?;
-    let (rest, counter_type) = terminated(
-        nom_primitives::parse_counter_type_typed,
-        tag::<_, _, OracleError<'_>>(" counters on it equal to "),
-    )
+    // The entering permanent is the spell the mana was spent on, named either
+    // by pronoun ("it") or by its type ("that creature").
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("it enters with "),
+        tag("that creature enters with "),
+    ))
     .parse(rest)
     .ok()?;
-    let (_, count) = all_consuming(terminated(
-        value(
-            QuantityExpr::Ref {
-                qty: QuantityRef::CommanderCastFromCommandZoneCount,
-            },
-            tag::<_, _, OracleError<'_>>(
-                "the number of times it's been cast from the command zone this game",
+    let (_, (counter_type, count)) = all_consuming(terminated(
+        alt((
+            // "an additional +1/+1 counter on it" — exactly one extra counter.
+            map(
+                delimited(
+                    tag::<_, _, OracleError<'_>>("an additional "),
+                    nom_primitives::parse_counter_type_typed,
+                    tag(" counter on it"),
+                ),
+                |counter_type| (counter_type, QuantityExpr::Fixed { value: 1 }),
             ),
-        ),
+            // "a number of additional +1/+1 counters on it equal to the number of
+            // times it's been cast from the command zone this game" (Opal Palace).
+            map(
+                (
+                    tag("a number of additional "),
+                    nom_primitives::parse_counter_type_typed,
+                    tag(" counters on it equal to "),
+                    tag("the number of times it's been cast from the command zone this game"),
+                ),
+                |(_, counter_type, _, _)| {
+                    (
+                        counter_type,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::CommanderCastFromCommandZoneCount,
+                        },
+                    )
+                },
+            ),
+        )),
         opt(char('.')),
     ))
     .parse(rest)
@@ -4108,6 +4156,68 @@ mod tests {
                 },
             }] if properties == &[FilterProp::IsCommander]
         ));
+    }
+
+    /// CR 106.6a + CR 614.1c: "that creature enters with an additional +1/+1
+    /// counter on it" riders across the three spend phrasings: Biophagus
+    /// ("this mana is spent to cast"), Animal Attendant ("that mana is spent to
+    /// cast"), and Guildmages' Forum ("that mana is spent on").
+    #[test]
+    fn parses_additional_counter_mana_entry_grants() {
+        let single_counter = |grants: Option<Vec<ManaSpellGrant>>| -> TargetFilter {
+            match grants.as_deref() {
+                Some(
+                    [ManaSpellGrant::EntersWithCounters {
+                        filter,
+                        counter_type: CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 1 },
+                    }],
+                ) => filter.clone(),
+                other => panic!("expected a single +1/+1 entry-counter grant, got {other:?}"),
+            }
+        };
+
+        let biophagus = single_counter(parse_mana_spell_grant(
+            "if this mana is spent to cast a creature spell, that creature enters with an additional +1/+1 counter on it.",
+        ));
+        assert_eq!(
+            biophagus,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))
+        );
+
+        let animal_attendant = single_counter(parse_mana_spell_grant(
+            "if that mana is spent to cast a non-human creature spell, that creature enters with an additional +1/+1 counter on it.",
+        ));
+        let TargetFilter::Typed(typed) = &animal_attendant else {
+            panic!("Animal Attendant filter must be typed, got {animal_attendant:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert_ne!(
+            animal_attendant, biophagus,
+            "the non-Human qualifier must narrow the filter"
+        );
+
+        let guildmages_forum = single_counter(parse_mana_spell_grant(
+            "if that mana is spent on a multicolored creature spell, that creature enters with an additional +1/+1 counter on it.",
+        ));
+        assert_ne!(
+            guildmages_forum, biophagus,
+            "the multicolored qualifier must narrow the filter"
+        );
+
+        // Unconsumed tails and unprinted openings stay unparsed.
+        assert_eq!(
+            parse_mana_spell_grant(
+                "if this mana is spent to cast a creature spell, that creature enters with an additional +1/+1 counter on it and gains haste.",
+            ),
+            None
+        );
+        assert_eq!(
+            parse_mana_spell_grant(
+                "if this mana is spent on a creature spell, that creature enters with an additional +1/+1 counter on it.",
+            ),
+            None
+        );
     }
 
     /// CR 106.6 + CR 702.10a: Hall of the Bandit Lord — any creature spell,
