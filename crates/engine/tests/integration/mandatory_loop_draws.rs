@@ -146,6 +146,8 @@ struct Board {
     wood_elves: Option<usize>,
     /// Impact Tremors on P0's battlefield.
     tremors: bool,
+    /// Angel of Salvation on P0's battlefield, built from its printed Oracle text.
+    angel: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -176,6 +178,8 @@ struct Run {
     prompts: BTreeMap<&'static str, usize>,
     /// Priority beats at which P0's Mountain stood untapped on the battlefield.
     out_beats: usize,
+    /// The most floating damage replacements ever present at a sampled beat.
+    max_shields: usize,
     /// Each action's acting player, whether it ordered triggers, and the confirm replays it ran.
     replays: Vec<(Option<PlayerId>, bool, u64)>,
 }
@@ -283,6 +287,15 @@ fn build(board: Board, mode: LoopDetectionMode) -> Option<Built> {
     }
     if board.tremors {
         scenario.add_real_card(P0, "Impact Tremors", Zone::Battlefield, db);
+    }
+    if board.angel {
+        // The curated fixture does not carry Angel of Salvation, so build it from its printed
+        // Oracle text — the same pattern this file uses for its `Test Counter Sink`. Flash,
+        // convoke and flying are cast-time keywords: the board starts with the Angel already on
+        // the battlefield and the loop only needs its mandatory, target-slot-free ETB.
+        scenario
+            .add_creature_from_oracle(P0, "Angel of Salvation", 5, 5, ANGEL_OF_SALVATION)
+            .id();
     }
     if let Some(bears) = board.banisher {
         scenario.add_real_card(P0, "Banisher Priest", Zone::Battlefield, db);
@@ -433,6 +446,7 @@ fn run_observed(
     let (mut entries, mut entries_at_half, mut reveals, mut reveals_at_half, mut max_ring) =
         (0, 0, 0, 0, 0);
     let (mut max_entries_per_action, mut out_beats, mut remembered) = (0, 0, false);
+    let mut max_shields = 0usize;
     let mut picks = 0;
     let mut prompts = BTreeMap::new();
     let mut replays = Vec::new();
@@ -445,6 +459,7 @@ fn run_observed(
         observe(state);
         let mut yield_first = None;
         max_ring = max_ring.max(state.loop_detect_ring.len());
+        max_shields = max_shields.max(state.pending_damage_replacements.len());
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             *prompts.entry(state.waiting_for.variant_name()).or_insert(0) += 1;
         }
@@ -619,6 +634,7 @@ fn run_observed(
         max_ring,
         prompts,
         out_beats,
+        max_shields,
         replays,
     })
 }
@@ -663,11 +679,26 @@ const PLAIN: Board = Board {
     first: None,
     wood_elves: None,
     tremors: false,
+    angel: false,
 };
 
 const ANCHOR: Board = Board {
     maggots: 1,
     first: Some("Brain Maggot"),
+    ..PLAIN
+};
+
+/// Scryfall/MTGJSON verbatim Oracle text for Angel of Salvation (2026-11 export). Built with
+/// `add_creature_from_oracle` because the curated fixture does not carry the card — the same
+/// pattern this file uses for its `Test Counter Sink`.
+const ANGEL_OF_SALVATION: &str = "Flash; convoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's color.)\nFlying\nWhen this creature enters, prevent the next 5 damage that would be dealt this turn to any number of targets, divided as you choose.";
+
+const ANGEL: Board = Board {
+    angel: true,
+    // CR 603.3b: this is the board default too — with Animate Dead's trigger first in
+    // the order it resolves LAST, so the Angel's trigger is listed last and resolves
+    // first. The install itself does not depend on the order (CR 113.7a).
+    first: Some("Angel of Salvation"),
     ..PLAIN
 };
 
@@ -686,6 +717,58 @@ fn worldgorger_animate_dead_is_a_draw_on_every_drive() {
             run.entries
         );
     }
+}
+
+/// CR 104.4b + CR 615.5: Angel of Salvation's mandatory ETB appends one identical "prevent the
+/// next 5 damage this turn" shield to `pending_damage_replacements` every cycle of the
+/// Worldgorger Dragon / Animate Dead loop. Every action is mandatory, so the game is still a
+/// draw; the growing registry must not turn the draw into a stall.
+#[test]
+fn worldgorger_with_angel_of_salvation_is_still_a_draw() {
+    for drive in EVERY_DRIVE {
+        let Some(run) = run(ANGEL, LoopDetectionMode::Interactive, drive, 300) else {
+            return;
+        };
+        assert_eq!(run.terminal, Terminal::GameOver(None), "{drive:?}");
+        assert!(
+            run.entries >= 2,
+            "{drive:?}: reach: the Dragon entered at least twice, got {}",
+            run.entries
+        );
+        assert!(
+            run.max_shields >= 1,
+            "{drive:?}: reach: the Angel's ETB resolved and its shield was live at a \
+             sampled beat, got {}",
+            run.max_shields
+        );
+    }
+}
+
+/// CR 615.5: the class the comparator's multiplicity rule exists for — the registry grows by one
+/// by-value identical, unconsumed, rider-less shield per cycle. With the detector off the board
+/// does not end by itself, so this row is also the draw row's negative control.
+#[test]
+fn worldgorger_with_angel_of_salvation_accumulates_identical_shields() {
+    let Some(run) = run(ANGEL, LoopDetectionMode::Off, Drive::Pass, 120) else {
+        return;
+    };
+    assert_eq!(run.terminal, Terminal::BeatsExhausted);
+    assert!(run.entries >= 3, "reach: {}", run.entries);
+    assert!(
+        run.max_shields >= 3,
+        "reach: registry grew, got {}",
+        run.max_shields
+    );
+    let shields = &run.state().pending_damage_replacements;
+    assert!(!shields.is_empty(), "reach: the registry is non-empty");
+    assert!(
+        shields.iter().all(|def| def == &shields[0]),
+        "each cycle installs a by-value identical shield"
+    );
+    assert!(
+        shields.iter().all(|def| def.runtime_execute.is_none()),
+        "the Angel's shield has no rider, so the arena is not in play"
+    );
 }
 
 /// CR 603.3b + CR 732.4: Brain Maggot's forced reveal of P1's only nonland card repeats each
