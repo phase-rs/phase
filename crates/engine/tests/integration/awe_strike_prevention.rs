@@ -21,8 +21,15 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{
     Effect, QuantityExpr, ResolvedAbility, ShieldKind, TargetFilter, TargetRef,
 };
+use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
+use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+
+use crate::impulsive_maneuvers_batch_shield::{
+    assert_damage_complete, declare_attacks, reach_combat_damage,
+};
 
 const AWE_STRIKE: &str = "The next time target creature would deal damage this turn, prevent that damage. You gain life equal to the damage prevented this way.";
 
@@ -688,25 +695,20 @@ fn awe_strike_prevents_both_trample_portions_and_gains_five_life_once() {
 /// gains P0 the 4 Awe Strike prevented, once.
 #[test]
 fn awe_strike_covers_portions_after_a_parked_ordering_choice() {
-    use engine::types::actions::GameAction;
-    use engine::types::game_state::{GameState, WaitingFor};
-    use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
-
-    use crate::impulsive_maneuvers_batch_shield::{
-        assert_damage_complete, declare_attacks, reach_combat_damage,
-    };
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let attacker = scenario.add_creature(P0, "Trampler", 6, 6).trample().id();
     let plain = scenario.add_creature(P1, "Plain Blocker", 0, 2).id();
+    // Full printed Fog Bank: this row only deals combat damage. Flying and
+    // defender do not restrict this block; power 0 creates no return damage.
     let shielded = scenario
         .add_creature_from_oracle(
             P1,
-            "Shielded Blocker",
+            "Fog Bank",
             0,
             2,
-            "Prevent all damage that would be dealt to Shielded Blocker.",
+            "Defender (This creature can't attack.)\nFlying\nPrevent all combat damage \
+             that would be dealt to and dealt by this creature.",
         )
         .id();
     let spell = scenario
