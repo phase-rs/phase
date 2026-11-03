@@ -212,11 +212,18 @@ fn my_card_does_the_thing() {
   printed card. See [real cards](../engine-implementer/SKILL.md#real-cards).
 - **Regenerate the integration fixture when your parser change touches a card
   it contains.** `add_real_card` reads the committed
-  `crates/engine/tests/fixtures/integration_cards.json` snapshot.
-  `python3 scripts/gen-test-fixture.py --check` verifies **coverage only — that every
-  referenced card is PRESENT (a key-set comparison). It never compares the stored parse
-  VALUES against a fresh export.** So a parser change that alters a fixture card's parse
-  leaves the fixture stale while the gate stays green: the integration test then asserts
-  against the *old* parse and proves nothing about the code you shipped. If your change
-  alters how any fixture card parses, re-run `python3 scripts/gen-test-fixture.py` (no
-  `--check`) and commit the regenerated fixture in the same PR.
+  `crates/engine/tests/fixtures/integration_cards.json.gz` snapshot.
+  `python3 scripts/gen-test-fixture.py --check` rebuilds that snapshot in memory from
+  `client/public/card-data.json` and compares it against the committed fixture, exiting
+  non-zero at the FIRST mismatch, in this order: a referenced card the fixture does not
+  cover (`error: fixture is stale — N card(s) not covered`, followed by the list), a
+  parser-backed card that leaked into the fixture, a stored value that differs from the
+  fresh export (`error: fixture semantic values are stale`), or a payload that is not
+  canonical `gzip -9 -n` output (`error: fixture bytes are not canonical gzip -9 -n
+  output`). On a match it prints `ok: fixture covers all N referenced cards with
+  canonical gzip bytes`. So the check is stricter than a key-set comparison — a parser
+  change that alters a fixture card's stored parse FAILS it, which is the signal to
+  re-run `python3 scripts/gen-test-fixture.py` (no `--check`) and commit the regenerated
+  fixture in the same PR. Note what does not run it: no CI workflow invokes `--check`, so
+  a stale fixture still reaches the integration suite — the gate is the command you run,
+  not a green build.
