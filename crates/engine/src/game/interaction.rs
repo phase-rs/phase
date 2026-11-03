@@ -2817,7 +2817,7 @@ fn preview_key(
 /// delta — "the predictable results of the sequence of choices", stated per display family
 /// and per affected seat.
 ///
-/// **This is arithmetic over the certificate's `per_cycle.delta`, and nothing else.** It
+/// **This is arithmetic over the certificate's `per_cycle` signature, and nothing else.** It
 /// applies no game action, resolves nothing, and touches no `GameState`: the multiplication
 /// `n × δ` is the whole computation. In particular it is NOT
 /// `interaction::preview_interaction`, which answers a different question (is this response
@@ -2835,18 +2835,31 @@ fn preview_key(
 /// short. No such delta exists — one period's delta is a difference of two game-state
 /// readings — and `i32` is exact in the JS number the binding generates, which `i64` is not.
 fn shortcut_preview_entries(
-    delta: &crate::analysis::resource::ResourceVector,
+    periodic: &crate::analysis::resource::PeriodicDelta,
     count: u32,
     victim: Option<&VictimSplit>,
 ) -> Vec<InteractionShortcutPreviewEntry> {
-    let charged_axis =
-        victim.map(|split| crate::analysis::resource::ResourceAxis::Life(split.charged_seat));
+    use crate::analysis::resource::ResourceAxis;
+    let charged_axis = victim.map(|split| ResourceAxis::Life(split.charged_seat));
+    let mill_of = |axis: ResourceAxis| match axis {
+        ResourceAxis::LibraryDelta(seat) => periodic
+            .instructed_mills
+            .as_ref()
+            .and_then(|mills| mills.get(&seat))
+            .map(|mill| (seat, *mill)),
+        _ => None,
+    };
     let mut per_cycle_totals: BTreeMap<(InteractionShortcutPreviewFamily, Option<u8>), i64> =
         BTreeMap::new();
-    for (axis, magnitude) in delta.axis_components() {
+    let mut library_losses = Vec::new();
+    for (axis, magnitude) in periodic.delta.axis_components() {
         // The charged seat's life is re-added below, spread across the seats the declaration
         // allocates the count to. Folding it here as well would state it twice.
         if Some(axis) == charged_axis {
+            continue;
+        }
+        if let Some((seat, mill)) = mill_of(axis) {
+            library_losses.push((seat, mill, -magnitude));
             continue;
         }
         let total = per_cycle_totals.entry(preview_key(axis)).or_insert(0);
@@ -2857,6 +2870,19 @@ fn shortcut_preview_entries(
             .into_iter()
             .map(|(key, per_cycle)| (key, per_cycle.saturating_mul(i64::from(count))))
             .collect();
+    // CR 701.17b: a seat mills no more than its library holds; CR 121.1: the rest of its library
+    // loss is drawn.
+    for (seat, mill, loss) in library_losses {
+        let milled = mill
+            .per_repetition
+            .saturating_mul(i64::from(count))
+            .min(mill.library.max(0));
+        let mill_key = (InteractionShortcutPreviewFamily::Mill, Some(seat.0));
+        *totals.entry(mill_key).or_insert(0) -= milled;
+        let drawn = (loss - mill.per_repetition).max(0);
+        let cards_key = (InteractionShortcutPreviewFamily::Cards, Some(seat.0));
+        *totals.entry(cards_key).or_insert(0) += drawn.saturating_mul(i64::from(count));
+    }
     // CR 119.3: the announced slot charges a LIFE magnitude, so the re-attribution moves the
     // `Life` family and nothing else. `DamageDealt`, `LibraryDelta` and `Poison` are seat-keyed
     // by `payload_seat` too, and keep the seat it gave them.
@@ -3236,7 +3262,7 @@ fn shortcut_preview_basis<'a>(
     let signature = projection.per_cycle.as_ref()?;
     let (crate::analysis::resource::PeriodSignature::EveryRepetition(periodic)
     | crate::analysis::resource::PeriodSignature::OneRepetition(periodic)) = signature;
-    if shortcut_preview_entries(&periodic.delta, 1, None).is_empty() {
+    if shortcut_preview_entries(periodic, 1, None).is_empty() {
         return None;
     }
     let (group, ids, seats, charge, lead) =
@@ -3291,7 +3317,7 @@ fn shortcut_preview_element(
                         VictimSplit::new(charge, &basis.ids, seats, &allocation, basis.lead)
                     },
                 );
-                shortcut_preview_entries(&periodic.delta, count, split.as_ref())
+                shortcut_preview_entries(periodic, count, split.as_ref())
             }
             // The count's consequence is the take's replay, which nothing here performs.
             crate::analysis::resource::PeriodSignature::OneRepetition(_) => Vec::new(),
@@ -10798,8 +10824,8 @@ fn materialize_loop_shortcut_response(
     // carried as ONE value because the seat the minted template is OWNED by and the seat the aim
     // walk measures against must be the same one.
     aim: crate::analysis::decision_template::AimContext<'_>,
-    // CR 732.2a: the answers the offer's confirmed period recorded; `None` off a recorded offer.
-    recorded: Option<&[PinnedDecision]>,
+    // CR 732.2a: the offer's confirmed period, empty off a recorded offer.
+    period: &crate::game::period_confirm::ConfirmedPeriod,
     authoritative_schema: &crate::analysis::decision_template::ShortcutDecisionSchema,
     authoritative_state: &GameState,
     response: &InteractionResponse,
@@ -10881,7 +10907,8 @@ fn materialize_loop_shortcut_response(
                 }
                 // CR 732.2a: the confirmed period's own answer is the one its take performs.
                 InteractionShortcutPointKind::MayChoice => {
-                    let answer = recorded
+                    let answer = period
+                        .recorded_answers()
                         .and_then(|recorded| recorded_answer(recorded, &point.slot))
                         .filter(|pin| matches!(pin, PinnedDecision::MayChoice { .. }))
                         .ok_or(InteractionReasonCode::InvalidAuthorityState)?;
@@ -11067,22 +11094,38 @@ fn materialize_loop_shortcut_response(
         // The `required` slot list is still not derived here: `declaration_conforms` derives it
         // from the SAME `authoritative_schema` this site already passed.
         //
-        // CR 732.2a: the preview and the submit paths share this chokepoint, so both answer the
-        // aim question the same way, and a failure here is this entry's `ConstraintUnsatisfied`
-        // rather than the declare handler's priority handback. Of
+        // CR 732.2a: the preview and the submit paths share this chokepoint, and it asks the
+        // declare handler's own question, so a declaration the handler would refuse fails here as
+        // this entry's `ConstraintUnsatisfied` rather than the handler's priority handback. Of
         // `InteractionShortcutDecision`'s three variants, `AcceptSuggested` and `Fixed` both fall
         // through the pin loop above into this call — so the suggestion-count route is validated
         // here too — while `Decline` returns before any pin is read and reaches no conjunct.
-        if !declaration_conforms(
-            authoritative_schema,
-            template,
-            crate::game::engine::shortcut_validated_range(&count, Some(template)),
-            aim.clone(),
-            recorded,
-            authoritative_state,
-        ) {
+        if period.performed.is_empty()
+            && !declaration_conforms(
+                authoritative_schema,
+                template,
+                crate::game::engine::shortcut_validated_range(&count, Some(template)),
+                aim.clone(),
+                period.recorded_answers(),
+                authoritative_state,
+            )
+        {
             return Err(InteractionReasonCode::ConstraintUnsatisfied);
         }
+    }
+    // CR 732.2a + CR 608.2b: on an offer whose period carries performances, a declaration
+    // conforms iff its pins conform and, performed from the offer frame, it reaches the count.
+    if !period.performed.is_empty()
+        && !crate::game::engine::performance_conforms(
+            authoritative_state,
+            authoritative_schema,
+            aim,
+            period,
+            template.as_ref(),
+            &count,
+        )
+    {
+        return Err(InteractionReasonCode::ConstraintUnsatisfied);
     }
     let pin_minimum = projection
         .points
@@ -11529,7 +11572,7 @@ fn materialize_response(
                     per_cycle: certificate.per_cycle.as_ref(),
                     published: declaration.as_ref(),
                 },
-                period.recorded_answers(),
+                period,
                 schema,
                 authoritative_state,
                 completed.as_ref().unwrap_or(response),

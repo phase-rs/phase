@@ -899,6 +899,7 @@ mod tests {
             declarable_victims: vec![],
             seat_life_charge: vec![],
             cleanup: None,
+            instructed_mills: None,
         }
     }
 
@@ -917,6 +918,7 @@ mod tests {
             declarable_victims: vec![],
             seat_life_charge: vec![],
             cleanup: None,
+            instructed_mills: None,
         }
     }
 
@@ -1210,6 +1212,7 @@ mod tests {
             declarable_victims: vec![P0, P1],
             seat_life_charge: vec![(P0, 2), (P1, 2)],
             cleanup: None,
+            instructed_mills: None,
         };
         let point = either_seat_point(&slot);
         let published = seat_declaration(&[(&slot, P1)]);

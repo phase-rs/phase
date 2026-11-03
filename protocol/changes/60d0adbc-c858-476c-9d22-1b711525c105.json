@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ConfirmedPeriod records the performed reach of each published declaration"
+}

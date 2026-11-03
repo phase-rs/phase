@@ -3649,6 +3649,7 @@ fn preview_offer_with_points(
                         victim_slot,
                         seat_life_charge: Vec::new(),
                         cleanup: None,
+                        instructed_mills: None,
                     },
                 )
             }),
@@ -4469,6 +4470,7 @@ fn respond_period(
         victim_slot,
         seat_life_charge: Vec::new(),
         cleanup: None,
+        instructed_mills: None,
     }
 }
 

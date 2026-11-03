@@ -6764,6 +6764,18 @@ fn scan_resolved_continuous_static(
             }
             acc
         }
+        // CR 702.11a + CR 702.18a and their sibling keywords: a fixed keyword grant reads no
+        // history; its subject is `affected`, scanned below.
+        crate::types::statics::StaticMode::Shroud
+        | crate::types::statics::StaticMode::Hexproof
+        | crate::types::statics::StaticMode::Vigilance
+        | crate::types::statics::StaticMode::Menace
+        | crate::types::statics::StaticMode::Reach
+        | crate::types::statics::StaticMode::Flying
+        | crate::types::statics::StaticMode::Trample
+        | crate::types::statics::StaticMode::Deathtouch
+        | crate::types::statics::StaticMode::Lifelink
+        | crate::types::statics::StaticMode::Indestructible => Axes::NONE,
         _ => return Axes::CONSERVATIVE,
     };
     if let Some(affected) = affected {
@@ -8062,6 +8074,36 @@ mod tests {
         )
         .statics
         .remove(0)
+    }
+
+    /// CR 702.11a + CR 702.11c: Leyline of Sanctity's "You have hexproof." reads no history,
+    /// while Kid Loki's hexproof grant to the creatures it was put counters on this turn reads
+    /// the counters it was put this turn.
+    #[test]
+    fn a_fixed_keyword_grant_reads_no_history_but_its_subject_may() {
+        let leyline = crate::parser::parse_oracle_text(
+            "If this card is in your opening hand, you may begin the game with it on the \
+             battlefield.\nYou have hexproof. (You can't be the target of spells or abilities \
+             your opponents control.)",
+            "Leyline of Sanctity",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        )
+        .statics
+        .into_iter()
+        .find(|def| def.mode == StaticMode::Hexproof)
+        .expect("reach: Leyline's player hexproof is a keyword static");
+        assert_eq!(static_definition_history(&leyline), HistoryReads::NONE);
+        let kid_loki = printed_creature(
+            "Kid Loki",
+            "Each creature you control that you've put one or more +1/+1 counters on this turn \
+             has hexproof.\nWhenever you draw your second card each turn, put a +1/+1 counter on \
+             Kid Loki.",
+        )
+        .statics
+        .remove(0);
+        assert_ne!(static_definition_history(&kid_loki), HistoryReads::NONE);
     }
 
     /// CR 601.2f: a cost-modifying static reads its spell filter and dynamic count, as a

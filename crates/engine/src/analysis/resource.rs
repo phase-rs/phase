@@ -875,6 +875,9 @@ pub struct PeriodicDelta {
     /// the same. A slot present here with no matching `ShortcutDecisionSchema` point is
     /// therefore CORRECT and expected, not a schema/certificate mismatch. Deriving this from
     /// the published points instead let the withhold silently raise the bound.
+    ///
+    /// Ordered by each slot's first resolution in the window, the rank a repetition's
+    /// resolutions take seats in.
     pub victim_slot: Vec<(DecisionSlot, i64)>,
     /// CR 704.5a: the seats [`PeriodicDelta::elimination_cascade`] RESERVED elimination
     /// headroom for — the union of the reaches of the [`SlotCharge`]s that produced the
@@ -925,6 +928,18 @@ pub struct PeriodicDelta {
     /// CR 514.1: the hand a turn-cycle period carries into each cleanup; `None` off that cover.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<CleanupPair>,
+    /// CR 701.17a: per seat, what one repetition mills from its library; `None` where the
+    /// period's departure was not certified, and the whole library loss is then read as draws.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructed_mills: Option<BTreeMap<PlayerId, InstructedMill>>,
+}
+
+/// CR 701.17a + CR 701.17b: one seat's instructed mill per repetition, beside the library it
+/// held at the offer, which no number of repetitions mills past.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstructedMill {
+    pub per_repetition: i64,
+    pub library: i64,
 }
 
 /// CR 732.2a: an offer's published per-period signature, by which repetitions it states. A
@@ -1043,6 +1058,10 @@ impl CleanupPair {
         )])
     }
 }
+
+/// A seat's departure: the repetition it leaves at and the rank of the slot whose resolution
+/// takes it, `None` when unknown.
+type SeatDeparture = (u32, Option<usize>);
 
 impl PeriodicDelta {
     /// [`PeriodicDelta::conforms_in`] over the WHOLE population — the degenerate scope, and the
@@ -1597,7 +1616,7 @@ impl PeriodicDelta {
                     bound,
                     lead,
                 )
-                .map(|repetition| (p.id, repetition))
+                .map(|(repetition, _)| (p.id, repetition))
             })
             .collect();
         // By repetition, then by seat, so the grouping below is a linear walk and the entries
@@ -1649,6 +1668,10 @@ impl PeriodicDelta {
     ///
     /// `horizon` is the WALK's, not this seat's, for the reason
     /// [`PeriodicDelta::elimination_cascade`] states where it derives it.
+    ///
+    /// Beside the repetition, the departure's RANK: the position in [`PeriodicDelta::victim_slot`]
+    /// (resolution order) of the charged slot whose resolution takes the seat, `None` when the
+    /// slot hits alone do not account for it ([`PeriodicDelta::departure_rank`]).
     // Each parameter is a separate authority the caller states at the call — the two templates,
     // the published points, the walk's horizon, the bound direction and the announced lead — and
     // bundling them would hide which question a call site is asking.
@@ -1663,7 +1686,7 @@ impl PeriodicDelta {
         horizon: u32,
         bound: ChargeBound,
         lead: AnnouncedLead<'_>,
-    ) -> Option<u32> {
+    ) -> Option<SeatDeparture> {
         // CR 704.5a: 0 or less life loses, so the whole total is the headroom. A living seat
         // ALREADY at 0 or less — which a committed board carries — crosses on the first
         // repetition, since `net` and `dip` are non-negative and the fatal test is `>=`. That
@@ -1686,18 +1709,127 @@ impl PeriodicDelta {
         // The strict answer is the largest count after which no axis has crossed, so the
         // crossing is the next one — `narrowed_repetitions` is the same division
         // `seat_headroom_bound` performs, over these two axes' own headrooms.
+        // CR 701.17a + CR 121.1 + CR 704.5b: milling an empty library loses nothing, so the
+        // library crosses only on a draw; each repetition mills first, so the draw that finds it
+        // empty comes in the repetition the whole per-repetition loss exhausts it.
+        let library_loss = -self.delta.library_delta.get(&p.id).copied().unwrap_or(0);
+        let mills = self
+            .instructed_mills
+            .as_ref()
+            .and_then(|mills| mills.get(&p.id))
+            .map_or(0, |mill| mill.per_repetition);
+        let library_rate = if library_loss - mills > 0 {
+            library_loss
+        } else {
+            0
+        };
         let non_life = ResourceVector::narrowed_repetitions(&[
             (
                 9 - i64::from(p.poison_counters),
                 self.delta.poison.get(&p.id).copied().unwrap_or(0),
             ),
-            (
-                state.library_of(p.id).len() as i64,
-                -self.delta.library_delta.get(&p.id).copied().unwrap_or(0),
-            ),
+            (state.library_of(p.id).len() as i64, library_rate),
         ])
         .and_then(|strict| u32::try_from(strict.saturating_add(1)).ok());
-        [life, non_life].into_iter().flatten().min()
+        let crossing = [life, non_life].into_iter().flatten().min()?;
+        let rank = (life == Some(crossing))
+            .then(|| {
+                self.departure_rank(
+                    p,
+                    declaration,
+                    observed,
+                    points,
+                    state,
+                    crossing,
+                    bound,
+                    lead,
+                )
+            })
+            .flatten();
+        Some((crossing, rank))
+    }
+
+    /// CR 608.1 + CR 704.5a: the rank, in [`PeriodicDelta::victim_slot`] order, of the charged
+    /// slot whose resolution in repetition `crossing` takes `p` from what the earlier repetitions
+    /// left it to 0 or less. `None` when a resolution this walk cannot place does it: a slot
+    /// whose aim it cannot read, a slot hit that never reaches the seat, or a seat whose
+    /// per-repetition loss exceeds what the slots the period aimed at it dealt, since that loss
+    /// resolves somewhere in the repetition no slot marks.
+    #[allow(clippy::too_many_arguments)]
+    fn departure_rank(
+        &self,
+        p: &Player,
+        declaration: Option<&DecisionTemplate>,
+        observed: Option<&DecisionTemplate>,
+        points: &[DecisionPoint],
+        state: &GameState,
+        crossing: u32,
+        bound: ChargeBound,
+        lead: AnnouncedLead<'_>,
+    ) -> Option<usize> {
+        let names_seat = |decisions: &[ConcreteDecision], slot: &DecisionSlot| {
+            decisions.iter().find_map(|decision| match decision {
+                ConcreteDecision::Targets {
+                    slot: pinned,
+                    targets,
+                } if pinned == slot => Some(targets.contains(&ConcreteTarget::Player(p.id))),
+                _ => None,
+            })
+        };
+        let aimed_by_period: i64 = observed
+            .and_then(|template| decision_template::resolve(template, 0, state).ok())
+            .map_or(0, |decisions| {
+                self.victim_slot
+                    .iter()
+                    .filter(|(slot, _)| names_seat(&decisions, slot) == Some(true))
+                    .map(|(_, magnitude)| (*magnitude).max(0))
+                    .sum()
+            });
+        if -self.delta.life.get(&p.id).copied().unwrap_or(0) > aimed_by_period {
+            return None;
+        }
+        let netted: i64 = self
+            .declared_seat_life_charges(p.id, declaration, observed, points, state, bound, lead)
+            .take(crossing.saturating_sub(1) as usize)
+            .map(|charge| charge.net)
+            .sum();
+        let remaining = i64::from(p.life) - netted;
+        if remaining <= 0 {
+            return None;
+        }
+        let iteration = crossing - 1;
+        let template = if declaration.is_some() && declaration == observed {
+            observed
+        } else {
+            declaration
+        };
+        let mut taken = 0i64;
+        for (rank, (slot, magnitude)) in self.victim_slot.iter().enumerate() {
+            let published = points.iter().find_map(|point| match &point.kind {
+                DecisionPointKind::Targets { legal_targets, .. } if point.slot == *slot => {
+                    Some(legal_targets.contains(&TargetRef::Player(p.id)))
+                }
+                _ => None,
+            });
+            let decisions = match iteration.checked_sub(lead.repetitions(slot)) {
+                None => lead.aims().map(<[ConcreteDecision]>::to_vec),
+                Some(index) => {
+                    template.and_then(|t| decision_template::resolve(t, index, state).ok())
+                }
+            };
+            match (
+                published,
+                decisions.as_deref().and_then(|d| names_seat(d, slot)),
+            ) {
+                (Some(true), Some(true)) => taken += (*magnitude).max(0),
+                (Some(false), _) | (_, Some(false)) => {}
+                _ => return None,
+            }
+            if taken >= remaining {
+                return Some(rank);
+            }
+        }
+        None
     }
 
     /// CR 732.2a: ONE legal declaration that exhibits a longer cascade than the offer's own — the
@@ -1717,12 +1849,13 @@ impl PeriodicDelta {
     /// and the `ReplayMode` are carried through untouched, so the witness differs from a
     /// declaration the publisher already validated in exactly the aim.
     ///
-    /// Each segment aims at one living reachable seat, and the next segment's first announcement
-    /// resolves at the repetition after that seat's own crossing, so no segment aims at a seat an
-    /// earlier segment crossed. With a leading slot ([`AnnouncedLead`]) announcement index `i`
-    /// resolves at repetition `i + 1 + lead`, so the next segment starts `lead` indices before
-    /// the crossing, and a seat that crosses before its own segment's first announcement resolves
-    /// (the in-flight hit alone takes it) gets no segment. Seats are taken in the charged point's
+    /// Each segment aims at one living reachable seat, and each charged slot switches to the next
+    /// segment at its first resolution after the previous seat's departure, so no segment aims at
+    /// a seat an earlier segment crossed. With a leading slot ([`AnnouncedLead`]) announcement
+    /// index `i` resolves at repetition `i + 1 + lead`; a slot ranked after the killing
+    /// resolution, or any slot when that resolution is unknown, switches in the departure's own
+    /// repetition, every other slot in the next. A seat that crosses at or before the previous
+    /// departure gets no segment. Seats are taken in the charged point's
     /// published `legal_targets` order, the order the declaration dialog lists them in — a
     /// choice on which nothing rests, because the witness's contract is legality and not
     /// optimality.
@@ -1795,29 +1928,52 @@ impl PeriodicDelta {
                     .map(|p| (i64::from(p.life), p.id))
             })
             .collect();
-        let leads = self
-            .victim_slot
-            .iter()
-            .map(|(slot, _)| lead.repetitions(slot))
-            .max()
-            .unwrap_or(0);
+        // CR 603.3d + CR 601.2c: after a departure at `(repetition, rank)`, a slot's first
+        // announcement aimed at the next seat is the one its first resolution after that
+        // departure makes — in the departure's own repetition when the slot resolves after the
+        // killing resolution, or when that resolution is unknown, else in the next one.
+        let rank_of = |slot: &DecisionSlot| self.victim_slot.iter().position(|(s, _)| s == slot);
+        let slot_start = |slot: &DecisionSlot, boundary: Option<SeatDeparture>| -> u32 {
+            let Some((repetition, killer)) = boundary else {
+                return 0;
+            };
+            let after = match (killer, rank_of(slot)) {
+                (Some(killer), Some(rank)) => rank > killer,
+                _ => true,
+            };
+            repetition
+                .saturating_sub(lead.repetitions(slot))
+                .saturating_sub(u32::from(after))
+        };
 
         // Segment by segment, because a segment's own END is the crossing the segments BEFORE it
-        // produce — the switch point is not knowable without them.
-        let mut steps: Vec<(u32, Ranking)> = Vec::new();
+        // produce — the switch point is not knowable without them. Each step carries the
+        // departure that ended the segment before it.
+        let mut steps: Vec<(Option<SeatDeparture>, Ranking)> = Vec::new();
         let mut witness: Option<DecisionTemplate> = None;
-        let mut start = 0u32;
+        let mut boundary: Option<SeatDeparture> = None;
         for (_, seat) in order {
-            if steps.iter().any(|(existing, _)| *existing == start) {
+            // A segment whose start meets an earlier one's on some slot is one no drive reads.
+            if self.victim_slot.iter().any(|(slot, _)| {
+                let at = slot_start(slot, boundary);
+                steps
+                    .iter()
+                    .any(|(earlier, _)| slot_start(slot, *earlier) >= at)
+            }) {
                 break;
             }
-            steps.push((start, Ranking::one(AnnouncementSubject::Seat(seat))));
+            steps.push((boundary, Ranking::one(AnnouncementSubject::Seat(seat))));
             let mut candidate = observed.clone();
             for decision in &mut candidate.decisions {
                 if let PinnedDecision::Targets { slot, targets } = decision {
                     if charged.contains(slot) {
                         *targets = vec![TargetPin::Scheduled(TargetSchedule::Piecewise(
-                            steps.clone(),
+                            steps
+                                .iter()
+                                .map(|(earlier, ranking)| {
+                                    (slot_start(slot, *earlier), ranking.clone())
+                                })
+                                .collect(),
                         ))];
                     }
                 }
@@ -1828,7 +1984,7 @@ impl PeriodicDelta {
             };
             // The horizon this walk is asked within is the cascade's own, so the two cannot
             // disagree about how far a crossing may be deferred.
-            let Some(crossing) = self.seat_crossing(
+            let Some((crossing, rank)) = self.seat_crossing(
                 p,
                 Some(&candidate),
                 Some(observed),
@@ -1845,15 +2001,21 @@ impl PeriodicDelta {
                 steps.pop();
                 break;
             };
-            // Crossed before this segment's first announcement resolves: no segment for it.
-            if crossing <= start + leads {
+            // Crossed at or before the departure that ended the previous segment: no segment
+            // for it.
+            let crossed_before = boundary.is_some_and(|(repetition, killer)| {
+                crossing < repetition
+                    || (crossing == repetition
+                        && match (rank, killer) {
+                            (Some(rank), Some(killer)) => rank <= killer,
+                            _ => true,
+                        })
+            });
+            if crossed_before {
                 steps.pop();
                 continue;
             }
-            // A `Piecewise` start is an ITERATION INDEX and a repetition is counted from 1, so
-            // the segment whose first announcement resolves after a crossing at repetition `r`
-            // starts at index `r - lead`.
-            start = crossing.saturating_sub(leads);
+            boundary = Some((crossing, rank));
             witness = Some(candidate);
         }
         witness
@@ -2095,11 +2257,10 @@ pub(crate) struct SlotCharge {
     /// [`PeriodicDelta::victim_slot`] carry, so charge and publication cannot name different
     /// slots.
     pub(crate) slot: DecisionSlot,
-    /// CR 119.3: the per-period life loss one repetition of this slot may adjust its named
-    /// seat's total by — at the mint, the per-seat sum of the period's FRAME-WISE negative
-    /// parts, maxed over seats ([`ResourceVector::with_frame_wise_life_loss`] then
-    /// [`ResourceVector::worst_seat_life_loss`]). At least the net term it replaces, at most
-    /// true gross: a loss an offsetting gain cancels inside one frame is still folded away.
+    /// CR 119.3 + CR 120.3a: the life one repetition of this slot may take from its named seat —
+    /// the most one of its resolutions in the window took from the single player it targeted,
+    /// capped by the period's worst frame-wise seat loss
+    /// ([`ResourceVector::worst_seat_life_loss`]), which a slot with no measured resolution keeps.
     pub(crate) magnitude: i64,
     /// CR 115.2: the seats this slot's announcement may legally name, sorted and deduped. A
     /// slot announced twice in one window reaches the UNION of its frames' legal sets.
@@ -2107,7 +2268,8 @@ pub(crate) struct SlotCharge {
     /// CR 608.1 + CR 608.2 + CR 119.3: the seat this slot's announcement that RESOLVED inside
     /// the window aimed at — the aim whose loss the period measured — or `None` when the window
     /// does not settle it: no resolved announcement of the slot, no single-player target, a seat
-    /// outside [`SlotCharge::reaches`], or two resolved announcements naming different seats.
+    /// neither in [`SlotCharge::reaches`] nor the proposer's (whom no reach holds), or two
+    /// resolved announcements naming different seats.
     ///
     /// `Option`, never a `bool` beside a seat: "the window saw this slot aim somewhere" and
     /// "where" are one fact. `None` is the fail-CLOSED reading — an unobserved aim is never
@@ -3601,11 +3763,12 @@ pub(crate) struct PeriodTouch<'a> {
     /// against — CR 603.3d announcement choices are a property of the board the
     /// ability was put on the stack against.
     pub(crate) announced: Vec<(&'a GameState, &'a StackEntry)>,
-    /// `(carrying_frame, entry)` for every entry that LEFT the stack inside the window
-    /// (CR 608.1): present on frame `i-1`'s stack, absent from frame `i`'s, carried by frame
-    /// `i-1`. The loss the period measured is these entries' resolution (CR 608.2 + CR 119.3),
-    /// so the aim a charge OBSERVED is read here, never off `announced`.
-    pub(crate) resolved: Vec<(&'a GameState, &'a StackEntry)>,
+    /// `(carrying_frame, frame_after, entry)` for every entry that LEFT the stack inside the
+    /// window (CR 608.1): present on frame `i-1`'s stack, absent from frame `i`'s, carried by
+    /// frame `i-1`. The loss the period measured is these entries' resolution (CR 608.2 +
+    /// CR 119.3), so the aim a charge OBSERVED, and what it took, are read here, never off
+    /// `announced`.
+    pub(crate) resolved: Vec<(&'a GameState, &'a GameState, &'a StackEntry)>,
     /// Entry ids of `current.stack` that the window proves FROZEN: the same id
     /// at the same index in EVERY window frame AND in `current`. CR 608.1: only
     /// the top of the stack resolves, so an entry that held its `(index, id)`
@@ -3642,7 +3805,7 @@ pub(crate) fn certified_period_touch<'a>(
     }
 
     let mut announced: Vec<(&'a GameState, &'a StackEntry)> = Vec::new();
-    let mut resolved: Vec<(&'a GameState, &'a StackEntry)> = Vec::new();
+    let mut resolved: Vec<(&'a GameState, &'a GameState, &'a StackEntry)> = Vec::new();
     let mut prev_frame: &'a GameState = window[0];
     let mut prev_ids: HashSet<ObjectId> = window[0].stack.iter().map(|e| e.id).collect();
     for frame in window
@@ -3659,7 +3822,7 @@ pub(crate) fn certified_period_touch<'a>(
         let ids: HashSet<ObjectId> = frame.stack.iter().map(|e| e.id).collect();
         for entry in &prev_frame.stack {
             if !ids.contains(&entry.id) {
-                resolved.push((prev_frame, entry));
+                resolved.push((prev_frame, frame, entry));
             }
         }
         prev_ids = ids;
@@ -12352,6 +12515,7 @@ mod tests {
                 &touch,
                 PlayerId(0),
                 delta.worst_seat_life_loss(),
+                crate::analysis::loop_check::OfferRoad::Ring,
             )
         }
 
@@ -12661,7 +12825,11 @@ mod tests {
         );
 
         // ── The publication half: ONE point, carrying the WIDE legal set ────────────────
-        let points = bounded_cycle_pin_slots_for_window(&touch, PlayerId(0));
+        let points = bounded_cycle_pin_slots_for_window(
+            &touch,
+            PlayerId(0),
+            crate::analysis::loop_check::OfferRoad::Ring,
+        );
         assert_eq!(
             points.len(),
             1,
@@ -12692,6 +12860,7 @@ mod tests {
             &touch,
             PlayerId(0),
             delta.worst_seat_life_loss(),
+            crate::analysis::loop_check::OfferRoad::Ring,
         );
         assert_eq!(
             charged.len(),
@@ -12759,6 +12928,7 @@ mod tests {
             &divergent_touch,
             PlayerId(0),
             delta.worst_seat_life_loss(),
+            crate::analysis::loop_check::OfferRoad::Ring,
         );
         assert_eq!(
             divergent.len(),
@@ -12813,10 +12983,15 @@ mod tests {
                 &current,
                 PeriodCertification::ResourceSignatureOnly,
             );
-            bounded_cycle_charged_targets_for_window(&touch, PlayerId(0), 1)
-                .into_iter()
-                .map(|charge| (charge.reaches, charge.aimed_at))
-                .collect::<Vec<_>>()
+            bounded_cycle_charged_targets_for_window(
+                &touch,
+                PlayerId(0),
+                1,
+                crate::analysis::loop_check::OfferRoad::Ring,
+            )
+            .into_iter()
+            .map(|charge| (charge.reaches, charge.aimed_at))
+            .collect::<Vec<_>>()
         };
 
         // PAIRED POSITIVE, first: the same one frame aimed INSIDE its own legal set records
@@ -12924,10 +13099,15 @@ mod tests {
                 &current,
                 PeriodCertification::ResourceSignatureOnly,
             );
-            bounded_cycle_charged_targets_for_window(&touch, PlayerId(0), 1)
-                .into_iter()
-                .map(|charge| (charge.reaches, charge.aimed_at))
-                .collect::<Vec<_>>()
+            bounded_cycle_charged_targets_for_window(
+                &touch,
+                PlayerId(0),
+                1,
+                crate::analysis::loop_check::OfferRoad::Ring,
+            )
+            .into_iter()
+            .map(|charge| (charge.reaches, charge.aimed_at))
+            .collect::<Vec<_>>()
         };
 
         assert_eq!(
@@ -13011,7 +13191,12 @@ mod tests {
         let charged_victims = |state: &GameState| {
             let touch =
                 certified_period_touch(&[], state, PeriodCertification::ResourceSignatureOnly);
-            bounded_cycle_charged_targets_for_window(&touch, PlayerId(0), 1)
+            bounded_cycle_charged_targets_for_window(
+                &touch,
+                PlayerId(0),
+                1,
+                crate::analysis::loop_check::OfferRoad::Ring,
+            )
         };
         let announcement_slot = |state: &GameState| {
             build_target_slots(state, state.stack[2].ability().unwrap())
@@ -13249,7 +13434,7 @@ mod tests {
                 .iter()
                 .map(|(_, m)| *m)
                 .collect::<Vec<_>>(),
-            vec![2],
+            vec![1],
             "CR 119.3: the forced announcement is CHARGED even though CR 732.2a published no \
              point for it — the combination that was unreachable before, because both \
              derivations read the published list; got {:?}",
@@ -17645,6 +17830,7 @@ mod tests {
             declarable_victims: SlotCharge::declarable_victims(&charges),
             seat_life_charge: published,
             cleanup: None,
+            instructed_mills: None,
         };
         let points = [seat_point(&slot, &[0, 1])];
         let observed = seat_schedule_declaration(&[(&slot, &[1])]);
@@ -17725,6 +17911,7 @@ mod tests {
             seat_life_charge: life_loss_delta(&[(0, 4), (1, 4)])
                 .seat_life_charges(&dipping_charges),
             cleanup: None,
+            instructed_mills: None,
         };
         assert_eq!(
             dipping.seat_life_charge,
@@ -17784,6 +17971,7 @@ mod tests {
                     .map(|&(seat, magnitude)| (PlayerId(seat), magnitude))
                     .collect(),
                 cleanup: None,
+                instructed_mills: None,
             };
             let DeclaredLifeCharge { net, dip } = nth_charge(
                 &period,
@@ -17883,6 +18071,7 @@ mod tests {
             declarable_victims: SlotCharge::declarable_victims(&swap_charges),
             seat_life_charge: swap_published,
             cleanup: None,
+            instructed_mills: None,
         };
         let swap_points = [seat_point(&s1, &[0, 1]), seat_point(&s2, &[0, 1])];
         let swap_observed = seat_schedule_declaration(&[(&s1, &[0]), (&s2, &[1])]);
@@ -17944,6 +18133,7 @@ mod tests {
             declarable_victims: SlotCharge::declarable_victims(&gain_charges),
             seat_life_charge: life_loss_delta(&[(0, 2), (1, 2)]).seat_life_charges(&gain_charges),
             cleanup: None,
+            instructed_mills: None,
         };
         let away = seat_schedule_declaration(&[(&g, &[1])]);
         let kept = seat_schedule_declaration(&[(&g, &[0])]);
@@ -17986,6 +18176,7 @@ mod tests {
             declarable_victims: Vec::new(),
             seat_life_charge: vec![(p0, 1)],
             cleanup: None,
+            instructed_mills: None,
         };
         assert_eq!(
             nth_charge(&even, p0, None, None, &[], 0, &board, ChargeBound::Ceiling),
@@ -18043,6 +18234,7 @@ mod tests {
             declarable_victims: SlotCharge::declarable_victims(&two_slots),
             seat_life_charge: frame_wise.seat_life_charges(&two_slots),
             cleanup: None,
+            instructed_mills: None,
         };
         let landing_points = [seat_point(&s1, &[0, 1]), seat_point(&s2, &[1])];
         let both_on_p1 = seat_schedule_declaration(&[(&s1, &[1]), (&s2, &[1])]);
@@ -18090,6 +18282,7 @@ mod tests {
             declarable_victims: SlotCharge::declarable_victims(&one_slot),
             seat_life_charge: frame_wise.seat_life_charges(&one_slot),
             cleanup: None,
+            instructed_mills: None,
         };
         assert_eq!(
             leaving.declarable_victims,
@@ -20637,6 +20830,7 @@ mod tests {
             declarable_victims: vec![PlayerId(1)],
             seat_life_charge: vec![(PlayerId(1), 3)],
             cleanup: None,
+            instructed_mills: None,
         };
         let json = serde_json::to_string(&populated)
             .expect("a populated PeriodicDelta must serialize (engine-wasm PANICS otherwise)");
@@ -20852,6 +21046,7 @@ mod tests {
                 declarable_victims: vec![],
                 seat_life_charge: vec![],
                 cleanup: None,
+                instructed_mills: None,
             })),
             shortened_by: None,
             published_declaration: None,
@@ -22750,7 +22945,11 @@ mod tests {
         // PAIRED POSITIVE REACH-GUARD, and it is what stops the property collapsing into a
         // vacuous truth about a stack nothing publishes on.
         let touch = certified_period_touch(&[], &state, PeriodCertification::ResourceSignatureOnly);
-        let points = bounded_cycle_pin_slots_for_window(&touch, PlayerId(0));
+        let points = bounded_cycle_pin_slots_for_window(
+            &touch,
+            PlayerId(0),
+            crate::analysis::loop_check::OfferRoad::Ring,
+        );
         assert!(
             !points.is_empty(),
             "reach-guard: at least one constructed entry must be ACCEPTED by the mint, or the \
@@ -28312,6 +28511,7 @@ mod tests {
             declarable_victims: domain.iter().copied().map(PlayerId).collect(),
             seat_life_charge: Vec::new(),
             cleanup: None,
+            instructed_mills: None,
         }
     }
 

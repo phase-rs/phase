@@ -323,8 +323,8 @@ fn an_altar_loop_growing_foods_is_offered() {
 /// CR 121.1 + CR 732.2a: Phyrexian Altar ("Sacrifice a creature: Add one mana of any color.")
 /// recurring Gravecrawler beside Samwise Gamgee ("Whenever another nontoken creature you control
 /// enters, create a Food token.") and Moldervine Reclamation ("Whenever a creature you control
-/// dies, you gain 1 life and draw a card.") grows a Food and draws P0 a card each cycle, so the
-/// cover puts the draw back beside the Food.
+/// dies, you gain 1 life and draw a card.") grows a Food and draws P0 a card each cycle; the cover
+/// puts the draw back beside the Food, so the period is offered.
 #[test]
 fn an_altar_loop_growing_foods_and_drawing_passes_the_cover() {
     let Some(db) = shared_card_db() else { return };
@@ -348,17 +348,15 @@ fn an_altar_loop_growing_foods_and_drawing_passes_the_cover() {
             "reach: cycle {cycle}"
         );
     }
-    let verdict = latest_verdict(runner.state());
-    assert!(
-        !matches!(verdict, Err(OfferRefusal::Cover(_))),
-        "{verdict:?}"
-    );
+    drive_altar_offers(&mut runner, (altar, gravecrawler), 3, |_| false);
+    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
 }
 
 /// CR 121.1 + CR 701.17a: beside Liliana the Repentant ("Whenever another creature or
 /// planeswalker you control enters, mill two cards.") and Moldervine Reclamation ("Whenever a
 /// creature you control dies, you gain 1 life and draw a card."), each cycle mills P0 two cards
-/// and then draws the card under them, which the cover puts back as the top once they had left.
+/// and then draws the card under them, which the cover puts back as the top once they had left, so
+/// the period is offered.
 #[test]
 fn a_draw_after_a_mill_passes_the_cover() {
     let Some(db) = shared_card_db() else { return };
@@ -382,11 +380,8 @@ fn a_draw_after_a_mill_passes_the_cover() {
             "reach: cycle {cycle} mills two and draws one"
         );
     }
-    let verdict = latest_verdict(runner.state());
-    assert!(
-        !matches!(verdict, Err(OfferRefusal::Cover(_))),
-        "{verdict:?}"
-    );
+    drive_altar_offers(&mut runner, (altar, gravecrawler), 3, |_| false);
+    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
 }
 
 /// Kiki-Jiki copying Deceiver Exarch, three cycles after the first: three priority frames.
@@ -1413,7 +1408,7 @@ fn a_moldervine_altar_of_the_brood_period_is_counted_to_the_casters_library() {
         panic!("an offer");
     };
     assert_eq!(schema.iteration_count, IterationCount::Fixed(9));
-    assert_eq!(schema.deliverable_capacity, 10);
+    assert_eq!(schema.deliverable_capacity, 9);
 }
 
 /// CR 732.1b: once both rotations of the Altar + Gravecrawler period are named, each later cycle
@@ -2184,13 +2179,18 @@ fn an_altar_zulaport_period_is_offered_a_bounded_shortcut_and_taken() {
             [(P0, 1), (P1, -1)].into_iter().collect(),
             "{payoff}"
         );
+        let WaitingFor::LoopShortcut { declaration, .. } = &offered.waiting_for else {
+            panic!("{payoff}: an offer");
+        };
+        // The offer's own declaration carries the period's recorded answers, Phyrexian Altar's
+        // colour among them.
         assert!(
             engine::ai_support::candidate_actions(&offered)
                 .iter()
                 .any(|candidate| candidate.action
                     == GameAction::DeclareShortcut {
                         count: IterationCount::Fixed(l),
-                        template: None,
+                        template: declaration.clone(),
                     }),
             "{payoff}: the AI proposer may declare the offer"
         );
@@ -2277,10 +2277,10 @@ fn an_altar_period_taken_to_lethal_in_a_best_of_three_reaches_sideboarding() {
     }
 }
 
-/// CR 732.2a: a period whose next repetition ends the game does not come round again, in a
-/// best-of-three as in a single game; with one more life the same steps are offered.
+/// CR 104.2a + CR 732.2a: a period whose second repetition ends a best-of-three game is counted to
+/// that ending with P0 its winner, as in a single game; with one more life it is counted to three.
 #[test]
-fn a_period_whose_replay_ends_a_best_of_three_game_does_not_recur() {
+fn a_period_whose_replay_ends_a_best_of_three_game_is_counted_to_its_ending() {
     let Some(db) = shared_card_db() else { return };
     let one_cycle_from = |p1_life: i32| {
         let (mut runner, altar, gravecrawler) =
@@ -2297,15 +2297,30 @@ fn a_period_whose_replay_ends_a_best_of_three_game_does_not_recur() {
         runner
     };
 
-    let refused = one_cycle_from(3);
-    assert_eq!(lives(refused.state()), [21, 2]);
-    assert!(!is_offer(refused.state()));
+    let counted = |p1_life: i32| {
+        let runner = one_cycle_from(p1_life);
+        let WaitingFor::LoopShortcut {
+            schema,
+            predicted_winner,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("an offer, got {:?}", runner.state().waiting_for);
+        };
+        (
+            lives(runner.state()),
+            schema.iteration_count.clone(),
+            *predicted_winner,
+        )
+    };
     assert_eq!(
-        latest_verdict(refused.state()),
-        Err(OfferRefusal::NoRecurrence)
+        counted(3),
+        (vec![21, 2], IterationCount::Fixed(2), Some(P0))
     );
-
-    assert!(is_offer(one_cycle_from(4).state()));
+    assert_eq!(
+        counted(4),
+        (vec![21, 3], IterationCount::Fixed(3), Some(P0))
+    );
 }
 
 /// `state` reloaded through the persisted codec the WASM restore and server persistence use, then
@@ -7325,4 +7340,287 @@ fn an_altar_of_the_brood_period_resolved_all_is_offered() {
         );
         assert_eq!(road(state), Some(OfferRoad::RecordedPeriod), "{scope:?}");
     }
+}
+
+/// The offer standing on `runner`, as its schema's published count and the certificate's.
+fn offered_parts(runner: &GameRunner) -> (IterationCount, u32, LoopCertificate) {
+    let WaitingFor::LoopShortcut {
+        schema,
+        certificate,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("an offer, got {:?}", runner.state().waiting_for);
+    };
+    (
+        schema.iteration_count.clone(),
+        schema.deliverable_capacity,
+        certificate.clone(),
+    )
+}
+
+/// CR 104.2a + CR 704.5a + CR 732.2a: with P1 at 2, the Altar–Zulaport period's second replayed
+/// repetition ends the game with P0 the winner, so the counting replay counts it and the take
+/// ends the game there.
+#[test]
+fn a_period_whose_replay_ends_the_game_for_its_holder_is_counted() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board_at("Zulaport Cutthroat", &[20, 3], db);
+    let score = |action: &GameAction| {
+        2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
+    };
+    cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+    settle(&mut runner, &score);
+    let index = ability(runner.state(), altar, true);
+    activate(&mut runner, altar, index);
+    settle(&mut runner, &score);
+    assert_eq!(lives(runner.state()), [21, 2]);
+    let (count, _, certificate) = offered_parts(&runner);
+    assert_eq!(count, IterationCount::Fixed(2));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut {
+            predicted_winner: Some(P0),
+            ..
+        }
+    ));
+    assert_eq!(certificate.win_kind, Some(WinKind::LethalDamage));
+    assert_eq!(certificate.win_kind_at, Some(2));
+    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    let events = take_recorded(runner.state_mut(), 2).events;
+    assert_eq!(markers(&events).len(), 2);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver {
+            winner: Some(P0),
+            ..
+        }
+    ));
+}
+
+/// CR 121.1 + CR 704.5b + CR 732.2a: a period that grows a Food and draws P0 a card each
+/// repetition has no CR 704 threshold but its own library, so it is offered at the draws that
+/// library holds; milling two first (Liliana the Repentant) leaves a third of them.
+#[test]
+fn a_drawing_advantage_period_is_offered_at_its_library() {
+    let Some(db) = shared_card_db() else { return };
+    for (payoff, per_repetition) in [("Samwise Gamgee", 1), ("Liliana the Repentant", 3)] {
+        let (mut runner, altar, gravecrawler) = altar_board(Some(payoff), db);
+        place(runner.state_mut(), P0, "Moldervine Reclamation", db);
+        drive_altar_offers(&mut runner, (altar, gravecrawler), 3, |_| false);
+        let library = runner.state().players[0].library.len() as u32;
+        let (count, _, _) = offered_parts(&runner);
+        assert_eq!(
+            count,
+            IterationCount::Fixed(library / per_repetition),
+            "{payoff}: library {library}"
+        );
+    }
+}
+
+/// CR 119.3: Spike Feeder ("Remove a +1/+1 counter from this creature: You gain 2 life.") beside
+/// Archangel of Thune ("Whenever you gain life, put a +1/+1 counter on each creature you
+/// control.") gains P0 2 life a repetition, so an offer near the largest life total the engine
+/// represents is held to the repetitions that stay representable, and its take completes.
+#[test]
+fn a_life_gaining_period_is_offered_within_the_representable_life_total() {
+    let Some(db) = shared_card_db() else { return };
+    let offered_at = |life: i32| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let feeder = scenario.add_real_card(P0, "Spike Feeder", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Archangel of Thune", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.loop_detection = LoopDetectionMode::Interactive;
+        state.players[0].life = life;
+        state
+            .objects
+            .get_mut(&feeder)
+            .expect("Spike Feeder")
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+        let index = runner.state().objects[&feeder]
+            .abilities
+            .iter()
+            .position(|a| {
+                a.kind == AbilityKind::Activated && matches!(*a.effect, Effect::GainLife { .. })
+            })
+            .expect("Spike Feeder's life gain");
+        for _ in 0..8 {
+            activate(&mut runner, feeder, index);
+            settle(&mut runner, &|_| 0);
+            if is_offer(runner.state()) {
+                return runner;
+            }
+        }
+        panic!("reach: the period is offered");
+    };
+    let headroom = 200;
+    let mut runner = offered_at(i32::MAX - headroom);
+    let life = runner.state().players[0].life;
+    let (_, capacity, _) = offered_parts(&runner);
+    assert_eq!(capacity, ((i32::MAX - life) / 2) as u32);
+    take_recorded(runner.state_mut(), capacity);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().players[0].life, life + 2 * capacity as i32);
+
+    let (_, uncapped, _) = offered_parts(&offered_at(20));
+    assert!(uncapped > capacity, "{uncapped}");
+}
+
+/// CR 701.17a + CR 701.17b + CR 121.1: beside Altar of the Brood and Moldervine Reclamation the
+/// period mills P1 one card and draws P0 one, so its preview mills P1 no more than its library
+/// holds, states P0's draws, and its certificate names no decking win; with P1's library as long
+/// as P0's, the take performs every repetition offered.
+#[test]
+fn a_moldervine_altar_of_the_brood_period_previews_its_mills_and_draws() {
+    let Some(db) = shared_card_db() else { return };
+    for p1_library in [3, 10] {
+        let (mut runner, altar, gravecrawler) = altar_board(Some("Altar of the Brood"), db);
+        let state = runner.state_mut();
+        place(state, P0, "Moldervine Reclamation", db);
+        let cut: Vec<ObjectId> = state.players[1]
+            .library
+            .iter()
+            .skip(p1_library)
+            .copied()
+            .collect();
+        for id in cut {
+            remove_from_zone(state, id, Zone::Library, P1);
+            state.objects.remove(&id);
+        }
+        drive_altar_offers(&mut runner, (altar, gravecrawler), 1, |_| false);
+        let offered = runner.state().clone();
+        let p1_held = i32::try_from(offered.players[1].library.len()).expect("small");
+        let (count, _, certificate) = offered_parts(&runner);
+        assert_ne!(certificate.win_kind, Some(WinKind::Decking), "{p1_library}");
+        let IterationCount::Fixed(n) = count else {
+            panic!("a fixed count");
+        };
+        let (_, view) = published_to_p0(&offered);
+        let Some(InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Shortcut { preview, .. },
+            ..
+        }) = view.opportunities.first().map(|o| &o.response)
+        else {
+            panic!("no shortcut opportunity");
+        };
+        let element = preview
+            .iter()
+            .find(|element| element.count == n)
+            .expect("the suggested count is previewed");
+        let amount = |family, seat: PlayerId| {
+            element
+                .entries
+                .iter()
+                .find(|entry| entry.family == family && entry.player == Some(seat.0))
+                .map(|entry| entry.amount)
+        };
+        assert_eq!(
+            amount(InteractionShortcutPreviewFamily::Mill, P1),
+            Some(-(n as i32).min(p1_held)),
+            "{p1_library}"
+        );
+        assert_eq!(
+            amount(InteractionShortcutPreviewFamily::Cards, P0),
+            Some(n as i32),
+            "{p1_library}"
+        );
+        if p1_library == 10 {
+            let events = take_recorded(runner.state_mut(), n).events;
+            assert_eq!(markers(&events).len(), n as usize);
+        }
+    }
+}
+
+/// CR 400.7 + CR 601.2h + CR 732.2a: Time Sieve ("{T}, Sacrifice five artifacts: Take an extra
+/// turn after this one.") sacrificing the five Thopters Thopter Assembly ("At the beginning of
+/// your upkeep, if you control no Thopters other than this creature, return this creature to its
+/// owner's hand and create five 1/1 colorless Thopter artifact creature tokens with flying.")
+/// makes each turn: the replay pays the Sieve's cost with the Thopters its own repetition made.
+#[test]
+fn a_time_sieve_thopter_assembly_period_pays_with_the_thopters_it_makes() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island"; 25]);
+    scenario.with_library_top(P1, &["Island"; 25]);
+    let sieve = scenario.add_real_card(P0, "Time Sieve", Zone::Battlefield, db);
+    for _ in 0..6 {
+        scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+    }
+    let assembly = scenario.add_real_card(P0, "Thopter Assembly", Zone::Hand, db);
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let start = runner.state().turn_number;
+    let mut verdicts = Vec::new();
+    while runner.state().turn_number <= start + 8 {
+        let state = runner.state();
+        if is_offer(state) {
+            assert_eq!(road(state), Some(OfferRoad::RecordedPeriod));
+            return;
+        }
+        let priority = matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+            && state.stack.is_empty();
+        if priority {
+            verdicts.extend(
+                confirm_for_tests(state)
+                    .into_iter()
+                    .map(|(_, verdict)| verdict),
+            );
+        }
+        let main = priority && state.active_player == P0 && state.phase == Phase::PreCombatMain;
+        let untapped_islands = state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].name == "Island" && !state.objects[id].tapped)
+            .count();
+        let thopters = state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].is_token)
+            .count();
+        let action = match &state.waiting_for {
+            _ if main && state.players[0].hand.contains(&assembly) && untapped_islands >= 6 => {
+                GameAction::CastSpell {
+                    object_id: assembly,
+                    card_id: state.objects[&assembly].card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::Auto,
+                }
+            }
+            _ if main && thopters >= 5 && !state.objects[&sieve].tapped => {
+                GameAction::ActivateAbility {
+                    source_id: sieve,
+                    ability_index: ability(state, sieve, false),
+                    payment_mode: CastPaymentMode::Auto,
+                }
+            }
+            WaitingFor::PayCost { choices, count, .. } => GameAction::SelectCards {
+                cards: choices
+                    .iter()
+                    .copied()
+                    .filter(|id| state.objects[id].is_token)
+                    .take(*count)
+                    .collect(),
+            },
+            WaitingFor::DiscardToHandSize { cards, count, .. } => GameAction::SelectCards {
+                cards: cards.iter().copied().take(*count).collect(),
+            },
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            _ => GameAction::PassPriority,
+        };
+        act(&mut runner, action);
+    }
+    panic!("the period is offered; verdicts {verdicts:?}");
 }

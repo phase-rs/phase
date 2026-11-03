@@ -65,9 +65,9 @@ pub enum OfferRefusal {
     Cover(ObjectGrowthVerdict),
     /// The period makes no progress for its controller.
     NoAxis,
-    /// CR 704.5a: the period moves some player toward losing the game, and the threshold
-    /// authority refused its replayed frames.
-    LossAxis,
+    /// CR 704.5a / CR 704.5b / CR 704.5c + CR 732.2a: the period moves some player toward losing
+    /// the game, and its proposer survives no repetition of the declaration it would be offered.
+    SurvivesNoRepetition,
     /// CR 732.2a + CR 613.4c: the period grows history a static reads, so each repetition's delta
     /// grows and neither a threshold count nor a constant per-repetition delta is true of it.
     GrowingLoss,
@@ -116,6 +116,24 @@ pub struct ConfirmedPeriod {
     /// How one repetition is performed; `None` when no plays were read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     performance: Option<PeriodPerformance>,
+    /// CR 732.2a: how far each declaration the offer published reaches when performed from the
+    /// offer frame; empty on every offer the threshold authority's replay did not count.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) performed: Vec<PerformedReach>,
+}
+
+/// CR 732.2a: one declaration performed forward from an offer frame, repetition by repetition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PerformedReach {
+    /// The performed declaration's pins, which key the record.
+    pub(crate) decisions: Vec<PinnedDecision>,
+    /// The repetitions its proposer is still in the game after.
+    pub(crate) reach: u32,
+    /// CR 800.4a: the seats that left the game in each performed repetition.
+    pub(crate) departures: Vec<PredictedDeparture>,
+    /// CR 104.2a: the proposer, when the performance ended the game with it winning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) winner: Option<PlayerId>,
 }
 
 /// CR 605.3a + CR 605.3b: whether a period's repetition is made only of mana abilities, which its
@@ -241,12 +259,15 @@ pub(crate) struct Confirmation {
     pub(crate) bounded: Option<BoundedOfferParts>,
 }
 
-/// The certificate, schema and declaration a bounded offer publishes.
-pub(crate) type BoundedOfferParts = (
-    LoopCertificate,
-    ShortcutDecisionSchema,
-    Option<DecisionTemplate>,
-);
+/// The certificate, schema and declaration a bounded offer publishes, and the winner its
+/// published declaration's performance ended the game with.
+#[derive(Debug, Clone)]
+pub(crate) struct BoundedOfferParts {
+    pub(crate) certificate: LoopCertificate,
+    pub(crate) schema: ShortcutDecisionSchema,
+    pub(crate) declaration: Option<DecisionTemplate>,
+    pub(crate) predicted_winner: Option<PlayerId>,
+}
 
 /// The refusal of a span whose optional choices are not `holder`'s alone: more than one seat's
 /// is a fragmented loop (CR 732.3), and one other seat's is that seat's period.
@@ -631,6 +652,47 @@ fn rebind_convoke(
     Ok(Some(tapped))
 }
 
+/// CR 400.7 + CR 601.2h: a recorded cost selection whose objects the prompt does not offer,
+/// with each such object replaced by an unused offered object of the same name; `rebound` is
+/// the recorded selection with the objects minted in the period already replaced.
+fn rebind_cost_selection(
+    recorded: &GameAction,
+    rebound: GameAction,
+    replay: &GameState,
+) -> GameAction {
+    let (
+        GameAction::SelectCards { cards: original },
+        GameAction::SelectCards { cards },
+        WaitingFor::PayCost { choices, .. },
+    ) = (recorded, &rebound, &replay.waiting_for)
+    else {
+        return rebound;
+    };
+    let name = |id: &ObjectId| replay.objects.get(id).map(|object| object.name.as_str());
+    let mut unused: Vec<ObjectId> = choices
+        .iter()
+        .filter(|id| !cards.contains(id))
+        .copied()
+        .collect();
+    let mut rebound_cards = Vec::with_capacity(cards.len());
+    for (id, original) in cards.iter().zip(original) {
+        if choices.contains(id) {
+            rebound_cards.push(*id);
+            continue;
+        }
+        let Some(printed) = name(id).or_else(|| name(original)) else {
+            return rebound;
+        };
+        let Some(at) = unused.iter().position(|other| name(other) == Some(printed)) else {
+            return rebound;
+        };
+        rebound_cards.push(unused.swap_remove(at));
+    }
+    GameAction::SelectCards {
+        cards: rebound_cards,
+    }
+}
+
 /// One replayed cycle from `replay`'s current state; the source of each triggered ability it
 /// resolved, in order. `frames`, when given, collects every priority frame the cycle passes, and
 /// `events` collects every event its actions emit.
@@ -642,8 +704,13 @@ fn replay_cycle(
     frames: Option<&mut Vec<GameState>>,
     events: &mut Vec<GameEvent>,
 ) -> Result<Vec<String>, OfferRefusal> {
-    replay_cycle_ordered(replay, items, end, choices, frames, None, events, None)
+    replay_cycle_ordered(
+        replay, items, end, choices, frames, None, events, None, None,
+    )
 }
+
+/// A declaration's pins and the repetition index they answer at.
+type Declared<'a> = Option<(&'a DecisionTemplate, u32)>;
 
 /// An occurrence and its rank among the equal occurrences at one ordering point, in prompt order.
 type Label = (Occurrence, usize);
@@ -938,6 +1005,7 @@ fn replay_cycle_ordered(
     mut settles: Option<&mut Vec<GameState>>,
     events: &mut Vec<GameEvent>,
     mut stop: Option<&mut PointStop<'_>>,
+    declared: Declared<'_>,
 ) -> Result<Vec<String>, OfferRefusal> {
     let mut done = vec![false; items.len()];
     let mut performed = Vec::new();
@@ -1019,6 +1087,17 @@ fn replay_cycle_ordered(
         let answered = match next {
             None => false,
             Some(at) => {
+                let candidates = at..next_play.unwrap_or(items.len());
+                if answer_declared(
+                    replay,
+                    items,
+                    &mut done,
+                    candidates.clone(),
+                    declared,
+                    events,
+                )? {
+                    continue;
+                }
                 let item = &items[at];
                 if item.play == Some((replay.stack.len(), PromptClass::Other)) {
                     let action = rebound(item, replay);
@@ -1032,7 +1111,6 @@ fn replay_cycle_ordered(
                     done[at] = true;
                     continue;
                 }
-                let candidates = at..next_play.unwrap_or(items.len());
                 answer(replay, items, &mut done, candidates, choices, events)?
             }
         };
@@ -1102,6 +1180,71 @@ fn pass(
     Ok(())
 }
 
+/// CR 603.3d + CR 601.2c: answers a trigger's target prompt whose slot `declared` pins with the
+/// declaration's targets at its repetition, in place of the recorded answer among `candidates`;
+/// `false` when the declaration pins no slot of the prompt. CR 608.2b + CR 400.7: a pinned
+/// target that is no longer there stops the repetition.
+fn answer_declared(
+    replay: &mut GameState,
+    items: &[PeriodItem],
+    done: &mut [bool],
+    candidates: std::ops::Range<usize>,
+    declared: Declared<'_>,
+    events: &mut Vec<GameEvent>,
+) -> Result<bool, OfferRefusal> {
+    use crate::analysis::decision_template::{take_answer, ConcreteDecision, ConcreteTarget};
+    let Some((template, iteration)) = declared else {
+        return Ok(false);
+    };
+    let WaitingFor::TriggerTargetSelection {
+        player,
+        source_id: Some(source_id),
+        ..
+    } = replay.waiting_for
+    else {
+        return Ok(false);
+    };
+    let Some(decision) = take_answer(
+        template,
+        iteration,
+        replay,
+        ChoicePoint::AnnouncedTarget,
+        |source| crate::game::engine::slot_source_prompted(replay, source, source_id),
+    ) else {
+        return Ok(false);
+    };
+    let Some(recorded) = candidates.clone().find(|&at| {
+        !done[at]
+            && matches!(
+                items[at].action,
+                GameAction::SelectTargets { .. } | GameAction::ChooseTarget { .. }
+            )
+    }) else {
+        return Ok(false);
+    };
+    let ConcreteDecision::Targets { targets, .. } =
+        decision.map_err(|_| OfferRefusal::IllegalReplayedPlay)?
+    else {
+        return Err(OfferRefusal::UnanswerablePrompt);
+    };
+    let targets = targets
+        .into_iter()
+        .map(|target| match target {
+            ConcreteTarget::Object(id) => TargetRef::Object(id),
+            ConcreteTarget::Player(seat) => TargetRef::Player(seat),
+        })
+        .collect();
+    step(
+        replay,
+        player,
+        GameAction::SelectTargets { targets },
+        OfferRefusal::IllegalReplayedPlay,
+        events,
+    )?;
+    done[recorded] = true;
+    Ok(true)
+}
+
 /// Answers the current prompt with the first unconsumed answer among `candidates` the reducer
 /// accepts; `false` when none does.
 fn answer(
@@ -1134,7 +1277,7 @@ fn answer(
             .cost_move
             .as_ref()
             .and_then(|_| CostChoices::at(replay));
-        let action = rebound(item, replay);
+        let action = rebind_cost_selection(&item.action, rebound(item, replay), replay);
         let choice = answered_choice(replay, &action);
         match step(
             replay,
@@ -1470,6 +1613,7 @@ fn replay_period(
         settles.as_deref_mut(),
         &mut Vec::new(),
         None,
+        None,
     )?;
     // CR 705.1 + CR 706.1 + CR 400.7: cycles that drew different outcomes differ in what those
     // outcomes made, so the compared cycles start after a lead-in, under one outcome sequence.
@@ -1495,6 +1639,7 @@ fn replay_period(
                 settles.as_deref_mut(),
                 &mut Vec::new(),
                 None,
+                None,
             )?
         }
     };
@@ -1510,6 +1655,7 @@ fn replay_period(
         None,
         settles,
         &mut Vec::new(),
+        None,
         None,
     );
     Ok(ReplayedPeriod {
@@ -1594,13 +1740,24 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         }
         sign => sign,
     };
+    // CR 104.2a + CR 732.2a: a second cycle the game ended in with its holder the winner was
+    // performed, so the counting replay counts the period.
+    let sign = match (sign, &second) {
+        (Ok(PeriodSign::Unbounded(_) | PeriodSign::LossAxis(_)), Err(_))
+            if counted_ending(holder, &s_n, &replay).is_some() =>
+        {
+            Ok(PeriodSign::Spend)
+        }
+        (sign, _) => sign,
+    };
+    let mut performed_reaches = Vec::new();
     let (delta, departure, bounded, growth, counted_by) = match (sign, second) {
         // Only a spend says why a period stopped after one repetition.
-        (Ok(PeriodSign::Unbounded(_) | PeriodSign::LossAxis) | Err(_), Err(stopped)) => {
+        (Ok(PeriodSign::Unbounded(_) | PeriodSign::LossAxis(_)) | Err(_), Err(stopped)) => {
             return Err(stopped);
         }
         (Err(refusal), Ok(_)) => return Err(refusal),
-        (Ok(PeriodSign::Unbounded(_) | PeriodSign::LossAxis), Ok(_))
+        (Ok(PeriodSign::Unbounded(_) | PeriodSign::LossAxis(_)), Ok(_))
             if verdict
                 == ObjectGrowthVerdict::ResourceRecurrence(Some(RecurrenceCover::GrowthRead)) =>
         {
@@ -1611,8 +1768,9 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
             (delta, departure, None, growth, CountedBy::Threshold)
         }
         // CR 704.5a + CR 732.2a: a loss period may be repeated only up to the threshold crossings
-        // the authority measures on its replayed frames.
-        (Ok(PeriodSign::LossAxis), Ok(_)) => {
+        // the authority measures on its replayed frames, and is offered at the count its
+        // published declaration reaches when performed.
+        (Ok(PeriodSign::LossAxis(unbounded)), Ok(_)) => {
             let mut frames = Vec::new();
             replay_cycle(
                 &mut s_n1.clone(),
@@ -1627,10 +1785,19 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
                 == ObjectGrowthVerdict::ResourceRecurrence(Some(RecurrenceCover::TurnCycle)))
             .then(|| CleanupPair::measure(&frames, holder))
             .flatten();
-            let parts = replay_bounded_offer(frame, holder, &frames, &choices, cleanup)
-                .map_err(|_| OfferRefusal::LossAxis)?;
-            let delta = ResourceVector::period(prior, current);
-            (delta, None, Some(parts), growth, CountedBy::Threshold)
+            match replay_bounded_offer(frame, holder, &frames, &choices, cleanup)? {
+                Some(mut parts) => {
+                    performed_reaches =
+                        perform_published(&mut parts, &s_n, &items, span.reach, holder);
+                    let delta = ResourceVector::period(prior, current);
+                    (delta, None, Some(parts), growth, CountedBy::Threshold)
+                }
+                // No threshold: the unbounded road's.
+                None => {
+                    let (delta, departure) = *unbounded;
+                    (delta, departure, None, growth, CountedBy::Threshold)
+                }
+            }
         }
         // CR 732.2a + CR 118.3: the count is the repetitions the reducer performs, and the offer
         // states no other.
@@ -1669,7 +1836,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
                 points,
                 count.survived(holder),
                 count.repetitions,
-                counted_ending(holder, &s_n, &replay),
+                counted_ending(holder, &s_n, &replay).map(|kind| (kind, holder)),
             );
             let departures = count.departures;
             return Ok(Confirmation {
@@ -1680,6 +1847,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
                     choices,
                     counted_by: CountedBy::Replay { departures },
                     performance,
+                    performed: Vec::new(),
                 },
                 frames: pair,
                 delta,
@@ -1698,6 +1866,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
             choices,
             counted_by,
             performance,
+            performed: performed_reaches,
         },
         frames: Box::new([s_n1, replay]),
         delta,
@@ -2130,6 +2299,7 @@ pub(crate) fn decision_points(frame: &GameState, span: NamedSpan) -> OptionProof
             None,
             &mut Vec::new(),
             Some(&mut stop),
+            None,
         );
         match (out, stop.reached) {
             (Ok(_), Some(frame)) => Ok((frame, replay, stop.taken)),
@@ -2327,15 +2497,135 @@ fn counted_ending(holder: PlayerId, start: &GameState, end: &GameState) -> Optio
 }
 
 /// CR 732.2c: performs one cycle of `period` from `state`, a frame where `holder` has priority,
-/// ending where the cycle comes round again; the events it emits are appended to `events`.
+/// ending where the cycle comes round again; the events it emits are appended to `events`. A
+/// `declared` declaration answers the target prompts it pins at its repetition index.
 pub(crate) fn perform_cycle(
     state: &mut GameState,
     period: &ConfirmedPeriod,
     holder: PlayerId,
+    declared: Declared<'_>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), OfferRefusal> {
     let end = FrameEnd::of(state, holder, period.reach);
-    replay_cycle(state, &period.items, &end, &mut Vec::new(), None, events).map(drop)
+    replay_cycle_ordered(
+        state,
+        &period.items,
+        &end,
+        &mut Vec::new(),
+        None,
+        None,
+        events,
+        None,
+        declared,
+    )
+    .map(drop)
+}
+
+/// CR 732.2a: performs `declared` forward from `start`, a frame where `holder` has priority, for
+/// at most `n` repetitions of the period `items` make, and states how far it reached.
+pub(crate) fn perform_declared(
+    start: &GameState,
+    items: &[PeriodItem],
+    reach: PeriodReach,
+    holder: PlayerId,
+    declared: &DecisionTemplate,
+    n: u32,
+) -> PerformedReach {
+    use crate::game::engine::{repetition_verdict, RepetitionVerdict};
+    let _probe = SimulationProbeGuard::enter();
+    let mut replay = start.clone();
+    let end = FrameEnd::of(&replay, holder, reach);
+    let mut count = Count::default();
+    let mut winner = None;
+    for k in 0..n {
+        let before = seats(&replay);
+        let completed = replay_cycle_ordered(
+            &mut replay,
+            items,
+            &end,
+            &mut Vec::new(),
+            None,
+            None,
+            &mut Vec::new(),
+            None,
+            Some((declared, k)),
+        )
+        .is_ok();
+        match repetition_verdict(&replay, completed, holder, None) {
+            RepetitionVerdict::Continue => {
+                count.note(before, &replay, true, holder);
+            }
+            RepetitionVerdict::Ended { winner: ended } => {
+                count.note(before, &replay, false, holder);
+                winner = ended.filter(|&seat| seat == holder);
+                break;
+            }
+            RepetitionVerdict::Stopped => break,
+        }
+    }
+    PerformedReach {
+        decisions: declared.decisions.clone(),
+        reach: count.survived(holder),
+        departures: count.departures,
+        winner,
+    }
+}
+
+/// [`perform_declared`] of `period` from `state`'s view for `holder`, as its offer frame was.
+pub(crate) fn perform_declared_on(
+    state: &GameState,
+    period: &ConfirmedPeriod,
+    holder: PlayerId,
+    declared: &DecisionTemplate,
+    n: u32,
+) -> PerformedReach {
+    let mut start = replay_base(state, holder);
+    start.waiting_for = WaitingFor::Priority { player: holder };
+    perform_declared(&start, &period.items, period.reach, holder, declared, n)
+}
+
+/// CR 732.2a: performs the offer's own declaration and its suggestion from `start` to the count
+/// the threshold authority published, publishes the suggestion's reach (the own's without one),
+/// withdraws a suggestion that reaches no further than the own, and returns both records.
+fn perform_published(
+    parts: &mut BoundedOfferParts,
+    start: &GameState,
+    items: &[PeriodItem],
+    reach: PeriodReach,
+    holder: PlayerId,
+) -> Vec<PerformedReach> {
+    use crate::analysis::decision_template::{IterationCount, ReplayMode};
+    let IterationCount::Fixed(n) = parts.schema.iteration_count else {
+        return Vec::new();
+    };
+    let mut performed = Vec::new();
+    let mut published = None;
+    for declaration in [
+        parts.declaration.as_mut(),
+        parts.schema.suggested_declaration.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let record = perform_declared(start, items, reach, holder, declaration, n);
+        declaration.replay = ReplayMode::Scheduled {
+            count: IterationCount::Fixed(record.reach),
+        };
+        published = Some(record.clone());
+        performed.push(record);
+    }
+    if let ([own, suggestion], Some(_)) = (performed.as_slice(), &parts.declaration) {
+        if suggestion.reach <= own.reach {
+            parts.schema.suggested_declaration = None;
+            published = Some(own.clone());
+        }
+    }
+    if let Some(record) = published {
+        parts.schema.iteration_count = IterationCount::Fixed(record.reach);
+        parts.schema.deliverable_capacity = record.reach;
+        parts.predicted_winner = record.winner;
+    }
+    performed
 }
 
 /// Every span the current trace names, with the confirmer's verdict on each at `state`, which

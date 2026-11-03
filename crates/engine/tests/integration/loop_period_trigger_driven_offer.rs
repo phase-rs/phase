@@ -978,14 +978,14 @@ fn assert_the_declared_may_answer_must_be_the_recorded_one(
         "{board:?}: the shared authority admits the confirmed period's own answers"
     );
     assert_eq!(
-        validate_recorded_answers(&declined, period.choices(), COUNT, &offer),
+        validate_recorded_answers(&declined, period.choices(), COUNT, None, &offer),
         Err(PinValidation::DivergesFromRecordedPeriod {
             slot: flipped[0].slot().clone()
         }),
         "{board:?}: the refusal names the slot answered otherwise than the period"
     );
     assert_eq!(
-        validate_recorded_answers(&recorded, period.choices(), COUNT, &offer),
+        validate_recorded_answers(&recorded, period.choices(), COUNT, None, &offer),
         Ok(())
     );
 

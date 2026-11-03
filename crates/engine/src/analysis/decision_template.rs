@@ -1594,14 +1594,30 @@ pub(crate) fn recorded_answer<'a>(
 /// declaration may pin a slot only the way the period answered it. Targets compare by what they
 /// resolve to at every driven index, since a recorded pin names its object at a past incarnation
 /// (CR 400.7).
+///
+/// Under an every-repetition signature a `Targets` pin at one of its charged slots is the
+/// declaration's own aim, which CR 601.2c lets it choose each repetition (via CR 603.3d), so it
+/// is not compared.
 pub fn validate_recorded_answers(
     template: &DecisionTemplate,
     recorded: &[PinnedDecision],
     validated_range: IterationIndex,
+    per_cycle: Option<&crate::analysis::resource::PeriodSignature>,
     state: &GameState,
 ) -> Result<(), PinValidation> {
+    let charged = match per_cycle {
+        Some(crate::analysis::resource::PeriodSignature::EveryRepetition(periodic)) => {
+            periodic.victim_slot.as_slice()
+        }
+        Some(crate::analysis::resource::PeriodSignature::OneRepetition(_)) | None => &[],
+    };
     for pin in &template.decisions {
         let slot = pin.slot();
+        if matches!(pin, PinnedDecision::Targets { .. })
+            && charged.iter().any(|(aimed, _)| aimed == slot)
+        {
+            continue;
+        }
         let agrees = recorded_answer(recorded, slot).is_some_and(|answer| match (pin, answer) {
             (
                 PinnedDecision::Targets { targets, .. },
@@ -1839,12 +1855,32 @@ pub fn declaration_conforms(
     // this range: `validate_pins` has confined every `Targets` pin to the offer's published legal
     // set at every index the count reaches, which is what makes the walk's `Err` arm a statement
     // about non-targeting pins rather than a hole.
+    declaration_pins_conform(
+        schema,
+        template,
+        validated_range,
+        aim.per_cycle,
+        recorded,
+        state,
+    ) && aims_survive_the_crossings(&schema.points, template, validated_range, aim, state).is_ok()
+}
+
+/// CR 732.2a: [`declaration_conforms`] less its aim walk — coverage, pin legality and agreement
+/// with the recorded answers. On an offer whose period was performed, what a declaration reaches
+/// is performed rather than modelled, so its callers ask the performance instead of the walk.
+pub fn declaration_pins_conform(
+    schema: &ShortcutDecisionSchema,
+    template: &DecisionTemplate,
+    validated_range: IterationIndex,
+    per_cycle: Option<&crate::analysis::resource::PeriodSignature>,
+    recorded: Option<&[PinnedDecision]>,
+    state: &GameState,
+) -> bool {
     predictability_gate(template, &schema.points).is_ok()
         && validate_pins(schema, template, validated_range, state).is_ok()
         && recorded.is_none_or(|recorded| {
-            validate_recorded_answers(template, recorded, validated_range, state).is_ok()
+            validate_recorded_answers(template, recorded, validated_range, per_cycle, state).is_ok()
         })
-        && aims_survive_the_crossings(&schema.points, template, validated_range, aim, state).is_ok()
 }
 
 #[cfg(test)]
@@ -3643,7 +3679,13 @@ mod tests {
             key: tri_key(),
         };
         assert_eq!(
-            validate_recorded_answers(&declaring(MayChoiceOption::Take, 10), &recorded, 2, &state),
+            validate_recorded_answers(
+                &declaring(MayChoiceOption::Take, 10),
+                &recorded,
+                2,
+                None,
+                &state
+            ),
             Ok(())
         );
         assert_eq!(
@@ -3651,16 +3693,23 @@ mod tests {
                 &declaring(MayChoiceOption::Decline, 10),
                 &recorded,
                 2,
+                None,
                 &state
             ),
             Err(PinValidation::DivergesFromRecordedPeriod { slot: may.clone() })
         );
         assert_eq!(
-            validate_recorded_answers(&declaring(MayChoiceOption::Take, 11), &recorded, 2, &state),
+            validate_recorded_answers(
+                &declaring(MayChoiceOption::Take, 11),
+                &recorded,
+                2,
+                None,
+                &state
+            ),
             Err(PinValidation::DivergesFromRecordedPeriod { slot: aim.clone() })
         );
         assert_eq!(
-            validate_recorded_answers(&declaring(MayChoiceOption::Take, 10), &[], 2, &state),
+            validate_recorded_answers(&declaring(MayChoiceOption::Take, 10), &[], 2, None, &state),
             Err(PinValidation::DivergesFromRecordedPeriod { slot: may })
         );
     }
@@ -3725,7 +3774,7 @@ mod tests {
                 replay: ReplayMode::Static,
                 key: tri_key(),
             };
-            validate_recorded_answers(&template, recorded, 2, &state)
+            validate_recorded_answers(&template, recorded, 2, None, &state)
         };
         let diverges = |index| Err(PinValidation::DivergesFromRecordedPeriod { slot: slot(index) });
 
