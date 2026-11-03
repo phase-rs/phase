@@ -2759,12 +2759,18 @@ fn crackback_damage(
     let attacker_source = projected_state.unwrap_or(state);
     // CR 508.1f: declaring attackers taps them, and the projection stops at
     // `OpponentAttackersDeclared` — so the opponent's declared non-vigilance
-    // attackers are tapped there. They are exactly the creatures that crack
-    // back, so a projected declared attacker counts despite `tapped`.
-    let projected_attacker = |id: ObjectId| -> bool {
-        projected_state
+    // attackers are tapped there. A declared attacker cracks back exactly when
+    // its announced target (CR 508.1b) is this player, tapped or not; one sent
+    // at another player (e.g. goaded away, CR 701.15b) deals this player
+    // nothing. An undeclared creature counts only if untapped.
+    let can_crack_back = |obj: &engine::game::game_object::GameObject| -> bool {
+        match projected_state
             .and_then(|ps| ps.combat.as_ref())
-            .is_some_and(|combat| combat.attackers.iter().any(|a| a.object_id == id))
+            .and_then(|combat| combat.attackers.iter().find(|a| a.object_id == obj.id))
+        {
+            Some(attack) => attack.attack_target == AttackTarget::Player(player),
+            None => !obj.tapped,
+        }
     };
     // Hoist block-legality statics once for the greedy O(attackers × blockers)
     // assignment sweep below. `attacker_source` is the only state queried.
@@ -2776,7 +2782,7 @@ fn crackback_damage(
                 let obj = attacker_source.objects.get(&id)?;
                 if obj.controller == opp
                     && obj.card_types.core_types.contains(&CoreType::Creature)
-                    && (!obj.tapped || projected_attacker(id))
+                    && can_crack_back(obj)
                     && !obj.has_keyword(&Keyword::Defender)
                 {
                     Some((id, obj.power.unwrap_or(0)))
@@ -4000,11 +4006,58 @@ mod tests {
         );
     }
 
+    /// CR 508.1b + CR 701.15b: a projected attacker announced at another player
+    /// (e.g. goaded away from P0) deals P0 nothing, tapped or untapped (vigilance).
+    #[test]
+    fn crackback_projection_ignores_attackers_declared_at_another_player() {
+        use engine::game::combat::{AttackerInfo, CombatState};
+        let mut state = setup_multiplayer(3);
+        let at_p0 = add_creature(&mut state, PlayerId(1), "Giant", 5, 5, vec![]);
+        let at_p2 = add_creature(&mut state, PlayerId(1), "Goaded Giant", 5, 5, vec![]);
+        let vigilant_at_p2 = add_creature(
+            &mut state,
+            PlayerId(1),
+            "Vigilant Giant",
+            4,
+            4,
+            vec![Keyword::Vigilance],
+        );
+
+        let mut projected = state.clone();
+        for id in [at_p0, at_p2] {
+            projected.objects.get_mut(&id).unwrap().tapped = true;
+        }
+        projected.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::new(at_p0, AttackTarget::Player(PlayerId(0)), PlayerId(0)),
+                AttackerInfo::new(at_p2, AttackTarget::Player(PlayerId(2)), PlayerId(2)),
+                AttackerInfo::new(
+                    vigilant_at_p2,
+                    AttackTarget::Player(PlayerId(2)),
+                    PlayerId(2),
+                ),
+            ],
+            ..Default::default()
+        });
+        let projection = Projection {
+            horizon_reached: ProjectionHorizon::OpponentAttackersDeclared,
+            state: projected,
+            snapshots: Vec::new(),
+            confidence: crate::projection::Confidence::Exact,
+            target_opponent: PlayerId(1),
+        };
+
+        let cb = crackback_damage(&state, PlayerId(0), &[PlayerId(1)], &[], Some(&projection));
+        assert_eq!(cb, 5, "only the attacker declared at P0 cracks back at P0");
+    }
+
     /// End to end: P1's tapped 5/5s untap and swing back for 10 into P0's 8 on
-    /// the projected turn, so crackback pruning keeps a 3/3 home. When the
-    /// projected declared attackers were read as tapped, crackback came out 0
-    /// and all three attacked. Measurement mode makes the projection
-    /// step-capped rather than clock-bound, so this is deterministic.
+    /// the projected turn, so crackback pruning keeps one 3/3 home (10 >= 8 with
+    /// all three in; 5 < 8 with one blocker). When the projected declared
+    /// attackers were read as tapped, crackback came out 0 and all three
+    /// attacked. Entered from P0's declare-attackers step, as production does;
+    /// Measurement mode makes the projection step-capped rather than
+    /// clock-bound, so this is deterministic.
     #[test]
     fn projected_crackback_keeps_a_blocker_home() {
         let mut state = setup();
@@ -4028,6 +4081,14 @@ mod tests {
             let giant = add_creature(&mut state, PlayerId(1), "Giant", 5, 5, vec![]);
             state.objects.get_mut(&giant).unwrap().tapped = true;
         }
+        state.priority_player = PlayerId(0);
+        state.phase = engine::types::phase::Phase::DeclareAttackers;
+        state.combat = Some(engine::game::combat::CombatState::default());
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ));
 
         let attacks = choose_attackers_with_targets_with_profile(
             &state,
@@ -4040,9 +4101,10 @@ mod tests {
             None,
             None,
         );
-        assert!(
-            !attacks.is_empty() && attacks.len() < 3,
-            "crackback must keep a blocker home against the 10-power swing-back, got {attacks:?}"
+        assert_eq!(
+            attacks.len(),
+            2,
+            "crackback must keep one blocker home against the 10-power swing-back, got {attacks:?}"
         );
     }
 
