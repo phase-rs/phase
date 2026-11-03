@@ -4789,6 +4789,7 @@ fn static_definition_reads_zone_membership(def: &StaticDefinition, zone: Zone) -
 ///   * an empty `active_zones` is the CR 113.6 battlefield default, and the zone
 ///     pipeline already marks both battlefield entry (`mark_layers_entered`) and
 ///     battlefield exit (`mark_layers_full`).
+///
 /// `mode != Continuous` definitions produce no layer effect at all
 /// (`active_continuous_effects_from_static_definitions` skips them), and the
 /// command-zone arm of `static_functions_in_zone` reads the same `active_zones`

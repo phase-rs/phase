@@ -5412,7 +5412,7 @@ mod tests {
         );
     }
 
-    /// CR 611.3a + CR 401.4: the board-wide half of the policy must also run on
+    /// CR 611.3a + CR 613.1: the board-wide half of the policy must also run on
     /// the sibling primitive. A static gated on a graveyard census loses its
     /// grant when the graveyard card is put onto the library. Fails at base:
     /// with no top-of-library static live, `move_to_library_at_index` marks
