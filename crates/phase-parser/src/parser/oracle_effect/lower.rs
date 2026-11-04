@@ -2347,7 +2347,6 @@ mod r2_zone_union_timing_tests {
             properties: vec![FilterProp::InAnyZone {
                 zones: vec![Zone::Hand, Zone::Graveyard],
             }],
-            ..Default::default()
         });
         assert_eq!(union.extract_zones(), vec![Zone::Hand, Zone::Graveyard]);
         assert_eq!(
