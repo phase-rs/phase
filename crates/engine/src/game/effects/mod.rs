@@ -11932,8 +11932,8 @@ fn detach_after_player_scope_local_chain(
         && is_player_scope_local_continuation(&node.effect, &next.effect, scope)
         && !next_is_scoped_search_shuffle_tail;
     // CR 608.2c + CR 118.12: a resolution step of a per-seat gated instruction
-    // ("If they don't, they lose 4 life and you surveil 1" — Tell Me What You
-    // See; "If they do, untap this creature and remove it from combat" —
+    // ("If they don't, they lose 2 life and you draw a card" — Braids's
+    // Frightful Return chapter III; "If they do, untap this creature and remove it from combat" —
     // Shakedown Heavy) is part of that instruction: it resolves inside the
     // seat's template and is skipped with its gate when the gate is false
     // (`starts_independent_instruction`). A child with its OWN `player_scope`
@@ -57516,13 +57516,32 @@ mod tests {
         );
     }
 
-    const TELL_ME_WHAT_YOU_SEE: &str = "When this enchantment enters, target opponent may have you draw a card. If they don't, they lose 4 life and you surveil 1.\nWhenever you face a dilemma, you may return this enchantment to its owner's hand. (You face a dilemma as you choose one or more modes for a spell or ability.)";
+    const BRAIDS_FRIGHTFUL_RETURN: &str = "Read ahead (Choose a chapter and start with that many lore counters. Add one after your draw step. Skipped chapters don't trigger. Sacrifice after III.)\nI — You may sacrifice a creature. If you do, each opponent discards a card.\nII — Return target creature card from your graveyard to your hand.\nIII — Target opponent may sacrifice a nonland, nontoken permanent of their choice. If they don't, they lose 2 life and you draw a card.";
 
     /// The resolved chain of the first trigger whose `execute` carries a
     /// `player_scope`, parsed from verbatim Oracle text.
     fn scoped_trigger_resolved(text: &str, name: &str, types: &[&str]) -> ResolvedAbility {
-        let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
-        let parsed = crate::parser::parse_oracle_text(text, name, &[], &types, &[]);
+        scoped_trigger_resolved_with(text, name, &[], types, &[])
+    }
+
+    /// `scoped_trigger_resolved` for a face with printed keywords and subtypes
+    /// (a Saga's "Read ahead").
+    fn scoped_trigger_resolved_with(
+        text: &str,
+        name: &str,
+        keywords: &[&str],
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> ResolvedAbility {
+        let owned =
+            |items: &[&str]| -> Vec<String> { items.iter().map(|t| t.to_string()).collect() };
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            name,
+            &owned(keywords),
+            &owned(types),
+            &owned(subtypes),
+        );
         let execute = parsed
             .triggers
             .iter()
@@ -57558,27 +57577,35 @@ mod tests {
         steps
     }
 
-    /// The Surveil node of Tell Me What You See's resolved ETB chain.
-    fn tell_me_surveil_mut(resolved: &mut ResolvedAbility) -> &mut ResolvedAbility {
+    /// Braids's Frightful Return chapter III's resolved chain.
+    fn braids_iii_resolved() -> ResolvedAbility {
+        scoped_trigger_resolved_with(
+            BRAIDS_FRIGHTFUL_RETURN,
+            "Braids's Frightful Return",
+            &["Read ahead"],
+            &["Enchantment"],
+            &["Saga"],
+        )
+    }
+
+    /// The Draw node of Braids's Frightful Return chapter III's resolved chain.
+    fn braids_iii_draw_mut(resolved: &mut ResolvedAbility) -> &mut ResolvedAbility {
         let lose_life = resolved.sub_ability.as_deref_mut().expect("LoseLife");
-        let surveil = lose_life.sub_ability.as_deref_mut().expect("Surveil");
-        assert!(matches!(surveil.effect, Effect::Surveil { .. }));
-        surveil
+        let draw = lose_life.sub_ability.as_deref_mut().expect("Draw");
+        assert!(matches!(draw.effect, Effect::Draw { .. }));
+        draw
     }
 
     /// U1 — CR 608.2c + CR 118.12: a per-seat gated instruction keeps its
-    /// continuation steps in the seat template. Tell Me What You See: "If they
-    /// don't, they lose 4 life and you surveil 1" — the surveil stays with the
-    /// gated life loss instead of detaching as the once-after-all-seats tail.
+    /// continuation steps in the seat template. Braids's Frightful Return
+    /// chapter III: "If they don't, they lose 2 life and you draw a card" — the
+    /// draw stays with the gated life loss instead of detaching as the
+    /// once-after-all-seats tail.
     #[test]
     fn player_scope_gated_instruction_keeps_its_continuation_steps() {
-        let resolved = scoped_trigger_resolved(
-            TELL_ME_WHAT_YOU_SEE,
-            "Tell Me What You See",
-            &["Enchantment"],
-        );
+        let resolved = braids_iii_resolved();
         let (template, tail) = split_at_first_scope(&resolved);
-        assert!(matches!(template.effect, Effect::Draw { .. }));
+        assert!(matches!(template.effect, Effect::Sacrifice { .. }));
         let steps = template_steps(&template);
         assert_eq!(steps.len(), 2, "template: {template:?}");
         assert!(matches!(steps[0].effect, Effect::LoseLife { .. }));
@@ -57590,8 +57617,8 @@ mod tests {
             "REACH: the life loss carries the per-seat decline gate"
         );
         assert!(
-            matches!(steps[1].effect, Effect::Surveil { .. }),
-            "the surveil is retained in the seat template"
+            matches!(steps[1].effect, Effect::Draw { .. }),
+            "the draw is retained in the seat template"
         );
         assert!(tail.is_none(), "nothing detaches: {tail:?}");
     }
@@ -57656,16 +57683,13 @@ mod tests {
     /// U4 — CR 608.2e: a continuation step with its OWN `player_scope` is the
     /// next multi-player action and is judged as before (detached). No printed
     /// card has a per-seat gated node followed by an own-scope step; the
-    /// nearest printed card is Sensation Gorger. The fixture is Tell Me What
-    /// You See's chain with its surveil given `player_scope: All`.
+    /// nearest printed card is Sensation Gorger. The fixture is Braids's
+    /// Frightful Return chapter III's chain with its draw given
+    /// `player_scope: All`.
     #[test]
     fn player_scope_gated_instruction_releases_own_scope_step() {
-        let mut resolved = scoped_trigger_resolved(
-            TELL_ME_WHAT_YOU_SEE,
-            "Tell Me What You See",
-            &["Enchantment"],
-        );
-        tell_me_surveil_mut(&mut resolved).player_scope = Some(PlayerFilter::All);
+        let mut resolved = braids_iii_resolved();
+        braids_iii_draw_mut(&mut resolved).player_scope = Some(PlayerFilter::All);
         let (template, tail) = split_at_first_scope(&resolved);
         let steps = template_steps(&template);
         assert_eq!(steps.len(), 1, "template: {template:?}");
@@ -57675,27 +57699,23 @@ mod tests {
         );
         assert!(
             tail.as_deref()
-                .is_some_and(|tail| matches!(tail.effect, Effect::Surveil { .. })),
-            "the own-scope surveil detaches: {tail:?}"
+                .is_some_and(|tail| matches!(tail.effect, Effect::Draw { .. })),
+            "the own-scope draw detaches: {tail:?}"
         );
     }
 
     /// U5 — CR 608.2c: the per-seat gate governs the whole run of continuation
     /// steps after the gated node, not just the first. No printed card has a
     /// run of two or more ungated steps after a per-seat gated node; the
-    /// nearest printed card is Tell Me What You See, whose surveil gets a
-    /// cloned continuation step here.
+    /// nearest printed card is Braids's Frightful Return chapter III, whose
+    /// draw gets a cloned continuation step here.
     #[test]
     fn player_scope_gated_instruction_keeps_a_run_of_steps() {
-        let mut resolved = scoped_trigger_resolved(
-            TELL_ME_WHAT_YOU_SEE,
-            "Tell Me What You See",
-            &["Enchantment"],
-        );
-        let surveil = tell_me_surveil_mut(&mut resolved);
-        let mut second = surveil.clone();
+        let mut resolved = braids_iii_resolved();
+        let draw = braids_iii_draw_mut(&mut resolved);
+        let mut second = draw.clone();
         second.sub_link = SubAbilityLink::ContinuationStep;
-        surveil.sub_ability = Some(Box::new(second));
+        draw.sub_ability = Some(Box::new(second));
         let (template, tail) = split_at_first_scope(&resolved);
         let steps = template_steps(&template);
         assert_eq!(steps.len(), 3, "template: {template:?}");
@@ -57703,8 +57723,8 @@ mod tests {
             matches!(steps[0].effect, Effect::LoseLife { .. }),
             "REACH: the gated life loss is retained"
         );
-        assert!(matches!(steps[1].effect, Effect::Surveil { .. }));
-        assert!(matches!(steps[2].effect, Effect::Surveil { .. }));
+        assert!(matches!(steps[1].effect, Effect::Draw { .. }));
+        assert!(matches!(steps[2].effect, Effect::Draw { .. }));
         assert!(tail.is_none(), "nothing detaches: {tail:?}");
     }
 

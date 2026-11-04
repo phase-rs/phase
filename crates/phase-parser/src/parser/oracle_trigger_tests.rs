@@ -1499,11 +1499,8 @@ fn crystalline_giant_random_counter_kind_lowers_to_a_real_choice() {
 #[test]
 fn palantir_life_loss_uses_milled_chain_set_and_targeted_opponent() {
     let parsed = parse_oracle_text(
-        "At the beginning of your end step, put an influence counter on Palantir of Orthanc and \
-         scry 2. Then target opponent may have you draw a card. If that player doesn't, you mill \
-         X cards, where X is the number of influence counters on Palantir of Orthanc, and that \
-         player loses life equal to the total mana value of those cards.",
-        "Palantir of Orthanc",
+        "At the beginning of your end step, put an influence counter on Palantír of Orthanc and scry 2. Then target opponent may have you draw a card. If that player doesn't, you mill X cards, where X is the number of influence counters on Palantír of Orthanc, and that player loses life equal to the total mana value of those cards.",
+        "Palantír of Orthanc",
         &[],
         &["Legendary".to_string(), "Artifact".to_string()],
         &[],
@@ -1516,15 +1513,24 @@ fn palantir_life_loss_uses_milled_chain_set_and_targeted_opponent() {
     assert!(matches!(put.effect.as_ref(), Effect::PutCounter { .. }));
     let scry = put.sub_ability.as_deref().expect("scry continuation");
     assert!(matches!(scry.effect.as_ref(), Effect::Scry { .. }));
-    let draw = scry.sub_ability.as_deref().expect("opponent draw choice");
-    assert!(draw.optional);
-    assert_eq!(draw.player_scope, Some(PlayerFilter::Opponent));
+    // CR 115.1 + CR 608.2d: the targeted opponent is declared by a `TargetOnly`
+    // head that is optional for that declared player, with no seat fan-out.
+    let head = scry.sub_ability.as_deref().expect("opponent draw choice");
+    assert!(matches!(head.effect.as_ref(), Effect::TargetOnly { .. }));
+    assert!(head.optional);
+    assert_eq!(head.player_scope, None);
+    let group = head.declares_chosen_group.expect("the head declares G");
+    assert_eq!(
+        head.optional_player,
+        Some(TargetFilter::DeclaredPlayer { group })
+    );
+    let draw = head.sub_ability.as_deref().expect("the controller's draw");
     assert!(matches!(draw.effect.as_ref(), Effect::Draw { .. }));
     let mill = draw.sub_ability.as_deref().expect("decline mill branch");
     assert!(matches!(
         mill.effect.as_ref(),
         Effect::Mill {
-            target: TargetFilter::OriginalController,
+            target: TargetFilter::Controller,
             ..
         }
     ));
@@ -1532,7 +1538,11 @@ fn palantir_life_loss_uses_milled_chain_set_and_targeted_opponent() {
     let Effect::LoseLife { amount, target } = lose.effect.as_ref() else {
         panic!("expected LoseLife, got {:?}", lose.effect);
     };
-    assert_eq!(target.as_ref(), Some(&TargetFilter::ScopedPlayer));
+    // CR 608.2c: "that player" is the declared target opponent.
+    assert_eq!(
+        target.as_ref(),
+        Some(&TargetFilter::DeclaredPlayer { group })
+    );
     assert_eq!(
         *amount,
         QuantityExpr::Ref {
@@ -1905,7 +1915,7 @@ fn teferis_veil_delayed_trigger_keeps_non_event_target_binding() {
 #[test]
 fn combustible_gearhulk_damage_uses_milled_chain_set() {
     let parsed = parse_oracle_text(
-        "First strike\nWhen Combustible Gearhulk enters, target opponent may have you draw three cards. If the player doesn't, you mill three cards, then Combustible Gearhulk deals damage to that player equal to the total mana value of those cards.",
+        "First strike\nWhen this creature enters, target opponent may have you draw three cards. If the player doesn't, you mill three cards, then this creature deals damage to that player equal to the total mana value of those cards.",
         "Combustible Gearhulk",
         &["First strike".to_string()],
         &["Artifact".to_string(), "Creature".to_string()],
@@ -1916,7 +1926,13 @@ fn combustible_gearhulk_damage_uses_milled_chain_set() {
         .iter()
         .find(|trigger| trigger.mode == TriggerMode::ChangesZone)
         .expect("Gearhulk enters trigger");
-    let draw = trigger.execute.as_deref().expect("draw choice");
+    let head = trigger
+        .execute
+        .as_deref()
+        .expect("the target opponent's choice");
+    assert!(matches!(head.effect.as_ref(), Effect::TargetOnly { .. }));
+    let group = head.declares_chosen_group.expect("the head declares G");
+    let draw = head.sub_ability.as_deref().expect("the controller's draw");
     let mill = draw.sub_ability.as_deref().expect("decline mill");
     let damage = mill.sub_ability.as_deref().expect("damage continuation");
     let Effect::DealDamage { amount, target, .. } = damage.effect.as_ref() else {
@@ -1941,7 +1957,8 @@ fn combustible_gearhulk_damage_uses_milled_chain_set() {
             filter: None
         }
     ));
-    assert!(matches!(target, TargetFilter::ScopedPlayer));
+    // CR 608.2c + CR 120.3a: "that player" is the declared target opponent.
+    assert_eq!(*target, TargetFilter::DeclaredPlayer { group });
 }
 
 #[test]

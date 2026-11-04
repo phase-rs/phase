@@ -38939,52 +38939,110 @@ fn not_effect_performed() -> Option<AbilityCondition> {
     })
 }
 
-/// P1 — CR 118.12 + CR 109.5 + CR 608.2c: Tell Me What You See. "If they
-/// don't, they lose 4 life and you surveil 1": the surveil is a continuation
-/// step of the gated life loss, and its "you" is the printed controller
-/// (`OriginalController`), not the per-opponent seat. The gate is NOT copied
-/// onto the step (the engine keeps the step with its gated instruction).
+/// P1′ — CR 118.12 + CR 109.5 + CR 608.2c: Braids's Frightful Return chapter
+/// III. "If they don't, they lose 2 life and you draw a card": the draw is a
+/// continuation step of the gated life loss, and its "you" is the printed
+/// controller (`OriginalController`), not the per-opponent seat. The gate is
+/// NOT copied onto the step (the engine keeps the step with its gated
+/// instruction). Re-anchored from Tell Me What You See, which leaves the
+/// scoped path (it declares its target opponent instead).
 #[test]
-fn tell_me_what_you_see_decline_surveil_binds_printed_controller() {
+fn braids_frightful_return_decline_draw_is_a_continuation_step_with_no_gate_copy() {
     use crate::types::ability::SubAbilityLink;
     let parsed = parse_oracle_text(
-        "When this enchantment enters, target opponent may have you draw a card. If they don't, they lose 4 life and you surveil 1.\nWhenever you face a dilemma, you may return this enchantment to its owner's hand. (You face a dilemma as you choose one or more modes for a spell or ability.)",
-        "Tell Me What You See",
-        &[],
+        "Read ahead (Choose a chapter and start with that many lore counters. Add one after your draw step. Skipped chapters don't trigger. Sacrifice after III.)\nI — You may sacrifice a creature. If you do, each opponent discards a card.\nII — Return target creature card from your graveyard to your hand.\nIII — Target opponent may sacrifice a nonland, nontoken permanent of their choice. If they don't, they lose 2 life and you draw a card.",
+        "Braids's Frightful Return",
+        &["Read ahead".to_string()],
         &["Enchantment".to_string()],
-        &[],
+        &["Saga".to_string()],
     );
     let root = scoped_trigger_root(&parsed);
     assert!(
         !chain_has_unimplemented(root),
-        "REACH: the ETB chain fully parses"
+        "REACH: chapter III fully parses"
     );
     assert_eq!(root.player_scope, Some(PlayerFilter::Opponent));
     assert!(root.optional);
-    assert!(
-        matches!(&*root.effect, Effect::Draw { target, .. } if *target == TargetFilter::OriginalController),
-        "root: {:?}",
-        root.effect
-    );
     let lose_life = root.sub_ability.as_deref().expect("decline LoseLife");
     assert!(matches!(&*lose_life.effect, Effect::LoseLife { .. }));
     assert_eq!(lose_life.condition, not_effect_performed());
     assert_eq!(lose_life.sub_link, SubAbilityLink::SequentialSibling);
-    let surveil = lose_life.sub_ability.as_deref().expect("decline Surveil");
-    assert_eq!(surveil.sub_link, SubAbilityLink::ContinuationStep);
-    assert_eq!(surveil.condition, None, "no gate copy onto the step");
-    assert_eq!(surveil.player_scope, None);
-    match &*surveil.effect {
-        Effect::Surveil { count, target } => {
-            assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
-            assert_eq!(
-                *target,
-                TargetFilter::OriginalController,
-                "CR 109.5: \"you surveil 1\" is the printed controller"
-            );
-        }
-        other => panic!("expected Surveil, got {other:?}"),
-    }
+    let draw = lose_life.sub_ability.as_deref().expect("decline Draw");
+    assert_eq!(draw.sub_link, SubAbilityLink::ContinuationStep);
+    assert_eq!(draw.condition, None, "no gate copy onto the step");
+    assert_eq!(draw.player_scope, None);
+    assert!(
+        matches!(&*draw.effect, Effect::Draw { target, .. } if *target == TargetFilter::OriginalController),
+        "CR 109.5: \"you draw a card\" is the printed controller, got {:?}",
+        draw.effect
+    );
+}
+
+/// P1′ (surveil leaf) — CR 109.5 + CR 701.25a: a scoped decline body's surveil
+/// continuation step rebinds its "you" to the printed controller. No printed
+/// scoped decline body surveils after the targeted-opponent causative route
+/// (Tell Me What You See leaves the scoped path); nearest printed card:
+/// Braids's Frightful Return chapter III (its continuation draws).
+#[test]
+fn scoped_decline_continuation_surveil_rebinds_printed_controller() {
+    let mut root = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Sacrifice {
+            target: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        },
+    )
+    .player_scope(PlayerFilter::Opponent)
+    .sub_ability(
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target: Some(TargetFilter::ScopedPlayer),
+            },
+        )
+        .condition(not_effect_performed().expect("gate"))
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Surveil {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )),
+    );
+    root.optional = true;
+    root.sub_ability.as_deref_mut().expect("LoseLife").sub_link =
+        crate::types::ability::SubAbilityLink::SequentialSibling;
+    super::apply_player_scope_rewrites(&mut root);
+    assert!(
+        matches!(&*root.effect, Effect::Sacrifice { .. }),
+        "REACH: the root is unchanged"
+    );
+    let lose_life = root.sub_ability.as_deref().expect("LoseLife");
+    assert!(
+        matches!(
+            &*lose_life.effect,
+            Effect::LoseLife {
+                target: Some(TargetFilter::ScopedPlayer),
+                ..
+            }
+        ),
+        "REACH: the gated life loss stays the scoped opponent's, got {:?}",
+        lose_life.effect
+    );
+    let surveil = lose_life.sub_ability.as_deref().expect("Surveil");
+    assert!(
+        matches!(
+            &*surveil.effect,
+            Effect::Surveil {
+                target: TargetFilter::OriginalController,
+                ..
+            }
+        ),
+        "CR 109.5: \"you surveil 1\" is the printed controller, got {:?}",
+        surveil.effect
+    );
 }
 
 /// P2 — CR 118.12 + CR 109.5: Braids's Frightful Return chapter III. "If they
@@ -39019,18 +39077,48 @@ fn braids_frightful_return_decline_draw_binds_printed_controller() {
     );
 }
 
-/// P3 — D1.3 idempotence: Combustible Gearhulk's decline body keeps its
-/// gated `Mill{OriginalController}` → gated `DealDamage{ScopedPlayer}` shape.
+/// P3′ — D1.3 idempotence: a scoped decline body keeps its gated
+/// `Mill{OriginalController}` → gated `DealDamage{ScopedPlayer}` shape when the
+/// rewrites run twice. No printed scoped card keeps a gated continuation after
+/// a gated decline node once Combustible Gearhulk declares its target opponent;
+/// nearest printed card: Braids's Frightful Return chapter III.
 #[test]
-fn combustible_gearhulk_decline_body_is_unchanged_by_the_continuation_walk() {
-    let parsed = parse_oracle_text(
-        "First strike\nWhen this creature enters, target opponent may have you draw three cards. If the player doesn't, you mill three cards, then this creature deals damage to that player equal to the total mana value of those cards.",
-        "Combustible Gearhulk",
-        &["First strike".to_string()],
-        &["Artifact".to_string(), "Creature".to_string()],
-        &["Construct".to_string()],
+fn scoped_decline_body_gated_continuation_is_idempotent_under_rewrites() {
+    let mut root = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Sacrifice {
+            target: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        },
+    )
+    .player_scope(PlayerFilter::Opponent)
+    .sub_ability(
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Controller,
+                destination: crate::types::zones::Zone::Graveyard,
+            },
+        )
+        .condition(not_effect_performed().expect("gate"))
+        .sub_ability(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ScopedPlayer,
+                    damage_source: None,
+                    excess: None,
+                },
+            )
+            .condition(not_effect_performed().expect("gate")),
+        ),
     );
-    let root = scoped_trigger_root(&parsed);
+    root.optional = true;
+    super::apply_player_scope_rewrites(&mut root);
+    super::apply_player_scope_rewrites(&mut root);
     let mill = root.sub_ability.as_deref().expect("decline Mill");
     assert_eq!(mill.condition, not_effect_performed());
     assert!(
@@ -39048,6 +39136,41 @@ fn combustible_gearhulk_decline_body_is_unchanged_by_the_continuation_walk() {
         "damage: {:?}",
         damage.effect
     );
+}
+
+/// CR 115.1 + CR 608.2d: the head a "target opponent may have <causee> …"
+/// clause lowers to — a `TargetOnly` over one opponent that declares group G,
+/// is optional for the declared player G, and carries no `player_scope`.
+/// Returns G and the causee's predicate node.
+fn targeted_causative_head(
+    head: &AbilityDefinition,
+) -> (crate::types::ability::ChosenGroupId, &AbilityDefinition) {
+    assert!(
+        matches!(
+            &*head.effect,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::Opponent),
+                    properties,
+                })
+            } if type_filters.is_empty() && properties.is_empty()
+        ),
+        "head: {:?}",
+        head.effect
+    );
+    assert!(head.optional, "the target opponent's may");
+    assert_eq!(head.player_scope, None, "no seat fan-out");
+    let group = head
+        .declares_chosen_group
+        .expect("the head declares the target opponent");
+    assert_eq!(
+        head.optional_player,
+        Some(TargetFilter::DeclaredPlayer { group }),
+        "only the declared opponent decides"
+    );
+    let predicate = head.sub_ability.as_deref().expect("the causee's predicate");
+    (group, predicate)
 }
 
 /// P4 — preservation (CR 608.2c): Wernog, Rider's Chaplain. The trailing
@@ -39088,8 +39211,9 @@ fn wernog_trailing_instruction_is_outside_the_decline_body() {
 
 /// P5 — CR 701.22a + CR 701.25a: the decline-body leaf rebinds a scry's or
 /// surveil's implicit "you" to the printed controller, and leaves an explicit
-/// target alone. Nearest printed card: Tell Me What You See (no printed
-/// scoped decline body scries).
+/// target alone. No printed scoped decline body scries or surveils after the
+/// targeted-opponent causative route; nearest printed card: Braids's Frightful
+/// Return chapter III (draw).
 #[test]
 fn decline_body_leaf_rebinds_scry_and_surveil_recipient() {
     use super::lower::rebind_decline_body_recipient;
@@ -72829,15 +72953,16 @@ fn chunk_level_you_may_have_keeps_the_may_with_the_controller() {
     }
 }
 
-/// CR 608.2c + CR 608.2d: the `Draw { target: OriginalController }` opponent-may
-/// class is a KNOWN NO-CHANGE (Deferral 6), not a fix. "Target opponent may have
-/// YOU draw a card" puts the DRAWER (not the announcer) in the effect's player
-/// slot, so no predicate over that slot can name the announcer correctly. This
-/// pins the honest non-change: admitting `OriginalController` would route the
-/// prompt to the drawer, which is worse than today's controller-held behaviour.
+/// CR 608.2c + CR 608.2d: "<actor> may have YOU draw a card" puts the DRAWER
+/// (not the announcer) in the effect's player slot, so no predicate over that
+/// slot can name the announcer. The targeted form ("target opponent may have you
+/// draw a card" — Bane, Lord of Darkness) declares its decider through a
+/// `TargetOnly` head instead; the untargeted defending-player form (Shakedown
+/// Heavy) keeps the drawer slot with no stamped announcer.
 #[test]
-fn target_opponent_may_have_you_draw_is_not_the_announcer_slot() {
-    // Bane, Lord of Darkness.
+fn target_opponent_may_have_you_draw_declares_the_announcer() {
+    // Bane, Lord of Darkness: the targeted causative declares its decider
+    // through its `TargetOnly` head; the drawer stays `OriginalController`.
     {
         let parsed = parse_oracle_text(
             "As long as your life total is less than or equal to half your starting life total, Bane has indestructible.\nWhenever another nontoken creature you control dies, target opponent may have you draw a card. If they don't, you may put a creature card with equal or lesser toughness from your hand onto the battlefield.",
@@ -72851,17 +72976,12 @@ fn target_opponent_may_have_you_draw_is_not_the_announcer_slot() {
             .iter()
             .find_map(|t| t.execute.as_deref())
             .expect("Bane has a creature-dies trigger");
-        assert!(node.optional, "reach-guard: the clause carries a may");
-        assert_eq!(
-            node.optional_for, None,
-            "reach-guard: the shell peel drops the scope"
-        );
+        let (_, draw) = targeted_causative_head(node);
         assert!(
-            matches!(&*node.effect, Effect::Draw { target, .. } if *target == TargetFilter::OriginalController),
-            "reach-guard: expected Draw{{OriginalController}}, got {:?}",
-            node.effect
+            matches!(&*draw.effect, Effect::Draw { target, .. } if *target == TargetFilter::OriginalController),
+            "expected Draw{{OriginalController}}, got {:?}",
+            draw.effect
         );
-        assert_eq!(node.optional_player, None);
     }
 
     // Shakedown Heavy.
@@ -94577,44 +94697,24 @@ mod targeted_opponent_optional_tests {
         assert_eq!(root.player_scope, None);
     }
 
-    /// V8 (SHAPE, preservation) — CR 608.2d: the causative `"target opponent may
-    /// have you draw a card"` keeps the CONTROLLER as the DRAWER (`Draw` targets
-    /// `OriginalController`) and the TARGETED OPPONENT as the decider: the
-    /// opponent announces the may, and the controller draws only if they accept.
-    ///
-    /// `optional_player: None` here is a DEFERRED representation detail of this
-    /// untouched shape, not evidence that the controller decides. Under this
-    /// field's shipped meaning ("the announcer is this ability's controller"),
-    /// leaving it unset names the wrong actor for the causative, and its surviving
-    /// per-seat `player_scope` is the same not-yet-correct fan-out the class fix
-    /// corrects for the `may draw` shapes — which is why this row asserts neither
-    /// of those as correct behaviour.
-    ///
-    /// What the row DOES pin is that the whole-clause discriminator must not
-    /// reroute this shape: it stays optional, its draw targets
-    /// `OriginalController`, and its `optional_player` keeps the value the
-    /// targeted-optional shape does not have.
+    /// V8 (SHAPE) — CR 115.1 + CR 608.2d + CR 111.2: the causative "target
+    /// opponent may have you create two Lander tokens" (Terrapact Intimidator)
+    /// declares the TARGETED OPPONENT as the decider through a `TargetOnly`
+    /// head (optional for that declared player, no `player_scope` fan-out); the
+    /// CONTROLLER creates the tokens as the head's continuation step.
     #[test]
-    fn causative_target_opponent_may_have_is_unchanged() {
+    fn causative_target_opponent_may_have_declares_the_target() {
         let parsed = parse_named_face(
-            "When ~ enters, target opponent may have you draw a card.",
-            "Causative Opponent May",
+            "When this creature enters, target opponent may have you create two Lander tokens. If they don't, put two +1/+1 counters on this creature. (A Lander token is an artifact with \"{2}, {T}, Sacrifice this token: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.\")",
+            "Terrapact Intimidator",
             &["Creature"],
         );
         let execute = changes_zone_execute(&parsed);
-        let Effect::Draw { count, target } = &*execute.effect else {
-            panic!("expected the causative Draw, got {:?}", execute.effect);
-        };
-        assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
-        assert_eq!(
-            *target,
-            TargetFilter::OriginalController,
-            "CR 608.2d: the CONTROLLER draws (the causative names WHO acts on you)"
-        );
-        assert!(execute.optional);
-        assert_eq!(
-            execute.optional_player, None,
-            "no announcer is stamped for the causative"
+        let (_, token) = super::targeted_causative_head(execute);
+        assert!(
+            matches!(&*token.effect, Effect::Token { name, .. } if name == "Lander"),
+            "the controller creates the Landers, got {:?}",
+            token.effect
         );
 
         // Hostile class sibling: "you may have target opponent draw a card" (the
@@ -96034,5 +96134,326 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
             ),
             "reveal-choice return keeps its pre-routing outcome, got {parsed:?} for {line:?}"
         );
+    }
+}
+
+/// The class of "target opponent may have <causee> <predicate>" (CR 115.1 +
+/// CR 118.12 + CR 608.2d): one declared target opponent decides; the causee
+/// (the controller, CR 109.5, or the source) acts; body anaphors read the
+/// declared opponent. Rows Q1–Q10 use verbatim Oracle text.
+mod targeted_opponent_causative_tests {
+    use super::*;
+    use crate::parser::oracle_effect::subject::{
+        classify_targeted_opponent_may, TargetedOpponentMay,
+    };
+    use crate::types::ability::SubAbilityLink;
+
+    fn parse(text: &str, name: &str, types: &[&str]) -> crate::parser::oracle::ParsedAbilities {
+        let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+        parse_oracle_text(text, name, &[], &types, &[])
+    }
+
+    /// The chain under `def`, in `sub_ability` order.
+    fn chain(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+        let mut nodes = Vec::new();
+        let mut cursor = Some(def);
+        while let Some(node) = cursor {
+            nodes.push(node);
+            cursor = node.sub_ability.as_deref();
+        }
+        nodes
+    }
+
+    fn first_trigger(parsed: &crate::parser::oracle::ParsedAbilities) -> &AbilityDefinition {
+        parsed
+            .triggers
+            .iter()
+            .find_map(|trigger| trigger.execute.as_deref())
+            .expect("a trigger body")
+    }
+
+    fn declined(node: &AbilityDefinition) -> bool {
+        node.condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_not_optional_effect_performed)
+    }
+
+    /// Q1 — Tell Me What You See: the head declares G, the controller draws,
+    /// and on decline "they" (G) lose 4, then the controller surveils.
+    #[test]
+    fn tell_me_what_you_see_declares_the_target_opponent() {
+        let parsed = parse(
+            "When this enchantment enters, target opponent may have you draw a card. If they don't, they lose 4 life and you surveil 1.\nWhenever you face a dilemma, you may return this enchantment to its owner's hand. (You face a dilemma as you choose one or more modes for a spell or ability.)",
+            "Tell Me What You See",
+            &["Enchantment"],
+        );
+        let head = first_trigger(&parsed);
+        assert!(!chain_has_unimplemented(head), "REACH: the ETB parses");
+        let (group, _) = super::targeted_causative_head(head);
+        let nodes = chain(head);
+        assert!(nodes.iter().all(|node| node.player_scope.is_none()));
+        assert!(
+            matches!(&*nodes[1].effect, Effect::Draw { target, .. } if *target == TargetFilter::OriginalController)
+        );
+        assert_eq!(nodes[1].condition, None);
+        assert!(declined(nodes[2]));
+        assert_eq!(nodes[2].sub_link, SubAbilityLink::SequentialSibling);
+        assert!(
+            matches!(&*nodes[2].effect, Effect::LoseLife { target: Some(TargetFilter::DeclaredPlayer { group: g }), .. } if *g == group),
+            "{:?}",
+            nodes[2].effect
+        );
+        assert_eq!(nodes[3].sub_link, SubAbilityLink::ContinuationStep);
+        assert_eq!(nodes[3].condition, None);
+        assert!(
+            matches!(&*nodes[3].effect, Effect::Surveil { target, .. } if *target == TargetFilter::Controller)
+        );
+    }
+
+    /// Q2 — Bane, Lord of Darkness: the decline body's put is the controller's,
+    /// from the controller's hand (CR 109.5 + CR 400.1). The toughness property
+    /// is a different seam and is not asserted.
+    #[test]
+    fn bane_decline_put_is_from_the_controllers_hand() {
+        let parsed = parse(
+            "As long as your life total is less than or equal to half your starting life total, Bane has indestructible.\nWhenever another nontoken creature you control dies, target opponent may have you draw a card. If they don't, you may put a creature card with equal or lesser toughness from your hand onto the battlefield.",
+            "Bane, Lord of Darkness",
+            &["Creature"],
+        );
+        let head = first_trigger(&parsed);
+        let (_, draw) = super::targeted_causative_head(head);
+        assert!(
+            matches!(&*draw.effect, Effect::Draw { target, .. } if *target == TargetFilter::OriginalController)
+        );
+        let put = draw.sub_ability.as_deref().expect("decline put");
+        assert!(declined(put));
+        assert!(put.optional, "\"you may put\" is the controller's choice");
+        assert_eq!(put.optional_player, None);
+        assert_hand_origin_bound_to_you(&put.effect);
+    }
+
+    fn assert_hand_origin_bound_to_you(effect: &Effect) {
+        let Effect::ChangeZone {
+            origin: Some(crate::types::zones::Zone::Hand),
+            target: TargetFilter::Typed(tf),
+            ..
+        } = effect
+        else {
+            panic!("expected a hand-origin ChangeZone over a typed filter, got {effect:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You), "{tf:?}");
+        assert!(
+            tf.properties.contains(&FilterProp::InZone {
+                zone: crate::types::zones::Zone::Hand
+            }),
+            "{tf:?}"
+        );
+    }
+
+    /// Q3 — Combustible Gearhulk: "that player" in the decline body's second
+    /// chunk is the declared target opponent (CR 608.2c).
+    #[test]
+    fn gearhulk_decline_damage_targets_the_declared_opponent() {
+        let parsed = parse(
+            "First strike\nWhen this creature enters, target opponent may have you draw three cards. If the player doesn't, you mill three cards, then this creature deals damage to that player equal to the total mana value of those cards.",
+            "Combustible Gearhulk",
+            &["Artifact", "Creature"],
+        );
+        let head = parsed
+            .triggers
+            .iter()
+            .find(|trigger| trigger.mode == TriggerMode::ChangesZone)
+            .and_then(|trigger| trigger.execute.as_deref())
+            .expect("enters trigger");
+        let (group, draw) = super::targeted_causative_head(head);
+        assert!(
+            matches!(&*draw.effect, Effect::Draw { target, .. } if *target == TargetFilter::OriginalController)
+        );
+        let mill = draw.sub_ability.as_deref().expect("decline mill");
+        assert!(declined(mill));
+        assert!(
+            matches!(&*mill.effect, Effect::Mill { target, .. } if *target == TargetFilter::Controller)
+        );
+        let damage = mill.sub_ability.as_deref().expect("decline damage");
+        assert!(declined(damage));
+        assert!(
+            matches!(&*damage.effect, Effect::DealDamage { target: TargetFilter::DeclaredPlayer { group: g }, .. } if *g == group),
+            "{:?}",
+            damage.effect
+        );
+    }
+
+    /// Q5 — Terrapact Intimidator: the controller creates the Landers; the
+    /// decline body counters the source.
+    #[test]
+    fn terrapact_decline_counters_the_source() {
+        let parsed = parse(
+            "When this creature enters, target opponent may have you create two Lander tokens. If they don't, put two +1/+1 counters on this creature. (A Lander token is an artifact with \"{2}, {T}, Sacrifice this token: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.\")",
+            "Terrapact Intimidator",
+            &["Creature"],
+        );
+        let head = first_trigger(&parsed);
+        let (_, token) = super::targeted_causative_head(head);
+        assert!(matches!(&*token.effect, Effect::Token { name, .. } if name == "Lander"));
+        let counters = token.sub_ability.as_deref().expect("decline counters");
+        assert!(declined(counters));
+        assert!(matches!(
+            &*counters.effect,
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+    }
+
+    /// Q6 — Risk Factor: "them" is the declared target opponent, and the
+    /// chain has exactly one player-target slot (the head).
+    #[test]
+    fn risk_factor_them_is_the_declared_opponent() {
+        let parsed = parse(
+            "Target opponent may have Risk Factor deal 4 damage to them. If that player doesn't, you draw three cards.\nJump-start (You may cast this card from your graveyard by discarding a card in addition to paying its other costs. Then exile this card.)",
+            "Risk Factor",
+            &["Instant"],
+        );
+        let head = parsed
+            .abilities
+            .iter()
+            .find(|ability| ability.kind == AbilityKind::Spell)
+            .expect("spell ability");
+        let (group, damage) = super::targeted_causative_head(head);
+        assert!(
+            matches!(&*damage.effect, Effect::DealDamage { target: TargetFilter::DeclaredPlayer { group: g }, .. } if *g == group),
+            "{:?}",
+            damage.effect
+        );
+        let draw = damage.sub_ability.as_deref().expect("decline draw");
+        assert!(declined(draw));
+        assert!(
+            matches!(&*draw.effect, Effect::Draw { target, .. } if *target == TargetFilter::Controller)
+        );
+        assert!(
+            chain(head)
+                .iter()
+                .all(|node| !matches!(node.effect.target_filter(), Some(TargetFilter::Player))),
+            "no any-player target slot"
+        );
+    }
+
+    /// Q7 — the classifier: announced actor vs causative vs neither.
+    #[test]
+    fn classifier_separates_the_two_targeted_forms_from_everything_else() {
+        assert_eq!(
+            classify_targeted_opponent_may("target opponent may draw a card"),
+            Some(TargetedOpponentMay::AnnouncedActor)
+        );
+        for causative in [
+            "target opponent may have you draw a card",
+            "target opponent may have you create two lander tokens",
+            "target opponent may have ~ deal 4 damage to them",
+        ] {
+            assert_eq!(
+                classify_targeted_opponent_may(causative),
+                Some(TargetedOpponentMay::Causative),
+                "{causative}"
+            );
+        }
+        for other in [
+            "target opponent may sacrifice a nonland, nontoken permanent of their choice",
+            "target opponent may have it deal 4 damage to them",
+            "defending player may have you draw a card",
+            "you may have target opponent draw a card",
+            "each opponent may have you draw a card",
+            "target opponent may",
+        ] {
+            assert_eq!(classify_targeted_opponent_may(other), None, "{other}");
+        }
+    }
+
+    /// Q8 — non-interference: the Pattern A "them" binding does not leak to a
+    /// clause with no declared antecedent (Browbeat, Vexing Devil).
+    #[test]
+    fn pattern_a_them_without_declared_antecedent_is_unchanged() {
+        let browbeat = parse(
+            "Any player may have Browbeat deal 5 damage to them. If no one does, target player draws three cards.",
+            "Browbeat",
+            &["Sorcery"],
+        );
+        let vexing = parse(
+            "When this creature enters, any opponent may have it deal 4 damage to them. If a player does, sacrifice this creature.",
+            "Vexing Devil",
+            &["Creature"],
+        );
+        let roots: Vec<&AbilityDefinition> = browbeat
+            .abilities
+            .iter()
+            .chain(vexing.triggers.iter().filter_map(|t| t.execute.as_deref()))
+            .collect();
+        assert_eq!(roots.len(), 2);
+        for root in roots {
+            assert!(!chain_has_unimplemented(root), "REACH");
+            let nodes = chain(root);
+            assert!(
+                nodes
+                    .iter()
+                    .any(|node| matches!(&*node.effect, Effect::DealDamage { .. })),
+                "REACH: the damage node parses"
+            );
+            for node in nodes {
+                assert_eq!(node.optional_player, None);
+                assert!(
+                    !matches!(
+                        node.effect.target_filter(),
+                        Some(TargetFilter::DeclaredPlayer { .. })
+                    ),
+                    "{:?}",
+                    node.effect
+                );
+            }
+        }
+    }
+
+    /// Q9 — shape 3 stays on the scoped path (not in this route).
+    #[test]
+    fn shape_three_stays_scoped() {
+        let parsed = parse(
+            "At the beginning of your upkeep, target opponent may exile a card from their graveyard. If that player doesn't, you may draw a card.",
+            "Gravestorm",
+            &["Enchantment"],
+        );
+        let root = first_trigger(&parsed);
+        assert!(!chain_has_unimplemented(root), "REACH");
+        assert_eq!(root.player_scope, Some(PlayerFilter::Opponent));
+        assert!(root.optional);
+    }
+
+    /// Q10 — CR 109.5 + CR 400.1: a "from your hand" origin inside the put
+    /// target span binds the hand's owner whatever property precedes it.
+    #[test]
+    fn put_origin_possessor_binds_the_controllers_hand() {
+        let fixtures: [(&str, &str, &[&str]); 4] = [
+            ("Arni Metalbrow", "Whenever a creature you control attacks or enters attacking, you may pay {1}{R}. If you do, you may put a creature card with mana value less than that creature's mana value from your hand onto the battlefield tapped and attacking.", &["Creature"]),
+            ("Minn, Wily Illusionist", "Whenever you draw your second card each turn, create a 1/1 blue Illusion creature token with \"This token gets +1/+0 for each other Illusion you control.\"\nWhenever an Illusion you control dies, you may put a permanent card with mana value less than or equal to that creature's power from your hand onto the battlefield.", &["Creature"]),
+            ("Dermoplasm", "Flying\nMorph {2}{U}{U} (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any time for its morph cost.)\nWhen this creature is turned face up, you may put a creature card with a morph ability from your hand onto the battlefield face up. If you do, return this creature to its owner's hand.", &["Creature"]),
+            ("Shadowfax, Lord of Horses", "Horses you control have haste. (They can attack and {T} as soon as they come under your control.)\nWhenever Shadowfax attacks, you may put a creature card with lesser power from your hand onto the battlefield tapped and attacking.", &["Creature"]),
+        ];
+        for (name, text, types) in fixtures {
+            let parsed = parse(text, name, types);
+            let put = parsed
+                .triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_deref())
+                .flat_map(chain)
+                .find(|node| {
+                    matches!(
+                        &*node.effect,
+                        Effect::ChangeZone {
+                            origin: Some(crate::types::zones::Zone::Hand),
+                            ..
+                        }
+                    )
+                })
+                .unwrap_or_else(|| panic!("REACH: {name} has a hand-origin put"));
+            assert_hand_origin_bound_to_you(&put.effect);
+        }
     }
 }

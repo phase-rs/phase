@@ -231,6 +231,7 @@ mod target_choice_kind_7692;
 mod target_controller_population;
 mod target_incarnation_revalidation;
 mod target_occurrence_authority;
+mod target_opponent_may_have_causative;
 mod target_player_zone_count_slot_6856;
 mod targeted_exchange_preview_budget;
 mod targeted_offer_witness;

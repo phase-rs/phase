@@ -12462,15 +12462,17 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
 
     /// CR 121.3a + CR 506.2 + CR 608.2d: "<actor> may have you draw a card" —
     /// the named actor decides; the printed controller draws. Covers the
-    /// targeted-opponent actor (Palantír of Orthanc, Bane, Lord of Darkness) and
-    /// the defending-player actor (Shakedown Heavy). The build-for-the-class
-    /// invariants checked here:
+    /// defending-player actor (Shakedown Heavy); the targeted-opponent actor
+    /// (Bane, Lord of Darkness) is checked by
+    /// `target_opponent_may_have_you_draw_declares_the_targeted_decider`. The
+    /// build-for-the-class invariants checked here:
     ///   1. the grant is an `Effect::Draw`, not an Unimplemented "have" static;
     ///   2. the clause is `optional` (the actor's may-choice);
-    ///   3. the actor is captured as the may-actor `player_scope`;
-    ///   4. "you" is bound to `OriginalController`, so the controller-rebind the
-    ///      `player_scope` fan-out applies (CR 109.5) does not redirect the draw
-    ///      to the actor.
+    ///   3. the defending-player actor is captured as the may-actor
+    ///      `player_scope`, while a targeted actor declares a `TargetOnly` head
+    ///      instead (no scope);
+    ///   4. "you" is bound to `OriginalController`, so a `player_scope` fan-out's
+    ///      controller-rebind (CR 109.5) does not redirect the draw to the actor.
     fn have_you_draw_grant_trigger(text: &str, name: &str) -> AbilityDefinition {
         let parsed = parse_named(text, name, &["Creature"]);
         let trigger = parsed
@@ -12515,26 +12517,37 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     }
 
     #[test]
-    fn target_opponent_may_have_you_draw_routes_to_original_controller() {
-        let def = have_you_draw_grant_trigger(
-            "At the beginning of your end step, target opponent may have you draw a card. \
-             If they don't, you scry 2.",
-            "Palantir of Orthanc",
+    fn target_opponent_may_have_you_draw_declares_the_targeted_decider() {
+        let parsed = parse_named(
+            "As long as your life total is less than or equal to half your starting life total, Bane has indestructible.\nWhenever another nontoken creature you control dies, target opponent may have you draw a card. If they don't, you may put a creature card with equal or lesser toughness from your hand onto the battlefield.",
+            "Bane, Lord of Darkness",
+            &["Creature"],
         );
-        assert!(matches!(*def.effect, Effect::Draw { .. }), "must be a Draw");
+        assert!(!has_swallowed_detector(&parsed, "Optional_MayHave"));
+        let def = parsed
+            .triggers
+            .iter()
+            .find_map(|trigger| trigger.execute.as_deref())
+            .expect("trigger must have an executed ability");
+        assert!(
+            !def_tree_has_unimplemented(def),
+            "the have-you-draw grant must not be Unimplemented"
+        );
+        assert!(matches!(*def.effect, Effect::TargetOnly { .. }));
         assert!(def.optional, "the opponent's may-choice is optional");
+        assert_eq!(def.player_scope, None, "no seat fan-out");
+        let group = def.declares_chosen_group.expect("declares the target");
         assert_eq!(
-            def.player_scope,
-            Some(crate::types::ability::PlayerFilter::Opponent),
-            "may-actor must be the targeted opponent",
+            def.optional_player,
+            Some(TargetFilter::DeclaredPlayer { group }),
+            "the declared target opponent decides",
         );
-        if let Effect::Draw { ref target, .. } = *def.effect {
-            assert_eq!(
-                *target,
-                TargetFilter::OriginalController,
-                "\"you draw\" must survive the may-actor controller rebind",
-            );
-        }
+        let draw = def.sub_ability.as_deref().expect("the controller's draw");
+        assert!(
+            matches!(*draw.effect, Effect::Draw { ref target, .. } if *target == TargetFilter::OriginalController),
+            "\"you draw\" is the printed controller, got {:?}",
+            draw.effect
+        );
     }
 
     #[test]

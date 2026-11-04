@@ -1879,9 +1879,11 @@ fn subject_anchored_optional_actor(
             // OPPONENT IN SEAT ORDER, which is not a seat a "may" may land on.
             TargetFilter::Opponent => None,
 
-            // The announcer is NOT in this slot: "target opponent may have YOU
-            // draw a card" puts the DRAWER here (Bane, Shakedown Heavy). Known
-            // no-change; see the plan's Deferral 6. 5 corpus nodes.
+            // The announcer is NOT in this slot: an untargeted "<actor> may have
+            // YOU draw a card" puts the DRAWER here (Shakedown Heavy's defending
+            // player; "any opponent may have you" through `optional_for`). The
+            // targeted causative ("target opponent may have you …") never reaches
+            // this refusal: it declares its decider through its `TargetOnly` head.
             TargetFilter::OriginalController => None,
 
             // Populations and sets, never one announcer (CR 608.2d names ONE
@@ -3285,8 +3287,9 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // `peel_clause`'s own opponent-may peel DROPS its scope, so that path
             // arrives here with `optional_for: None` — it is covered instead by the
             // admitted set, which refuses `OriginalController` (the slot that path
-            // leaves the DRAWER in: "target opponent may have you draw a card" — Bane,
-            // Shakedown Heavy).
+            // leaves the DRAWER in: "defending player may have you draw a card" —
+            // Shakedown Heavy; the targeted causative declares its decider through
+            // its `TargetOnly` head instead).
             //
             // The `optional_player.is_none()` conjunct is the PRECEDENCE guard:
             // never overwrite an announcer another producer already recorded.
@@ -3321,10 +3324,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 .fragment()
                 .unwrap_or_default()
                 .to_lowercase();
-            if super::subject::targeted_opponent_may_player_action(&fragment_lower) {
-                // The clause always carries an explicit player target (the Draw's
-                // `Typed { controller: Opponent }`), so `tag_player_declarations`
-                // stamps the group. `TargetFilter::Opponent` is the fail-soft
+            if super::subject::classify_targeted_opponent_may(&fragment_lower).is_some() {
+                // The clause always carries an explicit player target: the
+                // announced-actor Draw's `Typed { controller: Opponent }`, or, in
+                // the causative form ("target opponent may have you …"), the
+                // `TargetOnly` root that declares the subject's group through
+                // `declared_player_group`. Either way `def.declares_chosen_group`
+                // is the group. `TargetFilter::Opponent` is the fail-soft
                 // spelling if that stamp is ever absent (its resolver also prefers
                 // the announced player).
                 def.optional_player = Some(match def.declares_chosen_group {
