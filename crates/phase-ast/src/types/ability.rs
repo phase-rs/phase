@@ -10637,7 +10637,6 @@ mod r2_resolution_choice_authority_tests {
             properties: vec![FilterProp::InAnyZone {
                 zones: vec![Zone::Hand, Zone::Graveyard],
             }],
-            ..Default::default()
         });
         let mut effect: Effect =
             serde_json::from_str(r#"{"type":"ChangeZone","destination":"Battlefield"}"#).unwrap();
