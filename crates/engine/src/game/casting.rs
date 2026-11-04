@@ -24198,8 +24198,9 @@ pub(super) fn pay_mana_cost_with_choices_and_resume(
         .collect::<HashSet<_>>();
     cleanup_unused_convoke_payments(state, player, source_id, &spent_convoke_sources);
 
-    // CR 702.51a: Convoke taps are consumed by the payment algorithm but are
-    // not mana spent to cast the spell.
+    // CR 702.51a + CR 702.126a + CR 701.67a: Convoke, improvise and waterbend
+    // taps are consumed by the payment algorithm but are not mana spent to cast
+    // the spell.
     let mana_spent_units = spent_units
         .iter()
         .filter(|unit| !unit.is_convoke_payment())
@@ -24392,6 +24393,9 @@ pub(super) fn pay_mana_cost_from_pool_with_choices(
     })
 }
 
+/// CR 702.51a + CR 702.126a + CR 701.67a: once a spell's payment is complete,
+/// narrow the cast's convoked creatures to those whose tap paid, and release
+/// every convoke, improvise or waterbend tap the payment left unspent.
 fn cleanup_unused_convoke_payments(
     state: &mut GameState,
     player: PlayerId,
@@ -24410,43 +24414,82 @@ fn cleanup_unused_convoke_payments(
                 .map(|obj| obj.convoked_creatures.clone())
         })
         .unwrap_or_default();
-    if convoked_sources.is_empty() {
-        return;
-    }
 
     let mut unused_sources = Vec::new();
-    let spent_convoked_sources = convoked_sources
-        .into_iter()
-        .filter(|object_id| {
-            let spent = spent_sources.contains(object_id);
-            if !spent {
-                unused_sources.push(*object_id);
-            }
-            spent
-        })
-        .collect::<Vec<_>>();
+    if !convoked_sources.is_empty() {
+        let spent_convoked_sources = convoked_sources
+            .into_iter()
+            .filter(|object_id| {
+                let spent = spent_sources.contains(object_id);
+                if !spent {
+                    unused_sources.push(*object_id);
+                }
+                spent
+            })
+            .collect::<Vec<_>>();
 
-    if let Some(pending) = state
-        .pending_cast
-        .as_mut()
-        .filter(|pending| pending.object_id == source_id)
-    {
-        pending.convoked_creatures = spent_convoked_sources.clone();
-    }
-    if let Some(obj) = state.objects.get_mut(&source_id) {
-        obj.convoked_creatures = spent_convoked_sources;
-    }
-
-    for object_id in &unused_sources {
-        if let Some(obj) = state.objects.get_mut(object_id) {
-            obj.tapped = false;
+        if let Some(pending) = state
+            .pending_cast
+            .as_mut()
+            .filter(|pending| pending.object_id == source_id)
+        {
+            pending.convoked_creatures = spent_convoked_sources.clone();
         }
+        if let Some(obj) = state.objects.get_mut(&source_id) {
+            obj.convoked_creatures = spent_convoked_sources;
+        }
+    }
+
+    release_unspent_tap_markers(state, player, &unused_sources);
+}
+
+/// CR 702.51a + CR 702.126a + CR 701.67a: each of these taps a permanent
+/// "rather than pay that mana", so a tap whose marker a completed payment left
+/// in the pool paid for nothing. Drop each such marker from `player`'s pool and
+/// untap its permanent, so no later payment can redeem a tap made for this one.
+/// A marker is a tap when it names a permanent on the battlefield or one of
+/// `known_taps`. A delve marker names a card in a graveyard instead and is
+/// settled with the delve exile (CR 702.66a), so it is left alone here.
+fn release_unspent_tap_markers(state: &mut GameState, player: PlayerId, known_taps: &[ObjectId]) {
+    let mut released = known_taps.to_vec();
+    released.extend(
+        state
+            .players
+            .iter()
+            .filter(|p| p.id == player)
+            .flat_map(|p| p.mana_pool.shapes())
+            .filter(|(unit, _)| unit.is_convoke_payment())
+            .map(|(unit, _)| unit.source_id)
+            .filter(|object_id| {
+                state
+                    .objects
+                    .get(object_id)
+                    .is_some_and(|obj| obj.zone == Zone::Battlefield)
+            }),
+    );
+    released.sort();
+    released.dedup();
+    if released.is_empty() {
+        return;
     }
 
     if let Some(player_data) = state.players.iter_mut().find(|p| p.id == player) {
         player_data.mana_pool.retain_shapes(|unit| {
-            !(unit.is_convoke_payment() && unused_sources.contains(&unit.source_id))
+            !(unit.is_convoke_payment() && released.contains(&unit.source_id))
         });
+    }
+    crate::game::public_state::mark_mana_display_dirty(state);
+    for object_id in released {
+        if crate::game::object_state::resolve_and_apply_object_edit(
+            state,
+            object_id,
+            crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+            false,
+        )
+        .is_ok_and(|untapped| untapped)
+        {
+            crate::game::public_state::mark_public_state_object_dirty(state, object_id);
+        }
     }
 }
 
@@ -24586,11 +24629,17 @@ fn pay_ability_mana_cost_with_choices_excluding_and_parent(
     let activation_context = activation_payment_context(state, source_id, ability_index);
     let activation_ctx = activation_context.as_payment_context();
 
+    // CR 701.67a: each waterbend tap stands in for one generic mana of this
+    // cost, so only the rest is paid as mana. The markers are consumed once
+    // that payment has gone through: a paused payment retries with them intact.
+    let waterbend_taps = waterbend_taps_paying_activation(state, player, cost, resume);
+    let cost_after_taps = cost.reduced_by_generic(waterbend_taps);
+
     let payment = auto_tap_and_pay_cost_excluding(
         state,
         player,
         source_id,
-        cost,
+        &cost_after_taps,
         Some(&activation_ctx),
         phyrexian_choices,
         events,
@@ -24599,6 +24648,7 @@ fn pay_ability_mana_cost_with_choices_excluding_and_parent(
         resume,
         parent,
     )?;
+    consume_waterbend_tap_markers(state, player, source_id, waterbend_taps)?;
 
     // CR 106.1b + CR 602.2b (issue #6504): stamp the mana type(s) just spent
     // onto this ability's own source, mirroring `colors_spent_to_cast`'s
@@ -24628,6 +24678,102 @@ fn pay_ability_mana_cost_with_choices_excluding_and_parent(
             remaining_life_payments,
         },
     })
+}
+
+/// CR 701.67a: How many generic mana of an activation's waterbend cost the
+/// player's tap markers pay. A marker never pays for an activation through the
+/// spend path, where `ManaRestriction::allows_activation` keeps it from funding
+/// any other ability, such as a mana ability's own `{1}`: only a waterbend
+/// payment window may redeem it, and that is the window the `resume` names.
+/// [`waterbend_taps_remaining`] stops the taps at the generic count, so every
+/// marker in the window is redeemed here.
+fn waterbend_taps_paying_activation(
+    state: &GameState,
+    player: PlayerId,
+    cost: &crate::types::mana::ManaCost,
+    resume: Option<&ManaAbilityResume>,
+) -> u32 {
+    let in_waterbend_window = matches!(
+        resume,
+        Some(ManaAbilityResume::ManaPayment {
+            convoke_mode: Some(ConvokeMode::Waterbend),
+            ..
+        })
+    );
+    let crate::types::mana::ManaCost::Cost { generic, .. } = cost else {
+        return 0;
+    };
+    if !in_waterbend_window {
+        return 0;
+    }
+    let markers = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map_or(0, |p| {
+            p.mana_pool.count_where(|unit| unit.is_convoke_payment())
+        });
+    u32::try_from(markers).map_or(*generic, |markers| markers.min(*generic))
+}
+
+/// CR 701.67a: How many more permanents `player` may tap toward the waterbend
+/// cost being paid. "For each generic mana in that cost, you may tap" one, and
+/// every tap marker already in the payer's pool stands in for one of those
+/// generic mana. For an activation `pending.cost` is the waterbend cost itself;
+/// for a spell it is the whole total, so this bounds the taps by the generic
+/// mana in that total: pinned pool units don't reduce it, and the narrower
+/// CR 701.67b limit is not modelled here. The `TapForConvoke` handler, both
+/// offer sites and the AI's structural legality check read this one count.
+pub(crate) fn waterbend_taps_remaining(state: &GameState, player: PlayerId) -> u32 {
+    let generic = match state.pending_cast.as_deref().map(|pending| &pending.cost) {
+        Some(ManaCost::Cost { generic, .. }) => *generic,
+        Some(
+            ManaCost::NoCost
+            | ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. },
+        )
+        | None => 0,
+    };
+    let markers = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map_or(0, |p| {
+            p.mana_pool.count_where(|unit| unit.is_convoke_payment())
+        });
+    generic.saturating_sub(u32::try_from(markers).unwrap_or(u32::MAX))
+}
+
+/// CR 701.67a + CR 118.3a: Remove the markers whose taps paid part of an
+/// activation's cost. Being no mana, they reach no spent-mana read; only the
+/// journal's pip ledger sees them. `waterbend_taps_remaining` caps the taps at
+/// the generic being paid, so `count` covers every marker in the window.
+fn consume_waterbend_tap_markers(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    count: u32,
+) -> Result<(), EngineError> {
+    if count == 0 {
+        return Ok(());
+    }
+    let markers = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .into_iter()
+        .flat_map(|p| p.mana_pool.units())
+        .filter(|unit| unit.is_convoke_payment())
+        .take(count as usize)
+        .collect::<Vec<_>>();
+    let recipient = state.mana_payment_recipient(source_id, player);
+    state
+        .resolve_and_apply_mana_spend(player, recipient, &markers)
+        .map_err(|_| {
+            EngineError::ActionNotAllowed("Mana pool changed before payment applied".to_string())
+        })?;
+    Ok(())
 }
 
 /// Pay a mana cost during effect resolution. Resolution-time "you may pay"
@@ -31512,9 +31658,45 @@ pub fn handle_cancel_cast(
             obj.tapped = false;
         }
     }
+    // CR 733.1: an activation has no cast reversal to restore its payments, so
+    // the tap markers in the activator's pool are undone with their taps; no
+    // other player paid for this activation. No abilities trigger, so no event
+    // follows.
+    if pending.activation_ability_index.is_some() {
+        let activator = pending.ability.controller;
+        let tapped_for_payment = state
+            .players
+            .iter()
+            .filter(|player| player.id == activator)
+            .flat_map(|player| player.mana_pool.shapes())
+            .filter(|(unit, _)| unit.is_convoke_payment())
+            .map(|(unit, _)| unit.source_id)
+            .collect::<Vec<_>>();
+        for object_id in tapped_for_payment {
+            if crate::game::object_state::resolve_and_apply_object_edit(
+                state,
+                object_id,
+                crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                false,
+            )
+            .is_ok_and(|untapped| untapped)
+            {
+                crate::game::public_state::mark_public_state_object_dirty(state, object_id);
+                crate::game::public_state::mark_mana_display_dirty(state);
+            }
+        }
+    }
     // CR 733.1: a cancel drops the cast's delve and convoke markers; a terminal
-    // cancel passes a fresh `PendingCast`, so drop them all.
-    for player in &mut state.players {
+    // cancel passes a fresh `PendingCast`, so drop them all. An activation's
+    // pending state is always its own, so only the activator's are dropped.
+    let activation_payer = pending
+        .activation_ability_index
+        .map(|_| pending.ability.controller);
+    for player in state
+        .players
+        .iter_mut()
+        .filter(|player| activation_payer.is_none_or(|payer| player.id == payer))
+    {
         player
             .mana_pool
             .retain_shapes(|unit| !unit.is_convoke_payment());
