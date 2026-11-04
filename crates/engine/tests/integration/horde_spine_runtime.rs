@@ -183,7 +183,7 @@ fn horde_precombat_main_reveals_and_resolves_fixed_wave() {
 #[test]
 fn horde_emblem_grants_haste_and_must_attack_to_horde_creatures_only() {
     let mut state = horde_game(0, HORDE);
-    grant_horde_emblem(&mut state, HORDE, true);
+    grant_horde_emblem(&mut state, HORDE, true, true);
 
     let horde_creature = create_object(
         &mut state,
@@ -342,7 +342,7 @@ fn horde_emblem_must_attack_does_not_force_survivor_creatures_to_attack() {
     // Survivor is the active player — must-attack is only evaluated for the
     // active player's creatures.
     let mut state = horde_game(1, SURVIVOR);
-    grant_horde_emblem(&mut state, HORDE, true);
+    grant_horde_emblem(&mut state, HORDE, true, true);
 
     let horde_creature = create_object(
         &mut state,
@@ -383,7 +383,7 @@ fn horde_emblem_must_attack_does_not_force_survivor_creatures_to_attack() {
     // the Horde's turn, DOES report the requirement. Without this, the assertion
     // above could pass simply because the requirement never fires at all.
     let mut horde_turn = horde_game(1, HORDE);
-    grant_horde_emblem(&mut horde_turn, HORDE, true);
+    grant_horde_emblem(&mut horde_turn, HORDE, true, true);
     let forced = create_object(
         &mut horde_turn,
         CardId(9103),
@@ -413,7 +413,7 @@ fn horde_emblem_must_attack_does_not_force_survivor_creatures_to_attack() {
 #[test]
 fn horde_emblem_respects_forced_attackers_flag() {
     let mut state = horde_game(0, HORDE);
-    grant_horde_emblem(&mut state, HORDE, false);
+    grant_horde_emblem(&mut state, HORDE, false, true);
 
     let creature = create_object(
         &mut state,
@@ -592,7 +592,7 @@ fn horde_post_combat_pays_mana_costs_from_persistent_horde_mana() {
     }
     // Real production mark, as deck loading applies at game start (`false`:
     // skip the forced-attackers combat package — this beat is about mana).
-    grant_horde_emblem(&mut state, HORDE, false);
+    grant_horde_emblem(&mut state, HORDE, false, true);
 
     // A Horde ARTIFACT with a mana-plus-tap "{1}, {T}: Proliferate" ability.
     // As a non-creature it never attacks and is never summoning-sick, so it

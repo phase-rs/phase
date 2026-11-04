@@ -2115,7 +2115,7 @@ mod tests {
         use crate::game::deck_loading::grant_horde_emblem;
 
         let (mut on, horde) = horde_post_combat_game(HordePostCombatActivation::OncePerPermanent);
-        grant_horde_emblem(&mut on, horde, true);
+        grant_horde_emblem(&mut on, horde, true, true);
         assert!(
             !on.players
                 .iter()
@@ -2127,7 +2127,7 @@ mod tests {
         );
 
         let (mut off, horde2) = horde_post_combat_game(HordePostCombatActivation::None);
-        grant_horde_emblem(&mut off, horde2, true);
+        grant_horde_emblem(&mut off, horde2, true, true);
         assert!(
             off.players
                 .iter()
@@ -2372,7 +2372,7 @@ mod tests {
 
         // Grant the Horde its game-start emblem (haste + forced attackers +
         // only-Defenders-block).
-        crate::game::deck_loading::grant_horde_emblem(&mut state, horde, true);
+        crate::game::deck_loading::grant_horde_emblem(&mut state, horde, true, true);
 
         // Two Horde creatures: a plain attacker and a Defender wall.
         let grunt = create_object(
@@ -2459,7 +2459,7 @@ mod tests {
             .find(|&id| id != horde)
             .expect("a survivor seat");
 
-        crate::game::deck_loading::grant_horde_emblem(&mut state, horde, false);
+        crate::game::deck_loading::grant_horde_emblem(&mut state, horde, false, true);
 
         let grunt = create_object(
             &mut state,
@@ -2614,6 +2614,56 @@ mod tests {
         assert_eq!(state.objects[&creature].zone, Zone::Hand);
     }
 
+    /// Turtle Team-Up product booklet (printed p. 7): a Boss-owned card that
+    /// would go to hand is "put into their graveyard instead" — the Boss
+    /// graveyard Villain Scheme! reshuffles, never the event-deck library.
+    #[test]
+    fn turtle_boss_owned_permanent_bounced_to_hand_goes_to_boss_graveyard() {
+        use crate::game::zones::create_object;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::TurtleTeamUpHorde.default_ruleset()),
+            3,
+            42,
+        );
+        let horde = horde_seat(&state).expect("horde seat");
+
+        let ninja = create_object(
+            &mut state,
+            CardId(8020),
+            horde,
+            "Foot Ninja".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&ninja)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, ninja, Zone::Hand, &mut events);
+
+        let horde_player = state.players.iter().find(|p| p.id == horde).unwrap();
+        assert!(
+            !horde_player.hand.contains(&ninja),
+            "the Horde never holds a card in hand"
+        );
+        assert!(
+            !horde_player.library.contains(&ninja),
+            "a bounced Boss card is not recycled into the event deck"
+        );
+        assert!(
+            horde_player.graveyard.contains(&ninja),
+            "a bounced Boss-owned permanent goes to the Boss graveyard"
+        );
+        assert_eq!(state.objects[&ninja].zone, Zone::Graveyard);
+    }
+
     // ── LOTR Orc Army: revealed Army tokens amass one shared army ────────────
 
     /// LOTR "Two Towers" rule "Orc Armies grow as a single army": a revealed Orc
@@ -2722,7 +2772,7 @@ mod tests {
         let seats = horde_seats(&state);
         assert_eq!(seats.len(), 2, "two Horde seats");
         for &seat in &seats {
-            crate::game::deck_loading::grant_horde_emblem(&mut state, seat, true);
+            crate::game::deck_loading::grant_horde_emblem(&mut state, seat, true, true);
         }
 
         for &seat in &seats {

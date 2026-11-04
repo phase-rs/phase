@@ -376,6 +376,14 @@ fn graft_boss_abilities(state: &mut GameState, boss_id: ObjectId) {
     let Some(name) = boss_name(state, boss_id).map(str::to_string) else {
         return;
     };
+    // The collective-loss seat for the Karai/Shredder dies triggers, read
+    // before the graft borrows the Boss mutably. `None` only when no hero is
+    // alive — a game the heroes have already lost, where no trigger fires.
+    let captain = state
+        .objects
+        .get(&boss_id)
+        .map(|boss| boss.owner)
+        .and_then(|horde| team_captain(state, horde));
     let Some(obj) = state.objects.get_mut(&boss_id) else {
         return;
     };
@@ -400,10 +408,13 @@ fn graft_boss_abilities(state: &mut GameState, boss_id: ObjectId) {
         }
         // "Whenever a creature the heroes control dies, the heroes lose 1 life."
         "Karai, Shadow Warrior" => {
-            obj.push_printed_trigger(dies_trigger(
-                hero_creature_filter(),
-                "Whenever a creature the heroes control dies, the heroes lose 1 life.",
-            ));
+            if let Some(loser) = captain {
+                obj.push_printed_trigger(dies_trigger(
+                    hero_creature_filter(),
+                    "Whenever a creature the heroes control dies, the heroes lose 1 life.",
+                    loser,
+                ));
+            }
         }
         // "At the start of the Boss turn, the bosses lose 2 life." (The
         // additional-card clause is a wave-size rule, read live by
@@ -430,10 +441,13 @@ fn graft_boss_abilities(state: &mut GameState, boss_id: ObjectId) {
         }
         // "Whenever a creature the bosses control dies, the heroes lose 1 life."
         "Shredder, Foot Clan Overlord" => {
-            obj.push_printed_trigger(dies_trigger(
-                boss_creature_filter(),
-                "Whenever a creature the bosses control dies, the heroes lose 1 life.",
-            ));
+            if let Some(loser) = captain {
+                obj.push_printed_trigger(dies_trigger(
+                    boss_creature_filter(),
+                    "Whenever a creature the bosses control dies, the heroes lose 1 life.",
+                    loser,
+                ));
+            }
         }
         // "Attacking creatures the bosses control have first strike."
         "Slash, the Dark Mirror" => {
@@ -562,22 +576,29 @@ fn command_trigger(
     def
 }
 
-/// Trigger execute ability: each opponent (each hero) loses `amount` life —
-/// the `player_scope: Opponent` encoding ("Each opponent loses N life",
-/// resolved through `resolve_ability_chain`'s scope iteration).
-fn heroes_lose_life_execute(amount: i32) -> crate::types::ability::AbilityDefinition {
+/// Trigger execute ability: the heroes collectively lose `amount` life — ONE
+/// shared-pool loss, not one per hero. Karai ("the heroes lose 1 life") and
+/// Shredder name the team total, and Turtle heroes share one life total, so
+/// the loss lands on a single representative seat (`loser`, the team captain)
+/// via `SpecificPlayer`: CR 810.9c applies the diff to only that seat's life
+/// while the team total moves by exactly `amount`. A `player_scope: Opponent`
+/// encoding would multiply the loss per hero (6 with two heroes for a
+/// 3-life instruction) — correct for CR "each opponent" cards, wrong for the
+/// product's collective phrasing.
+fn heroes_lose_life_execute(
+    amount: i32,
+    loser: PlayerId,
+) -> crate::types::ability::AbilityDefinition {
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, PlayerFilter, QuantityExpr,
+        AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
     };
-    let mut def = AbilityDefinition::new(
+    AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::LoseLife {
             amount: QuantityExpr::Fixed { value: amount },
-            target: None,
+            target: Some(TargetFilter::SpecificPlayer { id: loser }),
         },
-    );
-    def.player_scope = Some(PlayerFilter::Opponent);
-    def
+    )
 }
 
 /// Bebop / Rocksteady: "Whenever the bosses attack, put a +1/+1 counter on
@@ -602,17 +623,20 @@ fn bosses_attack_put_counter_trigger() -> crate::types::ability::TriggerDefiniti
 }
 
 /// Shredder / Karai dies trigger: "Whenever [a creature the bosses/heroes
-/// control] dies, the heroes lose 1 life."
+/// control] dies, the heroes lose 1 life." The loss is collective (one
+/// shared-pool point on `loser`), never per-hero — see
+/// [`heroes_lose_life_execute`].
 fn dies_trigger(
     subject: crate::types::ability::TargetFilter,
     description: &str,
+    loser: PlayerId,
 ) -> crate::types::ability::TriggerDefinition {
     use crate::types::triggers::TriggerMode;
     let mut def = command_trigger(TriggerMode::ChangesZone, description);
     def.origin = Some(Zone::Battlefield);
     def.destination = Some(Zone::Graveyard);
     def.valid_card = Some(subject);
-    def.execute = Some(Box::new(heroes_lose_life_execute(1)));
+    def.execute = Some(Box::new(heroes_lose_life_execute(1, loser)));
     def
 }
 
@@ -951,15 +975,19 @@ fn rampage_steps(
         .collect()
 }
 
-/// "The heroes lose 3 life and the bosses gain 3 life."
+/// "The heroes lose 3 life and the bosses gain 3 life." The heroes' loss is
+/// collective — ONE 3-life step on the team captain, never one per hero:
+/// Turtle heroes share one life total, so CR 810.9c moves the team total by
+/// exactly 3 through the captain's seat. Per-hero steps would multiply the
+/// instruction (6 with two heroes, 12 with four).
 fn planning_steps(state: &GameState, horde: PlayerId) -> Vec<HeroEventApplyStep> {
-    let mut steps: Vec<HeroEventApplyStep> = hero_seats_in_order(state, horde)
-        .into_iter()
-        .map(|hero| HeroEventApplyStep::LoseLife {
-            player: hero,
+    let mut steps = Vec::new();
+    if let Some(captain) = team_captain(state, horde) {
+        steps.push(HeroEventApplyStep::LoseLife {
+            player: captain,
             amount: 3,
-        })
-        .collect();
+        });
+    }
     steps.push(HeroEventApplyStep::GainLife {
         player: horde,
         amount: 3,
@@ -1572,18 +1600,23 @@ fn build_answer_steps(
 }
 
 /// Battlefield-departure candidates of one hero-Event instruction: every
-/// Sacrifice and Destroy step card. Discard/LoseLife/GainLife/Tap/AddCounters
-/// never leave the battlefield; Damage kills through a later SBA check (not
-/// simultaneous with the instruction); ZoneMove producers in hero Events move
-/// non-battlefield cards; Bounce is never paired with a destroy/sacrifice
-/// cohort by any Event, so stamping it would newly enable cross-observation
-/// the sequential path deliberately forbids.
+/// Sacrifice, Destroy, and Bounce step card. Discard/LoseLife/GainLife/
+/// Tap/AddCounters never leave the battlefield; Damage kills through a later
+/// SBA check (not simultaneous with the instruction); ZoneMove producers in
+/// hero Events move non-battlefield cards. Bounce belongs: Savanti's Curse
+/// ("Each hero returns X creatures they control to their owners' hands")
+/// is one simultaneous instruction (CR 101.4), so a bounced Stormfront
+/// Riders observes the co-returned creatures via CR 603.10a look-back. Only
+/// Savanti's Curse produces Bounce steps, and it produces nothing else, so
+/// the stamp can only group bounces with bounces — never with a
+/// destroy/sacrifice cohort from another instruction.
 fn hero_event_departure_candidates(steps: &[HeroEventApplyStep]) -> Vec<ObjectId> {
     steps
         .iter()
         .filter_map(|step| match step {
             HeroEventApplyStep::Sacrifice { card, .. } => Some(*card),
             HeroEventApplyStep::Destroy { card } => Some(*card),
+            HeroEventApplyStep::Bounce { card } => Some(*card),
             _ => None,
         })
         .collect()
@@ -2907,6 +2940,7 @@ mod tests {
         for name in RESOLVED {
             let (mut state, horde, hero) = event_probe_game();
             let hero_life = seat_life(&state, hero);
+            let team_life_before = crate::game::players::team_life_total(&state, hero);
             let boss_life = seat_life(&state, horde);
             let (event_id, progress) = resolve_event_from_library(&mut state, horde, name);
             match *name {
@@ -2924,10 +2958,20 @@ mod tests {
                     );
                 }
                 "Event: Karai's Planning" => {
+                    // Collective: the probed hero IS the team captain (first
+                    // living hero seat), so its seat carries the whole loss
+                    // while the team total moves by exactly 3 — never 3 per
+                    // hero (per-hero steps would read `team_life_before - 6`
+                    // on this two-hero board).
                     assert_eq!(
                         seat_life(&state, hero),
                         hero_life - 3,
-                        "each hero loses 3 life"
+                        "the captain's seat carries the collective 3-life loss"
+                    );
+                    assert_eq!(
+                        crate::game::players::team_life_total(&state, hero),
+                        team_life_before - 3,
+                        "the shared team total moves once, not once per hero"
                     );
                     assert_eq!(
                         seat_life(&state, horde),

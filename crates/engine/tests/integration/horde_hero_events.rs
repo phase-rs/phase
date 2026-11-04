@@ -11,6 +11,8 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::deck_loading::{load_deck_into_state, DeckPayload};
+use engine::game::engine::EngineError;
+use engine::game::players::team_life_total;
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::game::zones::create_object;
 use engine::types::ability::{
@@ -37,10 +39,17 @@ const HERO2: PlayerId = PlayerId(2);
 /// top-first, stages hero boards, then opens the wave with
 /// [`begin_wave_with_budget`].
 fn hero_event_game() -> GameState {
+    hero_event_game_with_players(3, 42)
+}
+
+/// [`hero_event_game`] with an explicit seat count (`heroes + 1`) and seed —
+/// the four-hero Planning/Karai/Shredder regressions and the stage-1 boss
+/// seed search build on this.
+fn hero_event_game_with_players(players: u8, seed: u64) -> GameState {
     let mut state = GameState::new(
         FormatConfig::horde(ChallengeDeck::TurtleTeamUpHorde.default_ruleset()),
-        3,
-        42,
+        players,
+        seed,
     );
     load_deck_into_state(&mut state, &DeckPayload::default());
     state.turn_number = 4;
@@ -87,6 +96,210 @@ fn add_hero_creature(state: &mut GameState, owner: PlayerId, name: &str, power: 
 fn add_hand_card(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
     let card_id = CardId(state.next_object_id);
     create_object(state, card_id, owner, name.to_string(), Zone::Hand)
+}
+
+/// Murder with its real spell definition, parsed from verbatim Oracle text
+/// ("Destroy target creature.") through the production parser and cloned onto
+/// a hand object like [`add_blood_artist`], so the rig stays DB-free. Costless
+/// like every scenario-built spell (no `mana_cost` on either side), so the
+/// cast needs no mana grant. The destroy-shape reach-guard proves the parser
+/// path ran.
+fn add_murder_to_hand(state: &mut GameState, owner: PlayerId) -> ObjectId {
+    let murder = add_hand_card(state, owner, "Murder");
+    let mut oracle = GameScenario::new();
+    let parsed = oracle
+        .add_spell_to_hand_from_oracle(owner, "Murder", true, "Destroy target creature.")
+        .id();
+    let face = oracle.build();
+    let source = &face.state().objects[&parsed];
+    assert!(
+        source
+            .abilities
+            .iter()
+            .any(|a| matches!(a.effect.as_ref(), Effect::Destroy { .. })),
+        "Murder must parse to a destroy effect"
+    );
+    let obj = state.objects.get_mut(&murder).expect("murder");
+    obj.card_types.core_types.push(CoreType::Instant);
+    obj.base_card_types = obj.card_types.clone();
+    obj.abilities = source.abilities.clone();
+    obj.base_abilities = source.base_abilities.clone();
+    murder
+}
+
+/// A Boss-controlled battlefield creature (a Ninja of the foot), mirroring
+/// [`add_hero_creature`] for the Horde seat. Direct placement emits no ETB
+/// event and starts neither sick nor tapped.
+fn add_horde_creature(state: &mut GameState, name: &str, power: i32) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(state, card_id, HORDE, name.to_string(), Zone::Battlefield);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.controller = HORDE;
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.card_types.subtypes.push("Ninja".to_string());
+    obj.base_card_types = obj.card_types.clone();
+    obj.power = Some(power);
+    obj.toughness = Some(2);
+    obj.base_power = Some(power);
+    obj.base_toughness = Some(2);
+    id
+}
+
+/// Pin the deployed stage-1 Boss by name — the seed-pinned Karai/Shredder
+/// regressions fail loudly here (not downstream) if the shuffle ever moves.
+fn assert_stage1_boss(state: &GameState, name: &str) {
+    let bosses = deployed_bosses(state);
+    assert_eq!(bosses.len(), 1, "stage 1 deploys exactly one Boss");
+    assert_eq!(
+        state.objects[&bosses[0]].name, name,
+        "the pinned seed must deploy {name} at stage 1"
+    );
+}
+
+/// Park the game at `hero`'s priority on their pre-combat main (a mid-game
+/// turn), so the hero can cast at sorcery speed immediately with no Horde
+/// wave in flight.
+fn park_hero_priority(state: &mut GameState, hero: PlayerId) {
+    state.turn_number = 4;
+    state.active_player = hero;
+    state.phase = Phase::PreCombatMain;
+    state.priority_player = hero;
+    state.waiting_for = WaitingFor::Priority { player: hero };
+}
+
+/// Unsummon with its real spell definition, parsed from verbatim Oracle text
+/// ("Return target creature to its owner's hand.") and cloned onto a hand
+/// object like [`add_murder_to_hand`]. The bounce-shape reach-guard proves
+/// the parser path ran.
+fn add_unsummon_to_hand(state: &mut GameState, owner: PlayerId) -> ObjectId {
+    let unsummon = add_hand_card(state, owner, "Unsummon");
+    let mut oracle = GameScenario::new();
+    let parsed = oracle
+        .add_spell_to_hand_from_oracle(
+            owner,
+            "Unsummon",
+            true,
+            "Return target creature to its owner's hand.",
+        )
+        .id();
+    let face = oracle.build();
+    let source = &face.state().objects[&parsed];
+    assert!(
+        source
+            .abilities
+            .iter()
+            .any(|a| matches!(a.effect.as_ref(), Effect::Bounce { .. })),
+        "Unsummon must parse to a bounce effect"
+    );
+    let obj = state.objects.get_mut(&unsummon).expect("unsummon");
+    obj.card_types.core_types.push(CoreType::Instant);
+    obj.base_card_types = obj.card_types.clone();
+    obj.abilities = source.abilities.clone();
+    obj.base_abilities = source.base_abilities.clone();
+    unsummon
+}
+
+/// A classic mill-race Horde game (Cyberman ruleset, loader-run so the emblem
+/// comes from the production path) parked at the Horde's upkeep on turn 4.
+/// The caller rigs the Horde library top-first, then opens the wave. Seat 1
+/// is the survivor (`HERO1`).
+fn classic_horde_wave_game() -> GameState {
+    let mut state = GameState::new(
+        FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
+        2,
+        42,
+    );
+    load_deck_into_state(&mut state, &DeckPayload::default());
+    state.turn_number = 4;
+    state.active_player = HORDE;
+    state.phase = Phase::Upkeep;
+    state.priority_player = HORDE;
+    state.waiting_for = WaitingFor::Priority { player: HORDE };
+    state
+}
+
+/// The Horde-controlled battlefield token named `name` — asserts the wave
+/// reveal entered exactly one of them, so the combat assertions below never
+/// run against a missing reveal.
+fn find_revealed_token(state: &GameState, name: &str) -> ObjectId {
+    let found: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|o| o.is_token && o.controller == HORDE && o.name == name)
+        })
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "the wave reveals exactly one {name}, got {found:?}"
+    );
+    found[0]
+}
+
+/// Drive the Horde turn from a wave-budget-set pre-combat state through the
+/// end of combat: pass priority, declare no blockers, and run `attack` once
+/// at DeclareAttackers with the engine's legal-attacker list. Panics on any
+/// other prompt. Returns at post-combat with an empty stack at Priority.
+fn drive_wave_through_combat(
+    runner: &mut GameRunner,
+    mut attack: impl FnMut(&mut GameRunner, &[ObjectId]),
+) {
+    let mut attacked = false;
+    for _ in 0..200 {
+        {
+            let st = runner.state();
+            if st.phase == Phase::PostCombatMain
+                && st.stack.is_empty()
+                && matches!(st.waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids, ..
+            } => {
+                assert!(!attacked, "combat declares attackers exactly once");
+                attacked = true;
+                let ids = valid_attacker_ids.clone();
+                attack(runner, &ids);
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .declare_blockers(&[])
+                    .expect("the heroes have no blockers");
+            }
+            other => panic!("unexpected prompt during wave-to-combat: {other:?}"),
+        }
+    }
+    assert!(attacked, "combat must have declared attackers");
+    assert_eq!(
+        runner.state().phase,
+        Phase::PostCombatMain,
+        "the drive ends after combat"
+    );
+}
+
+/// A 2-seat classic mill-race Horde game (Cyberman ruleset) parked at the
+/// survivor's priority on their pre-combat main. No deck loading: the
+/// hand-redirect rule is ruleset-driven, and a bounce test needs no wave,
+/// emblem, or boss pile. Seat 1 is the survivor (`HERO1`).
+fn classic_horde_cast_game() -> GameState {
+    let mut state = GameState::new(
+        FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
+        2,
+        42,
+    );
+    park_hero_priority(&mut state, HERO1);
+    state
 }
 
 /// Face-up Boss cards in the command zone (stage deployment comes from the
@@ -594,6 +807,68 @@ fn savanti_curse_bounces_picks_to_hand() {
     );
 }
 
+/// CR 101.4 + CR 603.10a: Savanti's Curse at two Bosses is one simultaneous
+/// instruction, so bouncing Stormfront Riders plus another creature triggers
+/// Riders twice — its own return and the co-return — even when the second
+/// return pauses on a replacement choice mid-instruction.
+///
+/// Revert guard: without Bounce in the departure cohort, the co-return's
+/// look-back finds no co-departed Riders, so only one Soldier is created.
+#[test]
+fn savanti_curse_two_boss_bounce_cohort_triggers_riders_twice() {
+    let mut state = hero_event_game();
+    deploy_extra_boss(&mut state, "Extra Boss");
+    assert_eq!(
+        deployed_bosses(&state).len(),
+        2,
+        "X is the number of bosses: 2"
+    );
+    // Three creatures for an X=2 CHOICE (a two-creature board auto-resolves).
+    let riders = add_stormfront_riders(&mut state, HERO1);
+    let other = add_hero_creature(&mut state, HERO1, "Hero Ox", 2);
+    let spare = add_hero_creature(&mut state, HERO1, "Hero Spare", 2);
+    // HERO2 holds no creatures, so only HERO1 is prompted.
+    add_decline_rigging(&mut state, HERO1, other, Zone::Hand);
+    add_library_event(&mut state, "Event: Savanti Romero's Curse");
+    let mut runner = GameRunner::from_state(state);
+    begin_wave_with_budget(&mut runner, 1);
+    let mut answers = vec![vec![riders, other]];
+    let (replacements, targets) = drive_wave_with_artist(&mut runner, &mut answers, |runner| {
+        let WaitingFor::HeroEventChoice { count, cards, .. } = &runner.state().waiting_for else {
+            panic!("Savanti must prompt, got {:?}", runner.state().waiting_for);
+        };
+        assert_eq!(*count, 2, "X is the number of bosses");
+        assert_eq!(cards.len(), 3, "all three creatures are offered");
+    });
+    assert_eq!(
+        replacements, 1,
+        "the rigged return parks once on the decline branch"
+    );
+    assert_eq!(targets, 0, "Soldier creation asks for no targets");
+    assert_wave_settled(&runner);
+    let st = runner.state();
+    assert!(
+        in_pile(st, HERO1, riders, Zone::Hand),
+        "Riders returns to its owner's hand"
+    );
+    assert!(
+        in_pile(st, HERO1, other, Zone::Hand),
+        "the declined redirect still returns to hand"
+    );
+    assert!(
+        st.battlefield.contains(&spare),
+        "the unpicked creature stays on the battlefield"
+    );
+    assert_eq!(
+        st.objects
+            .values()
+            .filter(|o| o.is_token && o.name == "Soldier")
+            .count(),
+        2,
+        "Riders triggers for its own return and the co-return"
+    );
+}
+
 #[test]
 fn infiltration_destroys_strongest_without_draining() {
     let mut state = hero_event_game();
@@ -793,12 +1068,63 @@ fn add_blood_artist(state: &mut GameState, owner: PlayerId) -> ObjectId {
     artist
 }
 
-/// A one-shot Optional `Moved` redirect for `card`'s graveyard move
-/// (accept = 0 exiles instead, decline = 1 lets the death stand), mirroring
+/// Stormfront Riders with its real triggers, parsed from verbatim Oracle text
+/// through the production parser — a real printed card:
+/// "Flying. When this creature enters, return two creatures you control to
+/// their owner's hand. Whenever this creature or another creature is returned
+/// to your hand from the battlefield, create a 1/1 white Soldier creature
+/// token."
+/// Cloned onto the synthetic horde object like [`add_blood_artist`] so the rig
+/// stays DB-free. Direct battlefield placement emits no ETB event, so only the
+/// return trigger can fire below — the Soldier count proves it specifically.
+fn add_stormfront_riders(state: &mut GameState, owner: PlayerId) -> ObjectId {
+    const RIDERS: &str = "Flying\nWhen this creature enters, return two creatures you control to their owner's hand.\nWhenever this creature or another creature is returned to your hand from the battlefield, create a 1/1 white Soldier creature token.";
+    let riders = add_hero_creature(state, owner, "Stormfront Riders", 4);
+    let mut oracle = GameScenario::new();
+    let parsed = oracle
+        .add_creature(owner, "Stormfront Riders", 4, 3)
+        .from_oracle_text_with_keywords(&["Flying"], RIDERS)
+        .id();
+    let face = oracle.build();
+    let source = &face.state().objects[&parsed];
+    assert_eq!(
+        source.trigger_definitions.len(),
+        2,
+        "Stormfront Riders must parse to its ETB + return triggers"
+    );
+    let obj = state.objects.get_mut(&riders).expect("riders");
+    obj.trigger_definitions = source.trigger_definitions.clone();
+    obj.base_trigger_definitions = source.base_trigger_definitions.clone();
+    obj.power = Some(4);
+    obj.base_power = Some(4);
+    obj.toughness = Some(3);
+    obj.base_toughness = Some(3);
+    engine::game::trigger_index::reindex_object_triggers(state, riders);
+    riders
+}
+
+/// A second deployed Boss beside the loader's stage-1 Boss: face-up in the
+/// command zone, counted by the "number of bosses" reads (Savanti's X).
+/// Graft-free on purpose — ability grafting is orthogonal to the count seam,
+/// and an inert Boss keeps the rig deterministic (no extra upkeep/static
+/// interference). Only the name-keyed Krang wave bonus reads names, and this
+/// name never matches it.
+fn deploy_extra_boss(state: &mut GameState, name: &str) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(state, card_id, HORDE, name.to_string(), Zone::Command);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.face_down = false;
+    obj.card_types.core_types.push(CoreType::Boss);
+    obj.base_card_types = obj.card_types.clone();
+    id
+}
+
+/// A one-shot Optional `Moved` redirect for `card`'s move to `dest`
+/// (accept = 0 exiles instead, decline = 1 lets the move stand), mirroring
 /// the boss unit-test rig. Declining parks the hero batch mid-list so the
 /// resume drains the remainder — the cohort then needs the ledger stamp for
 /// cross-pause look-back.
-fn add_decline_rigging(state: &mut GameState, owner: PlayerId, card: ObjectId) {
+fn add_decline_rigging(state: &mut GameState, owner: PlayerId, card: ObjectId, dest: Zone) {
     use std::sync::Arc;
     let source = create_object(
         state,
@@ -826,7 +1152,7 @@ fn add_decline_rigging(state: &mut GameState, owner: PlayerId, card: ObjectId) {
                 enters_modified_if: None,
             },
         ))
-        .destination_zone(Zone::Graveyard)
+        .destination_zone(dest)
         .valid_card(TargetFilter::SpecificObject { id: card })
         .mode(ReplacementMode::Optional { decline: None });
     let obj = state.objects.get_mut(&source).expect("source");
@@ -836,10 +1162,16 @@ fn add_decline_rigging(state: &mut GameState, owner: PlayerId, card: ObjectId) {
 
 /// Drive a wave whose Event parks once on the decline rigging and whose Blood
 /// Artist triggers ask for targets. Returns (replacement_prompts,
-/// target_prompts). Any other prompt — or a planned hero answer that never
+/// target_prompts). The closure runs on every HeroEventChoice prompt BEFORE
+/// its answer is submitted, so each test asserts the full prompt shape
+/// unconditionally. Any other prompt — or a planned hero answer that never
 /// fires, or a trigger that never resolves — panics or fails the counts
 /// instead of passing silently.
-fn drive_wave_with_artist(runner: &mut GameRunner, answers: &mut Vec<Vec<ObjectId>>) -> (u32, u32) {
+fn drive_wave_with_artist(
+    runner: &mut GameRunner,
+    answers: &mut Vec<Vec<ObjectId>>,
+    mut on_prompt: impl FnMut(&mut GameRunner),
+) -> (u32, u32) {
     use engine::game::triggers::drain_order_triggers_with_identity;
     let mut replacement_prompts = 0;
     let mut target_prompts = 0;
@@ -868,6 +1200,7 @@ fn drive_wave_with_artist(runner: &mut GameRunner, answers: &mut Vec<Vec<ObjectI
                     "unexpected HeroEventChoice prompt: {:?}",
                     runner.state().waiting_for
                 );
+                on_prompt(runner);
                 let answer = answers.remove(0);
                 runner
                     .act(GameAction::SelectCards { cards: answer })
@@ -930,7 +1263,7 @@ fn chrome_dome_overload_sacrifice_pause_keeps_artist_cohort() {
     state.objects.get_mut(&artist).expect("artist").tapped = true;
     let doomed = add_hero_creature(&mut state, HERO2, "Doomed Ox", 2);
     state.objects.get_mut(&doomed).expect("doomed").tapped = true;
-    add_decline_rigging(&mut state, HERO2, doomed);
+    add_decline_rigging(&mut state, HERO2, doomed, Zone::Graveyard);
     add_library_event(&mut state, "Event: Chrome Dome's Overload");
     let mut runner = GameRunner::from_state(state);
     begin_wave_with_budget(&mut runner, 1);
@@ -941,7 +1274,7 @@ fn chrome_dome_overload_sacrifice_pause_keeps_artist_cohort() {
     let hero_life_before = seat_life(runner.state(), HERO1);
 
     let mut answers = Vec::new();
-    let (replacements, targets) = drive_wave_with_artist(&mut runner, &mut answers);
+    let (replacements, targets) = drive_wave_with_artist(&mut runner, &mut answers, |_| {});
     assert_eq!(
         replacements, 1,
         "the doomed sacrifice parks once on the decline rigging"
@@ -992,8 +1325,8 @@ fn chrome_dome_overload_double_pause_keeps_artist_cohort() {
     state.objects.get_mut(&artist).expect("artist").tapped = true;
     let doomed = add_hero_creature(&mut state, HERO2, "Doomed Ox", 2);
     state.objects.get_mut(&doomed).expect("doomed").tapped = true;
-    add_decline_rigging(&mut state, HERO1, artist);
-    add_decline_rigging(&mut state, HERO2, doomed);
+    add_decline_rigging(&mut state, HERO1, artist, Zone::Graveyard);
+    add_decline_rigging(&mut state, HERO2, doomed, Zone::Graveyard);
     add_library_event(&mut state, "Event: Chrome Dome's Overload");
     let mut runner = GameRunner::from_state(state);
     begin_wave_with_budget(&mut runner, 1);
@@ -1002,7 +1335,7 @@ fn chrome_dome_overload_double_pause_keeps_artist_cohort() {
     let hero_life_before = seat_life(runner.state(), HERO1);
 
     let mut answers = Vec::new();
-    let (replacements, targets) = drive_wave_with_artist(&mut runner, &mut answers);
+    let (replacements, targets) = drive_wave_with_artist(&mut runner, &mut answers, |_| {});
     assert_eq!(
         replacements, 2,
         "each rigged sacrifice parks once on its decline rigging"
@@ -1298,7 +1631,7 @@ fn villain_mayhem_destroy_pause_keeps_artist_cohort() {
     let spared_b = add_hero_creature(&mut state, HERO1, "Spared B", 2);
     let spared_c = add_hero_creature(&mut state, HERO2, "Spared C", 2);
     let doomed = add_hero_creature(&mut state, HERO2, "Doomed Ox", 2);
-    add_decline_rigging(&mut state, HERO2, doomed);
+    add_decline_rigging(&mut state, HERO2, doomed, Zone::Graveyard);
     add_library_event(&mut state, "Event: Villain Mayhem!");
     let mut runner = GameRunner::from_state(state);
     begin_wave_with_budget(&mut runner, 1);
@@ -1308,7 +1641,7 @@ fn villain_mayhem_destroy_pause_keeps_artist_cohort() {
 
     // The team spares three others; the Artist and the rigged Ox die.
     let mut answers = vec![vec![spared_a, spared_b, spared_c]];
-    let (replacements, targets) = drive_wave_with_artist(&mut runner, &mut answers);
+    let (replacements, targets) = drive_wave_with_artist(&mut runner, &mut answers, |_| {});
     assert_eq!(
         replacements, 1,
         "the rigged destroy parks once on the decline rigging"
@@ -1346,5 +1679,324 @@ fn villain_mayhem_destroy_pause_keeps_artist_cohort() {
         seat_life(st, HERO1),
         hero_life_before + 2,
         "the Artist's controller gains twice"
+    );
+}
+
+/// CR 810.9c: Karai's Planning ("The heroes lose 3 life and the bosses gain
+/// 3 life.") through the public wave pipeline at two and four heroes. The
+/// heroes' loss is collective — the shared team total moves by exactly 3 at
+/// either hero count — while the Bosses gain 3.
+///
+/// Revert guard: per-hero LoseLife steps drain 6 with two heroes and 12 with
+/// four; both arms flip.
+#[test]
+fn karais_planning_collective_loss_two_and_four_heroes() {
+    for players in [3u8, 5u8] {
+        let state = hero_event_game_with_players(players, 42);
+        let mut runner = GameRunner::from_state(state);
+        // Planning is choiceless, so a pre-rigged copy would resolve inside
+        // the turn-entry wave during the advance below (only prompting Events
+        // pause it). Rig AFTER the advance instead: the empty-library
+        // turn-entry wave no-ops, the baselines bracket the driven reveal,
+        // and the priority re-entry seam picks up the hand-set budget.
+        runner.advance_to_phase(Phase::PreCombatMain);
+        add_library_event(runner.state_mut(), "Event: Karai's Planning");
+        runner.state_mut().horde_wave_remaining = 1;
+        let team_before = team_life_total(runner.state(), HERO1);
+        let horde_before = seat_life(runner.state(), HORDE);
+        let mut answers = Vec::new();
+        drive_wave_with_answers(&mut runner, &mut answers, |runner| {
+            panic!(
+                "Planning prompts nobody, got {:?}",
+                runner.state().waiting_for
+            );
+        });
+        assert_wave_settled(&runner);
+        let st = runner.state();
+        assert_eq!(
+            team_life_total(st, HERO1),
+            team_before - 3,
+            "{players} seats: the shared team total moves once, not once per hero"
+        );
+        assert_eq!(
+            seat_life(st, HORDE),
+            horde_before + 3,
+            "{players} seats: the Bosses gain 3 life"
+        );
+    }
+}
+
+/// CR 810.9c: Karai's dies trigger ("Whenever a creature the heroes control
+/// dies, the heroes lose 1 life.") through the public cast pipeline at two
+/// and four heroes. A murdered hero creature costs the shared team total
+/// exactly 1 at either hero count.
+///
+/// Revert guard: a `player_scope: Opponent` execute drains 2 with two heroes
+/// and 4 with four; both arms flip.
+#[test]
+fn karai_dies_trigger_collective_loss_two_and_four_heroes() {
+    for players in [3u8, 5u8] {
+        let mut state = hero_event_game_with_players(players, 0);
+        assert_stage1_boss(&state, "Karai, Shadow Warrior");
+        let victim = add_hero_creature(&mut state, HERO1, "Doomed Bear", 2);
+        let murder = add_murder_to_hand(&mut state, HERO1);
+        park_hero_priority(&mut state, HERO1);
+        let mut runner = GameRunner::from_state(state);
+        let team_before = team_life_total(runner.state(), HERO1);
+        let outcome = runner.cast(murder).target_objects(&[victim]).resolve();
+        assert!(
+            matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+            "{players} seats: the cast settles back to Priority, got {:?}",
+            outcome.final_waiting_for()
+        );
+        let st = runner.state();
+        assert!(st.stack.is_empty(), "{players} seats: the stack is empty");
+        assert!(
+            in_pile(st, HERO1, murder, Zone::Graveyard),
+            "{players} seats: Murder resolves to the graveyard"
+        );
+        assert!(
+            in_pile(st, HERO1, victim, Zone::Graveyard),
+            "{players} seats: the victim dies"
+        );
+        assert_eq!(
+            team_life_total(st, HERO1),
+            team_before - 1,
+            "{players} seats: the shared team total moves once, not once per hero"
+        );
+    }
+}
+
+/// CR 810.9c: Shredder's dies trigger ("Whenever a creature the bosses
+/// control dies, the heroes lose 1 life.") through the public cast pipeline
+/// at two and four heroes. A murdered Boss creature costs the shared hero
+/// team total exactly 1 at either hero count.
+///
+/// Revert guard: a `player_scope: Opponent` execute drains 2 with two heroes
+/// and 4 with four; both arms flip.
+#[test]
+fn shredder_dies_trigger_collective_loss_two_and_four_heroes() {
+    for players in [3u8, 5u8] {
+        let mut state = hero_event_game_with_players(players, 1);
+        assert_stage1_boss(&state, "Shredder, Foot Clan Overlord");
+        let victim = add_horde_creature(&mut state, "Foot Ninja", 2);
+        let murder = add_murder_to_hand(&mut state, HERO1);
+        park_hero_priority(&mut state, HERO1);
+        let mut runner = GameRunner::from_state(state);
+        let team_before = team_life_total(runner.state(), HERO1);
+        let outcome = runner.cast(murder).target_objects(&[victim]).resolve();
+        assert!(
+            matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+            "{players} seats: the cast settles back to Priority, got {:?}",
+            outcome.final_waiting_for()
+        );
+        let st = runner.state();
+        assert!(st.stack.is_empty(), "{players} seats: the stack is empty");
+        assert!(
+            in_pile(st, HERO1, murder, Zone::Graveyard),
+            "{players} seats: Murder resolves to the graveyard"
+        );
+        assert!(
+            in_pile(st, HORDE, victim, Zone::Graveyard),
+            "{players} seats: the Boss creature dies to the Boss graveyard"
+        );
+        assert_eq!(
+            team_life_total(st, HERO1),
+            team_before - 1,
+            "{players} seats: the shared team total moves once, not once per hero"
+        );
+    }
+}
+
+/// Hordemagic basic rule through the public cast pipeline: Unsummon on a
+/// classic Horde creature tucks it to the TOP of the Horde library (the
+/// Horde has no hand to hold it).
+#[test]
+fn unsummon_on_classic_horde_creature_tucks_to_library_top() {
+    let mut state = classic_horde_cast_game();
+    // A marker already on top, to prove the bounced card lands ABOVE it.
+    let marker_id = CardId(state.next_object_id);
+    let marker = create_object(
+        &mut state,
+        marker_id,
+        HORDE,
+        "Marker".to_string(),
+        Zone::Library,
+    );
+    let beast = add_hero_creature(&mut state, HORDE, "Horde Beast", 2);
+    let unsummon = add_unsummon_to_hand(&mut state, HERO1);
+    let mut runner = GameRunner::from_state(state);
+    let outcome = runner.cast(unsummon).target_objects(&[beast]).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the cast settles back to Priority, got {:?}",
+        outcome.final_waiting_for()
+    );
+    let st = runner.state();
+    assert!(st.stack.is_empty(), "the stack is empty");
+    assert_eq!(st.objects[&beast].zone, Zone::Library);
+    let library = &st.players.iter().find(|p| p.id == HORDE).unwrap().library;
+    assert_eq!(
+        library.front(),
+        Some(&beast),
+        "the bounced Horde creature tucks to the TOP of the library"
+    );
+    assert!(
+        library.contains(&marker),
+        "the pre-existing top card is pushed below the tuck"
+    );
+}
+
+/// Turtle Team-Up product booklet (printed p. 7) through the public cast
+/// pipeline: Unsummon on a Boss-owned Ninja puts it into the Boss graveyard
+/// instead of recycling it into the event deck.
+///
+/// Revert guard: without the boss-stage destination split, the Ninja tucks
+/// to the library top and the graveyard assertion flips.
+#[test]
+fn unsummon_on_turtle_ninja_goes_to_boss_graveyard() {
+    let mut state = hero_event_game();
+    let ninja = add_horde_creature(&mut state, "Foot Ninja", 2);
+    let unsummon = add_unsummon_to_hand(&mut state, HERO1);
+    park_hero_priority(&mut state, HERO1);
+    let mut runner = GameRunner::from_state(state);
+    let outcome = runner.cast(unsummon).target_objects(&[ninja]).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the cast settles back to Priority, got {:?}",
+        outcome.final_waiting_for()
+    );
+    let st = runner.state();
+    assert!(st.stack.is_empty(), "the stack is empty");
+    assert!(
+        in_pile(st, HORDE, ninja, Zone::Graveyard),
+        "the bounced Ninja goes to the Boss graveyard"
+    );
+    assert_eq!(st.objects[&ninja].zone, Zone::Graveyard);
+    let horde = st.players.iter().find(|p| p.id == HORDE).unwrap();
+    assert!(
+        !horde.library.contains(&ninja),
+        "the Ninja is not recycled into the event deck"
+    );
+    assert!(
+        !horde.hand.contains(&ninja),
+        "the Horde never holds a card in hand"
+    );
+}
+
+/// Owner-scoping control for the redirect pair above: a survivor's own
+/// bounced creature returns to their hand normally in a classic Horde game.
+#[test]
+fn unsummon_on_survivor_creature_returns_to_hand() {
+    let mut state = classic_horde_cast_game();
+    // The Horde must control a creature: with its (loader-less) library
+    // empty, a creatureless Horde is already defeated and the first action
+    // ends the game before the cast.
+    let _beast = add_hero_creature(&mut state, HORDE, "Horde Beast", 2);
+    let bear = add_hero_creature(&mut state, HERO1, "Survivor Bear", 2);
+    let unsummon = add_unsummon_to_hand(&mut state, HERO1);
+    let mut runner = GameRunner::from_state(state);
+    let outcome = runner.cast(unsummon).target_objects(&[bear]).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the cast settles back to Priority, got {:?}",
+        outcome.final_waiting_for()
+    );
+    let st = runner.state();
+    assert!(st.stack.is_empty(), "the stack is empty");
+    assert!(
+        in_pile(st, HERO1, bear, Zone::Hand),
+        "a survivor's bounced creature returns to their hand"
+    );
+    assert_eq!(st.objects[&bear].zone, Zone::Hand);
+}
+
+/// Hordemagic basic rule through the public wave-to-combat path: a Zombie
+/// revealed this turn attacks the same turn — the classic emblem grants
+/// haste (CR 702.10b), so summoning sickness never gates the wave's army.
+///
+/// Revert guard: without the haste grant, the Zombie is no legal attacker
+/// and both the membership assertion and the declare flip.
+#[test]
+fn classic_revealed_token_attacks_same_turn_as_revealed() {
+    let mut state = classic_horde_wave_game();
+    // Rig BEFORE the advance: the token enters through the turn-entry wave's
+    // public reveal (and a classic Horde with an empty library and no
+    // creatures is already defeated, so the advance needs the library
+    // non-empty at its first state check).
+    add_library_token(&mut state, HORDE, "Zombie Token", 2, 2);
+    let mut runner = GameRunner::from_state(state);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    let life_before = seat_life(runner.state(), HERO1);
+    drive_wave_through_combat(&mut runner, |runner, valid| {
+        let zombie = find_revealed_token(runner.state(), "Zombie Token");
+        assert!(
+            valid.contains(&zombie),
+            "a hasted reveal is a legal attacker the turn it enters, got {valid:?}"
+        );
+        runner
+            .declare_attackers(&[(zombie, AttackTarget::Player(HERO1))])
+            .expect("the Zombie attacks the survivor");
+    });
+    let st = runner.state();
+    let zombie = find_revealed_token(st, "Zombie Token");
+    assert!(st.objects[&zombie].tapped, "the Zombie tapped to attack");
+    assert_eq!(
+        seat_life(st, HERO1),
+        life_before - 2,
+        "the Zombie deals its 2 combat damage"
+    );
+}
+
+/// Turtle Team-Up product booklet (printed p. 6) through the public
+/// wave-to-combat path: a Foot Ninja revealed this turn CANNOT attack — the
+/// default Turtle emblem grants no haste, so summoning sickness (CR 302.6)
+/// holds the fresh reveal out of combat while a veteran beside it attacks
+/// normally. Forced-attack is untouched: the veteran must attack (and does),
+/// the Ninja would attack if able.
+///
+/// Revert guard: with the unconditional haste grant, the Ninja joins the
+/// legal-attacker list and the exact-list assertion flips.
+#[test]
+fn turtle_revealed_ninja_cannot_attack_turn_revealed() {
+    let mut state = hero_event_game();
+    // A veteran already on the board (direct placement starts untapped and
+    // sickness-free), so combat genuinely happens around the sick reveal.
+    let veteran = add_horde_creature(&mut state, "Veteran Foot Ninja", 1);
+    // Rig BEFORE the advance: the token enters through the turn-entry wave's
+    // public reveal.
+    add_library_token(&mut state, HORDE, "Foot Ninja", 2, 2);
+    let mut runner = GameRunner::from_state(state);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    let team_before = team_life_total(runner.state(), HERO1);
+    drive_wave_through_combat(&mut runner, |runner, valid| {
+        let ninja = find_revealed_token(runner.state(), "Foot Ninja");
+        assert_eq!(
+            valid,
+            &[veteran],
+            "only the veteran is a legal attacker — the sick Ninja is excluded, got {valid:?}"
+        );
+        let err = runner
+            .declare_attackers(&[(ninja, AttackTarget::Player(HERO1))])
+            .expect_err("declaring a sick Ninja must fail");
+        assert!(
+            matches!(&err, EngineError::InvalidAction(msg) if msg.contains("summoning sickness")),
+            "rejected for sickness, got {err:?}"
+        );
+        runner
+            .declare_attackers(&[(veteran, AttackTarget::Player(HERO1))])
+            .expect("the veteran attacks");
+    });
+    let st = runner.state();
+    let ninja = find_revealed_token(st, "Foot Ninja");
+    assert!(
+        !st.objects[&ninja].tapped,
+        "the Ninja never attacks, so it never taps"
+    );
+    assert!(st.objects[&veteran].tapped, "the veteran tapped to attack");
+    assert_eq!(
+        team_life_total(st, HERO1),
+        team_before - 1,
+        "only the veteran's 1 combat damage reaches the heroes"
     );
 }

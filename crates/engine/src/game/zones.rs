@@ -1711,17 +1711,29 @@ pub(crate) fn move_to_zone_with_entry_flags(
         // than battlefield, exile, or command move to command instead.
         to = Zone::Command;
     }
-    // Basic Horde rule (hordemagic.com): "If a permanent is returned to the
-    // Horde's 'hand' and is owned by the Horde, it goes on top of the library."
-    // The Horde has no hand — it plays off the top of its library — so redirect
-    // ANY move that would put a Horde-owned card into a hand to the TOP of that
-    // Horde's library instead (generalizing "permanent" to any card, since the
-    // Horde can never hold a card in hand). Owner-scoped so a survivor's bounced
-    // card is unaffected; `is_horde_seat` is a no-op outside Horde games. The
-    // top-of-library placement is applied after the move completes below.
-    let horde_hand_to_top = to == Zone::Hand && super::horde::is_horde_seat(state, owner);
-    if horde_hand_to_top {
-        to = Zone::Library;
+    // The Horde has no hand, so ANY move that would put a Horde-owned card
+    // into a hand redirects by product rule (owner-scoped, so a survivor's
+    // bounced card is unaffected; `is_horde_seat` is a no-op outside Horde
+    // games):
+    // - Classic mill-race Horde (hordemagic.com): "If a permanent is returned
+    //   to the Horde's 'hand' and is owned by the Horde, it goes on top of
+    //   the library" — redirect to the TOP of that Horde's library
+    //   (generalizing "permanent" to any card, since the Horde can never
+    //   hold a card in hand). The top-of-library placement is applied after
+    //   the move completes below.
+    // - Boss-stage Horde (Turtle Team-Up product booklet, printed p. 7):
+    //   Boss-owned cards bound for hand are "put into their graveyard
+    //   instead" — redirect to the owner's graveyard (Villain Scheme!
+    //   reshuffles Boss Ninjas from there; the library redirect would wrongly
+    //   recycle them into the event deck).
+    let horde_hand_redirect = to == Zone::Hand && super::horde::is_horde_seat(state, owner);
+    let horde_hand_to_top = horde_hand_redirect && !super::horde::has_boss_stages(state);
+    if horde_hand_redirect {
+        to = if horde_hand_to_top {
+            Zone::Library
+        } else {
+            Zone::Graveyard
+        };
     }
     // CR 400.7 + CR 611.3a: a static may depend on an object's membership in
     // either the leaving or destination zone through its recipient filter,

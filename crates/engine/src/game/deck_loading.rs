@@ -947,31 +947,40 @@ pub fn momir_emblem_ability() -> crate::types::ability::AbilityDefinition {
 const HORDE_EMBLEM_SOURCE_NAME: &str = "The Horde";
 
 /// The Horde's game-start command-zone emblem static: a single continuous
-/// ability that grants every creature the Horde controls haste and (when the
-/// ruleset forces it) "attacks each combat if able".
+/// ability granting every creature the Horde controls haste (when the
+/// ruleset grants it) and "attacks each combat if able" (when the ruleset
+/// forces it).
 ///
 /// Both grants are Layer 6 ability-adding continuous effects (CR 613.1f /
-/// CR 613.3): `AddKeyword(Haste)` (CR 702.10b) and, gated on
-/// `horde_creatures_forced_attackers`, a grafted `StaticMode::MustAttack`
-/// (CR 508.1d) via `GrantStaticAbility`. The outer static is controlled by the
-/// Horde, so its `ControllerRef::You` affected-filter resolves to "creatures the
-/// Horde controls" — a live read, so a creature that changes controller stops
-/// receiving both grants. Mirrors `create_emblem::ninja_pump_static`'s
-/// command-zone anthem pattern.
-fn horde_emblem_static(forced_attackers: bool) -> crate::types::ability::StaticDefinition {
+/// CR 613.3): `AddKeyword(Haste)` (CR 702.10b), gated on the ruleset's
+/// `horde_creatures_haste` (classic Hordes grant it; default Turtle does
+/// not — booklet p. 6 excludes newly entered creatures from that turn's
+/// combat), and, gated on `horde_creatures_forced_attackers`, a grafted
+/// `StaticMode::MustAttack` (CR 508.1d) via `GrantStaticAbility`. The two
+/// axes are independent: a no-haste Horde still attacks every combat if
+/// able, just never the turn its creatures enter. The outer static is
+/// controlled by the Horde, so its `ControllerRef::You` affected-filter
+/// resolves to "creatures the Horde controls" — a live read, so a creature
+/// that changes controller stops receiving both grants. Mirrors
+/// `create_emblem::ninja_pump_static`'s command-zone anthem pattern.
+fn horde_emblem_static(
+    forced_attackers: bool,
+    haste: bool,
+) -> Option<crate::types::ability::StaticDefinition> {
     use crate::types::ability::{
         ContinuousModification, ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
     };
     use crate::types::keywords::Keyword;
     use crate::types::statics::StaticMode;
 
-    let mut modifications = vec![
+    let mut modifications = Vec::new();
+    if haste {
         // CR 702.10b: haste — the Horde's creatures can attack the turn they
         // enter and ignore summoning sickness for tap abilities.
-        ContinuousModification::AddKeyword {
+        modifications.push(ContinuousModification::AddKeyword {
             keyword: Keyword::Haste,
-        },
-    ];
+        });
+    }
     if forced_attackers {
         // CR 508.1d: graft "attacks each combat if able" onto each affected
         // creature as a static ability of its own (self-scoped), so the
@@ -987,14 +996,26 @@ fn horde_emblem_static(forced_attackers: bool) -> crate::types::ability::StaticD
         });
     }
 
-    StaticDefinition::continuous()
-        .affected(TargetFilter::Typed(
-            TypedFilter::creature().controller(ControllerRef::You),
-        ))
-        .modifications(modifications)
-        .description(
-            "Creatures the Horde controls have haste and attack each combat if able.".to_string(),
-        )
+    if modifications.is_empty() {
+        // Neither axis grants anything: install no static rather than an
+        // empty continuous effect. No shipped ruleset reaches this (every
+        // published Horde forces attackers, with or without haste).
+        return None;
+    }
+    let description = match (haste, forced_attackers) {
+        (true, true) => "Creatures the Horde controls have haste and attack each combat if able.",
+        (true, false) => "Creatures the Horde controls have haste.",
+        (false, true) => "Creatures the Horde controls attack each combat if able.",
+        (false, false) => unreachable!("empty modifications return above"),
+    };
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+            .modifications(modifications)
+            .description(description.to_string()),
+    )
 }
 
 /// The Horde combat rule "only Horde creatures with Defender can block": a Layer 6
@@ -1038,17 +1059,28 @@ fn horde_no_block_static() -> crate::types::ability::StaticDefinition {
 }
 
 /// Grant the Horde seat its game-start setup: the command-zone emblem (haste on
-/// its creatures always, plus — under `forced_attackers` — the aggressive-combat
-/// package of "attacks each combat if able" and "only Defenders can block") and,
-/// under the advanced `HordePostCombatActivation::OncePerPermanent` rule, infinite
-/// mana (so its post-combat activation costs are payable). Single authority for
-/// Horde game-start setup, mirroring the Momir emblem grant; `forced_attackers`
-/// comes from the ruleset, and the infinite-mana grant reads the ruleset directly.
-pub fn grant_horde_emblem(state: &mut GameState, horde_seat: PlayerId, forced_attackers: bool) {
+/// its creatures under `haste`, plus — under `forced_attackers` — the
+/// aggressive-combat package of "attacks each combat if able" and "only
+/// Defenders can block") and, under the advanced
+/// `HordePostCombatActivation::OncePerPermanent` rule, infinite mana (so its
+/// post-combat activation costs are payable). Single authority for Horde
+/// game-start setup, mirroring the Momir emblem grant; `forced_attackers` and
+/// `haste` come from the ruleset, and the infinite-mana grant reads the
+/// ruleset directly.
+pub fn grant_horde_emblem(
+    state: &mut GameState,
+    horde_seat: PlayerId,
+    forced_attackers: bool,
+    haste: bool,
+) {
     // The aggressive-Horde combat package: haste + forced attackers (in
-    // `horde_emblem_static`) and, under the same forced-attackers axis, the
-    // "only Defenders block" restriction ([`horde_no_block_static`]).
-    let mut statics = vec![horde_emblem_static(forced_attackers)];
+    // `horde_emblem_static`, each under its own ruleset axis) and, under the
+    // forced-attackers axis, the "only Defenders block" restriction
+    // ([`horde_no_block_static`]).
+    let mut statics = Vec::new();
+    if let Some(combat) = horde_emblem_static(forced_attackers, haste) {
+        statics.push(combat);
+    }
     if forced_attackers {
         statics.push(horde_no_block_static());
     }
@@ -2034,15 +2066,15 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
     // emblem grant above; scoped to the single Horde seat, unlike Momir's
     // all-seat loop, because only the Horde controls Horde creatures.
     if state.format_config.format == crate::types::format::GameFormat::Horde {
-        let forced_attackers = state
-            .format_config
-            .horde_ruleset
-            .as_ref()
-            .is_some_and(|r| r.horde_creatures_forced_attackers);
+        let ruleset = state.format_config.horde_ruleset.as_ref();
+        let forced_attackers = ruleset.is_some_and(|r| r.horde_creatures_forced_attackers);
+        // Haste is per-deck: the classic Hordes grant it, default Turtle does
+        // not (booklet p. 6 excludes newly entered creatures from combat).
+        let haste = ruleset.is_some_and(|r| r.horde_creatures_haste);
         // Every Horde seat gets the emblem — a two-Horde deck (LOTR Two Towers) has
         // two commanders, each controlling its own creatures.
         for horde_seat in crate::game::horde::horde_seats(state) {
-            grant_horde_emblem(state, horde_seat, forced_attackers);
+            grant_horde_emblem(state, horde_seat, forced_attackers, haste);
         }
     }
 

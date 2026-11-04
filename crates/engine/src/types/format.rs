@@ -875,6 +875,13 @@ impl BossStages {
     }
 }
 
+/// Fail-compatible default for `HordeRuleset::horde_creatures_haste` on a
+/// payload serialized before that axis existed: every pre-axis deck is a
+/// classic mill-race Horde, whose creatures always had haste.
+fn default_horde_haste_fallback() -> bool {
+    true
+}
+
 /// The parameters that distinguish one Horde deck's rules from another, carried
 /// on `FormatConfig` so a single `GameFormat::Horde` variant covers the whole
 /// family without sibling format variants. All fields are typed axes, not
@@ -909,6 +916,17 @@ pub struct HordeRuleset {
     /// (true for every published Horde ruleset; a typed axis so a future ruleset
     /// can opt out — e.g. Defeat a God's revelers that only attack when told).
     pub horde_creatures_forced_attackers: bool,
+    /// Whether the Horde's creatures have haste. True for the classic
+    /// mill-race Hordes (the hordemagic basic rule); false for Turtle Team-Up
+    /// by default, whose product booklet (printed p. 6) excludes newly entered
+    /// creatures from that turn's combat and offers haste only as the
+    /// optional "Relentless Attack!" difficulty modifier (printed p. 8).
+    /// Independent of `horde_creatures_forced_attackers`: a no-haste Horde
+    /// still attacks every combat if able, just never the turn its creatures
+    /// enter. `#[serde(default)]` back-fills `true` for pre-axis payloads —
+    /// correct, since they predate any no-haste deck.
+    #[serde(default = "default_horde_haste_fallback")]
+    pub horde_creatures_haste: bool,
     /// How the Horde's own legendary cards are treated when milled to its
     /// graveyard by damage. `Normal` for the basic community decks; the advanced
     /// decks (Walking Dead, Stranger Things, …) use
@@ -1021,12 +1039,16 @@ impl HordeRuleset {
             plural(u32::from(self.survivor_setup_turns)),
         );
 
-        let combat = if self.horde_creatures_forced_attackers {
-            "The Horde's creatures attack every combat if able, and only its Defenders can block"
-                .to_string()
-        } else {
-            "The Horde's creatures attack only when instructed".to_string()
-        };
+        let combat = match (
+            self.horde_creatures_forced_attackers,
+            self.horde_creatures_haste,
+        ) {
+            (true, true) => "The Horde's creatures have haste, attack every combat if able, and only its Defenders can block",
+            (true, false) => "The Horde's creatures attack every combat if able (never the turn they enter), and only its Defenders can block",
+            (false, true) => "The Horde's creatures have haste but attack only when instructed",
+            (false, false) => "The Horde's creatures attack only when instructed",
+        }
+        .to_string();
 
         // What survivor decks to bring — a per-deck property (community decks are
         // built for EDH; Theros-block decks for 60-card constructed).
@@ -1259,6 +1281,7 @@ impl ChallengeDeck {
                 combined_base_life: 100,
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
+                horde_creatures_haste: true,
                 // All shipped community decks are basic decks — the advanced
                 // legendary and post-combat rules arrive with Walking Dead /
                 // Stranger Things.
@@ -1283,6 +1306,7 @@ impl ChallengeDeck {
                 combined_base_life: 100,
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
+                horde_creatures_haste: true,
                 // All shipped community decks are basic decks — the advanced
                 // legendary and post-combat rules arrive with Walking Dead /
                 // Stranger Things.
@@ -1311,6 +1335,7 @@ impl ChallengeDeck {
                 combined_base_life: 100,
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
+                horde_creatures_haste: true,
                 // All shipped community decks are basic decks — the advanced
                 // legendary and post-combat rules arrive with Walking Dead /
                 // Stranger Things.
@@ -1336,6 +1361,7 @@ impl ChallengeDeck {
                 combined_base_life: 100,
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
+                horde_creatures_haste: true,
                 // All shipped community decks are basic decks — the advanced
                 // legendary and post-combat rules arrive with Walking Dead /
                 // Stranger Things.
@@ -1358,6 +1384,7 @@ impl ChallengeDeck {
                 combined_base_life: 100,
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
+                horde_creatures_haste: true,
                 // All shipped community decks are basic decks — the advanced
                 // legendary and post-combat rules arrive with Walking Dead /
                 // Stranger Things.
@@ -1380,6 +1407,7 @@ impl ChallengeDeck {
                 combined_base_life: 100,
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
+                horde_creatures_haste: true,
                 // LOTR advanced rule: a legendary that would be milled to the
                 // graveyard by damage instead enters the battlefield and phases out.
                 legendary_death: HordeLegendaryDeath::EtbThenPhaseOut,
@@ -1399,6 +1427,7 @@ impl ChallengeDeck {
                 combined_base_life: 100,
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
+                horde_creatures_haste: true,
                 legendary_death: HordeLegendaryDeath::EtbThenPhaseOut,
                 post_combat_activation: HordePostCombatActivation::None,
                 survivor_deck_format: SurvivorDeckFormat::Commander,
@@ -1416,6 +1445,7 @@ impl ChallengeDeck {
                 combined_base_life: 100,
                 per_extra_survivor_life_delta: -15,
                 horde_creatures_forced_attackers: true,
+                horde_creatures_haste: true,
                 legendary_death: HordeLegendaryDeath::EtbThenPhaseOut,
                 post_combat_activation: HordePostCombatActivation::None,
                 survivor_deck_format: SurvivorDeckFormat::Commander,
@@ -1434,6 +1464,9 @@ impl ChallengeDeck {
                 combined_base_life: 10,
                 per_extra_survivor_life_delta: 10,
                 horde_creatures_forced_attackers: true,
+                // Default Turtle has NO haste (product booklet p. 6); the
+                // "Relentless Attack!" haste modifier (p. 8) is opt-in.
+                horde_creatures_haste: false,
                 legendary_death: HordeLegendaryDeath::Normal,
                 post_combat_activation: HordePostCombatActivation::None,
                 // The four 60-card Turtle hero decks.
@@ -7309,6 +7342,7 @@ mod tests {
             combined_base_life: 100,
             per_extra_survivor_life_delta: -15,
             horde_creatures_forced_attackers: true,
+            horde_creatures_haste: true,
             legendary_death: HordeLegendaryDeath::Normal,
             post_combat_activation: HordePostCombatActivation::None,
             survivor_deck_format: SurvivorDeckFormat::Constructed,
@@ -7370,6 +7404,7 @@ mod tests {
                 combined_base_life: base,
                 per_extra_survivor_life_delta: delta,
                 horde_creatures_forced_attackers: true,
+                horde_creatures_haste: true,
                 legendary_death: HordeLegendaryDeath::Normal,
                 post_combat_activation: HordePostCombatActivation::None,
                 survivor_deck_format: SurvivorDeckFormat::Constructed,
@@ -7399,6 +7434,7 @@ mod tests {
             combined_base_life: 100,
             per_extra_survivor_life_delta: -15,
             horde_creatures_forced_attackers: true,
+            horde_creatures_haste: true,
             legendary_death: rule,
             post_combat_activation: HordePostCombatActivation::None,
             survivor_deck_format: SurvivorDeckFormat::Constructed,
@@ -7439,6 +7475,7 @@ mod tests {
             combined_base_life: 100,
             per_extra_survivor_life_delta: -15,
             horde_creatures_forced_attackers: true,
+            horde_creatures_haste: true,
             legendary_death: HordeLegendaryDeath::Normal,
             post_combat_activation: rule,
             survivor_deck_format: SurvivorDeckFormat::Constructed,
