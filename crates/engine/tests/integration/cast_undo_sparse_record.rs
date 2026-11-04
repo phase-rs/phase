@@ -13,6 +13,10 @@
 //! reveal during mana payment, an alternative cost (CR 118.9) and convoke
 //! (CR 702.51a) on a real four-player board, and each test asserts the CR 733.1
 //! cancel outcome too. The counter test pins how much the record serializes.
+//!
+//! An action that reverses a mana ability before any cost payment records
+//! nothing, so canceling keeps that reversal, and a later payment's inverse
+//! starts at that payment.
 
 use std::collections::BTreeSet;
 
@@ -26,7 +30,9 @@ use engine::types::game_state::{
     WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
+use engine::types::mana::{
+    ManaColor, ManaCost, ManaCostShard, ManaSourceOutput, ManaSourcePenalty, ManaType,
+};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -35,6 +41,13 @@ const BITTER_TRIUMPH: &str = "As an additional cost to cast this spell, discard 
 
 /// Force of Will, verbatim Oracle text (Scryfall).
 const FORCE_OF_WILL: &str = "You may pay 1 life and exile a blue card from your hand rather than pay this spell's mana cost.\nCounter target spell.";
+
+/// Battlefield Forge, verbatim Oracle text (Scryfall).
+const BATTLEFIELD_FORGE: &str =
+    "{T}: Add {C}.\n{T}: Add {R} or {W}. This land deals 1 damage to you.";
+
+/// Chord of Calling, verbatim Oracle text (Scryfall), Convoke reminder included.
+const CHORD_OF_CALLING: &str = "Convoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's color.)\nSearch your library for a creature card with mana value X or less, put it onto the battlefield, then shuffle.";
 
 /// A land whose mana ability reveals the top card of its controller's library.
 const LIBRARY_WITNESS: &str = "{T}: Add {B}. Reveal the top card of your library.";
@@ -713,4 +726,278 @@ fn a_convoke_step_serializes_only_unshared_objects_and_no_shared_deck_pool() {
         post.objects.len()
     );
     assert_eq!(delta.deck_pool_entries, 0);
+}
+
+/// Taps `source` for `mana` through the per-object `TapLandForMana` action the
+/// engine offers, which is the only way to pick a painland's colored ability.
+fn tap_offered(
+    runner: &mut GameRunner,
+    source: ObjectId,
+    mana: ManaType,
+) -> (CastUndoRecordCounters, ManaSourcePenalty) {
+    let (_, _, by_object) = engine::ai_support::legal_actions_full(runner.state());
+    let action = by_object
+        .get(&source)
+        .into_iter()
+        .flatten()
+        .find(|action| {
+            matches!(
+                action,
+                GameAction::TapLandForMana { selection }
+                    if selection.output == ManaSourceOutput::Concrete(mana)
+            )
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("{source:?} is offered as a {mana:?} source"));
+    let GameAction::TapLandForMana { selection } = &action else {
+        unreachable!("the offered action is a land tap");
+    };
+    let penalty = selection.penalty;
+    (act_counted(runner, action), penalty)
+}
+
+/// P0's floating mana as `(source, type)` pairs.
+fn pool(state: &GameState) -> Vec<(ObjectId, ManaType)> {
+    state.players[0]
+        .mana_pool
+        .units()
+        .map(|unit| (unit.source_id, unit.color))
+        .collect()
+}
+
+/// Gray Ogre ({2}{R}, vanilla) in P0's hand.
+fn add_gray_ogre(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_to_hand(P0, "Gray Ogre", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 2,
+        })
+        .id()
+}
+
+/// Casts `spell` with manual payment and returns the step's record counts.
+fn cast_manually(runner: &mut GameRunner, spell: ObjectId) -> CastUndoRecordCounters {
+    let card_id = runner.state().objects[&spell].card_id;
+    act_counted(
+        runner,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        },
+    )
+}
+
+/// CR 601.2g + CR 733.1: with no cost paid, untapping a land reverses its mana
+/// ability and records nothing. Pinning and unpinning pool mana record nothing
+/// either. Canceling is accepted, keeps the untap, and keeps the other land's
+/// legal mana activation.
+#[test]
+fn untapping_a_land_before_any_cost_payment_records_nothing_and_cancel_keeps_it_untapped() {
+    let _reference = engine::game::CastUndoReferenceCheck::enable();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let a = scenario.add_basic_land(P0, ManaColor::Red);
+    let b = scenario.add_basic_land(P0, ManaColor::Red);
+    let c = scenario.add_basic_land(P0, ManaColor::Red);
+    let ogre = add_gray_ogre(&mut scenario);
+    let mut runner = scenario.build();
+
+    assert_not_recorded(cast_manually(&mut runner, ogre), "CastSpell");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    assert_not_recorded(tap_land(&mut runner, a), "tapping a");
+    assert!(runner.state().objects[&a].tapped);
+
+    // CR 118.3a: pinning a floating unit to the cost and unpinning it moves no
+    // mana, so neither is a cost payment.
+    let pip_id = runner.state().players[0]
+        .mana_pool
+        .units()
+        .next()
+        .expect("a's mana floats")
+        .pip_id;
+    assert_eq!(pool(runner.state()), vec![(a, ManaType::Red)]);
+    for (step, action) in [
+        ("SpendPoolMana", GameAction::SpendPoolMana { pip_id }),
+        ("UnspendPoolMana", GameAction::UnspendPoolMana { pip_id }),
+    ] {
+        assert_not_recorded(act_counted(&mut runner, action), step);
+        assert!(!reversal_flag(runner.state(), "cost_mutations"), "{step}");
+    }
+
+    assert_not_recorded(tap_land(&mut runner, b), "tapping b");
+    assert!(runner.state().objects[&b].tapped);
+    assert!(!reversal_flag(runner.state(), "cost_mutations"));
+
+    let untap = act_counted(&mut runner, GameAction::UntapLandForMana { object_id: b });
+    assert!(!runner.state().objects[&b].tapped, "the untap ran");
+    assert_eq!(pool(runner.state()), vec![(a, ManaType::Red)]);
+    assert!(reversal(runner.state()).is_some(), "the cast is still open");
+    let untap_cost_mutations = reversal_flag(runner.state(), "cost_mutations");
+
+    // CR 733.1 + CR 733.2: the cancel is accepted and the spell returns to
+    // hand. b stays untapped with its mana gone; a's activation is kept.
+    runner
+        .act(GameAction::CancelCast)
+        .expect("the cast can be canceled");
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(state.objects[&ogre].zone, Zone::Hand);
+    assert!(state.pending_cast.is_none());
+    assert!(!state.objects[&b].tapped);
+    assert!(state.objects[&a].tapped);
+    assert!(!state.objects[&c].tapped);
+    assert_eq!(pool(state), vec![(a, ManaType::Red)]);
+
+    // CR 601.2g + CR 733.1: the untap reversed b's mana ability and paid no
+    // cost, so it recorded nothing.
+    assert_not_recorded(untap, "UntapLandForMana");
+    assert!(!untap_cost_mutations);
+}
+
+/// CR 733.1: after a painland's mana ability, untapping a basic land and
+/// canceling keeps the land untapped with its mana gone, while the painland's
+/// own activation, and its damage, are kept.
+#[test]
+fn untapping_after_a_painland_activation_keeps_the_painland_and_its_damage() {
+    let _reference = engine::game::CastUndoReferenceCheck::enable();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let forge = scenario
+        .add_land_from_oracle(P0, "Battlefield Forge", BATTLEFIELD_FORGE)
+        .id();
+    let m = scenario.add_basic_land(P0, ManaColor::Red);
+    let m2 = scenario.add_basic_land(P0, ManaColor::Red);
+    let ogre = add_gray_ogre(&mut scenario);
+    let mut runner = scenario.build();
+
+    assert_not_recorded(cast_manually(&mut runner, ogre), "CastSpell");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    let (delta, penalty) = tap_offered(&mut runner, forge, ManaType::Red);
+    assert_eq!(
+        penalty,
+        ManaSourcePenalty::DealsDamageOnResolution {
+            fixed_amount: Some(1)
+        },
+        "the Forge's colored ability is the painful one"
+    );
+    assert_not_recorded(delta, "tapping the Forge");
+    // CR 120.3a: the Forge's damage is life loss.
+    assert_eq!(runner.life(P0), 19);
+    assert!(runner.state().objects[&forge].tapped);
+
+    assert_not_recorded(tap_land(&mut runner, m), "tapping the Mountain");
+    let untap = act_counted(&mut runner, GameAction::UntapLandForMana { object_id: m });
+    assert!(!runner.state().objects[&m].tapped, "the untap ran");
+    let untap_cost_mutations = reversal_flag(runner.state(), "cost_mutations");
+
+    // CR 733.1 + CR 733.2: the Mountain stays untapped and its mana stays out
+    // of the pool; the Forge's activation and its damage stay.
+    runner
+        .act(GameAction::CancelCast)
+        .expect("the cast can be canceled");
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(state.objects[&ogre].zone, Zone::Hand);
+    assert!(!state.objects[&m].tapped);
+    assert!(state.objects[&forge].tapped);
+    assert!(!state.objects[&m2].tapped);
+    assert_eq!(runner.life(P0), 19);
+    assert_eq!(pool(runner.state()), vec![(forge, ManaType::Red)]);
+
+    // CR 601.2g + CR 733.1: the untap paid no cost, so it recorded nothing.
+    assert_not_recorded(untap, "UntapLandForMana");
+    assert!(!untap_cost_mutations);
+}
+
+/// CR 733.1 + CR 702.51a: a land untapped before the first payment is not in
+/// the inverse that payment begins. Canceling refunds the convoke tap and
+/// leaves the land untapped with its mana gone.
+#[test]
+fn untapping_before_a_convoke_payment_leaves_the_land_out_of_the_inverse() {
+    let _reference = engine::game::CastUndoReferenceCheck::enable();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let forest = scenario.add_basic_land(P0, ManaColor::Green);
+    let elves: Vec<ObjectId> = (0..3)
+        .map(|index| {
+            scenario
+                .add_creature(P0, &format!("Green Creature {index}"), 1, 1)
+                .with_color(vec![ManaColor::Green])
+                .id()
+        })
+        .collect();
+    let mut builder =
+        scenario.add_spell_to_hand_from_oracle(P0, "Chord of Calling", true, CHORD_OF_CALLING);
+    builder.with_mana_cost(ManaCost::Cost {
+        shards: vec![
+            ManaCostShard::X,
+            ManaCostShard::Green,
+            ManaCostShard::Green,
+            ManaCostShard::Green,
+        ],
+        generic: 0,
+    });
+    builder.from_oracle_text_with_keywords(&["Convoke"], CHORD_OF_CALLING);
+    let chord = builder.id();
+    let mut runner = scenario.build();
+
+    assert_not_recorded(cast_manually(&mut runner, chord), "CastSpell");
+    assert_not_recorded(
+        act_counted(&mut runner, GameAction::ChooseX { value: 0 }),
+        "ChooseX",
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment {
+            convoke_mode: Some(_),
+            ..
+        }
+    ));
+
+    assert_not_recorded(tap_land(&mut runner, forest), "tapping the Forest");
+    let untap = act_counted(
+        &mut runner,
+        GameAction::UntapLandForMana { object_id: forest },
+    );
+    assert!(!runner.state().objects[&forest].tapped, "the untap ran");
+    let untap_cost_mutations = reversal_flag(runner.state(), "cost_mutations");
+
+    let convoke = act_counted(
+        &mut runner,
+        GameAction::TapForConvoke {
+            object_id: elves[0],
+            mana_type: ManaType::Green,
+        },
+    );
+    assert!(runner.state().objects[&elves[0]].tapped);
+    let convoke_cost_mutations = reversal_flag(runner.state(), "cost_mutations");
+
+    // CR 702.51a + CR 733.1: the convoke payment is refunded; the Forest,
+    // reversed before any payment, stays untapped with no mana back.
+    runner
+        .act(GameAction::CancelCast)
+        .expect("the cast can be canceled");
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(state.objects[&chord].zone, Zone::Hand);
+    assert!(state.pending_cast.is_none());
+    assert!(!state.objects[&elves[0]].tapped);
+    assert!(!state.objects[&forest].tapped);
+    assert!(pool(state).is_empty());
+
+    // CR 601.2g + CR 733.1: the untap paid no cost, so it recorded nothing;
+    // the convoke tap is the first payment and starts the inverse.
+    assert_not_recorded(untap, "UntapLandForMana");
+    assert!(!untap_cost_mutations);
+    assert_recorded(convoke, "TapForConvoke");
+    assert!(convoke_cost_mutations);
 }
