@@ -125,7 +125,7 @@ fn thought_lash_cannot_be_activated_with_an_empty_library() {
 }
 
 /// CR 400.2 + CR 401.2 + CR 601.2h: an unpaid library cost stays hidden while
-/// the earlier mana payment pauses. CR 616.1: the Ruins' sacrifice requires its
+/// the earlier mana payment pauses. CR 616.1: the Thrull's sacrifice requires its
 /// controller to choose between the two printed graveyard replacements.
 #[test]
 fn royal_herbalist_keeps_the_unpaid_library_card_hidden_during_a_mana_pause() {
@@ -136,12 +136,9 @@ fn royal_herbalist_keeps_the_unpaid_library_card_hidden_during_a_mana_pause() {
         .add_creature(P0, "Royal Herbalist", 1, 1)
         .from_oracle_text("{2}, Exile the top card of your library: You gain 1 life.")
         .id();
-    let ruins = scenario
-        .add_land_from_oracle(
-            P0,
-            "Dwarven Ruins",
-            "This land enters tapped.\n{T}: Add {R}.\n{T}, Sacrifice this land: Add {R}{R}.",
-        )
+    let thrull = scenario
+        .add_creature(P0, "Basal Thrull", 1, 2)
+        .from_oracle_text("{T}, Sacrifice this creature: Add {B}{B}.")
         .id();
     scenario.add_enchantment_from_oracle(
         P1,
@@ -154,7 +151,6 @@ fn royal_herbalist_keeps_the_unpaid_library_card_hidden_during_a_mana_pause() {
         "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.",
     );
     let mut runner = scenario.build();
-    runner.state_mut().objects.get_mut(&ruins).unwrap().tapped = false;
     let before = library_ids(&runner);
     let top = before[0];
     let hidden_name = runner.state().objects[&top].name.clone();
@@ -171,12 +167,12 @@ fn royal_herbalist_keeps_the_unpaid_library_card_hidden_during_a_mana_pause() {
             ability_index: index,
             payment_mode: CastPaymentMode::Auto,
         })
-        .expect("the only mana source can pay by sacrificing Dwarven Ruins");
+        .expect("the only mana source can pay by sacrificing Basal Thrull");
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { player, .. } if player == P0
     ));
-    assert!(runner.state().objects[&ruins].tapped);
+    assert!(runner.state().objects[&thrull].tapped);
     assert!(runner.state().stack.is_empty());
     assert_eq!(library_ids(&runner), before);
     assert_eq!(runner.state().objects[&top].zone, Zone::Library);
@@ -213,7 +209,7 @@ fn royal_herbalist_keeps_the_unpaid_library_card_hidden_during_a_mana_pause() {
     ));
     assert!(runner.state().pending_cast.is_none());
     assert_eq!(runner.state().stack.len(), 1);
-    assert_eq!(runner.state().objects[&ruins].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&thrull].zone, Zone::Exile);
     assert_eq!(runner.state().objects[&top].zone, Zone::Exile);
     assert_eq!(library_ids(&runner), before[1..].to_vec());
     assert_eq!(runner.state().players[0].life, life_before);
