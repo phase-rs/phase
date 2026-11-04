@@ -1071,6 +1071,12 @@ fn redirect_attackers_to_planeswalker(
 
 const MULTIPLAYER_COMPARISON_WORK_LIMIT: usize = 4096;
 const MULTIPLAYER_COMPARISON_TIE_BAND: f64 = 0.25;
+/// Utility of a proposal whose only gain is an attack trigger's payoff (CR
+/// 508.3a + CR 508.3f) on a defender who prevents every attacker's damage. The
+/// comparison has no trigger value model, so this only places it above a
+/// decline: any proposal that deals damage scores at least
+/// `0.25 * 1 * 0.5`, well above it.
+const PAYOFF_ONLY_PROPOSAL_UTILITY: f64 = 0.01;
 
 #[cfg(test)]
 thread_local! {
@@ -1189,6 +1195,8 @@ struct CombatProposal {
     attackers: Vec<ObjectId>,
     utility: f64,
     finishes: bool,
+    /// Scored by `PAYOFF_ONLY_PROPOSAL_UTILITY` rather than by damage.
+    payoff_only: bool,
 }
 
 struct ExpandedComparisonInput<'a> {
@@ -1377,10 +1385,8 @@ fn expanded_multiplayer_choice(
         let mut blocked_damage = 0;
         let mut open_damage = 0;
         // CR 508.3a + CR 508.3f: a prevented attacker's own trigger is its whole
-        // payoff. The comparison has no trigger value model, so the damage it
-        // would deal unprevented stands in as pressure — never as a finish.
-        let mut payoff_blocked_damage = 0;
-        let mut payoff_open_damage = 0;
+        // payoff, and no damage it would have dealt is credited.
+        let mut prevented_payoff = false;
         let mut commander_finish = false;
         let mut complete = true;
 
@@ -1414,8 +1420,7 @@ fn expanded_multiplayer_choice(
             }
             // CR 702.16e + CR 702.16j: this defender prevents the attacker's
             // damage, so it joins the proposal only when it must attack or its
-            // own trigger pays off, and it credits no damage or finish (a
-            // payoff credits pressure only).
+            // own trigger pays off, and it credits no damage or finish.
             let damage_prevented = player_damage_prevented(state, defender, attacker_id);
             if damage_prevented
                 && !input.mandatory.contains(&attacker_id)
@@ -1495,24 +1500,21 @@ fn expanded_multiplayer_choice(
                 continue;
             }
             attackers.push(attacker_id);
-            let unprevented_blocked_damage = engine::game::combat_damage::combat_damage_to_defender(
-                state,
-                attacker_id,
-                damage_blockers,
-            );
-            let unprevented_open_damage =
-                engine::game::combat_damage::combat_damage_to_defender(state, attacker_id, &[]);
             let attacker_blocked_damage = if damage_prevented {
                 0
             } else {
-                unprevented_blocked_damage
+                engine::game::combat_damage::combat_damage_to_defender(
+                    state,
+                    attacker_id,
+                    damage_blockers,
+                )
             };
             blocked_damage += attacker_blocked_damage;
             if !damage_prevented {
-                open_damage += unprevented_open_damage;
+                open_damage +=
+                    engine::game::combat_damage::combat_damage_to_defender(state, attacker_id, &[]);
             } else if has_self_attack_payoff(state, attacker_id) {
-                payoff_blocked_damage += unprevented_blocked_damage;
-                payoff_open_damage += unprevented_open_damage;
+                prevented_payoff = true;
             }
             // A one-block exchange does not model menace or any other minimum
             // multi-block requirement. Keep its positive trade credit at zero
@@ -1548,11 +1550,17 @@ fn expanded_multiplayer_choice(
                 * (0.5 + threat_level(state, player, defender))
         };
         let finishes = blocked_damage >= defender_life && defender_life > 0 || commander_finish;
-        let open_pressure = pressure(open_damage + payoff_open_damage);
-        let pre_finish_utility = (opposing_losses - own_losses
-            + pressure(blocked_damage + payoff_blocked_damage))
-        .min(open_pressure);
-        let utility = pre_finish_utility + if finishes { 2.0 } else { 0.0 };
+        let open_pressure = pressure(open_damage);
+        let pre_finish_utility =
+            (opposing_losses - own_losses + pressure(blocked_damage)).min(open_pressure);
+        // A proposal that deals no damage but carries an attack-trigger payoff,
+        // at no net loss, beats a decline and nothing else.
+        let payoff_only = prevented_payoff && open_damage == 0 && pre_finish_utility >= 0.0;
+        let utility = if payoff_only {
+            PAYOFF_ONLY_PROPOSAL_UTILITY
+        } else {
+            pre_finish_utility + if finishes { 2.0 } else { 0.0 }
+        };
         #[cfg(test)]
         EXPANDED_PROPOSAL_ACCOUNTING.with(|accounting| {
             accounting.borrow_mut().push(ProposalAccounting {
@@ -1572,6 +1580,7 @@ fn expanded_multiplayer_choice(
             attackers,
             utility,
             finishes,
+            payoff_only,
         });
     }
 
@@ -1599,6 +1608,7 @@ fn expanded_multiplayer_choice(
             !best.finishes
                 && !proposal.finishes
                 && proposal.utility > 0.0
+                && proposal.payoff_only == best.payoff_only
                 && best.utility - proposal.utility <= MULTIPLAYER_COMPARISON_TIE_BAND
         })
         .collect();
@@ -10757,6 +10767,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// CR 508.3a + CR 702.16j: a payoff-only proposal against a protected
+    /// opponent never outscores a proposal that deals damage, however much more
+    /// threatening the protected opponent is. P1 has The One Ring's protection,
+    /// a full grip and a tapped army; P2 is open and quiet. Inferno Titan and
+    /// Grizzly Bears both attack P2.
+    #[test]
+    fn protected_high_threat_opponent_does_not_draw_the_attack() {
+        let mut scenario = GameScenario::new_with_format(
+            engine::types::format::FormatConfig::free_for_all(),
+            3,
+            42,
+        );
+        scenario.at_phase(engine::types::phase::Phase::DeclareAttackers);
+        let titan = scenario.add_real_card(
+            P0,
+            "Inferno Titan",
+            Zone::Battlefield,
+            crate::test_support::shared_integration_card_db(),
+        );
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let mut state = scenario.build().state().clone();
+        state.turn_number = 2;
+        for player in &mut state.players {
+            player.life = 40;
+        }
+        state.players[2].life = 20;
+        for attacker in [titan, bears] {
+            let object = state.objects.get_mut(&attacker).unwrap();
+            object.summoning_sick = false;
+            object.entered_battlefield_turn = Some(1);
+        }
+        for _ in 0..4 {
+            let threat = add_creature(&mut state, PlayerId(1), "Dragon", 6, 6, vec![]);
+            state.objects.get_mut(&threat).unwrap().tapped = true;
+        }
+        for _ in 0..7 {
+            let card_id = CardId(state.next_object_id);
+            create_object(
+                &mut state,
+                card_id,
+                PlayerId(1),
+                "Card in hand".to_string(),
+                Zone::Hand,
+            );
+        }
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        let threat = |target| threat_level(&state, PlayerId(0), target);
+        assert!(
+            (0.5 + threat(PlayerId(1))) / (0.5 + threat(PlayerId(2))) > 4.0 / 3.0,
+            "P1 must be threatening enough that a damage stand-in would pull the attack"
+        );
+
+        let attacks = choose_from_engine_prompt(&mut state);
+        let mut sorted = attacks.clone();
+        sorted.sort();
+        let mut expected = vec![
+            (titan, AttackTarget::Player(PlayerId(2))),
+            (bears, AttackTarget::Player(PlayerId(2))),
+        ];
+        expected.sort();
+        assert_eq!(sorted, expected, "got {attacks:?}");
     }
 
     /// CR 508.5 + CR 702.16e: when the alpha strike can finish the weakest
