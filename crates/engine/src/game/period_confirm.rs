@@ -2655,8 +2655,7 @@ fn perform_published(
         }
     }
     if let Some(record) = published {
-        // CR 732.2a: a published declaration its proposer survives no repetition of commits
-        // nothing, so it is refused as the analytic tail refuses it.
+        // CR 732.2a: a published declaration its proposer survives no repetition of commits nothing.
         if record.reach == 0 {
             return Err(OfferRefusal::SurvivesNoRepetition);
         }
