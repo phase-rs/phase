@@ -10125,6 +10125,39 @@ pub(super) fn shuffle_rest_clause(lower: &str) -> Option<ShuffleRestClause> {
     Some(form)
 }
 
+/// CR 608.2c + CR 400.7e + CR 115.10a: true when the bare pronoun "it" in a
+/// "shuffle it into its owner's library" clause names the ability's own source
+/// instead of an announced object.
+///
+/// Two nearer antecedents veto the reading, and both are proofs rather than
+/// guesses: an explicitly bound object pronoun (`object_pronoun_ref`, set by a
+/// trigger condition or a preceding clause), and any object slot an earlier
+/// clause of this chain announced (CR 601.2c — the registry is authoritative;
+/// an `Indeterminate` registry cannot prove the absence of one, so it declines).
+/// With neither, the departed object is the trigger's own source (CR 400.7e),
+/// and a subjectless construct ("Shuffle it into its owner's library") has no
+/// other referent at all. The source therefore binds `SelfRef`, the
+/// single-object movement authority; binding `ParentTarget` there would lower
+/// to the selected-population `ChangeZoneAll`, which requires announced targets
+/// to move anything (Alabaster Dragon, Dread, Serra Avatar).
+fn shuffle_it_names_the_source(object: &str, ctx: &ParseContext) -> bool {
+    if object.trim() != "it" {
+        return false;
+    }
+    if ctx.object_pronoun_ref.is_some() {
+        return false;
+    }
+    match &ctx.chain_declared_slots {
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Known(entries) => {
+            if !entries.is_empty() {
+                return false;
+            }
+        }
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Indeterminate => return false,
+    }
+    matches!(ctx.subject, None | Some(TargetFilter::SelfRef))
+}
+
 pub(super) fn parse_shuffle_ast(
     text: &str,
     lower: &str,
@@ -10132,6 +10165,14 @@ pub(super) fn parse_shuffle_ast(
 ) -> Option<ShuffleImperativeAst> {
     // CR 108.3 + CR 400.3: a typed object anaphor followed by an owner's
     // library. Bare "their" needs a proven owner actor and object pin.
+    //
+    // The pronoun's referent decides the MOVEMENT AUTHORITY, not just the
+    // destination: a bare "it" with no announced antecedent names the ability's
+    // own source (CR 400.7e — the object that left is the departure event's
+    // source), so the move is one `ChangeZone`. `ParentTarget` is reserved for a
+    // genuinely announced object, because lowering turns it into the
+    // selected-population `ChangeZoneAll`, which resolves only against announced
+    // targets (CR 115.10a: being affected is not being a target).
     if let Some(((object, owner_library), _)) = nom_on_lower(text, lower, |input| {
         let (input, _) =
             alt((tag::<_, _, OracleError<'_>>("shuffle "), tag("shuffles "))).parse(input)?;
@@ -10160,6 +10201,13 @@ pub(super) fn parse_shuffle_ast(
             if rest.trim().is_empty()
                 && matches!(target, TargetFilter::ParentTarget | TargetFilter::SelfRef)
             {
+                let target = if matches!(target, TargetFilter::ParentTarget)
+                    && shuffle_it_names_the_source(&object, ctx)
+                {
+                    TargetFilter::SelfRef
+                } else {
+                    target
+                };
                 return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
                     target,
                     owner_library: true,

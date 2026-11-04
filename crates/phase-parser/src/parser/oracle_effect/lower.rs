@@ -9131,20 +9131,30 @@ fn parse_required_target_count_verb(input: &str) -> OracleResult<'_, ()> {
 pub(crate) const BOUNDED_TARGET_CARDINALITIES: &[(&str, usize, usize)] =
     &[("one or two", 1, 2), ("one, two, or three", 1, 3)];
 
+/// CR 115.1c: true when `input` (already lowercase) opens with the article a
+/// declared-target phrase needs — bare, or qualified by "other"/"another",
+/// which belong to the qualifier's own filter rather than to the count. The
+/// single authority for that article axis: the exact-count, "any number of"
+/// and "up to N" quantifier arms all compose it instead of re-spelling the
+/// article list, so a future qualifier is added here once.
+fn followed_by_target_article(input: &str) -> bool {
+    alt((
+        tag::<_, _, OracleError<'_>>("target "),
+        tag("target,"),
+        tag("other target "),
+        tag("another target "),
+    ))
+    .parse(input)
+    .is_ok()
+}
+
 /// CR 115.1d + CR 601.2c: Strip exact target-count prefix before a targeted
 /// phrase. "two target creatures" and "X target creatures" both set the exact
 /// number of targets, unlike "up to X target creatures".
 pub(crate) fn strip_exact_target_prefix(lower: &str) -> Option<(QuantityExpr, &str)> {
     let (rest, count) = parse_exact_target_count_expr(lower).ok()?;
     let rest = rest.trim_start();
-    if alt((tag::<_, _, OracleError<'_>>("target "), tag("target,")))
-        .parse(rest)
-        .is_ok()
-    {
-        Some((count, rest))
-    } else {
-        None
-    }
+    followed_by_target_article(rest).then_some((count, rest))
 }
 
 fn parse_exact_target_count_expr(input: &str) -> OracleResult<'_, QuantityExpr> {
@@ -9232,15 +9242,6 @@ fn strip_distribute_among_target_quantifier<'a>(
 /// target set after they are put on the stack.
 pub(crate) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTargetSpec>) {
     let lower = text.to_ascii_lowercase();
-    fn followed_by_target_article(input: &str) -> bool {
-        alt((
-            tag::<_, _, OracleError<'_>>("target "),
-            tag("other target "),
-            tag("another target "),
-        ))
-        .parse(input)
-        .is_ok()
-    }
 
     // CR 107.1c + CR 115.6: "any number of [other|another] target …" includes
     // zero and is legal with no chosen targets. Prefix match without the
@@ -9255,16 +9256,20 @@ pub(crate) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTar
     }
 
     // CR 115.1c + CR 115.6: an exact count before the target article
-    // ("choose two target players") declares a fixed number of slots.
-    if let Ok((remainder, count)) = parse_multi_target_count_expr(lower.as_str()) {
-        let consumed = lower.len() - remainder.len();
+    // ("choose two target players") declares a fixed number of slots. The
+    // count and the article are read through the SHARED exact-prefix
+    // authority (`strip_exact_target_prefix`) and carried as
+    // `MultiTargetSpec::exact`, so this arm cannot drift from the other
+    // consumers of the same grammar. A variable count (X) stays out of this
+    // optional-prefix axis and keeps the handling owned by the paths that
+    // spell it (`oracle_target`'s filter-only X arm, the placement
+    // cardinality and the targeted-verb recovery sites).
+    if let Some((count @ QuantityExpr::Fixed { .. }, after_target)) =
+        strip_exact_target_prefix(lower.as_str())
+    {
+        let consumed = lower.len() - after_target.len();
         let rest = text[consumed..].trim_start();
-        if followed_by_target_article(&rest.to_ascii_lowercase()) {
-            if let QuantityExpr::Fixed { value } = count {
-                let n = value.max(0) as usize;
-                return (rest, Some(MultiTargetSpec::fixed(n, n)));
-            }
-        }
+        return (rest, Some(MultiTargetSpec::exact(count)));
     }
 
     let Ok((after_up_to, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(lower.as_str()) else {
