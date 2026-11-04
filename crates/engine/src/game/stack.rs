@@ -6375,8 +6375,8 @@ mod tests {
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
-        AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCast, StackPaidSnapshot,
-        WaitingFor,
+        AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, ParkedEntry, ParkedEntryState,
+        PendingCast, StackPaidSnapshot, WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggerFiring};
     use crate::types::keywords::Keyword;
@@ -7347,8 +7347,6 @@ mod tests {
     /// pending entry of another carrier stays for its producer.
     #[test]
     fn abandoning_a_resolution_drops_only_its_own_pending_entries() {
-        use crate::types::game_state::{ParkedEntry, ParkedEntryState};
-
         fn parked(id: u64, state: ParkedEntryState) -> ParkedEntry {
             ParkedEntry {
                 event: GameEvent::LandPlayed {
@@ -7357,6 +7355,7 @@ mod tests {
                     from_zone: Zone::Hand,
                 },
                 state,
+                entry_attack: None,
             }
         }
         let pending = |carrier| ParkedEntryState::Pending { carrier };

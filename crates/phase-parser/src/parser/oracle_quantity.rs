@@ -2095,20 +2095,10 @@ pub(crate) fn parse_event_context_quantity_with_context(
     // CR 706.2: "the result" of a coin flip / die roll — the result amount
     // is exposed via the same EventContextAmount channel that "that much" /
     // "that many" use (Adorable Kitten "You gain life equal to the result"
-    // after roll-a-die). Both compile to the same runtime resolver.
-    // CR 706.4 + CR 706.2 + CR 706.6: "the total of those results" is the aggregate of
-    // the surviving dice's results; the same runtime channel, with
-    // `die_result_this_resolution` holding the survivors' total.
-    if all_consuming(alt((
-        tag::<_, _, OracleError<'_>>("the result"),
-        tag("the total of those results"),
-    )))
-    .parse(lower)
-    .is_ok()
-    {
-        return Some(QuantityExpr::Ref {
-            qty: QuantityRef::EventContextAmount,
-        });
+    // after roll-a-die). Both compile to the same runtime resolver. The whole
+    // phrase only: a remainder falls through to the `Offset` arms.
+    if let Ok(("", qty)) = nom_quantity::parse_die_result_ref(lower) {
+        return Some(QuantityExpr::Ref { qty });
     }
 
     match lower {

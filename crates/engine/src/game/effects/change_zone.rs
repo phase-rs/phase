@@ -1965,13 +1965,41 @@ pub(crate) fn process_one_zone_move(
     member: &ChangeZoneMemberEntry,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
-    process_one_zone_move_with_terminal(state, ctx, member, events).into_zone_move_result()
+    // CR 508.4: its one caller, `search_outside_game.rs`, parks no logical owner.
+    process_one_zone_move_with_attack_seat(
+        state,
+        ctx,
+        member,
+        crate::game::zone_pipeline::PausedEntryAttackSeat::DeliveryCounterStep,
+        events,
+    )
+    .into_zone_move_result()
 }
 
+/// Its callers, the targeted loop, the drain's resume of `remaining` members and
+/// the two `EffectZoneChoice` member loops, each park a
+/// `PendingChangeZoneIteration` on `NeedsChoice`, which seats an owed attacker
+/// (CR 508.4).
 pub(crate) fn process_one_zone_move_with_terminal(
     state: &mut GameState,
     ctx: &ChangeZoneIterationCtx,
     member: &ChangeZoneMemberEntry,
+    events: &mut Vec<GameEvent>,
+) -> crate::game::zone_pipeline::ZoneMoveTerminalResult {
+    process_one_zone_move_with_attack_seat(
+        state,
+        ctx,
+        member,
+        crate::game::zone_pipeline::PausedEntryAttackSeat::ResumingOwner,
+        events,
+    )
+}
+
+fn process_one_zone_move_with_attack_seat(
+    state: &mut GameState,
+    ctx: &ChangeZoneIterationCtx,
+    member: &ChangeZoneMemberEntry,
+    attack_seat: crate::game::zone_pipeline::PausedEntryAttackSeat,
     events: &mut Vec<GameEvent>,
 ) -> crate::game::zone_pipeline::ZoneMoveTerminalResult {
     let obj_id = member.object_id;
@@ -2010,6 +2038,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
         ctx.enter_transformed,
         member.enter_tapped,
         member.enters_attacking,
+        attack_seat,
         ctx.enters_under_player,
         &member.enter_with_counters,
         ctx.face_down_profile.as_ref(),
@@ -3086,6 +3115,9 @@ pub fn resolve_all(
             false,
             enter_tapped,
             enters_attacking,
+            // CR 508.4: the mass loop pushes its owner on `NeedsChoice`, and that
+            // owner resumes the paused member and seats it.
+            crate::game::zone_pipeline::PausedEntryAttackSeat::ResumingOwner,
             enters_under_player,
             &enter_with_counters,
             face_down_profile.as_ref(),

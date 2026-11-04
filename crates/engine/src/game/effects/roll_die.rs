@@ -764,12 +764,19 @@ pub(crate) fn resume_after_ignore(
         // layer, `game/contraptions.rs`'s roll-difference scan, and
         // `game/effects/effect.rs`'s CR 611.2d snapshot all seeing survivors
         // only.
-        events.push(GameEvent::DieRolled {
+        let rolled = GameEvent::DieRolled {
             player_id: roller,
             sides,
             result: Some(actual),
             pre_entry_source,
-        });
+        };
+        // CR 603.2 + CR 113.6 + CR 614.1c: an entrant's own as-enters roll is part
+        // of its entry, so it is parked with that entry and collected with it by
+        // the settled release, not by whichever action made it.
+        if pre_entry_source.is_some() {
+            crate::game::engine_replacement::park_as_enters_roll(state, rolled.clone());
+        }
+        events.push(rolled);
 
         let actual_amount = i32::from(actual);
         total_actual = total_actual.saturating_add(actual_amount);
@@ -975,6 +982,7 @@ mod tests {
         state.deferred_entry_events = vec![ParkedEntry {
             event: entry,
             state: ParkedEntryState::Completed,
+            entry_attack: None,
         }];
         assert_eq!(stamps_of_two_dice(&mut state, entrant), vec![None, None]);
     }

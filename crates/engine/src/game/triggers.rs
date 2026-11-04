@@ -13576,6 +13576,11 @@ impl UnclaimedTriggerEvents {
 
 /// [`filter_consumed_trigger_events_from`], keeping each kept event's position
 /// in `events`.
+///
+/// CR 603.7 + CR 603.2c: a delayed scan over an action buffer never yields an
+/// as-enters roll; the settled release runs that roll's delayed half from the park
+/// (`collect_delayed_trigger_contexts_into_deferred`), and no queued witness
+/// survives to the pipeline's delayed scan.
 pub(crate) fn unclaimed_trigger_events_from(
     events: &[GameEvent],
     event_start: usize,
@@ -13586,6 +13591,15 @@ pub(crate) fn unclaimed_trigger_events_from(
         .iter()
         .enumerate()
         .filter_map(|(offset, event)| {
+            let released_with_its_entry = match requester {
+                TriggerCollectionRequester::Delayed => {
+                    crate::game::engine_replacement::is_as_enters_roll(event)
+                }
+                TriggerCollectionRequester::Ordinary => false,
+            };
+            if released_with_its_entry {
+                return None;
+            }
             let position = event_start + offset;
             let occurrence = trigger_event_occurrence(events, position);
             if !consumed.iter().any(|consumed| {
@@ -13682,6 +13696,15 @@ pub(crate) fn filter_consumed_trigger_events(
 /// completed owner's group is a caller-owned local that is gone before this runs
 /// (`GameState` holds a group only inside the two *paused* frames,
 /// `PendingChangeZoneIteration` and `PendingBatchDeliveries`).
+///
+/// An as-enters roll is parked at emission and collected only by
+/// `engine_replacement::release_settled_entry_continuation`; its copy in the
+/// emitting action's buffer is never the occurrence a scan needs, so a queued copy
+/// claims it as a queued `ZoneChanged` does. The OCCURRENCE EXACTNESS proof below is
+/// for `ZoneChanged` only: an as-enters roll carries no per-occurrence index, and
+/// identical rolls can be distinct occurrences (Neverwinter Hydra: "As this
+/// creature enters, roll X d6."), which is harmless here because every buffer copy
+/// is unneeded.
 ///
 /// OCCURRENCE EXACTNESS — PROVED WITHIN ONE TURN, WITH ITS BASIS AND ITS BOUNDS.
 /// CR 400.7 + CR 603.2c. Two byte-identical `ZoneChanged` in one slice denote
@@ -13796,11 +13819,11 @@ pub(crate) fn filter_already_collected_trigger_events_from(
     event_start: usize,
     consumed: &[ConsumedTriggerEventOccurrence],
 ) -> Vec<GameEvent> {
-    let mut queued_zone_change_witnesses: Vec<&GameEvent> = state
+    let mut queued_occurrence_witnesses: Vec<&GameEvent> = state
         .deferred_triggers
         .iter()
         .flat_map(|context| context.trigger_events.iter())
-        .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+        .filter(|event| has_queued_occurrence_witness(event))
         .collect();
     filter_consumed_trigger_events_from(
         events,
@@ -13810,21 +13833,30 @@ pub(crate) fn filter_already_collected_trigger_events_from(
     )
     .into_iter()
     .filter(|event| {
-        if !matches!(event, GameEvent::ZoneChanged { .. }) {
+        if !has_queued_occurrence_witness(event) {
             return true;
         }
-        match queued_zone_change_witnesses
+        match queued_occurrence_witnesses
             .iter()
             .position(|queued| *queued == event)
         {
             Some(index) => {
-                queued_zone_change_witnesses.remove(index);
+                queued_occurrence_witnesses.remove(index);
                 false
             }
             None => true,
         }
     })
     .collect()
+}
+
+/// CR 603.2c: the occurrence kinds a queued context's `trigger_events` can witness
+/// in an action buffer: a zone change a logical owner already collected, and an
+/// entrant's own as-enters roll, which only its settled release collects
+/// (CR 614.1c + CR 603.2).
+fn has_queued_occurrence_witness(event: &GameEvent) -> bool {
+    matches!(event, GameEvent::ZoneChanged { .. })
+        || crate::game::engine_replacement::is_as_enters_roll(event)
 }
 
 /// CR 603.4 + CR 608.2c: does this delayed body still carry work that the
@@ -56861,6 +56893,7 @@ mod entry_continuation_hold_tests {
         state.deferred_entry_events = vec![crate::types::game_state::ParkedEntry {
             event: parked,
             state: crate::types::game_state::ParkedEntryState::Completed,
+            entry_attack: None,
         }];
         assert!(state.deferred_triggers.is_empty());
         let mut events = Vec::new();
@@ -56890,6 +56923,7 @@ mod entry_continuation_hold_tests {
         let parked = crate::types::game_state::ParkedEntry {
             event: parked,
             state: crate::types::game_state::ParkedEntryState::Completed,
+            entry_attack: None,
         };
         state.deferred_entry_events = vec![parked.clone()];
         state.push_counter_additions(PendingCounterAdditionQueue {
@@ -56901,5 +56935,49 @@ mod entry_continuation_hold_tests {
         assert_eq!(state.deferred_entry_events, vec![parked]);
         assert!(state.deferred_triggers.is_empty());
         assert!(state.stack.is_empty());
+    }
+
+    /// U-3. CR 603.2c + CR 614.1c: a queued as-enters roll claims one identical
+    /// copy of it in an action buffer, as a queued `ZoneChanged` does, and a
+    /// delayed buffer scan never yields an as-enters roll. An unstamped roll of the
+    /// same value is an ordinary roll in both.
+    #[test]
+    fn a_queued_as_enters_roll_claims_its_buffer_copy() {
+        const BRAZEN_DWARF: &str =
+            "Whenever you roll one or more dice, this creature deals 1 damage to each opponent.";
+        let roll = |pre_entry_source| GameEvent::DieRolled {
+            player_id: P0,
+            sides: 6,
+            result: Some(4),
+            pre_entry_source,
+        };
+        let roll_a = roll(Some(ObjectId(900)));
+        let plain = roll(None);
+        let buffer = vec![roll_a.clone(), roll_a.clone(), plain.clone()];
+
+        let (mut state, dwarf) = observer_board(BRAZEN_DWARF);
+        collect_triggers_into_deferred(&mut state, std::slice::from_ref(&roll_a));
+        let queued = from_source(&state.deferred_triggers, dwarf);
+        assert_eq!(queued.len(), 1, "reach: the roll's observer is queued");
+        assert_eq!(queued[0].trigger_events, vec![roll_a.clone()]);
+        assert_eq!(
+            filter_already_collected_trigger_events_from(&state, &buffer, 0, &[]),
+            vec![roll_a.clone(), plain.clone()],
+            "one claim per queued copy"
+        );
+
+        state.deferred_triggers.clear();
+        assert_eq!(
+            filter_already_collected_trigger_events_from(&state, &buffer, 0, &[]),
+            buffer,
+            "with nothing queued every copy is kept"
+        );
+
+        let delayed =
+            unclaimed_trigger_events_from(&buffer, 0, TriggerCollectionRequester::Delayed, &[]);
+        assert_eq!(delayed.events, vec![plain]);
+        let ordinary =
+            unclaimed_trigger_events_from(&buffer, 0, TriggerCollectionRequester::Ordinary, &[]);
+        assert_eq!(ordinary.events, buffer);
     }
 }

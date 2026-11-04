@@ -1130,6 +1130,18 @@ pub(crate) fn parse_paid_energy_this_way_ref(input: &str) -> OracleResult<'_, Qu
     .parse(input)
 }
 
+/// CR 706.2 + CR 706.4 + CR 706.6: a die roll's result read by the instruction
+/// that rolled it: "the result" of one die, or "the total of those results" of
+/// several (the surviving dice's aggregate). Both read the event-context amount,
+/// which `die_result_this_resolution` carries.
+pub(crate) fn parse_die_result_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::EventContextAmount,
+        alt((tag("the total of those results"), tag("the result"))),
+    )
+    .parse(input)
+}
+
 /// CR 608.2c + CR 122.1: the shared terminal for "… counter(s) removed this
 /// way" quantity references — an optional single-token counter kind (`+1/+1`,
 /// `charge`, `eyeball`, …) plus the bare plural/singular head. Both the
@@ -15386,5 +15398,29 @@ mod tests {
                 .is_err(),
             "no superlative means no aggregate axis — must not match"
         );
+    }
+
+    /// P-1. CR 706.2 + CR 706.4: the die-result leaf reads one die's result and
+    /// the surviving dice's total, and leaves any suffix for its caller, which
+    /// takes the whole phrase only. The quantity-ref authority does not include
+    /// it, so the CDA authority stays blind to a bare die result.
+    #[test]
+    fn die_result_ref_reads_one_die_and_the_total() {
+        for phrase in ["the result", "the total of those results"] {
+            assert_eq!(
+                parse_die_result_ref(phrase).expect("binds"),
+                ("", QuantityRef::EventContextAmount),
+                "{phrase}"
+            );
+        }
+        assert_eq!(
+            parse_die_result_ref("the total of those results plus one").expect("binds"),
+            (" plus one", QuantityRef::EventContextAmount)
+        );
+        assert!(parse_die_result_ref("the number of results").is_err());
+        assert!(!matches!(
+            parse_quantity_ref("the total of those results"),
+            Ok(("", _))
+        ));
     }
 }

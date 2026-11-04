@@ -7749,6 +7749,11 @@ pub enum ParkedEntryState {
 pub struct ParkedEntry {
     pub event: GameEvent,
     pub state: ParkedEntryState,
+    /// CR 508.4: an entry put onto the battlefield attacking whose as-enters
+    /// continuation paused owes its attacking seat; the owner that resumes the
+    /// paused member seats it. `None` for every other entry and for a roll.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_attack: Option<crate::types::ability::EntryAttackDestination>,
 }
 
 impl ParkedEntry {
@@ -7757,6 +7762,17 @@ impl ParkedEntry {
         Self {
             event,
             state: ParkedEntryState::Pending { carrier },
+            entry_attack: None,
+        }
+    }
+
+    /// CR 614.1c + CR 706.2: an occurrence inside a pending entry that has already
+    /// happened: an as-enters roll.
+    pub fn occurred(event: GameEvent) -> Self {
+        Self {
+            event,
+            state: ParkedEntryState::Completed,
+            entry_attack: None,
         }
     }
 }
@@ -7771,18 +7787,28 @@ impl<'de> Deserialize<'de> for ParkedEntry {
         struct Repr {
             event: GameEvent,
             state: ParkedEntryState,
+            #[serde(default)]
+            entry_attack: Option<crate::types::ability::EntryAttackDestination>,
         }
 
         let value = serde_json::Value::deserialize(deserializer)?;
         if value.get("event").is_some() {
-            let Repr { event, state } =
-                serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-            return Ok(Self { event, state });
+            let Repr {
+                event,
+                state,
+                entry_attack,
+            } = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            return Ok(Self {
+                event,
+                state,
+                entry_attack,
+            });
         }
         let event = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
         Ok(Self {
             event,
             state: ParkedEntryState::Completed,
+            entry_attack: None,
         })
     }
 }
@@ -23559,7 +23585,9 @@ declare_game_state! {
     /// `NamedChoice`), a played land's pause and a meld's. Per CR 614.12a,
     /// effects that modify how a permanent enters function continuously *while
     /// it is entering*, so trigger scanning waits for the realized object
-    /// (Callidus Assassin's granted ETB, Soul Warden on the finished copy).
+    /// (Callidus Assassin's granted ETB, Soul Warden on the finished copy). It
+    /// also holds an entrant's own as-enters rolls, which happened inside its
+    /// entry and are collected with it (CR 614.1c + CR 603.2).
     ///
     /// Each entry carries a [`ParkedEntryState`]: `Pending` until its producer
     /// records that the entry happened, then `Completed` until its collector
@@ -38675,7 +38703,8 @@ mod drain_stack_reentrancy_tests {
         );
     }
 
-    /// The park's wire shape: both states round-trip byte-stably, a pre-bump bare
+    /// The park's wire shape: both states round-trip byte-stably, with or without
+    /// an owed attacking seat (none writes no key), a pre-bump bare
     /// `GameEvent` decodes as `Completed` (its take read presence, and a legacy
     /// paused drain has no binding), a malformed event still reports its schema
     /// error, and a drain with no binding writes no key.
@@ -38693,14 +38722,21 @@ mod drain_stack_reentrancy_tests {
                 carrier: Some(ObjectId(5)),
             },
         ] {
-            let entry = ParkedEntry {
-                event: event.clone(),
-                state,
-            };
-            let wire = serde_json::to_value(&entry).expect("serializes");
-            let decoded: ParkedEntry = serde_json::from_value(wire.clone()).expect("decodes");
-            assert_eq!(decoded, entry);
-            assert_eq!(serde_json::to_value(&decoded).expect("serializes"), wire);
+            for entry_attack in [
+                None,
+                Some(crate::types::ability::EntryAttackDestination::AnyDefender),
+            ] {
+                let entry = ParkedEntry {
+                    event: event.clone(),
+                    state,
+                    entry_attack: entry_attack.clone(),
+                };
+                let wire = serde_json::to_value(&entry).expect("serializes");
+                assert_eq!(wire.get("entry_attack").is_some(), entry_attack.is_some());
+                let decoded: ParkedEntry = serde_json::from_value(wire.clone()).expect("decodes");
+                assert_eq!(decoded, entry);
+                assert_eq!(serde_json::to_value(&decoded).expect("serializes"), wire);
+            }
         }
 
         let legacy = serde_json::to_value(&event).expect("serializes");

@@ -2570,6 +2570,21 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 paused_current.count,
                 crate::types::game_state::PausedZoneChangeDeliveryCount::NeedsCount
             ) {
+                // CR 508.4: the paused member's entry has completed, so an owed
+                // attacking seat is taken and the entrant seated before its entry
+                // is collected. With several legal attack targets the frame stays
+                // exactly as read for the answer, whose resume finds the seat
+                // already taken.
+                let owed_seat = crate::game::engine_replacement::take_owed_entry_attack_seat(
+                    state,
+                    &paused_current.delivery_events,
+                );
+                if let Some(player) =
+                    crate::game::zone_pipeline::seat_owed_entry_attacker(state, owed_seat)
+                {
+                    crate::game::replacement::park_waiting_for(state, player);
+                    return;
+                }
                 // CR 603.6d + CR 603.2c: this owner resumes only after the paused
                 // member's as-enters continuation completed, so its parked entry
                 // is collected here, once, against the realized entrant: custody

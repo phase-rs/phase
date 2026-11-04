@@ -752,6 +752,24 @@ pub(crate) enum ZoneDeliveryResult {
     NeedsChoice(PlayerId),
 }
 
+/// CR 508.4: who seats an entrant put onto the battlefield attacking once its
+/// entry has completed, when its as-enters continuation pauses. The value is
+/// fixed before the delivery, by the move's caller, and names the authority
+/// that will read the owed seat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PausedEntryAttackSeat {
+    /// No logical owner resumes the move. When the chain drains in the delivery
+    /// tail (`PostReplacementDrainOwner::DeliveryTail`), the entry keeps its
+    /// delivery-tail counter step, whose `ContinueZoneDeliveryTail` seats an
+    /// attacking entrant on `Done`, so the as-enters hand-on is refused for it.
+    /// Nothing is stamped. Under `CallerEpilogue` the chain runs after the
+    /// delivery's own seat, and this value decides nothing.
+    DeliveryCounterStep,
+    /// A `PendingChangeZoneIteration` or `PendingBatchDeliveries` resumes the
+    /// paused member and takes its stamp.
+    ResumingOwner,
+}
+
 /// THE single zone-change entry point. Reads `from` from the object's current
 /// zone, unpacks `EntryMods` / `ExileLinkSpec`, and runs the proposal through
 /// the replacement pipeline + delivery tail.
@@ -812,6 +830,24 @@ pub(crate) fn zone_move_is_primitive_noop(
 pub(crate) fn move_object_with_terminal(
     state: &mut GameState,
     req: ZoneMoveRequest,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveTerminalResult {
+    move_object_with_attack_seat(
+        state,
+        req,
+        PausedEntryAttackSeat::DeliveryCounterStep,
+        events,
+    )
+}
+
+/// [`move_object_with_terminal`], with the caller naming who seats an attacking
+/// entrant whose as-enters continuation pauses (CR 508.4). Only the generic
+/// effect-driven delivery reads it; the library-placement, draw and exempt arms
+/// never put an attacking entrant onto the battlefield.
+pub(crate) fn move_object_with_attack_seat(
+    state: &mut GameState,
+    req: ZoneMoveRequest,
+    attack_seat: PausedEntryAttackSeat,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveTerminalResult {
     let Some(object) = state.objects.get(&req.object_id) else {
@@ -1170,6 +1206,7 @@ pub(crate) fn move_object_with_terminal(
         req.mods.enter_transformed,
         req.mods.enter_tapped,
         req.mods.enters_attacking,
+        attack_seat,
         req.mods.controller_override,
         &req.mods.enter_with_counters,
         req.mods.face_down_profile.as_ref(),
@@ -1424,7 +1461,9 @@ fn deliver_batch(
         let anticipated_pause = anticipated_zone_change_delivery(state, &req);
         let delivery_start = events.len();
         let object_id = req.object_id;
-        match move_object_with_terminal(state, req, events) {
+        // CR 508.4: the batch owner resumes a paused member and takes its stamp.
+        match move_object_with_attack_seat(state, req, PausedEntryAttackSeat::ResumingOwner, events)
+        {
             ZoneMoveTerminalResult::Completed(completion) => {
                 logical_zone_change_group
                     .record_delivery_completion(object_id, completion)
@@ -1656,6 +1695,28 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
             zone_change_record_start,
             mut deferred_events,
         } = pending;
+        if let Some(ref paused_current) = paused_current {
+            // CR 508.4 + CR 603.6d: the batch resumes only after the paused
+            // member's as-enters continuation completed, so an owed attacking seat
+            // is taken here, before custody removes the entry that holds it. With
+            // several legal attack targets the frame stays exactly as read for the
+            // answer, whose resume finds the seat already taken.
+            let owed = crate::game::engine_replacement::take_owed_entry_attack_seat(
+                state,
+                &paused_current.delivery_events,
+            );
+            if let Some(player) = seat_owed_entry_attacker(state, owed) {
+                crate::game::replacement::park_waiting_for(state, player);
+                return;
+            }
+            // CR 603.6d + CR 603.2c: custody takes the paused member's parked
+            // entry (and runs its delayed half) so the segment below collects it
+            // once, against the realized entrant.
+            crate::game::engine_replacement::take_entry_continuation_custody(
+                state,
+                &paused_current.delivery_events,
+            );
+        }
         deferred_events.append(events);
         let attempted = if attempted.is_empty() {
             remaining.clone()
@@ -1684,14 +1745,8 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 .collect()
         };
         if let Some(ref paused_current) = paused_current {
-            // CR 603.6d + CR 603.2c: the batch resumes only after the paused
-            // member's as-enters continuation completed; custody takes its
-            // parked entry (and runs its delayed half) so the segment below
-            // collects it once, against the realized entrant.
-            crate::game::engine_replacement::take_entry_continuation_custody(
-                state,
-                &paused_current.delivery_events,
-            );
+            // CR 603.6d + CR 603.2c: custody above took the paused member's
+            // parked entry, so this segment collects it once.
             crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                 state,
                 &mut logical_zone_change_group,
@@ -3746,6 +3801,35 @@ pub(crate) fn deliver_replaced_zone_change(
     library_placement: Option<LibraryPosition>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
+    deliver_replaced_zone_change_with_attack_seat(
+        state,
+        event,
+        source_id,
+        duration,
+        exile_controller,
+        track_exiled_by_source,
+        drain,
+        library_placement,
+        PausedEntryAttackSeat::DeliveryCounterStep,
+        events,
+    )
+}
+
+/// [`deliver_replaced_zone_change`], with the move's caller naming who seats an
+/// attacking entrant whose as-enters continuation pauses (CR 508.4).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn deliver_replaced_zone_change_with_attack_seat(
+    state: &mut GameState,
+    event: ProposedEvent,
+    source_id: Option<ObjectId>,
+    duration: Option<&Duration>,
+    exile_controller: Option<PlayerId>,
+    track_exiled_by_source: bool,
+    drain: PostReplacementDrainOwner,
+    library_placement: Option<LibraryPosition>,
+    attack_seat: PausedEntryAttackSeat,
+    events: &mut Vec<GameEvent>,
+) -> ZoneDeliveryResult {
     if let ProposedEvent::ZoneChange {
         object_id,
         from,
@@ -4327,10 +4411,14 @@ pub(crate) fn deliver_replaced_zone_change(
             // CR 603.6d + CR 614.1c + CR 122.6: an as-enters roll is part of this entry,
             // so counters of the kind it places are one placement with the roll's, and
             // no counter choice comes before the roll. Counters of any other kind stay here.
-            // CR 508.4: an attacking entry keeps its counter step: only that pause
-            // records `enters_attacking` for the resume, so the entrant is still placed
-            // in combat after a chain that pauses.
-            if !enters_attacking {
+            // CR 508.4: under `CallerEpilogue` the chain runs after the seat, so the
+            // seat cannot be lost. CR 508.4: an attacking entry whose chain drains in
+            // this tail and that no logical owner resumes keeps its counter step,
+            // because only that pause's `ContinueZoneDeliveryTail` seats it.
+            if !enters_attacking
+                || matches!(drain, PostReplacementDrainOwner::CallerEpilogue)
+                || attack_seat == PausedEntryAttackSeat::ResumingOwner
+            {
                 counters_to_apply =
                     crate::game::engine_replacement::hand_entry_counters_to_as_enters_roll(
                         state,
@@ -4426,9 +4514,43 @@ pub(crate) fn deliver_replaced_zone_change(
                 return ZoneDeliveryResult::NeedsChoice(player);
             }
         }
+        // CR 508.4: the as-enters continuation paused, so the entry has not
+        // completed and the entrant cannot be seated yet. Its parked entry records
+        // the owed seat for the logical owner that resumes it.
+        if matches!(result, ZoneDeliveryResult::NeedsChoice(_))
+            && enters_attacking
+            && entered_battlefield
+            && attack_seat == PausedEntryAttackSeat::ResumingOwner
+        {
+            let _ = crate::game::engine_replacement::owe_entry_attack_seat(state, object_id);
+        }
         return result;
     }
     ZoneDeliveryResult::Done
+}
+
+/// CR 508.4: an entrant whose as-enters continuation paused is seated by the owner
+/// that resumes it, once its entry has completed. Returns the chooser when the
+/// seat needs the controller's choice of what it attacks (CR 508.4a applies at
+/// that choice).
+pub(crate) fn seat_owed_entry_attacker(
+    state: &mut GameState,
+    owed: Option<(
+        ObjectIncarnationRef,
+        crate::types::ability::EntryAttackDestination,
+    )>,
+) -> Option<PlayerId> {
+    // The stamp is the `AnyDefender` domain the seat itself offers.
+    let (entrant, _) = owed?;
+    if !entrant.is_current(state) {
+        return None;
+    }
+    let controller = state
+        .objects
+        .get(&entrant.object_id)
+        .filter(|object| object.zone == Zone::Battlefield)?
+        .controller;
+    crate::game::combat::choose_entry_attack_target_or_enter(state, entrant.object_id, controller)
 }
 
 fn replacement_pause_delivery_result(state: &GameState) -> ZoneDeliveryResult {
@@ -4494,6 +4616,8 @@ pub(crate) fn execute_zone_move(
     .into_zone_move_result()
 }
 
+/// Its callers are the single-pick branches of `change_zone::resolve`, which park
+/// no logical owner, so an attacking entrant keeps its counter step (CR 508.4).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_zone_move_with_controller(
     state: &mut GameState,
@@ -4526,6 +4650,7 @@ pub(crate) fn execute_zone_move_with_controller(
         enter_transformed,
         enter_tapped,
         enters_attacking,
+        PausedEntryAttackSeat::DeliveryCounterStep,
         controller_override,
         effect_enter_with_counters,
         face_down_profile,
@@ -4569,6 +4694,7 @@ pub(crate) fn execute_zone_move_with_terminal(
         enter_transformed,
         enter_tapped,
         enters_attacking,
+        PausedEntryAttackSeat::DeliveryCounterStep,
         controller_override,
         effect_enter_with_counters,
         face_down_profile,
@@ -4593,6 +4719,7 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
     enter_transformed: bool,
     enter_tapped: EtbTapState,
     enters_attacking: bool,
+    attack_seat: PausedEntryAttackSeat,
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
@@ -4614,6 +4741,7 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
         enter_transformed,
         enter_tapped,
         enters_attacking,
+        attack_seat,
         controller_override,
         effect_enter_with_counters,
         face_down_profile,
@@ -4710,6 +4838,9 @@ fn execute_zone_move_with_applied_terminal(
     enter_transformed: bool,
     enter_tapped: EtbTapState,
     enters_attacking: bool,
+    // CR 508.4: who seats an attacking entrant whose as-enters continuation
+    // pauses; passed to both deliveries below.
+    attack_seat: PausedEntryAttackSeat,
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
@@ -5005,7 +5136,7 @@ fn execute_zone_move_with_applied_terminal(
             }
             if let Some((controller, aura_id, legal_targets)) = pending_aura_choice {
                 let delivery_start = events.len();
-                match deliver_replaced_zone_change(
+                match deliver_replaced_zone_change_with_attack_seat(
                     state,
                     event,
                     Some(source_id),
@@ -5014,6 +5145,7 @@ fn execute_zone_move_with_applied_terminal(
                     track_exiled_by_source,
                     PostReplacementDrainOwner::DeliveryTail,
                     library_placement,
+                    attack_seat,
                     events,
                 ) {
                     ZoneDeliveryResult::Done => {
@@ -5050,7 +5182,7 @@ fn execute_zone_move_with_applied_terminal(
                 return ZoneMoveTerminalResult::NeedsAuraAttachmentChoice;
             }
             let delivery_start = events.len();
-            match deliver_replaced_zone_change(
+            match deliver_replaced_zone_change_with_attack_seat(
                 state,
                 event,
                 Some(source_id),
@@ -5059,6 +5191,7 @@ fn execute_zone_move_with_applied_terminal(
                 track_exiled_by_source,
                 PostReplacementDrainOwner::DeliveryTail,
                 library_placement,
+                attack_seat,
                 events,
             ) {
                 ZoneDeliveryResult::Done => {}

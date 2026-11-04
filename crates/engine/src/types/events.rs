@@ -1890,8 +1890,9 @@ pub enum GameEvent {
         /// replacement made this roll before its entry happened. Its abilities do not
         /// function yet, so it alone is not an observer of this event. `None` for
         /// every other roll, and for the as-enters roll of an entry that paused on
-        /// its counters first: an entry put onto the battlefield attacking, or one
-        /// whose counter step for counters of another kind paused (filed residuals).
+        /// its counters first: an entry put onto the battlefield attacking, inline,
+        /// that no logical owner resumes, or one whose counter step for counters of
+        /// another kind paused (filed residuals).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pre_entry_source: Option<ObjectId>,
     },
