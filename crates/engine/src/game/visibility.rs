@@ -1802,10 +1802,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // many names it takes — belong to its controller until the turn-face-up
     // special action publishes them (CR 702.106c). That secrecy is a property of
     // the face-down status, not of any one zone or projection leaf: this loop is
-    // also the only authority for a face-down conspiracy exiled with a departing
-    // player (CR 800.4a), which reaches the wire outside the command-zone leaf
-    // above. Enforcing it once over the final object set keeps every projection
-    // path — in-game, game-end, seated and unseated — on one answer.
+    // also the only authority for a face-down conspiracy that left the game
+    // with its owner (CR 800.4a) but remains stored in exile, outside the
+    // command-zone leaf above. Enforcing it once over the final object set keeps
+    // every projection path — in-game, game-end, seated and unseated — on one answer.
     for (_, obj) in filtered.objects.iter_mut() {
         if obj.face_down && !can_view_private_for_player(obj.controller) {
             redact_secret_agenda_choices(obj);

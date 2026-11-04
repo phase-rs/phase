@@ -1549,11 +1549,11 @@ fn game_end_reveal_hides_an_unanswered_double_agenda_count() {
     );
 }
 
-/// CR 702.106e + CR 800.4a: a named agenda whose controller leaves is revealed
-/// and then exiled with the rest of that player's objects. The departure reveal
-/// is not the turn-face-up action (CR 702.106c), so the secretly chosen names
-/// stay the controller's — including in the exile projection, which does not
-/// pass through the command-zone face-down leaf.
+/// CR 702.106e + CR 800.4a: a named agenda is revealed when its controller
+/// leaves, and leaves the game with its owner. The engine retains the departed
+/// object in exile. The reveal is not the turn-face-up action (CR 702.106c),
+/// so its secret names stay private even on that retained-object projection,
+/// which does not pass through the command-zone face-down leaf.
 #[test]
 fn conceding_named_agenda_keeps_secret_names_off_every_other_wire() {
     let mut state = priority_state();
@@ -1578,7 +1578,11 @@ fn conceding_named_agenda_keeps_secret_names_off_every_other_wire() {
         "CR 800.4a: the departing player's agenda leaves the command zone"
     );
     let departed = &state.objects[&bond_id];
-    assert_eq!(departed.zone, Zone::Exile, "CR 800.4a exiles owned objects");
+    assert_eq!(
+        departed.zone,
+        Zone::Exile,
+        "the engine retains the departed object in exile"
+    );
     assert!(
         departed.face_down,
         "CR 702.106e: the departure reveal does not turn the agenda face up"
