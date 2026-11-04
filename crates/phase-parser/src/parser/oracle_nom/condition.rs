@@ -5754,6 +5754,16 @@ fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
         remainder = next_remainder;
     }
 
+    // CR 301.5 + CR 303.4 + CR 701.3a: "<permanent> with a/an <type> attached
+    // to it" — the controlled permanent must be the host of an attachment of the
+    // named type ("you control another creature with a Communicator attached to
+    // it" — Combadge). Only the single-noun form has an unambiguous "it".
+    let (remainder, attachment_types) = opt(parse_with_attachment_attached_to_it)
+        .parse(remainder)
+        .map_err(|_: nom::Err<OracleError<'_>>| oracle_err(input))?;
+    if attachment_types.is_some() && filters.len() != 1 {
+        return Err(oracle_err(input));
+    }
     let combined = if filters.len() == 1 {
         filters.pop().expect("one filter")
     } else {
@@ -5766,6 +5776,27 @@ fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
         // a permanent controlled by ANY player satisfies the gate.
         None => inject_battlefield_presence(combined),
     };
+    // CR 701.3a: presence of a host carrying such an attachment is presence of
+    // an attachment of that type attached to a matching host — the existing
+    // filter-matched host referent (`AttachmentReferent::Host`). The host
+    // filter keeps its controller and "another" (relative to this ability's
+    // source); the attachment's own controller is unconstrained.
+    let combined = match attachment_types {
+        Some(types) => TargetFilter::Typed(TypedFilter {
+            type_filters: if types.len() == 1 {
+                types
+            } else {
+                vec![TypeFilter::AnyOf(types)]
+            },
+            controller: None,
+            properties: vec![FilterProp::AttachedTo {
+                to: AttachmentReferent::Host {
+                    filter: Box::new(combined),
+                },
+            }],
+        }),
+        None => combined,
+    };
     let consumed = input.len() - remainder.len();
     Ok((
         &input[consumed..],
@@ -5773,6 +5804,18 @@ fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
             filter: Some(combined),
         },
     ))
+}
+
+/// CR 301.5 + CR 303.4: " with a/an <type>[ and <type>]* attached to it" — the
+/// attachment-host suffix of a presence noun phrase. Returns the attachment's
+/// type words via the shared `parse_attachment_type_list` authority.
+fn parse_with_attachment_attached_to_it(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
+    delimited(
+        (tag(" with "), alt((tag("an "), tag("a ")))),
+        nom_quantity::parse_attachment_type_list,
+        tag(" attached to it"),
+    )
+    .parse(input)
 }
 
 /// CR 702: Parse "[a/an] <type-phrase> has <keyword>" → `IsPresent` whose
@@ -12721,6 +12764,52 @@ pub(crate) fn match_when_you_do(i: &str) -> OracleResult<'_, ()> {
 
 #[cfg(test)]
 mod tests {
+    /// CR 301.5 + CR 701.3a: "you control <permanent> with a/an <type> attached
+    /// to it" is presence of an attachment of that type on a matching host
+    /// (Combadge); the host keeps its controller and "another" legs.
+    #[test]
+    fn you_control_host_with_attachment_type_lowers_to_attached_host_presence() {
+        let (rest, cond) = parse_inner_condition(
+            "you control another creature with a communicator attached to it",
+        )
+        .expect("parses");
+        assert_eq!(rest, "");
+        let StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(attachment)),
+        } = cond
+        else {
+            panic!("expected IsPresent over the attachment, got {cond:?}");
+        };
+        assert_eq!(
+            attachment.type_filters,
+            vec![TypeFilter::Subtype("Communicator".to_string())]
+        );
+        assert_eq!(attachment.controller, None);
+        let [FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter: host },
+        }] = attachment.properties.as_slice()
+        else {
+            panic!(
+                "expected one AttachedTo(Host) prop, got {:?}",
+                attachment.properties
+            );
+        };
+        let TargetFilter::Typed(host) = host.as_ref() else {
+            panic!("expected a typed host, got {host:?}");
+        };
+        assert_eq!(host.type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(host.controller, Some(ControllerRef::You));
+        assert!(host.properties.contains(&FilterProp::Another));
+
+        // The plain presence form is unchanged.
+        let (_, plain) = parse_inner_condition("you control another creature").expect("parses");
+        assert!(matches!(
+            plain,
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(ref tf))
+            } if tf.type_filters == vec![TypeFilter::Creature]
+        ));
+    }
     use super::*;
     use crate::types::ability::{
         CardTypeSetSource, ControllerRef, CountScope, PtStat, PtValueScope, RoundingMode,

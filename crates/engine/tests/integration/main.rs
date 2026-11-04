@@ -252,6 +252,7 @@ mod yuriko_combat_damage;
 // test binary linking the full engine — see no_top_level_test_binaries).
 mod a_sigil_of_myrkul;
 mod activation_cost_work_census;
+mod combadge_communicator_attack_unblockable;
 mod committed_dump_walk;
 mod conformer_shuriken;
 mod conquerors_galleon_end_of_combat_transform;
