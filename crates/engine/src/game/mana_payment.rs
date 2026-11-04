@@ -3250,8 +3250,8 @@ fn spend_two_or_more_color_source_eligible(
     spend_selected(pool, |pool| {
         // CR 107.4c + CR 118.10: a Z preference cannot consume the only
         // colorless mana for a later strict C, just as it reserves strict colors.
-        let colorless_is_unreserved = |unit: &ManaUnit| {
-            unit.color != ManaType::Colorless
+        let colorless_is_unreserved = |color: ManaType| {
+            color != ManaType::Colorless
                 || demand.required_colorless == 0
                 || eligible_color_count(pool, ManaType::Colorless, spell)
                     > demand.required_colorless as usize
@@ -3269,7 +3269,7 @@ fn spend_two_or_more_color_source_eligible(
                             && !unit.is_snow()
                             && spell_permits_unit(spell, unit)
                             && color_is_unreserved(pool, unit.color, spell, &demand.preferred)
-                            && colorless_is_unreserved(unit)
+                            && colorless_is_unreserved(unit.color)
                     })
                 })
                 .flatten()
@@ -3285,7 +3285,7 @@ fn spend_two_or_more_color_source_eligible(
                             && spell_permits_unit(spell, unit)
                             && quality_demand.preserves_after(pool, unit, spell)
                             && color_is_unreserved(pool, unit.color, spell, &demand.required)
-                            && colorless_is_unreserved(unit)
+                            && colorless_is_unreserved(unit.color)
                     })
                 })
                 .flatten()
