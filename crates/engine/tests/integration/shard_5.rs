@@ -242,6 +242,7 @@ mod teamwork_keyword;
 mod teamwork_origin_composition;
 mod teferi_time_raveler_sorcery_speed_lock;
 mod teferis_puzzle_box_4241;
+mod tell_me_what_you_see_etb;
 mod telling_time_rest_split;
 mod temporal_anchor;
 mod temporal_extortion_priority;

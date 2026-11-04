@@ -38922,6 +38922,284 @@ fn wernog_subject_only_who_doesnt_lowers_optional_decline_gate() {
     }
 }
 
+/// The scoped root of the first trigger whose `execute` carries a
+/// `player_scope` (the "target opponent may …" / "each opponent may …" node).
+fn scoped_trigger_root(parsed: &crate::parser::oracle::ParsedAbilities) -> &AbilityDefinition {
+    parsed
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .find(|execute| execute.player_scope.is_some())
+        .expect("REACH: a scoped trigger body parses")
+}
+
+fn not_effect_performed() -> Option<AbilityCondition> {
+    Some(AbilityCondition::Not {
+        condition: Box::new(AbilityCondition::effect_performed()),
+    })
+}
+
+/// P1 — CR 118.12 + CR 109.5 + CR 608.2c: Tell Me What You See. "If they
+/// don't, they lose 4 life and you surveil 1": the surveil is a continuation
+/// step of the gated life loss, and its "you" is the printed controller
+/// (`OriginalController`), not the per-opponent seat. The gate is NOT copied
+/// onto the step (the engine keeps the step with its gated instruction).
+#[test]
+fn tell_me_what_you_see_decline_surveil_binds_printed_controller() {
+    use crate::types::ability::SubAbilityLink;
+    let parsed = parse_oracle_text(
+        "When this enchantment enters, target opponent may have you draw a card. If they don't, they lose 4 life and you surveil 1.\nWhenever you face a dilemma, you may return this enchantment to its owner's hand. (You face a dilemma as you choose one or more modes for a spell or ability.)",
+        "Tell Me What You See",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let root = scoped_trigger_root(&parsed);
+    assert!(
+        !chain_has_unimplemented(root),
+        "REACH: the ETB chain fully parses"
+    );
+    assert_eq!(root.player_scope, Some(PlayerFilter::Opponent));
+    assert!(root.optional);
+    assert!(
+        matches!(&*root.effect, Effect::Draw { target, .. } if *target == TargetFilter::OriginalController),
+        "root: {:?}",
+        root.effect
+    );
+    let lose_life = root.sub_ability.as_deref().expect("decline LoseLife");
+    assert!(matches!(&*lose_life.effect, Effect::LoseLife { .. }));
+    assert_eq!(lose_life.condition, not_effect_performed());
+    assert_eq!(lose_life.sub_link, SubAbilityLink::SequentialSibling);
+    let surveil = lose_life.sub_ability.as_deref().expect("decline Surveil");
+    assert_eq!(surveil.sub_link, SubAbilityLink::ContinuationStep);
+    assert_eq!(surveil.condition, None, "no gate copy onto the step");
+    assert_eq!(surveil.player_scope, None);
+    match &*surveil.effect {
+        Effect::Surveil { count, target } => {
+            assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+            assert_eq!(
+                *target,
+                TargetFilter::OriginalController,
+                "CR 109.5: \"you surveil 1\" is the printed controller"
+            );
+        }
+        other => panic!("expected Surveil, got {other:?}"),
+    }
+}
+
+/// P2 — CR 118.12 + CR 109.5: Braids's Frightful Return chapter III. "If they
+/// don't, they lose 2 life and you draw a card": the draw continuation's "you"
+/// is the printed controller. (The card stays unsupported through its
+/// unrelated `ChosenNumber` read-ahead gap.)
+#[test]
+fn braids_frightful_return_decline_draw_binds_printed_controller() {
+    let parsed = parse_oracle_text(
+        "Read ahead (Choose a chapter and start with that many lore counters. Add one after your draw step. Skipped chapters don't trigger. Sacrifice after III.)\nI — You may sacrifice a creature. If you do, each opponent discards a card.\nII — Return target creature card from your graveyard to your hand.\nIII — Target opponent may sacrifice a nonland, nontoken permanent of their choice. If they don't, they lose 2 life and you draw a card.",
+        "Braids's Frightful Return",
+        &["Read ahead".to_string()],
+        &["Enchantment".to_string()],
+        &["Saga".to_string()],
+    );
+    let root = scoped_trigger_root(&parsed);
+    assert!(
+        !chain_has_unimplemented(root),
+        "REACH: chapter III fully parses"
+    );
+    assert!(matches!(&*root.effect, Effect::Sacrifice { .. }));
+    assert_eq!(root.player_scope, Some(PlayerFilter::Opponent));
+    let lose_life = root.sub_ability.as_deref().expect("decline LoseLife");
+    assert!(matches!(&*lose_life.effect, Effect::LoseLife { .. }));
+    assert_eq!(lose_life.condition, not_effect_performed());
+    let draw = lose_life.sub_ability.as_deref().expect("decline Draw");
+    assert_eq!(draw.condition, None);
+    assert!(
+        matches!(&*draw.effect, Effect::Draw { target, .. } if *target == TargetFilter::OriginalController),
+        "CR 109.5: \"you draw a card\" is the printed controller, got {:?}",
+        draw.effect
+    );
+}
+
+/// P3 — D1.3 idempotence: Combustible Gearhulk's decline body keeps its
+/// gated `Mill{OriginalController}` → gated `DealDamage{ScopedPlayer}` shape.
+#[test]
+fn combustible_gearhulk_decline_body_is_unchanged_by_the_continuation_walk() {
+    let parsed = parse_oracle_text(
+        "First strike\nWhen this creature enters, target opponent may have you draw three cards. If the player doesn't, you mill three cards, then this creature deals damage to that player equal to the total mana value of those cards.",
+        "Combustible Gearhulk",
+        &["First strike".to_string()],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Construct".to_string()],
+    );
+    let root = scoped_trigger_root(&parsed);
+    let mill = root.sub_ability.as_deref().expect("decline Mill");
+    assert_eq!(mill.condition, not_effect_performed());
+    assert!(
+        matches!(&*mill.effect, Effect::Mill { target, .. } if *target == TargetFilter::OriginalController),
+        "mill: {:?}",
+        mill.effect
+    );
+    let damage = mill
+        .sub_ability
+        .as_deref()
+        .expect("REACH: decline DealDamage");
+    assert_eq!(damage.condition, not_effect_performed());
+    assert!(
+        matches!(&*damage.effect, Effect::DealDamage { target, .. } if *target == TargetFilter::ScopedPlayer),
+        "damage: {:?}",
+        damage.effect
+    );
+}
+
+/// P4 — preservation (CR 608.2c): Wernog, Rider's Chaplain. The trailing
+/// "You investigate X times …" is the next printed instruction
+/// (`SequentialSibling`); the continuation walk stops before it.
+#[test]
+fn wernog_trailing_instruction_is_outside_the_decline_body() {
+    use crate::types::ability::SubAbilityLink;
+    let parsed = parse_oracle_text(
+        "When Wernog, Rider's Chaplain enters or leaves the battlefield, each opponent may investigate. Each opponent who doesn't loses 1 life. You investigate X times, where X is one plus the number of opponents who investigated this way.\nPartner—Friends forever (You can have two commanders if both have this ability.)",
+        "Wernog, Rider's Chaplain",
+        &["Partner".to_string()],
+        &["Creature".to_string()],
+        &["Human".to_string()],
+    );
+    let root = scoped_trigger_root(&parsed);
+    let lose_life = root.sub_ability.as_deref().expect("decline LoseLife");
+    assert_eq!(lose_life.condition, not_effect_performed());
+    assert!(
+        matches!(
+            &*lose_life.effect,
+            Effect::LoseLife {
+                target: Some(TargetFilter::ScopedPlayer),
+                ..
+            }
+        ),
+        "REACH: the decline life loss is the scoped opponent's, got {:?}",
+        lose_life.effect
+    );
+    let investigate = lose_life
+        .sub_ability
+        .as_deref()
+        .expect("trailing Investigate");
+    assert!(matches!(&*investigate.effect, Effect::Investigate));
+    assert_eq!(investigate.sub_link, SubAbilityLink::SequentialSibling);
+    assert_eq!(investigate.condition, None);
+}
+
+/// P5 — CR 701.22a + CR 701.25a: the decline-body leaf rebinds a scry's or
+/// surveil's implicit "you" to the printed controller, and leaves an explicit
+/// target alone. Nearest printed card: Tell Me What You See (no printed
+/// scoped decline body scries).
+#[test]
+fn decline_body_leaf_rebinds_scry_and_surveil_recipient() {
+    use super::lower::rebind_decline_body_recipient;
+    let one = || QuantityExpr::Fixed { value: 1 };
+    let mut scry = Effect::Scry {
+        count: one(),
+        target: TargetFilter::Controller,
+    };
+    let mut surveil = Effect::Surveil {
+        count: one(),
+        target: TargetFilter::Controller,
+    };
+    rebind_decline_body_recipient(&mut scry);
+    rebind_decline_body_recipient(&mut surveil);
+    assert!(matches!(
+        scry,
+        Effect::Scry {
+            target: TargetFilter::OriginalController,
+            ..
+        }
+    ));
+    assert!(matches!(
+        surveil,
+        Effect::Surveil {
+            target: TargetFilter::OriginalController,
+            ..
+        }
+    ));
+
+    let mut targeted_scry = Effect::Scry {
+        count: one(),
+        target: TargetFilter::Player,
+    };
+    let mut targeted_surveil = Effect::Surveil {
+        count: one(),
+        target: TargetFilter::Player,
+    };
+    rebind_decline_body_recipient(&mut targeted_scry);
+    rebind_decline_body_recipient(&mut targeted_surveil);
+    assert!(matches!(
+        targeted_scry,
+        Effect::Scry {
+            target: TargetFilter::Player,
+            ..
+        }
+    ));
+    assert!(matches!(
+        targeted_surveil,
+        Effect::Surveil {
+            target: TargetFilter::Player,
+            ..
+        }
+    ));
+}
+
+/// P6 — CR 608.2c + CR 608.2e: the continuation walk visits a gated node's
+/// `ContinuationStep` descendants and stops at the next printed instruction
+/// (`SequentialSibling`) and at a descendant with its own `player_scope`. No
+/// printed card has a rebindable recipient past either stop; the nearest
+/// printed card is Wernog, Rider's Chaplain, whose `SequentialSibling`
+/// investigate carries no recipient.
+#[test]
+fn continuation_walk_stops_at_sequential_sibling_and_own_scope() {
+    use super::lower::{for_each_continuation_step_mut, rebind_decline_body_recipient};
+    use crate::types::ability::SubAbilityLink;
+    let draw = || {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+    };
+    let draw_target = |def: &AbilityDefinition| match &*def.effect {
+        Effect::Draw { target, .. } => target.clone(),
+        other => panic!("expected Draw, got {other:?}"),
+    };
+    let gated_lose_life = || {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target: Some(TargetFilter::ScopedPlayer),
+            },
+        )
+        .condition(not_effect_performed().expect("gate"))
+    };
+
+    // LoseLife →ContinuationStep→ Draw →SequentialSibling→ Draw.
+    let mut sibling = draw();
+    sibling.sub_link = SubAbilityLink::SequentialSibling;
+    let mut chain = gated_lose_life().sub_ability(draw().sub_ability(sibling));
+    for_each_continuation_step_mut(chain.sub_ability.as_deref_mut(), |node| {
+        rebind_decline_body_recipient(&mut node.effect)
+    });
+    let step = chain.sub_ability.as_deref().expect("step");
+    assert_eq!(draw_target(step), TargetFilter::OriginalController);
+    let next_instruction = step.sub_ability.as_deref().expect("sibling");
+    assert_eq!(draw_target(next_instruction), TargetFilter::Controller);
+
+    // LoseLife →ContinuationStep→ Draw (own player_scope: All).
+    let mut chain = gated_lose_life().sub_ability(draw().player_scope(PlayerFilter::All));
+    for_each_continuation_step_mut(chain.sub_ability.as_deref_mut(), |node| {
+        rebind_decline_body_recipient(&mut node.effect)
+    });
+    let own_scope = chain.sub_ability.as_deref().expect("own-scope step");
+    assert_eq!(draw_target(own_scope), TargetFilter::Controller);
+}
+
 /// CR 118.12 + CR 508.1c + CR 109.5: The Second Doctor — subject-only
 /// OPTIONAL-ACCEPT consequence with a CROSS-SCOPE AddRestriction body.
 /// "each player may draw a card. Each opponent who does can't attack you or

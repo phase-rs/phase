@@ -51,7 +51,7 @@ use lower::{
     consolidate_die_and_coin_defs, extract_deal_damage_multi_target,
     extract_double_counter_multi_target, extract_put_counter_multi_target,
     extract_remove_counter_multi_target, extract_switch_pt_multi_target,
-    instruction_spine_is_continuation, is_token_creating_effect,
+    for_each_continuation_step_mut, instruction_spine_is_continuation, is_token_creating_effect,
     parse_contextual_bare_card_aggregate, parse_damage_player_scope,
     parse_for_each_opponent_target_fanout_clause, rebind_clause_recipients_with,
     rebind_decline_body_recipient, rebind_subject_only_body_recipient,
@@ -40553,6 +40553,13 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
             .is_some_and(AbilityCondition::is_not_optional_effect_performed)
     {
         rebind_decline_body_recipient(&mut def.effect);
+        // CR 109.5 + CR 608.2c: a decline body's continuation steps ("they lose
+        // 4 life and you surveil 1" — Tell Me What You See) are part of the same
+        // gated instruction, so their "you" is the printed controller, not the
+        // per-opponent seat.
+        for_each_continuation_step_mut(def.sub_ability.as_deref_mut(), |node| {
+            rebind_decline_body_recipient(&mut node.effect)
+        });
     }
     // CR 608.2 + CR 109.5: Rebind actor-default `You` controllers to
     // `ScopedPlayer` for each-*player* iterations only. Each-opponent scopes
