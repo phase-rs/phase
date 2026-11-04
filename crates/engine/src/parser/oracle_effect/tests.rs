@@ -69939,7 +69939,7 @@ fn chunk_level_you_may_have_keeps_the_may_with_the_controller() {
             "reach-guard: expected Discard{{TriggeringPlayer}}, got {:?}",
             node.effect
         );
-        assert_eq!(node.optional_player, None);
+        assert_eq!(node.optional_player, Some(TargetFilter::OriginalController));
     }
 
     // Blood Seeker — "you may have that player lose 1 life."
@@ -69962,7 +69962,7 @@ fn chunk_level_you_may_have_keeps_the_may_with_the_controller() {
             "reach-guard: expected LoseLife{{target: Some(TriggeringPlayer)}}, got {:?}",
             node.effect
         );
-        assert_eq!(node.optional_player, None);
+        assert_eq!(node.optional_player, Some(TargetFilter::OriginalController));
     }
 
     // Natural Selection — "You may have that player shuffle."
@@ -69988,7 +69988,7 @@ fn chunk_level_you_may_have_keeps_the_may_with_the_controller() {
             "reach-guard: expected Shuffle{{ParentTargetController}}, got {:?}",
             node.effect
         );
-        assert_eq!(node.optional_player, None);
+        assert_eq!(node.optional_player, Some(TargetFilter::OriginalController));
     }
 
     // Mindleech Mass — "you may look at that player's hand."

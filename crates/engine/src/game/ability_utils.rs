@@ -13158,6 +13158,7 @@ mod tests {
             PlayerId(0),
         );
         ability.optional = true;
+        ability.optional_player = Some(TargetFilter::OriginalController);
         ability.instruction_actor = Some(ControllerRef::SpecificPlayer { id: PlayerId(1) }.into());
 
         let mut explicit = ability.clone();
@@ -13180,7 +13181,10 @@ mod tests {
             Some(PlayerId(0))
         );
         assert_eq!(ability.controller, PlayerId(1));
-        assert_eq!(ability.optional_player, None);
+        assert_eq!(
+            ability.optional_player,
+            Some(TargetFilter::OriginalController)
+        );
 
         let mut ordinary = ability.clone();
         ordinary.optional_player = None;

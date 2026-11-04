@@ -1694,8 +1694,8 @@ enum ActorBindingWindow {
 ///
 /// Returns the anaphor to stamp as `AbilityDefinition::optional_player` (the
 /// engine's single authority for "who receives this may", consumed by
-/// `game::effects::optional_prompt_player`), or `None` for a controller-held
-/// "may" — including a payload that is not optional at all.
+/// `game::effects::optional_prompt_player`), or `None` when this helper does
+/// not identify an anaphoric announcer.
 fn subject_anchored_optional_actor(
     def: &AbilityDefinition,
     window: ActorBindingWindow,
@@ -3267,8 +3267,24 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // helper no longer refuses a stamped node (it now READS the stamp),
             // so precedence belongs at the writer, not at the classifier.
             if def.optional_for.is_none() && def.optional_player.is_none() {
-                def.optional_player =
-                    subject_anchored_optional_actor(&def, ActorBindingWindow::ThisResolution);
+                // CR 109.5 + CR 608.2d: in a causative, the printed "you"
+                // announces the choice while the named patient acts. Keep
+                // that grammar-derived authority when the actor is rebound.
+                let lower = clause_ir
+                    .source
+                    .fragment()
+                    .unwrap_or_default()
+                    .to_lowercase();
+                let controller_causative =
+                    crate::parser::oracle_nom::primitives::scan_at_word_boundaries(&lower, |i| {
+                        tag::<_, _, OracleError<'_>>("you may have ").parse(i)
+                    })
+                    .is_some();
+                def.optional_player = if controller_causative {
+                    Some(TargetFilter::OriginalController)
+                } else {
+                    subject_anchored_optional_actor(&def, ActorBindingWindow::ThisResolution)
+                };
             }
         }
         if matches!(&clause_ir.parsed.effect, Effect::SearchOutsideGame { .. }) {

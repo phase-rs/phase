@@ -12881,10 +12881,8 @@ pub(crate) fn optional_prompt_player(
         }
     }
 
-    // CR 109.5 + CR 608.2d: absent a named announcer, "you may have
-    // <patient> ..." belongs to the ability's original controller, even
-    // after the patient's instruction actor has been bound and consumed.
-    Some(ability.original_controller.unwrap_or(ability.controller))
+    // CR 608.2d: absent a named announcer, the current acting player decides.
+    Some(ability.controller)
 }
 
 fn ability_with_event_context_targets(
@@ -23578,11 +23576,8 @@ mod tests {
             );
             if let Some(expected) = expected {
                 assert!(
-                    matches!(
-                        runner.state().waiting_for,
-                        WaitingFor::OptionalEffectChoice { player: P0, .. }
-                    ),
-                    "actor={actor:?}, announcer={P0:?}, wait={:?}",
+                    matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { player, .. } if player == expected),
+                    "actor={actor:?}, expected={expected:?}, wait={:?}",
                     runner.state().waiting_for
                 );
                 let frame = runner.state().active_optional_effect_frame().unwrap();
