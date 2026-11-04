@@ -900,7 +900,7 @@ fn float_hybrid_reserve_sources(
     for (unit, &(source, color, snow, multicolor, _)) in units.iter().zip(&ids) {
         assert_eq!(unit.source_id, source);
         assert_eq!(unit.color, color);
-        assert_eq!(unit.is_snow(), snow);
+        assert_eq!(unit.supertype == Some(ManaSupertype::Snow), snow);
         assert_eq!(unit.source_could_produce_two_or_more_colors, multicolor);
         assert!(r.state().objects[&source].tapped);
     }
@@ -1139,9 +1139,9 @@ fn snow_pool_z_hybrid_all_pairs_and_recursive_units() {
                 &[],
             )
             .unwrap();
-            assert!(spent[..count as usize]
-                .iter()
-                .all(|u| u.color == ManaType::Colorless && !u.is_snow()));
+            assert!(spent[..count as usize].iter().all(
+                |u| u.color == ManaType::Colorless && u.supertype != Some(ManaSupertype::Snow)
+            ));
             assert!(life.is_empty());
             assert!(pool.is_empty());
         }
