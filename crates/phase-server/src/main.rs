@@ -22388,6 +22388,7 @@ mod handshake_tests {
                 seat: 0,
                 main_deck: vec![],
                 commanders: vec![],
+                companion: None,
                 printings: vec![],
             },
             draft_core::types::DraftAction::ReportMatchResult {

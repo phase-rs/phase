@@ -16,6 +16,7 @@ use crate::types::card_printing::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::display_only::DisplayOnly;
+use crate::types::format::CompanionSlot;
 use crate::types::game_state::{GameState, OutsideGameCardUse, PlayerDeckPool};
 use crate::types::identifiers::CardId;
 use crate::types::player::PlayerId;
@@ -83,8 +84,9 @@ pub struct PlayerDeckPayload {
     pub sideboard: Vec<DeckEntry>,
     #[serde(default)]
     pub commander: Vec<DeckEntry>,
-    /// Commander-family companion held outside the game's 100-card deck.
-    /// The loader accepts this slot only for `GameFormat::uses_commander()`;
+    /// CR 702.139a: a companion designated outside the deck. The loader keeps
+    /// it only where `FormatConfig::companion_slot` provides a slot (the
+    /// commander family, and Limited, where it is netted from the sideboard);
     /// Oathbreaker keeps its separate signature-spell slot.
     #[serde(default)]
     pub companion: Vec<DeckEntry>,
@@ -1176,6 +1178,22 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
 /// CR 100.4 + CR 203.1 + CR 206.1: load the next game of a match. Each seat's pool
 /// keeps the previous game's printing record (the same allocation), and the payload's
 /// rebound rows stamp the new objects.
+/// Adds `copies` of `card` to a deck partition, merging into an existing entry
+/// of the same name.
+pub(crate) fn add_deck_copies(partition: &mut Vec<DeckEntry>, card: &DeckEntry, copies: u32) {
+    if let Some(entry) = partition
+        .iter_mut()
+        .find(|entry| entry.card.name == card.card.name)
+    {
+        entry.count += copies;
+    } else {
+        partition.push(DeckEntry {
+            card: card.card.clone(),
+            count: copies,
+        });
+    }
+}
+
 pub(crate) fn load_next_game_decks(
     state: &mut GameState,
     payload: &DeckPayload,
@@ -1211,13 +1229,6 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
         state.format_config.sideboard_policy,
         crate::types::format::SideboardPolicy::Forbidden
     );
-    let sideboard_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
-        if drop_sideboard {
-            Vec::new()
-        } else {
-            submitted.to_vec()
-        }
-    };
     // CR 903.5a: the commander is one of the 100 — a decklist that names it in
     // both the command zone and the main deck describes ONE physical card, not
     // two. The validator nets exactly this double-listing out of its deck-size
@@ -1227,7 +1238,7 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
     // signature spell is the second command-zone slot with the same "one
     // physical card" identity, and it is netted on the same axis rather than as
     // a special case. This is the rule-enforcement boundary, mirroring
-    // `sideboard_for` above.
+    // `drop_sideboard` above.
     //
     // Netting is bounded by occurrence: `min(command_zone_copies,
     // main_deck_copies)` per card, so a main deck holding more copies than the
@@ -1314,15 +1325,13 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
         entries.retain(|entry| entry.count > 0);
         entries
     };
-    // CR 702.139a: The Commander-family external companion slot represents one
-    // card, even when a transport bypasses name-list validation and supplies a
-    // resolved entry with an aggregated count. Keep one normalized copy in the
-    // game pool; construction validation remains responsible for rejecting an
-    // oversized submitted list.
-    let dedicated_companion_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
-        if !state.format_config.uses_commander {
-            return Vec::new();
-        }
+    // CR 702.139a: a designated companion slot represents one card, even when a
+    // transport bypasses name-list validation and supplies a resolved entry with
+    // an aggregated count. Keep one normalized copy in the game pool;
+    // construction validation remains responsible for rejecting an oversized
+    // submitted list.
+    let companion_slot = state.format_config.companion_slot();
+    let designated_companion = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
         submitted
             .first()
             .cloned()
@@ -1331,6 +1340,44 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
                 vec![entry]
             })
             .unwrap_or_default()
+    };
+    let allocate_companion_and_sideboard = |submitted_side: &[DeckEntry],
+                                            submitted_companion: &[DeckEntry]|
+     -> (Vec<DeckEntry>, Vec<DeckEntry>) {
+        let side = if drop_sideboard {
+            Vec::new()
+        } else {
+            submitted_side.to_vec()
+        };
+        match companion_slot {
+            CompanionSlot::SideboardOnly => (side, Vec::new()),
+            CompanionSlot::CommanderFamily => (side, designated_companion(submitted_companion)),
+            // CR 100.4b + CR 702.139a: in Limited every pool card outside the main
+            // deck is a sideboard card, so the designation is one of them. A
+            // payload that lists the sideboard nets the designated copy out of it;
+            // if no copy is there (all of them were put in the main deck) nothing
+            // is designated. The server payload carries no sideboard at all and
+            // sends the designated card only in its own slot.
+            CompanionSlot::LimitedPool if side.is_empty() => {
+                (side, designated_companion(submitted_companion))
+            }
+            CompanionSlot::LimitedPool => {
+                let mut side = side;
+                let mut allocated = Vec::new();
+                for companion in designated_companion(submitted_companion) {
+                    if let Some(copy) = side
+                        .iter_mut()
+                        .find(|entry| entry.card.name == companion.card.name)
+                        .filter(|entry| entry.count > 0)
+                    {
+                        copy.count -= 1;
+                        allocated.push(companion);
+                    }
+                }
+                side.retain(|entry| entry.count > 0);
+                (side, allocated)
+            }
+        }
     };
     let signature_spell_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
         if state.format_config.format == crate::types::format::GameFormat::Oathbreaker {
@@ -1342,10 +1389,12 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
 
     // Build each Arc<Vec<_>> once and share between registered_X and current_X —
     // they start identical and diverge via Arc::make_mut on first mutation.
+    let (p0_side_entries, p0_comp_entries) =
+        allocate_companion_and_sideboard(&payload.player.sideboard, &payload.player.companion);
     let p0_main = std::sync::Arc::new(main_deck_for(&payload.player));
-    let p0_side = std::sync::Arc::new(sideboard_for(&payload.player.sideboard));
+    let p0_side = std::sync::Arc::new(p0_side_entries);
     let p0_cmdr = std::sync::Arc::new(payload.player.commander.clone());
-    let p0_companion = std::sync::Arc::new(dedicated_companion_for(&payload.player.companion));
+    let p0_companion = std::sync::Arc::new(p0_comp_entries);
     let p0_sig = std::sync::Arc::new(signature_spell_for(&payload.player.signature_spell));
     let p0_planar = std::sync::Arc::new(payload.player.planar_deck.clone());
     let p0_scheme = std::sync::Arc::new(payload.player.scheme_deck.clone());
@@ -1369,10 +1418,12 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
             bracket_tier: payload.player.bracket_tier,
             printings: records.record_for(PlayerId(0), &payload.player),
         });
+    let (p1_side_entries, p1_comp_entries) =
+        allocate_companion_and_sideboard(&payload.opponent.sideboard, &payload.opponent.companion);
     let p1_main = std::sync::Arc::new(main_deck_for(&payload.opponent));
-    let p1_side = std::sync::Arc::new(sideboard_for(&payload.opponent.sideboard));
+    let p1_side = std::sync::Arc::new(p1_side_entries);
     let p1_cmdr = std::sync::Arc::new(payload.opponent.commander.clone());
-    let p1_companion = std::sync::Arc::new(dedicated_companion_for(&payload.opponent.companion));
+    let p1_companion = std::sync::Arc::new(p1_comp_entries);
     let p1_sig = std::sync::Arc::new(signature_spell_for(&payload.opponent.signature_spell));
     let p1_scheme = std::sync::Arc::new(payload.opponent.scheme_deck.clone());
     state
@@ -1397,10 +1448,12 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
         });
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         let player_id = PlayerId((2 + i) as u8);
+        let (ai_side_entries, ai_comp_entries) =
+            allocate_companion_and_sideboard(&ai_deck.sideboard, &ai_deck.companion);
         let main = std::sync::Arc::new(main_deck_for(ai_deck));
-        let side = std::sync::Arc::new(sideboard_for(&ai_deck.sideboard));
+        let side = std::sync::Arc::new(ai_side_entries);
         let cmdr = std::sync::Arc::new(ai_deck.commander.clone());
-        let companion = std::sync::Arc::new(dedicated_companion_for(&ai_deck.companion));
+        let companion = std::sync::Arc::new(ai_comp_entries);
         let sig = std::sync::Arc::new(signature_spell_for(&ai_deck.signature_spell));
         let scheme = std::sync::Arc::new(ai_deck.scheme_deck.clone());
         state

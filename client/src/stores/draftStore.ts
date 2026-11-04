@@ -196,7 +196,7 @@ interface DraftStoreActions {
   removeBasicLand(name: string): void;
   autoSuggestDeck(): Promise<void>;
   autoSuggestLands(): Promise<void>;
-  submitDeck(): Promise<void>;
+  submitDeck(commanders?: string[], companion?: string | null): Promise<void>;
   setPoolSortMode(mode: PoolSortMode): void;
   togglePoolPanel(): void;
   setDifficulty(difficulty: number): void;
@@ -1115,7 +1115,12 @@ function withBoosterPackPool(
 
 function matchPayload(run: DraftRunState): DraftMatchPayload {
   return {
-    player: { main_deck: run.playerDeck, sideboard: [], commander: [] },
+    player: {
+      main_deck: run.playerDeck,
+      sideboard: [],
+      commander: [],
+      companion: run.companion ? [run.companion] : [],
+    },
     opponent: { main_deck: run.opponentDeck, sideboard: [], commander: [] },
     ai_decks: [],
     booster_pack_pool: run.booster_pack_pool,
@@ -1134,7 +1139,7 @@ async function evaluateLimitedDeck(
     main_deck: deck.main_deck,
     sideboard: deck.sideboard,
     commander: deck.commander,
-    companion: [],
+    companion: deck.companion ?? [],
     planar_deck: [],
     scheme_deck: [],
     signature_spell: [],
@@ -1630,7 +1635,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     });
   },
 
-  submitDeck: async () => {
+  submitDeck: async (commanders: string[] = [], companion: string | null = null) => {
     const token = admitExclusive("submit");
     if (!token) return;
     const state = get();
@@ -1647,7 +1652,12 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       && get().view === state.view && get().workspaceState === state.workspaceState;
     try {
       const verdict = await evaluateLimitedDeck(
-        { main_deck: partition.mainDeck, sideboard: [], commander: [] },
+        {
+          main_deck: partition.mainDeck,
+          sideboard: [],
+          commander: commanders,
+          companion: companion ? [companion] : [],
+        },
         draftSetCodes(state.runState, state.view),
         "Bo1",
       );
@@ -1656,7 +1666,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       if (!fresh()) throw new Error("Stale draft deck submission");
       const view = await withDraftEngineOperation((lease) => {
         if (!fresh()) throw new Error("Stale draft deck submission");
-        return lease.submitDeck(partition.mainDeck, []);
+        return lease.submitDeck(partition.mainDeck, commanders, companion);
       });
       if (!isExclusive(token, "submit") || lifecycle !== lifecycleGeneration) return;
       retireExclusive(token);
@@ -1669,7 +1679,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         },
         persistence: "schedule",
       });
-      void autosaveDraftDeck({ view: state.view, setCode: state.selectedSet, partition, commanders: [] });
+      void autosaveDraftDeck({ view: state.view, setCode: state.selectedSet, partition, commanders, companion });
     } catch (error) {
       retireExclusive(token);
       throw error;
@@ -1740,6 +1750,18 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
           };
         });
         sessionJson = prepared.sessionJson;
+        let companion: string | null = null;
+        try {
+          const parsedSession = JSON.parse(prepared.sessionJson) as {
+            submitted_decks?: Record<string, { seat: number; companion?: string | null }>;
+          };
+          const playerSubmitted = Object.values(parsedSession.submitted_decks ?? {}).find(
+            (deck) => deck.seat === 0,
+          );
+          companion = playerSubmitted?.companion ?? null;
+        } catch {
+          companion = null;
+        }
         const { botSeat, opponentDeck } = await selectViableOpponent(
           playerDeck, [], state.view, codes, selectedMatchType, fresh,
         );
@@ -1751,6 +1773,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
           results: [],
           playerDeck,
           opponentDeck,
+          companion,
           usedBotSeats: [botSeat],
           lastOpponentSeat: botSeat,
           draft_set_codes: codes,

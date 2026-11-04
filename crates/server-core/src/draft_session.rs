@@ -959,6 +959,7 @@ fn deck_payload_from_submission(
         //
         // A Commander pod launches client-side; see the pod launch path.
         commander: Vec::new(),
+        companion: submission.companion.clone().into_iter().collect(),
         attraction_deck: Vec::new(),
         signature_spell: Vec::new(),
         printings: submission.printings.clone(),
@@ -1041,16 +1042,19 @@ fn authorize_client_draft_action(seat: usize, action: DraftAction) -> Result<Dra
             card_instance_ids,
         }),
         // The seat is table authority and is overwritten with the authenticated
-        // one; designations and owner printings are carried through untouched.
+        // one; the designation, companion and owner printings are player data and are carried
+        // through untouched.
         DraftAction::SubmitDeck {
             main_deck,
             commanders,
+            companion,
             printings,
             ..
         } => Ok(DraftAction::SubmitDeck {
             seat: seat as u8,
             main_deck,
             commanders,
+            companion,
             printings,
         }),
         // The seat is table authority and is overwritten with the
@@ -1473,6 +1477,7 @@ mod tests {
                     seat: 7,
                     main_deck: vec!["Plains".into(); 40],
                     commanders: vec![],
+                    companion: None,
                     printings: vec![],
                 },
                 None,
@@ -2767,6 +2772,7 @@ mod tests {
                 seat: 0,
                 main_deck: vec!["x".to_string()],
                 commanders: vec!["x".to_string()],
+                companion: Some("Yorion, Sky Nomad".to_string()),
                 printings: Vec::new(),
             },
         )
@@ -2777,6 +2783,7 @@ mod tests {
                 seat: 3,
                 main_deck: vec!["x".to_string()],
                 commanders: vec!["x".to_string()],
+                companion: Some("Yorion, Sky Nomad".to_string()),
                 printings: Vec::new(),
             }
         );

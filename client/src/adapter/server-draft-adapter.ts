@@ -573,7 +573,7 @@ export class ServerDraftAdapter implements EngineAdapter {
    * Preparation reserves the action slot and cannot be acknowledged by a
    * broadcast. After sending, acknowledgements remain uncorrelated as before.
    */
-  async submitDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
+  async submitDeck(mainDeck: string[], commanders: string[], companion?: string | null): Promise<DraftPlayerView> {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
@@ -600,9 +600,12 @@ export class ServerDraftAdapter implements EngineAdapter {
             draft_code: draftCode,
             action: {
               type: "SubmitDeck",
-              // Key order matches the Rust carrier; absent art keeps old bytes.
+              // Key order matches the Rust carrier (`seat`, `main_deck`,
+              // `commanders`, `companion`, `printings`); absent companion and
+              // art keep old bytes.
               data: {
                 seat, main_deck: deck.main_deck, commanders: capturedCommanders,
+                ...(companion !== undefined ? { companion } : {}),
                 ...(deck.printings?.length ? { printings: deck.printings } : {}),
               },
             },

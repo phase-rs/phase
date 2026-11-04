@@ -1680,6 +1680,11 @@ pub enum DraftAction {
         /// [`MAX_COMMANDER_DESIGNATIONS`](crate::types::MAX_COMMANDER_DESIGNATIONS).
         #[serde(default)]
         commanders: Vec<String>,
+        /// CR 702.139a: the optional companion card name designated outside the
+        /// main deck from the player's pool. Absent when none is designated, so a
+        /// companion-free submission keeps its pre-companion bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        companion: Option<String>,
         /// Optional owner choices; native ingress bounds them before dispatch.
         /// Name-only and server-generated submissions carry no annotations.
         #[serde(
@@ -2002,6 +2007,9 @@ pub struct DraftDeckSubmission {
     /// `validate_limited_deck`.
     #[serde(default)]
     pub commanders: Vec<String>,
+    /// CR 702.139a: the optional companion designation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub companion: Option<String>,
     /// Snapshotted with the accepted names. Every accepted resubmission replaces
     /// this vector, including an empty vector clearing previous owner choices.
     #[serde(

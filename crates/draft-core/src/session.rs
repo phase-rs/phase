@@ -451,8 +451,9 @@ fn apply_existing(
             seat,
             main_deck,
             commanders,
+            companion,
             printings,
-        } => apply_submit_deck(session, seat, main_deck, commanders, printings),
+        } => apply_submit_deck(session, seat, main_deck, commanders, companion, printings),
         DraftAction::GeneratePairings => apply_generate_pairings(session),
         DraftAction::ReportMatchResult {
             match_id,
@@ -2624,6 +2625,7 @@ fn apply_submit_deck(
     seat: u8,
     main_deck: Vec<String>,
     commanders: Vec<String>,
+    companion: Option<String>,
     printings: Vec<DeckPrinting>,
 ) -> Result<Vec<DraftDelta>, DraftError> {
     if session.status != DraftStatus::Deckbuilding {
@@ -2675,6 +2677,7 @@ fn apply_submit_deck(
         // assumed -- `0` for every kind whose decks are not Commander decks
         // (the four CR 905.1a kinds and `Winston`), `1` for CommanderDraft.
         usize::from(session.kind.procedure().commanders_required),
+        companion.as_deref(),
     ) {
         return Err(DraftError::ValidationFailed { errors });
     }
@@ -2693,6 +2696,7 @@ fn apply_submit_deck(
             // CR 903.3: snapshotted, not re-derived. A later pool change
             // must never silently re-designate this seat's commander(s).
             commanders,
+            companion,
             // Replace names and owner choices together, including empty clearing.
             printings,
         },
@@ -2762,6 +2766,7 @@ mod tests {
             seat: 0,
             main_deck: vec![name.into(); 40],
             commanders: Vec::new(),
+            companion: None,
             printings: set
                 .into_iter()
                 .map(|set| DeckPrinting {
@@ -2800,6 +2805,7 @@ mod tests {
                     seat: 0,
                     main_deck,
                     commanders,
+                    companion: None,
                     printings
                 },
                 "accepted resubmission replaces names and printings, including empty clearing"
@@ -3696,6 +3702,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -3731,6 +3738,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -3793,6 +3801,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -3838,6 +3847,7 @@ mod tests {
                 seat: 0,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -3851,6 +3861,7 @@ mod tests {
                 seat: 1,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -3927,6 +3938,7 @@ mod tests {
                 // so `CommanderNotInDeck` cannot fire. The row's subject is
                 // unchanged -- only what makes a Commander deck legal is.
                 commanders: vec!["Card 0".to_string()],
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -4033,6 +4045,7 @@ mod tests {
                 // so `CommanderNotInDeck` cannot fire. The row's subject is
                 // unchanged -- only what makes a Commander deck legal is.
                 commanders: vec!["Card 0".to_string()],
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -4057,6 +4070,7 @@ mod tests {
                 // so `CommanderNotInDeck` cannot fire. The row's subject is
                 // unchanged -- only what makes a Commander deck legal is.
                 commanders: vec!["Card 0".to_string()],
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -4121,6 +4135,7 @@ mod tests {
                 seat: 0,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -4136,6 +4151,7 @@ mod tests {
                 seat: 1,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -4161,6 +4177,7 @@ mod tests {
                 seat: 0,
                 main_deck: vec![],
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -5759,6 +5776,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck_with(2),
                 commanders: designations.clone(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -5774,6 +5792,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck_with(3),
                 commanders: designations,
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -5800,6 +5819,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: vec![filler.card_name.clone()],
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -5831,6 +5851,7 @@ mod tests {
                 seat: 0,
                 main_deck: main_deck.clone(),
                 commanders: over_bound,
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -5859,6 +5880,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: at_bound,
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -5885,6 +5907,7 @@ mod tests {
                 seat: 0,
                 main_deck: main_deck.clone(),
                 commanders: vec!["Card 999".to_string()],
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -5907,6 +5930,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: vec!["Card 0".to_string()],
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -6082,6 +6106,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck.clone(),
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -6108,6 +6133,7 @@ mod tests {
                     seat: 0,
                     main_deck: deck.clone(),
                     commanders: Vec::new(),
+                    companion: None,
                     printings: Vec::new(),
                 },
                 None,
@@ -6142,6 +6168,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck.clone(),
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -6171,6 +6198,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck,
                 commanders: vec!["Card 0".to_string()],
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -6192,6 +6220,7 @@ mod tests {
                 seat: 0,
                 main_deck: pooled_deck(40),
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -6213,6 +6242,7 @@ mod tests {
                     "Card 1".to_string(),
                     "Card 2".to_string(),
                 ],
+                companion: None,
                 printings: Vec::new(),
             },
             None,

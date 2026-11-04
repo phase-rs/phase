@@ -956,7 +956,14 @@ export class DraftEngineOperationLease {
     return this.wasm.get_view() as DraftPlayerView;
   }
 
-  submitDeck(mainDeck: string[], commanders: string[]): DraftPlayerView {
+  submitDeck(mainDeck: string[], commanders: string[] = [], companion?: string | null): DraftPlayerView {
+    if (companion !== undefined && companion !== null) {
+      return this.wasm.submit_deck(
+        JSON.stringify(mainDeck),
+        JSON.stringify(commanders),
+        companion,
+      ) as DraftPlayerView;
+    }
     return this.wasm.submit_deck(
       JSON.stringify(mainDeck),
       JSON.stringify(commanders),
@@ -1100,8 +1107,17 @@ export class DraftEngineOperationLease {
   submitDeckForSeat(
     seat: number,
     mainDeck: string[],
-    commanders: string[],
+    commanders: string[] = [],
+    companion?: string | null,
   ): DraftPlayerView {
+    if (companion !== undefined && companion !== null) {
+      return this.wasm.submit_deck_for_seat(
+        seat,
+        JSON.stringify(mainDeck),
+        JSON.stringify(commanders),
+        companion,
+      ) as DraftPlayerView;
+    }
     return this.wasm.submit_deck_for_seat(
       seat,
       JSON.stringify(mainDeck),
@@ -1260,8 +1276,8 @@ export class DraftAdapter {
     return withDraftEngineOperation((lease) => lease.getView());
   }
 
-  async submitDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
-    return withDraftEngineOperation((lease) => lease.submitDeck(mainDeck, commanders));
+  async submitDeck(mainDeck: string[], commanders: string[], companion?: string | null): Promise<DraftPlayerView> {
+    return withDraftEngineOperation((lease) => lease.submitDeck(mainDeck, commanders, companion));
   }
 
   async suggestDeck(): Promise<SuggestedDeck> {
@@ -1370,8 +1386,9 @@ export class DraftAdapter {
     seat: number,
     mainDeck: string[],
     commanders: string[],
+    companion?: string | null,
   ): Promise<DraftPlayerView> {
-    return withDraftEngineOperation((lease) => lease.submitDeckForSeat(seat, mainDeck, commanders));
+    return withDraftEngineOperation((lease) => lease.submitDeckForSeat(seat, mainDeck, commanders, companion));
   }
 
   async getViewForSeat(seat: number): Promise<DraftPlayerView> {

@@ -3237,6 +3237,7 @@ mod tests {
                 seat: 0,
                 main_deck: main_deck.clone(),
                 commanders: Vec::new(),
+                companion: None,
                 printings: serde_json::from_value(serde_json::json!([{
                     "section":"main_deck", "name":"Secret annotation", "count":1,
                     "printing":{"set_code":"secret-set","collector_number":"001"}

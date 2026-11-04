@@ -26,6 +26,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "Rotating card pool",
     group: "Constructed",
     legality_key: "standard",
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "Standard",
       starting_life: 20,
@@ -51,6 +52,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "Non-rotating from 2012",
     group: "Constructed",
     legality_key: "pioneer",
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "Pioneer",
       starting_life: 20,
@@ -76,6 +78,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "Non-rotating from Mirrodin onward",
     group: "Constructed",
     legality_key: "modern",
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "Modern",
       starting_life: 20,
@@ -101,6 +104,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "Old-frame constructed through Scourge",
     group: "Constructed",
     legality_key: "premodern",
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "Premodern",
       starting_life: 20,
@@ -126,6 +130,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "Eternal format, all sets legal",
     group: "Constructed",
     legality_key: "legacy",
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "Legacy",
       starting_life: 20,
@@ -151,6 +156,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "Broadest pool, Power Nine restricted",
     group: "Constructed",
     legality_key: "vintage",
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "Vintage",
       starting_life: 20,
@@ -176,6 +182,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "Arena's eternal format",
     group: "Constructed",
     legality_key: "historic",
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "Historic",
       starting_life: 20,
@@ -201,6 +208,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "Arena's eternal non-rotating format",
     group: "Constructed",
     legality_key: "timeless",
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "Timeless",
       starting_life: 20,
@@ -226,6 +234,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "Commons only",
     group: "Constructed",
     legality_key: "pauper",
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "Pauper",
       starting_life: 20,
@@ -251,6 +260,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "Every set, no bans, no copy limit, no deck minimum",
     group: "Constructed",
     legality_key: null,
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "Freeform",
       starting_life: 20,
@@ -276,6 +286,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "100-card singleton, 2–4 players",
     group: "Commander",
     legality_key: "commander",
+    companion_slot: { type: "CommanderFamily" },
     default_config: {
       format: "Commander",
       starting_life: 40,
@@ -301,6 +312,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "2v2 Commander, 60 shared life per team",
     group: "Commander",
     legality_key: "commander",
+    companion_slot: { type: "CommanderFamily" },
     default_config: {
       format: "TwoHeadedGiantCommander",
       starting_life: 60,
@@ -326,6 +338,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "1-vs-many Commander, 60 life each side",
     group: "Commander",
     legality_key: "commander",
+    companion_slot: { type: "CommanderFamily" },
     default_config: {
       format: "ArchenemyCommander",
       starting_life: 60,
@@ -352,6 +365,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "Commander multiplayer with a communal planar deck",
     group: "Commander",
     legality_key: "commander",
+    companion_slot: { type: "CommanderFamily" },
     default_config: {
       format: "PlanechaseCommander",
       starting_life: 40,
@@ -377,6 +391,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "Tournament 1v1 Commander, 30 life",
     group: "Commander",
     legality_key: "duel",
+    companion_slot: { type: "CommanderFamily" },
     default_config: {
       format: "DuelCommander",
       starting_life: 30,
@@ -402,6 +417,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "Commons-only singleton Commander",
     group: "Commander",
     legality_key: "paupercommander",
+    companion_slot: { type: "CommanderFamily" },
     default_config: {
       format: "PauperCommander",
       starting_life: 40,
@@ -427,6 +443,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "50-card Tiny singleton",
     group: "Commander",
     legality_key: null,
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "TinyLeaders",
       starting_life: 20,
@@ -452,6 +469,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "60-card singleton, Planeswalker + signature spell",
     group: "Commander",
     legality_key: "oathbreaker",
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "Oathbreaker",
       starting_life: 20,
@@ -477,6 +495,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "60-card Standard singleton",
     group: "Commander",
     legality_key: "standardbrawl",
+    companion_slot: { type: "CommanderFamily" },
     default_config: {
       format: "Brawl",
       starting_life: 25,
@@ -502,6 +521,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "100-card eternal singleton",
     group: "Commander",
     legality_key: "brawl",
+    companion_slot: { type: "CommanderFamily" },
     default_config: {
       format: "HistoricBrawl",
       starting_life: 25,
@@ -527,6 +547,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "Drafted 60-card minimum Commander, 3–8 players",
     group: "Commander",
     legality_key: null,
+    companion_slot: { type: "CommanderFamily" },
     default_config: {
       format: "CommanderDraft",
       starting_life: 40,
@@ -552,6 +573,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "Any castable card as your commander, every set, no deck minimum",
     group: "Commander",
     legality_key: null,
+    companion_slot: { type: "CommanderFamily" },
     default_config: {
       format: "FreeformCommander",
       starting_life: 40,
@@ -577,6 +599,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "3–6 player battle royale",
     group: "Multiplayer",
     legality_key: null,
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "FreeForAll",
       starting_life: 20,
@@ -602,6 +625,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "4 players, two teams of two",
     group: "Multiplayer",
     legality_key: null,
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "TwoHeadedGiant",
       starting_life: 30,
@@ -627,6 +651,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "One archenemy against a team of heroes",
     group: "Multiplayer",
     legality_key: null,
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "Archenemy",
       starting_life: 20,
@@ -653,6 +678,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "60-card multiplayer with a communal planar deck",
     group: "Multiplayer",
     legality_key: null,
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "Planechase",
       starting_life: 20,
@@ -678,6 +704,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "Draft or sealed, 40-card deck",
     group: "Limited",
     legality_key: null,
+    companion_slot: { type: "LimitedPool" },
     default_config: {
       format: "Limited",
       starting_life: 20,
@@ -703,6 +730,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "60 snow basic lands, random creature tokens",
     group: "Multiplayer",
     legality_key: null,
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "Momir",
       starting_life: 20,
@@ -728,6 +756,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     description: "Shared library and graveyard, fixed 80-card deck",
     group: "Multiplayer",
     legality_key: null,
+    companion_slot: { type: "SideboardOnly" },
     default_config: {
       format: "Dandan",
       starting_life: 20,
