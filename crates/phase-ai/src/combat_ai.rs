@@ -3625,6 +3625,7 @@ mod tests {
     use crate::config::{create_config, AiDifficulty, Platform};
     use crate::planner::quick_state_hash;
     use crate::projection::ProjectionKey;
+    use engine::game::combat::{AttackerInfo, CombatState};
     use engine::game::game_object::ObjectIncarnationRefExt;
     use engine::game::zones::create_object;
     use engine::types::ability::{
@@ -3974,7 +3975,6 @@ mod tests {
     /// a tapped creature that did not attack does not.
     #[test]
     fn crackback_projection_counts_declared_attackers_despite_tapped() {
-        use engine::game::combat::{AttackerInfo, CombatState};
         let mut state = setup();
         let declared = add_creature(&mut state, PlayerId(1), "Giant", 5, 5, vec![]);
         let idle = add_creature(&mut state, PlayerId(1), "Tapped Giant", 5, 5, vec![]);
@@ -4010,7 +4010,6 @@ mod tests {
     /// (e.g. goaded away from P0) deals P0 nothing, tapped or untapped (vigilance).
     #[test]
     fn crackback_projection_ignores_attackers_declared_at_another_player() {
-        use engine::game::combat::{AttackerInfo, CombatState};
         let mut state = setup_multiplayer(3);
         let at_p0 = add_creature(&mut state, PlayerId(1), "Giant", 5, 5, vec![]);
         let at_p2 = add_creature(&mut state, PlayerId(1), "Goaded Giant", 5, 5, vec![]);
