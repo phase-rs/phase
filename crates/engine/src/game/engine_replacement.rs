@@ -3947,6 +3947,26 @@ pub(crate) fn apply_pending_post_replacement_effect(
     event: Option<ReplacementEvent>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    dispatch_pending_post_replacement_effect(state, object_id, spell_resolution, event, events)
+        .map(|pause| pause.waiting_for)
+}
+
+/// A post-replacement dispatch that left a prompt standing, and the frame its drain sits in.
+pub(crate) struct PostReplacementPause {
+    pub(crate) waiting_for: WaitingFor,
+    /// The frame of the drain whose dispatch this was. Its resident is the paused work: this
+    /// dispatch's own entry, or a nested drain installed into the same frame (CR 616.1g).
+    pub(crate) frame: crate::types::game_state::PostReplacementFrameId,
+}
+
+/// [`apply_pending_post_replacement_effect`], reporting the dispatch's frame when it pauses.
+pub(crate) fn dispatch_pending_post_replacement_effect(
+    state: &mut GameState,
+    object_id: Option<ObjectId>,
+    spell_resolution: Option<&crate::types::game_state::PendingSpellResolution>,
+    event: Option<ReplacementEvent>,
+    events: &mut Vec<GameEvent>,
+) -> Option<PostReplacementPause> {
     // CR 614.12a (approximation): sacrifice prompt fires after ZoneChange completes,
     // matching Siege/Tribute precedent. A strict reading of 614.12a says the choice
     // is made *before* the permanent enters, but the engine's pipeline applies the
@@ -3979,7 +3999,16 @@ pub(crate) fn apply_pending_post_replacement_effect(
         .map(|drain| std::mem::take(&mut drain.applied))
         .unwrap_or_default();
 
+    // CR 614.6 + CR 615.5: a drain installed to run after other work carries its replaced
+    // event's amount; "that many" reads it, not whatever that other work stamped.
+    let captured_amount = state
+        .active_post_replacement_drains()
+        .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
+        .and_then(|drain| drain.event_amount);
     let (continuation, dispatch) = state.begin_post_replacement_dispatch()?;
+    if let Some(amount) = captured_amount {
+        state.last_effect_count = Some(crate::game::arithmetic::u32_to_i32_saturating(amount));
+    }
     // CR 603.3b + CR 608.2c: this dispatch is now live on this thread's call
     // stack. Constructed AFTER the mint so the `?` early-return path never
     // enters it, and dropped by RAII at every exit — the
@@ -4067,7 +4096,10 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // copy replacements) and the `handle_replacement_choice` path (optional
     // "you may have this enter as a copy" replacements) defer uniformly.
     capture_deferred_entry_events_if_mid_entry_choice(state, waiting_for.as_ref(), events);
-    waiting_for
+    waiting_for.map(|waiting_for| PostReplacementPause {
+        waiting_for,
+        frame: dispatch.frame(),
+    })
 }
 
 /// CR 614.12a: True when every branch of a `ChooseOneOfBranch` is a self-targeted

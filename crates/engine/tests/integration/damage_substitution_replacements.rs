@@ -1451,6 +1451,237 @@ fn an_earlier_rider_is_not_lost_to_a_substitution_and_reads_its_own_amount() {
     }
 }
 
+/// Answer every counter-order prompt with the replacement `first` names, recording the +1/+1
+/// counters on `id` at each prompt, until a prompt of another kind or rest.
+fn answer_counter_orders(
+    runner: &mut GameRunner,
+    events: &mut Vec<GameEvent>,
+    id: ObjectId,
+    first: ObjectId,
+) -> Vec<u32> {
+    let mut seen = Vec::new();
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ) {
+        seen.push(plus_counters(runner, id));
+        choose_source(runner, events, first);
+    }
+    seen
+}
+
+/// Test of Faith: "For each 1 damage prevented this way, put a +1/+1 counter on that
+/// creature." Dralnu, Lich Lord: "If damage would be dealt to Dralnu, sacrifice that many
+/// permanents instead." With Hardened Scales and Doubling Season, every counter event is
+/// ordered (CR 616.1), and the sacrifice follows all of them (CR 608.2c, CR 615.5): sacrificing
+/// Hardened Scales cannot change a counter event that already happened.
+///
+/// strict-failure: Test of Faith's counters parse as one counter at a time (Command Zone #174),
+/// so the engine asks three orders and puts 12 (Scales first) or 9 (Season first). The card puts
+/// three counters in one event: 8 or 7, with one order.
+#[test]
+fn an_earlier_riders_paused_counters_finish_before_the_substitution() {
+    for (scales_first, each, total) in [(true, 4, 12), (false, 3, 9)] {
+        let mut scenario = self::scenario();
+        let id = dralnu(&mut scenario, P0);
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES)
+            .id();
+        let season = scenario
+            .add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON)
+            .id();
+        lands(&mut scenario, P0, 2);
+        let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+        let slash = sorcery(&mut scenario, "Flame Slash", FLAME_SLASH);
+        let mut runner = scenario.build();
+        cast(&mut runner, faith, vec![object_target(id)]);
+        let mut events = cast(&mut runner, slash, vec![object_target(id)]);
+        choose_shield(&mut runner, &mut events);
+
+        let first = if scales_first { scales } else { season };
+        let seen = answer_counter_orders(&mut runner, &mut events, id, first);
+        assert_eq!(seen, vec![0, each, 2 * each]);
+        assert_eq!(plus_counters(&runner, id), total);
+        assert_eq!(zone_prompt(&runner), (1, 5));
+        answer(
+            &mut runner,
+            GameAction::SelectCards {
+                cards: vec![scales],
+            },
+            &mut events,
+        );
+
+        assert_eq!(zone(&runner, scales), Zone::Graveyard);
+        assert_eq!(zone(&runner, id), Zone::Battlefield);
+        assert_eq!(plus_counters(&runner, id), total);
+        assert_eq!(damage(&runner, id), 0);
+        assert_at_rest(&runner);
+    }
+
+    // Phytohydra: "put that many +1/+1 counters on it instead" is one more ordered counter
+    // event, of 1, after Test of Faith's three: 12 + 4.
+    let mut scenario = self::scenario();
+    let hydra = phytohydra(&mut scenario, P0);
+    let scales = scenario
+        .add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES)
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON);
+    let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let slash = sorcery(&mut scenario, "Flame Slash", FLAME_SLASH);
+    let mut runner = scenario.build();
+    cast(&mut runner, faith, vec![object_target(hydra)]);
+    let mut events = cast(&mut runner, slash, vec![object_target(hydra)]);
+    choose_shield(&mut runner, &mut events);
+    let seen = answer_counter_orders(&mut runner, &mut events, hydra, scales);
+    assert_eq!(seen, vec![0, 4, 8, 12]);
+    assert_eq!(plus_counters(&runner, hydra), 16);
+    assert_at_rest(&runner);
+
+    // Kicked Hurloon Battle Hymn: "If this spell was kicked, you gain 4 life." is the spell's
+    // next instruction, after the counters and the queued sacrifice (CR 608.2c).
+    let mut scenario = self::scenario();
+    let id = dralnu(&mut scenario, P0);
+    let scales = scenario
+        .add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES)
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON);
+    let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Hurloon Battle Hymn", true, HYMN)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 2,
+        })
+        .id();
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    scenario.add_basic_land(P0, ManaColor::White);
+    let mut runner = scenario.build();
+    cast(&mut runner, faith, vec![object_target(id)]);
+    {
+        let cast = runner.cast(spell).target_object(id);
+        let _ = cast.accept_optional().commit();
+    }
+    let mut events = Vec::new();
+    settle(&mut runner, &mut Vec::new(), &mut events);
+    choose_shield(&mut runner, &mut events);
+    let mut lives = Vec::new();
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ) {
+        lives.push((plus_counters(&runner, id), life(&runner, P0)));
+        choose_source(&mut runner, &mut events, scales);
+    }
+    // strict-failure: three counter events (Command Zone #174); the card puts one, for 8.
+    assert_eq!(lives, vec![(0, 20), (4, 20), (8, 20)]);
+    assert_eq!(zone_prompt(&runner), (1, 7));
+    assert_eq!(life(&runner, P0), 20);
+    answer(
+        &mut runner,
+        GameAction::SelectCards {
+            cards: vec![scales],
+        },
+        &mut events,
+    );
+    assert_eq!(life(&runner, P0), 24);
+    assert_eq!(plus_counters(&runner, id), 12);
+    assert_eq!(zone(&runner, scales), Zone::Graveyard);
+    assert_eq!(zone(&runner, id), Zone::Battlefield);
+    assert_at_rest(&runner);
+}
+
+/// Pyroclasm: "deals 2 damage to each creature." A rider that asks for an order leaves its
+/// prompt standing while Pyroclasm goes on to the other creatures; their riders and
+/// substitutions wait behind it (CR 608.2c, CR 615.5). Two Bears under their own Test of Faith
+/// each get their counters; Dralnu's sacrifice waits for the Bear's counters, or the Bear's
+/// counters wait for the sacrifice, whichever creature is dealt damage first.
+///
+/// strict-failure: Test of Faith's counters parse as one counter at a time (Command Zone #174),
+/// so each Bear's 2 prevented damage is two ordered counter events of 4 (8). The card puts two
+/// counters in one event: 6, with one order.
+#[test]
+fn a_paused_rider_keeps_the_batchs_later_riders_behind_it() {
+    let mut scenario = self::scenario();
+    let a = scenario.add_creature(P1, "Bear A", 2, 2).id();
+    let b = scenario.add_creature(P1, "Bear B", 2, 2).id();
+    let scales = scenario
+        .add_enchantment_from_oracle(P1, "Hardened Scales", HARDENED_SCALES)
+        .id();
+    scenario.add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON);
+    let faith_a = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let faith_b = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let spell = sorcery(&mut scenario, "Pyroclasm", PYROCLASM);
+    let mut runner = scenario.build();
+    cast(&mut runner, faith_a, vec![object_target(a)]);
+    cast(&mut runner, faith_b, vec![object_target(b)]);
+    let mut events = cast(&mut runner, spell, vec![]);
+    let mut prompts = 0;
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ) {
+        prompts += 1;
+        choose_source(&mut runner, &mut events, scales);
+    }
+    assert_eq!(prompts, 4);
+    assert_eq!(
+        (plus_counters(&runner, a), plus_counters(&runner, b)),
+        (8, 8)
+    );
+    assert_at_rest(&runner);
+
+    for bear_first in [true, false] {
+        let mut scenario = self::scenario();
+        let bear = bear_first.then(|| scenario.add_creature(P1, "Bear", 2, 2).id());
+        let id = dralnu(&mut scenario, P1);
+        let bear = bear.unwrap_or_else(|| scenario.add_creature(P1, "Bear", 2, 2).id());
+        let scales = scenario
+            .add_enchantment_from_oracle(P1, "Hardened Scales", HARDENED_SCALES)
+            .id();
+        scenario.add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON);
+        let land = lands(&mut scenario, P1, 2);
+        let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+        let spell = sorcery(&mut scenario, "Pyroclasm", PYROCLASM);
+        let mut runner = scenario.build();
+        cast(&mut runner, faith, vec![object_target(bear)]);
+        let mut events = cast(&mut runner, spell, vec![]);
+
+        let mut sacrificed_at = None;
+        let mut orders = Vec::new();
+        for _ in 0..4 {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::ReplacementChoice { .. } => {
+                    orders.push(plus_counters(&runner, bear));
+                    choose_source(&mut runner, &mut events, scales);
+                }
+                WaitingFor::EffectZoneChoice { count, .. } => {
+                    assert_eq!(count, 2);
+                    assert!(runner.state().pending_replacement.is_none());
+                    sacrificed_at = Some(plus_counters(&runner, bear));
+                    answer(
+                        &mut runner,
+                        GameAction::SelectCards {
+                            cards: land.clone(),
+                        },
+                        &mut events,
+                    );
+                }
+                _ => break,
+            }
+        }
+        assert_eq!(orders, vec![0, 4]);
+        assert_eq!(sacrificed_at, Some(if bear_first { 8 } else { 0 }));
+        assert_eq!(plus_counters(&runner, bear), 8);
+        assert_eq!(zone(&runner, id), Zone::Battlefield);
+        assert!(land
+            .iter()
+            .all(|land| zone(&runner, *land) == Zone::Graveyard));
+        assert_at_rest(&runner);
+    }
+}
+
 /// Temper with its printed {X}{1}{W}, and the mana to pay for it.
 fn temper(scenario: &mut GameScenario) -> ObjectId {
     let id = scenario

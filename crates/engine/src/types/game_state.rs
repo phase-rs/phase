@@ -27996,6 +27996,16 @@ pub struct PostReplacementDrain {
     /// where the affected object's controller remains the fallback.
     #[serde(default)]
     pub controller: Option<crate::types::player::PlayerId>,
+
+    /// CR 614.6 + CR 615.5: the amount of the replaced event, captured when this drain is
+    /// installed to run later than the replacement that produced it. A substitution installed
+    /// behind an earlier replacement's paused rider (Dralnu, Lich Lord's "sacrifice that many
+    /// permanents instead" behind Test of Faith's counters) reads its "that many" from here,
+    /// because the rider's own events have changed `last_effect_count` by the time it runs.
+    /// `None` for a drain that runs right after its replacement, which reads the stamp the
+    /// replacement just made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_amount: Option<u32>,
 }
 
 /// CR 616.1g: what an install does when a continuation is already resident.
@@ -28120,6 +28130,7 @@ impl PostReplacementDrain {
             event_source: None,
             event_target: None,
             controller: None,
+            event_amount: None,
         }
     }
 
@@ -28154,10 +28165,42 @@ impl PostReplacementDrainStack {
     /// and a nested check taken during that dispatch must not try to re-drain it.
     /// This is exactly what `post_replacement_continuation.is_some()` meant, since
     /// the old code took the continuation out of the slot before dispatching.
+    ///
+    /// Only the resident can run, so only the resident counts. A Ready entry beneath a paused
+    /// resident (`install_behind_paused_resident`) is work that waits for that resident to
+    /// retire; until then nothing may dispatch it, and a nested install must not collide with it.
     pub fn has_ready(&self) -> bool {
         self.drains
-            .iter()
-            .any(|drain| matches!(drain.status, DrainStatus::Ready(_)))
+            .last()
+            .is_some_and(|drain| matches!(drain.status, DrainStatus::Ready(_)))
+    }
+
+    /// CR 615.5 + CR 608.2c: whether work waits directly beneath the resident
+    /// (`install_behind_paused_resident`), to run once the resident retires.
+    pub fn has_ready_behind_resident(&self) -> bool {
+        self.drains
+            .len()
+            .checked_sub(2)
+            .and_then(|depth| self.drains.get(depth))
+            .is_some_and(|drain| matches!(drain.status, DrainStatus::Ready(_)))
+    }
+
+    /// CR 615.5 + CR 608.2c: queue `drain` directly beneath a paused resident, so it becomes the
+    /// resident, and runs, only once that paused work retires
+    /// (`finish_paused_dispatch`). Hands `drain` back, not installed, when the resident is not
+    /// paused.
+    pub fn install_behind_paused_resident(
+        &mut self,
+        drain: PostReplacementDrain,
+    ) -> Option<PostReplacementDrain> {
+        match self.drains.last().map(|resident| &resident.status) {
+            Some(DrainStatus::Paused) => {
+                let depth = self.drains.len() - 1;
+                self.drains.insert(depth, drain);
+                None
+            }
+            Some(DrainStatus::Ready(_) | DrainStatus::Dispatching) | None => Some(drain),
+        }
     }
 
     /// The innermost drain, whatever its status. Event-context reads (CR 615.5)
@@ -28958,6 +29001,11 @@ pub(crate) struct DamageBatchLedger {
     /// A printed guard reads once for the whole batch (Undergrowth Champion ruling: "its
     /// prevention effect will apply once to all that damage").
     pub(crate) settled_guards: Vec<crate::types::ability::SettledDamageGuard>,
+    /// CR 615.5 + CR 608.2c: the frame of the first noncombat rider in this batch that left its
+    /// prompt standing. The batch's later riders queue behind it
+    /// (`replacement::damage_rider_placement`). Combat settles every rider pause in the batch
+    /// (`drain_combat_damage_rider`), so it is never set there.
+    pub(crate) paused_rider: Option<PostReplacementFrameId>,
 }
 
 /// Who owns a player-resource change (life, player counter, energy) whose final
@@ -31205,6 +31253,18 @@ impl GameState {
             self.resolution_stack.push_post_replacement(drains);
         }
         installed
+    }
+
+    /// CR 615.5 + CR 608.2c: install `drain` behind the paused resident of the frame `owner`
+    /// names, found by identity. Hands `drain` back, not installed, when that frame is gone or
+    /// its resident is not paused.
+    pub(crate) fn install_post_replacement_drain_behind_paused(
+        &mut self,
+        owner: PostReplacementFrameId,
+        drain: PostReplacementDrain,
+    ) -> Option<PostReplacementDrain> {
+        self.resolution_stack
+            .install_post_replacement_drain_behind_paused(owner, drain)
     }
 
     /// True when the exact active general drain has ready continuation work.
@@ -38564,6 +38624,46 @@ mod drain_stack_reentrancy_tests {
             "the nested post-effect must be visible as pending work — \
              draw_through_replacement gates its drain on exactly this predicate"
         );
+    }
+
+    /// CR 615.5 + CR 608.2c: work queued behind a paused resident is not pending work until
+    /// that resident retires, so a nested stash still installs above it; then it is the
+    /// resident, and runs next.
+    #[test]
+    fn work_queued_behind_a_paused_resident_waits_for_it() {
+        let mut stack = PostReplacementDrainStack::default();
+        let queued = ready_drain("queued");
+        assert!(
+            stack
+                .install_behind_paused_resident(queued.clone())
+                .is_some(),
+            "an empty stack has no paused resident to wait behind"
+        );
+        assert!(stack.install(ready_drain("earlier"), ResidentDrainPolicy::KeepResident));
+        assert!(
+            stack
+                .install_behind_paused_resident(queued.clone())
+                .is_some(),
+            "a Ready resident is not paused work"
+        );
+        let (_, earlier) = stack
+            .begin_dispatch()
+            .expect("the earlier rider dispatches");
+        assert!(stack.pause_dispatch(earlier));
+
+        assert!(stack.install_behind_paused_resident(queued).is_none());
+        assert!(!stack.has_ready(), "only the resident can run");
+        assert!(stack.has_ready_behind_resident());
+        assert!(
+            stack.install(ready_drain("nested"), ResidentDrainPolicy::KeepResident),
+            "a nested stash is not dropped by work waiting behind the paused resident"
+        );
+        let (_, nested) = stack.begin_dispatch().expect("the nested drain dispatches");
+        assert!(stack.finish_dispatch(nested).is_some());
+
+        assert!(stack.finish_paused_dispatch().is_some());
+        assert!(stack.has_ready(), "the queued work is now the resident");
+        assert!(!stack.has_ready_behind_resident());
     }
 
     /// CR 615.5 + CR 616.1g: nested pausing replacement continuations own

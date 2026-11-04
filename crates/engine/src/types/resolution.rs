@@ -3229,6 +3229,19 @@ impl ResolutionStack {
             .map(PostReplacementDrainStack::len)
     }
 
+    /// CR 615.5 + CR 608.2c: queue `drain` behind the paused resident of the frame `id` names.
+    /// Identity-addressed, like the dispatcher's own cleanup.
+    pub(crate) fn install_post_replacement_drain_behind_paused(
+        &mut self,
+        id: PostReplacementFrameId,
+        drain: PostReplacementDrain,
+    ) -> Option<PostReplacementDrain> {
+        match self.post_replacement_frame_mut(id) {
+            Some(drains) => drains.install_behind_paused_resident(drain),
+            None => Some(drain),
+        }
+    }
+
     /// The mutable twin of [`Self::post_replacement_frame`].
     fn post_replacement_frame_mut(
         &mut self,
@@ -6094,6 +6107,7 @@ impl LegacyReplacementTailsWire {
                         // to the affected object's controller, exactly as it did
                         // before the field existed.
                         controller: None,
+                        event_amount: None,
                     },
                     ResidentDrainPolicy::Replace,
                 );

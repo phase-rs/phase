@@ -936,6 +936,31 @@ pub enum ReplacementResult {
 pub enum ApplyResult {
     Modified(ProposedEvent),
     Prevented,
+    /// CR 614.6 + CR 615.5 + CR 608.2c: the event was replaced wholesale, as with `Prevented`,
+    /// while an earlier replacement's rider on it was paused on a choice. The replacement's own
+    /// actions are installed behind that rider.
+    PreventedBehindRider(PausedRider),
+}
+
+/// An earlier replacement's rider that paused while a later replacement applied to the same
+/// event, and the later replacement's amount (CR 615.5, CR 608.2c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PausedRider {
+    /// The frame whose paused resident is the rider's unfinished work.
+    pub owner: crate::types::game_state::PostReplacementFrameId,
+    /// The amount the later replacement replaced or prevented, read as its "that many".
+    pub amount: Option<u32>,
+}
+
+/// How a damage rider drain ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DamageRiderDrain {
+    /// The rider ran to completion, or (in combat) every pause it raised was settled.
+    Completed,
+    /// The rider left a prompt standing (noncombat). `owner` is the frame of its paused work.
+    Paused {
+        owner: crate::types::game_state::PostReplacementFrameId,
+    },
 }
 
 /// CR 614.6: Install a mandatory post-effect's continuation — the replacement's own
@@ -963,35 +988,74 @@ pub enum ApplyResult {
 /// for the measured census.
 fn stash_post_replacement_continuation(
     state: &mut GameState,
+    drain: PostReplacementDrain,
+    behind: Option<PausedRider>,
+) {
+    // CR 615.5 + CR 608.2c: behind an earlier rider that paused, the replacement's actions wait
+    // for that rider's work to finish, reading the amount captured with it. A frame whose
+    // resident is no longer paused has nothing to wait behind.
+    let drain = match behind {
+        Some(rider) => {
+            let drain = PostReplacementDrain {
+                event_amount: rider.amount,
+                ..drain
+            };
+            match state.install_post_replacement_drain_behind_paused(rider.owner, drain) {
+                None => return,
+                Some(drain) => drain,
+            }
+        }
+        None => drain,
+    };
+    state.install_post_replacement_drain(drain, ResidentDrainPolicy::KeepResident);
+}
+
+/// CR 614.6: a mandatory post-effect's drain: the replacement's own actions, and the event
+/// context they read.
+fn mandatory_post_drain(
     continuation: PostReplacementContinuation,
     source: ObjectId,
     controller: Option<PlayerId>,
     applied: HashSet<AppliedReplacementKey>,
     event_source: Option<ObjectId>,
     event_target: Option<TargetRef>,
-) {
-    state.install_post_replacement_drain(
-        PostReplacementDrain {
-            status: DrainStatus::Ready(continuation),
-            source: Some(source),
-            applied,
-            event_source,
-            event_target,
-            // CR 109.5: "you" in the continuation is the REPLACING ability's
-            // controller. Carried beside `source` rather than derived from it,
-            // because `source` is the affected object on every zone-change
-            // path.
-            //
-            // Passed through as an `Option` rather than unwrapped at the call
-            // sites: `None` is the drain's own encoding of "no replacing object
-            // to speak of", which `apply_post_replacement_effect` answers by
-            // falling back to the AFFECTED object's controller. Substituting
-            // `active_player` here would stamp a confident wrong answer in
-            // place of that fallback.
-            controller,
-        },
-        ResidentDrainPolicy::KeepResident,
-    );
+) -> PostReplacementDrain {
+    PostReplacementDrain {
+        status: DrainStatus::Ready(continuation),
+        source: Some(source),
+        applied,
+        event_source,
+        event_target,
+        // CR 109.5: "you" in the continuation is the REPLACING ability's
+        // controller. Carried beside `source` rather than derived from it,
+        // because `source` is the affected object on every zone-change
+        // path.
+        //
+        // Passed through as an `Option` rather than unwrapped at the call
+        // sites: `None` is the drain's own encoding of "no replacing object
+        // to speak of", which `apply_post_replacement_effect` answers by
+        // falling back to the AFFECTED object's controller. Substituting
+        // `active_player` here would stamp a confident wrong answer in
+        // place of that fallback.
+        controller,
+        event_amount: None,
+    }
+}
+
+/// CR 615.5 + CR 608.2c: where a damage replacement's actions wait. Behind the rider this
+/// event's own substitution waited on (`ApplyResult::PreventedBehindRider`), else behind a rider
+/// of the same noncombat batch that left its prompt standing (Pyroclasm at a Bear under Test of
+/// Faith and at Dralnu, Lich Lord), reading the amount the applier just stamped.
+fn damage_rider_placement(state: &GameState, behind: Option<PausedRider>) -> Option<PausedRider> {
+    behind.or_else(|| {
+        let owner = state.damage_batch_ledger.as_ref()?.paused_rider?;
+        Some(PausedRider {
+            owner,
+            amount: state
+                .last_effect_count
+                .and_then(|count| u32::try_from(count).ok()),
+        })
+    })
 }
 
 fn ability_tree_creates_tokens(def: &AbilityDefinition) -> bool {
@@ -2945,12 +3009,25 @@ fn damage_done_applier(
             // CR 615.5: an earlier effect's rider takes place now, ahead of the stamp below,
             // because the drain stack keeps one Ready rider and both read `last_effect_count`.
             // Test of Faith, then Phytohydra: 3 counters for the 3 prevented and 1 for the last
-            // damage. `Prevented` ends this pipeline, so nothing here outlives the drain.
-            if state.has_post_replacement_drain() {
-                drain_damage_rider(state, events);
-            }
+            // damage.
+            let earlier = if state.has_post_replacement_drain() {
+                drain_damage_rider(state, events)
+            } else {
+                DamageRiderDrain::Completed
+            };
             state.last_effect_count = Some(u32_to_i32_saturating(amount));
-            return ApplyResult::Prevented;
+            // CR 608.2c + CR 616.1: a rider that paused (Test of Faith's counters under Hardened
+            // Scales and Doubling Season) still has work to do, and this replacement's actions
+            // (Dralnu, Lich Lord's sacrifice) follow all of it, reading this amount.
+            return match earlier {
+                DamageRiderDrain::Completed => ApplyResult::Prevented,
+                DamageRiderDrain::Paused { owner } => {
+                    ApplyResult::PreventedBehindRider(PausedRider {
+                        owner,
+                        amount: Some(amount),
+                    })
+                }
+            };
         }
         return ApplyResult::Modified(event);
     }
@@ -3344,6 +3421,7 @@ fn with_settled_damage_guards<T>(
     let restore = state.damage_batch_ledger.replace(DamageBatchLedger {
         applications: Vec::new(),
         settled_guards,
+        paused_rider: None,
     });
     let result = body(state);
     state.damage_batch_ledger = restore;
@@ -10885,6 +10963,7 @@ fn apply_single_replacement(
         _ => None,
     };
     let replacement_applied = proposed.applied_set().clone();
+    let is_damage_event = proposed_damage_source.is_some();
     // CR 609.7b + CR 120.8: Membership requires positive damage actually changed
     // or prevented. Capture scalar provenance only; do not clone damage events.
     let damage_batch_application =
@@ -11132,8 +11211,7 @@ fn apply_single_replacement(
                     // of the Hunt's "When you do, create a … Wolf" created the
                     // token for the opponent whose creature died, because the
                     // continuation had no handle on its own controller).
-                    stash_post_replacement_continuation(
-                        state,
+                    let drain = mandatory_post_drain(
                         post,
                         new_event.affected_object_id().unwrap_or(rid.source),
                         ability_controller,
@@ -11147,6 +11225,10 @@ fn apply_single_replacement(
                         // continuation's event-target slot changes.
                         proposed_event_target.clone(),
                     );
+                    let placement = is_damage_event
+                        .then(|| damage_rider_placement(state, None))
+                        .flatten();
+                    stash_post_replacement_continuation(state, drain, placement);
                 }
                 events.push(GameEvent::ReplacementApplied {
                     source_id: rid.source,
@@ -11154,7 +11236,11 @@ fn apply_single_replacement(
                 });
                 return Ok(new_event);
             }
-            ApplyResult::Prevented => {
+            ApplyResult::Prevented | ApplyResult::PreventedBehindRider(_) => {
+                let behind = match applier_result {
+                    ApplyResult::PreventedBehindRider(rider) => Some(rider),
+                    ApplyResult::Prevented | ApplyResult::Modified(_) => None,
+                };
                 if consume_on_apply {
                     mark_replacement_consumed(state, rid);
                     if let Some((key, damage_source, _)) = damage_batch_application {
@@ -11175,8 +11261,7 @@ fn apply_single_replacement(
                 // (Swans of Bryn Argoll). Distinct from `post_replacement_source`,
                 // which is the replacement's own source (Swans itself).
                 if let Some(post) = mandatory_post_effect {
-                    stash_post_replacement_continuation(
-                        state,
+                    let drain = mandatory_post_drain(
                         post,
                         rid.source,
                         // CR 109.5: same authority as the Modified arm — the
@@ -11189,6 +11274,12 @@ fn apply_single_replacement(
                         proposed_damage_source,
                         proposed_event_target.clone(),
                     );
+                    let placement = if is_damage_event {
+                        damage_rider_placement(state, behind)
+                    } else {
+                        behind
+                    };
+                    stash_post_replacement_continuation(state, drain, placement);
                 }
                 events.push(GameEvent::ReplacementApplied {
                     source_id: rid.source,
@@ -11261,7 +11352,7 @@ fn apply_replacement_to_token_batches(
         match apply_single_replacement(state, view, rid, branch, registry, events) {
             Ok(applied) => survivors.push(applied),
             Err(ApplyResult::Prevented) => {}
-            Err(ApplyResult::Modified(_)) => {
+            Err(ApplyResult::Modified(_) | ApplyResult::PreventedBehindRider(_)) => {
                 unreachable!("apply_single_replacement reports modification through Ok")
             }
         }
@@ -13383,7 +13474,9 @@ fn pipeline_loop(
             ) {
                 Ok(new_event) => proposed = new_event,
                 Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
-                Err(ApplyResult::Modified(_)) => unreachable!(),
+                Err(ApplyResult::Modified(_) | ApplyResult::PreventedBehindRider(_)) => {
+                    unreachable!()
+                }
             }
         } else if state.replacement_auto_choice_tail.is_some()
             || replacement_ordering_is_material(state, &candidates, &proposed)
@@ -13449,7 +13542,9 @@ fn pipeline_loop(
             ) {
                 Ok(new_event) => proposed = new_event,
                 Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
-                Err(ApplyResult::Modified(_)) => unreachable!(),
+                Err(ApplyResult::Modified(_) | ApplyResult::PreventedBehindRider(_)) => {
+                    unreachable!()
+                }
             }
         }
 
@@ -13483,18 +13578,34 @@ pub fn replace_event(
 /// CR 614.6 + CR 615.5: run the resident damage rider, immediately after the replacement that
 /// stashed it. Inside a combat batch (its tally is open, CR 510.2) the rider's pauses are
 /// settled before the batch moves on (`drain_combat_damage_rider`).
-pub(crate) fn drain_damage_rider(state: &mut GameState, events: &mut Vec<GameEvent>) {
+///
+/// Outside combat a rider may leave its prompt standing; the result names the frame of that
+/// paused work, so later work for the same event can wait behind it (CR 608.2c).
+pub(crate) fn drain_damage_rider(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> DamageRiderDrain {
     if state.combat_prevention_tally.is_some() {
         drain_combat_damage_rider(state, events);
-        return;
+        return DamageRiderDrain::Completed;
     }
     // CR 700.1: Follow-up damage is an independent event, even if its
     // source also participates in the original simultaneous instance.
     let ledger = state.damage_batch_ledger.take();
-    let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+    let pause = crate::game::engine_replacement::dispatch_pending_post_replacement_effect(
         state, None, None, None, events,
     );
     state.damage_batch_ledger = ledger;
+    match pause {
+        None => DamageRiderDrain::Completed,
+        Some(pause) => {
+            // CR 608.2c: the batch's later riders wait behind this one (`damage_rider_placement`).
+            if let Some(ledger) = state.damage_batch_ledger.as_mut() {
+                ledger.paused_rider.get_or_insert(pause.frame);
+            }
+            DamageRiderDrain::Paused { owner: pause.frame }
+        }
+    }
 }
 
 /// CR 615.5 + CR 510.2: run the resident damage rider at a combat drain, the per-portion drain
@@ -13697,6 +13808,7 @@ pub(crate) fn replace_combat_damage_batch(
     let restore_ledger = state.damage_batch_ledger.replace(DamageBatchLedger {
         applications: Vec::new(),
         settled_guards,
+        paused_rider: None,
     });
     // The ledger's `applications` are keyed by AppliedReplacementKey, which is registry-index
     // based, exactly as combat_prevention_tally's keys are. Its `settled_guards` are keyed by
@@ -14161,6 +14273,7 @@ fn continue_replacement_impl(
                         // zone-change drain rebinds `source` to the entering /
                         // moving object, so the branch's "you" needs its own slot.
                         controller: branch_controller,
+                        event_amount: None,
                     },
                     ResidentDrainPolicy::Replace,
                 );
@@ -14199,7 +14312,7 @@ fn continue_replacement_impl(
         match apply_single_replacement_and_dirty(state, proposed, rid, branch, registry, events) {
             Ok(new_event) => proposed = new_event,
             Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
-            Err(ApplyResult::Modified(_)) => unreachable!(),
+            Err(ApplyResult::Modified(_) | ApplyResult::PreventedBehindRider(_)) => unreachable!(),
         }
 
         return pipeline_loop(state, proposed, pending.depth + 1, registry, events);
@@ -14322,7 +14435,7 @@ fn continue_replacement_impl(
     ) {
         Ok(new_event) => proposed = new_event,
         Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
-        Err(ApplyResult::Modified(_)) => unreachable!(),
+        Err(ApplyResult::Modified(_) | ApplyResult::PreventedBehindRider(_)) => unreachable!(),
     }
 
     pipeline_loop(state, proposed, pending.depth + 1, registry, events)
@@ -18467,6 +18580,7 @@ mod tests {
         state.damage_batch_ledger = Some(DamageBatchLedger {
             applications: Vec::new(),
             settled_guards: guards,
+            paused_rider: None,
         });
 
         let obj = state.objects.get_mut(&champion).unwrap();
@@ -18528,6 +18642,7 @@ mod tests {
                 source,
             )],
             settled_guards: Vec::new(),
+            paused_rider: None,
         });
         assert!(consumed_replacement_applies_in_combat_batch(
             &state,
@@ -19848,6 +19963,7 @@ mod tests {
                     event_source: None,
                     event_target: Some(TargetRef::Player(PlayerId(0))),
                     controller: Some(PlayerId(0)),
+                    event_amount: None,
                 },
                 ResidentDrainPolicy::KeepResident,
             );

@@ -2134,12 +2134,18 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
                 drains.resident().map(|drain| &drain.status),
                 Some(crate::types::game_state::DrainStatus::Paused)
             );
+            // CR 615.5 + CR 608.2c: work queued behind the paused dispatch
+            // (`PostReplacementDrainStack::install_behind_paused_resident`: Dralnu, Lich
+            // Lord's sacrifice behind Test of Faith's counters) becomes the resident when
+            // that dispatch retires, and runs in the same pass.
+            let queued_behind = retired_paused_dispatch && drains.has_ready_behind_resident();
             if retired_paused_dispatch {
                 // CR 614.6 + CR 615.5: the direct child has answered the
                 // continuation's prompt, so retire precisely the resident
                 // paused dispatch before considering later ready work.
                 state.finish_active_paused_post_replacement_dispatch();
-            } else {
+            }
+            if !retired_paused_dispatch || queued_behind {
                 let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                     state, None, None, None, events,
                 );

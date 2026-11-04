@@ -3783,6 +3783,7 @@ fn markerless_rest(rest: TerminalRest, core_type: CoreType, zone: Zone) -> (Game
                 event_source: None,
                 event_target: None,
                 controller: None,
+                event_amount: None,
             },
             ResidentDrainPolicy::Replace,
         );

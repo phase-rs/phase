@@ -14671,23 +14671,47 @@ mod conjure_attach_parser_tests {
     }
 
     /// Conjures with no "and attach them to ~" tail keep no `Attach` sub. Perforator
-    /// Crocodile's "onto the battlefield attached to that creature" is a different
-    /// shape and stays as it was.
+    /// Crocodile's "for each creature your opponents control, conjure a card named Stab
+    /// Wound onto the battlefield attached to that creature" is a different shape: a Stab
+    /// Wound conjure repeated per opponent's creature, with no `Attach` (its attachment is
+    /// not parsed yet, Command Zone #177).
     #[test]
     fn conjure_without_an_attach_tail_has_no_attach_sub() {
         let crocodile = first_trigger_body(
             "When Perforator Crocodile enters, for each creature your opponents control, conjure a card named Stab Wound onto the battlefield attached to that creature.\nCycling {1}{B}",
             "Perforator Crocodile",
         );
+        let Effect::Conjure {
+            cards, destination, ..
+        } = &*crocodile.effect
+        else {
+            panic!("expected Conjure, got {:?}", crocodile.effect);
+        };
+        assert_eq!(*destination, Zone::Battlefield);
+        assert_eq!(
+            cards.iter().map(|c| c.named_name()).collect::<Vec<_>>(),
+            vec![Some("Stab Wound")]
+        );
+        assert!(
+            matches!(
+                &crocodile.repeat_for,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                })
+            ),
+            "the conjure repeats for each creature your opponents control: {:?}",
+            crocodile.repeat_for
+        );
         let mut node = Some(&crocodile);
         while let Some(ability) = node {
             assert!(
                 !matches!(
                     &*ability.effect,
-                    Effect::Attach {
-                        attachment: TargetFilter::LastCreated,
-                        ..
-                    }
+                    Effect::Unimplemented { .. }
+                        | Effect::Attach {
+                            attachment: TargetFilter::LastCreated,
+                            ..
+                        }
                 ),
                 "got {crocodile:?}"
             );
