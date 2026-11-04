@@ -953,11 +953,12 @@ mod tests {
         assert!(!object_sources_static_from_command_zone(&bf));
     }
 
-    /// CR 315.5b: a face-down conspiracy card has no characteristics, so the
-    /// CR 604.3 CDA carve-out must not admit one to the layer system before it
-    /// is turned face up. The creation path blanks the definition lists; this
-    /// covers the gate itself, so a path that re-applies the printed face to a
-    /// still-face-down object cannot start functioning from the command zone.
+    /// CR 315.5b + CR 604.3: No printed conspiracy in the current MTGJSON data
+    /// has a CDA. Brago's Favor is the nearest printed static-ability witness:
+    /// "Spells with the chosen name you cast cost {1} less to cast."
+    /// This synthetic gate fixture checks that face-down blanking wins over a
+    /// retained CDA definition; it is not a printed-card or restore-path regression.
+    /// The face-up checks below prove the CDA reaches both admission paths.
     #[test]
     fn face_down_conspiracy_cda_does_not_function_from_command_zone() {
         let state = new_state();
