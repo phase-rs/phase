@@ -1296,7 +1296,7 @@ fn collect_guard_sources(value: &serde_json::Value, out: &mut Vec<u64>) {
 
 /// Searing Blaze's board: Undergrowth Champion with one counter wearing Pariah, and a planeswalker
 /// for the Landfall clause's own target slot. That slot parses as its own target, so the spell
-/// can't be cast without a planeswalker (filed); the planeswalker is a textless filler.
+/// can't be cast without a planeswalker (Command Zone #175); the planeswalker is a textless filler.
 struct SearingBlazeBoard {
     runner: GameRunner,
     champion: ObjectId,
@@ -1354,7 +1354,7 @@ fn a_clause_in_an_else_branch_joins_the_run() {
 
 /// The same spell under Furnace of Rath pauses in its first clause. The forwarded "instead" sub,
 /// whose else clause is the run's second clause, carries the reading in the paused continuation.
-/// (After the pause the else clause's damage goes to the planeswalker, at base too; that is filed,
+/// (After the pause the else clause's damage goes to the planeswalker, at base too; that is Command Zone #175,
 /// so this row asserts the carrier, not the second clause's recipient.)
 #[test]
 fn a_pause_in_the_first_clause_keeps_the_runs_reading() {
@@ -1844,7 +1844,7 @@ fn gatta_and_luzzus_counters_take_one_legal_order_after_the_batch() {
             // strict-failure: the card reads one event of 2 counters, 5 or 6 by its controller's
             // order (CR 616.1, CR 616.1f; Hardened Scales' ruling: "you choose the order to apply
             // those effects"). "Put that many +1/+1 counters on it" parses as one counter repeated
-            // per damage (filed at PR time, with Brace for Impact, Temper and Test of Faith), so
+            // per damage (Command Zone #174, with Brace for Impact, Temper and Test of Faith), so
             // each counter takes its own legal order, 3 or 4.
             assert!([6, 7, 8].contains(&counters), "got {counters} counters");
         } else {
@@ -1896,8 +1896,8 @@ fn a_lifelink_answer_then_gatta_and_luzzus_rider() {
         let counters = plus_counters(&runner, child);
         if scales {
             // strict-failure: the card reads one event of 2 counters, 5 or 6 by its controller's
-            // order (CR 616.1, CR 616.1f; Hardened Scales' ruling); the per-counter parse (filed
-            // at PR time) gives each counter its own legal order, 3 or 4.
+            // order (CR 616.1, CR 616.1f; Hardened Scales' ruling); the per-counter parse (Command
+            // Zone #174) gives each counter its own legal order, 3 or 4.
             assert!([6, 7, 8].contains(&counters), "got {counters} counters");
         } else {
             assert_eq!(counters, 2);

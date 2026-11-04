@@ -3334,8 +3334,8 @@ pub(crate) fn with_damage_batch<T>(
 
 /// CR 608.2f + CR 611.3a: run `body` under guards a batch already read. The applications
 /// don't travel: consumed_replacement_applies_in_combat_batch reads them only for combat.
-/// Filed: Awe Strike on Thrashing Wumpus (CR 615.8) covers only the first portion; the issue
-/// number is added at PR time.
+/// Filed: Awe Strike on Thrashing Wumpus (CR 615.8) covers only the first portion
+/// (Command Zone #173).
 fn with_settled_damage_guards<T>(
     state: &mut GameState,
     settled_guards: Vec<SettledDamageGuard>,

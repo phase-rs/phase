@@ -32646,8 +32646,11 @@ mod tests {
 
     /// `while_antecedent_clause` reads a guard only inside the antecedent: a
     /// " while " after the comma that ends it is not the shield's guard. No
-    /// printed Oracle line has " while " only after the antecedent's comma, so
-    /// this is a building-block test on a phrase.
+    /// printed Oracle line has " while " after the antecedent's comma, so this is
+    /// a building-block test on a phrase. The nearest printed card carries its
+    /// guard inside the antecedent: Undergrowth Champion, "If damage would be
+    /// dealt to this creature while it has a +1/+1 counter on it, prevent that
+    /// damage and remove a +1/+1 counter from this creature." (CR 614.1a).
     #[test]
     fn while_antecedent_clause_ignores_a_while_after_the_antecedent_comma() {
         assert_eq!(
