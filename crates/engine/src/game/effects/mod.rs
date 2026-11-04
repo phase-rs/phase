@@ -15566,7 +15566,10 @@ fn is_selected_owner_library_shuffle_operation(ability: &ResolvedAbility) -> boo
         Effect::ChangeZoneAll {
             origin: None,
             destination: Zone::Library,
-            target: TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. },
+            target: TargetFilter::ParentTarget
+                | TargetFilter::ParentTargetSlot { .. }
+                | TargetFilter::PostReplacementDamageTarget
+                | TargetFilter::PostReplacementDamageTargetOwner,
             library_position: None,
             library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
             random_order: false,
