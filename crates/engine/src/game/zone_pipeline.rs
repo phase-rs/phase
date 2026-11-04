@@ -2195,10 +2195,8 @@ fn mark_staged_member_terminal(
                     destroyed = Some((member.identity.object_id, operation.source));
                 }
             } else {
-                change_zone_bookkeeping = Some((
-                    member.identity.object_id,
-                    member.approved_event.clone(),
-                ));
+                change_zone_bookkeeping =
+                    Some((member.identity.object_id, member.approved_event.clone()));
             }
             member.state = StagedBatchMemberState::Terminal;
             member.terminal = Some(terminal);

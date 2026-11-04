@@ -4400,13 +4400,11 @@ impl ResolutionStack {
                     // exactly {root} ∪ {its linked children} — never a second,
                     // independent owner.
                     if child.staged.is_some()
-                        && !(parent.staged.is_some()
-                            && parent.component_delivery_parent.is_none())
+                        && !(parent.staged.is_some() && parent.component_delivery_parent.is_none())
                     {
                         return Err(ResolutionStackError::InvalidPayload {
                             frame: FrameKind::BatchDelivery,
-                            message:
-                                "a staged component child has no staged original owner".into(),
+                            message: "a staged component child has no staged original owner".into(),
                         });
                     }
                     for id in [

@@ -26,10 +26,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, Duration, Effect, EffectKind,
-    QuantityExpr, ReplacementDefinition, ReplacementMode, ResolvedAbility, TargetFilter,
-    TargetRef,
+    QuantityExpr, ReplacementDefinition, ReplacementMode, ResolvedAbility, TargetFilter, TargetRef,
 };
-use engine::types::replacements::ReplacementEvent;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -41,6 +39,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
