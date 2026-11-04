@@ -3361,6 +3361,25 @@ mod recorded_niv_table {
         );
     }
 
+    /// CR 732.2a + CR 120.3a + CR 104.2a: at two seats the suggestion reaches the lone
+    /// opponent's 29 life over two pings a repetition, 15, and its take ends the game.
+    #[test]
+    fn a_two_seat_recorded_niv_table_offers_and_takes_fifteen() {
+        let Some(mut runner) = offered(&[20, 32], &[], 0, false) else {
+            return;
+        };
+        let state = runner.state();
+        assert_eq!(lives(state), [20, 29]);
+        assert_eq!(offer_count(state), IterationCount::Fixed(15));
+        let declared = suggestion(state);
+        assert_eq!(take(&mut runner, 15, declared), 15);
+        assert!(
+            won_by_p0(runner.state()),
+            "{:?}",
+            runner.state().waiting_for
+        );
+    }
+
     /// CR 702.11c + CR 104.2a: a hexproof seat is in no legal set, so the suggestion reaches the
     /// two targetable opponents' 29 + 25 life at two pings a repetition and its take ends with
     /// the hexproof seat still in the game.

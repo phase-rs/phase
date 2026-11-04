@@ -129,8 +129,6 @@ pub(crate) struct PerformedReach {
     pub(crate) decisions: Vec<PinnedDecision>,
     /// The repetitions its proposer is still in the game after.
     pub(crate) reach: u32,
-    /// CR 800.4a: the seats that left the game in each performed repetition.
-    pub(crate) departures: Vec<PredictedDeparture>,
     /// CR 104.2a: the proposer, when the performance ended the game with it winning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) winner: Option<PlayerId>,
@@ -1823,7 +1821,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
             )? {
                 Some(mut parts) => {
                     performed_reaches =
-                        perform_published(&mut parts, &s_n, &items, span.reach, holder);
+                        perform_published(&mut parts, &s_n, &items, span.reach, holder)?;
                     let delta = ResourceVector::period(prior, current);
                     (delta, None, Some(parts), growth, CountedBy::Threshold)
                 }
@@ -2603,7 +2601,6 @@ pub(crate) fn perform_declared(
     PerformedReach {
         decisions: declared.decisions.clone(),
         reach: count.survived(holder),
-        departures: count.departures,
         winner,
     }
 }
@@ -2630,10 +2627,10 @@ fn perform_published(
     items: &[PeriodItem],
     reach: PeriodReach,
     holder: PlayerId,
-) -> Vec<PerformedReach> {
+) -> Result<Vec<PerformedReach>, OfferRefusal> {
     use crate::analysis::decision_template::{IterationCount, ReplayMode};
     let IterationCount::Fixed(n) = parts.schema.iteration_count else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut performed = Vec::new();
     let mut published = None;
@@ -2658,11 +2655,16 @@ fn perform_published(
         }
     }
     if let Some(record) = published {
+        // CR 732.2a: a published declaration its proposer survives no repetition of commits
+        // nothing, so it is refused as the analytic tail refuses it.
+        if record.reach == 0 {
+            return Err(OfferRefusal::SurvivesNoRepetition);
+        }
         parts.schema.iteration_count = IterationCount::Fixed(record.reach);
         parts.schema.deliverable_capacity = record.reach;
         parts.predicted_winner = record.winner;
     }
-    performed
+    Ok(performed)
 }
 
 /// Every span the current trace names, with the confirmer's verdict on each at `state`, which
@@ -3115,6 +3117,38 @@ mod tests {
             OfferRefusal::LifeChangeUnrepresentable {
                 player: PlayerId(0)
             }
+        );
+    }
+
+    /// CR 732.2a + CR 704.5a: a published declaration its proposer survives no repetition of is
+    /// refused, never offered at `Fixed(0)`.
+    #[test]
+    fn a_published_declaration_reaching_no_repetition_is_refused() {
+        use crate::analysis::decision_template::{
+            DecisionGroupKey, DecisionKind, DecisionTemplate, IterationCount, ReplayMode,
+        };
+        let mut start = GameState::new_two_player(7);
+        start.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        start.players[0].life = 0;
+        let declared = DecisionTemplate {
+            owner: PlayerId(0),
+            decisions: Vec::new(),
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(1),
+            },
+            key: DecisionGroupKey::from_sources(&[], DecisionKind::LoopChoice),
+        };
+        let reached =
+            perform_declared(&start, &[], PeriodReach::InStep, PlayerId(0), &declared, 1).reach;
+        assert_eq!(reached, 0);
+        let mut parts =
+            crate::game::engine::counted_offer(&[start.clone()], Vec::new(), 1, 1, None);
+        parts.declaration = Some(declared);
+        assert_eq!(
+            perform_published(&mut parts, &start, &[], PeriodReach::InStep, PlayerId(0)),
+            Err(OfferRefusal::SurvivesNoRepetition)
         );
     }
 
