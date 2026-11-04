@@ -2796,6 +2796,49 @@ fn cant_attack_scoped_player_only_variant() {
     );
 }
 
+/// CR 508.1c + CR 508.6: Bloodthirster / Port Razer — "This creature can't attack
+/// a player it has already attacked this turn." The defended scope is the
+/// creature's OWN attack history, not a blanket prohibition. Before this arm
+/// existed the history rider was left unconsumed after the bare " a player" match,
+/// the whole line fell through to the blanket `CantAttack` arm, and the creature
+/// could not attack any opponent at all (issue #8064).
+///
+/// Both printed printings normalize their subject to the self-reference the static
+/// grammar understands (`This creature` and the card name both become `~`), so the
+/// subject axis is covered by the shared self-reference combinator rather than a
+/// per-card string.
+#[test]
+fn cant_attack_player_already_attacked_scopes_to_the_source_history() {
+    for line in [
+        "This creature can't attack a player it has already attacked this turn.",
+        "~ can't attack a player it has already attacked this turn.",
+    ] {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} must parse"));
+        assert_eq!(def.mode, StaticMode::CantAttack, "{line}");
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
+        assert_eq!(
+            def.attack_defended,
+            Some(crate::types::triggers::AttackTargetFilter::PlayerAttackedBySourceThisTurn),
+            "{line}: the restriction must scope to players this creature already attacked, got {:?}",
+            def.attack_defended
+        );
+        assert!(
+            def.condition.is_none(),
+            "{line}: the history rider belongs to the defended scope, not a gate; got {:?}",
+            def.condition
+        );
+    }
+
+    // Control: the bare self restriction is still a blanket `CantAttack` with no
+    // defended scope, so the new arm cannot swallow it.
+    let bare = parse_static_line("~ can't attack.").expect("bare cant attack");
+    assert_eq!(bare.mode, StaticMode::CantAttack);
+    assert_eq!(
+        bare.attack_defended, None,
+        "a bare CantAttack must stay unscoped"
+    );
+}
+
 /// CR 508.1b + CR 508.1c: The scoped-attack splitter must not suppress the
 /// existing bare-attack and cant-attack-or-block splitters.
 #[test]

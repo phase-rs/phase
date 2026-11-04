@@ -42458,3 +42458,117 @@ fn trigger_you_remove_typed_counter_filters_on_its_kind() {
         })
     );
 }
+
+const BARRACKS_OF_THE_THOUSAND: &str = "(Transforms from Thousand Moons Smithy.)\n{T}: Add {W}.\nWhenever you cast an artifact or creature spell using mana produced by Barracks of the Thousand, create a white Gnome Soldier artifact creature token with \"This token's power and toughness are each equal to the number of artifacts and/or creatures you control.\"";
+const TECUTLAN_THE_SEARING_RIFT: &str = "(Transforms from Brass's Tunnel-Grinder.)\n{T}: Add {R}.\nWhenever you cast a permanent spell using mana produced by Tecutlan, discover X, where X is that spell's mana value.";
+const THE_MYRIAD_POOLS: &str = "(Transforms from The Everflowing Well.)\n{T}: Add {U}.\nWhenever you cast a permanent spell using mana produced by The Myriad Pools, up to one other target permanent you control becomes a copy of that spell until end of turn.";
+
+/// The SpellCast trigger of a card whose text parsed with no gap.
+fn sole_spell_cast_trigger(name: &str, text: &str, types: &[&str]) -> TriggerDefinition {
+    let types: Vec<String> = types.iter().map(|ty| (*ty).to_string()).collect();
+    let parsed = parse_oracle_text(text, name, &[], &types, &[]);
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("{name}: expected one trigger, got {:?}", parsed.triggers);
+    };
+    assert_eq!(trigger.mode, TriggerMode::SpellCast, "{name}");
+    let execute = trigger.execute.as_ref().expect("the trigger has an effect");
+    assert!(
+        !has_unimplemented(execute),
+        "{name}: reach guard, the effect must parse without a gap: {execute:?}"
+    );
+    trigger.clone()
+}
+
+/// CR 106.3 + CR 601.2h + CR 603.4: "using mana produced by ~" is part of the
+/// trigger event, read from the triggering spell's payment. It lowers to a
+/// fire-time comparison naming the listener, with no intervening "if", and it
+/// leaves the spell filter and the effect intact for all three printed heads.
+#[test]
+fn using_mana_produced_by_self_lowers_to_an_event_time_payment_read() {
+    let gate = TriggerCondition::EventTime {
+        condition: Box::new(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::TriggeringSpell,
+                    metric: CastManaSpentMetric::FromSource {
+                        source_filter: TargetFilter::SelfRef,
+                    },
+                },
+            },
+            comparator: Comparator::GT,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        }),
+    };
+
+    let barracks = sole_spell_cast_trigger(
+        "Barracks of the Thousand",
+        BARRACKS_OF_THE_THOUSAND,
+        &["Artifact", "Land"],
+    );
+    assert_eq!(barracks.condition, Some(gate.clone()));
+    assert_eq!(
+        barracks.valid_card,
+        Some(TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                TargetFilter::Typed(TypedFilter::creature()),
+            ],
+        })
+    );
+    let execute = barracks.execute.expect("Barracks has an effect");
+    assert!(
+        matches!(&*execute.effect, Effect::Token { .. }),
+        "{:?}",
+        execute.effect
+    );
+
+    let tecutlan = sole_spell_cast_trigger(
+        "Tecutlan, the Searing Rift",
+        TECUTLAN_THE_SEARING_RIFT,
+        &["Land"],
+    );
+    assert_eq!(tecutlan.condition, Some(gate.clone()));
+    assert_eq!(
+        tecutlan.valid_card,
+        Some(TargetFilter::Typed(TypedFilter::permanent()))
+    );
+    let execute = tecutlan.execute.expect("Tecutlan has an effect");
+    assert!(
+        matches!(&*execute.effect, Effect::Discover { .. }),
+        "{:?}",
+        execute.effect
+    );
+
+    let pools =
+        sole_spell_cast_trigger("The Myriad Pools", THE_MYRIAD_POOLS, &["Artifact", "Land"]);
+    assert_eq!(pools.condition, Some(gate));
+    assert_eq!(
+        pools.valid_card,
+        Some(TargetFilter::Typed(TypedFilter::permanent()))
+    );
+    let execute = pools.execute.expect("The Myriad Pools has an effect");
+    assert!(
+        matches!(&*execute.effect, Effect::BecomeCopy { .. }),
+        "{:?}",
+        execute.effect
+    );
+}
+
+/// CR 603.2: the peel takes only a trailing self-reference qualifier and leaves
+/// every other tail, including a source the combinator cannot bind, in the
+/// residual.
+#[test]
+fn peel_trailing_cast_mana_source_splits_only_a_trailing_self_reference() {
+    assert_eq!(
+        peel_trailing_cast_mana_source("permanent spell using mana produced by ~"),
+        ("permanent spell", Some(cast_mana_source_condition()))
+    );
+    assert_eq!(
+        peel_trailing_cast_mana_source("permanent spell"),
+        ("permanent spell", None)
+    );
+    assert_eq!(
+        peel_trailing_cast_mana_source("spell using mana produced by a treasure"),
+        ("spell using mana produced by a treasure", None)
+    );
+}

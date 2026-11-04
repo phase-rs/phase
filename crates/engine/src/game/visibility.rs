@@ -1549,6 +1549,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // itself. Viewer projections are display-only clones; the authoritative
     // state the drain resumes from is never filtered.
     filtered.pending_discard_batch = None;
+    // CR 400.2: the single-card sibling of the batch above retains the object
+    // ID of a card still in a hand (a hidden zone), and Library of Leng can
+    // send it to another hidden zone. Server-only for every viewer.
+    filtered.pending_single_discard = None;
     // CR 401.4 + CR 608.2c: Queued owner batches retain exact hidden-card
     // identities and origins for later private choices, and the orders owners
     // have already chosen (CR 401.4: the order isn't revealed). The public
@@ -4041,7 +4045,7 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 ///
 /// Not carriers because no viewer receives them: `pending_cost_move_resume`,
 /// `pending_deferred_life_cost_resume`, `pending_triggered_mana_resume`,
-/// `pending_discard_batch`, `resolution_stack` and the other private resume cursors
+/// `pending_discard_batch`, `pending_single_discard`, `resolution_stack` and the other private resume cursors
 /// cleared above, `payment_transaction` (`None` in every projection); not serialized:
 /// `pending_discard_for_cost`, `resolving_player_scope_tail`,
 /// `resolving_created_token_seats`;
@@ -12449,6 +12453,54 @@ mod tests {
 
         assert!(
             state.pending_discard_batch.is_some(),
+            "filtering must not alter the authoritative server carrier"
+        );
+    }
+
+    /// CR 400.2: `pending_single_discard` names a card still in a HAND (a hidden
+    /// zone) and must be absent from every viewer projection, mirroring
+    /// `pending_discard_batch`. REVERT PROBE: delete
+    /// `filtered.pending_single_discard = None;` from `filter_state_for_scope`.
+    #[test]
+    fn parked_single_discard_is_absent_from_every_viewer_projection() {
+        let mut state = GameState::new_two_player(42);
+        let hidden = create_object(
+            &mut state,
+            CardId(70_008),
+            PlayerId(0),
+            "Hand Secret".to_string(),
+            Zone::Hand,
+        );
+        state.pending_single_discard =
+            Some(Box::new(crate::types::game_state::PendingSingleDiscard {
+                paused_card: crate::types::identifiers::ObjectIncarnationRef::of(hidden, 0),
+                player: PlayerId(0),
+                source_id: None,
+            }));
+
+        let authoritative = serde_json::to_string(&state.pending_single_discard)
+            .expect("the authoritative carrier serializes");
+        assert!(
+            authoritative.contains(&hidden.0.to_string()),
+            "reach guard: the authoritative carrier really does hold the hand card's ID"
+        );
+
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let view = filter_state_for_viewer(&state, viewer);
+            assert!(
+                view.pending_single_discard.is_none(),
+                "viewer {viewer:?} must not receive the parked single discard"
+            );
+            let wire = serde_json::to_string(&view).expect("the filtered snapshot serializes");
+            assert!(
+                !wire.contains("\"pendingSingleDiscard\":{")
+                    && !wire.contains("\"pending_single_discard\":{"),
+                "viewer {viewer:?}'s snapshot must not serialize the carrier at all"
+            );
+        }
+
+        assert!(
+            state.pending_single_discard.is_some(),
             "filtering must not alter the authoritative server carrier"
         );
     }

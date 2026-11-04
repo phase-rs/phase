@@ -52,6 +52,7 @@ use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
     split_sentence_units,
 };
+use super::oracle_nom::quantity::parse_using_mana_produced_by_self;
 use super::oracle_nom::target::parse_chosen_object_reference;
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
 use super::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
@@ -7017,7 +7018,8 @@ fn attack_clause_names_attacked_player(def: &TriggerDefinition) -> bool {
             | AttackTargetFilter::Battle
             | AttackTargetFilter::Owner
             | AttackTargetFilter::OwnerOrPlaneswalker
-            | AttackTargetFilter::PlayerOrPermanents,
+            | AttackTargetFilter::PlayerOrPermanents
+            | AttackTargetFilter::PlayerAttackedBySourceThisTurn,
         )
         | None => false,
     }
@@ -21056,6 +21058,8 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         if let Some(constraint) = turn_constraint {
             def.constraint = Some(constraint);
         }
+        let (payload, mana_source_gate) = peel_trailing_cast_mana_source(payload);
+        attach_event_window(&mut def, mana_source_gate);
 
         // CR 601.2a: pre-extract the "from <zone>" cast-origin tail BEFORE
         // running the type-phrase parser. `parse_type_phrase_folding`'s
@@ -24628,6 +24632,36 @@ pub(crate) fn parse_event_window(input: &str) -> OracleResult<'_, TriggerConditi
 fn peel_trailing_event_window(input: &str) -> (&str, Option<TriggerCondition>) {
     match scan_preceded(input, |i| all_consuming(parse_event_window).parse(i)) {
         Some((before, window, _)) => (before.trim_end(), Some(window)),
+        None => (input, None),
+    }
+}
+
+/// CR 106.3 + CR 601.2h: "using mana produced by ~" as a comparison over the
+/// triggering spell's payment: at least one mana spent on it came from this
+/// trigger's own source. Attached without an intervening "if", see
+/// [`peel_trailing_cast_mana_source`].
+fn cast_mana_source_condition() -> TriggerCondition {
+    TriggerCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::TriggeringSpell,
+                metric: CastManaSpentMetric::FromSource {
+                    source_filter: TargetFilter::SelfRef,
+                },
+            },
+        },
+        comparator: Comparator::GT,
+        rhs: QuantityExpr::Fixed { value: 0 },
+    }
+}
+
+/// CR 603.2 + CR 603.4: peel a "using mana produced by ~" qualifier that ends a
+/// cast head's payload. It is part of the trigger event, not an intervening "if".
+fn peel_trailing_cast_mana_source(input: &str) -> (&str, Option<TriggerCondition>) {
+    match scan_preceded(input, |i| {
+        all_consuming(parse_using_mana_produced_by_self).parse(i)
+    }) {
+        Some((before, (), _)) => (before.trim_end(), Some(cast_mana_source_condition())),
         None => (input, None),
     }
 }

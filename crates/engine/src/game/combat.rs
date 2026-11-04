@@ -4089,6 +4089,7 @@ pub fn compute_combat_tax(
                 if let Some(filter) = defended {
                     if !super::restrictions::attack_target_matches_defended_scope(
                         state,
+                        source_id,
                         attack_target.as_ref(),
                         filter,
                         source_obj.controller,
@@ -5543,6 +5544,7 @@ fn attack_passes_neighbor_restriction(
         };
         if !crate::game::restrictions::attack_target_matches_defended_scope(
             state,
+            source.id,
             Some(&target),
             &crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker,
             nearest,
@@ -5615,6 +5617,7 @@ fn attack_passes_temporary_prohibition(
         }
         if crate::game::restrictions::attack_target_matches_defended_scope(
             state,
+            *source,
             Some(&target),
             defended,
             protected,
@@ -7095,12 +7098,20 @@ pub(super) fn commit_attack_declaration(
     state
         .creatures_attacked_this_turn
         .extend(attacker_ids.iter().copied());
-    for (attacker_id, defending_player) in creature_attacked_defenders {
+    // CR 508.6: a creature has "attacked [a player]" only when declared attacking
+    // that player; attacking a planeswalker or battle that player controls or
+    // protects is not attacking the player (CR 506.3), so those declarations are
+    // not recorded in the per-creature player ledger.
+    for attacker in combat
+        .attackers
+        .iter()
+        .filter(|attacker| matches!(attacker.attack_target, AttackTarget::Player(_)))
+    {
         state
             .creature_attacked_defenders_this_turn
-            .entry(attacker_id)
+            .entry(attacker.object_id)
             .or_default()
-            .insert(defending_player);
+            .insert(attacker.defending_player);
     }
 
     // Use the first attacker's defending player for the event
@@ -11174,6 +11185,235 @@ mod tests {
             ));
             assert!(!combat_tax_relevant_kinds(&context).contains(&StaticModeKind::CantBeBlocked));
         }
+    }
+
+    /// CR 508.1c + CR 508.6: Bloodthirster — "This creature can't attack a player it
+    /// has already attacked this turn." The restriction is PER PAIRING: it must not
+    /// stop the creature attacking at all (the shipped misparse lowered the line to
+    /// a blanket `CantAttack` — issue #8064), and once it has attacked an opponent it
+    /// must stop a repeat attack on THAT opponent while leaving every other opponent
+    /// attackable.
+    #[test]
+    fn previously_attacked_player_restriction_narrows_only_the_attacked_opponent() {
+        const BLOODTHIRSTER: &str =
+            "This creature can't attack a player it has already attacked this turn.";
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.active_player = PlayerId(0);
+        state.turn_number = 2;
+
+        let bloodthirster = create_creature(&mut state, PlayerId(0), "Bloodthirster", 6, 6);
+        let def = parse_static_line(BLOODTHIRSTER).expect(BLOODTHIRSTER);
+        assert_eq!(def.mode, StaticMode::CantAttack);
+        assert_eq!(
+            def.attack_defended,
+            Some(crate::types::triggers::AttackTargetFilter::PlayerAttackedBySourceThisTurn)
+        );
+        state
+            .objects
+            .get_mut(&bloodthirster)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        let legal_targets = |state: &GameState| {
+            let gates = CombatStaticGates::compute(state);
+            let attackable = attackable_defender_targets(state);
+            legal_attack_targets_for_attacker(
+                state,
+                bloodthirster,
+                &attackable,
+                &gates,
+                &[PlayerId(0)],
+            )
+        };
+
+        // Before any attack this turn, every opponent is attackable. The reported
+        // bug was that NONE was.
+        let legal = legal_targets(&state);
+        assert!(
+            legal.contains(&AttackTarget::Player(PlayerId(1)))
+                && legal.contains(&AttackTarget::Player(PlayerId(2))),
+            "the restriction must not remove any opponent before an attack: {legal:?}"
+        );
+
+        // First combat: attack P1.
+        let mut events = Vec::new();
+        declare_attackers(
+            &mut state,
+            &[(bloodthirster, AttackTarget::Player(PlayerId(1)))],
+            &mut events,
+        )
+        .expect("the first attack on an opponent is legal");
+
+        // CR 511.3 end of combat ends the phase while the per-turn attack ledger
+        // (CR 508.6) survives to cleanup, and Bloodthirster's own trigger untaps it
+        // for the additional combat phase.
+        state.combat = None;
+        state.objects.get_mut(&bloodthirster).unwrap().tapped = false;
+
+        let legal = legal_targets(&state);
+        assert!(
+            !legal.contains(&AttackTarget::Player(PlayerId(1))),
+            "a player it has already attacked this turn must not be attackable again: {legal:?}"
+        );
+        assert!(
+            legal.contains(&AttackTarget::Player(PlayerId(2))),
+            "every other opponent stays attackable: {legal:?}"
+        );
+
+        assert!(
+            declare_attackers(
+                &mut state,
+                &[(bloodthirster, AttackTarget::Player(PlayerId(1)))],
+                &mut events,
+            )
+            .is_err(),
+            "the declaration engine must refuse the repeat attack on P1"
+        );
+        events.clear();
+        declare_attackers(
+            &mut state,
+            &[(bloodthirster, AttackTarget::Player(PlayerId(2)))],
+            &mut events,
+        )
+        .expect("attacking a different opponent stays legal");
+    }
+
+    /// CR 506.3 + CR 508.6: "can't attack a player it has already attacked this
+    /// turn" restricts attacks on a PLAYER only. Attacking a planeswalker or battle
+    /// is not attacking a player, so the restriction never stops one (official Port
+    /// Razer ruling, 2024-04-12: "Port Razer's last ability doesn't stop it from
+    /// attacking a planeswalker or battle during any combat").
+    #[test]
+    fn previously_attacked_player_restriction_leaves_planeswalker_attacks_legal() {
+        const PORT_RAZER: &str =
+            "This creature can't attack a player it has already attacked this turn.";
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.active_player = PlayerId(0);
+        state.turn_number = 2;
+
+        let razer = create_creature(&mut state, PlayerId(0), "Port Razer", 4, 4);
+        let def = parse_static_line(PORT_RAZER).expect(PORT_RAZER);
+        state
+            .objects
+            .get_mut(&razer)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        let walker_card = crate::types::identifiers::CardId(state.next_object_id);
+        let walker = create_object(
+            &mut state,
+            walker_card,
+            PlayerId(1),
+            "Jace".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&walker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Planeswalker);
+
+        let mut events = Vec::new();
+        declare_attackers(
+            &mut state,
+            &[(razer, AttackTarget::Player(PlayerId(1)))],
+            &mut events,
+        )
+        .expect("the first attack on P1 is legal");
+
+        state.combat = None;
+        state.objects.get_mut(&razer).unwrap().tapped = false;
+
+        let gates = CombatStaticGates::compute(&state);
+        let attackable = attackable_defender_targets(&state);
+        let legal =
+            legal_attack_targets_for_attacker(&state, razer, &attackable, &gates, &[PlayerId(0)]);
+        assert!(
+            !legal.contains(&AttackTarget::Player(PlayerId(1))),
+            "guard: the already attacked player is still prohibited per pairing, so the \
+             planeswalker result below is not vacuous: {legal:?}"
+        );
+        assert!(
+            legal.contains(&AttackTarget::Planeswalker(walker)),
+            "attacking a planeswalker is not attacking a player, so it stays a legal \
+             target: {legal:?}"
+        );
+        assert!(
+            attacker_can_attack_target(
+                &state,
+                razer,
+                AttackTarget::Planeswalker(walker),
+                &gates,
+                &[PlayerId(0)],
+            ),
+            "attacking a planeswalker is not attacking a player (CR 506.3)"
+        );
+        assert!(
+            !attacker_can_attack_target(
+                &state,
+                razer,
+                AttackTarget::Player(PlayerId(1)),
+                &gates,
+                &[PlayerId(0)],
+            ),
+            "the already-attacked PLAYER stays prohibited"
+        );
+    }
+
+    /// CR 508.6 + CR 506.3: attacking a planeswalker a player controls is not
+    /// attacking that player, so it does not record a player attack — the same
+    /// player stays attackable in the additional combat.
+    #[test]
+    fn attacking_a_planeswalker_does_not_count_as_attacking_its_controller() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.active_player = PlayerId(0);
+        state.turn_number = 2;
+
+        let razer = create_creature(&mut state, PlayerId(0), "Port Razer", 4, 4);
+        let def = parse_static_line(
+            "This creature can't attack a player it has already attacked this turn.",
+        )
+        .unwrap();
+        state
+            .objects
+            .get_mut(&razer)
+            .unwrap()
+            .static_definitions
+            .push(def);
+        let walker = create_planeswalker(&mut state, PlayerId(1), "Jace");
+
+        let mut events = Vec::new();
+        declare_attackers(
+            &mut state,
+            &[(razer, AttackTarget::Planeswalker(walker))],
+            &mut events,
+        )
+        .expect("attacking a planeswalker is legal");
+        assert!(
+            state.creatures_attacked_this_turn.contains(&razer),
+            "guard: the attack was declared"
+        );
+
+        state.combat = None;
+        state.objects.get_mut(&razer).unwrap().tapped = false;
+
+        let gates = CombatStaticGates::compute(&state);
+        assert!(
+            attacker_can_attack_target(
+                &state,
+                razer,
+                AttackTarget::Player(PlayerId(1)),
+                &gates,
+                &[PlayerId(0)],
+            ),
+            "P1 was never attacked directly, so it stays attackable"
+        );
     }
 
     fn setup() -> GameState {
