@@ -98,11 +98,12 @@ use crate::types::ability::{
     ContinuousModification, ControllerRef, CountScope, DelayedTriggerCondition, Duration,
     EachDamageRecipient, Effect, EffectScope, FilterProp, ForEachCategoryAction, GuessSubject,
     KeeperConstraint, ManaProduction, ModalChoice, ModalSelectionCondition,
-    ModalSelectionConstraint, MultiTargetSpec, NameStickerSet, ObjectScope, PlayerFilter,
-    PlayerScope, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation,
-    ReplacementCondition, ResolvedAbility, StaticCondition, TargetFilter, TokenAttackDestination,
-    TrackedAnaphorSource, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    TriggerLimitSpend, TypedFilter, UnlessPayModifier, ZoneChangeClause, ZoneChoiceCandidateSource,
+    ModalSelectionConstraint, MultiTargetSpec, NameStickerSet, ObjectScope, ParsedCondition,
+    PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    RepeatContinuation, ReplacementCondition, ResolvedAbility, StaticCondition, TargetFilter,
+    TokenAttackDestination, TrackedAnaphorSource, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TriggerLimitSpend, TypedFilter, UnlessPayModifier, ZoneChangeClause,
+    ZoneChoiceCandidateSource,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::keywords::{DisguiseCost, Keyword};
@@ -3022,8 +3023,12 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             ));
             acc
         }
-        QuantityRef::LandsPlayedThisTurn { player, .. } => {
-            let mut acc = Axes::NONE;
+        // CR 305.2a: the player's land-play count, or this turn's records when origins are named.
+        QuantityRef::LandsPlayedThisTurn { player, from_zones } => {
+            let mut acc = Axes::history_of(match from_zones {
+                None => HistoryMember::PlayerLandsPlayedThisTurn,
+                Some(_) => HistoryMember::LandsPlayedThisTurnByPlayer,
+            });
             acc = acc.or(scan_player_scope(player));
             acc
         }
@@ -3668,6 +3673,199 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
             acc = acc.or(scan_player_filter(filter, mode));
             acc
         }
+    }
+}
+
+/// CR 601.2f + CR 602.5b: what a parsed cost-reduction, activation or per-player gate reads when
+/// it is checked. A leaf sharing its name with an `AbilityCondition` or `StaticCondition` arm
+/// reads what that arm reads; every other leaf reads what `restrictions::evaluate_condition`
+/// reads for it.
+fn scan_parsed_condition(x: &ParsedCondition, mode: ScanMode) -> Axes {
+    // A battlefield census with no filter to scan.
+    const CENSUS: Axes = Axes {
+        event: false,
+        sibling: true,
+        projected: false,
+        history: HistoryReads::NONE,
+    };
+    // A per-turn or per-game journal `project_out_resources` clears.
+    const JOURNAL: Axes = Axes {
+        event: false,
+        sibling: false,
+        projected: true,
+        history: HistoryReads::NONE,
+    };
+    match x {
+        ParsedCondition::SourceIsAttacking => {
+            scan_static_condition(&StaticCondition::SourceIsAttacking, mode)
+        }
+        ParsedCondition::SourceIsBlocked => {
+            scan_static_condition(&StaticCondition::SourceIsBlocked, mode)
+        }
+        ParsedCondition::SourceIsAttackingOrBlocking => {
+            scan_static_condition(&StaticCondition::SourceIsAttacking, mode).or(
+                scan_static_condition(&StaticCondition::SourceIsBlocking, mode),
+            )
+        }
+        ParsedCondition::SourceEnteredThisTurn => {
+            scan_ability_condition(&AbilityCondition::SourceEnteredThisTurn, mode)
+        }
+        ParsedCondition::HasCityBlessing => {
+            scan_ability_condition(&AbilityCondition::HasCityBlessing, mode)
+        }
+        ParsedCondition::HasEnduringStory => {
+            scan_ability_condition(&AbilityCondition::HasEnduringStory, mode)
+        }
+        ParsedCondition::HasMaxSpeed => {
+            scan_ability_condition(&AbilityCondition::HasMaxSpeed, mode)
+        }
+        ParsedCondition::IsYourTurn => scan_ability_condition(&AbilityCondition::IsYourTurn, mode),
+        ParsedCondition::QuantityComparison {
+            lhs,
+            comparator: _,
+            rhs,
+        } => scan_quantity_expr(lhs, mode).or(scan_quantity_expr(rhs, mode)),
+        // Their twins' arms read none of the payload: `StaticCondition::SourceInZone`,
+        // `AbilityCondition::{SourceLacksKeyword, CompletedDungeon, CurrentPhaseIs}`.
+        ParsedCondition::SourceInZone { zone: _ }
+        | ParsedCondition::SourceLacksKeyword { keyword: _ }
+        | ParsedCondition::CompletedDungeon { specific: _ }
+        | ParsedCondition::CurrentPhaseIs { phases: _ } => Axes::NONE,
+        // CR 903.3d: as `AbilityCondition::ControlsCommander`, a battlefield census.
+        ParsedCondition::ControlsCommander { ownership: _ } => CENSUS,
+        // As `StaticCondition::OpponentPoisonAtLeast` (CR 122.1).
+        ParsedCondition::OpponentPoisonAtLeast { count: _ } => JOURNAL,
+        // The source's own power, counters, types or colors.
+        ParsedCondition::SourcePowerAtLeast { minimum: _ }
+        | ParsedCondition::SourceHasCounterAtLeast {
+            counter_type: _,
+            count: _,
+        }
+        | ParsedCondition::SourceHasNoCounter { counter_type: _ }
+        | ParsedCondition::SourceIsCreature
+        | ParsedCondition::SourceIsColor { color: _ } => {
+            CENSUS.or(scan_object_scope(&ObjectScope::Source))
+        }
+        // The host's types and tapped state, an object other than the source.
+        ParsedCondition::SourceAttachedTo { required_type: _ }
+        | ParsedCondition::SourceUntappedAttachedTo { required_type: _ } => CENSUS,
+        ParsedCondition::CreaturesYouControlTotalPowerAtLeast { minimum: _ }
+        | ParsedCondition::YouControlLandSubtypeAny { subtypes: _ }
+        | ParsedCondition::YouControlSubtypeCountAtLeast {
+            subtype: _,
+            count: _,
+        }
+        | ParsedCondition::YouControlCoreTypeCountAtLeast {
+            core_type: _,
+            count: _,
+        }
+        | ParsedCondition::YouControlColorPermanentCountAtLeast { color: _, count: _ }
+        | ParsedCondition::YouControlLegendaryCreature
+        | ParsedCondition::YouControlNamedPlaneswalker { name: _ }
+        | ParsedCondition::YouControlCreatureWithPowerAtLeast { minimum: _ }
+        | ParsedCondition::YouControlCreatureWithPt {
+            power: _,
+            toughness: _,
+        }
+        | ParsedCondition::YouControlAnotherColorlessCreature
+        | ParsedCondition::YouControlSnowPermanentCountAtLeast { count: _ }
+        | ParsedCondition::YouControlDifferentPowerCreatureCountAtLeast { count: _ }
+        | ParsedCondition::YouControlLandsWithSameNameAtLeast { count: _ }
+        | ParsedCondition::YouControlNoCreatures => CENSUS,
+        ParsedCondition::ControlsCreatureWithKeyword {
+            controller,
+            keyword: _,
+        } => CENSUS.or(scan_controller_ref(controller)),
+        ParsedCondition::YouControlSubtypeOrGraveyardCardSubtype { subtype: _ } => {
+            CENSUS.or(scan_count_scope(&CountScope::Controller))
+        }
+        // Only a graveyard, hand or library is counted, never the battlefield.
+        ParsedCondition::ZoneCardCountAtLeast { zone: _, count: _ }
+        | ParsedCondition::ZoneCardTypeCountAtLeast { zone: _, count: _ }
+        | ParsedCondition::ZoneCoreTypeCardCountAtLeast {
+            zone: _,
+            core_type: _,
+            count: _,
+        }
+        | ParsedCondition::ZoneSubtypeCardCountAtLeast {
+            zone: _,
+            subtype: _,
+            count: _,
+        }
+        | ParsedCondition::HandSizeExact { count: _ }
+        | ParsedCondition::HandSizeOneOf { counts: _ } => scan_count_scope(&CountScope::Controller),
+        ParsedCondition::SourceAttackedThisTurn => {
+            Axes::history_of(HistoryMember::CreaturesAttackedThisTurn)
+        }
+        ParsedCondition::OpponentSearchedLibraryThisTurn => {
+            Axes::history_of(HistoryMember::PlayersWhoSearchedLibraryThisTurn)
+        }
+        ParsedCondition::YouAttackedThisTurn => {
+            Axes::history_of(HistoryMember::PlayersAttackedThisTurn)
+        }
+        ParsedCondition::YouAttackedSourceControllerThisTurn => {
+            Axes::history_of(HistoryMember::AttackedDefendersThisTurn)
+        }
+        ParsedCondition::YouAttackedWithAtLeast {
+            count: _,
+            filter: None,
+        } => Axes::history_of(HistoryMember::AttackingCreaturesThisTurn),
+        // The filter is matched against each attack declaration's snapshot.
+        ParsedCondition::YouAttackedWithAtLeast {
+            count: _,
+            filter: Some(filter),
+        } => Axes::history_of(HistoryMember::AttackerDeclarationsThisTurn).or(scan_target_filter(
+            filter,
+            FilterReadContext::SnapshotOrEvent,
+            mode,
+        )),
+        ParsedCondition::YouPlayedLandThisTurn => {
+            Axes::history_of(HistoryMember::PlayerLandsPlayedThisTurn)
+        }
+        ParsedCondition::YouDiscardedCardThisTurn => {
+            Axes::history_of(HistoryMember::PlayersWhoDiscardedCardThisTurn)
+        }
+        // The step's attacked players are no history member.
+        ParsedCondition::BeenAttackedThisStep => Axes {
+            history: HistoryReads::ALL,
+            ..Axes::NONE
+        },
+        ParsedCondition::FirstSpellThisGame
+        | ParsedCondition::YouCastNoncreatureSpellThisTurn
+        | ParsedCondition::YouCastSpellCountAtLeast { count: _ }
+        | ParsedCondition::YouGainedLifeThisTurn
+        | ParsedCondition::YouCreatedTokenThisTurn
+        | ParsedCondition::YouSacrificedArtifactThisTurn
+        | ParsedCondition::CreatureDiedThisTurn
+        | ParsedCondition::YouHadCreatureEnterThisTurn
+        | ParsedCondition::YouHadAngelOrBerserkerEnterThisTurn
+        | ParsedCondition::YouHadArtifactEnterThisTurn
+        | ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast { count: _ } => JOURNAL,
+        ParsedCondition::YouCastSpellThisTurn { filter } => {
+            JOURNAL.or(filter.as_ref().map_or(Axes::NONE, |filter| {
+                scan_target_filter(filter, FilterReadContext::SnapshotOrEvent, mode)
+            }))
+        }
+        ParsedCondition::BattlefieldEntriesThisTurn { filter, count: _ } => JOURNAL.or(
+            scan_target_filter(filter, FilterReadContext::SnapshotOrEvent, mode),
+        ),
+        ParsedCondition::QuantityVsEachOpponent {
+            lhs,
+            comparator: _,
+            rhs,
+        } => scan_quantity_ref(lhs, mode).or(scan_quantity_ref(rhs, mode)),
+        ParsedCondition::PlayerCountAtLeast { filter, minimum: _ } => {
+            scan_player_filter(filter, mode)
+        }
+        ParsedCondition::IsOpponentsTurn => Axes::NONE,
+        // CR 601.2c: the targets the spell being cast has chosen.
+        ParsedCondition::SpellTargetsFilter { filter } => {
+            scan_target_filter(filter, FilterReadContext::SnapshotOrEvent, mode)
+        }
+        ParsedCondition::And { conditions } | ParsedCondition::Or { conditions } => conditions
+            .iter()
+            .fold(Axes::NONE, |acc, x| acc.or(scan_parsed_condition(x, mode))),
+        ParsedCondition::Not { condition } => scan_parsed_condition(condition, mode),
     }
 }
 
@@ -5882,7 +6080,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         acc = acc.or(Axes::CONSERVATIVE);
     }
     // CR 601.2f + CR 602.2b: a cost reduction reads its count and its gate when the cost is
-    // determined; no walker descends a parsed gate, so a gated reduction stays fail-closed.
+    // determined.
     if let Some(crate::types::ability::CostReduction {
         count,
         condition,
@@ -5891,8 +6089,8 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
     }) = cost_reduction
     {
         acc = acc.or(scan_quantity_expr(count, mode));
-        if condition.is_some() {
-            acc = acc.or(Axes::CONSERVATIVE);
+        if let Some(condition) = condition {
+            acc = acc.or(scan_parsed_condition(condition, mode));
         }
     }
     acc
@@ -6854,22 +7052,25 @@ pub(crate) fn ability_definition_history(def: &AbilityDefinition) -> HistoryRead
         acc = acc.or(scan_ability_cost(cost, ScanMode::LoopFirewall));
     }
     for restriction in &def.activation_restrictions {
-        acc = acc.or(scan_activation_restriction(restriction));
+        acc = acc.or(scan_activation_restriction(
+            restriction,
+            ScanMode::LoopFirewall,
+        ));
     }
     acc.history
 }
 
 /// CR 602.5b: an activation restriction's read when the ability is activated.
-fn scan_activation_restriction(r: &crate::types::ability::ActivationRestriction) -> Axes {
+fn scan_activation_restriction(
+    r: &crate::types::ability::ActivationRestriction,
+    mode: ScanMode,
+) -> Axes {
     use crate::types::ability::ActivationRestriction;
     match r {
-        // A parsed condition is not descended by this walk.
         ActivationRestriction::RequiresCondition { condition } => {
-            if condition.is_some() {
-                Axes::CONSERVATIVE
-            } else {
-                Axes::NONE
-            }
+            condition.as_ref().map_or(Axes::NONE, |condition| {
+                scan_parsed_condition(condition, mode)
+            })
         }
         // Timing windows, an activation count the projected tallies hold, and the source's own
         // counters, level or designations.
@@ -8012,10 +8213,9 @@ mod tests {
     }
 
     /// CR 601.2f + CR 602.2b: Battlefield Butcher's cost reduction reads what its count reads;
-    /// Human Torch, Johnny Storm's Power-up, gated by a condition no walker descends, reads
-    /// everything.
+    /// Human Torch, Johnny Storm's Power-up, gated on his entering this turn, reads the turn.
     #[test]
-    fn a_cost_reduction_reads_its_count_and_a_gated_one_reads_everything() {
+    fn a_cost_reduction_reads_its_count_and_its_gate() {
         let butcher = || {
             printed_creature(
                 "Battlefield Butcher",
@@ -8049,7 +8249,33 @@ mod tests {
             ability_definition_history(&counted),
             HistoryReads::of(HistoryMember::CardsDiscardedThisTurnByPlayer)
         );
-        let torch = printed_creature(
+        let torch = human_torch_power_up();
+        assert_eq!(
+            torch
+                .cost_reduction
+                .as_ref()
+                .and_then(|reduction| reduction.condition.as_ref()),
+            Some(&ParsedCondition::SourceEnteredThisTurn),
+            "reach: the Power-up's reduction is gated on his entering this turn"
+        );
+        assert_eq!(
+            ability_definition_history(&torch),
+            HistoryReads::of(HistoryMember::TurnNumber)
+        );
+        assert_eq!(
+            reads(ability_definition_axes(&torch, ScanMode::LoopFirewall)),
+            (
+                false,
+                false,
+                true,
+                HistoryReads::of(HistoryMember::TurnNumber)
+            )
+        );
+    }
+
+    /// Human Torch, Johnny Storm's Power-up, from its verbatim Oracle text.
+    fn human_torch_power_up() -> AbilityDefinition {
+        printed_creature(
             "Human Torch, Johnny Storm",
             "Flying\nWhenever you draw a card, if you control another Hero, Human Torch deals 1 \
              damage to target opponent.\nPower-up — {6}{R}: Put three +1/+1 counters on Human \
@@ -8059,15 +8285,231 @@ mod tests {
         .abilities
         .into_iter()
         .find(|ability| ability.cost_reduction.is_some())
-        .expect("reach: the Power-up's reduction");
-        assert!(
-            torch
-                .cost_reduction
-                .as_ref()
-                .is_some_and(|reduction| reduction.condition.is_some()),
-            "reach: the Power-up's reduction is gated"
+        .expect("reach: the Power-up's reduction")
+    }
+
+    /// The four axes, comparable.
+    fn reads(axes: Axes) -> (bool, bool, bool, HistoryReads) {
+        (axes.event, axes.sibling, axes.projected, axes.history)
+    }
+
+    /// What `gate` reads, hosted as the Power-up's cost-reduction gate. The host reads nothing
+    /// else, so the gate's reads are the host's.
+    fn gate_reads(gate: ParsedCondition) -> (bool, bool, bool, HistoryReads) {
+        let mut host = human_torch_power_up();
+        let reduction = host
+            .cost_reduction
+            .as_mut()
+            .expect("the Power-up's reduction");
+        reduction.condition = None;
+        assert_eq!(
+            reads(ability_definition_axes(&host, ScanMode::LoopFirewall)),
+            reads(Axes::NONE),
+            "reach: the ungated host reads nothing"
         );
-        assert_eq!(ability_definition_history(&torch), HistoryReads::ALL);
+        host.cost_reduction
+            .as_mut()
+            .expect("the Power-up's reduction")
+            .condition = Some(gate);
+        reads(ability_definition_axes(&host, ScanMode::LoopFirewall))
+    }
+
+    /// A parsed gate named like a condition arm reads what that arm reads.
+    #[test]
+    fn a_parsed_gate_with_a_twin_reads_what_its_twin_reads() {
+        assert_eq!(
+            gate_reads(ParsedCondition::SourceEnteredThisTurn),
+            reads(scan_ability_condition(
+                &AbilityCondition::SourceEnteredThisTurn,
+                ScanMode::LoopFirewall
+            ))
+        );
+        let life_above = |qty| ParsedCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref { qty },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 30 },
+        };
+        let life = QuantityRef::LifeTotal {
+            player: PlayerScope::Controller,
+        };
+        assert_eq!(
+            gate_reads(life_above(life.clone())),
+            reads(scan_static_condition(
+                &StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref { qty: life },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 30 },
+                },
+                ScanMode::LoopFirewall
+            ))
+        );
+        assert_eq!(
+            gate_reads(ParsedCondition::ControlsCommander {
+                ownership: crate::types::ability::CommanderOwnership::Own,
+            }),
+            (false, true, false, HistoryReads::NONE)
+        );
+        assert_eq!(
+            gate_reads(ParsedCondition::SourceIsAttackingOrBlocking),
+            reads(Axes::NONE)
+        );
+    }
+
+    /// A parsed gate counting the battlefield, or reading its source, reads the board.
+    #[test]
+    fn a_parsed_battlefield_gate_reads_the_board() {
+        for gate in [
+            ParsedCondition::YouControlNoCreatures,
+            ParsedCondition::YouControlCoreTypeCountAtLeast {
+                core_type: crate::types::CoreType::Artifact,
+                count: 3,
+            },
+            ParsedCondition::SourcePowerAtLeast { minimum: 4 },
+            ParsedCondition::SourceAttachedTo {
+                required_type: crate::types::CoreType::Creature,
+            },
+        ] {
+            assert_eq!(
+                gate_reads(gate.clone()),
+                (false, true, false, HistoryReads::NONE),
+                "{gate:?}"
+            );
+        }
+    }
+
+    /// A parsed gate on a per-turn record reads its history member, or the projected journal
+    /// `project_out_resources` clears; one with neither reads every member.
+    #[test]
+    fn a_parsed_journal_gate_reads_its_record() {
+        assert_eq!(
+            gate_reads(ParsedCondition::YouAttackedThisTurn),
+            (
+                false,
+                false,
+                false,
+                HistoryReads::of(HistoryMember::PlayersAttackedThisTurn)
+            )
+        );
+        assert_eq!(
+            gate_reads(ParsedCondition::Not {
+                condition: Box::new(ParsedCondition::YouDiscardedCardThisTurn),
+            }),
+            (
+                false,
+                false,
+                false,
+                HistoryReads::of(HistoryMember::PlayersWhoDiscardedCardThisTurn)
+            )
+        );
+        assert_eq!(
+            gate_reads(ParsedCondition::YouCastSpellThisTurn { filter: None }),
+            (false, false, true, HistoryReads::NONE)
+        );
+        assert_eq!(
+            gate_reads(ParsedCondition::And {
+                conditions: vec![
+                    ParsedCondition::YouAttackedThisTurn,
+                    ParsedCondition::CreatureDiedThisTurn,
+                ],
+            }),
+            (
+                false,
+                false,
+                true,
+                HistoryReads::of(HistoryMember::PlayersAttackedThisTurn)
+            )
+        );
+        assert_eq!(
+            gate_reads(ParsedCondition::BeenAttackedThisStep),
+            (false, false, false, HistoryReads::ALL)
+        );
+    }
+
+    /// A parsed gate counting the player's graveyard, hand or library reads no axis.
+    #[test]
+    fn a_parsed_zone_count_gate_reads_its_scope() {
+        for gate in [
+            ParsedCondition::ZoneCardCountAtLeast {
+                zone: Zone::Graveyard,
+                count: 7,
+            },
+            ParsedCondition::HandSizeExact { count: 0 },
+        ] {
+            assert_eq!(gate_reads(gate.clone()), reads(Axes::NONE), "{gate:?}");
+        }
+    }
+
+    /// "As long as you control a creature with flying" is a battlefield census.
+    #[test]
+    fn a_parsed_keyword_census_gate_reads_the_board() {
+        assert_eq!(
+            gate_reads(ParsedCondition::ControlsCreatureWithKeyword {
+                controller: ControllerRef::You,
+                keyword: Keyword::Flying,
+            }),
+            (false, true, false, HistoryReads::NONE)
+        );
+    }
+
+    /// CR 602.5b: Gilt-Blade Prowler's "Activate only if you've discarded a card this turn."
+    /// reads the discard record.
+    #[test]
+    fn an_activation_gate_reads_its_parsed_condition() {
+        let prowler = printed_creature(
+            "Gilt-Blade Prowler",
+            "{1}, {T}, Pay 1 life: Draw a card. Activate only if you've discarded a card this \
+             turn.",
+        )
+        .abilities
+        .remove(0);
+        assert!(
+            prowler
+                .activation_restrictions
+                .iter()
+                .any(|restriction| matches!(
+                    restriction,
+                    crate::types::ability::ActivationRestriction::RequiresCondition {
+                        condition: Some(_)
+                    }
+                )),
+            "reach: Prowler's restriction is a parsed condition"
+        );
+        assert_eq!(
+            ability_definition_history(&prowler),
+            HistoryReads::of(HistoryMember::CardsDiscardedThisTurnByPlayer)
+        );
+    }
+
+    /// CR 305.2a: River of Tears' "If you played a land this turn" reads the player's land-play
+    /// count; Spider-Man 2099's "if you've played a land … from anywhere other than your hand"
+    /// reads this turn's land-play records.
+    #[test]
+    fn a_lands_played_count_reads_its_record() {
+        let river = crate::parser::parse_oracle_text(
+            "{T}: Add {U}. If you played a land this turn, add {B} instead.",
+            "River of Tears",
+            &[],
+            &["Land".to_string()],
+            &[],
+        )
+        .abilities
+        .remove(0);
+        assert_eq!(
+            ability_definition_history(&river),
+            HistoryReads::of(HistoryMember::PlayerLandsPlayedThisTurn)
+        );
+        let spider_man = printed_creature(
+            "Spider-Man 2099",
+            "From the Future — You can't cast Spider-Man 2099 during your first, second, or third \
+             turns of the game.\nDouble strike, vigilance\nAt the beginning of your end step, if \
+             you've played a land or cast a spell this turn from anywhere other than your hand, \
+             Spider-Man 2099 deals damage equal to his power to any target.",
+        )
+        .triggers
+        .remove(0);
+        let history = trigger_definition_history(&spider_man);
+        assert!(history.reads(HistoryMember::LandsPlayedThisTurnByPlayer));
+        assert!(!history.reads(HistoryMember::PlayerLandsPlayedThisTurn));
     }
 
     /// Hollow One's "This spell costs {2} less to cast for each card you've cycled or discarded
