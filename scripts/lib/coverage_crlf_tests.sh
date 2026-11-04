@@ -206,5 +206,23 @@ else
     printf '%s\n' "$OUT" | sed 's/^/     /'
 fi
 
+# --- row 7: an embedded CR is not a line ending and must not manufacture a count ---------------
+mkdir -p "$TMP/embedded_cr"
+cat > "$TMP/embedded_cr/jq" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+    *.diagnostics\[*) printf '1\\r2\\r\\n' ;;
+    *) exec "$REAL_JQ" "\$@" ;;
+esac
+EOF
+chmod +x "$TMP/embedded_cr/jq"
+run "$TMP/embedded_cr" "$TMP/base.json" "$TMP/worse.json"
+if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "non-numeric value where a count was required"; then
+    ok "an embedded CR count is refused (exit $RC)"
+else
+    bad "an embedded CR count must be refused, got exit $RC"
+    printf '%s\n' "$OUT" | sed 's/^/     /'
+fi
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

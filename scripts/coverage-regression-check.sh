@@ -59,7 +59,8 @@ fi
 # not evaluate is the defect, so this must never fall through to a false "clean" verdict.
 jq_num() {
     local value
-    value="$(jq "$@" | tr -d '\r')"
+    value="$(jq "$@")"
+    value="${value%$'\r'}"
     # A sign is allowed; anything else that is not a digit is refused. Testing the whole value
     # against `[!0-9-]` let `-`, `--` and `1-2` through, and those fail inside `[[ ]]`'s CONDITION
     # context silently — no verdict, exit 0 — which is the false clean this boundary exists to stop.

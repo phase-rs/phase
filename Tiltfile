@@ -404,7 +404,7 @@ local_resource('prelowered-ratchet',
 # and the `-gt`/`-lt` arms. Tilt is the enforcement venue for script suites, not GitHub CI — CI
 # runs the gate itself (ci.yml), never its fixtures.
 local_resource('coverage-crlf',
-    cmd = '/bin/bash scripts/lib/coverage_crlf_tests.sh',
+    cmd = ['bash', 'scripts/lib/coverage_crlf_tests.sh'],
     deps = ['scripts/coverage-regression-check.sh',
             'scripts/lib/coverage_crlf_tests.sh'],
     ignore = TMP_IGNORE,
