@@ -544,6 +544,13 @@ fn face_down_conspiracy_visibility_redacted_for_opponent_revealed_for_controller
         .expect("wire state serializes");
         assert!(!wire.contains("Brago's Favor"), "viewer {viewer:?}");
         assert!(!wire.contains("Continuous"), "viewer {viewer:?}");
+        // The engine-authored display classification is not a characteristic, so
+        // the client can still seat a face-down conspiracy in its dock without
+        // learning which card it is.
+        assert!(
+            wire.contains("\"is_conspiracy\":true"),
+            "display classification for viewer {viewer:?}"
+        );
         for payload in RULES_PAYLOAD {
             assert!(!wire.contains(payload), "{payload} for viewer {viewer:?}");
         }
