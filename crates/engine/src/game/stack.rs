@@ -6356,8 +6356,9 @@ mod tests {
     use crate::types::ability::{AttachSelection, AttachmentReferent, FilterProp};
     use crate::types::ability::{
         CastingPermission, ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot, Effect,
-        ModalChoice, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
-        TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef, TypeFilter, TypedFilter,
+        EffectScope, ModalChoice, QuantityExpr, ResolvedAbility, TapStateChange, TargetFilter,
+        TargetRef, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef, TypeFilter,
+        TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
@@ -10045,9 +10046,6 @@ mod tests {
     /// original it is otherwise identical to.
     #[test]
     fn stack_display_groups_never_coalesce_activated_abilities() {
-        use crate::types::ability::{EffectScope, TapStateChange};
-        use crate::types::identifiers::{CardId, ObjectId};
-
         let mut state = GameState::new_two_player(42);
         let monolith = crate::game::zones::create_object(
             &mut state,

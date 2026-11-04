@@ -483,6 +483,37 @@ pub(crate) fn ready_tap_mana_sources(state: &GameState, player: PlayerId) -> Vec
         .collect()
 }
 
+/// The non-land sources auto-tap ranks ahead of every creature in a payment by
+/// `player`, read off the auto-tap sorter's own order: each source with a row
+/// ranked ahead of the first creature row, in that order. The sorter keeps
+/// creatures back as blockers (CR 509.1a), behind every non-sacrifice rock. A
+/// sacrifice row (Treasure, Gold, Ashnod's Altar) ranks after every creature
+/// row with no sacrifice; a self-exiling rock (Mirrored Lotus) ranks ahead of
+/// them. With no creature row every source is listed. This is the sort order
+/// only: the payer still
+/// gives each colored shard its least flexible source, so a creature can pay a
+/// shard ahead of a rock listed here (Llanowar Elves pays {G} before a Mirrored
+/// Lotus).
+pub fn auto_tap_noncreature_sources_before_creatures(
+    state: &GameState,
+    player: PlayerId,
+) -> Vec<ObjectId> {
+    let mut sources = Vec::new();
+    for option in super::casting_costs::sorted_auto_tap_source_options(state, player) {
+        let Some(object) = state.objects.get(&option.object_id) else {
+            continue;
+        };
+        let types = &object.card_types.core_types;
+        if types.contains(&CoreType::Creature) {
+            break;
+        }
+        if !types.contains(&CoreType::Land) && !sources.contains(&option.object_id) {
+            sources.push(option.object_id);
+        }
+    }
+    sources
+}
+
 /// The `TapLandForMana` rows [`activatable_mana_actions_for_player`] emits for
 /// one land, without sweeping the rest of the battlefield.
 ///

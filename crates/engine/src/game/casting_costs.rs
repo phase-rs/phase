@@ -15592,6 +15592,15 @@ impl AutoTapSourceCache {
     }
 }
 
+/// Every auto-tap row `player` has, in the order an unrestricted payment ranks
+/// them: no source deprioritized or excluded.
+pub(super) fn sorted_auto_tap_source_options(
+    state: &GameState,
+    player: PlayerId,
+) -> Vec<ManaSourceOption> {
+    collect_sorted_auto_tap_source_options(state, player, None, &HashSet::new(), None)
+}
+
 pub(super) fn build_auto_tap_source_cache(
     state: &GameState,
     player: PlayerId,
@@ -15599,7 +15608,7 @@ pub(super) fn build_auto_tap_source_cache(
     crate::game::perf_counters::record_auto_tap_source_cache_build();
     AutoTapSourceCache {
         player,
-        sources: collect_sorted_auto_tap_source_options(state, player, None, &HashSet::new(), None),
+        sources: sorted_auto_tap_source_options(state, player),
     }
 }
 

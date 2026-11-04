@@ -10,6 +10,7 @@ use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::keywords;
 use engine::game::life_safety::{preview_candidate_life_safety, CandidateLifeSafety};
 use engine::game::mana_abilities;
+use engine::game::mana_sources;
 use engine::game::quantity::resolve_quantity;
 use engine::game::targeting::find_legal_targets;
 use engine::game::turn_control;
@@ -1675,30 +1676,12 @@ fn pump_taps_blocker_penalty(ctx: &PolicyContext<'_>) -> f64 {
         return 0.0;
     }
 
-    // Non-land, non-creature tier-1 sources (mana rocks) that auto_tap would use
-    // before creatures. Exclude sacrifice-for-mana sources (Treasures) — those are
-    // tier 4 in auto_tap and would NOT be tapped before creature dorks.
-    // CR 701.21: the exclusion is `mana_abilities::is_renewable_mana_ability`, the
-    // single engine authority. The local copy this replaced matched only a
-    // `Composite` cost, so a Gold token (bare `Sacrifice`) defeated the stated
-    // intent and was counted as a renewable tier-1 rock.
-    let non_creature_tier1_count = ctx
-        .state
-        .battlefield
-        .iter()
-        .filter(|&&id| {
-            ctx.state.objects.get(&id).is_some_and(|obj| {
-                obj.controller == ctx.ai_player
-                    && !obj.tapped
-                    && !obj.card_types.core_types.contains(&CoreType::Land)
-                    && !obj.card_types.core_types.contains(&CoreType::Creature)
-                    && obj
-                        .abilities
-                        .iter()
-                        .any(mana_abilities::is_renewable_mana_ability)
-            })
-        })
-        .count();
+    // Non-land, non-creature sources (mana rocks) auto_tap ranks ahead of
+    // creatures, read off its own source order. A sacrifice-for-mana source
+    // (Treasure, Gold) ranks after creature dorks, so it isn't counted; a
+    // self-exiling rock (Mirrored Lotus) ranks ahead of them, so it is.
+    let non_creature_tier1_count =
+        mana_sources::auto_tap_noncreature_sources_before_creatures(ctx.state, ctx.ai_player).len();
 
     let creatures_at_risk = shortfall.saturating_sub(non_creature_tier1_count);
     let creatures_tapped = creatures_at_risk.min(creature_mana_source_count);
@@ -1872,6 +1855,7 @@ mod tests {
     };
     use engine::game::ability_utils::build_resolved_from_def;
     use engine::game::combat::AttackTarget;
+    use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::parser::oracle::parse_oracle_text;
     use engine::types::ability::{
@@ -5636,6 +5620,155 @@ mod tests {
             score < -4.0,
             "Should penalize pump spell that must tap creature blocker, got {score}"
         );
+    }
+
+    /// Mirrored Lotus, verbatim.
+    const MIRRORED_LOTUS: &str = "Reflect {0} (As this enters, each opponent may pay {0}. When they do, they create a token copy of this except it lacks this ability.)\n{T}, Exile Mirrored Lotus: Add three mana of any one color.";
+    /// Treasure's mana ability, as the engine's token has it.
+    const TREASURE: &str = "{T}, Sacrifice this artifact: Add one mana of any color.";
+
+    /// Giant Growth, verbatim.
+    const GIANT_GROWTH: &str = "Target creature gets +3/+3 until end of turn.";
+    /// Defiant Strike, verbatim.
+    const DEFIANT_STRIKE: &str = "Target creature gets +1/+0 until end of turn.\nDraw a card.";
+
+    /// A pump the blocker-penalty rows cast: its name, Oracle text and mana cost.
+    struct PumpRow {
+        name: &'static str,
+        text: &'static str,
+        cost: ManaCost,
+    }
+
+    /// The opponent's declare-attackers step with P0 holding priority: Llanowar Elves, the
+    /// artifact `rock`, no lands, the `pump` in hand and an opposing creature. Returns the
+    /// runner, the Elves, the rock and the pump.
+    fn rock_and_dork_board(
+        rock: (&str, &str),
+        pump: &PumpRow,
+    ) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::DeclareAttackers);
+        let elves = scenario
+            .add_creature_from_oracle(P0, "Llanowar Elves", 1, 1, "{T}: Add {G}.")
+            .id();
+        let rock = scenario.add_artifact_from_oracle(P0, rock.0, rock.1).id();
+        let spell = {
+            let mut spell = scenario.add_spell_to_hand_from_oracle(P0, pump.name, true, pump.text);
+            spell.with_mana_cost(pump.cost.clone());
+            spell.id()
+        };
+        scenario.add_creature(P1, "Goblin", 2, 2);
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        (runner, elves, rock, spell)
+    }
+
+    /// AntiSelfHarm's score for casting `spell` on `state`.
+    fn pump_score(state: &GameState, spell: ObjectId) -> f64 {
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell,
+                card_id: state.objects[&spell].card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Spell),
+        };
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        AntiSelfHarmPolicy.score(&ctx)
+    }
+
+    /// Maintainer review on #10586: the blocker penalty predicts which creatures auto-tap spends
+    /// on a pump in the opponent's combat (CR 509.1a: a tapped creature can't block), so it counts
+    /// the rocks auto-tap ranks ahead of creatures by auto-tap's own source order, not by
+    /// renewability. Mirrored Lotus exiles itself, so it isn't standing mana development, but it
+    /// ranks ahead of Llanowar Elves all the same. Each row scores the pump, then casts it through
+    /// the engine's Auto payment on the same board to confirm which source pays:
+    ///
+    /// - Lotus, Defiant Strike ({W}): the Lotus is counted, so there's no penalty, and the
+    ///   payment spends the Lotus and leaves the Elves untapped. Counted by renewability, the
+    ///   Lotus was left out and this took −5; the score is what fails on that count.
+    /// - Treasure, Giant Growth ({G}): a Treasure ranks after the Elves, so it isn't counted and
+    ///   the penalty applies, and the payment taps the Elves.
+    ///
+    /// The order is the sorter's only. The payer gives each colored shard its least flexible
+    /// source, so with a Lotus it spends the Elves on {G}, and with a Treasure the Treasure pays
+    /// {W}; the count reads neither, as on main.
+    #[test]
+    fn blocker_penalty_counts_a_rock_auto_tap_ranks_ahead_of_a_dork() {
+        let strike = || PumpRow {
+            name: "Defiant Strike",
+            text: DEFIANT_STRIKE,
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 0,
+            },
+        };
+        let growth = || PumpRow {
+            name: "Giant Growth",
+            text: GIANT_GROWTH,
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            },
+        };
+        let lotus = ("Mirrored Lotus", MIRRORED_LOTUS);
+        let treasure = ("Treasure", TREASURE);
+        for (label, rock, pump, elves_tap, rock_spent) in [
+            ("Lotus, Defiant Strike", lotus, strike(), false, true),
+            ("Treasure, Giant Growth", treasure, growth(), true, false),
+        ] {
+            let (mut runner, elves, rock_id, spell) = rock_and_dork_board(rock, &pump);
+            let score = pump_score(runner.state(), spell);
+            let paid = runner.cast(spell).target_object(elves).commit();
+            let state = paid.state();
+            let elves_tapped = state.objects[&elves].tapped;
+            let rock_left = state
+                .objects
+                .get(&rock_id)
+                .is_some_and(|rock| rock.zone == Zone::Battlefield && !rock.tapped);
+
+            assert!(
+                !state.stack.is_empty(),
+                "{label}: reach: the pump is paid for and on the stack"
+            );
+            assert_eq!(
+                elves_tapped, elves_tap,
+                "{label}: whether the payment taps the Elves"
+            );
+            assert_eq!(
+                !rock_left, rock_spent,
+                "{label}: whether the payment spends the rock"
+            );
+            if elves_tap {
+                assert!(
+                    score < -4.0,
+                    "{label}: the tapped Elves can't block, so the pump is penalized, got {score}"
+                );
+            } else {
+                assert!(
+                    score > -4.0,
+                    "{label}: the Elves stay untapped, so no blocker penalty, got {score}"
+                );
+            }
+        }
     }
 
     /// Row 15 — the F-1 migration, driven through the production policy seam.
