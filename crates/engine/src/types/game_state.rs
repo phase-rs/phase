@@ -3214,6 +3214,26 @@ pub struct PendingContinuation {
     /// owned the payment cannot be identified from the old payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) x_announcement: Option<ContinuationXAnnouncement>,
+    /// CR 614.6 + CR 615.5 + CR 608.2c: `Some` when this is work a replacement's own action left
+    /// for a later `apply()` (a step after a child prompt), and that action owns an amount. The
+    /// drain re-enters the action's scope, so its "that many" is still that amount, not the die
+    /// result or trigger event of the resolution around it. Captured at stash time from the
+    /// running scope (`quantity::current_replacement_action`), like `trigger_context`. A chain of
+    /// another owner never merges into this frame (`effects::append_to_pending_continuation`,
+    /// `prepend_to_pending_continuation_with_producer`). An action that owns no amount (an
+    /// entering object's as-enters choices) leaves its work ordinary. Serde-defaulted: a save
+    /// taken mid-prompt before this field existed resumes as ordinary work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) replacement_action: Option<ReplacementActionScope>,
+}
+
+/// CR 614.6 + CR 615.5: the replacement action a paused continuation belongs to
+/// ([`PendingContinuation::replacement_action`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacementActionScope {
+    /// The amount of the event the replacement replaced or prevented, bound when the
+    /// replacement applied.
+    pub amount: i32,
 }
 
 /// CR 107.3f: the resolution-time announcement that defines X for the rider a
@@ -3273,6 +3293,7 @@ impl PendingContinuation {
             player_scope_tail: state.resolving_player_scope_tail.clone(),
             player_scope_queue_end: false,
             x_announcement: None,
+            replacement_action: crate::game::quantity::current_replacement_action(),
         }
     }
 
@@ -3298,6 +3319,7 @@ impl PendingContinuation {
             player_scope_tail: state.resolving_player_scope_tail.clone(),
             player_scope_queue_end: false,
             x_announcement: None,
+            replacement_action: crate::game::quantity::current_replacement_action(),
         }
     }
 }

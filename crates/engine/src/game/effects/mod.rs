@@ -1604,6 +1604,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             player_scope_queue_end,
             // Consumed by the payment answer that announced X, before this drain.
             x_announcement: _,
+            replacement_action,
         } = cont;
         debug_assert!(
             pending_return_result_producer.is_none(),
@@ -1628,6 +1629,10 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         let trigger_snapshot = trigger_context
             .as_ref()
             .map(|ctx| super::triggers::push_resolving_trigger_context(state, ctx));
+        // CR 614.6 + CR 615.5 + CR 608.2c: work a replacement's action left behind a child
+        // prompt resumes inside that action, so its "that many" is still the amount the action
+        // owns. Held until the chain and its detached tail have run, like the trigger context.
+        let resumed_action = crate::game::quantity::resume_replacement_action(replacement_action);
         let mut chain = chain;
         // An unsettled moved-object referent must never fall back to the original source.
         if chain.context.pending_forwarded_zone_result.is_some() {
@@ -1703,6 +1708,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         // CR 608.2c: the detached "after each player" tail is the rest of the same
         // ability, so it runs under the frame's trigger context too; restore the
         // outer context only once both the chain and its tail have run.
+        drop(resumed_action);
         if let Some(snapshot) = trigger_snapshot {
             super::triggers::restore_trigger_event_context(state, snapshot);
         }
@@ -3195,6 +3201,17 @@ pub(crate) fn append_to_pending_continuation(
             return;
         }
     }
+    // CR 614.6 + CR 608.2c: a replacement action's work and the work around it resume under
+    // different scopes, so a tail of one owner never merges into the other's frame. It waits
+    // beneath the active frame instead, which keeps the merge's order (that frame's chain first).
+    if state.active_ability_continuation().is_some_and(|active| {
+        active.replacement_action != crate::game::quantity::current_replacement_action()
+    }) {
+        state
+            .insert_ability_continuation_parent_of_active(PendingContinuation::new(tail, state))
+            .expect("an active continuation accepts the tail that follows it as its parent");
+        return;
+    }
     if let Some(frame) = state.active_ability_continuation_frame_mut() {
         let mut cursor = frame.pending.chain.as_mut();
         let tail = Some(tail);
@@ -3318,10 +3335,13 @@ fn prepend_to_pending_continuation_with_producer(
     // combine a payment's marked rider with another chain: the answer's stamp
     // would reach both. Merge only when neither side is marked; otherwise park
     // `head` as its own frame above (the same order a merge gives).
+    // CR 614.6 + CR 608.2c: likewise a replacement action's work never merges with work of
+    // another owner (`PendingContinuation::replacement_action`).
     if x_announcement.is_none()
-        && state
-            .active_ability_continuation()
-            .is_some_and(|active| active.x_announcement.is_none())
+        && state.active_ability_continuation().is_some_and(|active| {
+            active.x_announcement.is_none()
+                && active.replacement_action == crate::game::quantity::current_replacement_action()
+        })
     {
         let frame = state
             .take_active_ability_continuation()
@@ -3341,6 +3361,7 @@ fn prepend_to_pending_continuation_with_producer(
             player_scope_tail,
             player_scope_queue_end,
             x_announcement: existing_x_announcement,
+            replacement_action,
         } = existing;
         assert!(
             pending_return_result_producer.is_none() || existing_return_result_producer.is_none(),
@@ -3369,6 +3390,7 @@ fn prepend_to_pending_continuation_with_producer(
                 player_scope_tail,
                 player_scope_queue_end,
                 x_announcement: None,
+                replacement_action,
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
         });
@@ -66141,5 +66163,86 @@ mod parser_oracle_effect_tests {
             !evaluate_condition(&cond, &state, &ability_for(strong)),
             "3/3 is not least power"
         );
+    }
+}
+
+#[cfg(test)]
+mod replacement_action_continuation_tests {
+    use super::*;
+    use crate::game::quantity::with_replacement_action_scope;
+    use crate::types::game_state::ReplacementActionScope;
+
+    fn draw(value: i32) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    fn draws(mut chain: &ResolvedAbility) -> Vec<i32> {
+        let mut counts = Vec::new();
+        loop {
+            if let Effect::Draw {
+                count: QuantityExpr::Fixed { value },
+                ..
+            } = &chain.effect
+            {
+                counts.push(*value);
+            }
+            match chain.sub_ability.as_deref() {
+                Some(next) => chain = next,
+                None => return counts,
+            }
+        }
+    }
+
+    fn frame(frame: Option<&ResolutionFrame>) -> &PendingContinuation {
+        match frame {
+            Some(ResolutionFrame::AbilityContinuation(frame)) => &frame.pending,
+            other => panic!("expected an ability continuation, got {other:?}"),
+        }
+    }
+
+    /// CR 614.6 + CR 615.5 + CR 608.2c: a continuation parked inside a replacement's action
+    /// carries that action (and its amount) for the later `apply()` that resumes it. Work of the
+    /// same action merges into it; work of another owner never does. A tail appended from
+    /// outside waits beneath it (it runs after, as a merge would have run it), and a head
+    /// prepended from outside is parked above it (it runs first, as a merge would have run it).
+    #[test]
+    fn a_replacement_actions_continuation_never_merges_with_work_of_another_owner() {
+        let action = Some(ReplacementActionScope { amount: 2 });
+        let mut state = GameState::new_two_player(42);
+        with_replacement_action_scope(Some(2), || {
+            let pending = PendingContinuation::new(Box::new(draw(1)), &state);
+            state.park_ability_continuation(pending);
+            append_to_pending_continuation(&mut state, Some(Box::new(draw(2))));
+        });
+        assert_eq!(state.resolution_stack.len(), 1, "same owner: merged");
+        let active = frame(state.resolution_stack.last());
+        assert_eq!(active.replacement_action, action);
+        assert_eq!(draws(&active.chain), vec![1, 2]);
+
+        append_to_pending_continuation(&mut state, Some(Box::new(draw(3))));
+        assert_eq!(state.resolution_stack.len(), 2, "other owner: not merged");
+        let active = frame(state.resolution_stack.last());
+        assert_eq!(active.replacement_action, action);
+        assert_eq!(draws(&active.chain), vec![1, 2]);
+        let beneath = frame(state.resolution_stack.active_predecessor());
+        assert_eq!(beneath.replacement_action, None);
+        assert_eq!(draws(&beneath.chain), vec![3]);
+
+        prepend_to_pending_continuation(&mut state, draw(4));
+        assert_eq!(state.resolution_stack.len(), 3, "other owner: not merged");
+        let active = frame(state.resolution_stack.last());
+        assert_eq!(active.replacement_action, None);
+        assert_eq!(draws(&active.chain), vec![4]);
+        let beneath = frame(state.resolution_stack.active_predecessor());
+        assert_eq!(beneath.replacement_action, action);
+        assert_eq!(draws(&beneath.chain), vec![1, 2]);
     }
 }

@@ -4047,8 +4047,10 @@ pub(crate) fn dispatch_pending_post_replacement_effect(
         .map(|drain| std::mem::take(&mut drain.applied))
         .unwrap_or_default();
 
-    // CR 614.6 + CR 615.5: a drain installed to run after other work carries its replaced
-    // event's amount; "that many" reads it, not whatever that other work stamped.
+    // CR 614.6 + CR 615.5: the drain carries the amount of the event its replacement replaced or
+    // prevented, bound when the replacement applied (`replacement::stamp_replacement_amount`), or
+    // when it was queued behind an earlier rider. "That many" reads it, not whatever other work
+    // stamped since.
     let captured_amount = state
         .active_post_replacement_drains()
         .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
@@ -4065,15 +4067,23 @@ pub(crate) fn dispatch_pending_post_replacement_effect(
     // sweeper must not treat a `Dispatching` resident as ownerless.
     let _live_dispatch = LiveDispatchGuard::enter();
     // CR 614.6 + CR 615.5: the continuation is the replacement's own action, so its "that many"
-    // is the amount the replacement replaced or prevented (stamped above, or by the applier just
-    // before an inline drain), not the event amount of a triggered ability that is resolving
-    // around it. Shockmaw Dragon: "Whenever this creature deals combat damage to a player, it deals 1
-    // damage to each creature that player controls." After 4 combat damage, Phytohydra ("put that
-    // many +1/+1 counters on it instead") gets 1 counter, not 4. The scope suppresses only the
-    // enclosing trigger's amount tiers of `EventContextAmount`, as it does for a reflexive
-    // trigger's own amount (CR 603.12).
+    // is the amount the replacement replaced or prevented (the drain's own amount, stamped
+    // above), not anything of the spell or ability resolving around it. The scope binds that
+    // amount ahead of the die result and the enclosing trigger's amount tiers of
+    // `EventContextAmount`, and suppresses those trigger tiers as the reflexive scope does
+    // (CR 603.12). A drain with no amount of its own (an entering object's continuation, an
+    // optional branch) binds none and reads the rest of the cascade. Shockmaw Dragon: "Whenever this creature deals combat damage to a player, it
+    // deals 1 damage to each creature that player controls." After 4 combat damage, Phytohydra
+    // ("put that many +1/+1 counters on it instead") gets 1 counter, not 4. Farideh's Fireball:
+    // "Roll a d20." then "deals 2 damage to each opponent." Delaying Shield ("put that many delay
+    // counters on this enchantment instead") gets 2 counters, not the d20 face.
+    //
+    // Work the action leaves for a later `apply()` (a step after a child prompt) carries this
+    // scope on its `PendingContinuation` and re-enters it when it resumes
+    // (`effects::drain_pending_continuation`).
+    let owned_amount = captured_amount.map(crate::game::arithmetic::u32_to_i32_saturating);
     let waiting_for =
-        crate::game::quantity::with_reflexive_resolution_scope(|| match continuation {
+        crate::game::quantity::with_replacement_action_scope(owned_amount, || match continuation {
             PostReplacementContinuation::Resolved(resolved) => {
                 apply_post_replacement_resolved_effect(
                     state,

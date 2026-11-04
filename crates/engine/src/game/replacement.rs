@@ -1010,6 +1010,22 @@ fn stash_post_replacement_continuation(
     state.install_post_replacement_drain(drain, ResidentDrainPolicy::KeepResident);
 }
 
+std::thread_local! {
+    /// CR 614.6 + CR 615.5: the amount of the event the replacement now applying replaced or
+    /// prevented, as its applier stamped it. Lives for one `apply_single_replacement` call and
+    /// is moved into the mandatory post-drain that call stashes, so a replacement's action binds
+    /// an amount only when its own applier stamped one.
+    static REPLACEMENT_AMOUNT_STAMP: std::cell::Cell<Option<u32>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// CR 614.6 + CR 615.5: stamp the amount of the event this replacement replaced or prevented,
+/// both as the resolution's `last_effect_count` and as the amount its action owns.
+fn stamp_replacement_amount(state: &mut GameState, amount: u32) {
+    state.last_effect_count = Some(u32_to_i32_saturating(amount));
+    REPLACEMENT_AMOUNT_STAMP.with(|stamp| stamp.set(Some(amount)));
+}
+
 /// CR 614.6: a mandatory post-effect's drain: the replacement's own actions, and the event
 /// context they read.
 fn mandatory_post_drain(
@@ -1038,7 +1054,8 @@ fn mandatory_post_drain(
         // `active_player` here would stamp a confident wrong answer in
         // place of that fallback.
         controller,
-        event_amount: None,
+        // CR 614.6 + CR 615.5: the amount this replacement's applier stamped, if it stamped one.
+        event_amount: REPLACEMENT_AMOUNT_STAMP.with(std::cell::Cell::take),
     }
 }
 
@@ -2941,7 +2958,7 @@ fn damage_done_applier(
                         }
                         // CR 615.5: the prevented-amount handoff for follow-up
                         // continuations — identical to Branch 2's stamp.
-                        state.last_effect_count = Some(prevented as i32);
+                        stamp_replacement_amount(state, prevented);
                     }
                 }
             }
@@ -3017,7 +3034,7 @@ fn damage_done_applier(
             } else {
                 DamageRiderDrain::Completed
             };
-            state.last_effect_count = Some(u32_to_i32_saturating(amount));
+            stamp_replacement_amount(state, amount);
             // CR 608.2c + CR 616.1: a rider that paused (Test of Faith's counters under Hardened
             // Scales and Doubling Season) still has work to do, and this replacement's actions
             // (Dralnu, Lich Lord's sacrifice) follow all of it, reading this amount.
@@ -3244,7 +3261,7 @@ fn damage_done_applier(
                 // trigger-resolution window, so `current_trigger_event` is None
                 // and `last_effect_count` is the documented fallback slot
                 // (see `quantity.rs` resolver).
-                state.last_effect_count = Some(prevented_amount as i32);
+                stamp_replacement_amount(state, prevented_amount);
             }
 
             return result;
@@ -3307,7 +3324,7 @@ fn damage_done_applier(
             // only the runtime rider's amount is aggregated, without emitting a
             // second, sentinel-source prevention event at the rider boundary.
             if !accumulated_in_batch || shield_has_per_event_execute_followup(state, rid) {
-                state.last_effect_count = Some(dmg as i32);
+                stamp_replacement_amount(state, dmg);
             }
             return ApplyResult::Prevented;
         }
@@ -4903,7 +4920,7 @@ fn gain_life_applier(
     // amount so "draw that many" sees the prevented life-gain quantity.
     if gain_life_execute_substitutes_event_type(state, rid) {
         if let ProposedEvent::LifeGain { amount, .. } = event {
-            state.last_effect_count = Some(amount as i32);
+            stamp_replacement_amount(state, amount);
         }
         return ApplyResult::Prevented;
     }
@@ -5083,7 +5100,7 @@ fn lose_life_applier(
         Effect::LoseLife { .. } | Effect::Unimplemented { .. }
     ) {
         if let ProposedEvent::LifeLoss { amount, .. } = event {
-            state.last_effect_count = Some(amount as i32);
+            stamp_replacement_amount(state, amount);
         }
         return ApplyResult::Prevented;
     }
@@ -10404,6 +10421,25 @@ fn optional_decline_is_noop(
 // arm carries an inherent `ProposedEvent` from the shared replacement pipeline.
 #[allow(clippy::result_large_err)]
 fn apply_single_replacement(
+    state: &mut GameState,
+    proposed: ProposedEvent,
+    rid: ReplacementId,
+    branch: ReplacementBranch,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    events: &mut Vec<GameEvent>,
+) -> Result<ProposedEvent, ApplyResult> {
+    // CR 614.6 + CR 615.5: an amount stamped for this replacement belongs to this application
+    // alone. It starts empty, and one its post-drain did not take ends with it.
+    let outer = REPLACEMENT_AMOUNT_STAMP.with(std::cell::Cell::take);
+    let result = apply_single_replacement_inner(state, proposed, rid, branch, registry, events);
+    REPLACEMENT_AMOUNT_STAMP.with(|stamp| stamp.set(outer));
+    result
+}
+
+// clippy::result_large_err: see `apply_shield_counter_replacement` — the Err
+// arm carries an inherent `ProposedEvent` from the shared replacement pipeline.
+#[allow(clippy::result_large_err)]
+fn apply_single_replacement_inner(
     state: &mut GameState,
     mut proposed: ProposedEvent,
     rid: ReplacementId,
