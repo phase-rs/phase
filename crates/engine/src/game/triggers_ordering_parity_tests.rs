@@ -313,6 +313,26 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // control" to the acting opponent; the pre-regen fixture carried
     // controller You, which the discriminator auto-ordered.
     "reservoir kraken",
+    // Dies self-return stamped by the CR 603.6 + CR 400.7e origin walk (AST
+    // measured): the inner ChangeZone is pinned to origin=Graveyard,
+    // target=SelfRef where the pre-regen fixture carried origin=null /
+    // target=TriggeringSource, which the batch discriminator auto-ordered.
+    // Each co-departing member returns ITS OWN source from its own graveyard
+    // departure — disjoint SelfRef referents, no shared pile, counter, or
+    // choice consumed — so identical siblings commute up to relabeling. The
+    // flipped prompt is fail-closed (CR 603.3b choice preserved), not
+    // rules-required. Class closed at 3: the export carries no other stamped
+    // self-return dies-aura.
+    "bronzehide lion",
+    // Same stamped self-return shape as bronzehide lion, plus a WasType(Creature)
+    // intervening-if ("if it was a creature"): the condition reads each member's
+    // OWN pre-departure type (per-source LKI, CR 608.2h), still disjoint, so the
+    // members commute. Fail-closed over-prompt, not genuine.
+    "harold and bob, first numens",
+    // Same stamped self-return shape as bronzehide lion, plus WasType(Creature)
+    // ("if it was a creature") — per-source condition read, disjoint referents,
+    // members commute. Fail-closed over-prompt, not genuine.
+    "old-growth troll",
 ];
 
 /// Batch-depth GENUINE order-dependence (kept SEPARATE from the same-event
