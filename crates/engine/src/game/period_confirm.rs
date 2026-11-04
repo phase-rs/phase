@@ -1014,30 +1014,25 @@ fn replay_cycle_ordered(
     let mut performed = Vec::new();
     let mut last_priority: Option<GameState> = None;
     let start = play_trace::WindowKey::of(replay);
+    // The stack entries no target credit may come from: those standing at the last priority
+    // beat, and each entry whose targets a prompt asked for.
     let mut seen: Vec<ObjectId> = replay.stack.iter().map(|entry| entry.id).collect();
-    let mut prompted = false;
     for beat in 0..CYCLE_BEATS {
         if replay.game_end.is_some() || !end.admits(start, replay) {
             return Err(OfferRefusal::NoRecurrence);
         }
-        // A trigger's targets exist only once it is on the stack, so only a priority beat that
-        // no target prompt preceded can show one the reducer targeted without asking.
-        if !prompted
-            && matches!(replay.waiting_for, WaitingFor::Priority { .. })
-            && replay
-                .stack
-                .back()
-                .is_some_and(|entry| !seen.contains(&entry.id))
-        {
-            if let Some(candidates) = pending_answers(items, &done) {
-                announced_declared(replay, items, &mut done, candidates, declared)?;
+        // A trigger's targets are set once it is on the stack, so they are read at priority.
+        match replay.waiting_for {
+            WaitingFor::Priority { .. } => {
+                if let Some(candidates) = pending_answers(items, &done) {
+                    announced_declared(replay, &seen, items, &mut done, candidates, declared)?;
+                }
+                seen = replay.stack.iter().map(|entry| entry.id).collect();
             }
+            // CR 603.3d: the prompted trigger is already on the stack, under construction.
+            WaitingFor::TriggerTargetSelection { .. } => seen.extend(replay.pending_trigger_entry),
+            _ => {}
         }
-        seen = replay.stack.iter().map(|entry| entry.id).collect();
-        prompted = matches!(
-            replay.waiting_for,
-            WaitingFor::TriggerTargetSelection { .. }
-        );
         let pending = pending_answers(items, &done);
         let next = pending.as_ref().map(|candidates| candidates.start);
         if let WaitingFor::Priority { player } = replay.waiting_for {
@@ -1264,11 +1259,14 @@ fn answer_declared(
     Ok(true)
 }
 
-/// CR 603.3d + CR 601.2c: a trigger the reducer just put on the stack with its only legal target,
-/// asking no one, makes the recorded mandatory target answer among `candidates` when `declared`
-/// pins its slot and the target it got is the declaration's at this repetition.
+/// CR 603.3d + CR 601.2c: each trigger put on the stack since the last priority beat with its
+/// only legal target, asking no one, makes the next recorded mandatory target answer among
+/// `candidates` when `declared` pins its slot and the target it got is the declaration's at this
+/// repetition. CR 603.3b + CR 405.2: its controller may have stacked others of the batch above it,
+/// so every entry outside `seen` is read in the order it was put on the stack.
 fn announced_declared(
     replay: &GameState,
+    seen: &[ObjectId],
     items: &[PeriodItem],
     done: &mut [bool],
     candidates: std::ops::Range<usize>,
@@ -1278,35 +1276,43 @@ fn announced_declared(
     let Some((template, iteration)) = declared else {
         return Ok(());
     };
-    let Some(StackEntryKind::TriggeredAbility {
-        source_id, ability, ..
-    }) = replay.stack.back().map(|entry| &entry.kind)
-    else {
-        return Ok(());
-    };
-    let Some(decision) = take_answer(
-        template,
-        iteration,
-        replay,
-        ChoicePoint::AnnouncedTarget,
-        |source| crate::game::engine::slot_source_prompted(replay, source, *source_id),
-    ) else {
-        return Ok(());
-    };
-    let Some(recorded) = candidates.clone().find(|&at| {
-        !done[at]
-            && items[at].mandatory_answer
-            && matches!(
-                items[at].action,
-                GameAction::SelectTargets { .. } | GameAction::ChooseTarget { .. }
-            )
-    }) else {
-        return Ok(());
-    };
-    if crate::game::ability_utils::declared_targets_in_chain(ability) != pinned_targets(decision)? {
-        return Err(OfferRefusal::IllegalReplayedPlay);
+    for entry in replay
+        .stack
+        .iter()
+        .filter(|entry| !seen.contains(&entry.id))
+    {
+        let StackEntryKind::TriggeredAbility {
+            source_id, ability, ..
+        } = &entry.kind
+        else {
+            continue;
+        };
+        let Some(decision) = take_answer(
+            template,
+            iteration,
+            replay,
+            ChoicePoint::AnnouncedTarget,
+            |source| crate::game::engine::slot_source_prompted(replay, source, *source_id),
+        ) else {
+            continue;
+        };
+        let Some(recorded) = candidates.clone().find(|&at| {
+            !done[at]
+                && items[at].mandatory_answer
+                && matches!(
+                    items[at].action,
+                    GameAction::SelectTargets { .. } | GameAction::ChooseTarget { .. }
+                )
+        }) else {
+            return Ok(());
+        };
+        if crate::game::ability_utils::declared_targets_in_chain(ability)
+            != pinned_targets(decision)?
+        {
+            return Err(OfferRefusal::IllegalReplayedPlay);
+        }
+        done[recorded] = true;
     }
-    done[recorded] = true;
     Ok(())
 }
 
@@ -3009,6 +3015,78 @@ mod tests {
         assert!(first_pair_certifies(
             &ObjectGrowthVerdict::ResourceRecurrence(Some(RecurrenceCover::GrowthRead))
         ));
+    }
+
+    /// CR 603.3b + CR 603.3d: of one batch, a trigger targeted unasked below one whose target was
+    /// prompted makes a recorded answer, and the prompted one makes none.
+    #[test]
+    fn an_unasked_target_below_a_prompted_one_is_credited_and_the_prompted_one_is_not() {
+        use crate::analysis::decision_template::{
+            DecisionGroupKey, DecisionKind, IterationCount, ReplayMode,
+        };
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+        let mut state = with_stack(&[]);
+        let source = |state: &mut GameState| {
+            crate::game::zones::create_object(
+                state,
+                CardId(0),
+                PlayerId(0),
+                String::new(),
+                Zone::Battlefield,
+            )
+        };
+        let (unasked, prompted) = (source(&mut state), source(&mut state));
+        for (id, trigger_source) in [(20, unasked), (21, prompted)] {
+            let mut entry = with_stack(&[id]).stack[0].clone();
+            entry.source_id = trigger_source;
+            let StackEntryKind::TriggeredAbility { source_id, .. } = &mut entry.kind else {
+                unreachable!("with_stack builds triggered abilities")
+            };
+            *source_id = trigger_source;
+            state.stack.push_back(entry);
+        }
+        let pin = |source_id| PinnedDecision::Targets {
+            slot: DecisionSlot::first(
+                YieldTarget::ThisObject {
+                    source_id,
+                    incarnation: None,
+                    trigger_description: None,
+                },
+                ChoicePoint::AnnouncedTarget,
+            ),
+            targets: Vec::new(),
+        };
+        let template = DecisionTemplate {
+            owner: PlayerId(0),
+            decisions: vec![pin(unasked), pin(prompted)],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(1),
+            },
+            key: DecisionGroupKey::from_sources(&[], DecisionKind::LoopChoice),
+        };
+        let answer = PeriodItem {
+            seat: PlayerId(0),
+            action: GameAction::ChooseTarget { target: None },
+            play: None,
+            mandatory_answer: true,
+            next_object_id: 0,
+            minted_since: 0,
+            cost_move: None,
+            point: None,
+        };
+        let items = [answer.clone(), answer];
+        let mut done = [false; 2];
+        announced_declared(
+            &state,
+            &[ObjectId(21)],
+            &items,
+            &mut done,
+            0..2,
+            Some((&template, 0)),
+        )
+        .expect("both pins resolve");
+        assert_eq!(done, [true, false]);
     }
 
     /// CR 603.3d + CR 732.2a: a mandatory answer is excused only when the replay went past it to

@@ -9562,3 +9562,135 @@ fn the_turn_five_draw_span_clears_the_fodder_cover() {
         "reach: a Repeat span confirms: {verdicts:?}"
     );
 }
+
+/// Tolarian Kraken's Oracle text, verbatim from card data.
+const KRAKEN: &str =
+    "Whenever you draw a card, you may pay {1}. When you do, you may tap or untap target creature.";
+
+/// The F4 dump with Tolarian Kraken (4/6 Creature — Kraken) on P0's battlefield, built from its
+/// Oracle text.
+fn f4_with_kraken() -> (GameState, ObjectId) {
+    use engine::types::ability::PtValue;
+    use engine::types::card::CardFace;
+    use engine::types::card_type::{CardType, CoreType};
+    use engine::types::identifiers::CardId;
+    use engine::types::zones::Zone;
+    let name = "Tolarian Kraken";
+    let parsed = engine::parser::parse_oracle_text(
+        KRAKEN,
+        name,
+        &[],
+        &["Creature".to_string()],
+        &["Kraken".to_string()],
+    );
+    let face = CardFace {
+        name: name.to_string(),
+        power: Some(PtValue::Fixed(4)),
+        toughness: Some(PtValue::Fixed(6)),
+        card_type: CardType {
+            supertypes: Vec::new(),
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Kraken".to_string()],
+        },
+        oracle_text: Some(KRAKEN.to_string()),
+        triggers: parsed.triggers,
+        ..Default::default()
+    };
+    let mut state = load_f4();
+    let card_id = CardId(state.next_object_id);
+    let kraken = engine::game::zones::create_object(
+        &mut state,
+        card_id,
+        P0,
+        name.to_string(),
+        Zone::Battlefield,
+    );
+    engine::game::printed_cards::apply_card_face_to_object(
+        state.objects.get_mut(&kraken).expect("just created"),
+        &face,
+    );
+    engine::game::trigger_index::reindex_object_triggers(&mut state, kraken);
+    (state, kraken)
+}
+
+/// One beat of the F4 drive on the Kraken board: Kraken's "may pay {1}" is answered `accept`, its
+/// reflexive trigger taps Kraken, and a trigger batch is put on the stack in the order listed.
+/// Returns whether the beat answered Kraken's "may".
+fn kraken_beat(state: &mut GameState, kraken: ObjectId, accept: bool) -> bool {
+    let action = match &state.waiting_for {
+        WaitingFor::OptionalEffectChoice { source_id, .. } if *source_id == kraken => {
+            GameAction::DecideOptionalEffect { accept }
+        }
+        WaitingFor::TriggerTargetSelection {
+            source_id: Some(source_id),
+            ..
+        } if *source_id == kraken => GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(kraken)),
+        },
+        WaitingFor::ChooseOneOfBranch { source_id, .. } if *source_id == kraken => {
+            GameAction::ChooseBranch { index: 0 }
+        }
+        WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
+            order: (0..triggers.len()).collect(),
+        },
+        _ => {
+            f4_drive_one_beat(state).expect("the F4 policy answers this beat");
+            return false;
+        }
+    };
+    let asked = matches!(action, GameAction::DecideOptionalEffect { .. });
+    let who = state.waiting_for.acting_player().expect("an acting player");
+    let actor = engine::game::turn_control::authorized_submitter_for_player(state, who);
+    apply(state, actor, action).expect("the Kraken beat is legal");
+    asked
+}
+
+/// The Kraken board driven to its offer, Kraken's "may" answered `accept`.
+fn kraken_at_offer(accept: bool) -> GameState {
+    let (mut state, kraken) = f4_with_kraken();
+    let mut asked = 0;
+    for _ in 0..400 {
+        if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
+            break;
+        }
+        asked += usize::from(kraken_beat(&mut state, kraken, accept));
+    }
+    assert!(asked > 0, "reach-guard: Kraken's trigger asked its \"may\"");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }),
+        "reach-guard: the Kraken board offers"
+    );
+    state
+}
+
+/// CR 118.3 + CR 603.12 + CR 603.3b + CR 732.2a: paying Kraken's {1} each time it can be paid, P0
+/// stacks Kraken's trigger above Human Torch's, which takes its sole legal target once two
+/// opponents are gone; accepting an unpayable {1} does nothing and its "when you do" trigger never
+/// fires, so the offer counts the 87 cards left, not the repetition where Torch was not asked.
+#[test]
+fn a_kraken_paid_while_it_can_be_is_offered_the_library_it_draws_through() {
+    let mut state = kraken_at_offer(true);
+    assert_eq!(
+        state.library_of(P0).len(),
+        87,
+        "reach-guard: the offer frame"
+    );
+    let (_, _, schema) = offer_parts(&state);
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(87));
+    f4_accept_suggested(&mut state);
+    assert_eq!(state.library_of(P0).len(), 0);
+    assert!(!f4_eliminated(&state, P0));
+}
+
+/// CR 603.5 + CR 732.2a: declining Kraken's "may" leaves the 88-card period's count.
+#[test]
+fn a_kraken_declined_is_offered_the_library_it_draws_through() {
+    let state = kraken_at_offer(false);
+    assert_eq!(
+        state.library_of(P0).len(),
+        88,
+        "reach-guard: the offer frame"
+    );
+    let (_, _, schema) = offer_parts(&state);
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(88));
+}
