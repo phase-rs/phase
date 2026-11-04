@@ -6216,7 +6216,7 @@ mod tests {
         );
         assert!(
             filter_refs_parent_object_anaphor(&wrapped(crate::types::ability::FilterProp::AnyOf {
-                props: vec![crate::types::ability::FilterProp::Token, relation],
+                props: vec![crate::types::ability::FilterProp::Token, relation.clone()],
             })),
             "a history dependency inside AnyOf is still pinned"
         );
@@ -6228,6 +6228,55 @@ mod tests {
             )),
             "AnyOf without the relation pins nothing"
         );
+        // The wrappers carry `HostRelation` unchanged: a nested history or
+        // attachment-host dependency is still never the condition's moving
+        // subject, and a nested player-only reference still names no object.
+        assert!(
+            !filter_names_parent_object_subject(&wrapped(crate::types::ability::FilterProp::Not {
+                prop: Box::new(relation.clone()),
+            })),
+            "a negated history dependency is not the moving subject"
+        );
+        assert!(
+            !filter_names_parent_object_subject(&wrapped(
+                crate::types::ability::FilterProp::AnyOf {
+                    props: vec![crate::types::ability::FilterProp::Token, relation],
+                }
+            )),
+            "a history dependency inside AnyOf is not the moving subject"
+        );
+        let nested_host = wrapped(crate::types::ability::FilterProp::Not {
+            prop: Box::new(crate::types::ability::FilterProp::AttachedTo {
+                to: crate::types::ability::AttachmentReferent::Host {
+                    filter: Box::new(TargetFilter::ParentTarget),
+                },
+            }),
+        });
+        assert!(
+            filter_refs_parent_object_anaphor(&nested_host),
+            "a negated host dependency is still pinned"
+        );
+        assert!(
+            !filter_names_parent_object_subject(&nested_host),
+            "a negated host dependency is not the moving subject"
+        );
+        for player_only in [
+            TargetFilter::ParentTargetController,
+            TargetFilter::ParentTargetOwner,
+        ] {
+            let nested_player = wrapped(crate::types::ability::FilterProp::AnyOf {
+                props: vec![crate::types::ability::FilterProp::Not {
+                    prop: Box::new(crate::types::ability::FilterProp::DistinctFrom {
+                        reference: Box::new(player_only),
+                    }),
+                }],
+            });
+            assert!(
+                !filter_refs_parent_object_anaphor(&nested_player),
+                "a nested player-only reference names no object"
+            );
+            assert!(!filter_names_parent_object_subject(&nested_player));
+        }
         let source = history_with(crate::types::ability::CombatRelationSubject::Source);
         assert!(
             !filter_refs_parent_object_anaphor(&source),

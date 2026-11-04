@@ -26811,9 +26811,19 @@ fn instruction_drops_block_partner(clause: &ParsedEffectClause, lower: &str) -> 
         )
         .flat_map(|effect| {
             // `mass_population_target` adds `ChangeZoneAll`, which the parser-side
-            // list does not carry.
-            let population =
-                mass_population_filter(effect).or_else(|| mass_population_target(effect));
+            // list does not carry. CR 701.27a + CR 115.10a: a scope-`All` Transform
+            // ("transform all Humans") keeps a population neither shared list names,
+            // and its `target_filter()` is `None`. It is read here only, so the
+            // chain-prior population the shared lists feed is unchanged.
+            let population = mass_population_filter(effect)
+                .or_else(|| mass_population_target(effect))
+                .or(match effect {
+                    Effect::Transform {
+                        scope: EffectScope::All,
+                        target,
+                    } => Some(target),
+                    _ => None,
+                });
             population.into_iter().chain(effect.target_filter())
         })
         .collect();
@@ -26822,8 +26832,72 @@ fn instruction_drops_block_partner(clause: &ParsedEffectClause, lower: &str) -> 
 
 #[cfg(test)]
 mod instruction_drops_block_partner_tests {
-    use super::parse_effect_chain;
-    use crate::types::ability::{AbilityKind, Effect};
+    use super::{instruction_drops_block_partner, parse_effect_chain, parsed_clause};
+    use crate::types::ability::{
+        AbilityKind, BlockPairDirection, CombatHistoryScope, CombatRelation, CombatRelationSubject,
+        Effect, EffectScope, FilterProp, TargetFilter, TypedFilter,
+    };
+
+    /// "Creatures ~ blocked this turn", as `parse_block_history_clause` binds it.
+    fn blocked_by_source_this_turn() -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::CombatRelation {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: Some(CombatHistoryScope::ThisTurn),
+                },
+                subject: CombatRelationSubject::Source,
+            }]),
+        )
+    }
+
+    /// The guard's three outcomes for one mass population: a history clause its
+    /// filter carries binds; the same clause over the bare population (a declined
+    /// "it") and a partner no subject word covers both fail closed.
+    fn assert_guard_reads_population(population: fn(TargetFilter) -> Effect, verb: &str) {
+        let bare = TargetFilter::Typed(TypedFilter::creature());
+        let represented = format!("{verb} all creatures it blocked this turn.");
+        let unbound =
+            format!("{verb} each creature that was blocked by one of those creatures this turn.");
+        assert!(
+            !instruction_drops_block_partner(
+                &parsed_clause(population(blocked_by_source_this_turn())),
+                &represented
+            ),
+            "{verb}: a represented partner binds"
+        );
+        assert!(
+            instruction_drops_block_partner(&parsed_clause(population(bare.clone())), &represented),
+            "{verb}: a declined partner fails closed"
+        );
+        assert!(
+            instruction_drops_block_partner(&parsed_clause(population(bare)), &unbound),
+            "{verb}: an unbound partner fails closed"
+        );
+    }
+
+    /// Synthetic guard control: no printed card puts a history clause on a mass
+    /// transform (Moonmist's "Transform all Humans" has none). CR 608.2c + CR 608.2i:
+    /// a scope-`All` Transform hides its population from `target_filter()` and from
+    /// both shared population accessors, so the guard reads it itself.
+    #[test]
+    fn transform_all_population_binds_or_fails_closed() {
+        assert_guard_reads_population(
+            |target| Effect::Transform {
+                target,
+                scope: EffectScope::All,
+            },
+            "transform",
+        );
+    }
+
+    /// Synthetic guard control: no printed card puts a history clause on an explore
+    /// population. CR 608.2c + CR 608.2i: `ExploreAll` reaches the guard through the
+    /// parser-side population accessor, which `mass_population_target` lacks.
+    #[test]
+    fn explore_all_population_binds_or_fails_closed() {
+        assert_guard_reads_population(|filter| Effect::ExploreAll { filter }, "explore");
+    }
 
     /// Parser shape only. CR 608.2c + CR 608.2i: an "each <type> ... explores"
     /// population reaches the guard through the shared mass-population accessor,

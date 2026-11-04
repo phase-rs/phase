@@ -18,16 +18,20 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{Effect, EffectKind, TargetFilter, TargetRef};
+use engine::types::ability::{
+    AbilityDefinition, CombatRelationSubject, Effect, EffectKind, FilterProp, TargetFilter,
+    TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
+use std::sync::Arc;
 
 const GAZE: &str = "({B/G} can be paid with either {B} or {G}.)\nRegenerate target creature. At this turn's next end of combat, destroy all creatures that blocked or were blocked by it this turn.";
 const BREATH: &str = "Choose target creature. At this turn's next end of combat, destroy all creatures that blocked or were blocked by it this turn.";
@@ -569,6 +573,151 @@ fn breath_ignores_blocks_by_a_returned_target() {
         };
         assert_eq!(zone(&x.runner, x.a), expected, "blink = {blink}");
         assert_eq!(zone(&x.runner, x.a2), Zone::Battlefield);
+    }
+}
+
+/// A meaning-preserving wrapper around one filter property.
+type PropWrap = fn(FilterProp) -> FilterProp;
+
+/// Rewrap the delayed payload's history relation on `spell`, keeping its meaning:
+/// `AnyOf [relation]` and `Not (Not relation)` select what the bare relation does.
+/// Returns how many relations were wrapped.
+fn wrap_history_relation(runner: &mut GameRunner, spell: ObjectId, wrap: PropWrap) -> usize {
+    fn in_definition(def: &mut AbilityDefinition, wrap: PropWrap) -> usize {
+        let here = match &mut *def.effect {
+            Effect::CreateDelayedTrigger { effect, .. } => in_definition(effect, wrap),
+            Effect::DestroyAll {
+                target: TargetFilter::Typed(typed),
+                ..
+            } => typed
+                .properties
+                .iter_mut()
+                .filter(|prop| {
+                    matches!(
+                        prop,
+                        FilterProp::CombatRelation {
+                            subject: CombatRelationSubject::AnaphoricTarget,
+                            ..
+                        }
+                    )
+                })
+                .map(|prop| *prop = wrap(prop.clone()))
+                .count(),
+            _ => 0,
+        };
+        here + def
+            .sub_ability
+            .as_deref_mut()
+            .map_or(0, |sub| in_definition(sub, wrap))
+    }
+    let object = runner
+        .state_mut()
+        .objects
+        .get_mut(&spell)
+        .expect("spell in hand");
+    let mut wrapped = 0;
+    for abilities in [&mut object.abilities, &mut object.base_abilities] {
+        for def in Arc::make_mut(abilities).iter_mut() {
+            wrapped += in_definition(def, wrap);
+        }
+    }
+    wrapped
+}
+
+/// Whether the payload's population carries a relation inside `AnyOf` or `Not`.
+fn payload_has_wrapped_relation(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::DestroyAll { target: TargetFilter::Typed(typed), .. }
+            if typed.properties.iter().any(|prop| matches!(
+                prop,
+                FilterProp::AnyOf { .. } | FilterProp::Not { .. }
+            ))
+    )
+}
+
+/// Synthetic: no printed card puts its history relation inside `AnyOf` or `Not`;
+/// Gaze of the Gorgon and Venomous Breath are the nearest printed shapes, so the
+/// fixture is Venomous Breath with its relation rewrapped to the same meaning.
+/// CR 603.7c + CR 608.2i: the delayed ability captures the announced B AND pins its
+/// incarnation, through the wrapper. P1 blinks B, so the B that blocks A is a new
+/// object that the ability does not read: A survives. Unpinned, the read falls back
+/// to the live B and destroys A.
+#[test]
+fn a_wrapped_history_relation_keeps_its_target_pin() {
+    let wraps: [(&str, PropWrap); 2] = [
+        ("AnyOf", |prop| FilterProp::AnyOf { props: vec![prop] }),
+        ("Not Not", |prop| FilterProp::Not {
+            prop: Box::new(FilterProp::Not {
+                prop: Box::new(prop),
+            }),
+        }),
+    ];
+    for (label, wrap) in wraps {
+        let mut x = board(BREATH, 1);
+        assert_eq!(
+            wrap_history_relation(&mut x.runner, x.spell, wrap),
+            2,
+            "{label}: reach: the relation is wrapped in both ability lists"
+        );
+        let announced = x.runner.state().objects[&x.b].incarnation;
+        x.runner.cast(x.spell).target_objects(&[x.b]).resolve();
+        drain(&mut x.runner);
+        let delayed = &x.runner.state().delayed_triggers;
+        assert_eq!(delayed.len(), 1, "{label}: one delayed ability");
+        assert!(
+            payload_has_wrapped_relation(&delayed[0].ability.effect),
+            "{label}: reach: the payload keeps the wrapper: {:?}",
+            delayed[0].ability.effect
+        );
+        assert_eq!(
+            delayed[0].ability.targets,
+            vec![TargetRef::Object(x.b)],
+            "{label}: the announced target is captured"
+        );
+        assert_eq!(
+            delayed[0].ability.target_incarnations,
+            vec![ObjectIncarnationRef::of(x.b, announced)],
+            "{label}: and pinned to its announced incarnation"
+        );
+
+        pass_priority_to(&mut x.runner, P1);
+        x.runner.cast(x.ephemerate).target_objects(&[x.b]).resolve();
+        drain(&mut x.runner);
+        assert_eq!(zone(&x.runner, x.b), Zone::Battlefield, "{label}: reach");
+        assert_ne!(
+            x.runner.state().objects[&x.b].incarnation,
+            announced,
+            "{label}: reach: B is a new object"
+        );
+        assert_eq!(
+            x.runner.state().delayed_triggers[0]
+                .ability
+                .target_incarnations,
+            vec![ObjectIncarnationRef::of(x.b, announced)],
+            "{label}: the pin survives the zone change"
+        );
+
+        attack_block(&mut x.runner, &[x.a, x.a2], &[(x.b, x.a), (x.b2, x.a2)]);
+        pass_until(&mut x.runner, "end of combat", |s| {
+            s.phase == Phase::EndCombat
+        });
+        assert_eq!(
+            x.runner.state().stack.len(),
+            1,
+            "{label}: reach: the delayed ability triggered"
+        );
+        past_end_of_combat(&mut x.runner);
+        assert!(
+            x.runner.state().delayed_triggers.is_empty(),
+            "{label}: reach: the delayed ability resolved"
+        );
+        assert_eq!(
+            zone(&x.runner, x.a),
+            Zone::Battlefield,
+            "{label}: the returned B's block is not read"
+        );
+        assert_eq!(zone(&x.runner, x.a2), Zone::Battlefield, "{label}");
     }
 }
 
