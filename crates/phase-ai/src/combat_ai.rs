@@ -858,13 +858,16 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
         attacking_ids
             .into_iter()
             .filter(|id| {
-                targeting
-                    .valid_attack_targets_by_attacker
-                    .is_none_or(|targets_by_attacker| {
-                        targets_by_attacker.get(id).is_some_and(|targets| {
-                            targets.contains(&AttackTarget::Player(defender))
-                        })
-                    })
+                // CR 508.1d: mandatory IDs survive this single-defender proposal;
+                // the issued per-attacker slice repairs their target below.
+                mandatory.contains(id)
+                    || targeting.valid_attack_targets_by_attacker.is_none_or(
+                        |targets_by_attacker| {
+                            targets_by_attacker.get(id).is_some_and(|targets| {
+                                targets.contains(&AttackTarget::Player(defender))
+                            })
+                        },
+                    )
             })
             .map(|id| (id, AttackTarget::Player(defender)))
             .collect()
@@ -1764,7 +1767,8 @@ fn attack_can_matter(
 /// CR 702.16e + CR 702.16j: move each voluntary attack aimed at a player who
 /// would prevent all of its damage onto a legal target that takes it; drop the
 /// attack when none exists, unless the creature's own attack trigger still pays
-/// off. Must-attack creatures (CR 508.1d) keep their assignment.
+/// off. Must-attack creatures (CR 508.1d) keep a legal assignment even when its
+/// damage is prevented.
 fn retarget_prevented_player_attacks(
     state: &GameState,
     targeting: &AttackTargetingContext<'_>,
@@ -1775,10 +1779,14 @@ fn retarget_prevented_player_attacks(
     assignments
         .into_iter()
         .filter_map(|(id, target)| {
-            if mandatory.contains(&id) {
-                return Some((id, target));
-            }
             let legal = attacker_legal_targets(targeting, attackable, id);
+            if mandatory.contains(&id) {
+                return legal
+                    .contains(&target)
+                    .then_some(target)
+                    .or_else(|| legal.first().copied())
+                    .map(|chosen| (id, chosen));
+            }
             if legal.contains(&target) && target_takes_damage_from(state, target, id) {
                 return Some((id, target));
             }
@@ -9942,6 +9950,111 @@ mod tests {
         assert_eq!(attacks, vec![(goaded, AttackTarget::Player(PlayerId(1)))]);
         engine::game::combat::declare_attackers(&mut state, &attacks, &mut vec![])
             .expect("engine must accept the goad-compliant declaration");
+    }
+
+    /// CR 508.1c + CR 508.1d: Xantcha must attack a legal nonowner even when
+    /// protection prevents its damage, without losing a voluntary attack on
+    /// the owner. Cover both the three-player legacy assignment and the
+    /// four-player selected-defender assignment before engine completion.
+    #[test]
+    fn mandatory_legal_target_repair_preserves_the_voluntary_attack() {
+        for player_count in [3, 4] {
+            let mut scenario = GameScenario::new_with_format(
+                engine::types::format::FormatConfig::free_for_all(),
+                player_count,
+                42,
+            );
+            scenario.at_phase(engine::types::phase::Phase::DeclareAttackers);
+            // Verbatim local MTGJSON Oracle; owner and controller intentionally differ.
+            let xantcha = scenario
+                .add_creature_from_oracle(
+                    PlayerId(1),
+                    "Xantcha, Sleeper Agent",
+                    5,
+                    5,
+                    "Xantcha enters under the control of an opponent of your choice.\nXantcha attacks each combat if able and can't attack its owner or planeswalkers its owner controls.\n{3}: Xantcha's controller loses 2 life and you draw a card. Any player may activate this ability.",
+                )
+                .controlled_by(P0)
+                .id();
+            let voluntary = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+            let mut state = scenario.build().state().clone();
+            state.turn_number = 2;
+            for player in &mut state.players {
+                player.life = 100;
+            }
+            for attacker in [xantcha, voluntary] {
+                let object = state.objects.get_mut(&attacker).unwrap();
+                object.summoning_sick = false;
+                object.entered_battlefield_turn = Some(1);
+            }
+            if player_count == 4 {
+                // P3 keeps a second damageable defender in the comparison, but
+                // its two walls leave P1 as the profitable voluntary defender.
+                for _ in 0..2 {
+                    add_creature(
+                        &mut state,
+                        PlayerId(3),
+                        "Wall",
+                        0,
+                        8,
+                        vec![Keyword::Defender],
+                    );
+                }
+            }
+            grant_protection_from_everything(&mut state, PlayerId(2));
+            let attackable = engine::game::combat::attackable_defender_targets(&state);
+            assert!(
+                engine::game::combat::creature_must_attack_with_attackable_targets(
+                    &state,
+                    xantcha,
+                    &attackable,
+                )
+            );
+
+            reset_expanded_comparison_counters();
+            let attacks = choose_from_engine_prompt(&mut state);
+            let WaitingFor::DeclareAttackers {
+                valid_attack_targets_by_attacker: Some(targets_by_attacker),
+                ..
+            } = &state.waiting_for
+            else {
+                panic!("the production prompt must issue per-attacker legal targets")
+            };
+            let legal = &targets_by_attacker[&xantcha];
+            assert_eq!(legal.first(), Some(&AttackTarget::Player(PlayerId(2))));
+            assert!(!legal.contains(&AttackTarget::Player(PlayerId(1))));
+            assert!(targets_by_attacker[&voluntary].contains(&AttackTarget::Player(PlayerId(1))));
+            assert_eq!(
+                expanded_comparison_counters().0,
+                usize::from(player_count == 4)
+            );
+            assert_eq!(
+                attacks.len(),
+                2,
+                "both attacks must survive for {player_count} players"
+            );
+            assert!(attacks.contains(&(xantcha, AttackTarget::Player(PlayerId(2)))));
+            assert!(attacks.contains(&(voluntary, AttackTarget::Player(PlayerId(1)))));
+
+            let action = engine::game::combat::complete_attacker_proposal(
+                &state,
+                &attacks,
+                &[],
+                engine::game::combat::CombatTaxPosture::Refuse,
+            );
+            assert!(
+                matches!(
+                    &action,
+                    engine::types::actions::GameAction::DeclareAttackers { attacks: completed, .. }
+                        if completed == &attacks
+                ),
+                "engine completion must preserve the legal voluntary proposal"
+            );
+            engine::game::engine::apply_as_current(&mut state, action)
+                .expect("the completed mandatory-plus-voluntary declaration is legal");
+            assert!(state.stack.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
     }
 
     /// CR 702.16e + CR 702.16j: the raw lowest-life lethal read does not hold
