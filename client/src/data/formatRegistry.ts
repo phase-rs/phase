@@ -752,6 +752,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
         combined_base_life: 100,
         per_extra_survivor_life_delta: -15,
         horde_creatures_forced_attackers: true,
+        horde_creatures_haste: true,
       },
     },
   },

@@ -52,4 +52,35 @@ describe("withChallengeDeck", () => {
     expect(std).toBeDefined();
     expect(withChallengeDeck(std!, "SauronHorde")).toBe(std);
   });
+
+  it("carries the engine-authored haste axis with the picked deck", () => {
+    // Selecting Turtle must preserve the engine's `false` (booklet p. 6:
+    // newly entered creatures can't attack that turn) — an absent field
+    // would deserialize engine-side as `true` via the pre-axis fallback.
+    const hordeConfig = formatMetadata("Horde")?.default_config;
+    expect(hordeConfig).toBeDefined();
+
+    const turtle = withChallengeDeck(hordeConfig!, "TurtleTeamUpHorde");
+    expect(turtle.horde_ruleset?.horde_creatures_haste).toBe(false);
+
+    // Every classic mill-race Horde grants haste.
+    for (const deck of [
+      "CybermanHorde",
+      "DndHorde",
+      "ZombiesHorde",
+      "SliversHorde",
+      "HumansGodzillaHorde",
+      "SauronHorde",
+      "SarumanHorde",
+      "LotrTwoTowersHorde",
+    ] as const) {
+      expect(withChallengeDeck(hordeConfig!, deck).horde_ruleset?.horde_creatures_haste).toBe(
+        true,
+      );
+    }
+
+    // Switching away from Turtle must not leave its `false` attached.
+    const backToClassic = withChallengeDeck(turtle, "DndHorde");
+    expect(backToClassic.horde_ruleset?.horde_creatures_haste).toBe(true);
+  });
 });

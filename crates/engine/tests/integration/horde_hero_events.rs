@@ -199,6 +199,43 @@ fn add_unsummon_to_hand(state: &mut GameState, owner: PlayerId) -> ObjectId {
     unsummon
 }
 
+/// Verbatim Oracle text for the graveyard exile replacement below.
+const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
+
+/// A battlefield enchantment with its real replacement definition, parsed
+/// from verbatim Oracle text and cloned onto a staged object like
+/// [`add_murder_to_hand`]. Direct placement emits no ETB event, so an
+/// enters-trigger on the same card never fires here. The replacement
+/// reach-guard proves the parser path ran.
+fn add_battlefield_enchantment_from_oracle(
+    state: &mut GameState,
+    owner: PlayerId,
+    name: &str,
+    oracle_text: &str,
+) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(state, card_id, owner, name.to_string(), Zone::Battlefield);
+    let mut oracle = GameScenario::new();
+    let parsed = oracle
+        .add_enchantment_from_oracle(owner, name, oracle_text)
+        .id();
+    let face = oracle.build();
+    let source = &face.state().objects[&parsed];
+    assert!(
+        !source.replacement_definitions.is_empty(),
+        "{name} must parse to a replacement effect"
+    );
+    let obj = state.objects.get_mut(&id).expect("enchantment");
+    obj.controller = owner;
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    obj.base_card_types = obj.card_types.clone();
+    obj.abilities = source.abilities.clone();
+    obj.base_abilities = source.base_abilities.clone();
+    obj.replacement_definitions = source.replacement_definitions.clone();
+    obj.base_replacement_definitions = source.base_replacement_definitions.clone();
+    id
+}
+
 /// A classic mill-race Horde game (Cyberman ruleset, loader-run so the emblem
 /// comes from the production path) parked at the Horde's upkeep on turn 4.
 /// The caller rigs the Horde library top-first, then opens the wave. Seat 1
@@ -1909,6 +1946,139 @@ fn unsummon_on_survivor_creature_returns_to_hand() {
         "a survivor's bounced creature returns to their hand"
     );
     assert_eq!(st.objects[&bear].zone, Zone::Hand);
+}
+
+/// Turtle booklet p. 7 through the public cast pipeline UNDER Rest in Peace:
+/// the Boss-hand→graveyard redirect normalizes BEFORE replacement
+/// consultation (CR 400.6 / CR 616.1f), so the graveyard destination reaches
+/// RiP and the Ninja is exiled instead of joining the Boss graveyard (where
+/// Villain Scheme! could recur it).
+///
+/// Revert guard: with the redirect in the final mover only, the consult sees
+/// Hand, RiP never applies, and the exile assertion flips to graveyard.
+#[test]
+fn unsummon_on_turtle_ninja_under_rest_in_peace_exiles() {
+    let mut state = hero_event_game();
+    let ninja = add_horde_creature(&mut state, "Foot Ninja", 2);
+    let rip =
+        add_battlefield_enchantment_from_oracle(&mut state, HERO1, "Rest in Peace", REST_IN_PEACE);
+    let unsummon = add_unsummon_to_hand(&mut state, HERO1);
+    park_hero_priority(&mut state, HERO1);
+    let mut runner = GameRunner::from_state(state);
+    let outcome = runner.cast(unsummon).target_objects(&[ninja]).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "a lone mandatory replacement applies without a prompt, got {:?}",
+        outcome.final_waiting_for()
+    );
+    let st = runner.state();
+    assert!(st.stack.is_empty(), "the stack is empty");
+    assert_eq!(st.objects[&ninja].zone, Zone::Exile);
+    assert!(
+        in_pile(st, HORDE, ninja, Zone::Exile),
+        "RiP exiles the redirected Ninja"
+    );
+    let horde = st.players.iter().find(|p| p.id == HORDE).unwrap();
+    assert!(
+        !horde.graveyard.contains(&ninja),
+        "the Ninja never reaches the Boss graveyard"
+    );
+    assert!(
+        !horde.library.contains(&ninja),
+        "the Ninja is not recycled into the event deck"
+    );
+    assert!(
+        !horde.hand.contains(&ninja),
+        "the Horde never holds a card in hand"
+    );
+    assert!(
+        !st.objects[&rip].replacement_definitions.is_empty(),
+        "reach guard: RiP carries its live replacement"
+    );
+}
+
+/// CR 616.1 ordering across the normalized redirect: two Rest in Peace both
+/// observe the graveyard destination, park an ordering choice mid-resolution,
+/// and the chosen exile still delivers after the resume. Proves the
+/// normalized destination survives the pause on the parked event.
+///
+/// Revert guard: with the redirect in the final mover only, the consult sees
+/// Hand, neither RiP applies, no prompt parks, and the choice assertion fails.
+#[test]
+fn unsummon_on_turtle_ninja_with_two_rest_in_peace_parks_ordering_choice() {
+    let mut state = hero_event_game();
+    let ninja = add_horde_creature(&mut state, "Foot Ninja", 2);
+    let rip =
+        add_battlefield_enchantment_from_oracle(&mut state, HERO1, "Rest in Peace", REST_IN_PEACE);
+    let _second =
+        add_battlefield_enchantment_from_oracle(&mut state, HERO1, "Rest in Peace", REST_IN_PEACE);
+    let unsummon = add_unsummon_to_hand(&mut state, HERO1);
+    park_hero_priority(&mut state, HERO1);
+    let mut runner = GameRunner::from_state(state);
+    // No `replacement_choice` declared: the driver halts at the prompt.
+    let outcome = runner.cast(unsummon).target_objects(&[ninja]).resolve();
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the two exiles compete for the redirected move, got {:?}",
+        outcome.final_waiting_for()
+    );
+    let index = match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice { candidates, .. } => {
+            assert_eq!(
+                candidates.len(),
+                2,
+                "both RiPs observe the graveyard destination: {candidates:?}"
+            );
+            candidates
+                .iter()
+                .position(|c| c.source_id == rip)
+                .expect("RiP is selectable")
+        }
+        other => panic!("expected ReplacementChoice, got {other:?}"),
+    };
+    assert_eq!(
+        runner.state().objects[&ninja].zone,
+        Zone::Battlefield,
+        "the first prompt pauses the Ninja's move mid-resolution"
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("choose the first RiP");
+    // The Ninja's move completes with that answer; Unsummon's own graveyard
+    // move then parks the second ordering prompt (both RiPs compete for it
+    // too — the same replacement, a different event).
+    assert_eq!(
+        runner.state().objects[&ninja].zone,
+        Zone::Exile,
+        "the chosen exile delivers after the resume"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "Unsummon's own graveyard move parks a second prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("exile Unsummon itself");
+    runner.advance_to_priority_window();
+    let st = runner.state();
+    assert!(
+        matches!(st.waiting_for, WaitingFor::Priority { .. }),
+        "resolution completes after the choices, got {:?}",
+        st.waiting_for
+    );
+    assert!(st.stack.is_empty(), "the stack is empty");
+    assert_eq!(st.objects[&ninja].zone, Zone::Exile);
+    assert!(
+        in_pile(st, HORDE, ninja, Zone::Exile),
+        "the chosen exile delivers after the resume"
+    );
 }
 
 /// Hordemagic basic rule through the public wave-to-combat path: a Zombie

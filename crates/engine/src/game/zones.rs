@@ -1501,6 +1501,35 @@ pub fn apply_resolved_zone_change(
     Ok(())
 }
 
+/// Boss-stage Horde (Turtle Team-Up product booklet, printed p. 7):
+/// Boss-owned cards bound for hand are "put into their graveyard instead".
+///
+/// The single authority for that product redirect. The proposed-zone seam
+/// (`zone_pipeline::execute_zone_move_with_applied_terminal`) normalizes
+/// through this BEFORE consulting replacements, so graveyard-scoped
+/// replacements (Rest in Peace) observe the real destination: CR 400.6
+/// applies replacements before the move happens, and CR 616.1f repeats the
+/// process for effects that would now be applicable. The raw mover below
+/// keeps the same mapping as a backstop for paths that bypass the consult
+/// (exempt causes, DebugCommand), where there is no replacement pass to
+/// inform. Owner-scoped, so a survivor's bounced card is unaffected; the
+/// identity return keeps the classic mill-race top-of-library redirect (and
+/// every non-Horde move) on the mover-level mapping below, unchanged.
+pub(crate) fn boss_hand_redirect_destination(
+    state: &GameState,
+    owner: PlayerId,
+    dest: Zone,
+) -> Zone {
+    if dest == Zone::Hand
+        && super::horde::is_horde_seat(state, owner)
+        && super::horde::has_boss_stages(state)
+    {
+        Zone::Graveyard
+    } else {
+        dest
+    }
+}
+
 /// CR 400.7: Move an object to a new zone. An object that moves to a new zone becomes a new object.
 ///
 /// Plain-entry convenience wrapper: delegates to
@@ -1723,17 +1752,19 @@ pub(crate) fn move_to_zone_with_entry_flags(
     //   the move completes below.
     // - Boss-stage Horde (Turtle Team-Up product booklet, printed p. 7):
     //   Boss-owned cards bound for hand are "put into their graveyard
-    //   instead" — redirect to the owner's graveyard (Villain Scheme!
-    //   reshuffles Boss Ninjas from there; the library redirect would wrongly
-    //   recycle them into the event deck).
-    let horde_hand_redirect = to == Zone::Hand && super::horde::is_horde_seat(state, owner);
-    let horde_hand_to_top = horde_hand_redirect && !super::horde::has_boss_stages(state);
-    if horde_hand_redirect {
-        to = if horde_hand_to_top {
-            Zone::Library
-        } else {
-            Zone::Graveyard
-        };
+    //   instead" (Villain Scheme! reshuffles Boss Ninjas from there; the
+    //   library redirect would wrongly recycle them into the event deck).
+    //   Consulted moves already normalized through
+    //   `boss_hand_redirect_destination` at the proposal seam; this arm is
+    //   the backstop for consult-bypassing paths (exempt causes,
+    //   DebugCommand).
+    let horde_hand_to_top = to == Zone::Hand
+        && super::horde::is_horde_seat(state, owner)
+        && !super::horde::has_boss_stages(state);
+    if horde_hand_to_top {
+        to = Zone::Library;
+    } else {
+        to = boss_hand_redirect_destination(state, owner, to);
     }
     // CR 400.7 + CR 611.3a: a static may depend on an object's membership in
     // either the leaving or destination zone through its recipient filter,

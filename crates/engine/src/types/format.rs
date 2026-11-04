@@ -7308,6 +7308,26 @@ mod tests {
                 "{:?}'s bundled rules summary does not match its ruleset",
                 meta.deck
             );
+            // The client mirror (`challengeDeckRegistry.ts`) must carry this
+            // axis for every deck: an absent field deserializes as `true` via
+            // the pre-axis fallback, which would silently re-enable haste on
+            // Turtle selection. Turtle false, every classic true.
+            let expected_haste = meta.deck != ChallengeDeck::TurtleTeamUpHorde;
+            assert_eq!(
+                meta.default_ruleset.horde_creatures_haste, expected_haste,
+                "{:?}'s bundled haste axis is wrong",
+                meta.deck
+            );
+            let serialized =
+                serde_json::to_value(&meta.default_ruleset).expect("ruleset serializes");
+            assert_eq!(
+                serialized
+                    .get("horde_creatures_haste")
+                    .and_then(|v| v.as_bool()),
+                Some(expected_haste),
+                "{:?}'s serialized ruleset must carry the haste axis",
+                meta.deck
+            );
             assert!(
                 !meta.rules.is_empty(),
                 "{:?} has no rules summary",

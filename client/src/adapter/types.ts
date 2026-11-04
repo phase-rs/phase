@@ -417,6 +417,15 @@ export interface HordeRuleset {
   per_extra_survivor_life_delta: number;
   horde_creatures_forced_attackers: boolean;
   /**
+   * Whether the Horde's creatures have haste. True for the classic mill-race
+   * Hordes; false for default Turtle Team-Up (booklet p. 6 excludes newly
+   * entered creatures from that turn's combat). Mirrors the engine
+   * `HordeRuleset::horde_creatures_haste` — required here (the engine always
+   * serializes it) so deck selection can never silently drop the axis and
+   * fall back to the engine's absent-means-true default.
+   */
+  horde_creatures_haste: boolean;
+  /**
    * How the Horde's legendary cards are treated when milled by damage. Optional
    * here (like the engine's `#[serde(default)]`) so pre-axis serialized configs
    * still parse; the engine's registry always emits it. Absent ⇒ `Normal`.
