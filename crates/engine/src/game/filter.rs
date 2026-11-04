@@ -205,6 +205,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -472,6 +473,7 @@ pub(crate) fn affected_filter_requires_attachment_relation(filter: &TargetFilter
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -630,6 +632,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -1028,6 +1031,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -2849,6 +2853,7 @@ fn filter_contains_input(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -4342,6 +4347,7 @@ fn absent_search_predicate_truth(filter: &TargetFilter) -> Option<bool> {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -6743,6 +6749,10 @@ fn filter_inner_for_object(
 ) -> bool {
     match filter {
         TargetFilter::None => false,
+        // CR 601.2f: the spell whose cost is being determined is a reference a
+        // cost-modifier quantity binds to that exact object before evaluating
+        // (`quantity::bind_casting_spell_referent`); unbound, it names nothing.
+        TargetFilter::CastingSpell => false,
         TargetFilter::Any => true,
         TargetFilter::Player => false, // Players are not objects
         // CR 118.12a: unless-payer population — never matches an object.
@@ -7948,6 +7958,7 @@ fn zone_change_filter_inner(
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -8290,6 +8301,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -8430,10 +8442,44 @@ pub fn spell_object_matches_filter_from_state_for(
     all_creature_types: &[String],
     fused: bool,
 ) -> bool {
+    spell_object_matches_filter_with_announced_x(
+        state,
+        spell_obj,
+        origin_zone,
+        caster,
+        filter,
+        source_id,
+        all_creature_types,
+        fused,
+        None,
+    )
+}
+
+/// Announced-X sibling of [`spell_object_matches_filter_from_state_for`].
+/// `announced_x: Some(x)` evaluates the filter against the spell as it stands
+/// once its caster has announced X (CR 601.2b): per CR 601.2a the spell being
+/// cast is on the stack, so CR 202.3e counts the announced X in its mana value
+/// (`GameObject::spell_mana_value_with_announced_x`). `None` reads the object as
+/// it currently presents itself, byte-identical to the `_for` entry.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spell_object_matches_filter_with_announced_x(
+    state: &GameState,
+    spell_obj: &GameObject,
+    origin_zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    all_creature_types: &[String],
+    fused: bool,
+    announced_x: Option<u32>,
+) -> bool {
     let Some(source_obj) = state.objects.get(&source_id) else {
         return false;
     };
-    let record = spell_cast_record_from_object_for(spell_obj, fused);
+    let mut record = spell_cast_record_from_object_for(spell_obj, fused);
+    if let Some(x) = announced_x {
+        record.mana_value = spell_obj.spell_mana_value_with_announced_x(fused, x);
+    }
     spell_object_matches_filter_inner(
         &record,
         origin_zone,
@@ -8616,6 +8662,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -8669,7 +8716,10 @@ fn spell_object_matches_property(
         }
         FilterProp::ManaValueParity { parity } => {
             let choice = context.and_then(|ctx| ctx.state.last_named_choice.as_ref());
-            mana_value_matches_parity_source(record.mana_value, parity, choice)
+            let source_choice = context
+                .and_then(|ctx| ctx.state.objects.get(&ctx.source_id))
+                .and_then(|source| chosen_parity(&source.chosen_attributes));
+            mana_value_matches_parity_source(record.mana_value, parity, choice, source_choice)
         }
         FilterProp::IsChosenCreatureType => context.is_some_and(|context| {
             context
@@ -8858,7 +8908,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
             }
         },
         FilterProp::ManaValueParity { parity } => {
-            mana_value_matches_parity_source(record.mana_value, parity, None)
+            mana_value_matches_parity_source(record.mana_value, parity, None, None)
         }
         // CR 202.1: SpellCastRecord retains colors + mana_value but no per-shard
         // ManaCost, so colored-pip count is unsupported here. RUNTIME: TODO.
@@ -9844,13 +9894,27 @@ fn matches_last_chosen_card_predicate(
     }
 }
 
-fn parity_from_source(source: &ParitySource, choice: Option<&ChoiceValue>) -> Option<Parity> {
+/// CR 607.2d: the odd/even quality a source object chose and keeps.
+fn chosen_parity(attributes: &[ChosenAttribute]) -> Option<Parity> {
+    attributes.iter().find_map(|attribute| match attribute {
+        ChosenAttribute::OddOrEven(parity) => Some(*parity),
+        _ => None,
+    })
+}
+
+fn parity_from_source(
+    source: &ParitySource,
+    choice: Option<&ChoiceValue>,
+    source_choice: Option<Parity>,
+) -> Option<Parity> {
     match source {
         ParitySource::Fixed(parity) => Some(*parity),
         ParitySource::LastNamedChoice => match choice {
             Some(ChoiceValue::OddOrEven(parity)) => Some(*parity),
             _ => None,
         },
+        // CR 607.2d: the source's own persisted as-enters choice.
+        ParitySource::SourceChosen => source_choice,
     }
 }
 
@@ -9858,8 +9922,10 @@ fn mana_value_matches_parity_source(
     mana_value: u32,
     source: &ParitySource,
     choice: Option<&ChoiceValue>,
+    source_choice: Option<Parity>,
 ) -> bool {
-    parity_from_source(source, choice).is_some_and(|parity| parity.matches(i64::from(mana_value)))
+    parity_from_source(source, choice, source_choice)
+        .is_some_and(|parity| parity.matches(i64::from(mana_value)))
 }
 
 fn attacking_defender_matches(
@@ -10198,7 +10264,12 @@ fn matches_filter_prop(
             // CR 202.3d + CR 709.4b: combined mana value off the stack (a split
             // card's parity is that of both halves), chosen half on the stack.
             let mana_value = obj.effective_mana_value();
-            mana_value_matches_parity_source(mana_value, parity, state.last_named_choice.as_ref())
+            mana_value_matches_parity_source(
+                mana_value,
+                parity,
+                state.last_named_choice.as_ref(),
+                chosen_parity(&source.chosen_attributes),
+            )
         }
         // CR 107.4 + CR 202.1: count colored mana symbols in the object's printed
         // mana cost via the single counting authority, then compare with the
@@ -11156,7 +11227,12 @@ fn zone_change_record_matches_property(
         // CR 202.3 + CR 608.2c: The event-time mana value is fixed in the
         // snapshot; the chosen odd/even quality is read from resolution state.
         FilterProp::ManaValueParity { parity } => {
-            mana_value_matches_parity_source(record.mana_value, parity, state.last_named_choice.as_ref())
+            mana_value_matches_parity_source(
+                record.mana_value,
+                parity,
+                state.last_named_choice.as_ref(),
+                chosen_parity(&source.chosen_attributes),
+            )
         }
         // CR 202.1: Zone-change records currently snapshot mana value, not the
         // full printed mana cost. Exact-cost predicates fail closed here.
@@ -12596,6 +12672,7 @@ pub(crate) fn single_target_count(filter: &TargetFilter) -> Option<SingleTargetC
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -12829,7 +12906,7 @@ mod tests {
         ControllerRef, CostPaidObjectSnapshot, DamageKindFilter, Effect, FilterProp,
         ManaContribution, ManaProduction, PlayerScope, QuantityExpr, QuantityRef,
         ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
-        TriggerDefinition, TypeFilter, TypedFilter,
+        ThisWayCause, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
@@ -19591,6 +19668,62 @@ mod tests {
             !matches_target_filter(&state, exiled, &sacrificed_this_way, sacrificed),
             "a member whose recorded producer action differs (Exiled) must not match Sacrificed"
         );
+    }
+
+    /// CR 608.2c + CR 701.26a: a merged chain set holding a destroyed member and
+    /// a tapped member serves "tapped this way" and "destroyed this way"
+    /// disjointly; the cause-agnostic read sees both.
+    #[test]
+    fn tracked_set_filtered_tapped_cause_discriminates_merged_set() {
+        let mut state = setup();
+        let destroyed = add_creature(&mut state, PlayerId(0), "Destroyed Member");
+        let tapped = add_creature(&mut state, PlayerId(0), "Tapped Member");
+        let set = crate::types::identifiers::TrackedSetId(4);
+        state
+            .tracked_object_sets
+            .insert(set, vec![destroyed, tapped]);
+        let mut causes = std::collections::HashMap::new();
+        causes.insert(destroyed, ThisWayCause::Destroyed);
+        causes.insert(tapped, ThisWayCause::Tapped);
+        state
+            .tracked_set_member_causes
+            .insert(set, causes.into_iter().collect());
+        state.chain_tracked_set_id = Some(set);
+
+        let tapped_this_way = sentinel_tracked_set_filtered(Some(ThisWayCause::Tapped));
+        assert!(matches_target_filter(
+            &state,
+            tapped,
+            &tapped_this_way,
+            tapped
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            destroyed,
+            &tapped_this_way,
+            tapped
+        ));
+        let destroyed_this_way = sentinel_tracked_set_filtered(Some(ThisWayCause::Destroyed));
+        assert!(matches_target_filter(
+            &state,
+            destroyed,
+            &destroyed_this_way,
+            destroyed
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            tapped,
+            &destroyed_this_way,
+            destroyed
+        ));
+        let any_member = sentinel_tracked_set_filtered(None);
+        assert!(matches_target_filter(&state, tapped, &any_member, tapped));
+        assert!(matches_target_filter(
+            &state,
+            destroyed,
+            &any_member,
+            destroyed
+        ));
     }
 
     /// Concrete (non-sentinel) `TrackedSetFiltered` ids bypass the ladder
