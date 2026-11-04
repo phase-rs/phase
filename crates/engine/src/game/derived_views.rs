@@ -1053,7 +1053,8 @@ impl Serialize for ClientGameStateRef<'_> {
 /// trigger-firing redaction below. Future private removals reaching `waiting_for` must
 /// remain shared with [`delivered_prompt_identity`].
 fn client_state_wire_value(state: &GameState) -> serde_json::Result<serde_json::Value> {
-    let projected_state = crate::game::visibility::project_paid_cast_cleanup_authority(state);
+    let mut projected_state = crate::game::visibility::project_paid_cast_cleanup_authority(state);
+    crate::game::visibility::redact_waiting_for_iteration_members(&mut projected_state.waiting_for);
     let mut value = serde_json::to_value(&projected_state)?;
     let Some(root) = value.as_object_mut() else {
         return Ok(value);
@@ -3220,9 +3221,9 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        CommanderDamageEntry, DelayedTrigger, PendingCast, StackEntry, StackEntryKind,
-        StackPaidSnapshot, TargetEffectDetail, TargetSelectionProgress, TargetSelectionSlot,
-        TriggerOrderGroup, WaitingFor, ZoneChangeRecord,
+        CommanderDamageEntry, DelayedTrigger, DistributionScope, DistributionUnit, PendingCast,
+        StackEntry, StackEntryKind, StackPaidSnapshot, TargetEffectDetail, TargetSelectionProgress,
+        TargetSelectionSlot, TriggerOrderGroup, WaitingFor, ZoneChangeRecord,
     };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, TriggerFiring,
@@ -8995,6 +8996,52 @@ mod tests {
             }),
             "the rows are exactly what a client rebuilds from the filtered object's counters, its \
              loyalty, the battlefield set and the `∞` store — zero new information"
+        );
+    }
+
+    /// CR 608.2d: `client_state_wire_value` redacts a paused resolution-time
+    /// division's look-result provenance by itself. The fixture is the raw
+    /// authoritative state — no viewer filter runs first — so this fails if the
+    /// serializer's own `redact_waiting_for_iteration_members` call is removed.
+    #[test]
+    fn client_wire_redacts_resolution_division_provenance_without_viewer_filter() {
+        let mut state = GameState::new_two_player(42);
+        let mut pending = ResolvedAbility::new(
+            Effect::unimplemented("private loop probe", "private loop probe"),
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        pending.context.parent_target_iteration_members = Some(vec![ObjectId(1), ObjectId(2)]);
+        state.waiting_for = WaitingFor::DistributeAmong {
+            player: PlayerId(0),
+            total: 3,
+            targets: vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Object(ObjectId(2)),
+            ],
+            unit: DistributionUnit::Damage,
+            scope: DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            },
+        };
+
+        let wire = client_state_wire_value(&state).expect("client projection serializes");
+        let pending_effect = &wire["waiting_for"]["data"]["scope"]["data"]["pending_effect"];
+        assert!(pending_effect.is_object(), "reach guard: {wire}");
+        assert!(
+            pending_effect["context"]
+                .get("parent_target_iteration_members")
+                .is_none(),
+            "wire payload leaked iteration members: {pending_effect}"
+        );
+        // Reach guard: the trusted serialization of the same state carries the
+        // provenance, so its absence above is the projection's own redaction.
+        let trusted = serde_json::to_value(&state).expect("trusted state serializes");
+        assert!(
+            trusted["waiting_for"]["data"]["scope"]["data"]["pending_effect"]["context"]
+                .get("parent_target_iteration_members")
+                .is_some()
         );
     }
 

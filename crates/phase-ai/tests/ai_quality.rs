@@ -2302,7 +2302,11 @@ fn action_score(
     state: &engine::types::game_state::GameState,
     matches_action: impl Fn(&GameAction) -> bool,
 ) -> f64 {
-    let config = create_config(AiDifficulty::Hard, Platform::Native);
+    // Measurement mode drops the wall-clock search deadline (`ensemble_deadline`),
+    // bounding the search by `max_nodes`/`max_depth` alone. Without it a loaded CI
+    // runner can cut the search short and shift a score by more than the ~0.06
+    // margin some ordering rows assert on.
+    let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(0);
     score_candidates(state, P0, &config)
         .into_iter()
         .find(|(action, _)| matches_action(action))

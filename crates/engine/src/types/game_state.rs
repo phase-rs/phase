@@ -19414,15 +19414,23 @@ pub enum WaitingFor {
         total_damage: u32,
         attackers: Vec<ObjectId>,
     },
-    /// CR 601.2d: Distribute N among targets at casting time ("divide N damage among").
-    /// Infrastructure ready: handler in engine.rs, AI candidates, continuation match.
-    /// TODO: Wire trigger in casting.rs when a "divide/distribute" ability is being cast.
-    /// Requires parser support for "divide N damage among" Oracle text patterns.
+    /// CR 601.2d: divide N among the announced targets while a spell or ability
+    /// is cast, activated, or put on the stack ("divided as you choose among any
+    /// number of targets"); or CR 608.2d: divide N among untargeted resolution
+    /// candidates while the effect is applied ("divided as its controller chooses
+    /// among any number of those Wolves"). `scope` says which (see
+    /// [`DistributionScope`]); `targets` holds the announced targets or the
+    /// resolution candidates respectively.
     DistributeAmong {
         player: PlayerId,
         total: u32,
         targets: Vec<TargetRef>,
         unit: DistributionUnit,
+        #[serde(
+            default,
+            skip_serializing_if = "DistributionScope::is_announced_targets"
+        )]
+        scope: DistributionScope,
     },
     /// CR 122.5 + CR 608.2d: "Move any number of counters ... onto [set]"
     /// chooses destinations and counts as the ability resolves.
@@ -19717,6 +19725,34 @@ pub struct DamageSlot {
     /// Lethal damage threshold. CR 702.2c: With deathtouch, lethal = 1.
     /// Informational for non-trample; enforced before trample excess (CR 702.19b).
     pub lethal_minimum: u32,
+}
+
+/// CR 601.2d / CR 608.2d: when a `WaitingFor::DistributeAmong` division is
+/// chosen and what it must cover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type", content = "data")]
+pub enum DistributionScope {
+    /// CR 601.2d + CR 603.3d: announced among the spell's/ability's targets while
+    /// it is cast, activated, or put on the stack; each target receives at least one.
+    #[default]
+    AnnouncedTargets,
+    /// CR 608.2d + CR 115.10a: an untargeted division chosen while the effect is
+    /// applied, among any number of `targets` (the resolution candidates); each
+    /// chosen object receives at least one and the whole amount is divided.
+    /// `pending_effect` is the paused node (its `sub_ability`/`else_ability`
+    /// cleared — the continuation owns the tail), resolved with the chosen
+    /// portions stamped into `ResolvedAbility::distribution`.
+    ResolutionCandidates {
+        pending_effect: Box<ResolvedAbility>,
+    },
+}
+
+impl DistributionScope {
+    /// Serde skip predicate: the announce-time scope is the wire default, so
+    /// payloads that predate `scope` round-trip byte-identically.
+    pub fn is_announced_targets(&self) -> bool {
+        matches!(self, Self::AnnouncedTargets)
+    }
 }
 
 /// CR 107.14 + CR 118.8: Quantity named in a "pay any amount of X" prompt.
@@ -22219,12 +22255,12 @@ fn layers_read_current_step_unknown() -> bool {
 /// continuous `static_definitions` entry (including `GrantStaticAbility` hosts)
 /// and command-zone emblems. The opt-in-zone / off-zone arm (Incarnation cycle —
 /// Anger/Brawn/Filth/Wonder/Valor, `active_zones`-gated statics functioning from
-/// the graveyard) is INTENTIONALLY NOT indexed: its generator-set changes (e.g.
-/// self-milling an Anger into the graveyard) do not all mark `layers_dirty`
-/// (`zones.rs` marks dirty only on battlefield/hand transitions; mill/effect
-/// movers add no mark), so a `layers_dirty`-gated cache of off-zone generators
-/// would go stale. That arm keeps its live `state.objects` scan in
-/// `for_each_static_effect_source`.
+/// the graveyard) is INTENTIONALLY NOT indexed. A source's arrival in or
+/// departure from a zone its own `active_zones` declares NOW marks `layers_dirty`
+/// (#10400, via `zones::move_to_zone` and `zones::move_to_library_at_index` →
+/// `static_layer_dependency_for_zone_transition`), but indexing the arm remains a
+/// separate optimization with no measured need, so it keeps its live
+/// `state.objects` scan in `for_each_static_effect_source`.
 ///
 /// Backed by `im::Vector` so `GameState::clone()` stays O(1) structural share
 /// (and `GameState: Send` is preserved — no `Rc`). Rebuilt at the TOP of
@@ -56851,6 +56887,59 @@ mod tests {
         ))
         .expect("the marked export parses");
         assert_eq!(via_string, marked);
+    }
+
+    /// C2.5 wire compatibility: a `DistributeAmong` payload serialized before
+    /// `scope` existed deserializes as the CR 601.2d announce-time scope and
+    /// re-serializes byte-identically; a CR 608.2d resolution-time wait carries
+    /// its scope on the wire and round-trips.
+    #[test]
+    fn distribute_among_scope_is_wire_compatible() {
+        let legacy = r#"{"type":"DistributeAmong","data":{"player":1,"total":3,"targets":[{"Object":7},{"Object":8}],"unit":{"type":"Damage"}}}"#;
+        let decoded: WaitingFor =
+            serde_json::from_str(legacy).expect("scope-less payload must deserialize");
+        match &decoded {
+            WaitingFor::DistributeAmong { scope, .. } => {
+                assert_eq!(scope, &DistributionScope::AnnouncedTargets);
+            }
+            other => panic!("expected DistributeAmong, got {other:?}"),
+        }
+        assert_eq!(
+            serde_json::to_string(&decoded).expect("serialize"),
+            legacy,
+            "announce-time scope must not appear on the wire"
+        );
+
+        let pending = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let resolution = WaitingFor::DistributeAmong {
+            player: PlayerId(1),
+            total: 3,
+            targets: vec![
+                TargetRef::Object(ObjectId(7)),
+                TargetRef::Object(ObjectId(8)),
+            ],
+            unit: DistributionUnit::Damage,
+            scope: DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            },
+        };
+        let json = serde_json::to_string(&resolution).expect("serialize");
+        assert!(
+            json.contains(r#""scope":{"type":"ResolutionCandidates""#),
+            "resolution-time scope must be on the wire: {json}"
+        );
+        let back: WaitingFor = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(back, resolution);
     }
 }
 
