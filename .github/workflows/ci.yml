@@ -224,10 +224,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Free runner disk for Rust test linking
-        # Build the workspace's test binaries once. Keep the Rust caches intact
-        # and reclaim only unused hosted-image payloads before setup-rust-toolchain
-        # restores/saves Cargo state.
+      - &free_runner_disk_cleanup
+        name: Free runner disk for Rust test linking and extraction
+        # Keep Rust caches intact and reclaim only unused hosted-image payloads
+        # before linking or extracting the test archive, and before
+        # setup-rust-toolchain restores/saves Cargo state.
         run: |
           echo "Disk before cleanup:"
           df -h /
@@ -305,15 +306,17 @@ jobs:
     name: Rust tests (shard ${{ matrix.shard }}/4)
     needs: rust-test-build
     runs-on: ubuntu-latest
-    # Archive downloads can consume over 10 minutes before tests begin.
-    # Keep a bounded job with time for each shard to finish its tests.
-    timeout-minutes: 30
+    # A shard hit the 30-minute ceiling after over 10 minutes of archive setup;
+    # allow 45 minutes for setup, extraction, and test execution.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - *free_runner_disk_cleanup
 
       # Some snapshot tests query Cargo metadata at runtime. This makes Cargo
       # available but does not build test binaries; those come from the archive.
