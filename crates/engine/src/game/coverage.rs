@@ -2806,6 +2806,7 @@ fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
                             "designated for an owner-library shuffle"
                         }
                         ThisWayCause::Discarded => "discarded",
+                        ThisWayCause::Tapped => "tapped",
                         ThisWayCause::Exiled => "exiled",
                         ThisWayCause::Milled => "milled",
                         ThisWayCause::Destroyed => "destroyed",

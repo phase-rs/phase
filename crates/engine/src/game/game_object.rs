@@ -2794,6 +2794,22 @@ impl GameObject {
         }
     }
 
+    /// CR 601.2a + CR 202.3e: The mana value of the spell this object represents
+    /// once its caster has announced `x` for the `{X}` in its mana cost. A spell
+    /// being cast is on the stack (CR 601.2a), so its announced X counts — even
+    /// though the engine keeps the card in its origin zone until the cast is
+    /// finalized and only stamps `cost_x_paid` after payment. Casting-legality
+    /// checks that read the spell's qualities after the X announcement project
+    /// the mana value through here rather than through the zone-gated
+    /// [`spell_mana_value_for`](Self::spell_mana_value_for).
+    pub fn spell_mana_value_with_announced_x(&self, fused: bool, x: u32) -> u32 {
+        match self.fused_split_half_for(fused) {
+            // Fuse cards carry no {X} in either half (see `spell_mana_value_for`).
+            Some(bf) => self.mana_cost.mana_value() + bf.mana_cost.mana_value(),
+            None => self.mana_cost.mana_value_with_x(Zone::Stack, Some(x)),
+        }
+    }
+
     /// CR 202.3d + CR 709.4d + CR 702.102b: The colors of the SPELL this object
     /// represents while being cast / on the stack — the COMBINED colors of both
     /// halves for a fused split spell, otherwise the object's own colors. See
