@@ -28766,9 +28766,8 @@ mod tests {
     use crate::database::synthesis::synthesize_extort;
     use crate::game::scenario::{GameScenario, P0, P1};
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ChooseOneOfKind, CoinFlipRun, DieResultBranch,
-        LibraryInstructionActor, LibraryPosition, ParentTargetMissingReason,
-        SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
+        ChooseOneOfKind, CoinFlipRun, DieResultBranch, LibraryInstructionActor, LibraryPosition,
+        ParentTargetMissingReason, SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
     };
 
     fn continuation_die_context_fixture(effect: Effect) -> (GameState, ObjectId, GameEvent) {
