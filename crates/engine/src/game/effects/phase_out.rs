@@ -352,6 +352,14 @@ mod tests {
         let attachment = add_creature(&mut state, PlayerId(0), "Animated attachment");
         // Raw collector fixture: ordinary creature attachments are detached by
         // SBAs before a public priority boundary. This isolates batch precedence.
+        // An animated Equipment keeps its artifact type, so CR 702.26g cascades it.
+        state
+            .objects
+            .get_mut(&attachment)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Artifact);
         state.objects.get_mut(&attachment).unwrap().attached_to = Some(host.into());
         state
             .objects
