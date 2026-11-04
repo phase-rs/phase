@@ -13703,8 +13703,12 @@ pub(crate) fn filter_consumed_trigger_events(
 /// claims it as a queued `ZoneChanged` does. The OCCURRENCE EXACTNESS proof below is
 /// for `ZoneChanged` only: an as-enters roll carries no per-occurrence index, and
 /// identical rolls can be distinct occurrences (Neverwinter Hydra: "As this
-/// creature enters, roll X d6."), which is harmless here because every buffer copy
-/// is unneeded.
+/// creature enters, roll X d6."), which is harmless for buffer copies because every
+/// one is unneeded. The release's own call passes the released roll itself through
+/// this filter, so a queued context still holding an identical roll from an earlier
+/// release would drop it. That needs the same entrant to re-enter and roll the same
+/// result before the first release's observers are placed, and no printed card is
+/// known to reach it.
 ///
 /// OCCURRENCE EXACTNESS — PROVED WITHIN ONE TURN, WITH ITS BASIS AND ITS BOUNDS.
 /// CR 400.7 + CR 603.2c. Two byte-identical `ZoneChanged` in one slice denote

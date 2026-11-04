@@ -5341,9 +5341,10 @@ fn parked_rolls(state: &GameState) -> usize {
 }
 
 /// R-3. CR 603.3b: on the Grumgully ordering route the roll's observer and the
-/// entry's observer go on the stack in the one batch the counter answer places.
+/// entry's observer both reach the stack by the Priority the counter answer
+/// leads to. This does not tell one batch from two at that Priority.
 #[test]
-fn an_ordered_rolls_observer_and_entry_observer_share_a_batch() {
+fn an_ordered_rolls_observer_and_entry_observer_reach_one_priority() {
     let fold = Fold::Grumgully("Hammer Jammer");
     let mut board = fold_board(7, fold, false);
     let mut events = Vec::new();

@@ -1978,8 +1978,9 @@ pub(crate) fn process_one_zone_move(
 
 /// Its callers, the targeted loop, the drain's resume of `remaining` members and
 /// the two `EffectZoneChoice` member loops, each park a
-/// `PendingChangeZoneIteration` on `NeedsChoice`, which seats an owed attacker
-/// (CR 508.4).
+/// `PendingChangeZoneIteration` on `NeedsChoice`, whose resume takes an owed
+/// attacking seat (CR 508.4); the `EffectZoneChoice` loops park it above the
+/// paused child, and that route is not verified.
 pub(crate) fn process_one_zone_move_with_terminal(
     state: &mut GameState,
     ctx: &ChangeZoneIterationCtx,
