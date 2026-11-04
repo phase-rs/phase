@@ -1793,16 +1793,22 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             IdentityProjection::FaceDownRevealed => {
                 if let Some(obj) = filtered.objects.get_mut(&obj_id) {
                     reveal_face_down_printed_identity(obj);
-                    // CR 702.106c + CR 702.106e: a reveal publishes the printed
-                    // card, never the agenda's secretly chosen names. This leaf is
-                    // also the CR 708.9 game-end projection, which reaches every
-                    // seated viewer, so the choices survive only where the card's
-                    // private access does — the controller's own look.
-                    if !can_view_private_for_player(obj.controller) {
-                        redact_secret_agenda_choices(obj);
-                    }
                 }
             }
+        }
+    }
+
+    // CR 702.106c + CR 702.106f: an agenda's secretly chosen names — and how
+    // many names it takes — belong to its controller until the turn-face-up
+    // special action publishes them (CR 702.106c). That secrecy is a property of
+    // the face-down status, not of any one zone or projection leaf: this loop is
+    // also the only authority for a face-down conspiracy exiled with a departing
+    // player (CR 800.4a), which reaches the wire outside the command-zone leaf
+    // above. Enforcing it once over the final object set keeps every projection
+    // path — in-game, game-end, seated and unseated — on one answer.
+    for (_, obj) in filtered.objects.iter_mut() {
+        if obj.face_down && !can_view_private_for_player(obj.controller) {
+            redact_secret_agenda_choices(obj);
         }
     }
 

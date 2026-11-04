@@ -54,6 +54,7 @@ use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
+use engine::types::zones::Zone;
 use std::sync::Arc;
 
 fn plain_card_face(name: &str) -> CardFace {
@@ -1531,6 +1532,74 @@ fn game_end_reveal_hides_an_unanswered_double_agenda_count() {
         controller_wire.contains("\"agenda_name_count\":2"),
         "the controller keeps the count of their own unanswered agenda"
     );
+}
+
+/// CR 702.106e + CR 800.4a: a named agenda whose controller leaves is revealed
+/// and then exiled with the rest of that player's objects. The departure reveal
+/// is not the turn-face-up action (CR 702.106c), so the secretly chosen names
+/// stay the controller's — including in the exile projection, which does not
+/// pass through the command-zone face-down leaf.
+#[test]
+fn conceding_named_agenda_keeps_secret_names_off_every_other_wire() {
+    let mut state = priority_state();
+    load_limited_decks(&mut state, vec![], vec![summoners_bond_face()]);
+    let bond_id = owned_command_zone_ids(&state, P1)[0];
+    record_secret_agenda_choices(
+        &mut state,
+        bond_id,
+        P1,
+        vec!["Grizzly Bears".to_string(), "Runeclaw Bear".to_string()],
+    )
+    .expect("valid double-agenda names");
+
+    apply(&mut state, P1, GameAction::Concede { player_id: P1 }).expect("P1 concedes");
+
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
+    assert!(
+        !state.command_zone.contains(&bond_id),
+        "CR 800.4a: the departing player's agenda leaves the command zone"
+    );
+    let departed = &state.objects[&bond_id];
+    assert_eq!(departed.zone, Zone::Exile, "CR 800.4a exiles owned objects");
+    assert!(
+        departed.face_down,
+        "CR 702.106e: the departure reveal does not turn the agenda face up"
+    );
+    assert_eq!(
+        departed.secret_chosen_names,
+        vec!["Grizzly Bears".to_string(), "Runeclaw Bear".to_string()],
+        "reach guard: the authoritative state keeps the controller's choices"
+    );
+
+    let opponent_view = filter_state_for_viewer(&state, P0);
+    assert!(opponent_view.objects[&bond_id]
+        .secret_chosen_names
+        .is_empty());
+    assert_eq!(opponent_view.objects[&bond_id].agenda_name_count, 0);
+    let opponent_wire = serde_json::to_string(&ClientGameStateRef::wrap(&state, Some(P0)))
+        .expect("wire state serializes");
+    assert!(!opponent_wire.contains("Runeclaw Bear"));
+    assert!(!opponent_wire.contains("Grizzly Bears"));
+    assert!(!opponent_wire.contains("secret_chosen_names"));
+    assert!(!opponent_wire.contains("agenda_name_count"));
+
+    let spectator_view = filter_state_for_unseated_viewer(&state);
+    assert!(spectator_view.objects[&bond_id]
+        .secret_chosen_names
+        .is_empty());
+    assert_eq!(spectator_view.objects[&bond_id].agenda_name_count, 0);
+    let spectator_wire = serde_json::to_string(&ClientGameStateRef::wrap(&state, None))
+        .expect("spectator wire state serializes");
+    assert!(
+        !spectator_wire.contains("Runeclaw Bear"),
+        "the spectator's wire carries no secret agenda name"
+    );
+    assert!(!spectator_wire.contains("Grizzly Bears"));
+    assert!(!spectator_wire.contains("secret_chosen_names"));
+    assert!(!spectator_wire.contains("agenda_name_count"));
 }
 
 /// The command-zone objects `owner` owns, in command-zone order.
