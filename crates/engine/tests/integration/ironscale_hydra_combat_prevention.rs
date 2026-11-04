@@ -13,7 +13,7 @@
 //! recipient) assignment, so the rider runs once per prevented event (CR 615.5).
 //!
 //! Out of scope: the CR 615.12 ruling ("damage that can't be prevented … you'll
-//! simultaneously put a +1/+1 counter on it") — tracked as Command Zone #86.
+//! simultaneously put a +1/+1 counter on it") — tracked as Command Zone #172.
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};

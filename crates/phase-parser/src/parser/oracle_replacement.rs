@@ -12064,26 +12064,26 @@ fn parse_while_antecedent(lower: &str, verb_anchor: &str) -> WhileAntecedent {
 /// CR 614.1a: the text of a "while <condition>" antecedent: after `verb_anchor`, up to the
 /// comma that ends the antecedent.
 fn while_antecedent_clause<'a>(lower: &'a str, verb_anchor: &str) -> Option<&'a str> {
-    // Locate the antecedent's "while " clause: it appears between
-    // " {verb_anchor} while " and the comma terminating the antecedent.
-    // Single nom combinator chain — locate verb anchor, consume gate marker,
-    // capture condition body in one pass.
-    let (after_verb, _) = (
+    // Locate the verb anchor, then take the antecedent: everything after the
+    // anchor up to the comma that ends it.
+    let (_, (_, _, antecedent)) = (
         take_until::<_, _, OracleError<'_>>(verb_anchor),
         tag::<_, _, OracleError<'_>>(verb_anchor),
+        take_until::<_, _, OracleError<'_>>(","),
     )
         .parse(lower)
         .ok()?;
     // The " while " gate need not be flush against the verb anchor: for damage
     // replacements the recipient clause ("noncombat damage to a permanent or
     // player") sits between the anchor and the gate, so scan forward to the gate
-    // marker. The life-gain caller's flush case is the empty-prefix match.
-    let (_, (_, _, condition_text)) = (
+    // marker. The life-gain caller's flush case is the empty-prefix match. The
+    // scan runs only inside the antecedent, so a " while " after its comma is
+    // not this antecedent's guard.
+    let (condition_text, _) = (
         take_until::<_, _, OracleError<'_>>(" while "),
         tag::<_, _, OracleError<'_>>(" while "),
-        take_until::<_, _, OracleError<'_>>(","),
     )
-        .parse(after_verb)
+        .parse(antecedent)
         .ok()?;
     Some(condition_text)
 }
@@ -32638,6 +32638,21 @@ mod tests {
         assert_eq!(
             while_antecedent_clause(
                 "if damage would be dealt to ~ while it's equipped prevent that damage.",
+                "would ",
+            ),
+            None
+        );
+    }
+
+    /// `while_antecedent_clause` reads a guard only inside the antecedent: a
+    /// " while " after the comma that ends it is not the shield's guard. No
+    /// printed Oracle line has " while " only after the antecedent's comma, so
+    /// this is a building-block test on a phrase.
+    #[test]
+    fn while_antecedent_clause_ignores_a_while_after_the_antecedent_comma() {
+        assert_eq!(
+            while_antecedent_clause(
+                "if damage would be dealt to ~, prevent that damage while it's untapped, then draw a card.",
                 "would ",
             ),
             None

@@ -8163,7 +8163,7 @@ fn object_replacement_candidate_applies(
         // take place". strict-failure: skipping the shield here also drops its rider
         // (Ironscale Hydra / Nine Lives / Gloom Surgeon / Polukranos rulings); the
         // rules-correct path needs a typed "that many" vs "prevented this way" rider
-        // amount and is tracked as Command Zone #86. Shield counters already follow
+        // amount and is tracked as Command Zone #172. Shield counters already follow
         // CR 615.12 (`apply_shield_counter_replacement`).
         return false;
     }
@@ -9370,7 +9370,7 @@ pub fn find_applicable_replacements(
                         // shield here also drops its rider (Ironscale Hydra / Nine Lives /
                         // Gloom Surgeon / Polukranos rulings); the rules-correct path needs a
                         // typed "that many" vs "prevented this way" rider amount and is
-                        // tracked as Command Zone #86. Shield counters already follow
+                        // tracked as Command Zone #172. Shield counters already follow
                         // CR 615.12 (`apply_shield_counter_replacement`).
                         continue;
                     }
@@ -13630,8 +13630,9 @@ fn abandon_combat_rider_pause(
 /// CR 616.1 + CR 510.2: the affected player orders these effects, but combat damage
 /// can't pause for the choice yet (Command Zone #140), so each order park takes one
 /// legal order instead of dropping the damage. Polukranos, Unchained under Furnace of
-/// Rath still removes counters and Torbran, Thane of Red Fell still adds 2, under
-/// ordinary and unpreventable damage alike. CR 616.1f: one answer can leave two
+/// Rath still removes counters, and Torbran, Thane of Red Fell still adds 2, under
+/// ordinary damage; under damage that can't be prevented Polukranos's shield waits on
+/// CR 615.12 admission (Command Zone #172). CR 616.1f: one answer can leave two
 /// candidates still in order (Torbran, Furnace of Rath, Gratuitous Violence), so
 /// repeat. A parked "may" is not an order, and index 0 there means "accept"
 /// (Battletide Alchemist: "you may prevent X of that damage"), so it gets no answer.

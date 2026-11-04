@@ -1,7 +1,7 @@
-//! CR 615.12 for prevention effects that have additional effects. The module holds the Outfitted
+//! Prevention effects that have additional effects. The module holds the Outfitted
 //! Jouster population rows, then the printed "while" guards on prevention lines and the one
-//! reading a guard gives a simultaneous damage batch. The admission of these effects under damage
-//! that can't be prevented extends it later.
+//! reading a guard gives a simultaneous damage batch. Their admission under damage that can't be
+//! prevented (CR 615.12) is tracked as Command Zone #172.
 //!
 //! Outfitted Jouster: "If damage would be dealt to Outfitted Jouster while it's equipped, prevent
 //! that damage. When damage is prevented this way, sacrifice an Equipment attached to Outfitted
@@ -1662,7 +1662,9 @@ pub(super) fn fight(
                 total_damage,
                 ..
             } => {
-                // CR 510.1c: lethal damage to each blocker in order, the rest to the last one.
+                // CR 510.1c: the attacking creature's controller divides its damage among the
+                // blockers as they choose; this helper assigns lethal damage to each blocker and
+                // the rest to the last one.
                 let mut remaining = *total_damage;
                 let mut assignments: Vec<(ObjectId, u32)> = blockers
                     .iter()
