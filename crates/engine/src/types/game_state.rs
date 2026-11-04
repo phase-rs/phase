@@ -53069,6 +53069,51 @@ mod tests {
         assert!(state.exile.is_empty());
     }
 
+    /// CR 800.4a + CR 701.8a: concession pruning leaves a Destroy member
+    /// `Abandoned` without clearing its outer approval flag. That is a legal
+    /// producer state and must pass the staged validator.
+    #[test]
+    fn abandoned_destroy_member_with_outer_approval_validates() {
+        let member = StagedBatchMember {
+            announcement_index: 0,
+            request: PendingBatchZoneMoveRequest {
+                object_id: ObjectId(1),
+                destination: Zone::Graveyard,
+                cause: PendingBatchZoneChangeCause::Effect {
+                    source: ObjectId(1),
+                },
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_transformed: false,
+                controller_override: None,
+                enter_with_counters: Vec::new(),
+                face_down_profile: None,
+                chain_referent: Default::default(),
+                attach_to: None,
+                performed_by: None,
+                library_placement: None,
+                exile_duration: None,
+                exile_controller: None,
+                exile_tracking: ZoneDeliveryExileTracking::None,
+                replacement_applied: std::collections::HashSet::new(),
+                face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+            },
+            identity: ObjectIncarnationRef::of(ObjectId(1), 0),
+            owner: PlayerId(0),
+            state: StagedBatchMemberState::Abandoned,
+            approved_event: None,
+            pending_outcome: None,
+            terminal: None,
+            operation: StagedMemberOperation::Destroy(StagedDestroyOperation {
+                source: ObjectId(1),
+                cant_regenerate: false,
+            }),
+            outer_destroy_approved: true,
+        };
+        PendingBatchDeliveries::validate_staged_member(&member)
+            .expect("concession-pruned destroy member with its outer approval is legal");
+    }
+
     #[test]
     fn game_state_has_seeded_rng() {
         let state1 = GameState::new_two_player(42);
