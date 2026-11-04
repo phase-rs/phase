@@ -26220,8 +26220,15 @@ fn modal_escalate_pays_tap_creature_cost_for_extra_mode() {
     let mut events = Vec::new();
     state.waiting_for =
         handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(50), &mut events).unwrap();
-    state.waiting_for =
-        handle_select_modes(&mut state, PlayerId(0), vec![1, 2], &mut events).unwrap();
+    // CR 601.2b: the mode choice goes through the action boundary, which
+    // owns the announcement's trigger carrier (the faced dilemma, CR 603.2).
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::SelectModes {
+            indices: vec![1, 2],
+        },
+    )
+    .unwrap();
 
     match &state.waiting_for {
         WaitingFor::PayCost {
@@ -27134,8 +27141,15 @@ fn modal_x_target_legality_chooses_x_before_targets() {
     let mut events = Vec::new();
     state.waiting_for =
         handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(61), &mut events).unwrap();
-    state.waiting_for =
-        handle_select_modes(&mut state, PlayerId(0), vec![0, 1], &mut events).unwrap();
+    // CR 601.2b: the mode choice goes through the action boundary, which
+    // owns the announcement's trigger carrier (the faced dilemma, CR 603.2).
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::SelectModes {
+            indices: vec![0, 1],
+        },
+    )
+    .unwrap();
     assert!(
         matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
         "X must be chosen before building target slots whose legality depends on X"
@@ -27328,8 +27342,15 @@ fn modal_x_target_selection_carries_per_mode_labels() {
     let mut events = Vec::new();
     state.waiting_for =
         handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(81), &mut events).unwrap();
-    state.waiting_for =
-        handle_select_modes(&mut state, PlayerId(0), vec![0, 1], &mut events).unwrap();
+    // CR 601.2b: the mode choice goes through the action boundary, which
+    // owns the announcement's trigger carrier (the faced dilemma, CR 603.2).
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::SelectModes {
+            indices: vec![0, 1],
+        },
+    )
+    .unwrap();
     assert!(
         matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
         "X must be chosen before building target slots whose legality depends on X"

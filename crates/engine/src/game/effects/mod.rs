@@ -26179,10 +26179,11 @@ fn record_player_actions_performed(state: &mut GameState, new_events: &[GameEven
         {
             state.player_actions_this_way.insert((*player_id, *action));
             // Draw completions record their turn-ledger entry at the single event
-            // emission site in `draw.rs`; overlapping nested chain windows may
-            // still see that event for the resolution-local set, but must not
-            // append it to the Vec more than once.
-            if *action != PlayerActionKind::Draw {
+            // emission site in `draw.rs`, and a faced dilemma at stack placement
+            // (`ability_utils::record_face_dilemma_after_stack_placement`);
+            // overlapping nested chain windows may still see those events for the
+            // resolution-local set, but must not append them to the Vec again.
+            if action.turn_history_recorded_by_chain_scan() {
                 record_player_action_this_turn(state, *player_id, *action);
             }
         }

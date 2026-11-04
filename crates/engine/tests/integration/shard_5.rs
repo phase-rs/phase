@@ -112,6 +112,7 @@ mod sentinel_sliver_vigilance_grant;
 mod sephiroth_super_nova_transform_emblem_4359;
 mod serpent_society_ward_poison_cost;
 mod serras_emissary_chosen_card_type_protection;
+mod shakedown_heavy;
 mod she_hulk_wallbreaker_becomes_blocked_4599;
 mod shelinda_yevon_acolyte_otherwise;
 mod shelob_repro_token;

@@ -3653,7 +3653,8 @@ export type PlayerActionKind =
   | "Proliferate"
   | "Investigate"
   | "Draw"
-  | "Forage";
+  | "Forage"
+  | "FaceDilemma";
 
 /** CR 602.2 + CR 605.1a + CR 606.1: which kind of activated ability was activated. */
 export type ActivatedAbilityKind = "Normal" | "Loyalty" | "Mana";

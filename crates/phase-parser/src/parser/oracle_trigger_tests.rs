@@ -17167,6 +17167,90 @@ fn trigger_you_proliferate() {
     );
 }
 
+/// CR 700.2a + CR 700.2b: "Whenever you face a dilemma" (TRK; you face a
+/// dilemma as you choose one or more modes — needs manual verification) is the
+/// generic player-action trigger for `PlayerActionKind::FaceDilemma`.
+#[test]
+fn trigger_you_face_a_dilemma_uses_generic_player_action_path() {
+    let def = parse_trigger_line(
+        "Whenever you face a dilemma, draw a card. (You face a dilemma as you choose one or more modes for a spell or ability.)",
+        "Seven of Nine",
+    );
+    assert_eq!(def.mode, TriggerMode::PlayerPerformedAction);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    assert_eq!(
+        def.player_actions,
+        Some(vec![PlayerActionKind::FaceDilemma])
+    );
+    let execute = def.execute.as_deref().expect("REACH: the body parses");
+    assert!(matches!(execute.effect.as_ref(), Effect::Draw { .. }));
+
+    // Gabriel Lorca, Mirror Menace: the graveyard trigger keeps its zone and
+    // its optional pay-{B} body.
+    let parsed = parse_oracle_text(
+        "Menace\nWhenever you face a dilemma, you may pay {B}. If you do, return this card from your graveyard to your hand. (You face a dilemma as you choose one or more modes for a spell or ability.)",
+        "Gabriel Lorca, Mirror Menace",
+        &["Menace".to_string()],
+        &["Creature".to_string()],
+        &[],
+    );
+    let lorca = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::PlayerPerformedAction)
+        .expect("Lorca's dilemma trigger");
+    assert_eq!(
+        lorca.player_actions,
+        Some(vec![PlayerActionKind::FaceDilemma])
+    );
+    assert_eq!(lorca.trigger_zones, vec![Zone::Graveyard]);
+    let body = lorca.execute.as_deref().expect("REACH: the body parses");
+    assert!(
+        !format!("{body:?}").contains("Unimplemented"),
+        "Lorca's body fully parses: {body:?}"
+    );
+}
+
+/// The "face(s) a dilemma" phrase is all-consuming: a trailing qualifier is not
+/// this action.
+#[test]
+fn player_action_list_reads_face_a_dilemma_exactly() {
+    for phrase in ["face a dilemma", "faces a dilemma"] {
+        assert_eq!(
+            super::parse_player_action_list(phrase),
+            Some(vec![PlayerActionKind::FaceDilemma]),
+            "{phrase}"
+        );
+    }
+    for phrase in [
+        "face a dilemmas",
+        "face dilemma",
+        "face a dilemma this turn",
+    ] {
+        assert_eq!(super::parse_player_action_list(phrase), None, "{phrase}");
+    }
+}
+
+/// Council's dilemma (CR 207.2c ability word, a vote, CR 701.38a) is not
+/// "face a dilemma": Tivit, Seller of Secrets keeps its enters and damage
+/// triggers and gains no player-action trigger.
+#[test]
+fn councils_dilemma_is_not_a_faced_dilemma() {
+    let parsed = parse_oracle_text(
+        "Flying, ward {3}\nCouncil's dilemma — Whenever Tivit enters or deals combat damage to a player, starting with you, each player votes for evidence or bribery. For each evidence vote, investigate. For each bribery vote, create a Treasure token.\nWhile voting, you may vote an additional time. (The votes can be for different choices or for the same choice.)",
+        "Tivit, Seller of Secrets",
+        &["Flying".to_string()],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(!parsed.triggers.is_empty(), "REACH: Tivit's triggers parse");
+    assert!(parsed
+        .triggers
+        .iter()
+        .all(|trigger| trigger.mode != TriggerMode::PlayerPerformedAction
+            && trigger.player_actions.is_none()));
+}
+
 #[test]
 fn trigger_you_forage_uses_generic_player_action_path() {
     let def = parse_trigger_line(

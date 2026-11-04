@@ -12,7 +12,7 @@
 //! raises a `SurveilChoice` (CR 701.25c: surveil 0 would be no surveil event).
 //!
 //! The ETB targets one opponent as it is put on the stack (CR 115.1d); only that
-//! opponent decides. The dilemma bounce is DEFERRED(phase 3).
+//! opponent decides. The dilemma bounce is covered in `face_a_dilemma.rs`.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;

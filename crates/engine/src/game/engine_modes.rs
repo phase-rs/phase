@@ -71,12 +71,23 @@ pub(super) fn handle_ability_mode_choice(
         None => pending_trigger_modal_history_source(state)?,
     };
     record_modal_mode_choices(state, history_source, &modal, &indices);
+    // CR 700.2a + CR 700.2b + CR 700.2e: the prompted player faces one dilemma
+    // for this mode choice (face a dilemma: needs manual verification).
+    let dilemma_chooser =
+        super::ability_utils::mode_choice_dilemma_chooser(&modal, player, &indices);
 
     let mut resolved =
         build_chained_resolved(&mode_abilities, indices.as_slice(), source_id, player)?;
     resolved.selected_mode_labels = selected_mode_labels(&modal.mode_descriptions, &indices);
 
     let waiting_for = if let Some(ability_index) = activated_ability_index {
+        // CR 602.2b + CR 700.2a: modes are chosen as part of activating, before
+        // costs (CR 601.2h). The event is collected by the activation's
+        // `end_action` custody; the history is recorded at stack placement.
+        resolved.context.mode_chooser = dilemma_chooser;
+        if let Some(chooser) = dilemma_chooser {
+            super::ability_utils::emit_face_dilemma_event(chooser, events);
+        }
         handle_activated_mode_choice(
             state,
             ActivatedModeChoice {
@@ -112,6 +123,14 @@ pub(super) fn handle_ability_mode_choice(
             },
             events,
         )?;
+        // CR 603.3c + CR 700.2b: a triggered ability's modes are chosen as it is
+        // put on the stack; the choice cannot be undone (no CancelCast for a
+        // triggered mode prompt), so the event and the history are written
+        // together.
+        if let Some(chooser) = dilemma_chooser {
+            super::ability_utils::emit_face_dilemma_event(chooser, events);
+        }
+        super::ability_utils::record_face_dilemma_after_stack_placement(state, dilemma_chooser);
         Ok(triggers::finish_trigger_construction_action(
             state, events, produced,
         ))
@@ -583,6 +602,9 @@ pub(super) fn resolve_random_modal_trigger(
     unavailable_modes: &[usize],
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EngineError> {
+    // CR 700.2b: modes drawn at random are not chosen by a player — no dilemma (see
+    // `ability_utils::mode_choice_dilemma_chooser`; engine policy, needs manual
+    // verification).
     // CR 603.3c + CR 700.2b: no mode can be chosen, or an "up to" draw chose
     // none. Either way the ability is removed from the stack; the caller drops
     // the pushed entry through `drop_mid_construction_pending_trigger`.

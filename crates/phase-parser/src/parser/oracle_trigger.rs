@@ -21735,6 +21735,19 @@ fn parse_player_action_phrase_nom(input: &str) -> OracleResult<'_, PlayerActionK
             alt((tag("surveils"), tag("surveil"))),
         ),
         value(PlayerActionKind::Scry, alt((tag("scries"), tag("scry")))),
+        // CR 700.2: "face(s) a dilemma" — the TRK reminder text defines it as
+        // choosing one or more modes for a spell or ability (needs manual
+        // verification; no CR rule names it).
+        value(
+            PlayerActionKind::FaceDilemma,
+            (
+                alt((tag("faces"), tag("face"))),
+                space1,
+                tag("a"),
+                space1,
+                tag("dilemma"),
+            ),
+        ),
         // CR 701.61a: Forage — exile three cards from your graveyard or
         // sacrifice a Food.
         value(

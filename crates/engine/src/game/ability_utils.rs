@@ -1484,6 +1484,56 @@ fn modal_indices_have_legal_target_assignment(
     }
 }
 
+/// CR 700.2a + CR 700.2b + CR 700.2e: the player who faces a dilemma for this
+/// mode choice — the prompted chooser — or `None` when the choice faces none:
+/// zero modes chosen ("as you choose one or more modes"; CR 603.3c removes a
+/// zero-mode trigger) or modes the game drew at random (no player chose; engine
+/// policy). Face a dilemma: needs manual verification (TRK rulings unpublished).
+pub(crate) fn mode_choice_dilemma_chooser(
+    modal: &ModalChoice,
+    chooser: PlayerId,
+    indices: &[usize],
+) -> Option<PlayerId> {
+    match modal.selection {
+        crate::types::ability::TargetSelectionMode::Chosen => {
+            (!indices.is_empty()).then_some(chooser)
+        }
+        crate::types::ability::TargetSelectionMode::Random => None,
+    }
+}
+
+/// CR 603.2: the dilemma is a game event as the modes are announced; abilities
+/// that trigger on it ("whenever you face a dilemma") trigger now. Face a
+/// dilemma: needs manual verification.
+pub(crate) fn emit_face_dilemma_event(
+    chooser: PlayerId,
+    events: &mut Vec<crate::types::events::GameEvent>,
+) {
+    events.push(crate::types::events::GameEvent::PlayerPerformedAction {
+        player_id: chooser,
+        action: crate::types::events::PlayerActionKind::FaceDilemma,
+        look_count: None,
+        scry_bottom_count: None,
+        scry_top_count: None,
+    });
+}
+
+/// CR 601.2i + CR 602.2b + CR 733.1: record the dilemma in the per-turn history
+/// once the announcement that faced it has reached the stack, so an undone
+/// announcement records nothing. Face a dilemma: needs manual verification.
+pub(crate) fn record_face_dilemma_after_stack_placement(
+    state: &mut GameState,
+    chooser: Option<PlayerId>,
+) {
+    if let Some(player) = chooser {
+        super::effects::record_player_action_this_turn(
+            state,
+            player,
+            crate::types::events::PlayerActionKind::FaceDilemma,
+        );
+    }
+}
+
 /// Records chosen mode indices for NoRepeat constraint enforcement.
 /// CR 700.2: Inserts into per-turn and/or per-game tracking maps.
 /// CR 400.7: `source` must be the same incarnation key the matching
