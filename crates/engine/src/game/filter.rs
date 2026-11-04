@@ -12914,16 +12914,17 @@ mod tests {
         filter_contains_filter_prop, filter_prop_contains, player_filter_contains,
         retarget_chosen_card_type_to_creature_type, AbilityDefinition, AbilityKind,
         AggregateFunction, AttachmentKind, ChosenAttribute, CombatHistoryScope, Comparator,
-        ControllerRef, CostPaidObjectSnapshot, DamageKindFilter, Effect, FilterProp,
-        ManaContribution, ManaProduction, PlayerScope, QuantityExpr, QuantityRef,
-        ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
-        TriggerDefinition, TypeFilter, TypedFilter,
+        ControllerRef, CostPaidObjectSnapshot, DamageKindFilter, Effect, FaceDownBody,
+        FaceDownCause, FaceDownProfile, FilterProp, ManaContribution, ManaProduction, PlayerScope,
+        QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, StaticDefinition,
+        TargetFilter, TargetRef, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        AttachmentSnapshot, LKISnapshot, StackEntry, StackEntryKind, ZoneChangeRecord,
+        AttachmentSnapshot, ExileLink, ExileLinkKind, LKISnapshot, StackEntry, StackEntryKind,
+        ZoneChangeRecord,
     };
     use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::keywords::Keyword;
@@ -19418,8 +19419,6 @@ mod tests {
     /// R1 and R1b matched, because `"".eq_ignore_ascii_case("")` is `true`.
     #[test]
     fn name_matches_any_permanent_refuses_a_nameless_object() {
-        use crate::types::ability::FaceDownProfile;
-
         let mut state = setup();
         let face_down_a = add_creature(&mut state, PlayerId(0), "Hidden A");
         apply_face_down_with_stash(&mut state, face_down_a, &FaceDownProfile::vanilla_2_2());
@@ -19618,9 +19617,6 @@ mod tests {
     /// is `true`. R13 matched at the record door for the same reason.
     #[test]
     fn same_name_as_parent_target_shares_no_name_with_a_nameless_target() {
-        use crate::types::ability::FaceDownProfile;
-        use std::collections::HashMap;
-
         let mut state = setup();
         let target = add_creature(&mut state, PlayerId(1), "Hidden A");
         apply_face_down_with_stash(&mut state, target, &FaceDownProfile::vanilla_2_2());
@@ -19653,10 +19649,7 @@ mod tests {
 
         let ability_targeting = |id: ObjectId| {
             ResolvedAbility::new(
-                Effect::Unimplemented {
-                    name: String::new(),
-                    description: None,
-                },
+                Effect::NoOp,
                 vec![TargetRef::Object(id)],
                 source,
                 PlayerId(0),
@@ -19779,10 +19772,7 @@ mod tests {
         );
 
         let mut snapshot_ability = ResolvedAbility::new(
-            Effect::Unimplemented {
-                name: String::new(),
-                description: None,
-            },
+            Effect::NoOp,
             vec![TargetRef::Object(gone)],
             restored,
             PlayerId(0),
@@ -19843,9 +19833,6 @@ mod tests {
     /// `"".eq_ignore_ascii_case("")` is `true`.
     #[test]
     fn same_name_as_exiled_by_source_shares_no_name_without_a_name() {
-        use crate::types::ability::{FaceDownBody, FaceDownCause, FaceDownProfile};
-        use crate::types::game_state::{ExileLink, ExileLinkKind};
-
         let mut state = setup();
         let lens = add_creature(&mut state, PlayerId(0), "Extraplanar Lens");
         let nameless_exiled = create_object(
@@ -19932,15 +19919,7 @@ mod tests {
         let record_nameless =
             ZoneChangeRecord::test_minimal(nameless_land, Some(Zone::Battlefield), Zone::Graveyard);
         assert_eq!(record_nameless.name, "", "the minimal record is nameless");
-        let ability = ResolvedAbility::new(
-            Effect::Unimplemented {
-                name: String::new(),
-                description: None,
-            },
-            Vec::new(),
-            lens,
-            PlayerId(0),
-        );
+        let ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), lens, PlayerId(0));
         assert!(
             !zone_change_filter_inner(
                 &state,
