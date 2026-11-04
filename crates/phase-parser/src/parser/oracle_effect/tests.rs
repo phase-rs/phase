@@ -5037,6 +5037,7 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
         up_to,
         filter,
         rest_destination,
+        rest_remainder,
         rest_order,
         destination,
         ..
@@ -5052,6 +5053,9 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
     assert!(!*up_to, "alt branch is exact-2 (not up-to)");
     assert_eq!(*destination, Some(Zone::Hand));
     assert_eq!(*rest_destination, Some(Zone::Library));
+    // CR 608.2c: the later "Put the rest …" clause owns the remainder the
+    // from-among selection declared silent.
+    assert_eq!(*rest_remainder, DigRestRemainder::Route);
     assert_eq!(*rest_order, DigRestOrder::Random);
     let TargetFilter::Or { filters } = filter else {
         panic!("alt filter should be Or, got {:?}", filter);
@@ -5088,6 +5092,7 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
         up_to: base_up_to,
         filter: base_filter,
         rest_destination: base_rest,
+        rest_remainder: base_rest_remainder,
         rest_order: base_rest_order,
         ..
     } = &*base.effect
@@ -5098,6 +5103,11 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
     assert_eq!(*base_keep, Some(1));
     assert!(*base_up_to, "base branch is up-to 1");
     assert_eq!(*base_rest, Some(Zone::Library), "PutRest must recurse");
+    assert_eq!(
+        *base_rest_remainder,
+        DigRestRemainder::Route,
+        "PutRest must re-declare the base branch's remainder as a route"
+    );
     assert_eq!(
         *base_rest_order,
         DigRestOrder::Random,
@@ -5110,6 +5120,47 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
         panic!("base filter should be Or, got {:?}", base_filter);
     };
     assert_eq!(base_filters.len(), 2);
+}
+
+/// PAIRED NEGATIVE of [`dig_conditional_instead_alternative_preserves_both_branches`]:
+/// the same two from-among selections with the trailing "Put the rest …" clause
+/// removed. Each selection declares its own silent remainder (CR 701.20e — the
+/// others were only looked at), so both branches keep the unchosen cards in the
+/// library. Together the pair shows the remainder is owned by the clause that
+/// speaks last about it (CR 608.2c), not by a default applied after assembly.
+#[test]
+fn dig_conditional_instead_alternative_without_a_rest_clause_is_silent_on_both_branches() {
+    let def = parse_effect_chain(
+        "Look at the top four cards of your library. You may reveal a creature or land card \
+         from among them and put it into your hand. If you gained life this turn, you may \
+         instead reveal two creature and/or land cards from among them and put them into your \
+         hand.",
+        AbilityKind::Spell,
+    );
+    let base = def
+        .else_ability
+        .as_deref()
+        .expect("base Dig must be stored as else_ability");
+    for (branch, effect) in [("alternative", &*def.effect), ("base", &*base.effect)] {
+        match effect {
+            Effect::Dig {
+                destination,
+                rest_destination,
+                rest_remainder,
+                ..
+            } => {
+                assert_eq!(*destination, Some(Zone::Hand), "{branch}");
+                assert_eq!(*rest_destination, None, "{branch}");
+                assert_eq!(
+                    *rest_remainder,
+                    DigRestRemainder::StayInLibrary,
+                    "{branch}: a selection that is silent about the others leaves them \
+                     in the library"
+                );
+            }
+            other => panic!("{branch}: expected Effect::Dig, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -95998,12 +96049,13 @@ fn mill_from_among_never_gets_the_silent_remainder_rule() {
 
 /// CR 701.20e + CR 608.2c — issue #7754: the STANDALONE entry point.
 ///
-/// `parse_effect_chain` assembles and lowers one effect body; the card pipeline's
-/// silent-remainder pass (`parse_oracle_pipeline`) never runs for it, so resolving
-/// a Dig built through that entry point used to apply the `Route` graveyard
-/// default and move every unchosen looked-at card out of the library.
+/// `parse_effect_chain` assembles one effect body without the card pipeline
+/// around it. The silent remainder is declared by the from-among clause during
+/// assembly, so this entry point must reach the same verdict as
+/// `parse_oracle_text`; a `Route` here applies the graveyard default and moves
+/// every unchosen looked-at card out of the library.
 #[test]
-fn standalone_chain_marks_a_silent_dig_remainder() {
+fn standalone_chain_declares_a_silent_dig_remainder() {
     let def = super::parse_effect_chain(
         "look at the top twenty cards of your library, put any number of land cards from among \
          them onto the battlefield tapped",
@@ -96031,6 +96083,68 @@ fn standalone_chain_marks_a_silent_dig_remainder() {
         }
         other => panic!("expected Effect::Dig, got {other:?}"),
     }
+}
+
+/// CR 701.20e + CR 608.2c: the Hideaway-shape selection ("exile one of them face
+/// down") declares a silent remainder too. Siphon Insight (verbatim Scryfall
+/// text) places "the other" with its own instruction, a placement over the
+/// tracked set that reads the card in the library; a `Route` remainder would
+/// first send that card to the graveyard, so the placement would find nothing.
+#[test]
+fn exile_one_face_down_leaves_the_other_for_its_own_placement() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Look at the top two cards of target opponent's library. Exile one of them face down \
+         and put the other on the bottom of that library. You may play the exiled card for as \
+         long as it remains exiled, and you may spend mana as though it were mana of any color \
+         to cast that spell.\nFlashback {1}{U}{B}",
+        "Siphon Insight",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let root = parsed
+        .abilities
+        .first()
+        .expect("Siphon Insight must parse to a spell ability");
+
+    match &*root.effect {
+        Effect::Dig {
+            destination,
+            keep_count,
+            rest_destination,
+            rest_remainder,
+            ..
+        } => {
+            assert_eq!(*destination, Some(Zone::Exile), "\"exile one of them\"");
+            assert_eq!(*keep_count, Some(1));
+            assert_eq!(*rest_destination, None);
+            assert_eq!(
+                *rest_remainder,
+                DigRestRemainder::StayInLibrary,
+                "CR 701.20e: the card that was not exiled stays in the library until \
+                 \"put the other on the bottom\" moves it"
+            );
+        }
+        other => panic!("expected Effect::Dig, got {other:?}"),
+    }
+
+    // Positive reach guard: the printed placement of "the other" really parses
+    // behind the selection, so the remainder it reads is the one asserted above.
+    let mut next = root.sub_ability.as_deref();
+    let mut placement = None;
+    while let Some(def) = next {
+        if let Effect::PutAtLibraryPosition {
+            target, position, ..
+        } = &*def.effect
+        {
+            placement = Some((target.clone(), position.clone()));
+        }
+        next = def.sub_ability.as_deref();
+    }
+    let (target, position) =
+        placement.expect("\"put the other on the bottom\" must parse as a placement");
+    assert!(matches!(target, TargetFilter::TrackedSet { .. }));
+    assert_eq!(position, crate::types::ability::LibraryPosition::Bottom);
 }
 
 /// CR 701.20e + CR 608.2c: the REORDER form of the silent remainder.

@@ -17,14 +17,14 @@ use crate::types::ability::{
     ActivationRestriction, AdditionalCost, CardPlayMode, CastManaSpentMetric, CastTimingPermission,
     CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification,
     ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
-    DelayedTriggerCondition, DigRestRemainder, Duration, Effect, EffectScope, FilterProp,
-    GuardReading, ManaProduction, ModalChoice, ParitySource, ParsedCondition, PlayerFilter,
-    QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, SolveCondition,
-    SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard, VoteSubject,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, GuardReading,
+    ManaProduction, ModalChoice, ParitySource, ParsedCondition, PlayerFilter, QuantityExpr,
+    QuantityRef, ReplacementDefinition, ReplacementMode, SolveCondition, SpellCastingOption,
+    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard, VoteSubject,
 };
 use crate::types::ability_visit::{
-    granter_symbols, visit_ability_def_scoped, DefinitionNode, DefinitionNodeMut, ResolutionScope,
+    granter_symbols, visit_ability_def_scoped, DefinitionNode, ResolutionScope,
 };
 use crate::types::card::DraftEffect;
 use crate::types::card_type::CoreType;
@@ -9213,97 +9213,6 @@ pub fn parse_oracle_text(
     .0
 }
 
-/// CR 701.20e + CR 608.2c — issue #7754 (Through the Forest Gate):
-/// "Look at the top twenty cards of your library, put any number of land cards
-/// from among them onto the battlefield tapped, then shuffle. You gain 8 life."
-///
-/// Looking at cards does not move them (CR 701.20e), so a "from among them"
-/// instruction that routes its chosen cards OUT of the library and never says
-/// where the rest goes leaves the other looked-at cards IN THE LIBRARY, holding
-/// the order they already had. That outcome is `DigRestRemainder::StayInLibrary`:
-/// neither alternative is equivalent. `rest_destination: Some(Zone::Library)`
-/// means an explicit "put the rest on the bottom", which MOVES them and reorders
-/// the library under CR 401.4, changing the next draw of any such dig with no
-/// later shuffle; the `None` graveyard default is a move too, and is the
-/// reported bug (seventeen looked-at cards milled and never shuffled back).
-///
-/// The same shape prints on Through the Forest Gate, Famished Worldsire and
-/// Ajani, Outland Chaperone's −8, so this is a class rule, not a card special
-/// case.
-fn mark_silent_dig_remainder(def: &mut AbilityDefinition) {
-    if let Effect::Dig {
-        destination: Some(_),
-        rest_destination,
-        rest_split_top_count,
-        keep_count,
-        rest_remainder,
-        ..
-    } = &mut *def.effect
-    {
-        // `Some(0)` is a pure peek: nothing is ever moved, so the remainder
-        // routing is never reached. A `rest_split_top_count` with no
-        // `rest_destination` cannot exist (the split names its own bottom pile),
-        // so the split form never reaches this arm either.
-        //
-        // The KEPT destination is deliberately not inspected. Whether the chosen
-        // cards leave the library for another zone or are put back on top of it
-        // ("put one of those cards back on top of your library"), an instruction
-        // that says nothing about the others leaves those others where they are.
-        // A `Library` kept destination is handled by the choice handler's reorder
-        // arm, which puts the unchosen cards back beneath the kept ones — the same
-        // CR 701.20e outcome, not a move.
-        if !matches!(*keep_count, Some(0))
-            && rest_destination.is_none()
-            && rest_split_top_count.is_none()
-        {
-            *rest_remainder = DigRestRemainder::StayInLibrary;
-        }
-    }
-}
-
-/// CR 701.20e + CR 608.2c: [`mark_silent_dig_remainder`] over one finished
-/// ability tree. Every standalone entry point that lowers a single effect body
-/// ([`crate::parser::oracle_effect::parse_effect_chain`]) is its own complete
-/// parse — no later unit of a card can patch a remainder instruction into it —
-/// so it must apply the same rule the card pipeline applies once a card is fully
-/// assembled, rather than depending on a caller to do so.
-pub(crate) fn mark_silent_dig_remainders_in_ability(def: &mut AbilityDefinition) {
-    let _ = crate::types::ability_visit::nodes_mut::visit_ability_def(
-        def,
-        &mut mark_silent_dig_remainder_node,
-    );
-}
-
-fn mark_silent_dig_remainder_node(node: DefinitionNodeMut<'_>) -> ControlFlow<()> {
-    if let DefinitionNodeMut::Ability(def) = node {
-        mark_silent_dig_remainder(def);
-    }
-    ControlFlow::Continue(())
-}
-
-/// CR 701.20e: applies [`mark_silent_dig_remainder`] to every definition node of
-/// a finished parse. The walk is the shared `ability_visit::nodes_mut` one, so a
-/// Dig nested anywhere the engine can reach — a `mode_abilities` branch, a
-/// `CreateDelayedTrigger` payload, a `ChooseOneOf` branch, a granted static, a
-/// replacement's decline continuation, or the replacement node itself — is
-/// covered by the same rule as a top-level spell line, instead of by whatever
-/// recursion set this pass happens to hand-roll.
-fn mark_silent_dig_remainders(parsed: &mut ParsedAbilities) {
-    let mut visit = mark_silent_dig_remainder_node;
-    for ability in parsed.abilities.iter_mut() {
-        let _ = crate::types::ability_visit::nodes_mut::visit_ability_def(ability, &mut visit);
-    }
-    for trigger in parsed.triggers.iter_mut() {
-        let _ = crate::types::ability_visit::nodes_mut::visit_trigger(trigger, &mut visit);
-    }
-    for static_def in parsed.statics.iter_mut() {
-        let _ = crate::types::ability_visit::nodes_mut::visit_static(static_def, &mut visit);
-    }
-    for replacement in parsed.replacements.iter_mut() {
-        let _ = crate::types::ability_visit::nodes_mut::visit_replacement(replacement, &mut visit);
-    }
-}
-
 /// CR-neutral hygiene: `unlowered_guard` is parser scratch, so a finished parse must hold
 /// none. Asked of the SERIALIZED tree rather than by re-walking it, because a re-walk would
 /// use the same recursion set it is meant to police: a mark left under an unrecursed key is
@@ -10151,15 +10060,6 @@ fn parse_oracle_pipeline(
     if let Some(raw) = raw_lowered.as_mut() {
         resolve_unlowered_guards(raw);
     }
-    // CR 701.20e + CR 608.2c — issue #7754 (Through the Forest Gate): a Dig that
-    // routes its chosen cards OUT of the library and was never told where the
-    // rest goes leaves the unchosen looked-at cards IN THE LIBRARY, because
-    // looking at cards never moves them. Runs on the FINISHED card, after every
-    // unit is lowered, so a remainder instruction printed anywhere on it owns
-    // the rest pile (Follow the Lumarets' "Put the rest on the bottom of your
-    // library in a random order" patches both of its Dig branches from a later
-    // unit than the one that built them).
-    mark_silent_dig_remainders(&mut parsed);
     let stages = document_ir
         .zip(raw_lowered)
         .map(|(document, raw)| (document, raw, normalized));

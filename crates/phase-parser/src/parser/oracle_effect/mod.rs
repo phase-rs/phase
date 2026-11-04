@@ -43607,19 +43607,9 @@ pub(super) fn parse_child_ability_with_parent_target(
 }
 
 /// The algebraic identity T8 rests on, written literally:
-/// `parse_effect_chain(t, k)` **is** the standalone lowering followed by the
-/// silent-remainder pass — the two stages the card pipeline also runs, applied
-/// to the one chain this entry point assembles.
+/// `parse_effect_chain(t, k)` **is** `lower_ability_ir(&parse_ability_ir_standalone(t, k))`.
 pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
-    let mut def = lower_ability_ir(&parse_ability_ir_standalone(text, kind));
-    // CR 701.20e + CR 608.2c: a standalone chain is its own finished parse.
-    // Nothing outside it can still add the remainder instruction this rule looks
-    // for (a card's later unit can, which is why the card pipeline applies the
-    // same pass at the end instead of per unit), so resolving from this entry
-    // point must not return `Route` for a silent Dig — resolving that shape moves
-    // the unchosen looked-at cards to the graveyard (issue #7754).
-    crate::parser::oracle::mark_silent_dig_remainders_in_ability(&mut def);
-    def
+    lower_ability_ir(&parse_ability_ir_standalone(text, kind))
 }
 
 /// Parse a nested compound body with subject context for pronoun resolution.

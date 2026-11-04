@@ -29,12 +29,13 @@ use crate::parser::oracle_quantity::{
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AttachCardinality, AttachSelection,
     CastingPermission, ChoiceType, Chooser, ContinuousModification, ControllerRef,
-    CopyRetargetPermission, CounterSourceRider, DigRestOrder, DigSource, Duration, Effect,
-    EffectScope, ExcessRecipient, ExileConcealment, FaceDownBody, FaceDownProfile, FilterProp,
-    ForEachCategoryAction, LibraryPosition, ManaSpendRestriction, MultiTargetSpec, ObjectScope,
-    PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
-    SpellStackToGraveyardReplacement, StaticDefinition, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, ThisWayCause, TokenAttackDestination, TypeFilter, TypedFilter,
+    CopyRetargetPermission, CounterSourceRider, DigRestOrder, DigRestRemainder, DigSource,
+    Duration, Effect, EffectScope, ExcessRecipient, ExileConcealment, FaceDownBody,
+    FaceDownProfile, FilterProp, ForEachCategoryAction, LibraryPosition, ManaSpendRestriction,
+    MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
+    QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement, StaticDefinition,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, ThisWayCause, TokenAttackDestination,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -5948,6 +5949,7 @@ pub(super) fn apply_clause_continuation(
                 filter,
                 destination,
                 rest_destination,
+                rest_remainder,
                 rest_split_top_count,
                 rest_order,
                 reveal,
@@ -6009,6 +6011,16 @@ pub(super) fn apply_clause_continuation(
                 // (CR 608.2c, written order).
                 *rest_split_top_count = rest_split_top.map(|boxed| *boxed);
                 *rest_order = continuation_rest_order;
+                // CR 701.20e + CR 608.2c: this clause names where the chosen
+                // cards go, so it also declares what happens to the others. A
+                // later "put the rest …" clause re-declares it as a route
+                // (`patch_rest_destination_recursively`).
+                *rest_remainder = declared_selection_remainder(
+                    kept_dest,
+                    new_keep,
+                    *rest_destination,
+                    rest_split_top_count.is_some(),
+                );
                 *dig_enter_tapped = enter_tapped;
                 *dig_enters_attacking = enters_attacking;
             } else if let Effect::Mill {
@@ -6303,6 +6315,7 @@ pub(super) fn apply_clause_continuation(
             if let Effect::Dig {
                 destination,
                 rest_destination,
+                rest_remainder,
                 ..
             } = &mut *previous.effect
             {
@@ -6313,6 +6326,9 @@ pub(super) fn apply_clause_continuation(
                     *destination = Some(Zone::Library);
                 }
                 *rest_destination = Some(Zone::Library);
+                // CR 608.2c: this clause places the rest itself, so the
+                // remainder is a route, not the silent one.
+                *rest_remainder = DigRestRemainder::Route;
             }
             let put_def = AbilityDefinition::new(
                 kind,
@@ -6862,11 +6878,25 @@ pub(super) fn apply_clause_continuation(
                     keep_count,
                     up_to,
                     destination,
+                    rest_destination,
+                    rest_split_top_count,
+                    rest_remainder,
                     ..
                 } => {
                     *keep_count = Some(count);
                     *up_to = false;
                     *destination = Some(Zone::Exile);
+                    // CR 701.20e + CR 608.2c: "exile one of them face down"
+                    // names where the chosen card goes and says nothing about
+                    // the others, which stay in the library until a later
+                    // clause moves them (Siphon Insight: "put the other on the
+                    // bottom of that library").
+                    *rest_remainder = declared_selection_remainder(
+                        *destination,
+                        *keep_count,
+                        *rest_destination,
+                        rest_split_top_count.is_some(),
+                    );
                 }
                 _ => unreachable!(),
             }
@@ -7015,6 +7045,41 @@ fn dig_needs_last_revealed_rest_sibling(effect: &Effect) -> bool {
     }
 }
 
+/// CR 701.20e + CR 608.2c: the remainder a selection clause declares for the
+/// look-at Dig it completes (issue #7754, Through the Forest Gate: "put any
+/// number of land cards from among them onto the battlefield tapped, then
+/// shuffle").
+///
+/// Looking at cards does not move them (CR 701.20e). A clause that names where
+/// the chosen cards go — out of the library or back on top of it — and names
+/// no destination or split for the others (`rest_destination` is the remainder
+/// instruction in force after this clause, including one an earlier clause
+/// already declared) leaves those others in the library in their existing
+/// order: `StayInLibrary`. A named remainder, a split, a selection that keeps
+/// nothing, or one that routes no chosen card is a `Route`.
+///
+/// Evaluated where the selection is declared — the `DigFromAmong` and
+/// `ExileLookedAtCardsFaceDown` continuations, and the "instead" alternative
+/// built from a from-among clause (`conditions.rs`) — so the policy is lowered
+/// once, during assembly. A later "put the rest …" clause owns the remainder by
+/// re-declaring it as a route (`patch_rest_destination_recursively`).
+pub(super) fn declared_selection_remainder(
+    kept_destination: Option<Zone>,
+    keep_count: Option<u32>,
+    rest_destination: Option<Zone>,
+    has_rest_split: bool,
+) -> DigRestRemainder {
+    if kept_destination.is_some()
+        && keep_count != Some(0)
+        && rest_destination.is_none()
+        && !has_rest_split
+    {
+        DigRestRemainder::StayInLibrary
+    } else {
+        DigRestRemainder::Route
+    }
+}
+
 /// Recursively patch `rest_destination` on Dig/RevealUntil effects reachable from
 /// `def` via `else_ability`. CR 608.2c: When a preceding def is a conditional
 /// "instead" wrapper (new_def with `else_ability = base_def`), a trailing
@@ -7030,6 +7095,7 @@ fn patch_rest_destination_recursively(
         Effect::Dig {
             destination: kept_destination,
             rest_destination,
+            rest_remainder,
             rest_order: dig_rest_order,
             ..
         } => {
@@ -7039,6 +7105,10 @@ fn patch_rest_destination_recursively(
             } else if rest_destination.is_none() {
                 *rest_destination = Some(destination);
             }
+            // CR 608.2c: the printed "put the rest …" instruction owns the
+            // remainder, replacing a silent one an earlier from-among clause
+            // declared (Follow the Lumarets patches both of its branches).
+            *rest_remainder = DigRestRemainder::Route;
             *dig_rest_order = rest_order;
         }
         Effect::RevealUntil {
