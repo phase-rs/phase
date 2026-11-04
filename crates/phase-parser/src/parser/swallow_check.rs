@@ -6585,11 +6585,12 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BlockPairDirection,
         CardPlayMode, CardSelectionMode, CastFromZoneDriver, ChooseFromZoneConstraint,
-        ChooseOneOfKind, Chooser, Comparator, ContinuousModification, CopyRetargetPermission,
-        DamageModification, Effect, EffectOutcomeSignal, FilterProp, ManaProduction,
-        OutsideGameSourcePool, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
-        SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, TargetFilter,
-        TriggerCondition, TypedFilter, UnlessPayModifier, ZoneChoiceCandidateSource, ZoneOwner,
+        ChooseOneOfKind, Chooser, CombatHistoryScope, CombatRelation, CombatRelationSubject,
+        Comparator, ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
+        EffectOutcomeSignal, FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition,
+        PlayerFilter, QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
+        StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, UnlessPayModifier,
+        ZoneChoiceCandidateSource, ZoneOwner,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -15216,7 +15217,6 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         scope: crate::types::ability::CombatHistoryScope,
         subject: crate::types::ability::CombatRelationSubject,
     ) -> bool {
-        use crate::types::ability::CombatRelation;
         let wanted = FilterProp::CombatRelation {
             relation: CombatRelation::BlockPairing {
                 direction,
@@ -15266,7 +15266,6 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     /// guard for the silent detector.
     #[test]
     fn target_block_history_cards_parse_clean() {
-        use crate::types::ability::{CombatHistoryScope, CombatRelationSubject};
         for (name, text, direction, scope, delayed) in [
             (
                 "Gaze of the Gorgon",
@@ -15552,7 +15551,6 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     /// a target and then reads its block history.
     #[test]
     fn combat_history_relation_binds_a_chain_pinned_target() {
-        use crate::types::ability::{CombatHistoryScope, CombatRelationSubject};
         let parsed = parse_named(
             "Whenever this creature blocks, tap target creature. Destroy all creatures it blocked this turn.",
             "Test Card",
@@ -15820,7 +15818,6 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     /// Each silent row is the positive for the reported rows beside it.
     #[test]
     fn combat_relation_detectors_carry_their_shapes_over_one_for_one() {
-        use crate::types::ability::{CombatHistoryScope, CombatRelation, CombatRelationSubject};
         let evidence = |direction, scope| {
             let prop = serde_json::to_string(&FilterProp::CombatRelation {
                 relation: CombatRelation::BlockPairing { direction, scope },

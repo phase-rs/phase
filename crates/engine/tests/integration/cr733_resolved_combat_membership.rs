@@ -33,13 +33,13 @@ use engine::game::combat::{
 use engine::game::engine::EngineError;
 use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{ChosenAttribute, EffectKind, TargetRef};
+use engine::types::ability::{ChosenAttribute, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
-use engine::types::game_state::{CastPaymentMode, LayersDirty, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, LayersDirty, StackEntryKind, WaitingFor};
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -1604,21 +1604,19 @@ fn cathedral_membrane_token_copy_never_blocked() {
         P1,
     );
 
-    let murder = runner.cast(first_murder).target_object(tokens[0]).resolve();
-    // CR 603.2 + CR 603.3: the token's dies trigger went on the stack and its
-    // `DamageAll` resolved, so the `BlockPairing { SubjectIsBlocker, ThisCombat }`
-    // population was evaluated and matched nothing.
+    runner.cast(first_murder).target_object(tokens[0]).commit();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the first player passes priority on Murder");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the second player resolves Murder");
     assert!(
-        murder.events().iter().any(|event| matches!(
-            event,
-            GameEvent::EffectResolved {
-                kind: EffectKind::DamageAll,
-                source_id,
-                ..
-            } if *source_id == tokens[0]
+        runner.state().stack.iter().any(|entry| matches!(
+            entry.kind,
+            StackEntryKind::TriggeredAbility { source_id, .. } if source_id == tokens[0]
         )),
-        "reach guard: the token copy's dies trigger must resolve; {:?}",
-        murder.events()
+        "reach guard: the copied Membrane's dies trigger must be on the stack"
     );
     runner.advance_until_stack_empty();
     assert_resolution_completed(&runner);
