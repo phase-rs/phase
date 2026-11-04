@@ -1489,7 +1489,8 @@ fn triton_tactics_does_not_widen() {
 /// Synthetic: Ride Down with its grant spelled "each creature that was blocked by a
 /// Zombie", a partner no subject word covers. CR 608.2c + CR 611.2c: the broadcast
 /// grant fails closed instead of giving every creature trample. B still dies, so
-/// the spell resolved; neither attacker, nor B2, gains trample.
+/// the spell resolved; neither attacker, nor B2, gains trample. No printed card has
+/// this shape; Ride Down is the nearest printed card.
 #[test]
 fn a_broadcast_grant_with_an_unbound_partner_does_not_widen() {
     const UNBOUND_RIDE: &str = "Destroy target blocking creature. Each creature that was blocked by a Zombie this combat gains trample until end of turn.";

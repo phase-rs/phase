@@ -26948,7 +26948,8 @@ mod instruction_drops_block_partner_tests {
     /// binds. Synthetic: an "each creature" grant over a partner no subject word
     /// covers (an indefinite "a Zombie", or "one of those creatures") parses its
     /// population bare, so it fails closed instead of granting trample to every
-    /// creature.
+    /// creature. No printed card has these shapes; Ride Down is the nearest printed
+    /// card.
     #[test]
     fn broadcast_grant_population_binds_or_fails_closed() {
         let ride_down = parse_effect_chain(
