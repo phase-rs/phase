@@ -31,8 +31,8 @@ use super::oracle_ir::effect_chain::{
     ClauseDisposition, ClauseIr, DieResultBranchIr, EffectChainIr,
 };
 use super::oracle_ir::trigger::{
-    effect_chain_has_terminal_roll_die, FirstTimeLimit, ReflexiveParent, ReflexiveParentIr,
-    TriggerBody, TriggerIr, TriggerModifiers, TriggerNodeIr,
+    effect_chain_has_terminal_roll_die, FirstTimeLimit, ReflexiveConnector, ReflexiveParent,
+    ReflexiveParentIr, TriggerBody, TriggerIr, TriggerModifiers, TriggerNodeIr,
 };
 use super::oracle_modal::try_parse_inline_modal_ir;
 use super::oracle_nom::bridge::nom_on_lower;
@@ -411,39 +411,184 @@ fn stamp_self_return_origin_from_trigger_condition(def: &mut TriggerDefinition) 
         return;
     };
     if let Some(execute) = def.execute.as_deref_mut() {
-        stamp_self_return_origin_in_effect(&mut execute.effect, origin);
+        stamp_self_return_origin_in_ability(execute, origin);
     }
 }
 
-fn stamp_self_return_origin_in_effect(effect: &mut Effect, origin: Zone) {
+/// Where the trigger's zone-change source is while an immediate chain resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChainSourceZone {
+    /// CR 400.7e + CR 400.7j: the source is in this public zone, where the
+    /// ability (or the effect that moved it there) can still find it.
+    Known(Zone),
+    /// CR 608.2d: an optional instruction moved the source to `moved_to` only
+    /// if the player chose to perform it, so only an "if you do" instruction
+    /// (CR 608.2c) can rely on that zone.
+    IfPerformed { moved_to: Zone },
+}
+
+impl ChainSourceZone {
+    /// The zone the source occupies when `link` resolves, when that is certain.
+    fn at(self, link: &AbilityDefinition) -> Option<Zone> {
+        match self {
+            ChainSourceZone::Known(zone) => Some(zone),
+            ChainSourceZone::IfPerformed { moved_to } => link
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::is_optional_effect_performed)
+                .then_some(moved_to),
+        }
+    }
+}
+
+/// How one instruction relocated the zone-change source.
+enum SourceMove {
+    /// The instruction did not move the source.
+    Stays,
+    /// The instruction moved the source to this zone.
+    To(Zone),
+    /// The instruction may have moved the source somewhere it cannot track.
+    Untracked,
+}
+
+/// CR 400.7e + CR 400.7j + CR 603.6: stamp each immediate self-return in the
+/// chain with the public zone in which the trigger can find its source.
+///
+/// The walk follows the source through the chain: an instruction that moves
+/// it to another public zone (Lamplight Phoenix's "exile it") changes the
+/// origin of a later return, and a move into a hidden zone, or one whose
+/// outcome the walk cannot know, ends it. It also ends at the first
+/// instruction that hands a chosen or newly produced object to the next one
+/// (`introduces_chosen_object_target`, CR 608.2c): a later return then names
+/// that object, never the source (Gorex, the Tombshell; Wildgrove Summoner).
+/// The walk does not enter a delayed trigger's payload, which resolves at a
+/// later time (CR 603.7a + CR 603.7b).
+fn stamp_self_return_origin_in_ability(ability: &mut AbilityDefinition, origin: Zone) {
+    for mode in &mut ability.mode_abilities {
+        stamp_self_return_origin_in_ability(mode, origin);
+    }
+    let mut zone = ChainSourceZone::Known(origin);
+    let mut node = Some(ability);
+    while let Some(link) = node {
+        if introduces_chosen_object_target(link.effect.as_ref()) {
+            break;
+        }
+        let here = zone.at(link);
+        // CR 608.2c: an otherwise branch replaces this instruction, so it sees
+        // the source where the instruction would have found it.
+        if let (ChainSourceZone::Known(zone), Some(else_ability)) =
+            (zone, link.else_ability.as_deref_mut())
+        {
+            stamp_self_return_origin_in_ability(else_ability, zone);
+        }
+        match stamp_self_return_origin_in_effect(&mut link.effect, here) {
+            SourceMove::Stays => {}
+            SourceMove::To(moved_to) if moved_to.is_public() && link.condition.is_none() => {
+                zone = match (link.optional, zone) {
+                    (false, _) => ChainSourceZone::Known(moved_to),
+                    (true, ChainSourceZone::Known(_)) => ChainSourceZone::IfPerformed { moved_to },
+                    (true, ChainSourceZone::IfPerformed { .. }) => break,
+                };
+            }
+            // CR 400.7j: only a move to a public zone leaves the source
+            // findable, and a conditional move leaves its zone unknown.
+            SourceMove::To(_) | SourceMove::Untracked => break,
+        }
+        node = link.sub_ability.as_deref_mut();
+    }
+}
+
+/// Stamp one instruction whose source is in `here` (when known) and report how
+/// the instruction moves the source.
+fn stamp_self_return_origin_in_effect(effect: &mut Effect, here: Option<Zone>) -> SourceMove {
     match effect {
         Effect::ChangeZone {
-            origin: o,
+            origin,
             destination,
             target,
             ..
         } if matches!(
             target,
             TargetFilter::SelfRef | TargetFilter::TriggeringSource
-        ) && matches!(destination, Zone::Battlefield | Zone::Hand) =>
+        ) =>
         {
-            if o.is_none() {
-                *o = Some(origin);
+            // An explicit origin naming another zone is not a move of the
+            // source from where it is; leave it as parsed, and stop tracking.
+            if here.is_some_and(|here| origin.is_some_and(|zone| zone != here)) {
+                return SourceMove::Untracked;
             }
-            if matches!(target, TargetFilter::TriggeringSource) {
+            if let (Some(here), Zone::Battlefield | Zone::Hand) = (here, *destination) {
+                *origin = Some(here);
                 *target = TargetFilter::SelfRef;
             }
+            SourceMove::To(*destination)
         }
-        Effect::CreateDelayedTrigger { effect: inner, .. } => {
-            stamp_self_return_origin_in_effect(&mut inner.effect, origin);
-        }
+        // CR 603.7a + CR 603.7b: a delayed trigger's payload resolves at a
+        // later time. An event-based one binds the object of its own new event,
+        // not the enclosing trigger's source; a phase-based one ("at the
+        // beginning of the next end step, return it") is deliberately left
+        // unstamped, because where the source will be then is unknown here
+        // (CR 603.7c governs it as it resolves).
+        Effect::CreateDelayedTrigger { .. } => SourceMove::Stays,
         Effect::ChooseOneOf { branches, .. } => {
-            for branch in branches.iter_mut() {
-                stamp_self_return_origin_in_effect(&mut branch.effect, origin);
+            if let Some(here) = here {
+                for branch in branches.iter_mut() {
+                    stamp_self_return_origin_in_ability(branch, here);
+                }
+            }
+            // The chosen branch may have moved the source.
+            SourceMove::Untracked
+        }
+        // Any other zone-moving instruction that names the source moves it
+        // somewhere this walk does not model (CR 400.7).
+        _ => {
+            if moves_named_object(effect) && names_zone_change_source(effect) {
+                SourceMove::Untracked
+            } else {
+                SourceMove::Stays
             }
         }
-        _ => {}
     }
+}
+
+/// Whether an instruction other than `ChangeZone` moves the object(s) it names
+/// to another zone (CR 400.7): destroying or sacrificing it, bouncing it,
+/// putting it into a library, discarding it, casting it, or turning it into a
+/// different kind of object.
+fn moves_named_object(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Destroy { .. }
+            | Effect::DestroyAll { .. }
+            | Effect::Sacrifice { .. }
+            | Effect::ChangeZoneAll { .. }
+            | Effect::Bounce { .. }
+            | Effect::BounceAll { .. }
+            | Effect::Discard { .. }
+            | Effect::DiscardCard { .. }
+            | Effect::ReturnAsAura { .. }
+            | Effect::PutAtLibraryPosition { .. }
+            | Effect::PutOnTopOrBottom { .. }
+            | Effect::Meld { .. }
+            | Effect::ExileHaunting { .. }
+            | Effect::HideawayConceal { .. }
+            | Effect::ExileFaceDownPile { .. }
+            | Effect::CastFromZone { .. }
+            | Effect::Manifest { .. }
+            | Effect::Cloak { .. }
+    )
+}
+
+/// Whether any target slot of `effect` names the trigger's zone-change source.
+fn names_zone_change_source(effect: &mut Effect) -> bool {
+    let mut names = false;
+    crate::parser::oracle_effect::each_target_filter_mut(effect, &mut |filter| {
+        names |= matches!(
+            filter,
+            TargetFilter::SelfRef | TargetFilter::TriggeringSource
+        );
+    });
+    names
 }
 
 /// CR 107.3a + CR 107.3i + CR 601.2f + CR 603.2: In an ETB trigger on a spell
@@ -1975,7 +2120,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     cost,
                     payment_chain: None,
                 },
-                connector,
+                connector: ReflexiveConnector::Condition(connector),
                 effect_chain,
                 modal: None,
             })))
@@ -2306,6 +2451,27 @@ fn filter_uses_departure_attachment_prop(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 603.12: a reflexive triggered ability keyed on an event — created as the
+/// parent's next instruction, it triggers only on that event having occurred
+/// earlier during the same resolution.
+pub(crate) fn reflexive_event_trigger(
+    event: &TriggerDefinition,
+    body: AbilityDefinition,
+) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(event.clone()),
+                or_trigger: None,
+                lifetime: crate::types::ability::DelayedTriggerLifetime::Reflexive,
+            },
+            effect: Box::new(body),
+            uses_tracked_set: false,
+        },
+    )
+}
+
 pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     let mut def = ir.partial_def.clone();
     let modifiers = &ir.modifiers;
@@ -2333,7 +2499,9 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 modifiers,
                 reflexive_die_results,
             );
-            reflexive_ability.condition = Some(reflexive.connector.clone());
+            if let ReflexiveConnector::Condition(connector) = &reflexive.connector {
+                reflexive_ability.condition = Some(connector.clone());
+            }
 
             if let Some(modal) = &reflexive.modal {
                 reflexive_ability = reflexive_ability.with_modal(
@@ -2376,6 +2544,12 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 // flag and no decline prompt.
                 ReflexiveParent::Mandatory { instruction } => {
                     lower_trigger_effect_chain(instruction, modifiers, parent_die_results)
+                }
+            };
+            let reflexive_ability = match &reflexive.connector {
+                ReflexiveConnector::Condition(_) => reflexive_ability,
+                ReflexiveConnector::Event(event) => {
+                    reflexive_event_trigger(event, reflexive_ability)
                 }
             };
             parent_ability.sub_ability = Some(Box::new(reflexive_ability));
@@ -2966,9 +3140,12 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // Gated on:
     //   1. `def.mode` is an event-source-bearing mode (see
     //      `mode_carries_event_source_object`), AND
-    //   2. the ability has no explicit targeting (`valid_target.is_none()`
-    //      AND `optional_targeting == false`) — otherwise `ParentTarget`
-    //      legitimately inherits the player's chosen target.
+    //   2. a chosen OBJECT `valid_target` does not block the lift.
+    //      A player-only slot ("target opponent" as an attach host) is a
+    //      different English referent from "it"/"that card" — CR 608.2k's
+    //      zone-changed object — so it must not keep the anaphor on
+    //      `ParentTarget`. Object-target flicker (Felidar Guardian) still
+    //      blocks. `optional_targeting == false` remains required.
     if let Some(execute) = def.execute.as_deref_mut() {
         // BecomesTarget's event object is the permanent/player that received the
         // target designation, not the spell or ability that selected it. Keep
@@ -2979,7 +3156,12 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             demote_becomes_target_delayed_payloads(execute);
         }
         if mode_carries_event_source_object(&def.mode)
-            && !valid_target_blocks_event_source_lift(&def.mode, def.valid_target.as_ref())
+            && !valid_target_blocks_event_source_lift(
+                &def.mode,
+                def.valid_target.as_ref(),
+                def.valid_card.as_ref(),
+                def.destination,
+            )
             && !execute.optional_targeting
         {
             lift_parent_target_to_triggering_source_in_ability(execute);
@@ -2990,6 +3172,16 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             // parent-target lift so the counter recipient is already
             // `TriggeringSource` when this checks the target.
             lift_counter_count_self_scope_to_event_source_in_ability(execute);
+            // CR 603.6 + CR 400.7e: a self-departure trigger returning its
+            // source must find the card in the public zone it moved to. An
+            // enters-the-battlefield trigger can instead retrieve a different
+            // object from a library or outside the game; its destination is
+            // not an origin for that retrieved object.
+            if matches!(def.valid_card, Some(TargetFilter::SelfRef)) {
+                if let Some(origin @ (Zone::Graveyard | Zone::Exile)) = def.destination {
+                    stamp_self_return_origin_in_ability(execute, origin);
+                }
+            }
         }
     }
 
@@ -3338,9 +3530,25 @@ fn mode_carries_event_source_object(mode: &TriggerMode) -> bool {
 fn valid_target_blocks_event_source_lift(
     mode: &TriggerMode,
     valid_target: Option<&TargetFilter>,
+    valid_card: Option<&TargetFilter>,
+    destination: Option<Zone>,
 ) -> bool {
     match mode {
         TriggerMode::Discarded | TriggerMode::DiscardedAll | TriggerMode::Unattach => false,
+        // CR 608.2k + CR 603.6: on a self put-into-a-graveyard trigger, a
+        // player-scoped `valid_target` (Accursed Witch's "attached to target
+        // opponent" host, or the owner scope of "put into your graveyard" —
+        // Narcomoeba, Creeping Chill) is never the "it" anaphor, which names
+        // the card that moved. Other player-targeted
+        // zone-change triggers can bind later instructions to that player
+        // (Thought Prison's "from it"), so they must retain ParentTarget.
+        TriggerMode::ChangesZone
+            if matches!(valid_card, Some(TargetFilter::SelfRef))
+                && destination == Some(Zone::Graveyard)
+                && valid_target.is_some_and(TargetFilter::is_player_scope) =>
+        {
+            false
+        }
         _ => valid_target.is_some(),
     }
 }
@@ -3490,6 +3698,9 @@ fn lift_parent_target_to_triggering_source_in_ability(ability: &mut AbilityDefin
     while let Some(link) = node {
         if introduces_chosen_object_target(link.effect.as_ref()) {
             break;
+        }
+        if let Some(else_ability) = link.else_ability.as_deref_mut() {
+            lift_parent_target_to_triggering_source_in_ability(else_ability);
         }
         let allow_set_tap_lift =
             is_top_level && link.multi_target.is_none() && !link.optional_targeting;
@@ -4188,7 +4399,12 @@ fn lift_filter_shared_quality_parent_target_to_triggering_source(filter: &mut Ta
 /// A zone choice (`Effect::ChooseFromZone`, every form) also returns `true`: it
 /// hands the chosen card(s) to the next instruction, so a later `ParentTarget`
 /// binds to the pick and never to the trigger event (Gorex, the Tombshell's
-/// dies half).
+/// dies half). Seek hands its sought cards over the same way (Wildgrove
+/// Summoner).
+///
+/// An unparsed instruction (`Effect::Unimplemented`) also returns `true`: it may
+/// have produced the object a later pronoun names (Bone Rattler), so the later
+/// anaphor is left unbound rather than guessed onto the trigger event.
 ///
 /// An exile-until loop (`Effect::ExileFromTopUntil`, every `UntilCondition`)
 /// also returns `true`: it hands what it exiled to the next instruction — a
@@ -4230,10 +4446,22 @@ fn introduces_chosen_object_target(effect: &Effect) -> bool {
     // never one of them.
     // CR 608.2c + CR 701.23a: search establishes the found-object antecedent
     // for every later instruction, including sequential siblings.
+    // Seek (an Alchemy random library selection) hands its sought cards to
+    // the next instruction the same way: Wildgrove Summoner's "seek two
+    // Forest cards and put them onto the battlefield" moves the sought cards,
+    // never the dying source.
     if matches!(
         effect,
-        Effect::ChooseFromZone { .. } | Effect::SearchLibrary { .. }
+        Effect::ChooseFromZone { .. } | Effect::SearchLibrary { .. } | Effect::Seek { .. }
     ) {
+        return true;
+    }
+    // CR 608.2c: an instruction the parser could not read may have produced
+    // the object a later pronoun names (Bone Rattler's unparsed "create four
+    // Reassembling Skeleton token cards and put them into your graveyard").
+    // The later anaphor stays unbound rather than being guessed onto the
+    // trigger event; the unparsed instruction keeps the card unsupported.
+    if matches!(effect, Effect::Unimplemented { .. }) {
         return true;
     }
     // CR 608.2c + CR 701.13a: an exile-until loop ("exile cards from the top of
@@ -22642,6 +22870,44 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     )))
     .parse(lower)
     .ok()?;
+    // CR 122.1 + CR 603.12: active voice — "you remove a [type] counter [from
+    // <subject>]" ("When you remove a counter this way", Immard, the
+    // Stormcleaver). With no "from" subject any object's removal matches.
+    if let Ok((rest, counter_type)) = (
+        tag::<_, _, OracleError<'_>>("you remove "),
+        alt((tag("a "), tag("an "), tag("one or more "))),
+        opt(terminated(
+            nom_primitives::parse_counter_type_typed,
+            tag::<_, _, OracleError<'_>>(" "),
+        )),
+        alt((tag("counters"), tag("counter"))),
+    )
+        .map(|(_, _, counter_type, _)| counter_type)
+        .parse(after_prefix)
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::CounterRemoved;
+        if let Ok((subject, _)) = tag::<_, _, OracleError<'_>>(" from ").parse(rest) {
+            // A subject rider this arm doesn't model ("… from this card while
+            // it's exiled") declines rather than being dropped.
+            let (filter, remainder) =
+                parse_single_subject(subject.trim(), &mut ParseContext::default());
+            if !remainder.trim().is_empty() {
+                return None;
+            }
+            def.valid_card = Some(filter);
+        } else if !rest.trim().is_empty() {
+            return None;
+        }
+        if let Some(counter_type) = counter_type {
+            def.description = Some(format!("{} counter", counter_type.as_str()));
+            def.counter_filter = Some(CounterTriggerFilter {
+                counter_type,
+                threshold: None,
+            });
+        }
+        return Some((TriggerMode::CounterRemoved, def));
+    }
     let (after_a, ()) = value((), tag::<_, _, OracleError<'_>>("a "))
         .parse(after_prefix)
         .ok()?;

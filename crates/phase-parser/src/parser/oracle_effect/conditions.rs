@@ -1811,6 +1811,45 @@ fn parse_if_revealed_card_type_conditional(text: &str) -> Option<(AbilityConditi
     ))
 }
 
+/// CR 701.20a + CR 608.2c: `"If all cards revealed this way are <types> cards,
+/// …"` — gates a sub_ability on EVERY card the preceding reveal produced having
+/// the type (Game Preserve). The revealed set is the chain's tracked set, so
+/// the gate is "the members matching the type number all of the members"; an
+/// empty reveal satisfies it vacuously and moves nothing.
+fn parse_if_all_revealed_cards_type_conditional(text: &str) -> Option<(AbilityCondition, String)> {
+    let lower = text.to_lowercase();
+    let (type_filters, remainder) = nom_on_lower(text, &lower, |input| {
+        let (rest, _) = (
+            tag::<_, _, OracleError<'_>>("if all cards revealed this way are "),
+            opt(alt((tag("an "), tag("a ")))),
+        )
+            .parse(input)?;
+        let (rest, type_filters) = nom_quantity::parse_type_filter_list(rest)?;
+        let (rest, _) = alt((tag::<_, _, OracleError<'_>>(" cards"), tag(" card"))).parse(rest)?;
+        Ok((rest, type_filters))
+    })?;
+    let type_filter = match type_filters.as_slice() {
+        [] => return None,
+        [single] => single.clone(),
+        many => TypeFilter::AnyOf(many.to_vec()),
+    };
+    Some((
+        AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::new(type_filter))),
+                    caused_by: None,
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+        },
+        remainder_after_optional_comma(remainder).to_string(),
+    ))
+}
+
 /// CR 608.2c + CR 406.6: "If the exiled card is a [type] card, ..." — gates a
 /// sub_ability / repeat-process loop on the type of the card just moved by the
 /// preceding step. `RevealedHasCardType` falls back to `last_zone_changed_ids`
@@ -2203,6 +2242,9 @@ pub(super) fn strip_milled_shared_quality_conditional(
 
 pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     if let Some((condition, remainder)) = parse_if_revealed_card_type_conditional(text) {
+        return (Some(condition), remainder);
+    }
+    if let Some((condition, remainder)) = parse_if_all_revealed_cards_type_conditional(text) {
         return (Some(condition), remainder);
     }
     if let Some((condition, remainder)) = parse_if_exiled_card_type_conditional(text) {

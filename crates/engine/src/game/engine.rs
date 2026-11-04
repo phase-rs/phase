@@ -1481,10 +1481,10 @@ fn apply_action_boundary_core(
     // same snapshot, and removing an impossible state is not part of the action
     // and must not be rolled back with it. CONSEQUENCE, stated so it is not
     // later read as a bug: an action this boundary REJECTS still leaves
-    // `resolution_stack` repaired, with no `bump_state_revision` and no events,
-    // because the error paths return before `finish_action_boundary` runs. That
-    // is intended — a client that submitted one bad action before its pass must
-    // not stay wedged because of it.
+    // `resolution_stack` repaired, with no events. The repair advances the revision
+    // itself because error paths return before `finish_action_boundary` runs.
+    // This is intended — a client that submitted one bad action before its pass
+    // must not stay wedged because of it.
     //
     // Re-entrancy is handled by the same live-dispatch guard the priority-
     // boundary sweep uses: `SimulationFilter`'s clone-and-apply probe re-enters
@@ -1496,7 +1496,14 @@ fn apply_action_boundary_core(
     let pre_recovery_pass_was_authorized = !authorize_actor
         || (matches!(&action, GameAction::PassPriority)
             && check_actor_authorization(state, authenticated_actor, &action).is_ok());
+    let resolution_stack_before = state.resolution_stack.clone();
     let recovered_terminal_rest_boundary = sweep_and_recover_priority_boundary_rest(state);
+    // The entry sweep runs before `boundary_snapshot`, so its repair survives a rejected
+    // action. A repair changes the delivered state, and the revision is the clients'
+    // staleness key, so the repair advances it itself.
+    if recovered_terminal_rest_boundary || state.resolution_stack != resolution_stack_before {
+        bump_state_revision(state);
+    }
     let recovered_stale_priority_pass =
         recovered_terminal_rest_boundary && matches!(&action, GameAction::PassPriority);
     // A completed hidden-search audience is an event-filtering sidecar for the
@@ -12176,6 +12183,67 @@ fn revoke_resolve_all_consent(
     restore_resolve_all_priority_snapshot(state)
 }
 
+/// CR 702.60a + CR 701.20a: a Ripple free cast of a same-named revealed card
+/// can pause mid-announcement (targets, modes, X, payment of additional costs)
+/// before the remaining hits or the bottom-order step. The un-cast revealed
+/// cards are still revealed through those pauses, so the reveal must survive
+/// them. Retention is bound to the ACTIVE announcement only: the live
+/// `pending_cast` (or the pending `ModalFaceChoice`) must itself name the
+/// resolution-owned permission carrying `RippleOfferRemaining` cleanup. The
+/// permission lingers on a successfully cast hit while it sits on the stack,
+/// so its mere presence is not proof the announcement is still running.
+fn ripple_resolution_cast_in_flight(state: &GameState) -> bool {
+    if state.revealed_cards.is_empty() {
+        return false;
+    }
+    // CR 601.2 + CR 616.1: resolved through the typed `PendingCastOwner`
+    // custody — the prompt's inline cast; the cast-bearing cost-move, discard
+    // and deferred-life roots behind their replacement choice; and the external
+    // `pending_cast` behind the `ManaPayment` family, Assist, `DistributeAmong`,
+    // or a mana ability (CR 605.3b) — prompted or with its own cost parked —
+    // whose activation chain returns to the cast's payment. A bare
+    // `state.pending_cast` outside those carriers is not an active announcement.
+    let active_cast = state.active_cast_announcement();
+    let permission_index = match (active_cast, &state.waiting_for) {
+        (Some(pending), _) => pending
+            .casting_permission_index
+            .map(|index| (pending.object_id, index)),
+        (
+            None,
+            WaitingFor::ModalFaceChoice {
+                player,
+                object_id,
+                card_id,
+                ..
+            },
+        ) => {
+            casting::current_resolution_cast_permission_index(state, *player, *object_id, *card_id)
+                .map(|index| (*object_id, index))
+        }
+        (None, _) => None,
+    };
+    permission_index
+        .and_then(|(object_id, index)| {
+            state
+                .objects
+                .get(&object_id)?
+                .casting_permissions
+                .get(index.0)
+        })
+        .is_some_and(|permission| {
+            matches!(
+                permission,
+                crate::types::ability::CastingPermission::ExileWithAltCost {
+                    resolution_cleanup: Some(cleanup),
+                    ..
+                } if matches!(
+                    cleanup.success_action,
+                    crate::types::ability::ResolutionCastSuccessAction::RippleOfferRemaining { .. }
+                )
+            )
+        })
+}
+
 /// CR 701.20e + CR 701.20a: Whether the controller's private "look at" window
 /// must survive the action now being applied. Looking follows the rules for
 /// revealing, so a looked-at card stays looked-at only "for as long as
@@ -12251,7 +12319,8 @@ fn apply_action(
             }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
-    ) {
+    ) && !ripple_resolution_cast_in_flight(state)
+    {
         state.revealed_cards.clear();
     }
 

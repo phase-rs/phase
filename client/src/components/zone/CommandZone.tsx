@@ -7,8 +7,9 @@ import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { cardImageLookup } from "../../services/cardImageLookup.ts";
+import { cardImageLookup, ownerPrintedRefOf } from "../../services/cardImageLookup.ts";
 import {
   collectObjectActions,
   deriveActivationAffordances,
@@ -64,6 +65,36 @@ function descriptionOf(emblem: GameObject, fallback: string): string {
   return parts.join("; ") || fallback;
 }
 
+/** Display grouping only; source printing participates exactly when enabled. */
+function groupEmblems(
+  emblems: readonly GameObject[],
+  fallback: string,
+  showOwnerPrintings: boolean,
+): GroupedEmblem[] {
+  const byKey = new Map<string, GroupedEmblem>();
+  for (const emblem of emblems) {
+    const desc = descriptionOf(emblem, fallback);
+    const sourceName = emblem.emblem_source?.name ?? null;
+    const legacyKey = `${sourceName ?? ""}|${desc}`;
+    let key = legacyKey;
+    if (showOwnerPrintings) {
+      const lookup = cardImageLookup(emblem);
+      const p = lookup.ownerPrinting;
+      const ref = ownerPrintedRefOf(lookup);
+      const ownerArtKey = p && ref ? [p.set_code, p.collector_number, ref.oracle_id, ref.face_name] : null;
+      key = JSON.stringify([legacyKey, ownerArtKey]);
+    }
+    const existing = byKey.get(key);
+    if (existing) {
+      // Activation remains reachable on every member, not just the image representative.
+      existing.members.push(emblem);
+    } else {
+      byKey.set(key, { description: desc, sourceName, members: [emblem] });
+    }
+  }
+  return [...byKey.values()];
+}
+
 /**
  * Renders emblems in the command zone as a compact horizontal strip.
  * Identical emblems are stacked with a count badge (CR 114).
@@ -71,6 +102,7 @@ function descriptionOf(emblem: GameObject, fallback: string): string {
 export function CommandZone({ playerId }: CommandZoneProps) {
   const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
+  const showOwnerPrintings = usePreferencesStore((s) => s.showOwnerPrintings);
 
   const groups = useMemo(() => {
     if (!gameState) return [];
@@ -83,27 +115,8 @@ export function CommandZone({ playerId }: CommandZoneProps) {
           obj != null && obj.is_emblem === true && obj.controller === playerId,
       );
 
-    // Group identical emblems by source + effect (CR 114). Keying on the source
-    // as well as the effect keeps emblems from different planeswalkers visually
-    // distinct even when their granted-ability text happens to coincide, so
-    // each chip shows the correct source art.
-    const byKey = new Map<string, GroupedEmblem>();
-    for (const emblem of emblems) {
-      const desc = descriptionOf(emblem, t("zone.emblemFallback"));
-      const sourceName = emblem.emblem_source?.name ?? null;
-      const key = `${sourceName ?? ""}|${desc}`;
-      const existing = byKey.get(key);
-      if (existing) {
-        // Retain the member, never just a tally — the chip needs its id to reach
-        // an action the engine published against this exact emblem.
-        existing.members.push(emblem);
-      } else {
-        byKey.set(key, { description: desc, sourceName, members: [emblem] });
-      }
-    }
-
-    return [...byKey.values()];
-  }, [gameState, playerId, t]);
+    return groupEmblems(emblems, t("zone.emblemFallback"), showOwnerPrintings);
+  }, [gameState, playerId, t, showOwnerPrintings]);
 
   if (groups.length === 0) return null;
 
@@ -128,10 +141,10 @@ export function CommandZone({ playerId }: CommandZoneProps) {
  */
 function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
   const isCompactHeight = useIsCompactHeight();
-  // DISPLAY identity only. Art, source and rules text are group-invariant by
-  // construction of the grouping key (`source | description`), so any member
-  // renders the same chip — but activation identity is resolved per-object
-  // below, never from this one.
+  // DISPLAY identity only. Source name and rules text are group-invariant;
+  // captured source-printing values are also invariant when owner art is enabled.
+  // Off mode intentionally keeps the legacy source/effect grouping. Activation
+  // identity is always resolved per-object below, never from this representative.
   const emblem = group.members[0];
   const imageLookup = cardImageLookup(emblem);
   const { src: artSrc, advanceFailedSource } = useCardImage(imageLookup.name, {
@@ -139,6 +152,7 @@ function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
     faceIndex: imageLookup.faceIndex,
     oracleId: imageLookup.oracleId,
     faceName: imageLookup.faceName,
+    ownerPrinting: imageLookup.ownerPrinting,
   });
 
   // CR 114.4 + CR 602.1: an emblem can carry an activated ability (the Momir

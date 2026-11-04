@@ -11,6 +11,7 @@ mod abdel_adrian_animate_dead_altar_board;
 mod abigale_integration;
 mod active_damage_trigger_recipient_anaphor;
 mod adapter_contract_fixtures;
+mod additional_cost_declaration_tail;
 mod agent_frank_horrigan_attacked_this_turn_indestructible;
 mod ancient_brass_dragon_roll_d20;
 mod ancient_bronze_dragon_roll_d20;
@@ -287,5 +288,6 @@ mod controller_anaphor_binds_through_context;
 
 mod resolution_progress_contract;
 
+mod ignite_memories_random_reveal;
 mod risky_move_gain_control_trigger;
 mod token_attack_destination;

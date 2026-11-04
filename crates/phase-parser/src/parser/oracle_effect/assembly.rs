@@ -1825,6 +1825,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::TriggeringSpellController
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringSource
+            | TargetFilter::CastingSpell
             | TargetFilter::EventTarget
             | TargetFilter::ParentTarget
             | TargetFilter::ParentTargetSlot { .. }
@@ -1966,6 +1967,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::ExiledBySource
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSource
+            | TargetFilter::CastingSpell
             | TargetFilter::EventTarget
             | TargetFilter::ParentTarget
             | TargetFilter::ParentTargetSlot { .. }
