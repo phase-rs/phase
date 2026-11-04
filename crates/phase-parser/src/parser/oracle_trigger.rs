@@ -7017,7 +7017,8 @@ fn attack_clause_names_attacked_player(def: &TriggerDefinition) -> bool {
             | AttackTargetFilter::Battle
             | AttackTargetFilter::Owner
             | AttackTargetFilter::OwnerOrPlaneswalker
-            | AttackTargetFilter::PlayerOrPermanents,
+            | AttackTargetFilter::PlayerOrPermanents
+            | AttackTargetFilter::PlayerAttackedBySourceThisTurn,
         )
         | None => false,
     }
