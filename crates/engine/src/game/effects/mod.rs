@@ -60,6 +60,7 @@ use crate::types::player::{Player, PlayerId};
 use crate::types::resolution::{
     AbilityContinuationFrame, ChildStackDepth, FrameGate, OptionalEffectFrame,
     PendingRepeatedOptionalPayment, RepeatedOptionalPaymentFrame, ResolutionFrame,
+    ResolutionPosition,
 };
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -2050,7 +2051,7 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
     let Some(frame) = state.resolution_stack.last().cloned() else {
         return;
     };
-    let entry_position = ResolutionPosition::at(state);
+    let entry_position = state.resolution_stack.position();
 
     match frame {
         ResolutionFrame::AbilityContinuation(_) | ResolutionFrame::ChangeZone(_) => {
@@ -2238,7 +2239,7 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
 /// depth is left to the payment's own boundary.
 fn exposes_finished_paused_dispatch(state: &GameState, entry: ResolutionPosition) -> bool {
     matches!(state.waiting_for, WaitingFor::Priority { .. })
-        && ResolutionPosition::at(state).is_strictly_inside(&entry)
+        && state.resolution_stack.position().is_strictly_inside(&entry)
         && state
             .pending_deferred_life_cost_resume
             .as_ref()
@@ -2251,35 +2252,6 @@ fn exposes_finished_paused_dispatch(state: &GameState, entry: ResolutionPosition
                     Some(crate::types::game_state::DrainStatus::Paused)
                 )
         )
-}
-
-/// How much resolution work is left: stack depth, then the drain count of the
-/// active post-replacement frame, ordered lexicographically. The same measure
-/// as the priority boundary's `engine::SubtreePosition`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ResolutionPosition {
-    resolution_depth: usize,
-    active_post_replacement_drains: usize,
-}
-
-impl ResolutionPosition {
-    fn at(state: &GameState) -> Self {
-        Self {
-            resolution_depth: state.resolution_stack.len(),
-            active_post_replacement_drains: state
-                .active_post_replacement_drains()
-                .map_or(0, crate::types::game_state::PostReplacementDrainStack::len),
-        }
-    }
-
-    /// Strictly less work remains than at `before`.
-    fn is_strictly_inside(&self, before: &Self) -> bool {
-        (self.resolution_depth, self.active_post_replacement_drains)
-            < (
-                before.resolution_depth,
-                before.active_post_replacement_drains,
-            )
-    }
 }
 
 /// CR 608.2c: Resume a "repeat this process" loop that paused when

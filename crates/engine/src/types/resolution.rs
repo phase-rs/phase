@@ -1082,6 +1082,28 @@ impl IdentifiedPostReplacementDispatch {
     }
 }
 
+/// How much resolution work is left: the stack depth, then the drain count of the active
+/// post-replacement frame (or its paired parent), compared lexicographically. Positional on
+/// purpose: a resume loop only needs a measure that strictly decreases while it makes progress,
+/// not the subtree's identity (that is `ReplacementSubtreeBoundary`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolutionPosition {
+    resolution_depth: usize,
+    active_post_replacement_drains: usize,
+}
+
+impl ResolutionPosition {
+    /// Strictly less work remains than at `before`: the stack is lower, or as high with fewer
+    /// drains in the active post-replacement frame (lexicographic on ℕ×ℕ).
+    pub(crate) fn is_strictly_inside(&self, before: &Self) -> bool {
+        (self.resolution_depth, self.active_post_replacement_drains)
+            < (
+                before.resolution_depth,
+                before.active_post_replacement_drains,
+            )
+    }
+}
+
 impl ResolutionStack {
     pub fn is_empty(&self) -> bool {
         self.frames.is_empty()
@@ -3081,6 +3103,16 @@ impl ResolutionStack {
         match self.frames.get(parent) {
             Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
             Some(_) | None => unreachable!("checked post-replacement parent must match"),
+        }
+    }
+
+    /// How much resolution work is left (see [`ResolutionPosition`]).
+    pub(crate) fn position(&self) -> ResolutionPosition {
+        ResolutionPosition {
+            resolution_depth: self.len(),
+            active_post_replacement_drains: self
+                .active_post_replacement_or_paired_parent()
+                .map_or(0, PostReplacementDrainStack::len),
         }
     }
 
