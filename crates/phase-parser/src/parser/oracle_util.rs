@@ -929,7 +929,14 @@ fn parse_count_binder(input: &str) -> OracleResult<'_, CountBinder> {
     alt((
         value(CountBinder::EqualTo, tag("equal to ")),
         value(CountBinder::WhereX, tag("where x is ")),
-        value(CountBinder::ForEach, tag("for each ")),
+        // CR 107.1a + CR 608.2c: "for every" is a marker spelling of "for each"
+        // ("draw a card for every five creature types among …" — Sarek). The
+        // quantity after either marker goes to the same for-each authority,
+        // which owns the grouped "N <things>" floor division.
+        value(
+            CountBinder::ForEach,
+            preceded(tag("for "), alt((tag("each "), tag("every ")))),
+        ),
     ))
     .parse(input)
 }

@@ -1274,11 +1274,7 @@ fn parse_put_onto_battlefield_this_way(input: &str) -> OracleResult<'_, StaticCo
 fn parse_exiled_this_way_count(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you exiled ").parse(input)?;
     let (rest, n) = parse_number(rest)?;
-    let (rest, comparator) = alt((
-        value(Comparator::GE, tag(" or more ")),
-        value(Comparator::LE, tag(" or fewer ")),
-    ))
-    .parse(rest)?;
+    let (rest, comparator) = parse_or_more_or_fewer_suffix(rest)?;
     let (rest, _) = alt((tag("cards this way"), tag("card this way"))).parse(rest)?;
     Ok((
         rest,
@@ -12528,14 +12524,20 @@ pub fn parse_you_control_or_returned_this_way_condition(
     ))
 }
 
-/// CR 121 + CR 608.2c: Parse "you draw [one or more] card[s] this
-/// way" — the active-voice draw-count gate (Transcendent Archaic: "you may draw
-/// X cards … If you draw one or more cards this way, discard two cards"). Reads
-/// the amount moved by the immediately preceding draw effect in the sub-ability
-/// chain via `QuantityRef::PreviousEffectAmount`.
+/// CR 121 + CR 608.2c: Parse "you draw <N> or more|or fewer card[s] this
+/// way" / "you draw at least one card this way" — the active-voice draw-count
+/// gate (Transcendent Archaic: "If you draw one or more cards this way, discard
+/// two cards"; Sarek, Federation Ambassador: "If you draw three or more cards
+/// this way, put two +1/+1 counters …"). Reads the amount moved by the
+/// immediately preceding draw effect in the sub-ability chain via
+/// `QuantityRef::PreviousEffectAmount`, compared against the printed threshold.
 pub fn parse_you_draw_this_way_condition(input: &str) -> OracleResult<'_, AbilityCondition> {
     let (rest, _) = tag("you draw ").parse(input)?;
-    let (rest, _) = alt((tag("one or more "), tag("at least one "))).parse(rest)?;
+    let (rest, (comparator, threshold)) = alt((
+        value((Comparator::GE, 1), tag("at least one ")),
+        (parse_number, parse_or_more_or_fewer_suffix).map(|(n, comparator)| (comparator, n)),
+    ))
+    .parse(rest)?;
     let (rest, _) = alt((tag("cards this way"), tag("card this way"))).parse(rest)?;
     Ok((
         rest,
@@ -12546,10 +12548,22 @@ pub fn parse_you_draw_this_way_condition(input: &str) -> OracleResult<'_, Abilit
                     aggregate: AggregateFunction::Sum,
                 },
             },
-            comparator: Comparator::GE,
-            rhs: QuantityExpr::Fixed { value: 1 },
+            comparator,
+            rhs: QuantityExpr::Fixed {
+                value: i32::try_from(threshold).unwrap_or(i32::MAX),
+            },
         },
     ))
+}
+
+/// CR 608.2c: the " or more " / " or fewer " threshold suffix after a count
+/// ("three or more cards", "two or fewer cards").
+fn parse_or_more_or_fewer_suffix(input: &str) -> OracleResult<'_, Comparator> {
+    alt((
+        value(Comparator::GE, tag(" or more ")),
+        value(Comparator::LE, tag(" or fewer ")),
+    ))
+    .parse(input)
 }
 
 /// CR 603.12 + CR 608.2c: the affirmative connector set. Literal "when you do"
@@ -26044,6 +26058,38 @@ mod tests {
             ),
             "got {c:?}"
         );
+    }
+
+    /// CR 121 + CR 608.2c: the draw-count gate reads the printed threshold and
+    /// comparator, not a fixed "one or more" — Sarek ("three or more"), the
+    /// "or fewer" mirror, and the legacy "one or more" / "at least one" forms.
+    #[test]
+    fn parse_you_draw_this_way_condition_reads_threshold_and_comparator() {
+        let previous = QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: crate::types::ability::DamageChannel::Total,
+                aggregate: AggregateFunction::Sum,
+            },
+        };
+        for (text, comparator, value) in [
+            ("you draw three or more cards this way", Comparator::GE, 3),
+            ("you draw two or fewer cards this way", Comparator::LE, 2),
+            ("you draw one or more cards this way", Comparator::GE, 1),
+            ("you draw at least one card this way", Comparator::GE, 1),
+        ] {
+            let (rest, condition) = parse_you_draw_this_way_condition(text).unwrap();
+            assert!(rest.is_empty(), "{text}: leftover {rest:?}");
+            assert_eq!(
+                condition,
+                AbilityCondition::QuantityCheck {
+                    lhs: previous.clone(),
+                    comparator,
+                    rhs: QuantityExpr::Fixed { value },
+                },
+                "{text}"
+            );
+        }
+        assert!(parse_you_draw_this_way_condition("you draw three cards this way").is_err());
     }
 
     /// The mirror "or fewer" form maps to the `LE` comparator (class coverage —

@@ -5851,9 +5851,17 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
             // CR 205.2a: "for each card type among <population>" and "card type
             // they share with <population>" share the population grammar; nested
             // to keep the outer `alt` within nom's tuple arity (21 items).
+            //
+            // CR 205.3m: "for every five creature types among non-Borg creatures
+            // you control" (Sarek) — the category-restricted distinct-subtype
+            // count shares the same population grammar, so the grouped
+            // "for each/every N …" reader can divide it. Its "<category> type"
+            // head must precede the generic controlled-type arms, whose leading
+            // "creature" token would otherwise commit.
             alt((
                 parse_distinct_card_types_among,
                 parse_shared_card_types_with,
+                parse_distinct_category_subtypes_among,
             )),
             // CR 108.3: owned-card populations; nested to keep the outer `alt`
             // within nom's tuple arity (21 items).

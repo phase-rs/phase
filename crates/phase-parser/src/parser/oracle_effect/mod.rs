@@ -39662,10 +39662,34 @@ fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
         // `CastCopyOfCard` both creates and casts the copies — so drop it and
         // keep the count-bearing `CastCopyOfCard`. The `up_to` choice in the
         // resolver carries the "you may cast" optionality, so the def-level
-        // `optional`/`repeat_for` are cleared to mirror the legacy fold.
-        if matches!(&*defs[index + 1].effect, Effect::CastCopyOfCard { .. }) {
+        // `optional` is cleared to mirror the legacy fold.
+        //
+        // CR 707.12 + CR 707.12a: the copy half's multiplicity ("copy that
+        // card three times" — Mnemonic Deluge; "X times, where X is …" —
+        // Infinite Diversity) rides the copy def's `repeat_for`. It is carried
+        // onto the fused `CastCopyOfCard` so each iteration creates one copy of
+        // every source and offers its cast individually (CR 707.12a), instead
+        // of being dropped with the redundant `CopySpell`. Only an uncapped cast
+        // carries it: an "up to N of the copies" cap counts across ALL copies,
+        // which a per-iteration cap cannot express (no printed card combines
+        // the two), so a capped cast keeps the legacy single-pass reading. A
+        // member-driven "for each card exiled this way" loop is not a
+        // multiplicity either: the resolver already covers every tracked-set
+        // member in one pass (the Case 2 rationale), so it is dropped too.
+        if let Effect::CastCopyOfCard { count, .. } = &*defs[index + 1].effect {
+            let member_driven = matches!(
+                defs[index].repeat_for,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. },
+                })
+            );
+            let multiplicity = if count.is_none() && !member_driven {
+                defs[index].repeat_for.take()
+            } else {
+                None
+            };
             defs[index + 1].optional = false;
-            defs[index + 1].repeat_for = None;
+            defs[index + 1].repeat_for = multiplicity;
             defs.remove(index);
             continue;
         }
