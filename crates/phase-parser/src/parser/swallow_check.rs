@@ -15536,6 +15536,10 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 "{name}: a unary clause is no history clause"
             );
             let parsed = parse_named(text, name, types);
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name}: reach guard — an unimplemented unit is skipped before the detector runs"
+            );
             assert!(!unbound(&parsed), "{name}: {:?}", parsed.abilities);
             assert!(
                 !has_swallowed_detector(&parsed, "CombatHistoryRelation"),
