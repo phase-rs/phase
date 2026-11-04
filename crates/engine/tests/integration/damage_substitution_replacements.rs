@@ -1690,9 +1690,9 @@ fn a_paused_rider_keeps_the_batchs_later_riders_behind_it() {
     }
 }
 
-/// Pyroclasm at a Bear under Test of Faith, Phyrexian Hydra and Lichenthrope. Phyrexian Hydra:
+/// Pyroclasm at a Bear under Test of Faith, two Phyrexian Hydras and Lichenthrope. Phyrexian Hydra:
 /// "Put a -1/-1 counter on this creature for each 1 damage prevented this way." Lichenthrope:
-/// "put that many -1/-1 counters on it instead." Phyrexian Hydra's counters wait behind the
+/// "put that many -1/-1 counters on it instead." Both Hydras' counters wait behind the
 /// Bear's paused counters, and both creatures get theirs before Pyroclasm finishes (CR 608.2c,
 /// CR 615.5); neither asks an order, since Hardened Scales puts no -1/-1 counter. Doubling Season
 /// doubles each: 2 × 2 = 4. The order between Lichenthrope's substitution and the Bear's counters
@@ -1707,6 +1707,10 @@ fn every_rider_queued_behind_a_paused_rider_runs() {
     let mut scenario = self::scenario();
     let bear = scenario.add_creature(P1, "Bear", 2, 2).id();
     let hydra = scenario
+        .add_creature_from_oracle(P1, "Phyrexian Hydra", 7, 7, PHYREXIAN_HYDRA)
+        .id();
+    // A second rider queued behind the Bear's, so the queue's second entry is a rider too.
+    let second_hydra = scenario
         .add_creature_from_oracle(P1, "Phyrexian Hydra", 7, 7, PHYREXIAN_HYDRA)
         .id();
     let lichenthrope = scenario
@@ -1727,10 +1731,15 @@ fn every_rider_queued_behind_a_paused_rider_runs() {
     assert_eq!(plus_counters(&runner, bear), 8);
     assert_eq!(counters(&runner, hydra, &CounterType::Minus1Minus1), 4);
     assert_eq!(
+        counters(&runner, second_hydra, &CounterType::Minus1Minus1),
+        4
+    );
+    assert_eq!(
         counters(&runner, lichenthrope, &CounterType::Minus1Minus1),
         4
     );
     assert_eq!(damage(&runner, hydra), 0);
+    assert_eq!(damage(&runner, second_hydra), 0);
     assert_eq!(damage(&runner, lichenthrope), 0);
     assert_at_rest(&runner);
 }
@@ -1832,7 +1841,7 @@ fn work_queued_behind_a_paused_rider_runs_in_the_order_it_was_queued() {
 /// Pyroclasm finishes (CR 608.2c, CR 615.5). With a 0/9 in their place, Pyroclasm still
 /// finishes.
 #[test]
-fn a_rider_draw_replaced_card_by_card_finishes_and_runs_the_work_behind_it() {
+fn a_rider_draw_replaced_card_by_card_finishes_before_the_spell_does() {
     for queued in [false, true] {
         let mut scenario = self::scenario();
         for index in 0..4 {
@@ -1919,7 +1928,7 @@ const SWELTERING_SUNS: &str = "Sweltering Suns deals 3 damage to each creature.\
 /// P0 should end with one card for each card of the draw: 2 from Pyroclasm, 3 from Sweltering
 /// Suns. These flows end a card short (Command Zone #178), so these rows assert no draw count.
 #[test]
-fn a_rider_draw_with_a_declined_replacement_finishes_and_runs_the_work_behind_it() {
+fn a_rider_draw_with_a_declined_replacement_finishes_before_the_spell_does() {
     for (name, text, amount, plan) in [
         ("Pyroclasm", PYROCLASM, 2, vec![true, false]),
         (

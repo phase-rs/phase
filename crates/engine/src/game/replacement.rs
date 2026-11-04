@@ -1044,8 +1044,10 @@ fn mandatory_post_drain(
 
 /// CR 615.5 + CR 608.2c: where a damage replacement's actions wait. Behind the rider this
 /// event's own substitution waited on (`ApplyResult::PreventedBehindRider`), else behind a rider
-/// of the same noncombat batch that left its prompt standing (Pyroclasm at a Bear under Test of
-/// Faith and at Dralnu, Lich Lord), reading the amount the applier just stamped.
+/// of the same noncombat batch that left its prompt standing (Pyroclasm at two Bears, each under
+/// Test of Faith), reading the amount the applier just stamped. A substitution on another
+/// creature (Dralnu, Lich Lord) also waits here today, though by CR 614.6 + CR 615.5 it should
+/// come first (Command Zone #172).
 fn damage_rider_placement(state: &GameState, behind: Option<PausedRider>) -> Option<PausedRider> {
     behind.or_else(|| {
         let owner = state.damage_batch_ledger.as_ref()?.paused_rider?;

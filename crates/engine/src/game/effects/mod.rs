@@ -1992,8 +1992,9 @@ pub(crate) fn sweep_ownerless_post_replacement_strand(state: &mut GameState) {
 /// CR 615.5 + CR 608.2c: dispatch the active post-replacement frame's resident, then each
 /// Ready entry that becomes its resident in turn, in the order it was queued
 /// (`PostReplacementDrainStack::install_behind_paused_resident`): Pyroclasm's Phyrexian Hydra
-/// and Lichenthrope counters both wait behind a Bear's paused Test of Faith counters, and both
-/// run once those finish.
+/// counters and Lichenthrope's (a substitution that by CR 614.6 + CR 615.5 should come first,
+/// Command Zone #172) wait behind a Bear's paused Test of Faith counters, and both run once
+/// those finish.
 ///
 /// Stops at the first pause (`waiting_for` leaves `Priority`), when other work sits on top of
 /// the frame, or once the frame is gone: exhausted, which removes it. A post-replacement frame
