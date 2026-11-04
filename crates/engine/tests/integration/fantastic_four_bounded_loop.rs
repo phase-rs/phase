@@ -10007,3 +10007,57 @@ fn a_template_free_declarations_responder_statement_is_what_the_take_does() {
         }
     }
 }
+
+/// The verdict on each `Repeat` span the trace names at `state`'s offer frame, its offer set aside
+/// so the frame is the priority frame it was minted at.
+fn f4_offer_frame_repeat_verdicts(
+    state: &GameState,
+) -> Vec<Result<Vec<String>, engine::game::period_confirm::OfferRefusal>> {
+    let (proposer, _, _) = offer_parts(state);
+    let mut frame = state.clone();
+    frame.waiting_for = WaitingFor::Priority { player: proposer };
+    engine::game::period_confirm::confirm_for_tests(&frame)
+        .into_iter()
+        .filter(|(span, _)| span.cause == engine::game::NamingCause::Repeat)
+        .map(|(_, verdict)| verdict)
+        .collect()
+}
+
+/// The fodder-cover refusals among `verdicts`.
+fn fodder_refusals(
+    verdicts: &[Result<Vec<String>, engine::game::period_confirm::OfferRefusal>],
+) -> Vec<[Vec<engine::analysis::resource::FodderCoverRefusal>; 2]> {
+    use engine::analysis::resource::ObjectGrowthVerdict;
+    use engine::game::period_confirm::OfferRefusal;
+    verdicts
+        .iter()
+        .filter_map(|verdict| match verdict {
+            Err(OfferRefusal::Cover(ObjectGrowthVerdict::FodderGrowth(pairs))) => {
+                Some(pairs.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 121.1 + CR 603.2c + CR 702.3b + CR 732.2a: at the turn-5 draw-step offer frame the
+/// period's draw is put back (Human Torch's Power-up gate reads only this turn's entries), Mister
+/// Fantastic's batched records name moves already made, the Wall tokens' defender is read by no
+/// surface, and Human Torch's trigger on the stack reads Heroes, not Walls, so the fodder cover
+/// refuses no `Repeat` span.
+#[test]
+fn the_turn_five_draw_span_clears_the_fodder_cover() {
+    use engine::types::phase::Phase;
+    let state = f4_at_offer();
+    assert_eq!(
+        (state.turn_number, state.phase),
+        (5, Phase::Draw),
+        "reach: the offer stands in turn 5's draw step"
+    );
+    let verdicts = f4_offer_frame_repeat_verdicts(&state);
+    assert!(fodder_refusals(&verdicts).is_empty(), "{verdicts:?}");
+    assert!(
+        verdicts.iter().any(Result::is_ok),
+        "reach: a Repeat span confirms: {verdicts:?}"
+    );
+}

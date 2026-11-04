@@ -821,6 +821,38 @@ mod map_key_pairs {
             .into_iter()
             .collect())
     }
+
+    /// The same pair encoding under an `Option`.
+    pub(super) mod opt {
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+        use std::collections::BTreeMap;
+
+        pub(in crate::analysis::resource) fn serialize<S, K, V>(
+            map: &Option<BTreeMap<K, V>>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+            K: Serialize + Ord,
+            V: Serialize,
+        {
+            map.as_ref()
+                .map(|map| map.iter().collect::<Vec<_>>())
+                .serialize(serializer)
+        }
+
+        pub(in crate::analysis::resource) fn deserialize<'de, D, K, V>(
+            deserializer: D,
+        ) -> Result<Option<BTreeMap<K, V>>, D::Error>
+        where
+            D: Deserializer<'de>,
+            K: Deserialize<'de> + Ord,
+            V: Deserialize<'de>,
+        {
+            Ok(Option::<Vec<(K, V)>>::deserialize(deserializer)?
+                .map(|pairs| pairs.into_iter().collect()))
+        }
+    }
 }
 
 /// CR 732.2a: the resource signature of ONE repetition of a certified loop — what the
@@ -930,7 +962,11 @@ pub struct PeriodicDelta {
     pub cleanup: Option<CleanupPair>,
     /// CR 701.17a: per seat, what one repetition mills from its library; `None` where the
     /// period's draws could not be told apart, and the whole library loss is then read as draws.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "map_key_pairs::opt"
+    )]
     pub instructed_mills: Option<BTreeMap<PlayerId, InstructedMill>>,
     /// CR 732.2a: what each repetition adds to the one before it on `delta`; zero for a constant
     /// period. Read only through [`PeriodicDelta::repetition`].
@@ -4862,7 +4898,11 @@ pub(crate) fn loop_states_cover_modulo_object_growth(
     // No current-stack entry reads the growing class. Both compared frames sit at a
     // clean priority window (empty projected stacks), so this is normally vacuous,
     // but stays closed under future sampling changes.
-    if cf.stack.iter().any(stack_entry_reads_growing_class) {
+    if cf
+        .stack
+        .iter()
+        .any(|entry| stack_entry_reads_grown(&cf, entry, &grown_ids))
+    {
         return false;
     }
 
@@ -5437,8 +5477,12 @@ pub(crate) fn fodder_growth_cover_refusals(
         refusals.push(FodderCoverRefusal::GrownNotInert);
     }
 
-    // No on-stack observer reads the growing class.
-    if cf.stack.iter().any(stack_entry_reads_growing_class) {
+    // No on-stack observer reads a grown member.
+    if cf
+        .stack
+        .iter()
+        .any(|entry| stack_entry_reads_grown(&cf, entry, &growing))
+    {
         refusals.push(FodderCoverRefusal::StackEntryRead);
     }
 
@@ -5449,7 +5493,8 @@ pub(crate) fn fodder_growth_cover_refusals(
     // CR 608.2h + CR 111.7: this comparison drops the stack, so last-known records are judged
     // only when neither frame held one.
     let mut equalized = pb.clone();
-    let equalizes = equalize_history(&mut equalized, &pa, reads);
+    // CR 603.2c: the judges read the flushed frames, whose journals the projection clears.
+    let equalizes = equalize_history(&mut equalized, &pa, [&pf, &cf], reads);
     let records_grew = pb.lki_cache != equalized.lki_cache
         || pb.lki_copiable_values != equalized.lki_copiable_values;
     let equalized_history =
@@ -6059,16 +6104,21 @@ fn frame_history_reads(prior: &GameState, current: &GameState) -> HistoryReads {
 /// [`history_covers`] under the live reads `reads`.
 fn history_covers_reading(prior: &GameState, current: &GameState, reads: HistoryReads) -> bool {
     let mut copy = current.clone();
-    equalize_history(&mut copy, prior, reads) && covers_modulo_resources(prior, &copy)
+    equalize_history(&mut copy, prior, [prior, current], reads)
+        && covers_modulo_resources(prior, &copy)
 }
 
 /// CR 732.2a + CR 732.1b: equalizes in `copy` the history members other than the turn cycle's
 /// that it grew from `prior`, and collapses its inserted unit run; whether something grew, each
 /// grown member is attributed and unread under `reads`, and each member judged by its own
-/// predicate passes it.
-fn equalize_history(copy: &mut GameState, prior: &GameState, reads: HistoryReads) -> bool {
+/// predicate passes it on `judged`, the unprojected frames that `prior` and `copy` stand for.
+fn equalize_history(
+    copy: &mut GameState,
+    prior: &GameState,
+    judged: [&GameState; 2],
+    reads: HistoryReads,
+) -> bool {
     use strum::IntoEnumIterator;
-    let current = copy.clone();
     let grown: Vec<HistoryMember> = HistoryMember::iter()
         .filter(|member| !member.turn_cycle() && member.equalize(copy, prior))
         .collect();
@@ -6084,15 +6134,16 @@ fn equalize_history(copy: &mut GameState, prior: &GameState, reads: HistoryReads
     }) {
         return false;
     }
-    let judged = |member: HistoryMember, holds: fn(&GameState, &GameState) -> bool| {
-        !grown.contains(&member) || holds(prior, &current)
+    let [before, after] = judged;
+    let judge = |member: HistoryMember, holds: fn(&GameState, &GameState) -> bool| {
+        !grown.contains(&member) || holds(before, after)
     };
-    judged(HistoryMember::TrackedObjectSets, tracked_sets_grow_unread)
-        && judged(
+    judge(HistoryMember::TrackedObjectSets, tracked_sets_grow_unread)
+        && judge(
             HistoryMember::LastKnownRecords,
             last_known_records_grow_unread,
         )
-        && judged(
+        && judge(
             HistoryMember::BatchedZoneChangeTriggerFired,
             batched_records_grow_stale,
         )
@@ -6355,8 +6406,8 @@ fn library_departures_restored(
         .copied()
         .collect();
     for id in &drawn {
-        // allow-raw-zone: equalizes the caster's draws in a discarded comparison clone, not a gameplay zone event.
-        copy.objects.get_mut(id)?.zone = Zone::Library;
+        // CR 400.7: the drawn card is a new object, so the one `prior`'s library held goes back.
+        *copy.objects.get_mut(id)? = prior.objects.get(id)?.clone();
     }
     Some(copy)
 }
@@ -6450,7 +6501,9 @@ fn growth_read_covers(prior: &GameState, current: &GameState) -> bool {
         .others
         .or(live_history_reads_by_kind(&flush_clone(current)).others);
     let mut copy = current.clone();
-    if !equalize_history(&mut copy, prior, others) || prior.stack.len() != copy.stack.len() {
+    if !equalize_history(&mut copy, prior, [prior, current], others)
+        || prior.stack.len() != copy.stack.len()
+    {
         return false;
     }
     set_aside_unread_trigger_events(&mut copy, prior);
@@ -7117,21 +7170,45 @@ fn grown_object_is_inert(o: &GameObject) -> bool {
 /// CR 602.2: [`grown_objects_are_inert`], except that a grown token untapped in `current`, and in
 /// `prior` when `prior` holds it, is judged without its activated abilities: none was activated
 /// across the period, and an ability not activated does nothing.
+///
+/// CR 702.9b + CR 702.3b: flying and defender restrict only blocks and attacks, so a grown member
+/// is judged without them when the period declares neither and no surface reads its abilities.
 fn grown_objects_are_inert_unless_unused(
     prior: &GameState,
     current: &GameState,
     grown: &HashSet<ObjectId>,
 ) -> bool {
+    use crate::types::keywords::Keyword;
+    // CR 508.1 + CR 509.1: attackers and blockers are declared only as their step begins, so a
+    // period inside one step declares neither.
+    let no_declaration = crate::game::play_trace::WindowKey::of(prior)
+        == crate::game::play_trace::WindowKey::of(current);
     grown.iter().all(|id| {
         let Some(object) = current.objects.get(id) else {
             return false;
         };
+        let object = if no_declaration
+            && (crate::game::keywords::has_keyword(object, &Keyword::Flying)
+                || crate::game::keywords::has_keyword(object, &Keyword::Defender))
+            && !grown_member_read(
+                current,
+                *id,
+                Differing::Kinds(crate::game::filter::CharacteristicKinds::ABILITIES),
+            ) {
+            let mut judged = object.clone();
+            judged
+                .keywords
+                .retain(|k| !matches!(k, Keyword::Flying | Keyword::Defender));
+            Cow::Owned(judged)
+        } else {
+            Cow::Borrowed(object)
+        };
         let unused = object.is_token
             && !object.tapped
             && prior.objects.get(id).is_none_or(|before| !before.tapped);
-        grown_object_is_inert(object)
+        grown_object_is_inert(&object)
             || unused && {
-                let mut unactivated = object.clone();
+                let mut unactivated = object.into_owned();
                 std::sync::Arc::make_mut(&mut unactivated.abilities)
                     .retain(|a| a.kind != crate::types::ability::AbilityKind::Activated);
                 grown_object_is_inert(&unactivated)
@@ -7291,17 +7368,84 @@ fn ability_acts_only_on_grown(
             .all(|next| ability_acts_only_on_grown(next, grown))
 }
 
+/// One surface the fire-time firewall walks, borrowed from the frame.
+#[derive(Clone, Copy)]
+enum FireTimeSurface<'a> {
+    TriggerCondition(&'a crate::types::ability::TriggerCondition),
+    /// An ability body, with the mode the firewall's veto scans it in.
+    Definition(&'a AbilityDefinition, crate::game::ability_scan::ScanMode),
+    ReplacementCondition(&'a crate::types::ability::ReplacementCondition),
+    ReplacementRider(&'a crate::types::ability::ResolvedAbility),
+    StaticCondition(&'a crate::types::ability::StaticCondition),
+    Modification(&'a crate::types::ability::ContinuousModification),
+    Duration(&'a crate::types::ability::Duration),
+    DelayedTrigger(&'a crate::types::game_state::DelayedTrigger),
+    /// A non-empty pending store the firewall does not classify.
+    PendingStore,
+}
+
+impl<'a> FireTimeSurface<'a> {
+    /// The firewall's veto on this surface: `sibling` ∨ `projected` where it asks both.
+    fn vetoes(self) -> bool {
+        use crate::game::ability_scan::{self as scan, ScanMode};
+        match self {
+            Self::TriggerCondition(c) => scan::trigger_condition_reads_sibling_mutable(c),
+            Self::Definition(def, ScanMode::LoopFirewall) => {
+                scan::ability_definition_reads_growing_class_for_loop(def)
+            }
+            Self::Definition(def, ScanMode::Conservative) => {
+                scan::ability_definition_reads_sibling_mutable(def)
+            }
+            Self::ReplacementCondition(c) => scan::replacement_condition_reads_sibling_mutable(c),
+            Self::ReplacementRider(rider) => scan::ability_reads_sibling_mutable(rider),
+            Self::StaticCondition(c) => scan::static_condition_reads_sibling_mutable(c),
+            // CR 613.1: a live continuous modification vetoes iff it READS a mutable board
+            // aggregate (`sibling`) OR a projected player resource (`projected`).
+            Self::Modification(m) => {
+                scan::continuous_modification_reads_sibling_mutable(m)
+                    || scan::continuous_modification_reads_projected_resource(m)
+            }
+            Self::Duration(d) => scan::duration_reads_sibling_mutable(d),
+            Self::DelayedTrigger(t) => scan::delayed_trigger_reads_growing_class_for_loop(t),
+            Self::PendingStore => true,
+        }
+    }
+
+    /// What this surface reads of the board's objects.
+    fn sibling_reads(self) -> crate::game::ability_scan::SiblingReads<'a> {
+        use crate::game::ability_scan::{self as scan, SiblingReads};
+        match self {
+            Self::TriggerCondition(c) => scan::trigger_condition_sibling_reads(c),
+            Self::Definition(def, _) => scan::ability_definition_sibling_reads(def),
+            Self::ReplacementCondition(c) => scan::replacement_condition_sibling_reads(c),
+            Self::ReplacementRider(rider) => scan::resolved_ability_sibling_reads(rider),
+            Self::StaticCondition(c) => scan::static_condition_sibling_reads(c),
+            Self::Modification(m) => scan::continuous_modification_sibling_reads(m),
+            Self::Duration(d) => scan::duration_sibling_reads(d),
+            Self::DelayedTrigger(t) => scan::delayed_trigger_sibling_reads(t),
+            Self::PendingStore => SiblingReads::Any,
+        }
+    }
+}
+
 /// The off-stack fire-time firewall: does ANY live observer read the growing class
-/// (`sibling` ∨ `projected`)? Scans, on the FLUSHED current: (1) trigger conditions AND
-/// `execute` bodies; (2) EVERY ability def on a functioning battlefield permanent regardless
-/// of `kind`; (3) replacement conditions AND bodies; (4) condition-gated statics — condition
-/// plus any live continuous modification (default-CONSERVATIVE: no
-/// `scan_continuous_modification` walker exists, and an anthem/P-T grant applies to and scales
-/// with the growing class); (5) transient continuous effects; (5b) granted-keyword synthesized
-/// triggers; (6) the belt over pending/delayed ability-body stores. Fail-closed on every
-/// surface it cannot classify.
+/// (`sibling` ∨ `projected`)? See [`fire_time_surfaces`] for the surfaces it scans.
 fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
-    use crate::game::ability_scan as scan;
+    fire_time_surfaces(state, &mut |_, surface| surface.vetoes())
+}
+
+/// Visits, on the FLUSHED current, each surface that can observe the growing class, with the
+/// object it functions on, and answers whether `visit` answered `true` for any (it stops at the
+/// first): (1) trigger conditions AND `execute` bodies; (2) EVERY ability def on a functioning
+/// battlefield permanent regardless of `kind`; (3) replacement conditions AND bodies; (4)
+/// condition-gated statics — condition plus any live continuous modification; (5) transient
+/// continuous effects; (5b) granted-keyword synthesized triggers; (6) the belt over
+/// pending/delayed ability-body stores.
+fn fire_time_surfaces(
+    state: &GameState,
+    visit: &mut impl FnMut(Option<ObjectId>, FireTimeSurface<'_>) -> bool,
+) -> bool {
+    use crate::game::ability_scan::ScanMode;
     // (1) Trigger fire-time conditions (CR 603.4) AND effect bodies.
     for obj in state.objects.values() {
         for active in crate::game::functioning_abilities::active_trigger_definitions(state, obj) {
@@ -7311,18 +7455,20 @@ fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
             if !crate::game::triggers::trigger_definition_functions_in_zone(def, obj.zone) {
                 continue;
             }
+            let source = Some(obj.id);
             if def
                 .condition
                 .as_ref()
-                .is_some_and(scan::trigger_condition_reads_sibling_mutable)
+                .is_some_and(|c| visit(source, FireTimeSurface::TriggerCondition(c)))
             {
                 return true;
             }
-            if def
-                .execute
-                .as_ref()
-                .is_some_and(|exec| scan::ability_definition_reads_growing_class_for_loop(exec))
-            {
+            if def.execute.as_ref().is_some_and(|exec| {
+                visit(
+                    source,
+                    FireTimeSurface::Definition(exec, ScanMode::LoopFirewall),
+                )
+            }) {
                 return true;
             }
         }
@@ -7334,34 +7480,37 @@ fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
         if obj.zone != Zone::Battlefield || obj.is_phased_out() {
             continue;
         }
-        if obj
-            .abilities
-            .iter()
-            .any(scan::ability_definition_reads_growing_class_for_loop)
-        {
+        if obj.abilities.iter().any(|def| {
+            visit(
+                Some(obj.id),
+                FireTimeSurface::Definition(def, ScanMode::LoopFirewall),
+            )
+        }) {
             return true;
         }
     }
     // (3) Replacement conditions AND bodies (CR 614.1), both stores.
-    for (_source, _idx, def) in loop_window_replacement_defs(state) {
+    for (host, _idx, def) in loop_window_replacement_defs(state) {
+        let source = host.map(|host| host.id);
         if def
             .condition
             .as_ref()
-            .is_some_and(scan::replacement_condition_reads_sibling_mutable)
+            .is_some_and(|c| visit(source, FireTimeSurface::ReplacementCondition(c)))
         {
             return true;
         }
         if state
             .replacement_rider(def)
-            .is_some_and(scan::ability_reads_sibling_mutable)
+            .is_some_and(|rider| visit(source, FireTimeSurface::ReplacementRider(rider)))
         {
             return true;
         }
-        if def
-            .execute
-            .as_ref()
-            .is_some_and(|a| scan::ability_definition_reads_sibling_mutable(a))
-        {
+        if def.execute.as_ref().is_some_and(|a| {
+            visit(
+                source,
+                FireTimeSurface::Definition(a, ScanMode::Conservative),
+            )
+        }) {
             return true;
         }
     }
@@ -7378,32 +7527,33 @@ fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
             if !crate::game::functioning_abilities::static_functions_in_zone(obj, def) {
                 continue;
             }
+            let source = Some(obj.id);
             if def
                 .condition
                 .as_ref()
-                .is_some_and(scan::static_condition_reads_sibling_mutable)
+                .is_some_and(|c| visit(source, FireTimeSurface::StaticCondition(c)))
             {
                 return true;
             }
-            // CR 613.1: a live continuous modification vetoes iff it READS a mutable board
-            // aggregate (`sibling`) OR a projected player resource (`projected`).
-            if def.modifications.iter().any(|m| {
-                scan::continuous_modification_reads_sibling_mutable(m)
-                    || scan::continuous_modification_reads_projected_resource(m)
-            }) {
+            if def
+                .modifications
+                .iter()
+                .any(|m| visit(source, FireTimeSurface::Modification(m)))
+            {
                 return true;
             }
         }
     }
     // (5) Transient continuous effects (duration + gating condition, CR 604.1).
     for tce in &state.transient_continuous_effects {
-        if scan::duration_reads_sibling_mutable(&tce.duration) {
+        let source = Some(tce.source_id);
+        if visit(source, FireTimeSurface::Duration(&tce.duration)) {
             return true;
         }
         if tce
             .condition
             .as_ref()
-            .is_some_and(scan::static_condition_reads_sibling_mutable)
+            .is_some_and(|c| visit(source, FireTimeSurface::StaticCondition(c)))
         {
             return true;
         }
@@ -7414,18 +7564,20 @@ fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
             continue;
         }
         for def in crate::game::triggers::granted_keyword_triggers_in_zone(state, obj) {
+            let source = Some(obj.id);
             if def
                 .condition
                 .as_ref()
-                .is_some_and(scan::trigger_condition_reads_sibling_mutable)
+                .is_some_and(|c| visit(source, FireTimeSurface::TriggerCondition(c)))
             {
                 return true;
             }
-            if def
-                .execute
-                .as_ref()
-                .is_some_and(|a| scan::ability_definition_reads_sibling_mutable(a))
-            {
+            if def.execute.as_ref().is_some_and(|a| {
+                visit(
+                    source,
+                    FireTimeSurface::Definition(a, ScanMode::Conservative),
+                )
+            }) {
                 return true;
             }
         }
@@ -7436,33 +7588,104 @@ fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
     state
         .delayed_triggers
         .iter()
-        .any(scan::delayed_trigger_reads_growing_class_for_loop)
-        || !state.deferred_triggers.is_empty()
-        || state.pending_trigger.is_some()
-        || state.pending_trigger_order.is_some()
-        || !state.epic_effects.is_empty()
+        .any(|t| visit(Some(t.source_id), FireTimeSurface::DelayedTrigger(t)))
+        || ((!state.deferred_triggers.is_empty()
+            || state.pending_trigger.is_some()
+            || state.pending_trigger_order.is_some()
+            || !state.epic_effects.is_empty())
+            && visit(None, FireTimeSurface::PendingStore))
 }
 
-/// Does a stack entry's AST read the growing class (the `sibling` axis)?
-/// Scans the embedded ability under the loop firewall — the same axis block (1) of the
-/// fire-time firewall asks of a trigger body — plus the trigger-level intervening-if
-/// (CR 603.4). `KeywordAction` has no AST ⇒ fail closed; a permanent `Spell { ability: None }`
-/// reads nothing (its resolution changes the board and breaks `board_covers` anyway).
-fn stack_entry_reads_growing_class(entry: &StackEntry) -> bool {
-    use crate::game::ability_scan as scan;
-    if let StackEntryKind::TriggeredAbility {
-        condition: Some(condition),
-        ..
-    } = &entry.kind
-    {
-        if scan::trigger_condition_reads_sibling_mutable(condition) {
-            return true;
+/// What a grown member differs in between the frames a reader could tell apart.
+#[derive(Debug, Clone, Copy)]
+enum Differing {
+    /// CR 613.1: only these characteristics.
+    Kinds(crate::game::filter::CharacteristicKinds),
+    /// The member itself, present in one frame only.
+    Whole,
+}
+
+impl Differing {
+    fn meets(self, read: crate::game::filter::CharacteristicKinds) -> bool {
+        match self {
+            Differing::Kinds(kinds) => kinds.intersects(read),
+            Differing::Whole => true,
         }
     }
-    match entry.ability() {
-        Some(ability) => scan::resolved_ability_reads_sibling_mutable_for_loop(ability),
-        None => matches!(entry.kind, StackEntryKind::KeywordAction { .. }),
+}
+
+/// CR 732.2a: does a functioning surface of `state` read `member` where it `differing`?
+fn grown_member_read(state: &GameState, member: ObjectId, differing: Differing) -> bool {
+    fire_time_surfaces(state, &mut |source, surface| {
+        sibling_reads_live(state, source, &surface.sibling_reads(), member, differing)
+    })
+}
+
+/// Whether `reads`, made by a surface functioning on `source`, can read `member` where it
+/// `differing`. A `projected`-only surface reads players and journals, never an object
+/// (CR 106.1, CR 119, CR 122.1), so it records no read here.
+fn sibling_reads_live(
+    state: &GameState,
+    source: Option<ObjectId>,
+    reads: &crate::game::ability_scan::SiblingReads<'_>,
+    member: ObjectId,
+    differing: Differing,
+) -> bool {
+    use crate::game::ability_scan::{SiblingRead, SiblingReads};
+    use crate::game::filter::{matches_target_filter, target_filter_characteristic_reads};
+    match reads {
+        SiblingReads::None => false,
+        SiblingReads::Any => true,
+        SiblingReads::Reads(reads) => reads.iter().any(|read| match *read {
+            SiblingRead::Filtered { filter, aggregate } => source.is_none_or(|source| {
+                matches_target_filter(
+                    state,
+                    member,
+                    filter,
+                    &crate::game::filter::FilterContext::from_source(state, source),
+                ) && differing.meets(target_filter_characteristic_reads(filter).union(aggregate))
+            }),
+            SiblingRead::Scoped { scope, aggregate } => {
+                (!matches!(scope, crate::types::ability::ObjectScope::Source)
+                    || source.is_none_or(|source| source == member))
+                    && differing.meets(aggregate)
+            }
+        }),
     }
+}
+
+/// Does a stack entry's AST read a member of `grown` (CR 603.4: the trigger-level
+/// intervening-if, plus the embedded ability under the loop firewall)? `KeywordAction` has no
+/// AST ⇒ fail closed; a permanent `Spell { ability: None }` reads nothing (its resolution
+/// changes the board and breaks `board_covers` anyway).
+fn stack_entry_reads_grown(
+    state: &GameState,
+    entry: &StackEntry,
+    grown: &HashSet<ObjectId>,
+) -> bool {
+    use crate::game::ability_scan::{self as scan, SiblingReads};
+    let condition = match &entry.kind {
+        StackEntryKind::TriggeredAbility {
+            condition: Some(condition),
+            ..
+        } => scan::trigger_condition_sibling_reads(condition),
+        _ => SiblingReads::None,
+    };
+    let body = match entry.ability() {
+        Some(ability) => scan::resolved_ability_sibling_reads(ability),
+        None if matches!(entry.kind, StackEntryKind::KeywordAction { .. }) => SiblingReads::Any,
+        None => SiblingReads::None,
+    };
+    let reads = condition.or(body);
+    grown.iter().any(|member| {
+        sibling_reads_live(
+            state,
+            Some(entry.source_id),
+            &reads,
+            *member,
+            Differing::Whole,
+        )
+    })
 }
 
 /// CR 601.2f + CR 732.2a: does ANY cost surface reference the growing class? ONE predicate
@@ -16027,6 +16250,83 @@ mod tests {
         assert!(fodder_cover(&p, &c), "reach-guard: no engine drift ⇒ COVER");
     }
 
+    /// CR 702.9b + CR 702.3b: a grown token's flying or defender is judged away while the period
+    /// stays inside one step and no surface reads the token's abilities; a period crossing a step
+    /// keeps it.
+    #[test]
+    fn a_grown_flyer_is_inert_only_inside_one_step() {
+        use crate::types::keywords::Keyword;
+        let refusals = |keyword: Keyword, next_step: bool| {
+            let (prior, mut current) = fodder_cover_base();
+            current.objects.get_mut(&ObjectId(705)).unwrap().keywords = vec![keyword];
+            if next_step {
+                current.phase = Phase::End;
+            }
+            fodder_growth_cover_refusals(&prior, &current, &saproling_class(), PlayerId(0)).0
+        };
+        assert_eq!(refusals(Keyword::Flying, false), vec![]);
+        assert_eq!(refusals(Keyword::Defender, false), vec![]);
+        assert!(refusals(Keyword::Flying, true).contains(&FodderCoverRefusal::GrownNotInert));
+        assert_eq!(
+            refusals(Keyword::Deathtouch, false),
+            vec![FodderCoverRefusal::GrownNotInert]
+        );
+    }
+
+    /// CR 613.1f + CR 732.2a: Skycat Sovereign's "This creature gets +1/+1 for each other creature
+    /// you control with flying." counts a grown flyer by its flying, so the flyer stays not inert;
+    /// Crusader of Odric's "Crusader of Odric's power and toughness are each equal to the number of
+    /// creatures you control." counts it by its type alone, which leaves its flying unread.
+    #[test]
+    fn a_grown_flyer_is_not_inert_only_beside_a_reader_of_its_flying() {
+        use crate::types::keywords::Keyword;
+        let statics = |text: &str, name: &str, subtypes: &[&str]| {
+            crate::parser::parse_oracle_text(
+                text,
+                name,
+                &[],
+                &["Creature".to_string()],
+                &subtypes.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            )
+            .statics
+        };
+        let skycat = statics(
+            "Flying\nThis creature gets +1/+1 for each other creature you control with flying.",
+            "Skycat Sovereign",
+            &["Cat", "Bird"],
+        );
+        let crusader = statics(
+            "Crusader of Odric's power and toughness are each equal to the number of creatures you \
+             control.",
+            "Crusader of Odric",
+            &["Human", "Soldier"],
+        );
+        let refusals = |reader: &[crate::types::ability::StaticDefinition]| {
+            let (mut prior, mut current) = fodder_cover_base();
+            let mut class = saproling_class();
+            class.card_types.core_types = vec![CoreType::Creature];
+            for frame in [&mut prior, &mut current] {
+                for id in frame.battlefield.clone() {
+                    let object = frame.objects.get_mut(&id).expect("on the battlefield");
+                    if object.name == "Saproling" {
+                        object.card_types.core_types = vec![CoreType::Creature];
+                    } else {
+                        object.static_definitions = reader.to_vec().into();
+                    }
+                }
+            }
+            current.objects.get_mut(&ObjectId(705)).unwrap().keywords = vec![Keyword::Flying];
+            fodder_growth_cover_refusals(&prior, &current, &class, PlayerId(0)).0
+        };
+        assert_eq!(refusals(&[]), vec![]);
+        assert_eq!(refusals(&skycat), vec![FodderCoverRefusal::GrownNotInert]);
+        assert!(
+            !refusals(&crusader).contains(&FodderCoverRefusal::GrownNotInert),
+            "{:?}",
+            refusals(&crusader)
+        );
+    }
+
     /// F-B7 (grown carries ability): the reproduced token (705) has a keyword, so it
     /// is fodder-by-content (keywords are not compared by `object_content_eq`) but not
     /// churn-inert. First branch: `grown_objects_are_inert`. Revert-failing: dropping
@@ -16035,7 +16335,7 @@ mod tests {
     fn fodder_reject_grown_not_inert() {
         use crate::types::keywords::Keyword;
         let (prior, mut current) = fodder_cover_base();
-        current.objects.get_mut(&ObjectId(705)).unwrap().keywords = vec![Keyword::Flying];
+        current.objects.get_mut(&ObjectId(705)).unwrap().keywords = vec![Keyword::Deathtouch];
         assert!(
             !fodder_cover(&prior, &current),
             "a non-inert grown fodder member must REJECT (grown_objects_are_inert)"
@@ -27621,6 +27921,89 @@ mod tests {
         assert!(!batched_records_grow_stale(&prior, &with(0, 2)));
     }
 
+    /// CR 603.2c: the fodder cover judges a batched record its period added on the flushed frames,
+    /// whose journal holds the move it names, so a record of a move already made equalizes and one
+    /// naming a move not yet made stays in the remainder.
+    #[test]
+    fn the_fodder_cover_judges_a_grown_batched_record_on_the_turns_moves() {
+        use crate::types::game_state::ZoneChangeRecord;
+        let trigger = crate::parser::parse_oracle_text(
+            "Whenever one or more other creatures you control with base power and toughness 1/1 \
+             enter, put a +1/+1 counter on Bess.",
+            "Bess, Soul Nourisher",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Citizen".to_string()],
+        )
+        .triggers
+        .remove(0);
+        let refusals = |named_move: usize| {
+            let (mut prior, mut current) = fodder_cover_base();
+            for frame in [&mut prior, &mut current] {
+                let engine = frame.objects.get_mut(&ObjectId(800)).expect("the engine");
+                engine.trigger_definitions.push(trigger.clone());
+            }
+            let engine = &current.objects[&ObjectId(800)];
+            let definition = engine.trigger_definition_ref(&engine.trigger_definitions[0]);
+            current
+                .zone_changes_this_turn
+                .push_back(ZoneChangeRecord::test_minimal(
+                    ObjectId(705),
+                    None,
+                    Zone::Battlefield,
+                ));
+            let made = current.zone_changes_this_turn.len() - 1;
+            let turn = current.turn_number;
+            current
+                .batched_zone_change_trigger_fired
+                .insert((definition, turn, made + named_move));
+            assert!(
+                project_out_resources(&current)
+                    .zone_changes_this_turn
+                    .is_empty(),
+                "reach: the projected frame holds no move"
+            );
+            fodder_growth_cover_refusals(&prior, &current, &saproling_class(), PlayerId(0)).0
+        };
+        assert_eq!(refusals(0), vec![]);
+        assert_eq!(refusals(1), vec![FodderCoverRefusal::NonObjectRemainder]);
+    }
+
+    /// CR 400.7: a draw the cover puts back restores the object the earlier frame's library held,
+    /// not the hand's new object moved back.
+    #[test]
+    fn a_restored_draw_is_the_earlier_frames_object() {
+        use crate::game::zones::{create_object, move_to_zone};
+        let mut prior = GameState::new_two_player(42);
+        for card in 1..=2 {
+            create_object(
+                &mut prior,
+                CardId(card),
+                PlayerId(0),
+                "Island".into(),
+                Zone::Library,
+            );
+        }
+        let top = prior.library_of(PlayerId(0))[0];
+        let mut current = prior.clone();
+        move_to_zone(&mut current, top, Zone::Hand, &mut Vec::new());
+        assert_ne!(
+            current.objects[&top].incarnation, prior.objects[&top].incarnation,
+            "reach: the draw made a new object"
+        );
+        let restored =
+            library_departures_restored(&prior, &current, PlayerId(0)).expect("a restored draw");
+        assert_eq!(
+            restored.library_of(PlayerId(0)),
+            prior.library_of(PlayerId(0))
+        );
+        let (card, earlier) = (&restored.objects[&top], &prior.objects[&top]);
+        assert_eq!(
+            (card.incarnation, card.zone),
+            (earlier.incarnation, earlier.zone)
+        );
+    }
+
     /// CR 400.7: stripping a cast card from the confirmer's frame removes its id from the pile
     /// that stores it.
     #[test]
@@ -29913,13 +30296,11 @@ mod tests {
         }
     }
 
-    /// CR 732.2a: a stack entry is asked the loop firewall's question, so a move of one
-    /// particular object is relieved while a sweep over every creature still refuses.
-    ///
-    /// REVERT-PROBE: ask `ability_reads_sibling_mutable` (the conservative scan) ⇒ the
-    /// relieved leg **FAILS**.
+    /// CR 732.2a: a stack entry is asked whether it reads a grown member, so a move of one
+    /// particular object reads none, and a sweep over every creature reads a grown creature but
+    /// not a grown artifact its filter does not admit.
     #[test]
-    fn a_stack_entry_is_scanned_under_the_loop_firewall() {
+    fn a_stack_entry_reads_a_grown_member_only_through_a_filter_admitting_it() {
         use crate::types::ability::{Effect, TargetFilter, TypedFilter};
         let particular_move = Effect::ChangeZone {
             origin: Some(Zone::Exile),
@@ -29940,12 +30321,34 @@ mod tests {
             target: TargetFilter::Typed(TypedFilter::creature()),
             cant_regenerate: false,
         };
+        let mut state = GameState::new_two_player(7);
+        inert_token(&mut state, 701, 0, "Source");
+        let typed = |state: &mut GameState, id: u64, core: CoreType| {
+            let id = inert_token(state, id, 0, "Token");
+            state
+                .objects
+                .get_mut(&id)
+                .expect("the token")
+                .card_types
+                .core_types = vec![core];
+            id
+        };
+        let creature = typed(&mut state, 702, CoreType::Creature);
+        let artifact = typed(&mut state, 703, CoreType::Artifact);
+        let reads = |effect: &Effect, grown: ObjectId| {
+            stack_entry_reads_grown(
+                &state,
+                &stack_entry_with(effect.clone()),
+                &HashSet::from([grown]),
+            )
+        };
         assert_eq!(
             (
-                stack_entry_reads_growing_class(&stack_entry_with(particular_move)),
-                stack_entry_reads_growing_class(&stack_entry_with(sweep)),
+                reads(&particular_move, creature),
+                reads(&sweep, creature),
+                reads(&sweep, artifact),
             ),
-            (false, true)
+            (false, true, false)
         );
     }
 

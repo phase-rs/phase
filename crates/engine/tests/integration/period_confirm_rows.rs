@@ -271,10 +271,12 @@ fn grown_not_inert(verdict: &Result<Vec<String>, OfferRefusal>) -> bool {
 
 /// CR 702.8a + CR 702.10c: Kiki-Jiki copying Deceiver Exarch ("Flash … When this creature enters,
 /// choose one — • Untap target permanent you control. …") confirms, its copies' flash and haste
-/// and their delayed "sacrifice it" each grown; Pestermite's copies ("Flash Flying When this
-/// creature enters, you may tap or untap target permanent.") carry flying and are not inert.
+/// and their delayed "sacrifice it" each grown. CR 702.9b + CR 732.2a: Pestermite's copies ("Flash
+/// Flying When this creature enters, you may tap or untap target permanent.") carry flying, which
+/// only restricts blocks; the period declares no block and nothing reads the copies' abilities,
+/// so it confirms, is offered at the engine's cap (nothing the cards spend bounds it) and taken.
 #[test]
-fn kiki_jiki_confirms_with_deceiver_exarch_and_not_with_pestermite() {
+fn kiki_jiki_confirms_with_deceiver_exarch_and_with_pestermite() {
     let Some((mut runner, kiki, exarch)) = kiki_copy_board("Deceiver Exarch") else {
         return;
     };
@@ -290,15 +292,41 @@ fn kiki_jiki_confirms_with_deceiver_exarch_and_not_with_pestermite() {
     let Some((mut runner, kiki, pestermite)) = kiki_copy_board("Pestermite") else {
         return;
     };
-    for cycle in 0..4 {
-        assert_eq!(
-            kiki_copy_cycle(&mut runner, kiki, pestermite),
-            None,
-            "cycle {cycle}"
+    let score = kiki_score(kiki, pestermite);
+    kiki_activates(&mut runner, kiki, &score);
+    kiki_activates(&mut runner, kiki, &score);
+    assert!(
+        is_offer(runner.state()),
+        "{:?}",
+        latest_verdict(runner.state())
+    );
+    let WaitingFor::LoopShortcut { schema, .. } = &runner.state().waiting_for else {
+        unreachable!();
+    };
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(1_000));
+    assert_eq!(
+        performed_for_tests(runner.state()),
+        Some(Ok(vec!["Pestermite".to_string()]))
+    );
+    let before = tokens(runner.state(), P0);
+    take_to_step_end(&mut runner, 2);
+    let state = runner.state();
+    let minted: Vec<ObjectId> = tokens(state, P0)
+        .into_iter()
+        .filter(|id| !before.contains(id))
+        .collect();
+    assert_eq!(minted.len(), 2, "the take made the copies it counted");
+    for id in &minted {
+        let copy = &state.objects[id];
+        assert!(
+            !copy.tapped
+                && copy.keywords.contains(&Keyword::Flying)
+                && copy.keywords.contains(&Keyword::Haste),
+            "{id:?}: tapped={} keywords={:?}",
+            copy.tapped,
+            copy.keywords
         );
     }
-    let verdict = latest_verdict(runner.state());
-    assert!(grown_not_inert(&verdict), "{verdict:?}");
 }
 
 /// CR 602.2 + CR 732.2a: Phyrexian Altar recurring Gravecrawler beside Samwise Gamgee ("Whenever

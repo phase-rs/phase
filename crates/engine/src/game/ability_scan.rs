@@ -247,7 +247,7 @@ impl<'a> SiblingReads<'a> {
         }
     }
 
-    fn or(self, other: SiblingReads<'a>) -> SiblingReads<'a> {
+    pub(crate) fn or(self, other: SiblingReads<'a>) -> SiblingReads<'a> {
         match (self, other) {
             (SiblingReads::Any, _) | (_, SiblingReads::Any) => SiblingReads::Any,
             (SiblingReads::None, reads) | (reads, SiblingReads::None) => reads,
@@ -2396,7 +2396,19 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
         // Field-less self-gathering effect: no target/quantity axes to scan.
         Effect::RedistributeLifeTotals => Axes::NONE,
         Effect::ReverseTurnOrder => Axes::NONE,
-        Effect::ChooseOneOf { .. } => Axes::CONSERVATIVE,
+        // CR 608.2d: a choice between branches reads what its chooser and each branch read.
+        Effect::ChooseOneOf {
+            chooser,
+            branches,
+            kind: _,
+        } => match mode {
+            ScanMode::Conservative => Axes::CONSERVATIVE,
+            ScanMode::LoopFirewall => branches
+                .iter()
+                .fold(scan_player_filter(chooser, mode), |acc, branch| {
+                    acc.or(ability_definition_axes(branch, mode))
+                }),
+        },
         Effect::Unimplemented {
             name: _,
             description: _,
@@ -7118,11 +7130,50 @@ fn scan_resolved_continuous_static(
     acc
 }
 
-/// The CR 732.2a firewall's `sibling` axis on a resolved ability — a stack entry's body.
-pub(crate) fn resolved_ability_reads_sibling_mutable_for_loop(ability: &ResolvedAbility) -> bool {
-    resolved_ability_axes(ability, ScanMode::LoopFirewall)
+// CR 732.2a: what each fire-time surface reads of the board's objects, scanned under the loop
+// firewall so each read carries the filter or scope it was made through.
+
+pub(crate) fn trigger_condition_sibling_reads(condition: &TriggerCondition) -> SiblingReads<'_> {
+    scan_trigger_condition(condition, ScanMode::LoopFirewall).sibling
+}
+
+pub(crate) fn ability_definition_sibling_reads(def: &AbilityDefinition) -> SiblingReads<'_> {
+    ability_definition_axes(def, ScanMode::LoopFirewall).sibling
+}
+
+pub(crate) fn replacement_condition_sibling_reads(
+    condition: &ReplacementCondition,
+) -> SiblingReads<'_> {
+    scan_replacement_condition(condition, ScanMode::LoopFirewall).sibling
+}
+
+pub(crate) fn resolved_ability_sibling_reads(ability: &ResolvedAbility) -> SiblingReads<'_> {
+    resolved_ability_axes(ability, ScanMode::LoopFirewall).sibling
+}
+
+pub(crate) fn static_condition_sibling_reads(condition: &StaticCondition) -> SiblingReads<'_> {
+    scan_static_condition(condition, ScanMode::LoopFirewall).sibling
+}
+
+pub(crate) fn continuous_modification_sibling_reads(
+    m: &ContinuousModification,
+) -> SiblingReads<'_> {
+    scan_continuous_modification(m, ScanMode::LoopFirewall).sibling
+}
+
+pub(crate) fn duration_sibling_reads(duration: &Duration) -> SiblingReads<'_> {
+    scan_duration(duration, ScanMode::LoopFirewall).sibling
+}
+
+pub(crate) fn delayed_trigger_sibling_reads(
+    trigger: &crate::types::game_state::DelayedTrigger,
+) -> SiblingReads<'_> {
+    scan_delayed_trigger_condition(&trigger.condition, ScanMode::LoopFirewall)
+        .or(resolved_ability_axes(
+            &trigger.ability,
+            ScanMode::LoopFirewall,
+        ))
         .sibling
-        .is_read()
 }
 
 /// CR 603.7 + CR 732.2a: does a stored delayed trigger's firing condition or body read the
