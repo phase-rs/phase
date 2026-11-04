@@ -98,6 +98,11 @@ fn sharpshooter_untaps_when_a_creature_dies() {
         .target_object(victim)
         .resolve();
     runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 
     // CR 704.5g: 1 damage is lethal to a 1/1, so the victim is destroyed and
     // CR 700.4 "dies" is satisfied. Without this the untap assertion below
@@ -130,6 +135,11 @@ fn sharpshooter_stays_tapped_when_no_creature_dies() {
         .target_object(victim)
         .resolve();
     runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 
     // CR 704.5g: 1 damage is not lethal to a 2/2, so nothing dies.
     assert_eq!(
@@ -175,6 +185,11 @@ fn sharpshooter_untaps_when_its_deathtouch_ping_kills() {
         .target_object(victim)
         .resolve();
     runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 
     // CR 704.5h: one deathtouch damage destroys a 3/3 even though CR 704.5g
     // would not, so reaching the graveyard also proves the ping resolved —
@@ -226,15 +241,21 @@ fn sharpshooter_untaps_when_a_commander_dies() {
     // action must actually be offered. Without this, a format or eligibility
     // regression would silently downgrade this test into the plain
     // lethal-damage case and it would still pass.
-    assert!(
-        matches!(
-            outcome.final_waiting_for(),
-            WaitingFor::CommanderZoneChoice { .. }
-        ),
-        "reach guard: CR 903.9a must offer the command-zone return after the commander dies; \
-         halted in {:?} instead",
-        outcome.final_waiting_for()
-    );
+    let WaitingFor::CommanderZoneChoice {
+        player,
+        commander_id,
+        current_zone,
+    } = outcome.final_waiting_for()
+    else {
+        panic!(
+            "reach guard: CR 903.9a must offer the command-zone return after the commander dies; \
+             halted in {:?} instead",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(*player, P1);
+    assert_eq!(*commander_id, commander);
+    assert_eq!(*current_zone, Zone::Graveyard);
     assert_eq!(
         runner.state().objects[&commander].zone,
         Zone::Graveyard,
@@ -248,6 +269,11 @@ fn sharpshooter_untaps_when_a_commander_dies() {
         .act(GameAction::DecideOptionalEffect { accept: true })
         .expect("the commander's owner may accept the CR 903.9a return");
     runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 
     assert_eq!(
         runner.state().objects[&commander].zone,
