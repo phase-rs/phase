@@ -24,7 +24,7 @@ use engine::types::game_state::{
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{
     parse_mtgjson_mana_cost, ActivationManaColorConstraint, CostPermissionContext,
-    LifePaymentColors, ManaColor, ManaPipId, ManaPool, ManaRestriction, ManaSourceOutput,
+    LifePaymentColors, ManaColor, ManaCost, ManaPipId, ManaPool, ManaRestriction, ManaSourceOutput,
     ManaSourceQuantity, ManaSupertype, ManaType, ManaUnit, PaymentContext, SpellMeta,
 };
 use engine::types::phase::Phase;
@@ -813,6 +813,15 @@ fn float_hybrid_reserve_sources(
     sources: &[(&str, ManaType)],
     life_after_activations: i32,
 ) -> (GameRunner, ObjectId) {
+    float_hybrid_reserve_sources_with_extra(cost, sources, life_after_activations, None)
+}
+
+fn float_hybrid_reserve_sources_with_extra(
+    cost: &str,
+    sources: &[(&str, ManaType)],
+    life_after_activations: i32,
+    extra_land: Option<ManaColor>,
+) -> (GameRunner, ObjectId) {
     let mut s = board();
     let mut ids = Vec::new();
     for &(name, color) in sources {
@@ -857,6 +866,9 @@ fn float_hybrid_reserve_sources(
             matches!(name, "Adarkar Wastes" | "Caves of Koilos") && color != ManaType::Colorless,
         );
         ids.push((id, color, snow, multicolor, damage));
+    }
+    if let Some(color) = extra_land {
+        s.add_basic_land(P0, color);
     }
     let creature = s
         .add_creature_to_hand_from_oracle(P0, "Supplemental hybrid/Z/S payment", 1, 1, "")
@@ -1199,6 +1211,23 @@ fn snow_pool_z_hybrid_unpayable_and_forced_life_suffixes() {
             )
             .is_err());
             assert_eq!(pool, before);
+        }
+    }
+}
+
+#[test]
+fn snow_pool_z_hybrid_repeated_partial_phyrexian_auto_tap() {
+    // Supplemental Experiment Five / Astrolabe / Gut Shot cost (CR 601.2g/h).
+    // The floating pool cannot pay R/P with mana. At one life the only legal
+    // completion is to retain its Z/S units and auto-tap the ordinary Mountain.
+    for count in [4, 8] {
+        let cost = format!("{}{{S}}{{R/P}}", "{Z}".repeat(count));
+        let mut sources = vec![("Adarkar Wastes", ManaType::Colorless); count];
+        sources.push(("Highland Forest", ManaType::Green));
+        for extra in [ManaColor::Red, ManaColor::Blue] {
+            let (r, creature) =
+                float_hybrid_reserve_sources_with_extra(&cost, &sources, 1, Some(extra));
+            cast_floated_hybrid_reserve(r, creature, extra == ManaColor::Red, None, 0);
         }
     }
 }

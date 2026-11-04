@@ -1433,11 +1433,17 @@ fn reduce_cost_by_pool_from(
                     quality_demand,
                     ..continuation
                 };
+                // Reduction and its proof both require mana, never life.
+                let choices: Vec<_> = order[position + 1..]
+                    .iter()
+                    .filter(|&&i| is_phyrexian_requirement(&shard_to_mana_type(shards[i])))
+                    .map(|_| ShardChoice::PayMana)
+                    .collect();
                 let minimum_life = suffix.minimum_life_after_z(
                     &scratch,
                     spell,
                     mana_spend_permission,
-                    None,
+                    Some(&choices),
                     crate::types::mana::LifePaymentColors::EMPTY,
                 );
                 spend_two_or_more_color_source_eligible(
@@ -1465,11 +1471,6 @@ fn reduce_cost_by_pool_from(
                         }
                         // Reduction never spends life. Check the same mana-only
                         // suffix against actual dispatch, without reordering it.
-                        let choices: Vec<_> = order[position + 1..]
-                            .iter()
-                            .filter(|&&i| is_phyrexian_requirement(&shard_to_mana_type(shards[i])))
-                            .map(|_| ShardChoice::PayMana)
-                            .collect();
                         pay_cost_with_demand_and_choices_from(
                             &mut remaining.clone(),
                             suffix,
