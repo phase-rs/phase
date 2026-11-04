@@ -1481,6 +1481,9 @@ fn c10_paused_mass_population_pins_non_abandoned_count_and_ledger() {
 /// member's entry replacement. The marker records the staged group; after
 /// settlement the chained referent is bound to the exact battlefield arrivals.
 /// Exact reproduction fixture from the rows executor (see r4c-c12-fixture.md).
+/// Infrastructure/helper evidence: this row installs `forward_result` and the
+/// sub-ability on a directly constructed `ResolvedAbility` and drives
+/// `resolve_ability_chain`; it is not a public producer path.
 #[test]
 fn c12_forwarded_zone_result_binds_staged_arrivals_after_pause() {
     use engine::game::engine::apply_as_current;
