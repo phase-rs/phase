@@ -12,7 +12,7 @@ use super::conspiracy::{
     agenda_name_count, card_has_hidden_agenda, conspiracies_in_command_zone,
     functions_from_command_zone, is_conspiracy, start_with_conspiracy, turn_hidden_agenda_face_up,
 };
-use super::filter::{matches_target_filter, FilterContext};
+use super::filter::{matches_target_filter, matches_target_filter_for_zone, FilterContext};
 use super::functioning_abilities::{
     active_static_definitions, active_trigger_definitions, game_functioning_statics,
 };
@@ -436,6 +436,10 @@ fn face_down_conspiracy_has_no_characteristics_until_turned_up() {
     };
     let ctx = FilterContext::from_source(&state, id);
     assert!(!matches_target_filter(&state, id, &named, &ctx));
+    assert!(
+        !matches_target_filter_for_zone(&state, id, Zone::Command, &named, &ctx),
+        "CR 315.5b: the command-zone filter path reads no printed name either"
+    );
 
     let obj = state.objects.get(&id).unwrap();
     assert!(is_conspiracy(obj), "internal identity survives");
@@ -456,6 +460,13 @@ fn face_down_conspiracy_has_no_characteristics_until_turned_up() {
     ));
     let ctx = FilterContext::from_source(&state, id);
     assert!(matches_target_filter(&state, id, &named, &ctx));
+    assert!(matches_target_filter_for_zone(
+        &state,
+        id,
+        Zone::Command,
+        &named,
+        &ctx
+    ));
     let obj = state.objects.get(&id).unwrap();
     assert_eq!(obj.name, "Brago's Favor");
     assert!(obj.card_types.core_types.contains(&CoreType::Conspiracy));
