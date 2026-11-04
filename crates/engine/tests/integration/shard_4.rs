@@ -445,6 +445,7 @@ mod orzhov_advokist;
 mod other_than_attached_host_exclusion;
 mod otherwise_conditional_effects;
 mod outrageous_robbery_look_and_play;
+mod overflow_submatrix_graveyard_finality;
 mod overload_no_legal_target;
 mod overlord_impending_offer_2859;
 mod oversimplify_per_player_fractal;
