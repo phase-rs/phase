@@ -654,6 +654,40 @@ fn a_wrapped_history_relation_keeps_its_target_pin() {
         }),
     ];
     for (label, wrap) in wraps {
+        // Control, no blink: the same wrapped payload reads B's block, so A, which B
+        // blocked, dies and A2, which B2 blocked, stays.
+        let mut x = board(BREATH, 1);
+        assert_eq!(
+            wrap_history_relation(&mut x.runner, x.spell, wrap),
+            2,
+            "{label} control: reach: the relation is wrapped in both ability lists"
+        );
+        x.runner.cast(x.spell).target_objects(&[x.b]).resolve();
+        drain(&mut x.runner);
+        let delayed = &x.runner.state().delayed_triggers;
+        assert_eq!(delayed.len(), 1, "{label} control: one delayed ability");
+        assert!(
+            payload_has_wrapped_relation(&delayed[0].ability.effect),
+            "{label} control: reach: the payload keeps the wrapper: {:?}",
+            delayed[0].ability.effect
+        );
+        attack_block(&mut x.runner, &[x.a, x.a2], &[(x.b, x.a), (x.b2, x.a2)]);
+        past_end_of_combat(&mut x.runner);
+        assert!(
+            x.runner.state().delayed_triggers.is_empty(),
+            "{label} control: reach: the delayed ability resolved"
+        );
+        assert_eq!(
+            zone(&x.runner, x.a),
+            Zone::Graveyard,
+            "{label} control: B blocked A"
+        );
+        assert_eq!(
+            zone(&x.runner, x.a2),
+            Zone::Battlefield,
+            "{label} control: B did not block A2"
+        );
+
         let mut x = board(BREATH, 1);
         assert_eq!(
             wrap_history_relation(&mut x.runner, x.spell, wrap),
@@ -1118,6 +1152,16 @@ fn glyph_on_a_token_wall_reads_no_block() {
         "reach: Glyph's delayed ability"
     );
     past_end_of_combat(&mut runner);
+    assert_eq!(
+        runner
+            .state()
+            .delayed_triggers
+            .iter()
+            .filter(|delayed| delayed.ability.controller == P0)
+            .count(),
+        0,
+        "reach: Glyph's delayed ability fired and resolved"
+    );
     assert_eq!(zone(&runner, wall), Zone::Battlefield);
 }
 
@@ -1440,6 +1484,22 @@ fn triton_tactics_does_not_widen() {
         "reach: it fired"
     );
     assert!(!tapped(&x.runner, x.b2), "no widened tap");
+}
+
+/// Synthetic: Ride Down with its grant spelled "each creature that was blocked by a
+/// Zombie", a partner no subject word covers. CR 608.2c + CR 611.2c: the broadcast
+/// grant fails closed instead of giving every creature trample. B still dies, so
+/// the spell resolved; neither attacker, nor B2, gains trample.
+#[test]
+fn a_broadcast_grant_with_an_unbound_partner_does_not_widen() {
+    const UNBOUND_RIDE: &str = "Destroy target blocking creature. Each creature that was blocked by a Zombie this combat gains trample until end of turn.";
+    let mut x = blocked_board(UNBOUND_RIDE, 5);
+    x.runner.cast(x.spell).target_objects(&[x.b]).resolve();
+    drain(&mut x.runner);
+    assert_eq!(zone(&x.runner, x.b), Zone::Graveyard, "reach: it resolved");
+    for (label, id) in [("A", x.a), ("A2", x.a2), ("B2", x.b2)] {
+        assert!(!tramples(&x.runner, id), "{label}: no widened trample");
+    }
 }
 
 // ── V10, V36: Heal the Scars ───────────────────────────────────────────

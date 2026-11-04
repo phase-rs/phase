@@ -26800,7 +26800,7 @@ fn anaphor_rewrite_would_drop_this_way_binding(text_lower: &str, effect: &Effect
 /// Representing it without the clause would widen it to every creature, or every creature
 /// as a legal target, so the caller fails the instruction closed. The populations are read
 /// across the clause's compound "and" chain, where a mass conjunct sits ("destroy it and
-/// all creatures it blocked this turn").
+/// all creatures it blocked this turn"), and from a broadcast grant's statics.
 fn instruction_drops_block_partner(clause: &ParsedEffectClause, lower: &str) -> bool {
     let populations: Vec<&TargetFilter> = std::iter::once(&clause.effect)
         .chain(
@@ -26824,7 +26824,25 @@ fn instruction_drops_block_partner(clause: &ParsedEffectClause, lower: &str) -> 
                     } => Some(target),
                     _ => None,
                 });
-            population.into_iter().chain(effect.target_filter())
+            // CR 611.2c: an untargeted continuous grant over a broadcast population
+            // ("creatures that were blocked by that creature this combat gain
+            // trample", Ride Down) keeps that population in its statics' `affected`,
+            // which neither shared list nor `target_filter()` names. Read here only.
+            let grant_populations = match effect {
+                Effect::GenericEffect {
+                    static_abilities,
+                    target: None,
+                    ..
+                } => static_abilities.as_slice(),
+                _ => &[],
+            }
+            .iter()
+            .filter_map(|static_def| static_def.affected.as_ref())
+            .filter(|filter| is_broadcast_population_filter(filter));
+            population
+                .into_iter()
+                .chain(grant_populations)
+                .chain(effect.target_filter())
         })
         .collect();
     !populations.is_empty() && population_drops_block_history_clause(lower, &populations)
@@ -26921,6 +26939,74 @@ mod instruction_drops_block_partner_tests {
         let bare = parse_effect_chain("Each creature explores.", AbilityKind::Spell);
         assert!(
             matches!(&*bare.effect, Effect::ExploreAll { .. }),
+            "{bare:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2c: a broadcast grant keeps its population in its statics'
+    /// `affected`. Ride Down's bound partner ("that creature", the earlier target)
+    /// binds. Synthetic: an "each creature" grant over a partner no subject word
+    /// covers (an indefinite "a Zombie", or "one of those creatures") parses its
+    /// population bare, so it fails closed instead of granting trample to every
+    /// creature.
+    #[test]
+    fn broadcast_grant_population_binds_or_fails_closed() {
+        let ride_down = parse_effect_chain(
+            "Destroy target blocking creature. Creatures that were blocked by that creature this combat gain trample until end of turn.",
+            AbilityKind::Spell,
+        );
+        let grant = ride_down.sub_ability.as_deref().expect("Ride Down's grant");
+        let Effect::GenericEffect {
+            static_abilities,
+            target: None,
+            ..
+        } = &*grant.effect
+        else {
+            panic!("Ride Down's grant binds: {grant:?}");
+        };
+        assert!(
+            static_abilities
+                .iter()
+                .any(|static_def| static_def
+                    .affected
+                    .as_ref()
+                    .is_some_and(|affected| matches!(
+                        affected,
+                        TargetFilter::Typed(typed) if typed.properties.iter().any(|prop| matches!(
+                            prop,
+                            FilterProp::CombatRelation {
+                                subject: CombatRelationSubject::AnaphoricTarget,
+                                ..
+                            }
+                        ))
+                    ))),
+            "Ride Down's grant carries its partner: {grant:?}"
+        );
+
+        for partner in ["a Zombie", "one of those creatures"] {
+            let text = format!(
+                "Each creature that was blocked by {partner} this turn gains trample until end of turn."
+            );
+            let def = parse_effect_chain(&text, AbilityKind::Spell);
+            assert!(
+                matches!(
+                    &*def.effect,
+                    Effect::Unimplemented { name, .. } if name == "block_history_partner"
+                ),
+                "{partner}: {def:?}"
+            );
+        }
+        // Reach guard: without the clause the same subject parses as a broadcast grant.
+        let bare = parse_effect_chain(
+            "Each creature gains trample until end of turn.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*bare.effect,
+                Effect::GenericEffect { target: None, static_abilities, .. }
+                    if static_abilities.iter().any(|static_def| static_def.affected.is_some())
+            ),
             "{bare:?}"
         );
     }
