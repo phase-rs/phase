@@ -872,15 +872,17 @@ pub(crate) fn try_parse_cost_modification(
                 }
             })
             .or_else(|| {
-                let (count_filter, _) = parse_type_phrase_folding(count_text);
+                let (count_filter, remainder) = parse_type_phrase_folding(count_text);
                 // CR 601.2f: an unconstrained filter means the type phrase
                 // recognized nothing; counting every object would invent a
                 // reduction, so the clause stays unparsed instead (#7899).
-                (count_filter != TargetFilter::Typed(TypedFilter::default())).then_some(
-                    QuantityRef::ObjectCount {
-                        filter: count_filter,
-                    },
-                )
+                // Also require full clause consumption — an unparsed qualifier
+                // would make the count apply more broadly than the text allows.
+                (remainder.trim().is_empty()
+                    && count_filter != TargetFilter::Typed(TypedFilter::default()))
+                .then_some(QuantityRef::ObjectCount {
+                    filter: count_filter,
+                })
             })
     } else {
         None

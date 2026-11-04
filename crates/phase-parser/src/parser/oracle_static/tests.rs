@@ -6564,6 +6564,45 @@ fn static_cost_reduction_with_unreadable_for_each_count_fails_closed() {
     );
 }
 
+/// CR 601.2f: the type-phrase fallback must consume the WHOLE count clause. A
+/// recognized type followed by an unparsed qualifier would otherwise count a
+/// broader class than the text allows ("each creature" instead of "each creature
+/// that's attacking") and over-reduce the cost. The premise assert pins that the
+/// folding parser really leaves this qualifier behind, so the test cannot go
+/// vacuously green if that parser learns the suffix later.
+#[test]
+fn static_cost_reduction_with_unparsed_type_qualifier_fails_closed() {
+    let phrase = "creature that's attacking";
+    let (filter, remainder) = crate::parser::oracle_target::parse_type_phrase_folding(phrase);
+    assert!(
+        !remainder.trim().is_empty()
+            && matches!(filter, TargetFilter::Typed(ref tf) if !tf.type_filters.is_empty()),
+        "probe premise: a recognized type with an unparsed qualifier, got {filter:?} / {remainder:?}"
+    );
+    let line = format!("This spell costs {{1}} less to cast for each {phrase}.");
+    let def = parse_static_line(&line);
+    assert!(
+        !matches!(
+            def.as_ref().map(|def| &def.mode),
+            Some(StaticMode::ModifyCost { .. })
+        ),
+        "{line}: unparsed qualifier must not yield a cost modifier, got {def:?}"
+    );
+    // Reach guard: the same type phrase without the qualifier still parses.
+    let readable =
+        parse_static_line("This spell costs {1} less to cast for each creature you control.");
+    assert!(
+        matches!(
+            readable.as_ref().map(|def| &def.mode),
+            Some(StaticMode::ModifyCost {
+                dynamic_count: Some(QuantityRef::ObjectCount { .. }),
+                ..
+            })
+        ),
+        "readable count must still parse, got {readable:?}"
+    );
+}
+
 #[test]
 fn static_this_spell_cost_less_for_each_creature_you_attacked_with_this_turn() {
     let def = parse_static_line(
