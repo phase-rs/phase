@@ -303,6 +303,52 @@ pub fn is_face_down_conspiracy_candidate(obj: &GameObject, player: PlayerId) -> 
         && is_conspiracy(obj)
 }
 
+/// CR 702.106e: Reveal to all players every face-down conspiracy card `player`
+/// controls in the command zone. Called by the player-leaves-game authority
+/// before CR 800.4a removes the objects, and for every player when the game
+/// ends ([`reveal_face_down_conspiracies_at_game_end`]).
+///
+/// This is a reveal (CR 701.20a), not the CR 702.106c special action: the
+/// conspiracies stay face down and never begin functioning, and the secret
+/// names are not turned into chosen names (`chosen_attributes` / `CardNamed`).
+/// The revealed identity is the printed face kept as the reveal snapshot
+/// (`back_face`). A conspiracy already turned face up has nothing left to
+/// disclose, and the CR 800.4a exile removes a departed player's cards from the
+/// command zone, so each card is revealed at most once.
+pub fn reveal_face_down_conspiracies(
+    state: &GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    let (card_ids, card_names): (Vec<ObjectId>, Vec<String>) = state
+        .command_zone
+        .iter()
+        .filter_map(|&id| {
+            let obj = state
+                .objects
+                .get(&id)
+                .filter(|obj| obj.controller == player && obj.face_down && is_conspiracy(obj))?;
+            Some((id, obj.back_face.as_ref()?.name.clone()))
+        })
+        .unzip();
+    if card_ids.is_empty() {
+        return;
+    }
+    events.push(GameEvent::CardsRevealed {
+        player,
+        card_ids,
+        card_names,
+    });
+}
+
+/// CR 702.106e: At the end of each game, all face-down conspiracy cards are
+/// revealed to all players — one reveal per controller, in seat order.
+pub fn reveal_face_down_conspiracies_at_game_end(state: &GameState, events: &mut Vec<GameEvent>) {
+    for &player in &state.seat_order {
+        reveal_face_down_conspiracies(state, player, events);
+    }
+}
+
 /// CR 905.4a + CR 702.106: Turn a face-down hidden-agenda conspiracy face up.
 ///
 /// A player may do this any time they have priority. No-op (returns `false`)

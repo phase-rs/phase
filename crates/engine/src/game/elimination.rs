@@ -1716,6 +1716,9 @@ fn do_eliminate(
     // is not a state-based action", and no replacement effect applies to a
     // player leaving the game, so the consult is skipped while the
     // unconditional primitive guards still run (PLAN §3).
+    // CR 702.106e: first reveal the leaving player's face-down conspiracies to
+    // all players, while they are still in the command zone.
+    super::conspiracy::reveal_face_down_conspiracies(state, player, events);
     exile_owned_objects_on_player_left_game(state, player, events);
     crate::game::planechase::finish_player_left_game_handoff(state, planar_handoff, events);
 
@@ -2127,6 +2130,9 @@ pub(super) fn end_game(
     events: &mut Vec<GameEvent>,
 ) {
     state.game_end = Some(GameEnd { winner });
+    // CR 702.106e: at the end of the game, every face-down conspiracy card is
+    // revealed to all players.
+    super::conspiracy::reveal_face_down_conspiracies_at_game_end(state, events);
     events.push(GameEvent::GameOver { winner });
     state.waiting_for = WaitingFor::GameOver { winner };
 

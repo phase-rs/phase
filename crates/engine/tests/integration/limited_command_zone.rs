@@ -28,7 +28,9 @@ use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, submit_interaction,
 };
 use engine::game::scenario::{GameRunner, P0, P1};
-use engine::game::visibility::{filter_state_for_viewer, HIDDEN_CARD_NAME};
+use engine::game::visibility::{
+    filter_events_for_viewer, filter_state_for_viewer, HIDDEN_CARD_NAME,
+};
 use engine::types::ability::{
     ChosenAttribute, ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
 };
@@ -863,7 +865,21 @@ fn pregame_agenda_prompt_survives_a_conceding_chooser() {
         WaitingFor::SecretAgendaChoice { player: P0, .. }
     ));
 
-    apply(&mut state, P0, GameAction::Concede { player_id: P0 }).expect("P0 concedes");
+    let p0_brago = owned_command_zone_ids(&state, P0)[0];
+    let p2_brago = owned_command_zone_ids(&state, PlayerId(2))[0];
+    let conceded =
+        apply(&mut state, P0, GameAction::Concede { player_id: P0 }).expect("P0 concedes");
+
+    // CR 702.106e: the departing chooser's face-down conspiracy is revealed to
+    // every survivor; the surviving P2's agenda stays hidden.
+    for survivor in [P1, PlayerId(2)] {
+        assert_eq!(
+            revealed_conspiracies(&conceded.events, &state, survivor),
+            vec![(P0, vec![p0_brago], vec!["Brago's Favor".to_string()])],
+            "survivor {survivor:?} sees the departing player's conspiracy"
+        );
+    }
+    assert!(state.objects[&p2_brago].face_down);
 
     assert!(
         matches!(
@@ -886,4 +902,157 @@ fn pregame_agenda_prompt_survives_a_conceding_chooser() {
         vec![PlayerId(1), PlayerId(2)],
         "eliminated P0 is excluded from the new mulligan round"
     );
+
+    // CR 702.106e: a later departure reveals only its own player's conspiracy;
+    // the first departure's card is not disclosed again.
+    let conceded = apply(
+        &mut state,
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("P2 concedes");
+    assert_eq!(
+        revealed_conspiracies(&conceded.events, &state, P1),
+        vec![(
+            PlayerId(2),
+            vec![p2_brago],
+            vec!["Brago's Favor".to_string()]
+        )],
+    );
+}
+
+/// CR 702.106e: a player who leaves after the pregame procedure reveals their
+/// face-down conspiracy to all players, once, without turning it face up: the
+/// secret name is not published as a chosen name, and an already face-up
+/// conspiracy is not part of the reveal.
+#[test]
+fn departing_player_reveals_face_down_conspiracies_after_pregame() {
+    let mut state = priority_state();
+    load_limited_decks(
+        &mut state,
+        vec![
+            conspiracy_card_face("Brago's Favor", true),
+            conspiracy_card_face("Worldknit", false),
+        ],
+        vec![],
+    );
+    let brago_id = state
+        .command_zone
+        .iter()
+        .copied()
+        .find(|id| state.objects[id].face_down)
+        .expect("hidden agenda starts face down");
+    choose_names(&mut state, brago_id, &["Grizzly Bears"]);
+    assert_eq!(
+        filter_state_for_viewer(&state, P1).objects[&brago_id].name,
+        HIDDEN_CARD_NAME,
+        "identity is hidden from the opponent before the departure"
+    );
+
+    let conceded =
+        apply(&mut state, P0, GameAction::Concede { player_id: P0 }).expect("P0 concedes");
+
+    assert_eq!(
+        revealed_conspiracies(&conceded.events, &state, P1),
+        vec![(P0, vec![brago_id], vec!["Brago's Favor".to_string()])],
+        "exactly one reveal, of the face-down conspiracy only"
+    );
+    assert!(
+        !conceded
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CardNamed { .. })),
+        "the departure reveal is not the turn-face-up special action"
+    );
+    assert!(
+        !state.command_zone.contains(&brago_id),
+        "CR 800.4a: the conspiracy leaves the game after it is revealed"
+    );
+}
+
+/// CR 702.106e: when the game ends, every face-down conspiracy still in the
+/// command zone is revealed to all players. The departing player's card is
+/// revealed by the departure and not again at the game end.
+#[test]
+fn game_end_reveals_every_remaining_face_down_conspiracy_once() {
+    let mut state = priority_state();
+    load_limited_decks(
+        &mut state,
+        vec![conspiracy_card_face("Brago's Favor", true)],
+        vec![conspiracy_card_face("Brago's Favor", true)],
+    );
+    let p0_brago = owned_command_zone_ids(&state, P0)[0];
+    let p1_brago = owned_command_zone_ids(&state, P1)[0];
+    assert!(state.objects[&p1_brago].face_down);
+    assert_eq!(
+        filter_state_for_viewer(&state, P0).objects[&p1_brago].name,
+        HIDDEN_CARD_NAME,
+        "P1's agenda is hidden from P0 during the game"
+    );
+
+    let conceded =
+        apply(&mut state, P0, GameAction::Concede { player_id: P0 }).expect("P0 concedes");
+
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::GameOver { winner: Some(P1) }
+    ));
+    for viewer in [P0, P1] {
+        assert_eq!(
+            revealed_conspiracies(&conceded.events, &state, viewer),
+            vec![
+                (P0, vec![p0_brago], vec!["Brago's Favor".to_string()]),
+                (P1, vec![p1_brago], vec!["Brago's Favor".to_string()]),
+            ],
+            "viewer {viewer:?} sees the departure reveal, then the game-end reveal"
+        );
+    }
+    let game_over = conceded
+        .events
+        .iter()
+        .position(|event| matches!(event, GameEvent::GameOver { .. }))
+        .expect("the game ends");
+    assert!(
+        conceded.events[..game_over]
+            .iter()
+            .filter(|event| matches!(event, GameEvent::CardsRevealed { .. }))
+            .count()
+            == 2,
+        "both reveals happen before the game is over"
+    );
+    assert!(
+        state.objects[&p1_brago].face_down,
+        "the game-end reveal does not turn the conspiracy face up"
+    );
+}
+
+/// The command-zone objects `owner` owns, in command-zone order.
+fn owned_command_zone_ids(state: &GameState, owner: PlayerId) -> Vec<ObjectId> {
+    state
+        .command_zone
+        .iter()
+        .copied()
+        .filter(|id| state.objects[id].owner == owner)
+        .collect()
+}
+
+/// The `CardsRevealed` events `viewer` receives from `events`.
+fn revealed_conspiracies(
+    events: &[GameEvent],
+    state: &GameState,
+    viewer: PlayerId,
+) -> Vec<(PlayerId, Vec<ObjectId>, Vec<String>)> {
+    filter_events_for_viewer(events, state, viewer)
+        .into_iter()
+        .filter_map(|event| match event {
+            GameEvent::CardsRevealed {
+                player,
+                card_ids,
+                card_names,
+            } => Some((player, card_ids, card_names)),
+            _ => None,
+        })
+        .collect()
 }
