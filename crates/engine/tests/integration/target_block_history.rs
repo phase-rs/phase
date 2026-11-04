@@ -372,17 +372,21 @@ fn settle(runner: &mut GameRunner, prefer: &[ObjectId], accept: bool) -> bool {
 }
 
 /// Pass priority until the stack is empty, answering a scry by keeping every card on top.
-fn resolve_keeping_scry_on_top(runner: &mut GameRunner) {
+/// Returns the events those actions emitted.
+fn resolve_keeping_scry_on_top(runner: &mut GameRunner) -> Vec<GameEvent> {
+    let mut events = Vec::new();
     for _ in 0..40 {
         match runner.state().waiting_for.clone() {
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return events,
             WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
+                let result = runner.act(GameAction::PassPriority).expect("pass priority");
+                events.extend(result.events);
             }
             WaitingFor::ScryChoice { cards, .. } => {
-                runner
+                let result = runner
                     .act(GameAction::SelectCards { cards })
                     .expect("scry everything to the top");
+                events.extend(result.events);
             }
             other => panic!("unexpected prompt {other:?}"),
         }
@@ -1630,8 +1634,19 @@ fn judge_unworthy_with_an_empty_library_deals_no_damage() {
         "reach: no card to reveal"
     );
     runner.cast(judge).target_objects(&[t]).commit();
-    resolve_keeping_scry_on_top(&mut runner);
+    let events = resolve_keeping_scry_on_top(&mut runner);
     assert_eq!(zone(&runner, judge), Zone::Graveyard, "reach: it resolved");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::DealDamage,
+                source_id,
+                ..
+            } if *source_id == judge
+        )),
+        "reach: the damage instruction resolved; {events:?}"
+    );
     assert_eq!(runner.state().objects[&t].damage_marked, 0);
 }
 
@@ -1640,7 +1655,8 @@ fn judge_unworthy_with_an_empty_library_deals_no_damage() {
 /// card has a targeted instruction between a reveal and its read (nearest: Pact
 /// Weapon, whose parse gives its pump an `Any` target). The derived loss is 3, the
 /// revealed card's mana value; this asserts only that the target's mana value, 5,
-/// is not read.
+/// is not read, since the reveal's referent reads 0 here (the gap V35's Judge
+/// Unworthy row names).
 #[test]
 fn a_non_root_target_lends_no_referent() {
     const TEXT: &str = "Draw a card and reveal it. Target creature gets +X/+X until end of turn and you lose X life, where X is that card's mana value.";
@@ -1674,7 +1690,19 @@ fn a_non_root_target_lends_no_referent() {
     );
     let hand = runner.state().players[0].hand.len();
     let before = life(&runner, P0);
-    runner.cast(spell).target_objects(&[t]).resolve();
+    let outcome = runner.cast(spell).target_objects(&[t]).resolve();
+    assert!(
+        outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::LoseLife,
+                source_id,
+                ..
+            } if *source_id == spell
+        )),
+        "reach: the life-loss instruction resolved; {:?}",
+        outcome.events()
+    );
     drain(&mut runner);
     assert_eq!(zone(&runner, spell), Zone::Graveyard, "reach: it resolved");
     assert!(runner.state().stack.is_empty());

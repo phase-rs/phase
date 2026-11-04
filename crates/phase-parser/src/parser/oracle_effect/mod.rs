@@ -26810,18 +26810,46 @@ fn instruction_drops_block_partner(clause: &ParsedEffectClause, lower: &str) -> 
             .map(|def| &*def.effect),
         )
         .flat_map(|effect| {
-            let population = match effect {
-                Effect::SetTapState {
-                    scope: EffectScope::All,
-                    target,
-                    ..
-                } => Some(target),
-                _ => mass_population_target(effect),
-            };
+            // `mass_population_target` adds `ChangeZoneAll`, which the parser-side
+            // list does not carry.
+            let population =
+                mass_population_filter(effect).or_else(|| mass_population_target(effect));
             population.into_iter().chain(effect.target_filter())
         })
         .collect();
     !populations.is_empty() && population_drops_block_history_clause(lower, &populations)
+}
+
+#[cfg(test)]
+mod instruction_drops_block_partner_tests {
+    use super::parse_effect_chain;
+    use crate::types::ability::{AbilityKind, Effect};
+
+    /// Parser shape only. CR 608.2c + CR 608.2i: an "each <type> ... explores"
+    /// population reaches the guard through the shared mass-population accessor,
+    /// so a history clause its filter does not carry fails the instruction closed
+    /// instead of leaving every creature to explore. Hand-built: no printed card
+    /// puts a history clause on an explore population.
+    #[test]
+    fn explore_population_with_an_unbound_partner_fails_closed() {
+        let def = parse_effect_chain(
+            "Each creature that was blocked by a Zombie this turn explores.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::Unimplemented { name, .. } if name == "block_history_partner"
+            ),
+            "{def:?}"
+        );
+        // Reach guard: without the clause the same subject parses as an explore population.
+        let bare = parse_effect_chain("Each creature explores.", AbilityKind::Spell);
+        assert!(
+            matches!(&*bare.effect, Effect::ExploreAll { .. }),
+            "{bare:?}"
+        );
+    }
 }
 
 /// CR 608.2c: whether a gate counts members of the chain's tracked set.

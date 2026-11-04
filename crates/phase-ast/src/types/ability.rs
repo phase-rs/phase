@@ -10663,34 +10663,42 @@ pub fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
                 // hit, Radiance's "each OTHER creature that shares a color with it")
                 // reads the parent's chosen target, so the enclosing effect must
                 // inherit `ability.targets` on a decline for the exclusion to fire.
-                || typed.properties.iter().any(|prop| match prop {
-                    FilterProp::DistinctFrom { reference } => {
-                        filter_refs_parent_target(reference)
-                    }
-                    // CR 701.3a: a mass object set defined by attachment to the
-                    // parent referent ("destroy all Auras attached to that
-                    // creature") names the parent inside the host filter, so
-                    // propagation, delayed-trigger snapshotting and loop
-                    // rebinding must see it.
-                    FilterProp::AttachedTo {
-                        to: AttachmentReferent::Host { filter },
-                    } => filter_refs_parent_target(filter),
-                    // CR 608.2c + CR 608.2i: a mass set defined by its history with
-                    // an earlier instruction's target names that target inside a
-                    // property, so propagation, delayed-trigger snapshotting and
-                    // the mass-population validation arm must see it.
-                    FilterProp::CombatRelation {
-                        subject: CombatRelationSubject::AnaphoricTarget,
-                        ..
-                    } => true,
-                    _ => false,
-                })
+                || typed.properties.iter().any(filter_prop_refs_parent_target)
         }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(filter_refs_parent_target)
         }
         TargetFilter::Not { filter } => filter_refs_parent_target(filter),
         TargetFilter::TrackedSetFiltered { filter, .. } => filter_refs_parent_target(filter),
+        _ => false,
+    }
+}
+
+/// The property half of [`filter_refs_parent_target`]: whether `prop`, or a
+/// property its `Not`/`AnyOf` combinators nest, names the parent's target.
+fn filter_prop_refs_parent_target(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::DistinctFrom { reference } => filter_refs_parent_target(reference),
+        // CR 701.3a: a mass object set defined by attachment to the
+        // parent referent ("destroy all Auras attached to that
+        // creature") names the parent inside the host filter, so
+        // propagation, delayed-trigger snapshotting and loop
+        // rebinding must see it.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => filter_refs_parent_target(filter),
+        // CR 608.2c + CR 608.2i: a mass set defined by its history with
+        // an earlier instruction's target names that target inside a
+        // property, so propagation, delayed-trigger snapshotting and
+        // the mass-population validation arm must see it.
+        FilterProp::CombatRelation {
+            subject: CombatRelationSubject::AnaphoricTarget,
+            ..
+        } => true,
+        // CR 608.2c: a negated or disjunctive property still reads the
+        // referent its inner property names.
+        FilterProp::Not { prop } => filter_prop_refs_parent_target(prop),
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_refs_parent_target),
         _ => false,
     }
 }
@@ -49036,6 +49044,20 @@ mod tests {
         assert!(filter_refs_parent_target(&TargetFilter::Or {
             filters: vec![TargetFilter::SelfRef, anaphor.clone()],
         }));
+        let TargetFilter::Typed(anaphor_typed) = &anaphor else {
+            unreachable!("filter_of builds a typed filter")
+        };
+        let relation = anaphor_typed.properties[0].clone();
+        let nested = |prop| TargetFilter::Typed(TypedFilter::creature().properties(vec![prop]));
+        assert!(filter_refs_parent_target(&nested(FilterProp::Not {
+            prop: Box::new(relation.clone()),
+        })));
+        assert!(filter_refs_parent_target(&nested(FilterProp::AnyOf {
+            props: vec![FilterProp::Token, relation],
+        })));
+        assert!(!filter_refs_parent_target(&nested(FilterProp::AnyOf {
+            props: vec![FilterProp::Token],
+        })));
         assert!(effect_refs_parent_target(&destroy_all(anaphor.clone())));
         assert!(!effect_needs_parent_target_combat_relation_slot(
             &destroy_all(anaphor.clone())
