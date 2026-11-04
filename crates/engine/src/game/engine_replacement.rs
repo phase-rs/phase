@@ -4066,8 +4066,8 @@ pub(crate) fn dispatch_pending_post_replacement_effect(
     let _live_dispatch = LiveDispatchGuard::enter();
     // CR 614.6 + CR 615.5: the continuation is the replacement's own action, so its "that many"
     // is the amount the replacement replaced or prevented (stamped above, or by the applier just
-    // before an inline drain), never the event of a triggered ability that is resolving around
-    // it. Shockmaw Dragon: "Whenever this creature deals combat damage to a player, it deals 1
+    // before an inline drain), not the event amount of a triggered ability that is resolving
+    // around it. Shockmaw Dragon: "Whenever this creature deals combat damage to a player, it deals 1
     // damage to each creature that player controls." After 4 combat damage, Phytohydra ("put that
     // many +1/+1 counters on it instead") gets 1 counter, not 4. The scope suppresses only the
     // enclosing trigger's amount tiers of `EventContextAmount`, as it does for a reflexive
