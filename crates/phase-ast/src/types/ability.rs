@@ -2467,8 +2467,9 @@ pub enum ShieldKind {
     /// CR 614.1a + CR 614.6: "If damage would be dealt to X, <Y> that many … instead"
     /// (Phytohydra, Lichenthrope, Dralnu, Force Bubble, Delaying Shield, Nefarious Lich,
     /// Crumbling Sanctuary). The damage event is replaced wholesale by `execute`, which
-    /// reads the would-be amount. Not a CR 615 prevention effect (CR 615.1a): damage
-    /// that can't be prevented is still replaced, and nothing is "prevented" (CR 615.13).
+    /// reads the would-be amount. Not a CR 615 prevention effect (CR 615.1a), so CR 615.12
+    /// doesn't reach it: damage that can't be prevented is still replaced, and nothing counts
+    /// as prevented, so "when damage is prevented" triggers don't fire (CR 615.13).
     Substitution,
 }
 

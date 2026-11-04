@@ -13483,7 +13483,7 @@ pub fn replace_event(
 /// CR 614.6 + CR 615.5: run the resident damage rider, immediately after the replacement that
 /// stashed it. Inside a combat batch (its tally is open, CR 510.2) the rider's pauses are
 /// settled before the batch moves on (`drain_combat_damage_rider`).
-fn drain_damage_rider(state: &mut GameState, events: &mut Vec<GameEvent>) {
+pub(crate) fn drain_damage_rider(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if state.combat_prevention_tally.is_some() {
         drain_combat_damage_rider(state, events);
         return;

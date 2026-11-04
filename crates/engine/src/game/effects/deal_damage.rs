@@ -643,9 +643,7 @@ pub(crate) fn apply_damage_to_target(
                 // can resolve against the prevented event's damage source. Clear
                 // after the call to prevent leakage into unrelated later
                 // replacements.
-                let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                    state, None, None, None, events,
-                );
+                crate::game::replacement::drain_damage_rider(state, events);
             }
             Ok(DamageResult::Applied(0))
         }
@@ -2106,9 +2104,7 @@ fn resolve_each_target_power_damage(
                 // CR 615.5: A prevention rider (e.g. "for each 1 damage prevented
                 // this way") resolves immediately afterward for non-combat damage.
                 if state.has_post_replacement_drain() {
-                    let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                        state, None, None, None, events,
-                    );
+                    crate::game::replacement::drain_damage_rider(state, events);
                 }
             }
             ReplacementResult::NeedsChoice(player) => {
@@ -3349,9 +3345,7 @@ fn resolve_each_source_deals_damage_portions(
                 // "-1/-1 counter for each 1 damage prevented") inline so it
                 // resolves "immediately afterward" as the rule requires.
                 if state.has_post_replacement_drain() {
-                    let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                        state, None, None, None, events,
-                    );
+                    crate::game::replacement::drain_damage_rider(state, events);
                 }
             }
             ReplacementResult::NeedsChoice(player) => {
