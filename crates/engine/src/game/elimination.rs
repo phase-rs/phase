@@ -790,6 +790,11 @@ pub(crate) fn eliminate_players(
 /// list, the mulligan flow advances (closing the declare round or finishing) —
 /// bottoming is now resolved per-entry at the declare point, so there is no
 /// separate batch bottoms phase left to advance to.
+///
+/// This is also the pregame-reconciliation seam for the prompts that precede
+/// mulligans: a departed companion chooser (CR 103.2b) is resumed at the walk
+/// cursor by `advance_companion_reveal`, and a departed agenda chooser (CR
+/// 103.2e) resumes at the agenda step.
 fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let alive: HashSet<PlayerId> = state
         .prepaid_mulligan_bottoms
@@ -831,6 +836,15 @@ fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 free_first_mulligan,
                 events,
             );
+        }
+        // CR 702.139a + CR 800.4a: a player who leaves answers no companion
+        // reveal. Resume the seat-order walk (CR 103.2b) from that chooser's
+        // cursor: later living seats still get their offers, and the agenda
+        // step (CR 103.2e) still follows. Restarting the walk with
+        // `check_all_companion_reveals` would re-offer a companion a living
+        // player already declined.
+        WaitingFor::CompanionReveal { player, .. } if !players::is_alive(state, player) => {
+            state.waiting_for = super::companion::advance_companion_reveal(state, player, events);
         }
         // CR 800.4a: a player who leaves answers no agenda prompt; the pregame
         // procedure carries on for the players who remain.

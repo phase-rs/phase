@@ -470,8 +470,15 @@ pub(super) fn companion_reveals_or_agenda(
         .unwrap_or_else(|| super::conspiracy::agenda_choices_or_mulligan(state, events))
 }
 
-/// Move to the next player's companion reveal, or start the agenda step if all done.
-fn advance_companion_reveal(
+/// CR 702.139a: Move past `current_player` to the next living player's
+/// companion reveal, or start the agenda step (CR 103.2e) once the walk is done.
+///
+/// CR 800.4a: `elimination::prune_mulligan_pending` resumes a departed chooser's
+/// prompt here, so the walk continues from that chooser's seat cursor — later
+/// living seats still get their offers, and a companion a living player already
+/// declined behind the cursor is never re-offered (unlike the fresh
+/// `check_all_companion_reveals` walk).
+pub(super) fn advance_companion_reveal(
     state: &mut GameState,
     current_player: PlayerId,
     events: &mut Vec<GameEvent>,

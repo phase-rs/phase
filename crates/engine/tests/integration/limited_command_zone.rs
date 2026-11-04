@@ -1117,6 +1117,127 @@ fn companion_reveal_walk_skips_a_conceding_later_seat() {
     );
 }
 
+/// CR 702.139a + CR 800.4a + CR 103.2b: a departure by the **current**
+/// companion chooser must resume the reveal walk at that chooser's seat cursor.
+/// Later living seats keep their offers, and the agenda step that follows the
+/// walk (CR 103.2e) still runs before mulligans. P0 remains eligible after
+/// declining, so reaching P2 without re-offering P0 proves the walk continued
+/// from the cursor instead of restarting from the front of seat order.
+#[test]
+fn conceding_current_companion_chooser_resumes_the_walk_before_agendas() {
+    let mut state = GameState::new(FormatConfig::limited_with_command_zone(), 3, 7);
+    state.all_card_names = known_card_names();
+    let p2 = PlayerId(2);
+    let entries = |cards: Vec<CardFace>| {
+        cards
+            .into_iter()
+            .map(|card| DeckEntry { card, count: 1 })
+            .collect::<Vec<_>>()
+    };
+    let seat = |companions: Vec<CardFace>| PlayerDeckPayload {
+        main_deck: forty_card_main(),
+        sideboard: entries(companions),
+        ..Default::default()
+    };
+    let payload = DeckPayload {
+        player: seat(vec![companion_face()]),
+        opponent: seat(vec![companion_face()]),
+        ai_decks: vec![PlayerDeckPayload {
+            main_deck: forty_card_main(),
+            sideboard: entries(vec![companion_face()]),
+            commander: entries(vec![conspiracy_card_face("Brago's Favor", true)]),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    load_deck_into_state(&mut state, &payload);
+    let p2_brago = owned_command_zone_ids(&state, p2)[0];
+
+    // Reach guard: every seat holds an eligible companion, so the walk visits
+    // all three in seat order and P0's decline alone cannot end it.
+    for player in [P0, P1, p2] {
+        assert!(
+            check_companion_reveal(&state, player).is_some(),
+            "seat {player:?} must hold an eligible companion for this walk"
+        );
+    }
+
+    start_game_with_starting_player(&mut state, P0);
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::CompanionReveal { player: P0, .. }
+        ),
+        "CR 103.2b: the walk starts at the first seat: {:?}",
+        state.waiting_for
+    );
+
+    apply(
+        &mut state,
+        P0,
+        GameAction::DeclareCompanion {
+            choice: CompanionDeclaration::Decline,
+        },
+    )
+    .expect("decline P0's companion");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::CompanionReveal { player, .. } if player == P1),
+        "the walk reaches P1: {:?}",
+        state.waiting_for
+    );
+
+    // CR 104.3a: the current chooser leaves. Two players remain, so this is not
+    // a game-ending departure.
+    apply(&mut state, P1, GameAction::Concede { player_id: P1 }).expect("P1 concedes");
+
+    // P0 still *could* be offered (declining does not consume the sideboard
+    // offer), so P2's prompt is only reachable through the departure cursor.
+    assert!(
+        check_companion_reveal(&state, P0).is_some(),
+        "P0 remains eligible, so a restarted walk would re-offer it"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::CompanionReveal { player, .. } if player == p2),
+        "CR 800.4a: resume after the departed chooser without re-offering P0: {:?}",
+        state.waiting_for
+    );
+
+    apply(
+        &mut state,
+        p2,
+        GameAction::DeclareCompanion {
+            choice: CompanionDeclaration::Decline,
+        },
+    )
+    .expect("decline P2's companion");
+
+    // CR 103.2e + CR 702.106a: the walk's end still hands off to the surviving
+    // seat's unnamed agenda, not to ordinary priority.
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::SecretAgendaChoice {
+                player,
+                object_id,
+                name_count: 1,
+            } if player == p2 && object_id == p2_brago
+        ),
+        "the surviving agenda is still asked: {:?}",
+        state.waiting_for
+    );
+    apply(&mut state, p2, names(&["Grizzly Bears"])).expect("P2 answers its agenda");
+
+    let WaitingFor::MulliganDecision { pending, .. } = &state.waiting_for else {
+        panic!("expected MulliganDecision, got {:?}", state.waiting_for);
+    };
+    let pending_players: Vec<PlayerId> = pending.iter().map(|entry| entry.player).collect();
+    assert_eq!(
+        pending_players,
+        vec![P0, p2],
+        "mulligans follow the agenda step for exactly the living seats"
+    );
+}
+
 /// CR 702.106e: a player who leaves after the pregame procedure reveals their
 /// face-down conspiracy to all players, once, without turning it face up: the
 /// secret name is not published as a chosen name, and an already face-up
