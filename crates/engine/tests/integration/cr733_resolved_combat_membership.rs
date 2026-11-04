@@ -39,7 +39,7 @@ use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
-use engine::types::game_state::{CastPaymentMode, LayersDirty, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, LayersDirty, StackEntryKind, WaitingFor};
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -1604,7 +1604,20 @@ fn cathedral_membrane_token_copy_never_blocked() {
         P1,
     );
 
-    runner.cast(first_murder).target_object(tokens[0]).resolve();
+    runner.cast(first_murder).target_object(tokens[0]).commit();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the first player passes priority on Murder");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the second player resolves Murder");
+    assert!(
+        runner.state().stack.iter().any(|entry| matches!(
+            entry.kind,
+            StackEntryKind::TriggeredAbility { source_id, .. } if source_id == tokens[0]
+        )),
+        "reach guard: the copied Membrane's dies trigger must be on the stack"
+    );
     runner.advance_until_stack_empty();
     assert_resolution_completed(&runner);
     assert!(
