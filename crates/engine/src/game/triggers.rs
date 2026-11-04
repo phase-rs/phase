@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::game::game_object::ObjectIncarnationRefExt;
@@ -5348,6 +5348,8 @@ fn collect_pending_triggers_with_collection(
     // retroactively "sees" a sacrifice/etc. that occurred earlier in the same
     // chain, before it was there to observe it (issue #8160).
     let battlefield_entry_index = battlefield_entry_observation_indices(events);
+    // CR 603.10a: built on the first co-departure group this pass sees.
+    let mut co_departure_index: Option<CoDepartureObserverIndex> = None;
 
     for (event_idx, event) in events.iter().enumerate() {
         // CR 603.2 / CR 603.3: Per-event dedup. A single printed trigger definition
@@ -6183,6 +6185,15 @@ fn collect_pending_triggers_with_collection(
                 if observer_id == *moved_id {
                     continue;
                 }
+                let index = &*co_departure_index
+                    .get_or_insert_with(|| CoDepartureObserverIndex::build(state, events));
+                // CR 603.10a: only an observer that left with a trigger can
+                // observe this departure. Skipping the rest up front keeps a
+                // board wipe of vanilla creatures from resolving N² source
+                // contexts that would match nothing.
+                if !index.may_observe(observer_id) {
+                    continue;
+                }
                 // CR 603.10a + CR 704.5d: a co-departed observer that ceased to
                 // exist is still an observer. Its object is gone from
                 // `state.objects`, but its ZoneChangeRecord owns its identity and
@@ -6203,6 +6214,8 @@ fn collect_pending_triggers_with_collection(
                 if !super::zones::battlefield_residency(state, observer_id).has_departed() {
                     continue;
                 }
+                #[cfg(feature = "test-support")]
+                super::perf_counters::record_co_departure_observer_resolution();
                 // CR 603.10a + CR 400.7: This observer left in the same
                 // departure batch, so its own ZoneChanged record—not the
                 // post-move object in `state`—owns the source identity. The
@@ -6214,8 +6227,8 @@ fn collect_pending_triggers_with_collection(
                 // observer's departure in an earlier action fragment, so it is
                 // absent from `events`; its stamped per-turn record is the same
                 // authority and is consulted when the event is not at hand.
-                let observer_source_context = events
-                    .iter()
+                let observer_source_context = index
+                    .zone_changes(events, observer_id)
                     .find_map(|observer_event| {
                         let GameEvent::ZoneChanged {
                             object_id,
@@ -6263,8 +6276,8 @@ fn collect_pending_triggers_with_collection(
                 // correctly for co-departed Curse Auras whose live
                 // `attached_to` was cleared by
                 // `sever_battlefield_attachment_graph_on_exit`.
-                let lki_attached_to = events
-                    .iter()
+                let lki_attached_to = index
+                    .zone_changes(events, observer_id)
                     .find_map(|ev| {
                         if let GameEvent::ZoneChanged {
                             object_id: oid,
@@ -7483,14 +7496,13 @@ fn drop_auto_inert_noop_trigger(state: &mut GameState, ctx: &PendingTriggerConte
         origin,
     };
     match state.may_trigger_auto_choice_for_live_prompt(&key) {
-        Some(AutoMayChoice::Decline) => {
-            // CR 603.5: the remembered decline is the controller's optional choice.
-            state.record_loop_decision(crate::game::play_trace::AnswerOptionality::Optional);
-            true
-        }
+        // CR 603.5: an optional trigger goes on the stack regardless of whether
+        // its controller intends to exercise the option; the remembered decline
+        // is applied when the ability resolves. While it waits on the stack,
+        // players receive priority and it can be targeted (Strionic Resonator).
+        Some(AutoMayChoice::Decline) | None => false,
         // CR 603.3d: no legal target means no choice was offered, so nothing is recorded.
         Some(AutoMayChoice::Accept) => pending_trigger_has_no_legal_resolution_targets(state, ctx),
-        None => false,
     }
 }
 
@@ -9412,6 +9424,84 @@ pub(crate) fn take_sba_choice_trigger_batch(
     sba_choice
 }
 
+/// CR 603.10a: Per-pass lookups for the co-departure arm of
+/// `collect_pending_triggers_with_collection`.
+///
+/// A simultaneous departure of N permanents (one board wipe) stamps every
+/// departure with an (N - 1)-member `co_departed` group, so the arm visits
+/// N² (departure, observer) pairs. Resolving each pair by scanning `events`
+/// and the per-turn departure ledger made a board wipe O(N³) (issue #10468).
+/// This index is built once per collection pass, the first time a
+/// co-departure group is seen, and answers both questions per pair without a
+/// scan. Trigger collection never grows `zone_changes_this_turn`, so a
+/// pass-scoped snapshot of it stays exact.
+struct CoDepartureObserverIndex {
+    /// Indices into `events` of every `ZoneChanged` naming the object, in
+    /// event order, so a per-observer lookup visits the same events, in the
+    /// same order, that a scan of `events` would match.
+    zone_changes_by_object: HashMap<ObjectId, Vec<usize>>,
+    /// Objects with at least one battlefield-departure record (in `events` or
+    /// in the per-turn ledger) whose latched source context carries a trigger
+    /// entry. Every source context the co-departure arm can select is one of
+    /// these records, and a context source matches only its latched
+    /// `trigger_entries`, so an observer absent from this set cannot trigger.
+    observers_with_triggers: HashSet<ObjectId>,
+}
+
+impl CoDepartureObserverIndex {
+    fn build(state: &GameState, events: &[GameEvent]) -> Self {
+        #[cfg(feature = "test-support")]
+        super::perf_counters::record_co_departure_index_build();
+        let mut zone_changes_by_object: HashMap<ObjectId, Vec<usize>> = HashMap::new();
+        let mut observers_with_triggers = HashSet::new();
+        let mut note_departure = |record: &crate::types::game_state::ZoneChangeRecord| {
+            if record.from_zone == Some(Zone::Battlefield)
+                && record
+                    .trigger_source_context()
+                    .is_some_and(|context| !context.trigger_entries.is_empty())
+            {
+                observers_with_triggers.insert(record.object_id);
+            }
+        };
+        for (idx, event) in events.iter().enumerate() {
+            if let GameEvent::ZoneChanged {
+                object_id, record, ..
+            } = event
+            {
+                zone_changes_by_object
+                    .entry(*object_id)
+                    .or_default()
+                    .push(idx);
+                note_departure(record);
+            }
+        }
+        state.zone_changes_this_turn.iter().for_each(note_departure);
+        Self {
+            zone_changes_by_object,
+            observers_with_triggers,
+        }
+    }
+
+    /// Whether `observer_id` left the battlefield with a trigger that could
+    /// observe a co-departure. `false` means the arm would collect nothing.
+    fn may_observe(&self, observer_id: ObjectId) -> bool {
+        self.observers_with_triggers.contains(&observer_id)
+    }
+
+    /// The `ZoneChanged` events naming `object_id`, in event order.
+    fn zone_changes<'e>(
+        &'e self,
+        events: &'e [GameEvent],
+        object_id: ObjectId,
+    ) -> impl Iterator<Item = &'e GameEvent> + 'e {
+        self.zone_changes_by_object
+            .get(&object_id)
+            .into_iter()
+            .flatten()
+            .map(move |&idx| &events[idx])
+    }
+}
+
 /// CR 603.10a + CR 608.2h: The most recent battlefield-departure record of
 /// `observer_id` that names `moved_id` in its simultaneous-departure group.
 fn co_departed_observer_record(
@@ -11144,6 +11234,7 @@ fn dispatch_pending_trigger_context_core(
                                     total,
                                     targets: assigned_targets,
                                     unit,
+                                    scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
                                 };
                             restore_trigger_event_context(state, context_snapshot);
                             return TriggerDispatchDisposition::Paused;
@@ -11427,8 +11518,8 @@ pub(crate) fn collect_mana_action_trigger_batch(
 ///
 /// The collected state records what observing bound (`ActivationObservers`):
 /// any admitted trigger, counted at match time — before an auto-inert context
-/// (a remembered decline) is pruned, since admission alone may have spent a
-/// "triggers only once each turn" limit. A bound observation revokes any undo
+/// (a remembered accept with no legal target) is pruned, since admission alone
+/// may have spent a "triggers only once each turn" limit. A bound observation revokes any undo
 /// already recorded for this source (CR 605.3b; a replacement-paused
 /// activation reaches this boundary only on resume), and
 /// `mana_sources::record_undoable_mana_tap` never records one for it.
@@ -12187,7 +12278,14 @@ pub(super) fn is_trigger_construction_prompt(
             | WaitingFor::OptionalEffectChoice { .. }
             | WaitingFor::AbilityModeChoice { .. }
             | WaitingFor::TriggerTargetSelection { .. }
-            | WaitingFor::DistributeAmong { .. }
+            // CR 603.3d + CR 601.2d: only an announce-time division is part of
+            // putting a trigger on the stack. A CR 608.2d resolution-time division
+            // (`ResolutionCandidates`) is a choice made while the effect is applied,
+            // not a construction prompt.
+            | WaitingFor::DistributeAmong {
+                scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
+                ..
+            }
     )
 }
 
@@ -45328,8 +45426,55 @@ pub mod tests {
                 total: 2,
                 targets: Vec::new(),
                 unit: crate::types::game_state::DistributionUnit::Damage,
+                scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
             },
         ]
+    }
+
+    /// D5 / C2.6: the construction census keeps today's classification of an
+    /// announce-time (CR 603.3d + CR 601.2d) division and excludes a CR 608.2d
+    /// resolution-time division, which is chosen while the effect is applied.
+    #[test]
+    fn trigger_construction_prompt_census_excludes_resolution_time_division() {
+        let targets = vec![
+            TargetRef::Object(ObjectId(11)),
+            TargetRef::Object(ObjectId(12)),
+        ];
+        let announced = WaitingFor::DistributeAmong {
+            player: PlayerId(0),
+            total: 3,
+            targets: targets.clone(),
+            unit: DistributionUnit::Damage,
+            scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
+        };
+        assert!(
+            is_trigger_construction_prompt(&announced),
+            "announce-time division stays a construction prompt"
+        );
+        let pending = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        let resolution = WaitingFor::DistributeAmong {
+            player: PlayerId(0),
+            total: 3,
+            targets,
+            unit: DistributionUnit::Damage,
+            scope: crate::types::game_state::DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            },
+        };
+        assert!(
+            !is_trigger_construction_prompt(&resolution),
+            "CR 608.2d resolution-time division is not a construction prompt"
+        );
     }
 
     /// Round-20 closure map, "Exact preserve/finish contract" clause 1: with no
