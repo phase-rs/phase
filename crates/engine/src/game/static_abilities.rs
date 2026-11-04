@@ -973,6 +973,7 @@ fn static_ability_match_applies(
         if let Some(defended) = def.attack_defended.as_ref() {
             if !super::restrictions::attack_target_matches_defended_scope(
                 state,
+                obj.id,
                 context.attack_target.as_ref(),
                 defended,
                 def.source_controller.unwrap_or(obj.controller),
