@@ -3672,14 +3672,35 @@ const GOBLINS: Board = Board {
     ..PLAIN
 };
 
-/// CR 705.1 + CR 732.2a: Crazed Firecat ("When this creature enters, flip a coin until you lose a
-/// flip. ...") returns with Worldgorger Dragon each cycle. With no out the cards make the loop a
-/// draw, but a replay samples one sequence of flips and cannot show that none stops it, so P0 is
-/// offered a draw without end, and its counted take performs, since no next action depends on a
-/// flip.
+/// Asserts every drive at `board`, whose loop flips a coin or rolls a die each cycle, is a draw
+/// after the trigger drew an outcome, and that Off runs on.
+fn a_random_outcome_is_drawn(board: Board) {
+    for drive in EVERY_DRIVE {
+        let Some(run) = run(board, LoopDetectionMode::Interactive, drive, 60) else {
+            return;
+        };
+        assert_eq!(run.terminal, Terminal::GameOver(None), "{drive:?}");
+        assert!(
+            run.state().rng.outcome_draws() > 0,
+            "{drive:?}: reach: the trigger drew an outcome"
+        );
+        assert!(run.entries >= 1, "{drive:?}: reach: the Dragon entered");
+    }
+    for drive in EVERY_DRIVE {
+        if run_off(board, drive, 40).is_none() {
+            return;
+        }
+    }
+}
+
+/// CR 104.4b + CR 732.4 + CR 705.1 + CR 400.7: Crazed Firecat ("When this creature enters, flip a
+/// coin until you lose a flip. Put a +1/+1 counter on this creature for each flip you won.")
+/// returns with Worldgorger Dragon each cycle. The flips write only the Firecat's counters, which
+/// leave with it when the Dragon exiles it, and nothing else reads them, so with no out no flip is
+/// a way to stop the loop and it is a draw.
 #[test]
-fn a_coin_flip_no_player_can_stop_is_offered() {
-    a_random_outcome_is_offered(FIRECAT, CountedTake::Performs, 0);
+fn a_coin_flip_no_player_can_stop_is_a_draw() {
+    a_random_outcome_is_drawn(FIRECAT);
 }
 
 /// CR 705.1 + CR 732.5: beside P1's Lightning Bolt and untapped Mountain, an out, the coin-flip
@@ -3696,12 +3717,50 @@ fn a_coin_flip_beside_an_out_is_offered() {
     );
 }
 
-/// CR 706.1 + CR 111.7 + CR 732.2a: Swarming Goblins rolls a d20 each cycle and makes one to three
-/// Goblin tokens, which Worldgorger Dragon exiles in the next cycle, where they cease to exist.
-/// With no out the cards make the loop a draw; it is offered without end, as the coin flip is.
+/// CR 104.4b + CR 732.4 + CR 706.1 + CR 111.7: Swarming Goblins rolls a d20 each cycle and makes
+/// one to three Goblin tokens, which Worldgorger Dragon exiles, where they cease to exist, and
+/// nothing but the Dragon's exile reads them, so with no out no roll is a way to stop the loop and
+/// it is a draw.
 #[test]
-fn a_die_roll_each_cycle_is_offered() {
-    a_random_outcome_is_offered(GOBLINS, CountedTake::Performs, 1);
+fn a_die_roll_each_cycle_is_a_draw() {
+    a_random_outcome_is_drawn(GOBLINS);
+}
+
+/// CR 603.2 + CR 706.1: P1's Soul Warden ("Whenever another creature enters, you gain 1 life.")
+/// triggers on each Goblin token the d20 makes, so P1's life depends on the roll and outlasts the
+/// cycle, and the die-roll loop is offered, never drawn.
+#[test]
+fn a_die_roll_another_players_trigger_reads_is_offered() {
+    let board = Board {
+        soul_warden: Some(P1),
+        ..GOBLINS
+    };
+    for drive in EVERY_DRIVE {
+        let Some(run) = run(board, LoopDetectionMode::Interactive, drive, 60) else {
+            return;
+        };
+        assert_eq!(
+            run.terminal,
+            Terminal::Offer {
+                predicted_winner: None,
+                mandatory: false
+            },
+            "{drive:?}"
+        );
+        assert!(
+            matches!(
+                &run.state().waiting_for,
+                WaitingFor::LoopShortcut { schema, .. }
+                    if schema.iteration_count == IterationCount::WithoutEnd
+            ),
+            "{drive:?}"
+        );
+        assert!(
+            run.state().rng.outcome_draws() > 0,
+            "{drive:?}: reach: a d20 was rolled"
+        );
+        assert!(run.life(P1) > 20, "{drive:?}: reach: P1's life rose");
+    }
 }
 
 /// CR 706.1 + CR 732.5: beside P1's Lightning Bolt and untapped Mountain the die-roll loop is
@@ -3719,14 +3778,18 @@ fn a_die_roll_beside_an_out_is_offered() {
     );
 }
 
-/// CR 732.2a + CR 706.1: at the die-roll loop's offer on every drive, P0's accepted `Fixed(3)`
-/// performs three cycles by play, each rolling its own d20 and making Goblin tokens, and returns
-/// priority to P0.
+/// CR 732.2a + CR 705.1: at the coin-flip loop's offer beside P1's Lightning Bolt on every drive,
+/// P0's accepted `Fixed(3)` performs three cycles by play, each resolving the Firecat's trigger,
+/// which flips until it loses one flip, and returns priority to P0.
 #[test]
-fn a_counted_take_of_a_die_roll_loop_performs_its_count() {
+fn a_counted_take_of_a_coin_flip_loop_performs_its_count() {
+    let board = Board {
+        optional: true,
+        ..FIRECAT
+    };
     for drive in EVERY_DRIVE {
         let leg = format!("{drive:?}");
-        let Some(offered) = run(GOBLINS, LoopDetectionMode::Interactive, drive, 60) else {
+        let Some(offered) = run(board, LoopDetectionMode::Interactive, drive, 60) else {
             return;
         };
         assert_out_offer(&offered, &leg);
@@ -3746,14 +3809,18 @@ fn a_counted_take_of_a_die_roll_loop_performs_its_count() {
             &leg,
         );
         assert!(priority_to(&taken, P0), "{leg}: {:?}", taken.waiting_for);
-        assert_eq!(taken.rng.outcome_draws(), rolled + 3, "{leg}");
-        assert!(
-            events.iter().any(|event| matches!(
-                event,
-                GameEvent::ZoneChanged { to: Zone::Battlefield, record, .. }
-                    if record.is_token && record.name == "Goblin"
-            )),
-            "{leg}: reach: a Goblin token entered during the take"
+        let flips: Vec<bool> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CoinFlipped { won, .. } => Some(*won),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(flips.iter().filter(|won| !**won).count(), 3, "{leg}");
+        assert_eq!(
+            taken.rng.outcome_draws(),
+            rolled + flips.len() as u64,
+            "{leg}"
         );
     }
 }

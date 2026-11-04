@@ -2808,7 +2808,7 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
         profile.with_option_proof(|| {
             super::play_trace::mandatory_recurrence(state)
                 .map_or(super::period_confirm::OptionProof::Undecided, |span| {
-                    super::period_confirm::span_option_proof(state, span, &proved).1
+                    super::period_confirm::span_option_proof(state, span, &proved, None).1
                 })
         })
     };
@@ -3064,9 +3064,12 @@ fn decide_mandatory_span(
         return MandatoryDecision::Keep(Witnessed::Refused);
     };
     let proved = reading.profile.clone();
+    let certificate = reading.certificate.as_ref();
     let prove = || {
         proof
-            .get_or_init(|| super::period_confirm::span_option_proof(state, span, &proved))
+            .get_or_init(|| {
+                super::period_confirm::span_option_proof(state, span, &proved, certificate)
+            })
             .1
     };
     if !has_no_loss_axis(&reading.delta) {
@@ -3105,7 +3108,7 @@ fn decide_mandatory_span(
     let profile = reading.profile;
     let verdict = if profile.holds_unproven_option() {
         // An option tree costs more than the replay, so only a period that holds is asked it.
-        super::period_confirm::mandatory_period_holds(state, span)
+        super::period_confirm::mandatory_period_holds(state, span, certificate)
             .map_or(Witnessed::Refused, |held| {
                 settle(&profile.with_option_proof(prove), held)
             })
@@ -3115,7 +3118,7 @@ fn decide_mandatory_span(
         if !profile.is_forced() && !profile.is_offered() {
             return MandatoryDecision::Keep(Witnessed::Refused);
         }
-        super::period_confirm::mandatory_period_holds(state, span)
+        super::period_confirm::mandatory_period_holds(state, span, certificate)
             .map_or(Witnessed::Refused, |held| settle(&profile, held))
     };
     MandatoryDecision::Keep(verdict)

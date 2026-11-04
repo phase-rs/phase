@@ -535,38 +535,298 @@ impl FrameEnd {
     }
 }
 
+/// CR 705.1 + CR 706.1: what random outcomes wrote: the objects an outcome's step created, and
+/// the counters it changed on the others.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Written {
+    created: BTreeSet<ObjectId>,
+    countered: BTreeSet<(ObjectId, crate::types::counter::CounterType)>,
+}
+
+impl Written {
+    const NONE: Written = Written {
+        created: BTreeSet::new(),
+        countered: BTreeSet::new(),
+    };
+
+    /// What the step from `before`'s objects to `after` wrote.
+    fn of_step(before: &crate::types::object_map::ObjectMap, after: &GameState) -> Written {
+        let mut written = Written::default();
+        for (id, object) in after.objects.iter() {
+            let Some(prior) = before.get(id) else {
+                written.created.insert(*id);
+                continue;
+            };
+            for counter in object.counters.keys().chain(prior.counters.keys()) {
+                if object.counters.get(counter) != prior.counters.get(counter) {
+                    written.countered.insert((*id, counter.clone()));
+                }
+            }
+        }
+        written
+    }
+
+    fn extend(&mut self, other: &Written) {
+        self.created.extend(other.created.iter().copied());
+        self.countered.extend(other.countered.iter().cloned());
+    }
+
+    fn objects(&self) -> BTreeSet<ObjectId> {
+        let countered = self.countered.iter().map(|(id, _)| *id);
+        self.created.iter().copied().chain(countered).collect()
+    }
+}
+
+/// CR 705.1 + CR 706.1 + CR 400.7 + CR 111.7: every object a period's random outcomes wrote
+/// leaves the zone it was written in within the cycle, feeding no choice, no player and no
+/// reader on the way, so no outcome is a way to stop the period; `written` is what the reading's
+/// outcomes wrote.
+#[derive(Debug, Clone)]
+pub(crate) struct OutcomeCertificate {
+    written: Written,
+}
+
+/// A reading's first-cycle writes, followed until each leaves the zone it was written in.
+#[derive(Default)]
+struct Lifetime {
+    second_cycle: bool,
+    /// Each object the first cycle's outcomes wrote, and the zone it was written in.
+    first: Vec<(ObjectId, crate::types::zones::Zone)>,
+    /// Those that have since left that zone.
+    left: BTreeSet<ObjectId>,
+    /// Each priority frame from the write while one is still in its zone.
+    frames: Vec<GameState>,
+    /// The triggered abilities that wrote, and those that moved a written object out of its zone.
+    authors: Vec<crate::types::ability::TriggerDefinitionRef>,
+    /// An outcome fed a player or a prompt, or a confining move changed a player.
+    escaped: bool,
+}
+
+impl Lifetime {
+    /// Whether a written object is still in the zone it was written in at `state`.
+    fn holds(&self, state: &GameState) -> bool {
+        self.first.iter().any(|(id, zone)| {
+            !self.left.contains(id) && state.objects.get(id).is_some_and(|o| o.zone == *zone)
+        })
+    }
+}
+
+/// While outcomes are admitted: how many outcome draws the replays kept and what they wrote.
+#[derive(Default)]
+struct OutcomeRecord {
+    kept: u64,
+    written: Written,
+    lifetime: Option<Lifetime>,
+}
+
+/// The state a step's record compares against, read before the step.
+struct BeforeStep {
+    objects: crate::types::object_map::ObjectMap,
+    players: Vec<PlayerMarks>,
+    /// The triggered ability resolving, or on top of the stack.
+    resolving: Option<crate::types::ability::TriggerDefinitionRef>,
+}
+
+/// CR 119 + CR 122.1 + CR 400.1: what of a player a random outcome could feed.
+type PlayerMarks = (
+    i32,
+    im::Vector<ObjectId>,
+    im::Vector<ObjectId>,
+    im::Vector<ObjectId>,
+    u32,
+);
+
+fn player_marks(state: &GameState) -> Vec<PlayerMarks> {
+    state
+        .players
+        .iter()
+        .map(|p| {
+            (
+                p.life,
+                p.hand.clone(),
+                p.library.clone(),
+                p.graveyard.clone(),
+                p.poison_counters,
+            )
+        })
+        .collect()
+}
+
+impl BeforeStep {
+    fn of(state: &GameState) -> Self {
+        let resolving = state
+            .resolving_stack_entry
+            .as_ref()
+            .or_else(|| state.stack.back())
+            .and_then(|entry| entry.ability())
+            .and_then(|ability| ability.trigger_definition_ref.clone());
+        BeforeStep {
+            objects: state.objects.clone(),
+            players: player_marks(state),
+            resolving,
+        }
+    }
+}
+
+impl OutcomeRecord {
+    /// Notes the step from `before` to `after`, which drew `drawn` outcomes and emitted `events`.
+    fn note(&mut self, before: BeforeStep, after: &GameState, drawn: u64, events: &[GameEvent]) {
+        let fed_a_player = before.players != player_marks(after);
+        if drawn > 0 {
+            self.kept += drawn;
+            let wrote = Written::of_step(&before.objects, after);
+            if let Some(lifetime) = &mut self.lifetime {
+                lifetime.escaped |=
+                    fed_a_player || !matches!(after.waiting_for, WaitingFor::Priority { .. });
+                lifetime.authors.extend(before.resolving.clone());
+                if !lifetime.second_cycle {
+                    lifetime.first.extend(
+                        wrote
+                            .objects()
+                            .into_iter()
+                            .filter_map(|id| Some((id, after.objects.get(&id)?.zone))),
+                    );
+                }
+            }
+            self.written.extend(&wrote);
+        } else if let Some(lifetime) = &mut self.lifetime {
+            let moved: Vec<ObjectId> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(from),
+                        ..
+                    } if lifetime.first.contains(&(*object_id, *from))
+                        && !lifetime.left.contains(object_id) =>
+                    {
+                        Some(*object_id)
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !moved.is_empty() {
+                lifetime.escaped |= fed_a_player;
+                lifetime.authors.extend(before.resolving);
+                lifetime.left.extend(moved);
+            }
+        }
+        if let Some(lifetime) = &mut self.lifetime {
+            if matches!(after.waiting_for, WaitingFor::Priority { .. }) && lifetime.holds(after) {
+                lifetime.frames.push(after.clone());
+            }
+        }
+    }
+
+    /// CR 400.7 + CR 111.7 + CR 704.5d + CR 603.2: the certificate, when every object the first
+    /// cycle wrote leaves the zone it was written in again in the second cycle, whose `events`
+    /// end at `end`, and no surface but its authors' reads one while it is there.
+    fn certificate(&self, end: &GameState, events: &[GameEvent]) -> Option<OutcomeCertificate> {
+        let lifetime = self.lifetime.as_ref()?;
+        let leaves = lifetime.first.iter().all(|&(id, zone)| {
+            !end.objects.contains_key(&id)
+                || events.iter().any(|event| {
+                    matches!(event, GameEvent::ZoneChanged { object_id, from: Some(from), .. }
+                        if *object_id == id && *from == zone)
+                })
+        });
+        let unread = || {
+            lifetime.frames.iter().all(|frame| {
+                lifetime
+                    .first
+                    .iter()
+                    .filter(|(id, zone)| frame.objects.get(id).is_some_and(|o| o.zone == *zone))
+                    .all(|(id, _)| {
+                        !crate::analysis::resource::written_member_read(
+                            frame,
+                            *id,
+                            &lifetime.authors,
+                        )
+                    })
+            })
+        };
+        (!lifetime.first.is_empty() && !lifetime.escaped && leaves && unread()).then(|| {
+            OutcomeCertificate {
+                written: self.written.clone(),
+            }
+        })
+    }
+}
+
 thread_local! {
-    /// While a reading admits outcomes: how many outcome draws its replays kept.
-    static OUTCOMES_KEPT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    /// While outcomes are admitted: what the replays' outcomes kept and wrote.
+    static OUTCOMES: std::cell::RefCell<Option<OutcomeRecord>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// CR 705.1 + CR 706.1 + CR 104.4b: while held, a replayed coin flip or die roll is kept as the
-/// period's randomness instead of refused.
+/// period's randomness instead of refused, and what it writes is recorded.
 #[must_use]
-struct OutcomesAdmitted(Option<u64>);
+struct OutcomesAdmitted(Option<OutcomeRecord>);
 
 impl OutcomesAdmitted {
     fn enter() -> Self {
-        OutcomesAdmitted(OUTCOMES_KEPT.with(|kept| kept.replace(Some(0))))
+        OutcomesAdmitted(OUTCOMES.with(|record| record.replace(Some(OutcomeRecord::default()))))
+    }
+
+    /// Enters a guard only where outcomes are already admitted, to read its replays' own writes.
+    fn nested() -> Option<Self> {
+        outcomes_admitted().then(Self::enter)
+    }
+
+    fn with<T>(&self, read: impl FnOnce(&mut OutcomeRecord) -> T) -> T {
+        OUTCOMES.with(|record| {
+            read(
+                record
+                    .borrow_mut()
+                    .as_mut()
+                    .expect("a held guard keeps a record"),
+            )
+        })
     }
 
     /// Whether a replay kept an outcome since this guard was entered.
     fn kept(&self) -> bool {
-        OUTCOMES_KEPT
-            .with(std::cell::Cell::get)
-            .is_some_and(|kept| kept > 0)
+        self.with(|record| record.kept > 0)
+    }
+
+    /// What the replays wrote since this guard was entered.
+    fn written(&self) -> Written {
+        self.with(|record| record.written.clone())
+    }
+
+    /// Follows the first cycle's writes, for [`OutcomeRecord::certificate`].
+    fn follow_writes(&self) {
+        self.with(|record| record.lifetime = Some(Lifetime::default()));
+    }
+
+    fn second_cycle(&self) {
+        self.with(|record| {
+            if let Some(lifetime) = &mut record.lifetime {
+                lifetime.second_cycle = true;
+            }
+        });
+    }
+
+    fn certificate(&self, end: &GameState, events: &[GameEvent]) -> Option<OutcomeCertificate> {
+        self.with(|record| record.certificate(end, events))
     }
 }
 
 impl Drop for OutcomesAdmitted {
     fn drop(&mut self) {
-        let inner = OUTCOMES_KEPT.with(std::cell::Cell::get).unwrap_or(0);
-        OUTCOMES_KEPT.with(|kept| kept.set(self.0.map(|outer| outer + inner)));
+        OUTCOMES.with(|record| {
+            let inner = record.replace(self.0.take());
+            if let (Some(inner), Some(outer)) = (inner, record.borrow_mut().as_mut()) {
+                outer.kept += inner.kept;
+                outer.written.extend(&inner.written);
+            }
+        });
     }
 }
 
 fn outcomes_admitted() -> bool {
-    OUTCOMES_KEPT.with(std::cell::Cell::get).is_some()
+    OUTCOMES.with(|record| record.borrow().is_some())
 }
 
 /// Upper bound on the actions one replayed cycle may take.
@@ -582,6 +842,8 @@ fn step(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), OfferRefusal> {
     let outcomes = replay.rng.outcome_draws();
+    let before = outcomes_admitted().then(|| BeforeStep::of(replay));
+    let from = events.len();
     events.extend(
         apply(replay, seat, action)
             .map_err(|error| match error {
@@ -593,12 +855,18 @@ fn step(
             .events,
     );
     let drawn = replay.rng.outcome_draws() - outcomes;
-    if drawn > 0 {
-        if !outcomes_admitted() {
-            return Err(OfferRefusal::Randomness);
+    let Some(before) = before else {
+        return if drawn > 0 {
+            Err(OfferRefusal::Randomness)
+        } else {
+            Ok(())
+        };
+    };
+    OUTCOMES.with(|record| {
+        if let Some(record) = record.borrow_mut().as_mut() {
+            record.note(before, replay, drawn, &events[from..]);
         }
-        OUTCOMES_KEPT.with(|kept| kept.set(kept.get().map(|kept| kept + drawn)));
-    }
+    });
     Ok(())
 }
 
@@ -1576,9 +1844,18 @@ pub(crate) fn normalize_cast_frame(state: &GameState, casts: &[ObjectId]) -> Gam
 }
 
 /// [`normalize_cast_frame`] with the casts read from `state` itself, since a prepared copy cast
-/// strips a different copy in each frame.
-fn normalize_period_frame(state: &GameState, items: &[PeriodItem]) -> GameState {
-    normalize_cast_frame(state, &period_casts(state, items))
+/// strips a different copy in each frame, and what `written` names stripped too: an object a
+/// random outcome created, and a counter it changed (CR 705.1, CR 706.1).
+fn normalize_period_frame(state: &GameState, items: &[PeriodItem], written: &Written) -> GameState {
+    let mut stripped = period_casts(state, items);
+    stripped.extend(written.created.iter().copied());
+    let mut normalized = normalize_cast_frame(state, &stripped);
+    for (id, counter) in &written.countered {
+        if let Some(object) = normalized.objects.get_mut(id) {
+            object.counters.remove(counter);
+        }
+    }
+    normalized
 }
 
 /// A span replayed twice from a priority frame: the stage the confirmer and the
@@ -1599,6 +1876,8 @@ struct ReplayedPeriod {
     second: Result<Vec<String>, OfferRefusal>,
     /// The outcome position each compared cycle starts from, when the replay drew an outcome.
     pinned: Option<u128>,
+    /// What the replay's outcomes wrote.
+    written: Written,
     /// Every frame above is read inside the probe.
     _probe: SimulationProbeGuard,
 }
@@ -1647,8 +1926,9 @@ fn period_floors(
 }
 
 impl ReplayedPeriod {
-    /// Each replayed frame's floor; the closing frame's needs a third cycle.
-    fn floors(&self) -> [usize; 3] {
+    /// Each replayed frame's floor, read with `written` stripped; the closing frame's needs a
+    /// third cycle.
+    fn floors(&self, written: &Written) -> [usize; 3] {
         let mut next = self.replay.clone();
         if let Some(at) = self.pinned {
             next.rng.set_word_pos(at);
@@ -1664,7 +1944,7 @@ impl ReplayedPeriod {
         period_floors(
             [&self.s_n, &self.s_n1, &self.replay],
             third.is_ok().then_some(&next),
-            |state| normalize_period_frame(state, &self.items),
+            |state| normalize_period_frame(state, &self.items, written),
         )
     }
 }
@@ -1698,6 +1978,7 @@ fn replay_period(
     #[cfg(feature = "test-support")]
     crate::game::perf_counters::record_play_trace(|counters| counters.confirm_drives += 1);
     let probe = SimulationProbeGuard::enter();
+    let own = OutcomesAdmitted::nested();
     let mut s_n = replay_base(frame, holder);
     let end = FrameEnd::of(&s_n, holder, span.reach);
     let mut replay = s_n.clone();
@@ -1770,6 +2051,10 @@ fn replay_period(
         replay,
         second,
         pinned,
+        written: own
+            .as_ref()
+            .map(OutcomesAdmitted::written)
+            .unwrap_or_default(),
         _probe: probe,
     })
 }
@@ -1791,6 +2076,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         mut replay,
         second,
         pinned: _,
+        written: _,
         _probe,
     } = replay_period(frame, span, None)?;
     // A period whose second cycle is refused has one pair of frames, read as any pair is.
@@ -1800,7 +2086,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
     };
     let (verdict, growth) = certify_object_growth_frames(
         [&s_n, &s_n1, current],
-        |state| normalize_period_frame(state, &items),
+        |state| normalize_period_frame(state, &items, &Written::NONE),
         holder,
         None,
     );
@@ -2032,8 +2318,13 @@ pub(crate) struct HeldPeriod {
 /// action: no loss axis (CR 704.5c), no driving resource falling on a carried permanent and no
 /// marked damage growing (CR 704.5g, CR 704.5i, CR 704.5q), and no -1/-1 counter growth
 /// (CR 704.5f). A player counter nothing in the loop reads is no way to stop it (CR 122.1), so
-/// no unmeasured axis bars the period.
-pub(crate) fn mandatory_period_holds(frame: &GameState, span: NamedSpan) -> Option<HeldPeriod> {
+/// no unmeasured axis bars the period. Under `certificate` the frames are read with what the
+/// replay's outcomes wrote stripped.
+pub(crate) fn mandatory_period_holds(
+    frame: &GameState,
+    span: NamedSpan,
+    certificate: Option<&OutcomeCertificate>,
+) -> Option<HeldPeriod> {
     let _outcomes = OutcomesAdmitted::enter();
     #[cfg(feature = "test-support")]
     crate::game::perf_counters::record_play_trace(|counters| counters.mandatory_replays += 1);
@@ -2043,7 +2334,11 @@ pub(crate) fn mandatory_period_holds(frame: &GameState, span: NamedSpan) -> Opti
     else {
         return None;
     };
-    let floors = period.floors();
+    let written = match certificate {
+        Some(_) => period.written.clone(),
+        None => Written::NONE,
+    };
+    let floors = period.floors(&written);
     let ReplayedPeriod {
         items,
         s_n,
@@ -2057,7 +2352,7 @@ pub(crate) fn mandatory_period_holds(frame: &GameState, span: NamedSpan) -> Opti
     let covered = living.iter().all(|&seat| {
         let verdict = certify_object_growth_frames(
             [&s_n, &s_n1, &s_n2],
-            |state| normalize_period_frame(state, &items),
+            |state| normalize_period_frame(state, &items, &written),
             seat,
             Some(floors),
         )
@@ -2105,9 +2400,11 @@ pub(crate) fn mandatory_period_holds(frame: &GameState, span: NamedSpan) -> Opti
 pub(crate) struct MandatoryReading {
     pub(crate) profile: crate::types::game_state::LoopDecisionProfile,
     pub(crate) delta: ResourceVector,
-    /// The board one cycle moves; empty when the replay kept a random outcome (CR 705.1, CR 706.1).
+    /// The board one cycle moves; empty when the replay kept a random outcome (CR 705.1, CR 706.1)
+    /// no certificate covers.
     pub(crate) residual: crate::analysis::resource::BoardDelta,
     pub(crate) winner: Option<PlayerId>,
+    pub(crate) certificate: Option<OutcomeCertificate>,
 }
 
 /// CR 104.4b + CR 732.5: the mandatory span `span` replayed for two cycles from `frame` itself,
@@ -2124,6 +2421,7 @@ pub(crate) fn mandatory_reading(frame: &GameState, span: NamedSpan) -> Option<Ma
     crate::game::perf_counters::record_play_trace(|counters| counters.confirm_drives += 1);
     let _probe = SimulationProbeGuard::enter();
     let outcomes = OutcomesAdmitted::enter();
+    outcomes.follow_writes();
     let mut replay = without_standing_passes(frame.clone());
     let end = FrameEnd::of(&replay, holder, span.reach);
     replay_cycle(
@@ -2137,16 +2435,19 @@ pub(crate) fn mandatory_reading(frame: &GameState, span: NamedSpan) -> Option<Ma
     .ok()?;
     let s1 = replay.clone();
     let mut frames = Vec::new();
+    let mut events = Vec::new();
+    outcomes.second_cycle();
     replay_cycle(
         &mut replay,
         &items,
         &end,
         &mut Vec::new(),
         Some(&mut frames),
-        &mut Vec::new(),
+        &mut events,
     )
     .ok()?;
     let s2 = replay;
+    let certificate = outcomes.certificate(&s2, &events);
     let mut profile = LoopDecisionProfile::of_window(
         [&s1.loop_decision_marks_with(out)],
         &s2.loop_decision_marks_with(out),
@@ -2160,10 +2461,12 @@ pub(crate) fn mandatory_reading(frame: &GameState, span: NamedSpan) -> Option<Ma
         profile.members.insert(LoopDecision::Outs);
     }
     // CR 705.1 + CR 706.1: a replay that kept an outcome saw one outcome of many, so nothing it
-    // read is forced or published.
-    let kept = outcomes.kept();
+    // read is forced or published, unless the certificate shows no outcome can stop the period.
+    let kept = outcomes.kept() && certificate.is_none();
     if kept {
         profile.members.insert(LoopDecision::Random);
+    } else if certificate.is_some() {
+        profile.members.remove(&LoopDecision::Random);
     }
     let delta = period_delta(&s1, &s2);
     let fallers: Vec<PlayerId> = seats(&s2)
@@ -2179,16 +2482,20 @@ pub(crate) fn mandatory_reading(frame: &GameState, span: NamedSpan) -> Option<Ma
                     || crate::analysis::loop_check::fallers_lives_pairwise_equal(&read, &fallers))
         },
     );
-    let residual = if kept {
-        crate::analysis::resource::BoardDelta::default()
-    } else {
-        crate::analysis::resource::board_delta(&s1, &s2)
+    let residual = match &certificate {
+        Some(certificate) => crate::analysis::resource::board_delta(
+            &normalize_period_frame(&s1, &items, &certificate.written),
+            &normalize_period_frame(&s2, &items, &certificate.written),
+        ),
+        None if kept => crate::analysis::resource::BoardDelta::default(),
+        None => crate::analysis::resource::board_delta(&s1, &s2),
     };
     Some(MandatoryReading {
         profile,
         residual,
         delta,
         winner,
+        certificate,
     })
 }
 
@@ -2201,15 +2508,17 @@ pub(crate) enum Outcomes {
 
 /// CR 603.3b + CR 732.2a: the every-option proof of the mandatory span `span` for the period read
 /// as `profile`, read from the trace when kept. A random profile is never forced, so only its
-/// proof may keep an outcome a replay draws.
+/// proof, or one under `certificate`, may keep an outcome a replay draws.
 pub(crate) fn span_option_proof(
     state: &GameState,
     span: NamedSpan,
     profile: &crate::types::game_state::LoopDecisionProfile,
+    certificate: Option<&OutcomeCertificate>,
 ) -> (Outcomes, OptionProof) {
-    let outcomes = if profile
-        .members
-        .contains(&crate::types::game_state::LoopDecision::Random)
+    let outcomes = if certificate.is_some()
+        || profile
+            .members
+            .contains(&crate::types::game_state::LoopDecision::Random)
     {
         Outcomes::Admitted
     } else {
@@ -2217,7 +2526,7 @@ pub(crate) fn span_option_proof(
     };
     let proof = play_trace::order_proof(state, span.start, outcomes).unwrap_or_else(|| {
         let _admitted = (outcomes == Outcomes::Admitted).then(OutcomesAdmitted::enter);
-        decision_points(state, span)
+        decision_points(state, span, certificate)
     });
     (outcomes, proof)
 }
@@ -2378,11 +2687,14 @@ struct PointNode {
     prompt: GameState,
     key: PromptKey,
     road: Road,
+    /// What the outcomes of the replays that reached this node wrote.
+    written: Written,
     /// The point's answer paths, found when the closure first counts them; `None` when they
     /// cannot all be listed.
     edges: std::cell::OnceCell<Option<Vec<Edge>>>,
-    /// The frames before the next two points with this node's key, along `road`.
-    onward: std::cell::OnceCell<Result<[GameState; 2], Halt>>,
+    /// The frames before the next two points with this node's key, along `road`, and what the
+    /// replays to the second wrote.
+    onward: std::cell::OnceCell<Result<([GameState; 2], Written), Halt>>,
 }
 
 impl PointNode {
@@ -2406,8 +2718,13 @@ fn point_key(labels: &[Label]) -> Vec<Label> {
 /// CR 603.3b + CR 104.4b: replays the span `span` from `frame` under every answer at every
 /// decision point it meets, with saved orders asked rather than applied, closing over the frames
 /// before each point; a frame is covered when the recorded road's certification, with each
-/// frame's floor, equates it with a node at the same point.
-pub(crate) fn decision_points(frame: &GameState, span: NamedSpan) -> OptionProof {
+/// frame's floor and, under `certificate`, what the outcomes wrote stripped, equates it with a
+/// node at the same point.
+pub(crate) fn decision_points(
+    frame: &GameState,
+    span: NamedSpan,
+    certificate: Option<&OutcomeCertificate>,
+) -> OptionProof {
     let WaitingFor::Priority { player: holder } = frame.waiting_for else {
         return OptionProof::Undecided;
     };
@@ -2424,10 +2741,11 @@ pub(crate) fn decision_points(frame: &GameState, span: NamedSpan) -> OptionProof
     let end = FrameEnd::of(&s0, holder, span.reach);
     let living = seats(frame);
     // The replay from `from` to the decision prompt it stops at: the frame before the prompt, the
-    // state at it, and the answers given on the way.
+    // state at it, the answers given on the way, and what its outcomes wrote.
     let replay_from = |from: &GameState, answering: Answering| {
         #[cfg(feature = "test-support")]
         crate::game::perf_counters::record_play_trace(|counters| counters.confirm_drives += 1);
+        let own = OutcomesAdmitted::nested();
         let mut replay = from.clone();
         let mut stop = PointStop {
             answering,
@@ -2445,8 +2763,12 @@ pub(crate) fn decision_points(frame: &GameState, span: NamedSpan) -> OptionProof
             Some(&mut stop),
             None,
         );
+        let written = own
+            .as_ref()
+            .map(OutcomesAdmitted::written)
+            .unwrap_or_default();
         match (out, stop.reached) {
-            (Ok(_), Some(frame)) => Ok((frame, replay, stop.taken)),
+            (Ok(_), Some(frame)) => Ok((frame, replay, stop.taken, written)),
             (Ok(_), None) => Err(Halt::Undecided),
             (Err(refusal), _) => Err(halt(&replay, &refusal)),
         }
@@ -2459,7 +2781,7 @@ pub(crate) fn decision_points(frame: &GameState, span: NamedSpan) -> OptionProof
         }
         road
     };
-    let node_at = |frame: Option<GameState>, prompt: GameState, road: Road| {
+    let node_at = |frame: Option<GameState>, prompt: GameState, road: Road, written: Written| {
         // A prompt following another with no priority between is no node frame.
         let frame = frame.ok_or(Halt::Undecided)?;
         let (key, _) = decision_prompt(&prompt, ORDER_EDGES).ok_or(Halt::Undecided)?;
@@ -2468,14 +2790,24 @@ pub(crate) fn decision_points(frame: &GameState, span: NamedSpan) -> OptionProof
             prompt,
             key,
             road,
+            written,
             edges: std::cell::OnceCell::new(),
             onward: std::cell::OnceCell::new(),
         })
     };
+    let lineage = |node: &PointNode, mut written: Written| {
+        written.extend(&node.written);
+        written
+    };
     let step = |node: &PointNode, path: &[(PromptKey, PointAnswer)]| {
-        let (frame, prompt, taken) =
+        let (frame, prompt, taken, written) =
             replay_from(&node.frame, Answering::Path(path.iter().cloned().collect()))?;
-        node_at(frame, prompt, road_with(&node.road, &taken))
+        node_at(
+            frame,
+            prompt,
+            road_with(&node.road, &taken),
+            lineage(node, written),
+        )
     };
     // CR 603.3b + CR 601.2c + CR 608.2d: `node`'s answer paths, found by replaying each answer at
     // its prompt and keeping that replay as the edge when priority comes before the next decision
@@ -2486,7 +2818,7 @@ pub(crate) fn decision_points(frame: &GameState, span: NamedSpan) -> OptionProof
         for answer in answers {
             let path = vec![(key.clone(), answer)];
             match replay_from(&node.frame, Answering::Path(path.iter().cloned().collect())) {
-                Ok((None, prompt, _)) => {
+                Ok((None, prompt, _, _)) => {
                     let (_, tails) = decision_paths(&prompt, ORDER_EDGES)?;
                     edges.extend(tails.into_iter().map(|tail| Edge {
                         path: [path.as_slice(), &tail].concat(),
@@ -2494,8 +2826,13 @@ pub(crate) fn decision_points(frame: &GameState, span: NamedSpan) -> OptionProof
                     }));
                 }
                 reached => {
-                    let reached = reached.and_then(|(frame, prompt, taken)| {
-                        node_at(frame, prompt, road_with(&node.road, &taken))
+                    let reached = reached.and_then(|(frame, prompt, taken, written)| {
+                        node_at(
+                            frame,
+                            prompt,
+                            road_with(&node.road, &taken),
+                            lineage(node, written),
+                        )
                     });
                     edges.push(Edge {
                         path,
@@ -2514,8 +2851,14 @@ pub(crate) fn decision_points(frame: &GameState, span: NamedSpan) -> OptionProof
         let mut held: Option<PointNode> = None;
         for _ in 0..ONWARD_POINTS {
             let at = held.as_ref().unwrap_or(node);
-            let (frame, prompt, taken) = replay_from(&at.frame, Answering::Road(&at.road))?;
-            let next = node_at(frame, prompt, road_with(&at.road, &taken))?;
+            let (frame, prompt, taken, written) =
+                replay_from(&at.frame, Answering::Road(&at.road))?;
+            let next = node_at(
+                frame,
+                prompt,
+                road_with(&at.road, &taken),
+                lineage(at, written),
+            )?;
             if next.key == node.key {
                 return Ok(next);
             }
@@ -2524,7 +2867,7 @@ pub(crate) fn decision_points(frame: &GameState, span: NamedSpan) -> OptionProof
         Err(Halt::Undecided)
     };
     let Ok(root) = replay_from(&s0, Answering::Path(Default::default()))
-        .and_then(|(frame, prompt, _)| node_at(frame, prompt, Vec::new()))
+        .and_then(|(frame, prompt, _, written)| node_at(frame, prompt, Vec::new(), written))
     else {
         return OptionProof::Undecided;
     };
@@ -2549,10 +2892,14 @@ pub(crate) fn decision_points(frame: &GameState, span: NamedSpan) -> OptionProof
             let chain = next.onward.get_or_init(|| {
                 let first = onward(next)?;
                 let second = onward(&first)?;
-                Ok([first.frame, second.frame])
+                Ok(([first.frame, second.frame], second.written))
             });
-            let [y1, y2] = chain.as_ref().map_err(|halt| *halt)?;
-            let normalize = |state: &GameState| normalize_period_frame(state, &items);
+            let ([y1, y2], onward_written) = chain.as_ref().map_err(|halt| *halt)?;
+            let written = match certificate {
+                Some(_) => lineage(seen, onward_written.clone()),
+                None => Written::NONE,
+            };
+            let normalize = |state: &GameState| normalize_period_frame(state, &items, &written);
             let floors = period_floors([&seen.frame, &next.frame, y1], Some(y2), normalize);
             Ok(living.iter().all(|&seat| {
                 certify_object_growth_frames(

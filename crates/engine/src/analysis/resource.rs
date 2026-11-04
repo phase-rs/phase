@@ -7194,6 +7194,7 @@ fn grown_objects_are_inert_unless_unused(
                 current,
                 *id,
                 Differing::Kinds(crate::game::filter::CharacteristicKinds::ABILITIES),
+                &[],
             ) {
             let mut judged = object.clone();
             judged
@@ -7426,6 +7427,18 @@ impl<'a> FireTimeSurface<'a> {
             Self::PendingStore => SiblingReads::Any,
         }
     }
+
+    /// Whether this surface is part of the triggered ability `def`.
+    fn of_trigger(self, def: &crate::types::ability::TriggerDefinition) -> bool {
+        match self {
+            Self::TriggerCondition(c) => def.condition.as_ref().is_some_and(|d| std::ptr::eq(c, d)),
+            Self::Definition(body, _) => def
+                .execute
+                .as_deref()
+                .is_some_and(|d| std::ptr::eq(body, d)),
+            _ => false,
+        }
+    }
 }
 
 /// The off-stack fire-time firewall: does ANY live observer read the growing class
@@ -7614,11 +7627,70 @@ impl Differing {
     }
 }
 
-/// CR 732.2a: does a functioning surface of `state` read `member` where it `differing`?
-fn grown_member_read(state: &GameState, member: ObjectId, differing: Differing) -> bool {
+/// CR 732.2a: does a functioning surface of `state`, other than those of the triggered abilities
+/// `skip` names, read `member` where it `differing`?
+fn grown_member_read(
+    state: &GameState,
+    member: ObjectId,
+    differing: Differing,
+    skip: &[crate::types::ability::TriggerDefinitionRef],
+) -> bool {
+    let skipped = skipped_triggers(state, skip);
     fire_time_surfaces(state, &mut |source, surface| {
-        sibling_reads_live(state, source, &surface.sibling_reads(), member, differing)
+        !skipped.iter().any(|def| surface.of_trigger(def))
+            && sibling_reads_live(state, source, &surface.sibling_reads(), member, differing)
     })
+}
+
+/// The functioning triggered abilities of `state` that `refs` name.
+fn skipped_triggers<'a>(
+    state: &'a GameState,
+    refs: &[crate::types::ability::TriggerDefinitionRef],
+) -> Vec<&'a crate::types::ability::TriggerDefinition> {
+    if refs.is_empty() {
+        return Vec::new();
+    }
+    state
+        .objects
+        .values()
+        .flat_map(|obj| crate::game::functioning_abilities::active_trigger_definitions(state, obj))
+        .filter(|active| refs.contains(&active.definition_ref))
+        .map(|active| active.definition)
+        .collect()
+}
+
+/// CR 603.2 + CR 732.2a: does a surface functioning in `state`, other than those of the triggered
+/// abilities `skip` names, read `member`: a surface whose read is live for the whole member, or a
+/// trigger event matcher that admits it?
+pub(crate) fn written_member_read(
+    state: &GameState,
+    member: ObjectId,
+    skip: &[crate::types::ability::TriggerDefinitionRef],
+) -> bool {
+    use crate::game::filter::{matches_target_filter, FilterContext};
+    grown_member_read(state, member, Differing::Whole, skip)
+        || state.objects.values().any(|obj| {
+            crate::game::functioning_abilities::active_trigger_definitions(state, obj).any(
+                |active| {
+                    let def = active.definition;
+                    !skip.contains(&active.definition_ref)
+                        && crate::game::triggers::trigger_definition_functions_in_zone(
+                            def, obj.zone,
+                        )
+                        && [&def.valid_card, &def.valid_source]
+                            .into_iter()
+                            .flatten()
+                            .any(|filter| {
+                                matches_target_filter(
+                                    state,
+                                    member,
+                                    filter,
+                                    &FilterContext::from_source(state, obj.id),
+                                )
+                            })
+                },
+            )
+        })
 }
 
 /// Whether `reads`, made by a surface functioning on `source`, can read `member` where it
