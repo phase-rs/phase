@@ -5062,6 +5062,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         // CR 701.15b/c: goad is a candidate-local designation read; it scans no
         // board/object axis.
         | FilterProp::Goaded
+        // CR 101.2 + CR 611.3a: CanBeBeamedUp reads other permanents' functioning statics — a board read with no player resource, like EnchantedBy.
         | FilterProp::CanBeBeamedUp
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase

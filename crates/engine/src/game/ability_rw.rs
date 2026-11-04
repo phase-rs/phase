@@ -2723,6 +2723,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         // CR 701.15b/c: goad is a candidate-local designation, not a legacy
         // event-context or per-source member-bound referent.
         | FilterProp::Goaded
+        // CR 101.2 + CR 611.3a: CanBeBeamedUp is a live read of other permanents' statics, not a legacy event-context or per-source member-bound referent.
         | FilterProp::CanBeBeamedUp
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
@@ -3055,6 +3056,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         // CR 701.15b/c: goad is a candidate-local designation, not a legacy
         // event-context or per-source member-bound referent.
         | FilterProp::Goaded
+        // CR 101.2 + CR 611.3a: CanBeBeamedUp is a live read of other permanents' statics, not a legacy event-context or per-source member-bound referent.
         | FilterProp::CanBeBeamedUp
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
