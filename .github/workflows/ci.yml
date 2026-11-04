@@ -401,7 +401,7 @@ jobs:
         # because the download is file-existence-gated. Same-week runs reuse the
         # exact-key hit.
         id: mtgjson-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: data/mtgjson/AtomicCards.json
           key: mtgjson-atomic-${{ steps.cache-keys.outputs.week }}
@@ -450,7 +450,7 @@ jobs:
         # before deriving the key so the gitignored MTGJSON input participates
         # in it.
         id: cardgen-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             data/card-data.json
@@ -475,7 +475,7 @@ jobs:
         # green for the next push. This cache is written by card-data-gate alone,
         # so a hit cannot lie about a gate.
         id: gates-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             data/coverage-data.json
@@ -792,7 +792,7 @@ jobs:
         # card-data-gate's `mtgjson-atomic-` key (this job never fetches
         # AtomicCards). Exact weekly key, NO restore-keys: a new week misses and
         # re-fetches fresh set data; same-week runs reuse the exact-key hit.
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             data/mtgjson/SetList.json
