@@ -690,7 +690,67 @@ fn condition_reads_a_hand(condition: &ParsedCondition) -> bool {
             conditions.iter().any(condition_reads_a_hand)
         }
         ParsedCondition::Not { condition } => condition_reads_a_hand(condition),
-        _ => false,
+        ParsedCondition::SourceInZone { .. }
+        | ParsedCondition::SourceIsAttacking
+        | ParsedCondition::SourceIsAttackingOrBlocking
+        | ParsedCondition::SourceIsBlocked
+        | ParsedCondition::SourcePowerAtLeast { .. }
+        | ParsedCondition::SourceHasCounterAtLeast { .. }
+        | ParsedCondition::SourceHasNoCounter { .. }
+        | ParsedCondition::SourceEnteredThisTurn
+        | ParsedCondition::SourceAttackedThisTurn
+        | ParsedCondition::SourceIsCreature
+        | ParsedCondition::SourceAttachedTo { .. }
+        | ParsedCondition::SourceUntappedAttachedTo { .. }
+        | ParsedCondition::SourceLacksKeyword { .. }
+        | ParsedCondition::SourceIsColor { .. }
+        | ParsedCondition::FirstSpellThisGame
+        | ParsedCondition::OpponentSearchedLibraryThisTurn
+        | ParsedCondition::BeenAttackedThisStep
+        | ParsedCondition::OpponentPoisonAtLeast { .. }
+        | ParsedCondition::CreaturesYouControlTotalPowerAtLeast { .. }
+        | ParsedCondition::YouControlLandSubtypeAny { .. }
+        | ParsedCondition::YouControlSubtypeCountAtLeast { .. }
+        | ParsedCondition::YouControlCoreTypeCountAtLeast { .. }
+        | ParsedCondition::YouControlColorPermanentCountAtLeast { .. }
+        | ParsedCondition::YouControlSubtypeOrGraveyardCardSubtype { .. }
+        | ParsedCondition::YouControlLegendaryCreature
+        | ParsedCondition::YouControlNamedPlaneswalker { .. }
+        | ParsedCondition::ControlsCreatureWithKeyword { .. }
+        | ParsedCondition::YouControlCreatureWithPowerAtLeast { .. }
+        | ParsedCondition::YouControlCreatureWithPt { .. }
+        | ParsedCondition::YouControlAnotherColorlessCreature
+        | ParsedCondition::YouControlSnowPermanentCountAtLeast { .. }
+        | ParsedCondition::YouControlDifferentPowerCreatureCountAtLeast { .. }
+        | ParsedCondition::YouControlLandsWithSameNameAtLeast { .. }
+        | ParsedCondition::YouControlNoCreatures
+        | ParsedCondition::YouAttackedThisTurn
+        | ParsedCondition::YouAttackedSourceControllerThisTurn
+        | ParsedCondition::YouAttackedWithAtLeast { .. }
+        | ParsedCondition::YouPlayedLandThisTurn
+        | ParsedCondition::YouCastSpellThisTurn { .. }
+        | ParsedCondition::YouCastNoncreatureSpellThisTurn
+        | ParsedCondition::YouCastSpellCountAtLeast { .. }
+        | ParsedCondition::YouGainedLifeThisTurn
+        | ParsedCondition::YouCreatedTokenThisTurn
+        | ParsedCondition::YouDiscardedCardThisTurn
+        | ParsedCondition::YouSacrificedArtifactThisTurn
+        | ParsedCondition::CreatureDiedThisTurn
+        | ParsedCondition::YouHadCreatureEnterThisTurn
+        | ParsedCondition::YouHadAngelOrBerserkerEnterThisTurn
+        | ParsedCondition::YouHadArtifactEnterThisTurn
+        | ParsedCondition::BattlefieldEntriesThisTurn { .. }
+        | ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast { .. }
+        | ParsedCondition::PlayerCountAtLeast { .. }
+        | ParsedCondition::HasCityBlessing
+        | ParsedCondition::HasEnduringStory
+        | ParsedCondition::CompletedDungeon { .. }
+        | ParsedCondition::HasMaxSpeed
+        | ParsedCondition::IsYourTurn
+        | ParsedCondition::IsOpponentsTurn
+        | ParsedCondition::CurrentPhaseIs { .. }
+        | ParsedCondition::SpellTargetsFilter { .. }
+        | ParsedCondition::ControlsCommander { .. } => false,
     }
 }
 
