@@ -411,14 +411,6 @@ pub(crate) fn bind_instruction_actor(
             }
         },
     )?;
-    // CR 608.2c + CR 608.2d: the player making a "may" choice can differ
-    // from the player instructed to perform its effect. Preserve the choice
-    // authority before consuming the instruction's actor metadata.
-    if ability.optional && ability.optional_for.is_none() && ability.optional_player.is_none() {
-        if let Some(player) = super::effects::optional_prompt_player(state, ability) {
-            ability.optional_player = Some(TargetFilter::SpecificPlayer { id: player });
-        }
-    }
     ability.original_controller = Some(printed_controller);
     ability.controller = actor;
     ability.instruction_actor = None;
@@ -13188,10 +13180,12 @@ mod tests {
             Some(PlayerId(0))
         );
         assert_eq!(ability.controller, PlayerId(1));
+        assert_eq!(ability.optional_player, None);
 
         let mut ordinary = ability.clone();
         ordinary.optional_player = None;
         ordinary.instruction_actor = None;
+        ordinary.original_controller = None;
         assert_eq!(
             bind_instruction_actor(&state, &mut ordinary),
             Some(PlayerId(1))

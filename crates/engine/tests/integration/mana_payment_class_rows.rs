@@ -230,6 +230,12 @@ fn answer(b: &mut Board, done: &mut [bool]) {
         if matches!(b.r.state().waiting_for, WaitingFor::Priority { .. }) {
             return;
         }
+        if matches!(b.r.state().waiting_for, WaitingFor::ScryChoice { .. }) {
+            if !step(&mut b.r, GameAction::SelectCards { cards: vec![] }) {
+                return;
+            }
+            continue;
+        }
         if let WaitingFor::ManaSourceSelection { options, .. } = &b.r.state().waiting_for {
             let selection = options
                 .iter()
@@ -348,7 +354,7 @@ fn drive(row: &Row) -> (bool, String) {
         if step(&mut b.r, cast) {
             answer(&mut b, &mut done);
             for _ in 0..6 {
-                if b.r.state().stack.is_empty() {
+                if b.r.state().stack.is_empty() && b.r.state().resolving_stack_entry.is_none() {
                     break;
                 }
                 if matches!(b.r.state().waiting_for, WaitingFor::Priority { .. }) {
@@ -382,11 +388,11 @@ fn drive(row: &Row) -> (bool, String) {
     );
     if reading != row.7 {
         eprintln!(
-            "{}: waiting={:?}, stack={:?}, resolving={:?}",
+            "{}: waiting={:?}, stack entries={}, resolving={}",
             row.0,
             b.r.state().waiting_for,
-            b.r.state().stack,
-            b.r.state().resolving_stack_entry
+            b.r.state().stack.len(),
+            b.r.state().resolving_stack_entry.is_some()
         );
     }
 

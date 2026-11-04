@@ -16,6 +16,7 @@ use engine::types::ability::{
 };
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::identifiers::CardId;
 use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::zones::Zone;
@@ -35,13 +36,11 @@ fn wedding_announcement_human_branch_transforms_and_applies_festivity_anthem() {
         .as_deref()
         .expect("conditional must retain its Human otherwise branch");
     assert!(matches!(*human.effect, Effect::Token { .. }));
-    assert!(
-        matches!(
-            human.sub_ability.as_deref().map(|tail| &*tail.effect),
-            Some(Effect::Transform { .. })
-        ),
-        "the independent transform tail must be present on the Human branch"
-    );
+    assert!(human.sub_ability.is_none());
+    assert!(matches!(
+        conditional.sub_ability.as_deref().map(|tail| &*tail.effect),
+        Some(Effect::Transform { .. })
+    ));
 
     let mut scenario = GameScenario::new();
     let existing_creature = scenario.add_vanilla(P0, 2, 2);
@@ -117,6 +116,11 @@ fn wedding_announcement_human_branch_transforms_and_applies_festivity_anthem() {
         "the third invitation counter must transform the enchantment; counters: {:?}; \
          resolved chain: {resolved:#?}; events: {events:#?}",
         festivity.counters,
+    );
+    assert_eq!(
+        events.iter().filter(|event| matches!(event, GameEvent::Transformed { object_id } if *object_id == wedding)).count(),
+        1,
+        "the independent tail resolves exactly once"
     );
     assert_eq!(festivity.name, "Wedding Festivity");
     assert_eq!(

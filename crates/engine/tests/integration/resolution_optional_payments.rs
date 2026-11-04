@@ -1762,6 +1762,26 @@ fn eliminated_resolution_sacrifice_payer_declines_real_stack_replacement_pause()
 
     assert!(runner.state().active_optional_effect_frame().is_none());
     assert!(runner.state().active_ability_continuation().is_none());
+    // The same replacement also applies when the resolved spell moves from
+    // the stack to its owner's graveyard. Decline this independent choice.
+    let WaitingFor::ReplacementChoice {
+        player: P0,
+        candidates,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("expected the spell's graveyard replacement choice");
+    };
+    let decline = candidates
+        .iter()
+        .position(|candidate| candidate.description == "Decline")
+        .expect("the optional replacement can be declined");
+    apply(
+        runner.state_mut(),
+        P0,
+        GameAction::ChooseReplacement { index: decline },
+    )
+    .unwrap();
     assert!(
         runner.state().resolving_stack_entry.is_none(),
         "unexpected resolving entry after elimination: waiting={:?}, replacement={:?}, entry={:?}",

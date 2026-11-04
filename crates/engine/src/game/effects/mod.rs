@@ -12881,15 +12881,10 @@ pub(crate) fn optional_prompt_player(
         }
     }
 
-    // CR 109.5 + CR 608.2d: without an explicitly named announcer, a marked
-    // "you may have <patient> ..." choice belongs to the printed controller,
-    // not to the player now carrying out the inner instruction. Legacy
-    // unmarked scoped instructions retain their existing acting-seat fallback.
-    Some(if ability.instruction_actor.is_some() {
-        ability.original_controller.unwrap_or(ability.controller)
-    } else {
-        ability.controller
-    })
+    // CR 109.5 + CR 608.2d: absent a named announcer, "you may have
+    // <patient> ..." belongs to the ability's original controller, even
+    // after the patient's instruction actor has been bound and consumed.
+    Some(ability.original_controller.unwrap_or(ability.controller))
 }
 
 fn ability_with_event_context_targets(
@@ -23583,8 +23578,11 @@ mod tests {
             );
             if let Some(expected) = expected {
                 assert!(
-                    matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { player, .. } if player == expected),
-                    "actor={actor:?}, expected={expected:?}, wait={:?}",
+                    matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::OptionalEffectChoice { player: P0, .. }
+                    ),
+                    "actor={actor:?}, announcer={P0:?}, wait={:?}",
                     runner.state().waiting_for
                 );
                 let frame = runner.state().active_optional_effect_frame().unwrap();
