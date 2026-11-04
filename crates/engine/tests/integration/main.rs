@@ -4,6 +4,7 @@
 // `--test`), so one implementation serves both without shipping guard code in a release build.
 // MEASURED, not assumed — the alternative already in this tree is `test_support.rs` / `support.rs`,
 // twin files kept equal by a comment asking a human to remember.
+#![recursion_limit = "512"]
 #[path = "../../src/source_census.rs"]
 mod source_census;
 

@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Integration tests for Petals of Insight (Champions of Kamigawa).
 //!
 //! Oracle: "Look at the top three cards of your library. You may put those cards
@@ -11,16 +12,12 @@
 //! - CR 608.2m: As the final step of resolving an instant or sorcery, if it was not moved
 //!   by an effect (e.g. self-bounce), it is placed into its owner's graveyard.
 
+use crate::rules::{GameAction, GameRunner, GameScenario, ObjectId, WaitingFor, Zone, P0, P1};
 use engine::game::filter_state_for_viewer;
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{DigRestOrder, DigSource, Effect, QuantityExpr, TargetFilter};
-use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
-use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
-use engine::types::zones::Zone;
 
 const PETALS_OF_INSIGHT_ORACLE: &str = "Look at the top three cards of your library. \
 You may put those cards on the bottom of your library in any order. \
@@ -65,7 +62,7 @@ fn setup_scenario() -> (GameRunner, ObjectId, [ObjectId; 3], [ObjectId; 3]) {
 }
 
 #[test]
-fn petals_of_insight_ast_shape() {
+pub fn petals_of_insight_ast_shape() {
     let parsed = parse_oracle_text(
         PETALS_OF_INSIGHT_ORACLE,
         "Petals of Insight",
@@ -147,7 +144,7 @@ fn petals_of_insight_ast_shape() {
 }
 
 #[test]
-fn petals_of_insight_accept_puts_cards_on_bottom_and_bounces_to_hand() {
+pub fn petals_of_insight_accept_puts_cards_on_bottom_and_bounces_to_hand() {
     let (mut runner, spell, [top_a, top_b, top_c], [deep_a, _, _]) = setup_scenario();
 
     // Cast Petals of Insight and stop at the optional decision prompt.
@@ -248,7 +245,7 @@ fn petals_of_insight_accept_puts_cards_on_bottom_and_bounces_to_hand() {
 /// may learn which library cards were looked at. The opponent's serialized
 /// projection carries neither the private-look ledger nor the prompt's ids.
 #[test]
-fn petals_of_insight_bottom_order_prompt_hides_looked_at_ids_from_opponent() {
+pub fn petals_of_insight_bottom_order_prompt_hides_looked_at_ids_from_opponent() {
     let (mut runner, spell, looked, _) = setup_scenario();
     let _ = runner.cast(spell).commit().stop_at_optional().resolve();
     runner
@@ -294,7 +291,7 @@ fn petals_of_insight_bottom_order_prompt_hides_looked_at_ids_from_opponent() {
 }
 
 #[test]
-fn petals_of_insight_decline_draws_three_cards_and_goes_to_graveyard() {
+pub fn petals_of_insight_decline_draws_three_cards_and_goes_to_graveyard() {
     let (mut runner, spell, [top_a, top_b, top_c], [deep_a, _, _]) = setup_scenario();
 
     // Cast Petals of Insight and stop at the optional decision prompt.
@@ -357,7 +354,7 @@ fn petals_of_insight_decline_draws_three_cards_and_goes_to_graveyard() {
 /// permutation to announce — while the accepted "If you do" branch still
 /// returns Petals of Insight to its owner's hand.
 #[test]
-fn petals_of_insight_single_looked_at_card_needs_no_bottom_order_prompt() {
+pub fn petals_of_insight_single_looked_at_card_needs_no_bottom_order_prompt() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 

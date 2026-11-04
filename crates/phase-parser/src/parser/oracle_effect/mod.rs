@@ -36794,6 +36794,15 @@ pub(super) fn def_is_dig_look(def: &AbilityDefinition) -> bool {
     matches!(&*def.effect, Effect::Dig { .. })
 }
 
+/// CR 701.20e + CR 608.2c: A bare private peek Dig ("look at the top N cards"
+/// with no destination, no keep, no reveal, source=Library). This is the
+/// antecedent for "put those cards on the bottom" continuations (Petals of
+/// Insight, Lim-Dûl's Vault). The recognizers only emit the continuation when
+/// they see this exact shape, so the role must match exactly.
+pub(super) fn def_is_bare_private_peek(def: &AbilityDefinition) -> bool {
+    effect_is_bare_private_peek(&def.effect)
+}
+
 /// CR 608.2c: Apply a "Repeat this process for <keyword list>" continuation
 /// (Kathril, Aspect Warper). Walks `defs` from the back for the most recent
 /// conditional keyword-counter placement (`PutCounter { counter_type:
@@ -38553,17 +38562,19 @@ fn clause_ir_is_exile_producer(clause: &ClauseIr) -> bool {
         || continuation_is_exile_producer(clause.disposition.intrinsic())
 }
 
-/// CR 701.20e + CR 608.2c: the RAW "look at the top N cards" shape a private
-/// peek carries BEFORE the assembly pure-peek lowering stamps `keep_count =
-/// Some(0)`. Single authority shared by the assembly lowering match and the
-/// `ClauseIr` seed predicate so the two sites cannot drift on which `Dig` shape
-/// counts as a bare peek.
+/// CR 701.20e + CR 608.2c: A bare private peek Dig ("look at the top N cards"
+/// with no destination, no keep, no reveal, source=Library). This matches both
+/// the RAW shape (keep_count=None) emitted by the parser and the NORMALIZED
+/// shape (keep_count=Some(0)) after the assembly pure-peek lowering pass.
+/// Single authority shared by the assembly lowering match, the `ClauseIr` seed
+/// predicate, and the `DigBarePrivatePeek` antecedent role so the three sites
+/// cannot drift on which `Dig` shape counts as a bare peek.
 pub(super) fn effect_is_bare_private_peek(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::Dig {
             reveal: false,
-            keep_count: None,
+            keep_count: None | Some(0),
             keep_count_expr: None,
             filter: TargetFilter::Any,
             destination: None,

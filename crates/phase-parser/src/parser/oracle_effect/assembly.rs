@@ -78,8 +78,8 @@ use super::{
     attach_repeat_process_keywords, attach_same_is_true_keywords,
     bind_anaphoric_damage_subject_keep_recipient, collapse_ephemeral_color_choice_mana,
     contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
-    def_is_damage_dealer, def_is_dig_look, def_is_dig_or_mill, def_is_generic_effect_head,
-    def_is_keyword_counter_placement, def_is_perpetual_keyword_grant,
+    def_is_bare_private_peek, def_is_damage_dealer, def_is_dig_look, def_is_dig_or_mill,
+    def_is_generic_effect_head, def_is_keyword_counter_placement, def_is_perpetual_keyword_grant,
     demote_unbindable_batch_aggregate, draw_object_count_filter, fold_cast_copy_of_card_defs,
     has_explicit_player_target, inject_chosen_color_choice_grant,
     inject_printed_color_choice_filter, instead_override_body_mut, intrinsic_continuation_effect,
@@ -875,6 +875,15 @@ pub(super) enum AntecedentRole {
     /// old scans never reached. Same trap, mirrored, as narrowing `GenericEffectHead`
     /// to "has a static".
     DigLook,
+    /// A `Dig` that is a bare private peek ("look at the top N cards of your library"
+    /// with no destination, no keep, no reveal) — the antecedent for "put those cards
+    /// on the bottom of your library" clauses (Petals of Insight, Lim-Dûl's Vault).
+    /// CR 701.20e + CR 608.2c: the private look records `private_look_ids`; the
+    /// subsequent placement on the bottom of the library reads that ledger via
+    /// `DigSource::PriorLook`. This role is narrower than `DigLook` (which includes
+    /// revealed Digs and Digs with destinations) so that the binding finds exactly
+    /// the private-peek anchor the recognizers emitted the continuation for.
+    DigBarePrivatePeek,
     /// A def whose effect TREE bears a `CopySpell` — the antecedent a "you may choose
     /// new targets for the copy/copies" sentence binds back to (CR 707.10c). A clause
     /// that resolves between the copy and the sentence may sit in between (Narset's
@@ -942,6 +951,12 @@ fn live_role_predicate(role: AntecedentRole) -> Option<fn(&AbilityDefinition) ->
         // nests a `sub_ability` in place — also length-preserving. Live, the role is
         // EXACTLY the scan it replaces.
         AntecedentRole::DigLook => Some(def_is_dig_look),
+        // LIVE — mirrors the recognizers' filter for the private-peek Dig that
+        // anchors "put those cards on the bottom" continuations. The recognizers only
+        // emit the continuation when they see a bare private peek, so the role must
+        // match exactly that shape to avoid walking past a rewritten Dig (e.g. an
+        // ExileLookedAtCard rewrite turns the Dig into ExileTop with no length change).
+        AntecedentRole::DigBarePrivatePeek => Some(def_is_bare_private_peek),
         // LIVE. `ExcessDamageToController` writes a FIELD (`*excess = Some(..)`) — the
         // most length-preserving mutation there is. A cached registry is refreshed only
         // where `defs.len()` changes, so it could not see this at all; that it happens
@@ -1314,6 +1329,7 @@ impl AssemblyEnv {
                 | AntecedentRole::KeywordCounterPlacement
                 | AntecedentRole::DigOrMill
                 | AntecedentRole::DigLook
+                | AntecedentRole::DigBarePrivatePeek
                 | AntecedentRole::DamageDealer
                 | AntecedentRole::CopySpellBearer
                 | AntecedentRole::PerpetualKeywordGrantHead => Vec::new(),
@@ -4206,7 +4222,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // updated count (Rite of Replication / Saproling Migration / Krothuss).
     resolve_those_tokens_anaphors(&mut defs);
     resolve_populated_unsuspect_anaphors(&mut defs);
-    resolve_prior_look_library_bottom_anaphors(&mut defs);
+    resolve_prior_look_library_bottom_anaphors(&mut defs, &env);
 
     // CR 701.36a + CR 603.7c: Resolve "the token created this way …" and the
     // "sacrifice it" anaphors that follow a token-creating effect (Populate,
