@@ -20520,7 +20520,13 @@ pub(crate) fn drain_pending_discard_batch(
         return Ok(PendingDiscardBatchOutcome::Idle);
     };
 
-    stamp_resumed_discard_if_unrecorded(state, &batch, events);
+    stamp_resumed_discard_if_unrecorded(
+        state,
+        batch.paused_card,
+        batch.player,
+        Some(batch.source_id),
+        events,
+    );
 
     // Finish what this seat still owes. The cursor is replaced with an empty
     // one so a re-park below installs a fresh remainder rather than mutating a
@@ -20847,10 +20853,11 @@ fn repark_discard_batch(
 /// guard.
 fn stamp_resumed_discard_if_unrecorded(
     state: &mut GameState,
-    batch: &crate::types::game_state::PendingDiscardBatch,
+    paused: ObjectIncarnationRef,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) {
-    let paused = batch.paused_card;
     let card = paused.object_id;
     let already_recorded = events.iter().any(|event| {
         matches!(
@@ -20891,7 +20898,7 @@ fn stamp_resumed_discard_if_unrecorded(
     if !left_hand {
         return;
     }
-    crate::game::restrictions::record_discard(state, batch.player);
+    crate::game::restrictions::record_discard(state, player);
     // CR 702.187b: the Mayhem marker is stamped only when the card actually
     // landed in the graveyard — a redirect leaves it elsewhere, matching the
     // un-paused path's own condition.
@@ -20899,10 +20906,26 @@ fn stamp_resumed_discard_if_unrecorded(
         crate::game::restrictions::record_card_discarded(state, card);
     }
     events.push(GameEvent::Discarded {
-        player_id: batch.player,
+        player_id: player,
         object_id: card,
-        source_id: Some(batch.source_id),
+        source_id,
     });
+}
+
+/// CR 701.9a + CR 614.6 + CR 603.2: settle a paused frameless single-card
+/// discard once its move has been delivered. The record is made at most once
+/// (shared stamp), so the `ProposedEvent::Discard` resume that already emitted
+/// `Discarded` is not double counted.
+pub(crate) fn settle_paused_single_discard(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    if let Some(paused) = state.pending_single_discard.take() {
+        stamp_resumed_discard_if_unrecorded(
+            state,
+            paused.paused_card,
+            paused.player,
+            paused.source_id,
+            events,
+        );
+    }
 }
 
 /// CR 701.57c + CR 608.2h: When a Discover pauses on its cast-or-hand offer, the

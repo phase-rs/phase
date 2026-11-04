@@ -2330,12 +2330,63 @@ pub(crate) fn uncreate_unentered_aura_token(
     state.objects.remove(&object_id);
 }
 
+/// CR 614.1a + CR 614.12: how much of the battlefield-entry pipeline a
+/// `ProposedEvent::TokenEntry` still has to run.
+///
+/// Not serialized: a function parameter on the liminal commit seam, never
+/// stored on `GameState`, never part of a resolution frame or the wire.
+#[derive(Clone, Copy)]
+pub(crate) enum TokenEntryMode {
+    /// The proposal cleared `replacement::replace_event`. Counters go through
+    /// the counter replacement consult (CR 614.1a / CR 616.1) and the CR 303.4f
+    /// as-enters host choice applies.
+    Standard,
+    /// Debug "Run ETB effects" unchecked: the operator forces the state,
+    /// mirroring `ZoneChangeCause::DebugCommand`. The proposal did NOT run the
+    /// replacement consult; the characteristic counters are installed directly
+    /// (CR 122.6a), no as-enters choice may park, and the callers skip the ETB
+    /// trigger drain and the SBA pass themselves.
+    Forced,
+}
+
+impl TokenEntryMode {
+    /// The single place the debug protocol's "Run ETB effects" bool becomes the
+    /// typed mode.
+    pub(crate) fn from_run_etb(run_etb: bool) -> Self {
+        if run_etb {
+            Self::Standard
+        } else {
+            Self::Forced
+        }
+    }
+}
+
+/// The production entry: a token entry whose proposal already cleared the
+/// replacement window, so it keeps the consulting behaviour byte-for-byte.
 pub(crate) fn commit_liminal_token_entry_with_post_actions(
     state: &mut GameState,
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
     entry_events: TokenEntryEventEmission,
     post_actions_after_finalize: Vec<PendingCounterPostAction>,
+) -> bool {
+    commit_liminal_token_entry_with_replacement_state(
+        state,
+        event,
+        events,
+        entry_events,
+        post_actions_after_finalize,
+        TokenEntryMode::Standard,
+    )
+}
+
+pub(crate) fn commit_liminal_token_entry_with_replacement_state(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+    entry_events: TokenEntryEventEmission,
+    post_actions_after_finalize: Vec<PendingCounterPostAction>,
+    mode: TokenEntryMode,
 ) -> bool {
     let ProposedEvent::TokenEntry {
         entry_ref,
@@ -2481,10 +2532,14 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
     // explicitly by `legal_aura_attachment_targets`, and `FilterProp::Another` is
     // source-relative to the Aura itself, so both already exclude the entrant on
     // either side. No card in the pool carries a counting enchant ability.
-    let hosts = if entry.attach_to.is_none() {
-        crate::game::zone_pipeline::entering_aura_hosts(state, entry_ref)
-    } else {
-        crate::game::zone_pipeline::EnteringAuraHosts::NotApplicable
+    let hosts = match mode {
+        // No as-enters host choice runs for a forced entry (the raw command
+        // contract), so nothing is decided.
+        TokenEntryMode::Forced => crate::game::zone_pipeline::EnteringAuraHosts::NotApplicable,
+        TokenEntryMode::Standard if entry.attach_to.is_none() => {
+            crate::game::zone_pipeline::entering_aura_hosts(state, entry_ref)
+        }
+        TokenEntryMode::Standard => crate::game::zone_pipeline::EnteringAuraHosts::NotApplicable,
     };
 
     // CR 303.4g: "If an Aura is entering the battlefield and there is no legal
@@ -2535,33 +2590,42 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
             .expect("resolved copy-token creation must have a live journal cause");
     }
 
-    match crate::game::zone_pipeline::apply_entering_aura_hosts(state, entry_ref, hosts) {
-        // `NoLegalHost` is unreachable here: the empty-`legal_targets` arm above
-        // returned for every entrant, card-backed included.
-        crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
-        | crate::game::zone_pipeline::EnteringAuraAttachment::Attached
-        | crate::game::zone_pipeline::EnteringAuraAttachment::NoLegalHost => {}
-        crate::game::zone_pipeline::EnteringAuraAttachment::NeedsChoice {
-            controller: chooser,
-            legal_targets,
-        } => {
-            // CR 616.1 carrier: park the entry tail exactly like the
-            // enter-with-counters pause below, so the finalize step and any
-            // remaining batch continuation run after the host is chosen.
-            state.last_created_token_ids = entry.created_ids.clone();
-            let remaining_counters = counters_to_apply
-                .iter()
-                .filter(|(_, count)| *count > 0)
-                .map(|(counter_type, count)| PendingCounterAddition::Object {
-                    actor: owner,
-                    object_id: entry_ref,
-                    counter_type: counter_type.clone(),
-                    count: *count,
-                })
-                .collect();
-            let mut post_actions = vec![finalization];
-            post_actions.extend(post_actions_after_finalize);
-            super::counters::stash_pending_counter_additions(
+    match mode {
+        // CR 303.4f/g: `Forced` runs no as-enters host choice. It must SKIP the
+        // act half rather than feed it `NotApplicable`: `apply_entering_aura_hosts`
+        // clears any parked `entering_aura_authority` (zone_pipeline.rs) BEFORE
+        // its `NotApplicable` early return, and a raw debug entry is admitted
+        // from any waiting state — calling it would spend an unrelated Aura's
+        // parked CR 303.4f authority.
+        TokenEntryMode::Forced => {}
+        TokenEntryMode::Standard => {
+            match crate::game::zone_pipeline::apply_entering_aura_hosts(state, entry_ref, hosts) {
+                // `NoLegalHost` is unreachable here: the empty-`legal_targets` arm above
+                // returned for every entrant, card-backed included.
+                crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
+                | crate::game::zone_pipeline::EnteringAuraAttachment::Attached
+                | crate::game::zone_pipeline::EnteringAuraAttachment::NoLegalHost => {}
+                crate::game::zone_pipeline::EnteringAuraAttachment::NeedsChoice {
+                    controller: chooser,
+                    legal_targets,
+                } => {
+                    // CR 616.1 carrier: park the entry tail exactly like the
+                    // enter-with-counters pause below, so the finalize step and any
+                    // remaining batch continuation run after the host is chosen.
+                    state.last_created_token_ids = entry.created_ids.clone();
+                    let remaining_counters = counters_to_apply
+                        .iter()
+                        .filter(|(_, count)| *count > 0)
+                        .map(|(counter_type, count)| PendingCounterAddition::Object {
+                            actor: owner,
+                            object_id: entry_ref,
+                            counter_type: counter_type.clone(),
+                            count: *count,
+                        })
+                        .collect();
+                    let mut post_actions = vec![finalization];
+                    post_actions.extend(post_actions_after_finalize);
+                    super::counters::stash_pending_counter_additions(
                 state,
                 remaining_counters,
                 crate::types::game_state::PendingEffectResolved::with_post_actions_without_effect(
@@ -2574,39 +2638,60 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
                     post_actions,
                 ),
             );
-            state.waiting_for = WaitingFor::ReturnAsAuraTarget {
-                player: chooser,
-                source_id: entry.source_id,
-                returned_id: entry_ref,
-                legal_targets,
-                pending_effect: Box::new(ResolvedAbility::new(
-                    Effect::Attach {
-                        attachment: TargetFilter::SelfRef,
-                        target: TargetFilter::Any,
-                        selection: AttachSelection::AtResolution {
-                            count: AttachCardinality::One,
-                        },
-                    },
-                    Vec::new(),
-                    entry.source_id,
-                    chooser,
-                )),
-            };
-            return false;
+                    state.waiting_for = WaitingFor::ReturnAsAuraTarget {
+                        player: chooser,
+                        source_id: entry.source_id,
+                        returned_id: entry_ref,
+                        legal_targets,
+                        pending_effect: Box::new(ResolvedAbility::new(
+                            Effect::Attach {
+                                attachment: TargetFilter::SelfRef,
+                                target: TargetFilter::Any,
+                                selection: AttachSelection::AtResolution {
+                                    count: AttachCardinality::One,
+                                },
+                            },
+                            Vec::new(),
+                            entry.source_id,
+                            chooser,
+                        )),
+                    };
+                    return false;
+                }
+            }
         }
     }
 
     for (counter_index, (counter_type, counter_count)) in counters_to_apply.iter().enumerate() {
-        if *counter_count > 0
-            && !super::counters::add_counter_with_replacement(
-                state,
-                owner,
-                entry_ref,
-                counter_type.clone(),
-                *counter_count,
-                events,
-            )
-        {
+        let applied = *counter_count == 0
+            || match mode {
+                TokenEntryMode::Standard => super::counters::add_counter_with_replacement(
+                    state,
+                    owner,
+                    entry_ref,
+                    counter_type.clone(),
+                    *counter_count,
+                    events,
+                ),
+                // CR 122.6a: the controller puts the counters; CR 306.5b /
+                // CR 310.4b are themselves replacement effects (CR 614.1c) the
+                // forced entry does not consult. `apply_counter_addition`
+                // re-derives `loyalty` / `defense` from the counter map
+                // (CR 306.5c / CR 310.4c), exactly what the DebugCommand card
+                // arm installs, so the two modes cannot drift.
+                TokenEntryMode::Forced => {
+                    super::counters::apply_counter_addition(
+                        state,
+                        owner,
+                        entry_ref,
+                        counter_type.clone(),
+                        *counter_count,
+                        events,
+                    );
+                    true
+                }
+            };
+        if *counter_count > 0 && !applied {
             state.last_created_token_ids = entry.created_ids.clone();
             let remaining_counters = counters_to_apply[counter_index + 1..]
                 .iter()
