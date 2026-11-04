@@ -191,8 +191,9 @@ pub fn pending_agenda_choice(state: &GameState) -> Option<WaitingFor> {
 }
 
 /// CR 702.106a: Answer a [`WaitingFor::SecretAgendaChoice`], then continue the
-/// pregame procedure. No event is emitted: the choice is secret until the
-/// conspiracy is turned face up (CR 702.106c).
+/// agenda step. No event is emitted: the choice is secret until the conspiracy
+/// is turned face up (CR 702.106c). The companion-reveal step is already done,
+/// so this cannot reoffer a companion (CR 103.2b precedes CR 103.2e).
 pub fn handle_secret_agenda_names(
     state: &mut GameState,
     player: PlayerId,
@@ -201,14 +202,27 @@ pub fn handle_secret_agenda_names(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, String> {
     record_secret_agenda_choices(state, object_id, player, names)?;
-    Ok(next_pregame_decision(state, events))
+    Ok(agenda_choices_or_mulligan(state, events))
 }
 
-/// CR 702.106a: The next agenda prompt, or the companion and mulligan steps once
-/// every agenda is named. Authority for leaving the agenda step of pregame.
-pub fn next_pregame_decision(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
-    pending_agenda_choice(state)
-        .unwrap_or_else(|| super::companion::companion_reveals_or_mulligan(state, events))
+/// CR 103.2b + CR 103.2e + CR 702.106a: Begin the pregame procedure at the
+/// companion-reveal step. CR 103.2 orders the pregame steps: companion reveals
+/// (103.2b) come before conspiracies enter the command zone (103.2e) and their
+/// hidden-agenda names are chosen (702.106a); mulligans follow both. This is the single
+/// entry into pregame; the companion walk hands off to
+/// [`agenda_choices_or_mulligan`] and never back here, so a companion already
+/// handled is not offered again when an agenda is answered.
+pub fn begin_pregame(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
+    super::companion::companion_reveals_or_agenda(state, events)
+}
+
+/// CR 702.106a: The next agenda prompt, or mulligans once every agenda is named.
+/// Authority for leaving the agenda step of pregame.
+pub fn agenda_choices_or_mulligan(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    pending_agenda_choice(state).unwrap_or_else(|| super::mulligan::start_mulligan(state, events))
 }
 
 /// CR 905.4 + CR 113.6b: True when this object is a conspiracy that is currently

@@ -336,7 +336,7 @@ pub fn check_all_companion_reveals(state: &GameState) -> Option<WaitingFor> {
 /// CR 702.139a: Handle companion declaration or decline.
 /// `eligible_companions` is the pre-computed list from `WaitingFor::CompanionReveal`,
 /// ensuring the typed response exactly matches a card that was presented.
-/// Returns the next WaitingFor state (next player's reveal or mulligans).
+/// Returns the next WaitingFor state (next player's reveal or the agenda step).
 pub fn handle_declare_companion(
     state: &mut GameState,
     player: PlayerId,
@@ -459,17 +459,18 @@ pub fn handle_declare_companion(
     Ok(advance_companion_reveal(state, player, events))
 }
 
-/// CR 702.139a + CR 103.5: The pregame step after start-of-game conspiracies are
-/// set: companion reveals if any player has an eligible companion, else mulligans.
-pub(super) fn companion_reveals_or_mulligan(
+/// CR 702.139a + CR 103.2b: Start the pregame companion-reveal step. If any
+/// living player has an eligible companion, offer the first reveal; otherwise
+/// hand off to the conspiracy agenda step, which hands off to mulligans.
+pub(super) fn companion_reveals_or_agenda(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     check_all_companion_reveals(state)
-        .unwrap_or_else(|| super::mulligan::start_mulligan(state, events))
+        .unwrap_or_else(|| super::conspiracy::agenda_choices_or_mulligan(state, events))
 }
 
-/// Move to the next player's companion reveal, or start mulligans if all done.
+/// Move to the next player's companion reveal, or start the agenda step if all done.
 fn advance_companion_reveal(
     state: &mut GameState,
     current_player: PlayerId,
@@ -491,8 +492,8 @@ fn advance_companion_reveal(
         }
     }
 
-    // All players done — proceed to mulligans
-    super::mulligan::start_mulligan(state, events)
+    // All players done — proceed to the conspiracy agenda step, then mulligans.
+    super::conspiracy::agenda_choices_or_mulligan(state, events)
 }
 
 // ── Special Action: Pay {3} to Move Companion to Hand ───────────────────

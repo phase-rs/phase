@@ -21061,9 +21061,10 @@ pub fn start_game_with_starting_player(
     // If players have cards in their libraries, start mulligan flow
     let has_libraries = state.players.iter().any(|p| !p.library.is_empty());
     let waiting_for = if has_libraries {
-        // CR 702.106a: Agenda names are chosen as conspiracies enter the command
-        // zone, ahead of companion reveals and mulligans (CR 702.139a).
-        super::conspiracy::next_pregame_decision(state, &mut events)
+        // CR 103.2b + CR 103.2e: companion reveals come before conspiracies
+        // enter the command zone and their hidden-agenda names are chosen;
+        // mulligans follow both.
+        super::conspiracy::begin_pregame(state, &mut events)
     } else {
         // No cards to mulligan with, skip straight to game
         crate::game::planechase::reveal_starting_plane(state);
