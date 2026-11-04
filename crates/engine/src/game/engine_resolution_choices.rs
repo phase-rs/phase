@@ -7158,6 +7158,7 @@ pub(super) fn handle_resolution_choice(
                             },
                             pending_return_result_producer,
                             stamp_this_way: true,
+                            consumes_own_exile_links: false,
                         };
                             match crate::game::zone_pipeline::deliver_staged_change_zone_batch(
                                 state,

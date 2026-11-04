@@ -2168,8 +2168,7 @@ fn mark_staged_member_terminal(
 ) {
     // CR 608.2c: the mass hand-exile counter is the completion's typed
     // `MassAllMembers` policy; a targeted or choice-selected population never
-    // increments it. The per-member exile link is the member request's own
-    // typed tracking, not a parallel batch flag.
+    // increments it.
     let count_hand_exile = matches!(
         owner.completion.as_ref(),
         Some(crate::types::game_state::BatchCompletion::ChangeZonePopulationSettled { tail, .. })
@@ -2177,6 +2176,15 @@ fn mark_staged_member_terminal(
                 tail.count,
                 crate::types::game_state::ChangeZoneCountPolicy::MassAllMembers
             )
+    );
+    // CR 400.7 + CR 608.2c: consuming the member's own exile link is the
+    // completion tail's typed fact — the same tail that carries the count
+    // policy. Link creation for a later return is a different producer and
+    // keeps its links.
+    let consumes_own_exile_links = matches!(
+        owner.completion.as_ref(),
+        Some(crate::types::game_state::BatchCompletion::ChangeZonePopulationSettled { tail, .. })
+            if tail.consumes_own_exile_links
     );
     let mut destroyed = None;
     let mut change_zone_bookkeeping = None;
@@ -2190,10 +2198,6 @@ fn mark_staged_member_terminal(
                 change_zone_bookkeeping = Some((
                     member.identity.object_id,
                     member.approved_event.clone(),
-                    matches!(
-                        member.request.exile_tracking,
-                        ZoneDeliveryExileTracking::TrackBySource
-                    ),
                 ));
             }
             member.state = StagedBatchMemberState::Terminal;
@@ -2212,14 +2216,14 @@ fn mark_staged_member_terminal(
             source_id: Some(source_id),
         });
     }
-    if let Some((object_id, approved_event, exiled_by_source)) = change_zone_bookkeeping {
+    if let Some((object_id, approved_event)) = change_zone_bookkeeping {
         note_change_zone_member_terminal(
             state,
             object_id,
             approved_event.as_ref(),
             terminal,
             count_hand_exile,
-            exiled_by_source,
+            consumes_own_exile_links,
         );
     }
 }
@@ -2234,6 +2238,8 @@ fn note_change_zone_member_terminal(
     count_hand_exile: bool,
     exiled_by_source: bool,
 ) {
+    // `approved_event` is the member's own approved move: only a Hand->Exile
+    // terminal counts toward the mass hand-exile producer.
     if count_hand_exile && terminal == ZoneMoveCompletion::Moved {
         let hand_to_exile = matches!(
             approved_event,
@@ -11989,9 +11995,20 @@ mod staged_batch_tests {
                 None,
             );
             let mut member = member;
-            if stage == BatchDeliveryStage::Approving {
-                member.state = StagedBatchMemberState::Unconsulted;
-                member.approved_event = None;
+            match stage {
+                BatchDeliveryStage::Approving => {
+                    member.state = StagedBatchMemberState::Unconsulted;
+                    member.approved_event = None;
+                }
+                // A Delivering payload whose cursor is at the end has already
+                // delivered every member, so each carries its terminal. An
+                // `Approved` member behind the delivery cursor is the malformed
+                // shape the staged validator rejects.
+                BatchDeliveryStage::Delivering => {
+                    member.state = StagedBatchMemberState::Terminal;
+                    member.terminal = Some(ZoneMoveCompletion::Moved);
+                }
+                BatchDeliveryStage::Arranging => {}
             }
             let group_id = push_approved_staged(&mut state, vec![member], stage);
             let before = state.active_batch_delivery().unwrap().staged.clone();

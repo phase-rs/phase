@@ -8343,6 +8343,13 @@ pub struct ChangeZoneBatchTail {
     /// targeted/mass paths do not.
     #[serde(default)]
     pub stamp_this_way: bool,
+    /// CR 400.7 + CR 608.2c: this population selected its members by the
+    /// source's own exile links (`TargetFilter::ExiledBySource`), so each moved
+    /// member's link is consumed at its terminal. Every other population keeps
+    /// its links — including one that CREATES them for a later return
+    /// (Worldgorger Dragon's mass exile).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub consumes_own_exile_links: bool,
 }
 
 /// CR 608.2c: how a settled ChangeZone population contributes

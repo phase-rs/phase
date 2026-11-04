@@ -1512,6 +1512,7 @@ pub fn resolve(
             },
             pending_return_result_producer: None,
             stamp_this_way: true,
+            consumes_own_exile_links: false,
         };
         match crate::game::zone_pipeline::deliver_staged_change_zone_batch(
             state,
@@ -3299,6 +3300,7 @@ pub fn resolve_all(
             count: crate::types::game_state::ChangeZoneCountPolicy::MassAllMembers,
             pending_return_result_producer: None,
             stamp_this_way: true,
+            consumes_own_exile_links: matches!(effective_filter, TargetFilter::ExiledBySource),
         };
         match crate::game::zone_pipeline::deliver_staged_change_zone_batch(
             state,
@@ -14584,6 +14586,7 @@ mod tests {
                 count: ChangeZoneCountPolicy::MassAllMembers,
                 pending_return_result_producer: None,
                 stamp_this_way: true,
+                consumes_own_exile_links: false,
             }),
             settled: Some(ChangeZoneSettled {
                 policy_count: 3,
