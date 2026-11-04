@@ -69,8 +69,9 @@ fn surveil_ledger(runner: &GameRunner, player: PlayerId) -> usize {
         .count()
 }
 
-/// Cast Tell Me What You See, target `target` with its enters trigger, answer
-/// every optional prompt with `accept`, and resolve to an empty stack.
+/// Cast Tell Me What You See, answer any target prompt its enters trigger raises
+/// with `target` (at this commit it raises none: the trigger has no target slot),
+/// answer every optional prompt with `accept`, and resolve to an empty stack.
 fn cast_and_resolve(
     runner: &mut GameRunner,
     card: ObjectId,
