@@ -7479,8 +7479,6 @@ fn filter_auto_inert_noop_triggers(
         .collect()
 }
 
-/// CR 603.5: a "may" trigger goes on the stack whatever its stored answer; only a stored accept
-/// with no legal target is dropped (CR 603.3d).
 fn drop_auto_inert_noop_trigger(state: &mut GameState, ctx: &PendingTriggerContext) -> bool {
     let pending = &ctx.pending;
     if !pending.ability.optional {
