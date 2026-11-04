@@ -18,8 +18,9 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{Effect, TargetFilter, TargetRef};
+use engine::types::ability::{Effect, EffectKind, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -1696,12 +1697,37 @@ fn a_non_root_target_lends_no_referent() {
 
 // ── V37: a dropped recipient stays unbound ─────────────────────────────
 
-/// CR 608.2c: a damage instruction whose printed recipient the parse dropped sends
-/// its damage to the parent's own target. The announced object must not become the
-/// referent, or it would deal damage to itself. Crush Underfoot's Giant and Orim's
-/// Thunder's indestructible artifact creature each take no damage.
+/// KNOWN-GAP PIN (CR 608.2c). Both cards parse with their printed "to target
+/// creature" recipient dropped, so the damage instruction names the parent's own
+/// target; Crush Underfoot's parse also reads "Choose a Giant creature you control"
+/// as a target, which is why the Giant is announced here (CR 115.10a: "choose" does not
+/// target). That dropped-recipient parse is a pre-existing gap tracked separately.
+/// Rules-correct, the chosen Giant deals 4 to target creature T, and kicked Orim's
+/// Thunder deals 4 to target creature X; the base parse cannot produce either. What
+/// this row pins is only the `damages_parent_target` decline: the announced object
+/// does not become the instruction's referent, so the damage instruction still
+/// resolves (the positive guard) but deals nothing to it, where a referent would
+/// size the damage from the announced object and send it back to that object.
 #[test]
 fn a_dropped_damage_recipient_takes_no_referent() {
+    let damage_instruction_resolved = |events: &[GameEvent], spell: ObjectId| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::DealDamage,
+                    source_id,
+                    ..
+                } if *source_id == spell
+            )
+        })
+    };
+    let damage_dealt = |events: &[GameEvent]| {
+        events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DamageDealt { .. }))
+    };
+
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
     let giant = s
@@ -1711,7 +1737,16 @@ fn a_dropped_damage_recipient_takes_no_referent() {
     s.add_creature(P1, "T", 2, 7);
     let crush = free_spell(&mut s, P0, "Crush Underfoot", CRUSH_UNDERFOOT);
     let mut runner = s.build();
-    runner.cast(crush).target_objects(&[giant]).resolve();
+    let outcome = runner.cast(crush).target_objects(&[giant]).resolve();
+    assert!(
+        damage_instruction_resolved(outcome.events(), crush),
+        "reach: the damage instruction resolved; {:?}",
+        outcome.events()
+    );
+    assert!(
+        !damage_dealt(outcome.events()),
+        "the declined instruction deals no damage"
+    );
     drain(&mut runner);
     assert_eq!(zone(&runner, crush), Zone::Graveyard, "reach: it resolved");
     assert_eq!(runner.state().objects[&giant].damage_marked, 0);
@@ -1733,11 +1768,20 @@ fn a_dropped_damage_recipient_takes_no_referent() {
         vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
     );
     let mut runner = s.build();
-    runner
+    let outcome = runner
         .cast(orim)
         .target_objects(&[artifact, x])
         .accept_optional()
         .resolve();
+    assert!(
+        damage_instruction_resolved(outcome.events(), orim),
+        "reach: the kicked damage instruction resolved; {:?}",
+        outcome.events()
+    );
+    assert!(
+        !damage_dealt(outcome.events()),
+        "the declined instruction deals no damage"
+    );
     drain(&mut runner);
     assert_eq!(
         zone(&runner, artifact),

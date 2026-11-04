@@ -15068,109 +15068,65 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     }
 
     /// CR 509.1g + CR 608.2i: every shape whose bare "it" has no `SelfRef`
-    /// antecedent declines the blocked-history clause and must be REPORTED, in
-    /// both windows: a typed trigger subject in an anaphoric compound (a), a
-    /// spell's chosen target in the same instruction (b), a typed subject in a
-    /// delayed body (d), and a typed dies-trigger subject (e). A chain-pinned
-    /// target (c) now binds as an earlier instruction's target
-    /// (`combat_history_relation_binds_a_chain_pinned_target`). Each row pairs the
-    /// negative (no windowed `BlockPairing` in the parse) with its reach guard — the
-    /// mass effect parsed with its unrestricted creature filter — and with the
-    /// detector firing, which itself proves the unit was not skipped as
-    /// unimplemented.
+    /// antecedent declines the blocked-history clause, and the mass instruction
+    /// then FAILS CLOSED as `Unimplemented { block_history_partner }` rather than
+    /// widening to every creature, in both windows: a typed trigger subject in an
+    /// anaphoric compound (a), a spell's chosen target in the same instruction
+    /// (b), a typed subject in a delayed body (d), and a typed dies-trigger
+    /// subject (e). A chain-pinned target (c) binds as an earlier instruction's
+    /// target (`combat_history_relation_binds_a_chain_pinned_target`). Each row
+    /// pairs the negatives (no widened mass effect, no windowed `BlockPairing`)
+    /// with the fail-closed marker as its reach guard.
     #[test]
-    fn combat_history_relation_detector_reports_every_declined_clause() {
-        // (a) Typed trigger subject, anaphoric compound: the primary acted on the
-        // triggering creature, so the continuation gets no `SelfRef` pin.
-        let parsed = parse_named(
-            "Whenever a creature you control blocks, destroy it and all creatures it blocked this turn.",
-            "Test Card",
-            &["Enchantment"],
-        );
-        let execute = parsed.triggers[0]
-            .execute
-            .as_deref()
-            .expect("reach guard: the trigger body parsed");
-        assert!(
-            matches!(
-                &*execute.effect,
-                Effect::Destroy {
-                    target: TargetFilter::TriggeringSource,
-                    ..
-                }
+    fn combat_history_relation_declined_clause_fails_closed() {
+        let fails_closed = |parsed: &crate::parser::oracle::ParsedAbilities| {
+            UnitEvidence::of(parsed).any::<AbilityDefinition>(|def| {
+                matches!(
+                    &*def.effect,
+                    Effect::Unimplemented { name, .. } if name == "block_history_partner"
+                )
+            })
+        };
+        for (label, text, types, is_mass_effect) in [
+            (
+                "(a) typed compound",
+                "Whenever a creature you control blocks, destroy it and all creatures it blocked this turn.",
+                &["Enchantment"][..],
+                destroy_all_target as fn(&Effect) -> Option<&TargetFilter>,
             ),
-            "reach guard: primary must destroy the triggering creature, got {:?}",
-            execute.effect
-        );
-        assert!(
-            execute
-                .sub_ability
-                .as_deref()
-                .is_some_and(|sub| destroy_all_target(&sub.effect).is_some()),
-            "reach guard: the DestroyAll continuation must exist"
-        );
-
-        // (b) A spell's chosen target: the continuation's "it" names a target,
-        // which has no sound combat-relation subject.
-        let spell = parse_named(
-            "Destroy target creature and all creatures it blocked this turn.",
-            "Test Card",
-            &["Instant"],
-        );
-        let primary = &spell.abilities[0];
-        assert!(
-            matches!(
-                &*primary.effect,
-                Effect::Destroy {
-                    target: TargetFilter::Typed(_),
-                    ..
-                }
+            (
+                "(b) spell target",
+                "Destroy target creature and all creatures it blocked this turn.",
+                &["Instant"][..],
+                destroy_all_target,
             ),
-            "reach guard: primary must destroy the chosen target, got {:?}",
-            primary.effect
-        );
-        assert!(
-            primary
-                .sub_ability
-                .as_deref()
-                .is_some_and(|sub| destroy_all_target(&sub.effect).is_some()),
-            "reach guard: the DestroyAll continuation must exist"
-        );
-
-        for (label, parsed, is_mass_effect) in [
-            ("(a) typed compound", parsed, destroy_all_target as fn(&Effect) -> Option<&TargetFilter>),
-            ("(b) spell target", spell, destroy_all_target),
             (
                 "(d) typed delayed body",
-                parse_named(
-                    "Whenever a creature you control blocks, at end of combat, destroy all creatures it blocked this turn.",
-                    "Test Card",
-                    &["Enchantment"],
-                ),
+                "Whenever a creature you control blocks, at end of combat, destroy all creatures it blocked this turn.",
+                &["Enchantment"][..],
                 destroy_all_target,
             ),
             (
                 "(e) typed dies subject, this combat",
-                parse_named(
-                    "Whenever a creature you control dies, it deals 2 damage to each creature it blocked this combat.",
-                    "Test Card",
-                    &["Enchantment"],
-                ),
+                "Whenever a creature you control dies, it deals 2 damage to each creature it blocked this combat.",
+                &["Enchantment"][..],
                 damage_all_target,
             ),
         ] {
+            let parsed = parse_named(text, "Test Card", types);
             assert!(
-                parse_has_bare_creature_mass_effect(&parsed, is_mass_effect),
-                "{label}: reach guard — the mass effect must parse with its bare creature filter"
+                fails_closed(&parsed),
+                "{label}: reach guard — the instruction must fail closed; {:?} {:?}",
+                parsed.abilities,
+                parsed.triggers
+            );
+            assert!(
+                !parse_has_bare_creature_mass_effect(&parsed, is_mass_effect),
+                "{label}: no widened mass effect may remain"
             );
             assert!(
                 !parse_has_blocked_history_filter(&parsed),
                 "{label}: a non-source antecedent must not bind the clause"
-            );
-            assert!(
-                has_swallowed_detector(&parsed, "CombatHistoryRelation"),
-                "{label}: the declined clause must be reported; warnings = {:?}",
-                parsed.parse_warnings
             );
         }
     }
@@ -15388,6 +15344,50 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         );
     }
 
+    /// CR 603.7a: Triton Tactics' deferred body keeps both of its actions under
+    /// "at this turn's next end of combat" — the bare "and it doesn't untap …"
+    /// must not split out of the delayed trigger and run at resolution. The body
+    /// itself stays a reported gap.
+    #[test]
+    fn triton_tactics_delayed_body_keeps_its_second_action() {
+        let triton = parse_named(
+            "Up to two target creatures each get +0/+3 until end of turn. Untap those creatures. At this turn's next end of combat, tap each creature that was blocked by one of those creatures this turn and it doesn't untap during its controller's next untap step.",
+            "Triton Tactics",
+            &["Instant"],
+        );
+        assert_eq!(triton.abilities.len(), 1, "{:?}", triton.abilities);
+        let mut def = &triton.abilities[0];
+        let mut delayed = None;
+        loop {
+            if let Effect::CreateDelayedTrigger {
+                condition, effect, ..
+            } = &*def.effect
+            {
+                if *condition == this_turns_next_end_of_combat() {
+                    delayed = Some((def, effect));
+                }
+            }
+            match def.sub_ability.as_deref() {
+                Some(next) => def = next,
+                None => break,
+            }
+        }
+        let (delayed_def, payload) =
+            delayed.expect("reach guard: the delayed trigger must parse on the resolution chain");
+        assert!(
+            delayed_def.sub_ability.is_none(),
+            "no action may follow the delayed trigger at resolution: {:?}",
+            delayed_def.sub_ability
+        );
+        assert!(
+            matches!(
+                &*payload.effect,
+                Effect::Unimplemented { name, .. } if name == "block_history_partner"
+            ),
+            "the deferred body stays a reported gap: {payload:?}"
+        );
+    }
+
     /// CR 608.2c + CR 608.2i: a history clause whose partner no subject word
     /// covers fails closed. On a mass instruction the instruction becomes
     /// `Unimplemented { block_history_partner }` with no widened mass effect
@@ -15532,23 +15532,35 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     }
 
     /// CR 509.1g + CR 608.2i: a one-way filter cannot vouch for a two-way clause
-    /// on the same line. Hand-built: no printed card has this shape (nearest:
-    /// Gaze of the Gorgon). The one-way filter is the reach guard.
+    /// on the same line: the unbound two-way instruction fails the line closed
+    /// instead of leaving a widened destroy beside the represented one.
+    /// Hand-built: no printed card has this shape (nearest: Gaze of the Gorgon).
+    /// The one-way sentence parsed alone is the reach guard.
     #[test]
     fn combat_history_relation_one_way_filter_does_not_vouch_for_two_way_clause() {
+        let one_way = parse(
+            "Destroy all creatures that were blocked by Test Card this turn.",
+            &["Creature"],
+        );
+        assert!(
+            parse_has_blocked_history_filter(&one_way),
+            "reach guard: the one-way clause is represented alone; {:?}",
+            one_way.abilities
+        );
         let parsed = parse(
             "Destroy all creatures that were blocked by Test Card this turn. Destroy all creatures that blocked or were blocked by it this turn.",
             &["Creature"],
         );
         assert!(
-            parse_has_blocked_history_filter(&parsed),
-            "reach guard: the one-way clause is represented; {:?}",
+            any_ability_has_unimplemented(&parsed),
+            "the two-way instruction must fail closed; {:?}",
             parsed.abilities
         );
         assert!(
-            has_swallowed_detector(&parsed, "CombatHistoryRelation"),
-            "{:?}",
-            parsed.parse_warnings
+            !UnitEvidence::of(&parsed)
+                .any_effect(|effect| matches!(effect, Effect::DestroyAll { .. })),
+            "no destroy may survive beside the unbound clause; {:?}",
+            parsed.abilities
         );
     }
 

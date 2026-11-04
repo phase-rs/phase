@@ -7,13 +7,13 @@ use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
-    AggregateFunction, AttachmentKind, AttachmentReferent, BlockPairDirection, CardTypeSetSource,
-    ChoiceType, CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator,
-    ControllerRef, CostCategory, CountScope, CrewRelation, DamageKindFilter, FilterProp,
-    NameStickerSet, ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation,
-    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
-    SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause,
-    TypeFilter, TypedFilter,
+    filter_contains_filter_prop, AggregateFunction, AttachmentKind, AttachmentReferent,
+    BlockPairDirection, CardTypeSetSource, ChoiceType, CombatHistoryScope, CombatRelation,
+    CombatRelationSubject, Comparator, ControllerRef, CostCategory, CountScope, CrewRelation,
+    DamageKindFilter, FilterProp, NameStickerSet, ObjectProperty, ObjectScope, ParitySource,
+    PlayerFilter, PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr,
+    QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
+    TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -7093,14 +7093,33 @@ pub(crate) fn strip_block_history_clauses(lower: &str) -> String {
     stripped
 }
 
-/// CR 608.2c + CR 608.2i: does `lower` hold a block-history clause whose partner no
-/// subject word covers (Triton Tactics: "one of those creatures")?
-pub(crate) fn names_unbound_block_partner(lower: &str) -> bool {
+/// CR 608.2c + CR 608.2i: does `lower` hold a block-history clause that none of
+/// `populations` carries as a `BlockPairing` filter of the clause's own direction and window?
+/// Both ways a parse drops the clause land here: a partner no subject word covers
+/// (Triton Tactics: "one of those creatures"), and a recognized "it" or "that creature"
+/// whose antecedent `resolve_relation_subject` rejects ("destroy target creature and all
+/// creatures it blocked this turn").
+pub(crate) fn population_drops_block_history_clause(
+    lower: &str,
+    populations: &[&TargetFilter],
+) -> bool {
     let mut remaining = lower;
     while let Some((_, clause, rest)) =
         nom_primitives::scan_preceded(remaining, parse_block_history_clause)
     {
-        if clause.partner.is_none() {
+        let represented = clause.partner.is_some()
+            && populations.iter().any(|population| {
+                filter_contains_filter_prop(population, &|prop| {
+                    matches!(
+                        prop,
+                        FilterProp::CombatRelation {
+                            relation: CombatRelation::BlockPairing { direction, scope },
+                            ..
+                        } if *direction == clause.direction && *scope == Some(clause.scope)
+                    )
+                })
+            });
+        if !represented {
             return true;
         }
         remaining = rest;
@@ -12830,8 +12849,8 @@ mod tests {
     }
 
     /// CR 608.2c: the anaphor text drops every history clause, wherever it sits,
-    /// and keeps the rest; the guard reader flags only a clause with an unnamed
-    /// partner.
+    /// and keeps the rest; the guard reader flags a clause with an unnamed partner,
+    /// and a named one whose population lacks the clause's own filter.
     #[test]
     fn block_history_clause_readers_strip_and_flag_partners() {
         assert_eq!(
@@ -12844,17 +12863,37 @@ mod tests {
             strip_block_history_clauses("destroy target creature."),
             "destroy target creature."
         );
-        assert!(names_unbound_block_partner(
-            "tap each creature that was blocked by one of those creatures this turn"
+        let bare = TargetFilter::Typed(TypedFilter::creature());
+        let blocked_by_source = blocked_by_source_creatures(CombatHistoryScope::ThisTurn);
+        assert!(population_drops_block_history_clause(
+            "tap each creature that was blocked by one of those creatures this turn",
+            &[&blocked_by_source]
         ));
-        assert!(names_unbound_block_partner(
-            "destroy all creatures that were blocked by target wall this turn."
+        assert!(population_drops_block_history_clause(
+            "destroy all creatures that were blocked by target wall this turn.",
+            &[&bare]
         ));
-        assert!(!names_unbound_block_partner(
-            "destroy all creatures that blocked or were blocked by it this turn."
+        // A recognized "it" whose binding was declined leaves the bare population.
+        assert!(population_drops_block_history_clause(
+            "destroy all creatures it blocked this turn.",
+            &[&bare]
         ));
-        assert!(!names_unbound_block_partner(
-            "destroy each creature that blocked or was blocked this turn."
+        // The filter must match the clause's own direction and window.
+        assert!(population_drops_block_history_clause(
+            "destroy all creatures it blocked this combat.",
+            &[&blocked_by_source]
+        ));
+        assert!(population_drops_block_history_clause(
+            "destroy all creatures that blocked or were blocked by it this turn.",
+            &[&blocked_by_source]
+        ));
+        assert!(!population_drops_block_history_clause(
+            "destroy all creatures it blocked this turn.",
+            &[&blocked_by_source]
+        ));
+        assert!(!population_drops_block_history_clause(
+            "destroy each creature that blocked or was blocked this turn.",
+            &[&bare]
         ));
     }
 

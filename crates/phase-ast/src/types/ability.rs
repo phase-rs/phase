@@ -6712,7 +6712,7 @@ pub enum CombatRelation {
     /// CR 509.1g + CR 400.7: the candidate and the subject form a block pair in
     /// `direction`.
     ///
-    /// * `scope: None` — the current block pairing (CR 509.1h). A subject that
+    /// * `scope: None` — the current block pairing (CR 509.1g). A subject that
     ///   has left the battlefield answers from the pairings it had immediately
     ///   before it left (CR 608.2h last known information), and only for a
     ///   candidate still in that combat role (CR 506.4).

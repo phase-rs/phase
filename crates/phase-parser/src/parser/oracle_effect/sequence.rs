@@ -3029,6 +3029,10 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
         tag::<_, _, OracleError<'_>>("at the beginning of the next "),
         tag("at the beginning of your next "),
         tag("at the end of "),
+        // CR 603.7a: "At this turn's next end of combat, …" — the same prefix
+        // `starts_prefix_clause` keeps whole, so a bare "and" inside the deferred
+        // body stays with it (Triton Tactics: "… and it doesn't untap …").
+        tag("at this turn's next end of combat"),
     ))
     .parse(trimmed)
     .is_ok()

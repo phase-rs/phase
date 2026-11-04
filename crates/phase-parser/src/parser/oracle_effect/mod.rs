@@ -106,11 +106,11 @@ use super::oracle_quantity::{
     parse_for_each_object_filter_clause_with_context,
 };
 use super::oracle_target::{
-    names_unbound_block_partner, parse_anaphoric_target_ref, parse_definite_anaphor,
-    parse_definite_parent_reference, parse_event_context_ref, parse_fight_target,
-    parse_parent_target_controller_population, parse_target, parse_target_with_ctx,
-    parse_target_with_disjunctive_restriction, parse_target_with_syntax, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx, resolve_singular_exiled_card_target,
+    parse_anaphoric_target_ref, parse_definite_anaphor, parse_definite_parent_reference,
+    parse_event_context_ref, parse_fight_target, parse_parent_target_controller_population,
+    parse_target, parse_target_with_ctx, parse_target_with_disjunctive_restriction,
+    parse_target_with_syntax, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
+    population_drops_block_history_clause, resolve_singular_exiled_card_target,
     strip_block_history_clauses, unique_slot_for_anaphor, AnaphorNoun, AnaphorZoneClass,
     DefiniteAnaphor, TargetSyntax,
 };
@@ -26793,19 +26793,30 @@ fn anaphor_rewrite_would_drop_this_way_binding(text_lower: &str, effect: &Effect
 }
 
 /// CR 608.2c + CR 608.2i: a mass instruction whose population is defined by a block-history
-/// clause with a partner no subject word covers. Representing it without the clause would
-/// widen it to every creature (Triton Tactics: "tap each creature that was blocked by one of
-/// those creatures this turn"), so the caller fails the instruction closed.
-fn mass_instruction_drops_block_partner(effect: &Effect, lower: &str) -> bool {
-    (mass_population_target(effect).is_some()
-        || matches!(
-            effect,
+/// clause its population filter does not carry — a partner no subject word covers, or a
+/// recognized partner with no source or earlier-target antecedent. Representing it without
+/// the clause would widen it to every creature (Triton Tactics: "tap each creature that was
+/// blocked by one of those creatures this turn"), so the caller fails the instruction closed.
+/// The populations are read across the clause's compound "and" chain, where a mass
+/// conjunct sits ("destroy it and all creatures it blocked this turn").
+fn mass_instruction_drops_block_partner(clause: &ParsedEffectClause, lower: &str) -> bool {
+    let populations: Vec<&TargetFilter> = std::iter::once(&clause.effect)
+        .chain(
+            std::iter::successors(clause.sub_ability.as_deref(), |def| {
+                def.sub_ability.as_deref()
+            })
+            .map(|def| &*def.effect),
+        )
+        .filter_map(|effect| match effect {
             Effect::SetTapState {
                 scope: EffectScope::All,
+                target,
                 ..
-            }
-        ))
-        && names_unbound_block_partner(lower)
+            } => Some(target),
+            _ => mass_population_target(effect),
+        })
+        .collect();
+    !populations.is_empty() && population_drops_block_history_clause(lower, &populations)
 }
 
 /// CR 608.2c: whether a gate counts members of the chain's tracked set.
@@ -49261,7 +49272,7 @@ fn parse_effect_chain_ir_body(
                 replace_target_with_parent(&mut clause.effect);
             }
         }
-        if mass_instruction_drops_block_partner(&clause.effect, &text_lower) {
+        if mass_instruction_drops_block_partner(&clause, &text_lower) {
             clause.effect = Effect::unimplemented("block_history_partner", text.as_str());
             clause.sub_ability = None;
             clause.multi_target = None;
