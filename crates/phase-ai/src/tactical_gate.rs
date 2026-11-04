@@ -66,7 +66,8 @@ use crate::policies::context::{
     collect_ability_effects, collect_resolved_abilities, PolicyContext,
 };
 use crate::policies::effect_classify::{
-    effect_polarity, extract_target_filter, targets_creatures_only, EffectPolarity,
+    ability_is_temporary_combat_modifier, effect_polarity, extract_target_filter,
+    targets_creatures_only, EffectPolarity,
 };
 use crate::policies::stack_awareness::{
     can_be_destroyed, chain_has_effect, damage_kills, has_pending_removal,
@@ -74,7 +75,6 @@ use crate::policies::stack_awareness::{
     will_target_die_from_stack, RemovalStep,
 };
 use crate::policies::strategy_helpers::can_pay_ward_cost;
-use crate::search::ability_is_temporary_combat_modifier;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GateDecision {
@@ -4707,13 +4707,23 @@ mod tests {
         state.waiting_for = WaitingFor::Priority { player: P0 };
 
         assert_eq!(harvest_amount(state, harvest), Some(0));
-        let pre_harvest_cast = engine::ai_support::candidate_actions(state)
-            .into_iter()
-            .find(|candidate| {
-                matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == held_draw)
-            })
-            .expect("the engine issues a held-spell cast before resource payment preflight")
-            .action;
+        // CR 601.2b + CR 601.2h: the castability predicate already rejects the
+        // unpayable graveyard-exile cost, so no candidate is issued; a forged
+        // submission must still be rejected by the casting authority.
+        assert!(
+            !engine::ai_support::candidate_actions(state)
+                .into_iter()
+                .any(|candidate| {
+                    matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == held_draw)
+                }),
+            "the engine does not issue a cast whose required additional cost is unpayable"
+        );
+        let pre_harvest_cast = GameAction::CastSpell {
+            object_id: held_draw,
+            card_id: state.objects[&held_draw].card_id,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        };
         let pre_harvest_state = state.clone();
         let mut rejected_state = state.clone();
         let rejected =

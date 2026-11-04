@@ -2221,7 +2221,8 @@
     "unitDamage": "obrażeń",
     "unitLife": "życia",
     "title": "Rozdziel {{total}} {{unit}}",
-    "subtitle": "Przydziel co najmniej 1 {{unit}} każdemu celowi. Pozostało: {{remaining}}"
+    "subtitle": "Przydziel co najmniej 1 {{unit}} każdemu celowi. Pozostało: {{remaining}}",
+    "subtitleAnyNumber": "Przydziel co najmniej 1 {{unit}} każdemu wybranemu, spośród dowolnej ich liczby. Pozostało: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Wybierz loch",
@@ -2405,6 +2406,7 @@
     "cardFallback": "Karta",
     "title": "Umieść {{name}} na wierzchu lub spodzie biblioteki",
     "top": "Wierzch biblioteki",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "Spód biblioteki"
   },
   "mutateMerge": {

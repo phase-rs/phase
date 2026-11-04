@@ -2259,7 +2259,8 @@
     "unitDamage": "ダメージ",
     "unitLife": "ライフ",
     "title": "{{total}}{{unit}}を分配",
-    "subtitle": "各対象に少なくとも1{{unit}}を割り当ててください。残り：{{remaining}}"
+    "subtitle": "各対象に少なくとも1{{unit}}を割り当ててください。残り：{{remaining}}",
+    "subtitleAnyNumber": "任意の数を選び、選んだそれぞれに少なくとも1{{unit}}を割り当ててください。残り：{{remaining}}"
   },
   "dungeonChoice": {
     "title": "ダンジョンを選択",
@@ -2443,6 +2444,7 @@
     "cardFallback": "カード",
     "title": "{{name}}をライブラリーの一番上か一番下に置く",
     "top": "ライブラリーの一番上",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "ライブラリーの一番下"
   },
   "mutateMerge": {

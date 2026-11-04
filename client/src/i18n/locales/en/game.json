@@ -2259,7 +2259,8 @@
     "unitDamage": "damage",
     "unitLife": "life",
     "title": "Distribute {{total}} {{unit}}",
-    "subtitle": "Assign at least 1 {{unit}} to each target. Remaining: {{remaining}}"
+    "subtitle": "Assign at least 1 {{unit}} to each target. Remaining: {{remaining}}",
+    "subtitleAnyNumber": "Assign at least 1 {{unit}} to each one you choose, among any number of them. Remaining: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Choose a Dungeon",
@@ -2443,6 +2444,7 @@
     "cardFallback": "Card",
     "title": "Put {{name}} on top or bottom of library",
     "top": "Top of library",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "Bottom of library"
   },
   "mutateMerge": {

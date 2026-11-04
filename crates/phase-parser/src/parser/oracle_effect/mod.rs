@@ -132,11 +132,11 @@ use crate::types::ability::{
     ConjureSource, ContinuousEffectOnset, ContinuousModification, ControlWindow, ControllerRef,
     CopyChooseScope, CopyRetargetPermission, CopyScale, DamageModification, DamageSource,
     DelayedTriggerCondition, DelayedTriggerLifetime, DieResultBranch, DigRestOrder, Duration,
-    Effect, EffectOutcomeSignal, EffectScope, ExtraPhaseRecipient, FilterProp, GameRestriction,
-    GuardReading, GuessSubject, IntensityScope, IterationKindBinding, KeeperConstraint,
-    KeeperCounterMark, LibraryPosition, ManaProduction, ManaSpendPermission, ManaTargetRole,
-    MassLibraryShuffleMode, MultiTargetSpec, NameStickerSet, NumberDistinctness, ObjectProperty,
-    ObjectScope, OriginConstraint, PerPlayerScope, PerpetualModification,
+    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, ExtraPhaseRecipient, FilterProp,
+    GameRestriction, GuardReading, GuessSubject, IntensityScope, IterationKindBinding,
+    KeeperConstraint, KeeperCounterMark, LibraryPosition, ManaProduction, ManaSpendPermission,
+    ManaTargetRole, MassLibraryShuffleMode, MultiTargetSpec, NameStickerSet, NumberDistinctness,
+    ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope, PerpetualModification,
     PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter, PlayerRelation,
     PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue,
     QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, ReplacementCondition,
@@ -11279,6 +11279,7 @@ fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: C
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -12378,14 +12379,13 @@ fn parse_effect_clause_inner_with_damage_context(
         return clause;
     }
 
-    // CR 601.2d: "deal N damage divided as you choose among [targets]" /
-    // "divided evenly" → DealDamage with distribute. (The "distributed among"
-    // needle was removed: it matches 0 of 34,632 cards — no Magic card uses that
-    // templating — so it only guarded phrasing that does not exist.)
-    if scan_contains_phrase(&lower, "divided as you choose among")
-        || scan_contains_phrase(&lower, "divided evenly")
-    {
-        if let Some(clause) = try_parse_distribute_damage(&lower, text) {
+    // CR 601.2d / CR 608.2d: "deal N damage divided as <you choose | its
+    // controller chooses> among [recipients]" / "divided evenly, rounded down,
+    // among [targets]" → DealDamage with distribute. The division marker
+    // combinator is the single authority for the chooser axis. (The
+    // "distributed among" needle was removed: it matches 0 of 34,632 cards.)
+    if nom_primitives::scan_at_word_boundaries(&lower, lower::parse_division_marker).is_some() {
+        if let Some(clause) = try_parse_distribute_damage(&lower, text, ctx) {
             return clause;
         }
     }
@@ -13666,6 +13666,24 @@ fn parse_perpetual_self_subject<'a>(
     lower: &'a str,
     ctx: &ParseContext,
 ) -> Option<(&'a str, TargetFilter)> {
+    // CR 608.2c: plural back-reference "those cards perpetually gain ..." — the
+    // cards the preceding instruction just moved, published as the chain's
+    // tracked set (Circadian Struggle: "Seek X cards …. … those cards
+    // perpetually gain …").
+    if let Ok((rest, _)) = (
+        tag::<_, _, OracleError<'_>>("those cards perpetually "),
+        alt((tag("gains "), tag("gain "))),
+    )
+        .parse(lower)
+    {
+        return Some((
+            rest,
+            TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            },
+        ));
+    }
+
     // Anaphoric back-reference: "that <type> perpetually gains ...".
     if let Ok((after_that, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower) {
         let (rest, _) = take_until::<_, _, OracleError<'_>>("perpetually ")
@@ -14695,8 +14713,8 @@ fn parse_conjure_card_name(lower: &str) -> Option<(&str, &str)> {
 
 /// Parse the destination zone from conjure text using nom combinators. Returns
 /// the zone, an optional in-library slot (`Some` only for the Alchemy "into the
-/// top N cards … at random" and "on top of your library" positional
-/// destinations), the player scope whose
+/// top N cards … at random", "on top of your library" and "<ordinal> from the
+/// top" positional destinations), the player scope whose
 /// libraries receive the cards (`Some(PlayerFilter::All)` only for the "each
 /// player's library" fan-out; `None` = the controller's library), and the
 /// unconsumed tail.
@@ -14744,6 +14762,24 @@ fn parse_conjure_zone(
     // non-load-bearing.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" on top of your library").parse(lower) {
         return Some((Zone::Library, Some(LibraryPosition::Top), None, rest));
+    }
+
+    // CR 401.7: "conjure … into your library <ordinal> from the top" (Calim,
+    // Djinn Emperor's "seventh from the top") names a specific in-library slot.
+    // The conjure resolver already honors `NthFromTop` (clamped to the bottom per
+    // CR 401.7); the zone-only arms below would drop the ordinal.
+    if let Ok((rest, n)) = preceded(
+        tag::<_, _, OracleError<'_>>(" into your library "),
+        nom_primitives::parse_nth_from_top,
+    )
+    .parse(lower)
+    {
+        return Some((
+            Zone::Library,
+            Some(LibraryPosition::NthFromTop { n }),
+            None,
+            rest,
+        ));
     }
 
     alt((
@@ -15781,6 +15817,7 @@ fn try_parse_put_on_top_or_bottom(
         return Some(parsed_clause(Effect::PutOnTopOrBottom {
             target: TargetFilter::ParentTarget,
             chooser: TargetFilter::ParentTargetOwner,
+            top_position: LibraryPosition::Top,
         }));
     }
 
@@ -15819,6 +15856,7 @@ fn try_parse_put_on_top_or_bottom(
         return Some(parsed_clause(Effect::PutOnTopOrBottom {
             target: filter,
             chooser: TargetFilter::ParentTargetOwner,
+            top_position: LibraryPosition::Top,
         }));
     }
 
@@ -15862,6 +15900,7 @@ fn try_parse_put_on_top_or_bottom(
         return Some(parsed_clause(Effect::PutOnTopOrBottom {
             target: filter,
             chooser: TargetFilter::ParentTargetOwner,
+            top_position: LibraryPosition::Top,
         }));
     }
 
@@ -15900,6 +15939,7 @@ fn try_parse_self_put_on_top_or_bottom(
     Some(parsed_clause(Effect::PutOnTopOrBottom {
         target,
         chooser: TargetFilter::Controller,
+        top_position: LibraryPosition::Top,
     }))
 }
 
@@ -16053,32 +16093,50 @@ fn try_parse_owner_of_target_shuffle(
     }))
 }
 
-/// CR 400.3: Parse "the owner of target [filter] puts it into their library
-/// second from the top or on the bottom".
+/// CR 400.3 + CR 401.7: Parse "the owner of target [filter] puts it into their
+/// library <ordinal> from the top or on the bottom".
 ///
 /// Handles:
 /// - "The owner of target nonland permanent puts it into their library second from the top or on the bottom"
 /// - "The owner of target creature or enchantment puts it into their library second from the top or on the bottom"
 ///
-/// The "second from the top or on the bottom" pattern is semantically PutOnTopOrBottom (the
-/// player chooses). We map it to the same `PutOnTopOrBottom` effect.
+/// The owner chooses between the named Nth-from-the-top slot and the bottom, so
+/// this is `PutOnTopOrBottom` carrying that slot as `top_position` (CR 608.2d).
+///
+/// Only the "their library" form is recognized. The possessive "its owner's
+/// library" form is deliberately not handled: no printed card uses it, and an
+/// unrecognized clause stays `Unimplemented` (the fail-honest direction).
 fn try_parse_owner_of_target_put_second(
     tp: TextPair,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
-    // Must contain the signature suffix
-    if !nom_primitives::scan_contains(tp.lower, "second from the top or on the bottom") {
-        return None;
-    }
+    // CR 401.7 + CR 608.2d: the signature tail names the non-bottom branch's
+    // library position; it parameterises the choice rather than being dropped.
+    let top_position = nom_primitives::scan_at_word_boundaries(
+        tp.lower,
+        parse_into_library_nth_from_top_or_bottom,
+    )?;
 
     let target = extract_owner_of_target(tp, ctx)?;
 
     Some(parsed_clause(Effect::PutOnTopOrBottom {
         target,
         chooser: TargetFilter::ParentTargetOwner,
+        top_position,
     }))
+}
+
+/// CR 401.7: "into their library <ordinal> from the top or on the bottom" —
+/// the owner chooses between a specific Nth-from-the-top position and the bottom
+/// (Deem Inferior, Trickster's Stratagem). Yields the `NthFromTop` branch; the
+/// bottom branch is implied by `Effect::PutOnTopOrBottom`.
+fn parse_into_library_nth_from_top_or_bottom(i: &str) -> OracleResult<'_, LibraryPosition> {
+    let (i, _) = tag("into their library ").parse(i)?;
+    let (i, n) = nom_primitives::parse_nth_from_top(i)?;
+    let (i, _) = tag(" or on the bottom").parse(i)?;
+    Ok((i, LibraryPosition::NthFromTop { n }))
 }
 
 /// Shared helper: extract the target filter from "the owner of target [filter] [verb]s it ..."
@@ -26732,6 +26790,18 @@ fn anaphor_rewrite_would_drop_this_way_binding(text_lower: &str, effect: &Effect
             .is_some_and(TargetFilter::references_tracked_set)
 }
 
+/// CR 608.2c: whether a gate counts members of the chain's tracked set.
+fn condition_measures_tracked_set(condition: &AbilityCondition) -> bool {
+    condition.any_quantity_expr(&|expr| {
+        matches!(
+            expr,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. }
+            }
+        )
+    })
+}
+
 /// Replace the target filter on an effect with ParentTarget.
 /// Used for anaphoric "it"/"that creature" references in compound sub-effects.
 fn replace_target_with_parent(effect: &mut Effect) {
@@ -27266,6 +27336,19 @@ fn damage_clause_has_self_ref_recipient(effect: &Effect) -> bool {
     )
 }
 
+/// CR 608.2c + CR 115.10a: a damage clause whose recipient is a population
+/// bound earlier in the same resolution ("those Wolves" — a tracked set). The
+/// recipient predicate is the shared [`TargetFilter::is_tracked_set_population`]
+/// authority the engine's resolution-time division also reads.
+fn damage_clause_has_tracked_population_recipient(effect: &Effect) -> bool {
+    match effect {
+        Effect::DealDamage { target, .. } | Effect::DamageAll { target, .. } => {
+            target.is_tracked_set_population()
+        }
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy)]
 enum SourceRefRebind {
     AllObjectRefs,
@@ -27448,7 +27531,7 @@ fn bind_self_ref_damage_subject(effect: &mut Effect) -> bool {
 /// the triggering object. Returns true
 /// (= decline the blanket `replace_target_with_parent`) when handled.
 ///
-/// Covers five recipient shapes: (1) the fresh-opponent recipient — attribute
+/// Covers six recipient shapes: (1) the fresh-opponent recipient — attribute
 /// the damage source to the parent target while preserving the recipient and
 /// the anaphoric amount; (2) the self-reference recipient ("to this
 /// creature"/"to ~", `TargetFilter::SelfRef`, the Karplusan Yeti fight-back
@@ -27472,7 +27555,13 @@ fn bind_self_ref_damage_subject(effect: &mut Effect) -> bool {
 /// `damage_source` stays `None` (the spell itself), so
 /// the runtime one-sided-fight fallback in `game/quantity.rs` (gated on
 /// `damage_source == Some(Target)`) never fires and `Power{Anaphoric}`
-/// resolves to 0 — Nova Flame with any X dealt no damage.
+/// resolves to 0 — Nova Flame with any X dealt no damage. (6) a tracked-set
+/// population recipient ("… among any number of those Wolves", Master of the
+/// Wild Hunt) — attribute the damage source to the declared object and bind
+/// "its power" to `ObjectScope::Target`, the declared target, not to
+/// `Anaphoric`: the effect-context ladder would read a lone earlier-tapped
+/// object first. #699 cannot arise because the recipient is a population, never
+/// a target slot.
 fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
     // CR 201.5 + CR 608.2c: a self-reference recipient ("to this creature"/"to ~")
     // is the source object itself and must be preserved verbatim (fight-back
@@ -27503,6 +27592,30 @@ fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
                 ObjectScope::Anaphoric,
                 SourceRefRebind::AllObjectRefs,
             );
+        }
+        return true;
+    }
+    // Shape (6) — CR 608.2c + CR 115.10a + CR 120.1: a tracked-set population
+    // recipient ("… among any number of those Wolves") is printed by the clause
+    // and is never the antecedent. The subject is the declared target, and
+    // "its power" is that target's (CR 608.2h), bound to `Target` rather than
+    // the effect-context ladder because an earlier single-object tap would
+    // otherwise capture the referent.
+    if damage_clause_has_tracked_population_recipient(effect) {
+        set_damage_clause_source_only(effect, DamageSource::Target);
+        if let Effect::DealDamage { amount, .. } | Effect::DamageAll { amount, .. } = effect {
+            for from in [
+                ObjectScope::Source,
+                ObjectScope::Anaphoric,
+                ObjectScope::EventSource,
+            ] {
+                rebind_object_scope_amount(
+                    amount,
+                    from,
+                    ObjectScope::Target,
+                    SourceRefRebind::PowerOrToughness,
+                );
+            }
         }
         return true;
     }
@@ -27604,6 +27717,12 @@ fn has_typed_target(effect: &Effect) -> bool {
             ..
         } | Effect::Counter {
             target: TargetFilter::Typed(_),
+            ..
+        }
+        // CR 115.1 + CR 608.2c: "each <source> deals damage … to target creature"
+        // declares a chosen typed referent that a later "that creature" names.
+        | Effect::EachSourceDealsDamage {
+            recipient: EachDamageRecipient::Shared(TargetFilter::Typed(_)),
             ..
         }
         // CR 608.2c + CR 701.57a / CR 702.85a: An `ExileFromTopUntil { NextMatches }`
@@ -27721,6 +27840,12 @@ fn has_typed_target_widened(effect: &Effect) -> bool {
         // `Effect::Unimplemented` -- discovered via a fresh coverage-parse-diff
         // run against this PR's own fix, not assumed.
         | Effect::SetLifeTotal { target, .. } => target,
+        // CR 115.1 + CR 608.2c: a shared "each <source> deals damage … to target
+        // creature" recipient is a chosen typed referent (mirrors `has_typed_target`).
+        Effect::EachSourceDealsDamage {
+            recipient: EachDamageRecipient::Shared(target),
+            ..
+        } => target,
         Effect::TurnFaceUp { target } => {
             return matches!(
                 target,
@@ -28151,6 +28276,21 @@ fn chain_prior_targeted_player(clauses: &[ClauseIr]) -> bool {
 /// because its condition node has its own local target.
 fn chain_declared_object_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
     chain_declared_object_target_clause(clauses).map(|(_, filter)| filter)
+}
+
+/// CR 608.2c + CR 109.4: an earlier object target described by its controller
+/// as an indefinite player ("target creature an opponent controls") introduces
+/// that player, so a later "that player" / "they" names the target's controller
+/// (Craterous Stomp: "… target creature an opponent controls. Each other
+/// creature that player controls …").
+fn declared_object_target_controller_antecedent(clauses: &[ClauseIr]) -> Option<ControllerRef> {
+    match chain_declared_object_target(clauses)? {
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::Opponent),
+            ..
+        }) => Some(ControllerRef::ParentTargetController),
+        _ => None,
+    }
 }
 
 /// CR 601.2c + CR 115.1: the single target filter a chain node announces as
@@ -36680,7 +36820,7 @@ pub(super) fn damage_dealer_effect_mut(def: &mut AbilityDefinition) -> &mut Effe
 }
 
 /// Membership mirror for `AntecedentRole::DigLook` — the `Dig` anchor that both
-/// private-look riders bind back to (`ExileLookedAtCard`, `ExileOneOfThemFaceDown`).
+/// private-look riders bind back to (`ExileLookedAtCard`, `ExileLookedAtCardsFaceDown`).
 /// ONE predicate because the two scans it replaces were byte-identical.
 ///
 /// The effect variant alone, NOT `reveal: false`. The private-look condition
@@ -38412,7 +38552,7 @@ fn continuation_is_exile_producer(continuation: Option<&ContinuationAst>) -> boo
     matches!(
         continuation,
         Some(
-            ContinuationAst::ExileOneOfThemFaceDown { .. }
+            ContinuationAst::ExileLookedAtCardsFaceDown { .. }
                 | ContinuationAst::ExileLookedAtCard { .. }
         )
     )
@@ -38425,7 +38565,7 @@ fn continuation_is_exile_producer(continuation: Option<&ContinuationAst>) -> boo
 /// face down" chunk parses to its own standalone exile-shaped raw effect
 /// (`ChangeZone { destination: Exile, target: ParentTarget }`) — CR 406.6's
 /// exile genuinely happened in that clause's text — but it is ALSO dispositioned
-/// `Continue`, because a `ContinuationAst::ExileOneOfThemFaceDown` marker on this
+/// `Continue`, because a `ContinuationAst::ExileLookedAtCardsFaceDown` marker on this
 /// SAME clause later rewrites the PRECEDING `Dig` into the exile-producing form
 /// and discards this raw `ChangeZone` during the LATER lowering pass.
 /// `chain_has_prior_exile_producer` is seeded during the earlier per-chunk PARSE
@@ -41837,7 +41977,7 @@ pub(crate) struct PrintedColorCarrier {
 /// more than once is REFUSED rather than collapsed (see the ARITY CONTRACT
 /// below), so the census records only which arm today's pool takes.
 /// RE-MEASURED **2026-08-29** against the MTGJSON pool whose tracked vintage
-/// sidecar `crates/engine/data/mtgjson-vintage` reads **2026-08-28**.
+/// sidecar `crates/phase-ast/data/mtgjson-vintage` reads **2026-08-28**.
 /// Re-measure rather than trusting the constant:
 ///
 /// ```text
@@ -47882,6 +48022,7 @@ fn parse_effect_chain_ir_body(
                 // controller, not the damaged player from the trigger
                 // condition's TriggeringPlayer scope).
                 .or_else(|| chain_parent_target_controller_scope.clone())
+                .or_else(|| declared_object_target_controller_antecedent(builder.clauses()))
                 .or_else(|| ctx.relative_player_scope.clone())
                 .or_else(|| {
                     player_scope
@@ -48764,6 +48905,17 @@ fn parse_effect_chain_ir_body(
         // immediately-following consumer.
         chain_pending_tracked_set_origin = match &clause.effect {
             Effect::ChooseFromZone { zone, .. } => Some(*zone),
+            // CR 701.20b: revealed cards stay in the library they were revealed
+            // from, so "put those cards …" reads them out of the library. A bare
+            // reveal is still a reveal `Dig` with no kept-card destination here;
+            // assembly demotes it to `RevealTop` later.
+            Effect::RevealTop { .. }
+            | Effect::Dig {
+                reveal: true,
+                destination: None,
+                keep_count: None,
+                ..
+            } => Some(Zone::Library),
             _ => None,
         };
         // CR 608.2d + CR 115.7d: The chunk loop intentionally keeps the full
@@ -48989,6 +49141,13 @@ fn parse_effect_chain_ir_body(
         // which is scoped to exactly the reported bug class.
         if condition.is_some()
             && !is_distributed_chunk
+            // CR 608.2c: a gate that measures the chain's tracked set ("If all
+            // cards revealed this way are creature cards, put those cards …")
+            // names the same set its clause's "those cards" does; that set is
+            // the antecedent, not the parent target.
+            && !condition
+                .as_ref()
+                .is_some_and(condition_measures_tracked_set)
             // CR 608.2k: only a GENUINE source-counter gate (no prior chosen
             // target — see `binds_source_counter_pronoun`) keeps the SelfRef
             // binding; a mis-scoped bare "it" over a prior typed target
@@ -54459,6 +54618,169 @@ mod scan_at_random_authority_tests {
             Some(("2, 3, or 4 ", ""))
         );
         assert_eq!(scan_at_random("a color"), None);
+    }
+}
+
+#[cfg(test)]
+mod resolution_time_division_parse_tests {
+    use super::*;
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{AbilityCost, AbilityDefinition};
+    use crate::types::game_state_kinds::DistributionUnit;
+    use crate::types::identifiers::TrackedSetId;
+
+    /// Walk an ability's `sub_ability` chain.
+    fn chain_nodes(root: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+        let mut nodes = Vec::new();
+        let mut cursor = Some(root);
+        while let Some(node) = cursor {
+            nodes.push(node);
+            cursor = node.sub_ability.as_deref();
+        }
+        nodes
+    }
+
+    fn tap_ability(oracle: &str, name: &str, subtypes: &[String]) -> AbilityDefinition {
+        parse_oracle_text(oracle, name, &[], &["Creature".into()], subtypes)
+            .abilities
+            .into_iter()
+            .find(|ability| matches!(&ability.cost, Some(AbilityCost::Tap)))
+            .expect("the {T} ability parses")
+    }
+
+    /// V4 (C2.1): Master of the Wild Hunt's clause 3 — "That creature deals
+    /// damage equal to its power divided as its controller chooses among any
+    /// number of those Wolves." — lowers to a CR 608.2d untargeted division: the
+    /// source is the declared target (CR 120.1), "its power" is that target's
+    /// (CR 608.2h; bound to `Target`, not the effect-context ladder), the
+    /// recipients are the Wolves tapped this way (the chain's tracked set,
+    /// CR 115.10a), the target's controller chooses, and no node is
+    /// `Unimplemented`.
+    #[test]
+    fn master_of_the_wild_hunt_clause_three_is_a_resolution_time_division() {
+        let oracle = "At the beginning of your upkeep, create a 2/2 green Wolf creature token.\n\
+{T}: Tap all untapped Wolf creatures you control. Each Wolf tapped this way deals damage equal to its power to target creature. That creature deals damage equal to its power divided as its controller chooses among any number of those Wolves.";
+        let activated = tap_ability(
+            oracle,
+            "Master of the Wild Hunt",
+            &["Human".into(), "Shaman".into()],
+        );
+        let nodes = chain_nodes(&activated);
+        for node in &nodes {
+            assert!(
+                !matches!(node.effect.as_ref(), Effect::Unimplemented { .. }),
+                "no node may be Unimplemented: {:?}",
+                node.effect
+            );
+        }
+        assert_eq!(
+            nodes.len(),
+            3,
+            "tap, each-Wolf damage, division: {nodes:#?}"
+        );
+
+        // Node 2 keeps its Phase-1 shape (regression guard).
+        assert!(matches!(
+            nodes[1].effect.as_ref(),
+            Effect::EachSourceDealsDamage {
+                sources: TargetFilter::TrackedSetFiltered { .. },
+                recipient: EachDamageRecipient::Shared(TargetFilter::Typed(_)),
+                ..
+            }
+        ));
+
+        let division = nodes[2];
+        assert_eq!(
+            division.effect.as_ref(),
+            &Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    },
+                },
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype(
+                        "Wolf".to_string()
+                    )))),
+                    caused_by: None,
+                },
+                damage_source: Some(DamageSource::Target),
+                excess: None,
+            }
+        );
+        assert_eq!(division.distribute, Some(DistributionUnit::Damage));
+        assert_eq!(
+            division.target_chooser,
+            Some(TargetFilter::ParentTargetController)
+        );
+        assert!(division.multi_target.is_none());
+    }
+
+    /// V4 siblings (C2.1/C2.4): the targeted division family keeps its shape —
+    /// the controller announces, the recipient is a target phrase, and no chooser
+    /// is recorded; the even split is still `EvenSplitDamage`. D3 hostile: an
+    /// each-source clause with no follow-on is unaffected by the typed-introducer
+    /// arm.
+    #[test]
+    fn targeted_division_family_is_unchanged_by_the_chooser_axis() {
+        let inferno = tap_ability(
+            "{T}: This creature deals damage equal to its power divided as you choose among any number of target creatures. Each of those creatures deals damage equal to its power to this creature.",
+            "Living Inferno",
+            &["Elemental".into()],
+        );
+        assert_eq!(inferno.distribute, Some(DistributionUnit::Damage));
+        assert!(inferno.multi_target.is_some());
+        assert!(inferno.target_chooser.is_none());
+        assert!(matches!(
+            inferno.effect.as_ref(),
+            Effect::DealDamage {
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        ));
+
+        let pyrotechnics = parse_oracle_text(
+            "Pyrotechnics deals 4 damage divided as you choose among any number of targets.",
+            "Pyrotechnics",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        let spell = &pyrotechnics.abilities[0];
+        assert_eq!(spell.distribute, Some(DistributionUnit::Damage));
+        assert!(spell.multi_target.is_some());
+        assert!(spell.target_chooser.is_none());
+
+        let fireball = parse_oracle_text(
+            "This spell costs {1} more to cast for each target beyond the first.\nFireball deals X damage divided evenly, rounded down, among any number of targets.",
+            "Fireball",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        assert!(
+            fireball
+                .abilities
+                .iter()
+                .any(|ability| ability.distribute == Some(DistributionUnit::EvenSplitDamage)),
+            "Fireball keeps its even split"
+        );
+
+        let each_source = parse_oracle_text(
+            "Each creature you control deals 1 damage to target creature.",
+            "Each Source Probe",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        let spell = &each_source.abilities[0];
+        assert!(matches!(
+            spell.effect.as_ref(),
+            Effect::EachSourceDealsDamage { .. }
+        ));
+        assert!(spell.sub_ability.is_none());
+        assert!(spell.target_chooser.is_none());
     }
 }
 

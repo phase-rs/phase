@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CR 401.7 + CR 608.2d: Effect::PutOnTopOrBottom gains top_position (LibraryPosition, default Top) and WaitingFor::TopOrBottomChoice gains top_position; 'second from the top or on the bottom' (Deem Inferior, Trickster's Stratagem, Lost Days, Temporal Cleansing, Happy Hogan, Wan Shi Tong) previously dropped the position. An older full-game/P2P peer drops the non-default top_position when decoding and re-encoding the effect or the pending prompt, so its owner's 'top' choice would place the card first instead of second from the top."
+}

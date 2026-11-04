@@ -1342,6 +1342,7 @@
   },
   "distributeAmong": {
     "subtitle": "每个目标至少分配1{{unit}}。剩余：{{remaining}}",
+    "subtitleAnyNumber": "可选择任意数量，每个选中的对象至少分配1{{unit}}。剩余：{{remaining}}",
     "title": "分配{{total}}{{unit}}",
     "unitCounter": "个{{counter}}指示物",
     "unitDamage": "点伤害",
@@ -2641,6 +2642,7 @@
   "topOrBottom": {
     "bottom": "牌库底",
     "cardFallback": "牌",
+    "nthFromTop": "Position {{n}} from the top of library",
     "title": "将{{name}}置于牌库顶或牌库底",
     "top": "牌库顶"
   },

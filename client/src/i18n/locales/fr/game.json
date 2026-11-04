@@ -2221,7 +2221,8 @@
     "unitDamage": "blessures",
     "unitLife": "points de vie",
     "title": "Répartir {{total}} {{unit}}",
-    "subtitle": "Assignez au moins 1 {{unit}} à chaque cible. Restant : {{remaining}}"
+    "subtitle": "Assignez au moins 1 {{unit}} à chaque cible. Restant : {{remaining}}",
+    "subtitleAnyNumber": "Assignez au moins 1 {{unit}} à chacun de ceux que vous choisissez, parmi un nombre quelconque d'entre eux. Restant : {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Choisir un donjon",
@@ -2405,6 +2406,7 @@
     "cardFallback": "Card",
     "title": "Put {{name}} on top or bottom of library",
     "top": "Top of library",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "Bottom of library"
   },
   "mutateMerge": {
