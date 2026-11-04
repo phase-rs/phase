@@ -738,8 +738,8 @@ fn parse_reveal_until_rest_zone_and_order(lower: &str) -> (Option<Zone>, DigRest
 /// "that player's", "that library") selects no player; it must not decide whether
 /// the order instruction is read (Black Cat / Gonti: "... of their library in a
 /// random order" / "... of that library in a random order").
-/// CR 400.3: the bare form names no library; the rest are in the library they
-/// were looked at in (There's Coffee in that Nebula / Loot, Exuberant Explorer:
+/// CR 400.3: the bare form names no library; the rest go to the bottom of their
+/// owner's library (There's Coffee in that Nebula / Loot, Exuberant Explorer:
 /// "Put the rest on the bottom in a random order.").
 fn parse_put_rest_on_bottom_line(input: &str) -> OracleResult<'_, DigRestOrder> {
     let (input, _) = (

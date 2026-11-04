@@ -519,7 +519,7 @@ impl CastingVariant {
             // {3} rather than the printed mana cost — an alternative cost, so only
             // one alternative casting method may apply (CR 118.9a).
             | CastingVariant::FaceDown
-            // CR 118.9a: the beam me up cost replaces the mana cost (rule number needs manual verification).
+            // CR 118.9 + CR 118.9a: the beam me up cost is paid rather than the mana cost, so no other alternative cost may apply (beam me up rule number needs manual verification).
             | CastingVariant::BeamMeUp
             | CastingVariant::Freerunning => true,
             CastingVariant::Normal
