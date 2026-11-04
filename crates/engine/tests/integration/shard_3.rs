@@ -51,6 +51,7 @@ mod dig_announced_target_preservation;
 mod dig_impossible_keep_count;
 mod dig_rest_pile_stranding_on_etb_pause;
 mod dihada_graveyard_treasure_count_8159;
+mod dilemma_history_readers;
 mod diligent_farmhand_counts_as_named;
 mod diluvian_primordial_6754;
 mod dina_noff_turn5_loader;

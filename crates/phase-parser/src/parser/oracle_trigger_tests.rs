@@ -17211,6 +17211,62 @@ fn trigger_you_face_a_dilemma_uses_generic_player_action_path() {
     );
 }
 
+/// CR 603.4: The Caretaker's "if you faced a dilemma this turn" is an
+/// intervening-if over the controller's per-turn `FaceDilemma` history.
+#[test]
+fn caretaker_intervening_if_reads_the_dilemma_history() {
+    let parsed = parse_oracle_text(
+        "Vigilance, ward {2}\nAt the beginning of each end step, if you faced a dilemma this turn, target opponent exiles cards from the top of their library until they exile a nonland card. You may cast that card without paying its mana cost. (You face a dilemma as you choose one or more modes for a spell or ability.)",
+        "The Caretaker",
+        &["Vigilance".to_string()],
+        &["Creature".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::Phase)
+        .expect("end-step trigger");
+    let condition = format!("{:?}", trigger.condition);
+    assert!(
+        condition.contains("PlayerActionsThisTurn") && condition.contains("FaceDilemma"),
+        "{condition}"
+    );
+    let body = trigger.execute.as_deref().expect("REACH: the body parses");
+    assert!(
+        !format!("{body:?}").contains("Unimplemented"),
+        "the exile-and-cast body parses: {body:?}"
+    );
+}
+
+/// "for each dilemma you've faced this turn" (Captain Benjamin Sisko) counts
+/// the controller's `FaceDilemma` history; "this turn" is consumed by the count.
+#[test]
+fn sisko_officer_count_reads_the_dilemma_history() {
+    let parsed = parse_oracle_text(
+        "At the beginning of your end step, create a 1/1 red Officer creature token for each dilemma you've faced this turn.\n{2}{W}{U}{B}{R}{G}, {T}: Exile the top five cards of your library. You may cast any number of spells with mana value less than or equal to the number of Officers you control from among those cards without paying their mana costs.",
+        "Captain Benjamin Sisko",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let trigger = parsed.triggers.first().expect("end-step trigger");
+    let token = trigger.execute.as_deref().expect("token effect");
+    let Effect::Token { count, .. } = token.effect.as_ref() else {
+        panic!("expected Token, got {:?}", token.effect);
+    };
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::PlayerActionsThisTurn {
+                player: crate::types::ability::PlayerScope::Controller,
+                action: PlayerActionKind::FaceDilemma,
+            }
+        }
+    );
+    assert_eq!(token.duration, None, "no stray duration from \"this turn\"");
+}
+
 /// The "face(s) a dilemma" phrase is all-consuming: a trailing qualifier is not
 /// this action.
 #[test]

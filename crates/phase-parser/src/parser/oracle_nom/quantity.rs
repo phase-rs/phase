@@ -5412,6 +5412,25 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     )
 }
 
+/// CR 700.2a + CR 700.2b: "dilemma you've faced this turn" (after "for each ")
+/// — the controller's faced dilemmas this turn, one per mode-choice
+/// announcement (TRK "face a dilemma"; needs manual verification). "This turn"
+/// is the count's own window, so it is consumed here.
+fn parse_for_each_dilemma_faced_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::PlayerActionsThisTurn {
+            player: PlayerScope::Controller,
+            action: crate::types::event_kinds::PlayerActionKind::FaceDilemma,
+        },
+        (
+            tag("dilemma "),
+            alt((tag("you've"), tag("you have"))),
+            tag(" faced this turn"),
+        ),
+    )
+    .parse(input)
+}
+
 /// Parse "for each differently named <type>" patterns.
 /// Used for patterns like "for each differently named dungeon you've completed".
 /// CR 201.2: Distinct-by-name population count.
@@ -5824,7 +5843,11 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
         parse_event_context_opponent_dealt_damage,
         parse_for_each_card_drawn_this_way,
         parse_for_each_recipient_attack_count,
-        parse_for_each_spells_before_triggering_spell,
+        // Nested to keep the outer `alt` within nom's tuple arity.
+        alt((
+            parse_for_each_spells_before_triggering_spell,
+            parse_for_each_dilemma_faced_this_turn,
+        )),
         alt((
             alt((
                 parse_for_each_one_life_changed_this_turn,
