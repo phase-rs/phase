@@ -1172,45 +1172,81 @@ fn snow_pool_z_hybrid_unpayable_and_forced_life_suffixes() {
     // {R/P} composition: CR 601.2h and 107.4f. Missing mandatory mana must
     // reject atomically, and unavoidable life must not invite permutation search.
     for count in [4, 6, 8] {
-        let mut units: Vec<_> = (0..count)
-            .map(|n| hybrid_reserve_unit(ManaType::Colorless, n + 1, false, true))
-            .collect();
-        units.push(hybrid_reserve_unit(ManaType::Green, 20, true, true));
-        let funded = ManaPool::from_units(units);
-        let z = "{Z}".repeat(count as usize);
-        for choices in [None, Some([ShardChoice::PayLife])] {
-            let mut pool = funded.clone();
-            let (spent, life) = pay_cost_with_demand_and_choices(
-                &mut pool,
-                &parse_mtgjson_mana_cost(&format!("{z}{{S}}{{R/P}}")),
-                None,
-                None,
-                None,
-                choices.as_ref().map(|v| v.as_slice()),
-                LifePaymentColors::EMPTY,
-                &[],
-            )
-            .unwrap();
-            assert_eq!(spent.len(), count as usize + 1);
-            assert_eq!(life.len(), 1);
-            assert!(pool.is_empty());
+        for snow_color in [ManaType::Green, ManaType::Red] {
+            let mut units: Vec<_> = (0..count)
+                .map(|n| hybrid_reserve_unit(ManaType::Colorless, n + 1, false, true))
+                .collect();
+            units.push(hybrid_reserve_unit(snow_color, 20, true, true));
+            let funded = ManaPool::from_units(units);
+            let z = "{Z}".repeat(count as usize);
+            for choices in [None, Some([ShardChoice::PayLife])] {
+                let mut pool = funded.clone();
+                let (spent, life) = pay_cost_with_demand_and_choices(
+                    &mut pool,
+                    &parse_mtgjson_mana_cost(&format!("{z}{{S}}{{R/P}}")),
+                    None,
+                    None,
+                    None,
+                    choices.as_ref().map(|v| v.as_slice()),
+                    LifePaymentColors::EMPTY,
+                    &[],
+                )
+                .unwrap();
+                assert_eq!(spent.len(), count as usize + 1);
+                assert_eq!(life.len(), 1);
+                assert!(pool.is_empty());
+            }
+            for suffix in ["{U}{S}", "{2}{S}"] {
+                let mut pool = funded.clone();
+                pool.add(hybrid_reserve_unit(ManaType::Red, 21, false, false));
+                let before = pool.clone();
+                assert!(pay_cost_with_demand_and_choices(
+                    &mut pool,
+                    &parse_mtgjson_mana_cost(&format!("{z}{suffix}")),
+                    None,
+                    None,
+                    None,
+                    None,
+                    LifePaymentColors::EMPTY,
+                    &[],
+                )
+                .is_err());
+                assert_eq!(pool, before);
+            }
         }
-        for suffix in ["{U}{S}", "{2}{S}"] {
-            let mut pool = funded.clone();
-            pool.add(hybrid_reserve_unit(ManaType::Red, 21, false, false));
-            let before = pool.clone();
-            assert!(pay_cost_with_demand_and_choices(
-                &mut pool,
-                &parse_mtgjson_mana_cost(&format!("{z}{suffix}")),
-                None,
-                None,
-                None,
-                None,
-                LifePaymentColors::EMPTY,
-                &[],
-            )
-            .is_err());
-            assert_eq!(pool, before);
+        for hybrid in ["{C/U}", "{W/U}"] {
+            for ordinary in [ManaType::Black, ManaType::Blue] {
+                let mut units: Vec<_> = (0..count)
+                    .map(|n| hybrid_reserve_unit(ManaType::Red, n + 1, false, true))
+                    .collect();
+                units.push(hybrid_reserve_unit(ManaType::Green, 20, true, true));
+                units.push(hybrid_reserve_unit(ordinary, 21, false, false));
+                let mut pool = ManaPool::from_units(units);
+                let before = pool.clone();
+                let cost = parse_mtgjson_mana_cost(&format!(
+                    "{}{hybrid}{{S}}",
+                    "{Z}".repeat(count as usize)
+                ));
+                let result = pay_cost_with_demand_and_choices(
+                    &mut pool,
+                    &cost,
+                    None,
+                    None,
+                    None,
+                    None,
+                    LifePaymentColors::EMPTY,
+                    &[],
+                );
+                if ordinary == ManaType::Blue {
+                    let (spent, life) = result.unwrap();
+                    assert_eq!(spent.len(), count as usize + 2);
+                    assert!(life.is_empty());
+                    assert!(pool.is_empty());
+                } else {
+                    assert!(result.is_err());
+                    assert_eq!(pool, before);
+                }
+            }
         }
     }
 }

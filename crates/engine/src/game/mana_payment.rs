@@ -1222,8 +1222,8 @@ struct PaymentContinuation<'a> {
 
 impl PaymentContinuation<'_> {
     /// CR 601.2h + CR 107.4f: necessary bounds before testing a Z allocation.
-    /// Each availability probe sees the whole pool, including the current Z
-    /// unit. It may overestimate available mana, but cannot prove a payment.
+    /// Availability probes reserve the mandatory source qualities, including
+    /// the current Z. They may overestimate other shared mana, but cannot prove a payment.
     /// Only the actual continuation can do that. Optional life costs require
     /// no mandatory mana; unavoidable life gives the search a lower bound.
     fn minimum_life_after_z(
@@ -1234,6 +1234,19 @@ impl PaymentContinuation<'_> {
         choices: Option<&[ShardChoice]>,
         life_colors: crate::types::mana::LifePaymentColors,
     ) -> Option<usize> {
+        let quality = SourceQualityDemand {
+            multicolor: self.quality_demand.multicolor + 1,
+            ..self.quality_demand
+        };
+        let mut spare = pool.clone();
+        spare.retain_shapes(|unit| quality.preserves_after(pool, unit, spell));
+        let color_available =
+            |color| sim_phyrexian_mana_available(&spare, spell, permission.is_some(), color);
+        let two_generic_available = || {
+            let mut probe = spare.clone();
+            spend_generic_eligible(&mut probe, spell, None, &[]).is_some()
+                && spend_generic_eligible(&mut probe, spell, None, &[]).is_some()
+        };
         let mut minimum_units = self.generic as usize + 1;
         let mut minimum_life = 0;
         let mut choice_cursor = 0;
@@ -1243,7 +1256,7 @@ impl PaymentContinuation<'_> {
             let mana_available = match requirement {
                 ShardRequirement::Single(color) => {
                     if !sim_phyrexian_mana_available(
-                        pool,
+                        &spare,
                         spell,
                         permission.is_some_and(|p| p.allows_payment_as(color)),
                         color,
@@ -1253,27 +1266,36 @@ impl PaymentContinuation<'_> {
                     minimum_units += 1;
                     continue;
                 }
-                ShardRequirement::Hybrid(..)
-                | ShardRequirement::ColorlessHybrid(..)
-                | ShardRequirement::TwoGenericHybrid(..)
-                | ShardRequirement::Snow
-                | ShardRequirement::TwoOrMoreColorSource => {
+                ShardRequirement::Hybrid(a, b) => {
+                    if !color_available(a) && !color_available(b) {
+                        return None;
+                    }
+                    minimum_units += 1;
+                    continue;
+                }
+                ShardRequirement::ColorlessHybrid(color) => {
+                    if !color_available(ManaType::Colorless) && !color_available(color) {
+                        return None;
+                    }
+                    minimum_units += 1;
+                    continue;
+                }
+                ShardRequirement::TwoGenericHybrid(color) => {
+                    if !color_available(color) && !two_generic_available() {
+                        return None;
+                    }
+                    minimum_units += 1;
+                    continue;
+                }
+                ShardRequirement::Snow | ShardRequirement::TwoOrMoreColorSource => {
                     minimum_units += 1;
                     continue;
                 }
                 ShardRequirement::X => continue,
-                ShardRequirement::Phyrexian(color) => {
-                    sim_phyrexian_mana_available(pool, spell, permission.is_some(), color)
-                }
-                ShardRequirement::HybridPhyrexian(a, b) => {
-                    sim_phyrexian_mana_available(pool, spell, permission.is_some(), a)
-                        || sim_phyrexian_mana_available(pool, spell, permission.is_some(), b)
-                }
+                ShardRequirement::Phyrexian(color) => color_available(color),
+                ShardRequirement::HybridPhyrexian(a, b) => color_available(a) || color_available(b),
                 ShardRequirement::TwoGenericHybridPhyrexian(color) => {
-                    let mut probe = pool.clone();
-                    sim_phyrexian_mana_available(pool, spell, permission.is_some(), color)
-                        || (spend_generic_eligible(&mut probe, spell, None, &[]).is_some()
-                            && spend_generic_eligible(&mut probe, spell, None, &[]).is_some())
+                    color_available(color) || two_generic_available()
                 }
             };
             match choices.and_then(|choices| choices.get(choice_cursor)) {
