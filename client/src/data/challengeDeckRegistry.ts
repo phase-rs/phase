@@ -84,7 +84,7 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       {
         label: "Horde combat",
         detail:
-          "The Horde's creatures attack every combat if able, and only its Defenders can block",
+          "The Horde's creatures have haste, attack every combat if able, and only its Defenders can block",
       },
     ],
   },
@@ -157,7 +157,7 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       {
         label: "Horde combat",
         detail:
-          "The Horde's creatures attack every combat if able, and only its Defenders can block",
+          "The Horde's creatures have haste, attack every combat if able, and only its Defenders can block",
       },
     ],
   },
@@ -244,7 +244,7 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       {
         label: "Horde combat",
         detail:
-          "The Horde's creatures attack every combat if able, and only its Defenders can block",
+          "The Horde's creatures have haste, attack every combat if able, and only its Defenders can block",
       },
     ],
   },
@@ -317,7 +317,7 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       {
         label: "Horde combat",
         detail:
-          "The Horde's creatures attack every combat if able, and only its Defenders can block",
+          "The Horde's creatures have haste, attack every combat if able, and only its Defenders can block",
       },
     ],
   },
@@ -390,7 +390,7 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       {
         label: "Horde combat",
         detail:
-          "The Horde's creatures attack every combat if able, and only its Defenders can block",
+          "The Horde's creatures have haste, attack every combat if able, and only its Defenders can block",
       },
     ],
   },
@@ -467,7 +467,7 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       {
         label: "Horde combat",
         detail:
-          "The Horde's creatures attack every combat if able, and only its Defenders can block",
+          "The Horde's creatures have haste, attack every combat if able, and only its Defenders can block",
       },
       {
         label: "Legendary deaths",
@@ -549,7 +549,7 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       {
         label: "Horde combat",
         detail:
-          "The Horde's creatures attack every combat if able, and only its Defenders can block",
+          "The Horde's creatures have haste, attack every combat if able, and only its Defenders can block",
       },
       {
         label: "Legendary deaths",
@@ -635,7 +635,7 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       {
         label: "Horde combat",
         detail:
-          "The Horde's creatures attack every combat if able, and only its Defenders can block",
+          "The Horde's creatures have haste, attack every combat if able, and only its Defenders can block",
       },
       {
         label: "Legendary deaths",
@@ -730,7 +730,7 @@ export const CHALLENGE_DECK_REGISTRY: readonly ChallengeDeckMetadata[] = [
       {
         label: "Horde combat",
         detail:
-          "The Horde's creatures attack every combat if able, and only its Defenders can block",
+          "The Horde's creatures attack every combat if able (never the turn they enter), and only its Defenders can block",
       },
       {
         label: "Bosses",
