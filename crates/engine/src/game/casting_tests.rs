@@ -32,7 +32,7 @@ use crate::types::mana::{
 };
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{CastFrequency, CostModifyMode, StaticMode};
 use std::sync::Arc;
 
 fn setup_game_at_main_phase() -> GameState {
@@ -52139,6 +52139,33 @@ fn skyseer_increases_chosen_name_activated_ability_cost() {
         3,
         "a source without the chosen name must not be taxed"
     );
+
+    // CR 109.2c: "source" means a source of an ability in ANY zone, so the
+    // chosen-name description is NOT battlefield-denoting and keeps taxing an
+    // activation whose source is a card in a graveyard. This pins the CR 109.2
+    // gate's scope test: a gate keyed on "has any source filter" instead of
+    // `filter_denotes_battlefield_permanent` fails here.
+    let grave_matched = create_object(
+        &mut state,
+        CardId(4),
+        PlayerId(1),
+        "Targeted Source".to_string(),
+        Zone::Graveyard,
+    );
+    state
+        .objects
+        .get_mut(&grave_matched)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(crate::types::card_type::CoreType::Creature);
+    let mut def_grave = make_def();
+    apply_cost_reduction(&state, &mut def_grave, PlayerId(1), grave_matched);
+    assert_eq!(
+        generic_of(&def_grave),
+        5,
+        "CR 109.2c: a chosen-name source is taxed in every zone, graveyard included"
+    );
 }
 
 /// CR 606.1 + CR 118.7 + CR 601.2f: Eidolon of Obstruction — "Loyalty abilities
@@ -62353,6 +62380,119 @@ fn an_activation_journal_row_round_trips() {
     let json = serde_json::to_string(&row).unwrap();
     let back: AbilityActivationRecord = serde_json::from_str(&json).unwrap();
     assert_eq!(back, row, "{json}");
+}
+
+/// CR 109.2 + CR 110.1 + CR 602.2a: MECHANISM ROW, not a printed-card row.
+///
+/// Tezzeret, Betrayer of Flesh ("The first activated ability of an artifact you
+/// activate each turn costs {2} less to activate.") is the nearest printed card,
+/// but its line is a strict parse failure today (`dispatch.rs` declines it; see
+/// `professor_hojo_activation_cost.rs::
+/// once_per_turn_discount_without_a_target_restriction_stays_unsupported`), so
+/// no supported card reaches this arm. The journal arm is therefore pinned with
+/// a hand-built definition: a once-per-turn reducer whose scope is "a creature
+/// you control" must not count an activation announced from a graveyard as its
+/// qualifying first activation, while a battlefield activation of the same shape
+/// must. Both rows come from `capture_activation_record_from`, the real
+/// announcement capturer, so the recorded `source_zone` is what the gate reads.
+///
+/// Reverting the gate's zone predicate makes the graveyard row qualify (the
+/// creature CARD still matches "creature you control" through its at-departure
+/// controller), flipping the first assertion.
+#[test]
+fn a_graveyard_activation_does_not_consume_a_battlefield_scoped_first_activation_discount() {
+    let mut state = GameState::new_two_player(7);
+    let reducer = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "First Activation Reducer".to_string(),
+        Zone::Battlefield,
+    );
+    let grave_source = create_object(
+        &mut state,
+        CardId(2),
+        PlayerId(0),
+        "Graveyard Creature".to_string(),
+        Zone::Graveyard,
+    );
+    let field_source = create_object(
+        &mut state,
+        CardId(3),
+        PlayerId(0),
+        "Battlefield Creature".to_string(),
+        Zone::Battlefield,
+    );
+    for id in [grave_source, field_source] {
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+    }
+
+    let definition = StaticDefinition::new(StaticMode::ReduceAbilityCost {
+        mode: CostModifyMode::Reduce,
+        keyword: "activated".to_string(),
+        amount: 1,
+        minimum_mana: None,
+        dynamic_count: None,
+        exemption: crate::types::statics::ActivationExemption::None,
+        activator: None,
+        targets: None,
+        frequency: Some(CastFrequency::OncePerTurn),
+    })
+    .affected(TargetFilter::Typed(
+        TypedFilter::creature().controller(ControllerRef::You),
+    ));
+    // Reach guard: this definition is the journal-path shape under test.
+    assert!(super::is_first_activation_modifier(&definition.mode));
+
+    let filter = definition.affected.as_ref().unwrap();
+    let ctx = crate::game::filter::FilterContext::from_source_with_controller(reducer, PlayerId(0));
+    let qualifies = |state: &GameState| {
+        super::earlier_activation_this_turn_qualified(
+            state,
+            "activated",
+            crate::types::statics::ActivationExemption::None,
+            None,
+            Some(filter),
+            None,
+            reducer,
+            PlayerId(0),
+            &ctx,
+        )
+    };
+
+    let grave_row =
+        super::capture_activation_record_from(&state, PlayerId(0), grave_source, None, &[])
+            .expect("a graveyard source yields a record");
+    assert_eq!(grave_row.source_zone, Zone::Graveyard);
+    state
+        .abilities_activated_this_turn_by_player
+        .entry(PlayerId(0))
+        .or_default()
+        .push_back(grave_row);
+    assert!(
+        !qualifies(&state),
+        "an activation announced from a graveyard is not a \"creature you control\" activation"
+    );
+
+    let field_row =
+        super::capture_activation_record_from(&state, PlayerId(0), field_source, None, &[])
+            .expect("a battlefield source yields a record");
+    assert_eq!(field_row.source_zone, Zone::Battlefield);
+    state
+        .abilities_activated_this_turn_by_player
+        .entry(PlayerId(0))
+        .or_default()
+        .push_back(field_row);
+    assert!(
+        qualifies(&state),
+        "a battlefield activation of the same shape is the qualifying first activation"
+    );
 }
 
 /// CR 102.2 + CR 102.3 + CR 800.4a: "each opponent" is each opponent still in

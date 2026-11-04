@@ -156,8 +156,8 @@ impl ActivationTriggerState {
 
 /// CR 603.2 + CR 603.5: What observing an activation at its boundary bound.
 /// `Bound` means at least one trigger was admitted for the event — whether its
-/// context was queued or then pruned (a remembered decline still spends a
-/// "triggers only once each turn" limit). A bound observation has consequences
+/// context was queued or then pruned (a remembered accept with no legal target
+/// still spends a "triggers only once each turn" limit). A bound observation has consequences
 /// a mana-tap undo cannot reverse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActivationObservers {

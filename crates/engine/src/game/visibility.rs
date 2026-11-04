@@ -6,8 +6,8 @@ use crate::types::action_rejection::ActionRejection;
 use crate::types::display_only::DisplayOnly;
 use crate::types::events::{GameEvent, LibrarySearchCardFaceView, LibrarySearchCardView};
 use crate::types::game_state::{
-    CastOfferKind, GameState, LibraryKnowledgeStamp, PayCostKind, StackEntryKind, WaitingFor,
-    ZoneChangeRecord,
+    CastOfferKind, DistributionScope, GameState, LibraryKnowledgeStamp, PayCostKind,
+    StackEntryKind, WaitingFor, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -31,10 +31,24 @@ fn redact_parent_target_iteration_members(ability: &mut crate::types::ability::R
     }
 }
 
-fn redact_waiting_for_iteration_members(waiting_for: &mut WaitingFor) {
+///
+/// Shared by both viewer boundaries: `filter_state_for_viewer` and the direct
+/// client serializer (`derived_views::client_state_wire_value`), so a caller
+/// that skips the viewer filter still cannot ship the provenance.
+pub(crate) fn redact_waiting_for_iteration_members(waiting_for: &mut WaitingFor) {
     match waiting_for {
         WaitingFor::UnlessPayment { pending_effect, .. }
         | WaitingFor::UnlessPaymentChooseCost { pending_effect, .. } => {
+            redact_parent_target_iteration_members(pending_effect);
+        }
+        // CR 608.2d: the paused resolution-time division effect is retained in
+        // authoritative state to resume from; the prompt (`targets`, `total`,
+        // `unit`) is the whole public surface, so its private look-result
+        // provenance never reaches a viewer.
+        WaitingFor::DistributeAmong {
+            scope: DistributionScope::ResolutionCandidates { pending_effect },
+            ..
+        } => {
             redact_parent_target_iteration_members(pending_effect);
         }
         _ => {}
@@ -5104,12 +5118,12 @@ mod tests {
     };
     use crate::game::scenario::{GameScenario, P0, P1};
     use crate::game::zones::create_object;
-    use crate::types::ability::EffectKind;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, BeholdCostAction, CostPaidObjectSnapshot,
         Effect, FaceDownProfile, QuantityExpr, ReplacementDefinition, ResolvedAbility,
         TargetFilter,
     };
+    use crate::types::ability::{EffectKind, TargetRef};
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::counter::CounterType;
@@ -5118,7 +5132,7 @@ mod tests {
     use crate::types::game_state::{
         ActiveLibrarySearch, AutoMayChoice, BattlefieldEntryRecord, CastPaymentMode,
         CastingVariant, CostResume, CounterAddedRecord, DamageRecord, DelayedTrigger,
-        DepartedStackSpell, FrozenScopedSearchFoundDisposition, LinkedExileLki,
+        DepartedStackSpell, DistributionUnit, FrozenScopedSearchFoundDisposition, LinkedExileLki,
         LinkedExileSnapshot, ManaAbilityCostCursor, ManaAbilityCostResolutionMode,
         ManaAbilityResume, ManaSpentSourceSnapshot, MayTriggerAutoChoiceKey, MayTriggerOrigin,
         PendingBeginGameAbility, PendingCast, PendingCostMoveCompletion, PendingCostMoveResume,
@@ -7932,6 +7946,52 @@ mod tests {
             pending_effect.context.parent_target_iteration_members, None,
             "a viewer snapshot must not expose the private look-result object ids"
         );
+    }
+
+    /// CR 608.2d: the paused resolution-time division effect is retained in
+    /// authoritative state, but its resolution-only look-result provenance never
+    /// reaches a viewer through the typed filter. The direct client serializer's
+    /// own redaction is pinned in `derived_views` on an unfiltered state.
+    #[test]
+    fn resolution_division_projection_redacts_private_iteration_members() {
+        let mut state = GameState::new_two_player(42);
+        let mut pending = ResolvedAbility::new(
+            Effect::unimplemented("private loop probe", "private loop probe"),
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        pending.context.parent_target_iteration_members = Some(vec![ObjectId(1), ObjectId(2)]);
+        state.waiting_for = WaitingFor::DistributeAmong {
+            player: PlayerId(0),
+            total: 3,
+            targets: vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Object(ObjectId(2)),
+            ],
+            unit: DistributionUnit::Damage,
+            scope: DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            },
+        };
+
+        let members = |waiting_for: &WaitingFor| match waiting_for {
+            WaitingFor::DistributeAmong {
+                scope: DistributionScope::ResolutionCandidates { pending_effect },
+                ..
+            } => pending_effect
+                .context
+                .parent_target_iteration_members
+                .clone(),
+            other => panic!("the prompt must survive projection, got {other:?}"),
+        };
+
+        // Typed viewer filter.
+        let filtered = filter_state_for_viewer(&state, PlayerId(1));
+        assert_eq!(members(&filtered.waiting_for), None);
+
+        // Authoritative state still carries the provenance for the resume.
+        assert!(members(&state.waiting_for).is_some());
     }
 
     fn dummy_pending_mana_ability(
