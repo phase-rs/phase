@@ -16128,7 +16128,7 @@ fn try_parse_owner_of_target_shuffle(
     let mut trial = ctx.clone_throwaway();
     let application = subject::parse_subject_application(subject_text, &mut trial);
     // allow-noncombinator: possessive anaphor classification for the owner-shuffle shortcut.
-    let possessive_anaphor = subject_text.contains("'s owner ") // allow-noncombinator: possessive subject scan.
+    let possessive_anaphor = subject_text.contains("'s owner") // allow-noncombinator: possessive subject scan.
         && !subject_text.to_ascii_lowercase().contains("target "); // allow-noncombinator: declared-target guard.
     let target = match application {
         Some(application) => {
@@ -16147,6 +16147,14 @@ fn try_parse_owner_of_target_shuffle(
     });
     let mut bound_move = AbilityDefinition::new(AbilityKind::Spell, movement.effect);
     bound_move.sub_ability = movement.sub_ability;
+    // CR 400.3: a possessive anaphor ("that creature's owner") announces no new
+    // target, so the shuffle is the clause's root effect — a replacement
+    // follow-up must execute it, not a TargetOnly declaration.
+    if possessive_anaphor {
+        let mut bound = parsed_clause(*bound_move.effect);
+        bound.sub_ability = bound_move.sub_ability;
+        return Some(bound);
+    }
     let mut declaration = parsed_clause(Effect::TargetOnly { target });
     declaration.sub_ability = Some(Box::new(bound_move));
     Some(declaration)

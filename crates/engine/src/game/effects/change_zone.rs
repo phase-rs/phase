@@ -2972,6 +2972,18 @@ pub fn resolve_all(
             _ => {
                 let objects = if ability.parent_target_missing_reason.is_some() {
                     Vec::new()
+                } else if matches!(target_filter, TargetFilter::PostReplacementDamageTarget) {
+                    // CR 615.5 + CR 608.2c: the replacement continuation's own
+                    // bound targets may name the damaging source; the prevented
+                    // event's live object referent is the moved permanent.
+                    state
+                        .post_replacement_event_target()
+                        .and_then(|target| match target {
+                            TargetRef::Object(id) => Some(*id),
+                            TargetRef::Player(_) => None,
+                        })
+                        .into_iter()
+                        .collect()
                 } else {
                     crate::game::targeting::resolved_object_ids_for_filter(
                         state,
