@@ -372,13 +372,22 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
     if candidates.is_empty() {
         return Vec::new();
     }
-    // CR 702.16e + CR 702.16j: the defender is chosen, and lethal read, only among
-    // opponents an attack can do something to. Blocker grouping, crackback, and
-    // the stabilize read keep every opponent: a protected player still blocks and
-    // still attacks back. With no such opponent the candidates remain for
-    // non-player targets, so the full list stands in.
+    // CR 702.16e + CR 702.16j: the per-attacker path chooses its one defender,
+    // and reads lethal, only among opponents some candidate can damage; the
+    // free-for-all comparison, which scores each defender separately, also
+    // weighs opponents only an attack trigger pays off against. Blocker
+    // grouping, crackback, and the stabilize read keep every opponent: a
+    // protected player still blocks and still attacks back. With no such
+    // opponent the candidates remain for non-player targets or attack
+    // triggers, so the full list stands in.
+    let damageable = damageable_opponents(state, &opponents, &candidates);
+    let defender_pool: &[PlayerId] = if damageable.is_empty() {
+        &opponents
+    } else {
+        &damageable
+    };
     let worthwhile = attack_worthy_opponents(state, &opponents, &candidates);
-    let defender_pool: &[PlayerId] = if worthwhile.is_empty() {
+    let comparison_pool: &[PlayerId] = if worthwhile.is_empty() {
         &opponents
     } else {
         &worthwhile
@@ -457,7 +466,7 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
                 state,
                 player,
                 ExpandedComparisonInput {
-                    opponents: defender_pool,
+                    opponents: comparison_pool,
                     candidates: &candidates,
                     mandatory: &mandatory,
                     slices: &slices,
@@ -1253,7 +1262,6 @@ fn expanded_multiplayer_choice(
         state.format_config.topology(),
         FormatTopology::IndividualSeats
     ) || input.opponents.len() < 2
-        || comparison_misses_trigger_payoff(state, &input)
     {
         return None;
     }
@@ -1264,18 +1272,27 @@ fn expanded_multiplayer_choice(
     if reachable_opponents.is_empty() {
         return None;
     }
+    // CR 702.16e + CR 702.16j: a fallback defender is chosen without a scored
+    // proposal, so it comes only from opponents some candidate can damage —
+    // never one only an attack trigger pays off against.
+    let damage_reachable = damageable_opponents(state, &reachable_opponents, input.candidates);
+    let fallback_defenders: &[PlayerId] = if damage_reachable.is_empty() {
+        &reachable_opponents
+    } else {
+        &damage_reachable
+    };
 
     if input.shared_deadline.expired()
         || input
             .local_deadline
             .is_some_and(|deadline| deadline.expired())
     {
-        return fallback_multiplayer_defender(state, player, &reachable_opponents).map(
-            |defender| ExpandedMultiplayerChoice {
+        return fallback_multiplayer_defender(state, player, fallback_defenders).map(|defender| {
+            ExpandedMultiplayerChoice {
                 defender,
                 attackers: None,
-            },
-        );
+            }
+        });
     }
 
     let work_upper_bound = input
@@ -1292,24 +1309,24 @@ fn expanded_multiplayer_choice(
             )
         }));
     if input.shared_deadline.expired() || work_upper_bound > MULTIPLAYER_COMPARISON_WORK_LIMIT {
-        return fallback_multiplayer_defender(state, player, &reachable_opponents).map(
-            |defender| ExpandedMultiplayerChoice {
+        return fallback_multiplayer_defender(state, player, fallback_defenders).map(|defender| {
+            ExpandedMultiplayerChoice {
                 defender,
                 attackers: None,
-            },
-        );
+            }
+        });
     }
 
     if input
         .local_deadline
         .is_some_and(|deadline| deadline.expired())
     {
-        return fallback_multiplayer_defender(state, player, &reachable_opponents).map(
-            |defender| ExpandedMultiplayerChoice {
+        return fallback_multiplayer_defender(state, player, fallback_defenders).map(|defender| {
+            ExpandedMultiplayerChoice {
                 defender,
                 attackers: None,
-            },
-        );
+            }
+        });
     }
     let mut values = HashMap::new();
     for &id in input
@@ -1359,6 +1376,11 @@ fn expanded_multiplayer_choice(
         let mut credited_blockers = HashSet::new();
         let mut blocked_damage = 0;
         let mut open_damage = 0;
+        // CR 508.3a + CR 508.3f: a prevented attacker's own trigger is its whole
+        // payoff. The comparison has no trigger value model, so the damage it
+        // would deal unprevented stands in as pressure — never as a finish.
+        let mut payoff_blocked_damage = 0;
+        let mut payoff_open_damage = 0;
         let mut commander_finish = false;
         let mut complete = true;
 
@@ -1392,7 +1414,8 @@ fn expanded_multiplayer_choice(
             }
             // CR 702.16e + CR 702.16j: this defender prevents the attacker's
             // damage, so it joins the proposal only when it must attack or its
-            // own trigger pays off, and it credits no damage or finish.
+            // own trigger pays off, and it credits no damage or finish (a
+            // payoff credits pressure only).
             let damage_prevented = player_damage_prevented(state, defender, attacker_id);
             if damage_prevented
                 && !input.mandatory.contains(&attacker_id)
@@ -1472,19 +1495,24 @@ fn expanded_multiplayer_choice(
                 continue;
             }
             attackers.push(attacker_id);
+            let unprevented_blocked_damage = engine::game::combat_damage::combat_damage_to_defender(
+                state,
+                attacker_id,
+                damage_blockers,
+            );
+            let unprevented_open_damage =
+                engine::game::combat_damage::combat_damage_to_defender(state, attacker_id, &[]);
             let attacker_blocked_damage = if damage_prevented {
                 0
             } else {
-                engine::game::combat_damage::combat_damage_to_defender(
-                    state,
-                    attacker_id,
-                    damage_blockers,
-                )
+                unprevented_blocked_damage
             };
             blocked_damage += attacker_blocked_damage;
             if !damage_prevented {
-                open_damage +=
-                    engine::game::combat_damage::combat_damage_to_defender(state, attacker_id, &[]);
+                open_damage += unprevented_open_damage;
+            } else if has_self_attack_payoff(state, attacker_id) {
+                payoff_blocked_damage += unprevented_blocked_damage;
+                payoff_open_damage += unprevented_open_damage;
             }
             // A one-block exchange does not model menace or any other minimum
             // multi-block requirement. Keep its positive trade credit at zero
@@ -1520,9 +1548,10 @@ fn expanded_multiplayer_choice(
                 * (0.5 + threat_level(state, player, defender))
         };
         let finishes = blocked_damage >= defender_life && defender_life > 0 || commander_finish;
-        let open_pressure = pressure(open_damage);
-        let pre_finish_utility =
-            (opposing_losses - own_losses + pressure(blocked_damage)).min(open_pressure);
+        let open_pressure = pressure(open_damage + payoff_open_damage);
+        let pre_finish_utility = (opposing_losses - own_losses
+            + pressure(blocked_damage + payoff_blocked_damage))
+        .min(open_pressure);
         let utility = pre_finish_utility + if finishes { 2.0 } else { 0.0 };
         #[cfg(test)]
         EXPANDED_PROPOSAL_ACCOUNTING.with(|accounting| {
@@ -1550,16 +1579,16 @@ fn expanded_multiplayer_choice(
         .iter()
         .max_by(|left, right| left.utility.total_cmp(&right.utility))
     else {
-        return fallback_multiplayer_defender(state, player, &reachable_opponents).map(
-            |defender| ExpandedMultiplayerChoice {
+        return fallback_multiplayer_defender(state, player, fallback_defenders).map(|defender| {
+            ExpandedMultiplayerChoice {
                 defender,
                 attackers: None,
-            },
-        );
+            }
+        });
     };
     if best.utility <= 0.0 {
         return Some(ExpandedMultiplayerChoice {
-            defender: reachable_opponents[0],
+            defender: fallback_defenders[0],
             attackers: Some(Vec::new()),
         });
     }
@@ -1713,6 +1742,24 @@ fn has_self_attack_payoff(state: &GameState, attacker: ObjectId) -> bool {
     })
 }
 
+/// CR 702.16e + CR 702.16j: the opponents at least one candidate's combat
+/// damage reaches.
+fn damageable_opponents(
+    state: &GameState,
+    opponents: &[PlayerId],
+    candidates: &[ObjectId],
+) -> Vec<PlayerId> {
+    opponents
+        .iter()
+        .copied()
+        .filter(|&opponent| {
+            candidates
+                .iter()
+                .any(|&id| !player_damage_prevented(state, opponent, id))
+        })
+        .collect()
+}
+
 /// CR 702.16e + CR 702.16j: the opponents an attack can do something to — at
 /// least one candidate's combat damage reaches them, or a candidate's own
 /// trigger pays off whoever it attacks (`has_self_attack_payoff`).
@@ -1730,24 +1777,6 @@ fn attack_worthy_opponents(
             })
         })
         .collect()
-}
-
-/// Whether some candidate's attack into a defender in the comparison pays off
-/// only through its own trigger: the defender prevents its damage, but it has a
-/// self attack payoff. The comparison scores combat damage and trades, not
-/// trigger payoffs (CR 508.3a, CR 508.3f), so it would value that attack at
-/// nothing and decline it; the per-attacker selection admits it instead.
-fn comparison_misses_trigger_payoff(
-    state: &GameState,
-    input: &ExpandedComparisonInput<'_>,
-) -> bool {
-    input.candidates.iter().any(|&id| {
-        has_self_attack_payoff(state, id)
-            && input
-                .opponents
-                .iter()
-                .any(|&defender| player_damage_prevented(state, defender, id))
-    })
 }
 
 /// CR 702.16e + CR 702.16j: the power of `attackers` whose damage `opponent`
@@ -10510,10 +10539,10 @@ mod tests {
                 "{card} must attack the protected player for its payoff"
             );
 
-            // Master's life-total effect currently resolves against its
-            // controller rather than the defending player, an engine defect
-            // independent of this choice, so only Nightstalker's payoff is
-            // observed here.
+            // Master's "that player's life total becomes 1" currently does not
+            // resolve against the defending player (its trigger binds "that
+            // player" to `ParentTarget`), a defect independent of this choice,
+            // so only Nightstalker's payoff is observed here.
             if card == "Abyssal Nightstalker" {
                 let after = declare_and_resolve_unblocked(state, &attacks);
                 assert!(
@@ -10617,17 +10646,18 @@ mod tests {
     }
 
     /// CR 508.3f + CR 509.3g + CR 702.16j: in a free-for-all, Abyssal
-    /// Nightstalker still attacks a protected opponent for its discard, on both
-    /// the comparison and rollout paths, and the discard resolves. Either every
-    /// opponent is protected, or only P1 is and P2's 5/5 would block and kill
-    /// it, so the protected P1 is the attack worth making.
+    /// Nightstalker still attacks a protected opponent for its discard, and the
+    /// discard resolves. With every opponent protected, on both the comparison
+    /// and rollout paths. With one protected and the other holding a 5/5 that
+    /// would block and kill it, the comparison weighs each defender and picks
+    /// the protected one, in either seat.
     #[test]
     fn unblocked_attack_payoff_attacks_in_a_protected_free_for_all() {
-        for (comparison_deadline, mixed) in [
-            (Some(Deadline::none()), false),
-            (None, false),
-            (Some(Deadline::none()), true),
-            (None, true),
+        for (comparison_deadline, protected_only) in [
+            (Some(Deadline::none()), None),
+            (None, None),
+            (Some(Deadline::none()), Some(PlayerId(1))),
+            (Some(Deadline::none()), Some(PlayerId(2))),
         ] {
             let mut scenario = GameScenario::new_with_format(
                 engine::types::format::FormatConfig::free_for_all(),
@@ -10656,24 +10686,23 @@ mod tests {
                     "Card in hand".to_string(),
                     Zone::Hand,
                 ));
-                if !mixed || opponent == PlayerId(1) {
+                if protected_only.is_none_or(|protected| protected == opponent) {
                     grant_protection_from_everything(&mut state, opponent);
+                } else {
+                    add_creature(&mut state, opponent, "Blocker", 5, 5, vec![]);
                 }
-            }
-            if mixed {
-                add_creature(&mut state, PlayerId(2), "Blocker", 5, 5, vec![]);
             }
 
             let comparison = comparison_deadline.is_some();
             let attacks = choose_from_engine_prompt_with(&mut state, comparison_deadline);
             let [(id, AttackTarget::Player(defender))] = attacks[..] else {
                 panic!(
-                    "Nightstalker must attack a player, got {attacks:?}                      (comparison={comparison}, mixed={mixed})"
+                    "Nightstalker must attack a player, got {attacks:?}                      (comparison={comparison}, protected_only={protected_only:?})"
                 )
             };
             assert_eq!(id, attacker);
-            if mixed {
-                assert_eq!(defender, PlayerId(1), "comparison={comparison}");
+            if let Some(protected) = protected_only {
+                assert_eq!(defender, protected, "comparison={comparison}");
             }
 
             let after = declare_and_resolve_unblocked(state, &attacks);
@@ -10682,6 +10711,51 @@ mod tests {
                 !after.players[defender.0 as usize].hand.contains(&card),
                 "the defending player must discard (comparison={comparison})"
             );
+        }
+    }
+
+    /// CR 508.3a + CR 702.16j: one creature with an attack trigger doesn't pull
+    /// the plain attackers onto a protected player. P1 (next seat) has The One
+    /// Ring's protection; P2 is open. Goblin Guide may attack either, but both
+    /// Grizzly Bears attack P2, on the comparison and rollout paths.
+    #[test]
+    fn attack_trigger_creature_does_not_redirect_plain_attackers() {
+        let mut scenario = GameScenario::new_with_format(
+            engine::types::format::FormatConfig::free_for_all(),
+            3,
+            42,
+        );
+        scenario.at_phase(engine::types::phase::Phase::DeclareAttackers);
+        let guide = scenario.add_real_card(
+            P0,
+            "Goblin Guide",
+            Zone::Battlefield,
+            crate::test_support::shared_integration_card_db(),
+        );
+        let bears = [
+            scenario.add_creature(P0, "Grizzly Bears", 2, 2).id(),
+            scenario.add_creature(P0, "Grizzly Bears", 2, 2).id(),
+        ];
+        let mut state = scenario.build().state().clone();
+        state.turn_number = 2;
+        for attacker in std::iter::once(guide).chain(bears) {
+            let object = state.objects.get_mut(&attacker).unwrap();
+            object.summoning_sick = false;
+            object.entered_battlefield_turn = Some(1);
+        }
+        assert!(has_self_attack_payoff(&state, guide));
+        grant_protection_from_everything(&mut state, PlayerId(1));
+
+        for comparison_deadline in [Some(Deadline::none()), None] {
+            let mut state = state.clone();
+            let attacks = choose_from_engine_prompt_with(&mut state, comparison_deadline);
+            for bear in bears {
+                assert!(
+                    attacks.contains(&(bear, AttackTarget::Player(PlayerId(2)))),
+                    "both Bears attack the open P2, got {attacks:?} (comparison={})",
+                    comparison_deadline.is_some()
+                );
+            }
         }
     }
 
@@ -10769,7 +10843,7 @@ mod tests {
         ));
 
         grant_protection_from_everything(&mut state, PlayerId(1));
-        assert!(attack_worthy_opponents(&state, &[PlayerId(1)], &attackers).is_empty());
+        assert!(damageable_opponents(&state, &[PlayerId(1)], &attackers).is_empty());
         assert!(!lethal_on_damageable_opponent(
             &state,
             &[PlayerId(1)],
