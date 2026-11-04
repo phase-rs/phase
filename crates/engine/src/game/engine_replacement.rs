@@ -4715,7 +4715,9 @@ mod tests {
     use super::*;
     use crate::game::engine::apply_as_current;
     use crate::game::replacement::{self as replacement_mod, ReplacementResult};
+    use crate::game::zone_pipeline::{move_object, ZoneMoveRequest, ZoneMoveResult};
     use crate::game::zones::create_object;
+    use crate::types::ability::LibraryPosition;
     use crate::types::ability::{
         AbilityKind, ChooseOneOfKind, QuantityExpr, ReplacementDefinition, ReplacementMode,
     };
@@ -4724,6 +4726,7 @@ mod tests {
     use crate::types::counter::CounterType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::proposed_event::AppliedReplacementKey;
     use crate::types::proposed_event::{ProposedEvent, ReplacementId};
     use crate::types::replacements::ReplacementEvent;
 
@@ -4764,10 +4767,6 @@ mod tests {
 
     #[test]
     fn canonical_library_placement_away_and_back_public_resume_ignores_stale_mirror() {
-        use crate::game::zone_pipeline::{move_object, ZoneMoveRequest, ZoneMoveResult};
-        use crate::types::ability::LibraryPosition;
-        use crate::types::proposed_event::AppliedReplacementKey;
-
         // Infrastructure-only synthetic Moved definitions. Rest in Peace is the
         // nearest printed redirect; no printed away/back replacement or Wheel
         // grammar/reveal support is asserted by this disposition test.

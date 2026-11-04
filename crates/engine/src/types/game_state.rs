@@ -8,6 +8,7 @@ use std::sync::Arc;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 use crate::database::card_db::CardDbHandle;
 use crate::game::game_object::ObjectIncarnationRefExt;
@@ -6811,6 +6812,16 @@ pub struct PendingBatchDeliveries {
 }
 
 impl PendingBatchDeliveries {
+    /// CR 608.2c: this batch is the ChangeZone family. The typed completion's
+    /// `ChangeZonePopulationSettled` tail is the only family authority, so no
+    /// parallel flag can disagree with it.
+    pub fn is_change_zone_population(&self) -> bool {
+        matches!(
+            self.completion.as_ref(),
+            Some(BatchCompletion::ChangeZonePopulationSettled { .. })
+        )
+    }
+
     /// R4b structural validation for the staged lifecycle.
     ///
     /// `None` is inert: ordinary batches and every legacy save keep exactly the
@@ -6854,45 +6865,23 @@ impl PendingBatchDeliveries {
         }) {
             return Err("staged batch mixes operation families".to_string());
         }
-        if destroy_family && staged.change_zone.is_some() {
-            return Err("a destroy staged batch carries ChangeZone metadata".to_string());
+        if destroy_family
+            && matches!(
+                self.completion.as_ref(),
+                Some(BatchCompletion::ChangeZonePopulationSettled { .. })
+            )
+        {
+            return Err("a destroy staged batch carries a ChangeZone completion".to_string());
         }
-        // CR 101.4 + CR 608.2c: the ChangeZone family metadata and its typed
-        // completion are one payload. A crafted state may not carry either
-        // without the other, and the mass-only producer flags must agree with
-        // the completion's count policy.
-        let change_zone_completion = match &self.completion {
-            Some(BatchCompletion::ChangeZonePopulationSettled { tail, .. }) => Some(&**tail),
-            Some(_) | None => None,
-        };
-        match (&staged.change_zone, change_zone_completion) {
-            (Some(meta), Some(tail)) => {
-                let mass = matches!(
-                    tail.count,
-                    crate::types::game_state::ChangeZoneCountPolicy::MassAllMembers
-                );
-                if meta.count_hand_exile && !mass {
-                    return Err(
-                        "ChangeZone metadata counts hand exile on a non-mass tail".to_string()
-                    );
-                }
-                if meta.exiled_by_source && !meta.count_hand_exile {
-                    return Err(
-                        "ChangeZone metadata links ExiledBySource without the mass producer"
-                            .to_string(),
-                    );
-                }
-                if tail.group_id != self.logical_zone_change_group.logical_group_id {
-                    return Err("ChangeZone tail names another logical group".to_string());
-                }
+        // CR 101.4 + CR 608.2c: the ChangeZone family is exactly the typed
+        // completion's tail, and that tail names this batch's own logical group.
+        // There is no second family flag to disagree with it.
+        if let Some(BatchCompletion::ChangeZonePopulationSettled { tail, .. }) =
+            self.completion.as_ref()
+        {
+            if tail.group_id != self.logical_zone_change_group.logical_group_id {
+                return Err("ChangeZone tail names another logical group".to_string());
             }
-            (Some(_), None) => {
-                return Err("ChangeZone metadata on a non-ChangeZone staged batch".to_string())
-            }
-            (None, Some(_)) => {
-                return Err("ChangeZone completion without family metadata".to_string())
-            }
-            (None, None) => {}
         }
 
         // `requests`/`remaining` are exactly the not-yet-consulted members in
@@ -7139,7 +7128,7 @@ impl PendingBatchDeliveries {
                 }
             }
             BatchDeliveryStage::Delivering => {
-                for member in members {
+                for (index, member) in members.iter().enumerate() {
                     if !matches!(
                         member.state,
                         StagedBatchMemberState::Approved
@@ -7148,6 +7137,26 @@ impl PendingBatchDeliveries {
                     ) {
                         return Err(
                             "a staged member entered delivery without a final approval".to_string()
+                        );
+                    }
+                    // CR 608.2c: the cursor is the next member to deliver, so
+                    // every member behind it has already been delivered and
+                    // must carry its terminal (or be abandoned because its owner
+                    // left). A still-`Approved` member there would be reported
+                    // Delivered without ever producing an outcome, and
+                    // `change_zone_settled_facts` would then reject the
+                    // remaining Pending slot it settled with. Members ahead of
+                    // the cursor may legitimately already be Terminal: approval
+                    // settles a prevented or remained member before the delivery
+                    // cursor resets to zero.
+                    if index < staged.cursor
+                        && !matches!(
+                            member.state,
+                            StagedBatchMemberState::Terminal | StagedBatchMemberState::Abandoned
+                        )
+                    {
+                        return Err(
+                            "an undelivered staged member precedes the delivery cursor".to_string()
                         );
                     }
                 }
@@ -7363,28 +7372,14 @@ pub struct StagedBatchDelivery {
     pub arrangements: Vec<StagedLibraryArrangement>,
     /// Next arrangement group to prompt (`Arranging`).
     pub arrangement_cursor: usize,
-    /// CR 608.2c: ChangeZone-family delivery bookkeeping. `None` for Destroy
-    /// and generic R4b batches; `Some` for the ChangeZone family.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub change_zone: Option<ChangeZoneBatchMeta>,
 }
 
-/// CR 400.7 + CR 608.2c: the late per-member ChangeZone bookkeeping that the
-/// legacy producer loop ran inline after each move. A staged member may pause
-/// before delivery, so the rule runs at the delivery terminal instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct ChangeZoneBatchMeta {
-    /// Mass `ChangeZoneAll` whose filter is `ExiledBySource`; owns link
-    /// consumption.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub exiled_by_source: bool,
-    /// CR 608.2c: the legacy hand-exile counter is mass-only. Targeted and
-    /// effect-choice paths leave it false so they never increment the mass
-    /// counter.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub count_hand_exile: bool,
-}
-
+/// CR 400.7 + CR 608.2c: the legacy per-member ChangeZone bookkeeping the
+/// producer loop ran inline after each move. A staged member may pause before
+/// delivery, so the rule runs at the delivery terminal instead — derived from
+/// the member's own typed request tracking and the batch completion's typed
+/// count policy, never from parallel flags.
+///
 /// CR 101.4: the three distinct stages of one admitted batch. Consultation and
 /// arrangement may each pause; delivery never re-enters consultation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -7787,7 +7782,6 @@ pub(crate) fn change_zone_settled_facts(
     policy: &ChangeZoneCountPolicy,
     destination: Zone,
 ) -> ChangeZoneSettled {
-    use crate::types::game_state::LogicalZoneChangeTerminalOutcome;
     let mut records = Vec::new();
     let mut policy_count = 0i32;
     let mut arrival_count = 0usize;
@@ -8312,6 +8306,11 @@ pub enum BatchCompletion {
     /// the members whose outer `Destroy` was approved and whose terminal is not
     /// `Abandoned` (Moved, Remained or inner-Prevented) — the singleton's exact
     /// `CreatureDestroyed` emission rule.
+    ///
+    /// CR 701.8a + CR 608.2c: the population is already settled here — every
+    /// member's destruction was resolved during approval — so this completion
+    /// does not destroy anything again. It publishes the settled population in
+    /// the instruction's own order, once, after the last member's terminal.
     DestroyPopulationSettled {
         ability: Box<ResolvedAbility>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -27613,8 +27612,6 @@ pub(crate) mod replacement_library_placement_wire_tests {
 fn migrate_legacy_replacement_library_placement(
     value: &mut serde_json::Value,
 ) -> Result<(), String> {
-    use serde_json::Value;
-
     fn child_path(path: &str, key: &str) -> String {
         format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"))
     }
@@ -40615,6 +40612,7 @@ mod tests {
     };
     use crate::types::card_printing::CardPrinting;
     use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
+    use crate::types::identifiers::LogicalZoneChangeGroupId;
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
         LEGACY_INCARNATION,
@@ -53190,6 +53188,167 @@ mod tests {
             .expect("concession-pruned destroy member with its outer approval is legal");
     }
 
+    fn cursor_member(
+        object: u64,
+        state: StagedBatchMemberState,
+        terminal: Option<ZoneMoveCompletion>,
+        approved: bool,
+    ) -> StagedBatchMember {
+        let object_id = ObjectId(object);
+        let event = ProposedEvent::zone_change(
+            object_id,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Some(ObjectId(999)),
+        );
+        StagedBatchMember {
+            announcement_index: 0,
+            request: PendingBatchZoneMoveRequest {
+                object_id,
+                destination: Zone::Graveyard,
+                cause: PendingBatchZoneChangeCause::Effect {
+                    source: ObjectId(999),
+                },
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_transformed: false,
+                controller_override: None,
+                enter_with_counters: Vec::new(),
+                face_down_profile: None,
+                chain_referent: Default::default(),
+                attach_to: None,
+                performed_by: None,
+                library_placement: None,
+                exile_duration: None,
+                exile_controller: None,
+                exile_tracking: ZoneDeliveryExileTracking::None,
+                replacement_applied: std::collections::HashSet::new(),
+                face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+            },
+            identity: ObjectIncarnationRef::of(object_id, 0),
+            owner: PlayerId(0),
+            state,
+            approved_event: approved.then_some(event),
+            pending_outcome: None,
+            terminal,
+            operation: StagedMemberOperation::ZoneMove,
+            outer_destroy_approved: false,
+        }
+    }
+
+    fn cursor_validation_deliveries(
+        members: Vec<StagedBatchMember>,
+        cursor: usize,
+    ) -> PendingBatchDeliveries {
+        let mut state = GameState::new_two_player(7);
+        let mut logical_zone_change_group = state.allocate_logical_zone_change_group(&[]);
+        logical_zone_change_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("empty group latches");
+        let attempted = members
+            .iter()
+            .map(|member| member.identity.object_id)
+            .collect();
+        PendingBatchDeliveries {
+            component_delivery_parent: None,
+            logical_zone_change_group,
+            paused_current: None,
+            remaining: Vec::new(),
+            destination: Zone::Graveyard,
+            source_id: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: std::collections::HashSet::new(),
+            requests: Vec::new(),
+            attempted,
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+            staged: Some(StagedBatchDelivery {
+                stage: BatchDeliveryStage::Delivering,
+                members,
+                cursor,
+                arrangements: Vec::new(),
+                arrangement_cursor: 0,
+            }),
+        }
+    }
+
+    /// CR 608.2c: the delivery cursor is the next member to deliver, so no
+    /// still-`Approved` member may sit behind it — `deliver_staged_members`
+    /// would report it Delivered with no outcome, and the settlement would then
+    /// find a Pending slot it cannot settle.
+    #[test]
+    fn delivery_cursor_rejects_still_approved_members_behind_it() {
+        let deliveries = cursor_validation_deliveries(
+            vec![
+                cursor_member(1, StagedBatchMemberState::Approved, None, true),
+                cursor_member(
+                    2,
+                    StagedBatchMemberState::Terminal,
+                    Some(ZoneMoveCompletion::Moved),
+                    true,
+                ),
+            ],
+            2,
+        );
+        let staged = deliveries.staged.as_ref().expect("staged payload");
+        let error = deliveries
+            .validate_staged_stage(staged)
+            .expect_err("an undelivered member behind the cursor must be rejected");
+        assert!(
+            error.contains("precedes the delivery cursor"),
+            "unexpected error: {error}"
+        );
+
+        // Both terminal behind the cursor is the real delivered shape.
+        let delivered = cursor_validation_deliveries(
+            vec![
+                cursor_member(
+                    1,
+                    StagedBatchMemberState::Terminal,
+                    Some(ZoneMoveCompletion::Moved),
+                    true,
+                ),
+                cursor_member(
+                    2,
+                    StagedBatchMemberState::Terminal,
+                    Some(ZoneMoveCompletion::Prevented),
+                    true,
+                ),
+            ],
+            2,
+        );
+        delivered
+            .validate_staged_stage(delivered.staged.as_ref().expect("staged payload"))
+            .expect("every delivered member carries its terminal");
+
+        // Approval legitimately terminalizes prevented/remained members BEFORE
+        // the delivery cursor resets to zero, so a future Terminal member is
+        // still legal.
+        let future_terminal = cursor_validation_deliveries(
+            vec![
+                cursor_member(
+                    1,
+                    StagedBatchMemberState::Terminal,
+                    Some(ZoneMoveCompletion::Moved),
+                    true,
+                ),
+                cursor_member(
+                    2,
+                    StagedBatchMemberState::Terminal,
+                    Some(ZoneMoveCompletion::Remained),
+                    true,
+                ),
+            ],
+            1,
+        );
+        future_terminal
+            .validate_staged_stage(future_terminal.staged.as_ref().expect("staged payload"))
+            .expect("a future terminal member is a legitimate approval outcome");
+    }
+
     #[test]
     fn game_state_has_seeded_rng() {
         let state1 = GameState::new_two_player(42);
@@ -55080,8 +55239,6 @@ mod tests {
     /// round-trips without being mistaken for a legacy completion.
     #[test]
     fn dig_rest_split_continuation_preserves_legacy_wire_shape() {
-        use crate::types::identifiers::LogicalZoneChangeGroupId;
-
         let legacy = BatchCompletion::ReturnAsAuraNoTargetComplete {
             source_id: ObjectId(7),
         };

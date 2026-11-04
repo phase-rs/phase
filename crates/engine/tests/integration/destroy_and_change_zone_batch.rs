@@ -25,6 +25,7 @@
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::change_zone::resolve_all;
 use engine::game::effects::resolve_ability_chain;
+use engine::game::engine::apply_as_current;
 use engine::game::scenario::{GameScenario, Outcome, P0, P1};
 use engine::game::zones::create_object;
 use engine::parser::oracle_effect::parse_effect_chain;
@@ -32,21 +33,36 @@ use engine::types::ability::{
     AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ReplacementMode,
     ResolvedAbility, TargetFilter, TargetRef,
 };
+use engine::types::ability::{
+    ControllerRef, EffectKind, FaceDownProfile, MassLibraryShuffleMode, QuantityExpr,
+};
+use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
+use engine::types::game_state::{
+    GameState, PersistedGameState, PersistedRestoreFinalization, WaitingFor,
+};
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
+use engine::types::zones::EtbTapState;
 use engine::types::zones::Zone;
 
 const DAY_OF_JUDGMENT: &str = "Destroy all creatures.";
 const HEX: &str = "Destroy six target creatures.";
 const FINAL_JUDGMENT: &str = "Exile all creatures.";
-// Fixture: the return instruction only. The printed token continuation and
-// flashback are card-level coverage, not part of this population row.
-const VENGEFUL_REGROWTH: &str =
+// Full printed Oracle text: the row must exercise the printed "that many"
+// count consumer, not just the return instruction. Flashback is a cast-mode
+// concern and is not part of this resolution row.
+const VENGEFUL_REGROWTH: &str = "Return up to three target land cards from your graveyard to the battlefield tapped. Create that many 4/2 green Plant Warrior creature tokens with reach.";
+// C10 observes the LAST instruction's zone-change ledger, so it keeps a
+// return-only fixture. The printed token continuation and its "that many" count
+// consumer are covered by C5 with the full card above.
+const VENGEFUL_REGROWTH_RETURN_ONLY: &str =
     "Return up to three target land cards from your graveyard to the battlefield tapped.";
 
 fn regeneration_shield() -> ReplacementDefinition {
@@ -311,6 +327,50 @@ fn c5_targeted_change_zone_counts_actual_arrivals() {
         Some(3),
         "the targeted policy counts actual arrivals"
     );
+
+    // The printed continuation consumes that same count: exactly three 4/2
+    // green Plant Warrior tokens with reach.
+    let tokens: Vec<ObjectId> = outcome
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            outcome.state().objects[id]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature)
+        })
+        .collect();
+    assert_eq!(
+        tokens.len(),
+        3,
+        "\"Create that many ...\" creates one token per returned land"
+    );
+    for token in tokens {
+        let object = &outcome.state().objects[&token];
+        assert_eq!(
+            (object.power, object.toughness),
+            (Some(4), Some(2)),
+            "the tokens are 4/2"
+        );
+        for subtype in ["Plant", "Warrior"] {
+            assert!(
+                object
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|value| value == subtype),
+                "the token is a {subtype}, got {:?}",
+                object.card_types.subtypes
+            );
+        }
+        assert!(
+            object.keywords.contains(&Keyword::Reach),
+            "the token has reach, got {:?}",
+            object.keywords
+        );
+    }
 }
 
 /// Oracle texts used by the rows below (raw, as a player would read them).
@@ -421,10 +481,6 @@ fn d2_prevention_controls_regen_shield_counter_and_cant_regenerate() {
 /// and the host emits no `CreatureDestroyed`.
 #[test]
 fn d2_umbra_armor_prevents_destruction_even_with_cant_regenerate() {
-    use engine::types::card_type::CoreType;
-    use engine::types::game_state::GameState;
-    use engine::types::keywords::Keyword;
-
     fn umbra_board(
         oracle: &str,
         name: &str,
@@ -763,7 +819,15 @@ fn d7_kayas_wrath_gains_life_only_for_controller_owned_destroyed() {
     state.priority_player = PlayerId(0);
     let own_a = battlefield_creature(&mut state, 9_801, PlayerId(0), "Own A");
     let own_b = battlefield_creature(&mut state, 9_802, PlayerId(0), "Own B");
-    let _their = battlefield_creature(&mut state, 9_803, PlayerId(1), "Their Bear");
+    let their = battlefield_creature(&mut state, 9_803, PlayerId(1), "Their Bear");
+    // A controller-owned indestructible creature: it dies for nobody's count.
+    let control = battlefield_creature(&mut state, 9_804, PlayerId(0), "Adamant Titan");
+    state
+        .objects
+        .get_mut(&control)
+        .unwrap()
+        .keywords
+        .push(Keyword::Indestructible);
     let (ability, _source) = direct_spell_ability(
         &mut state,
         "Destroy all creatures. You gain life equal to the number of creatures you controlled that were destroyed this way.",
@@ -777,9 +841,19 @@ fn d7_kayas_wrath_gains_life_only_for_controller_owned_destroyed() {
     assert_eq!(state.objects[&own_a].zone, Zone::Graveyard);
     assert_eq!(state.objects[&own_b].zone, Zone::Graveyard);
     assert_eq!(
+        state.objects[&their].zone,
+        Zone::Graveyard,
+        "the opponent's creature really died, so the count is discriminated"
+    );
+    assert_eq!(
+        state.objects[&control].zone,
+        Zone::Battlefield,
+        "the indestructible control is a Remained member"
+    );
+    assert_eq!(
         state.players[0].life,
         life_before + 2,
-        "only the caster's own destroyed creatures add life"
+        "only the caster's own DESTROYED creatures add life"
     );
 }
 
@@ -826,6 +900,51 @@ fn d9_singleton_and_indestructible_negatives() {
                 engine::types::resolution::ResolutionFrame::BatchDelivery(_)
             )),
         "a one-member destroy population is never admitted to the staged owner"
+    );
+
+    // LIVE discriminator: the same singleton destroy parked on its own
+    // replacement choice must still own no staged BatchDelivery. Asserting
+    // only after completion cannot see a carrier that settled and popped.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = {
+        let mut builder = scenario.add_creature(P0, "Pausing Bear", 2, 2);
+        let id = builder.id();
+        builder.with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::Destroy)
+                .mode(ReplacementMode::Optional { decline: None })
+                .valid_card(TargetFilter::SelfRef)
+                .description("pause the destroy".to_string())
+                .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+        );
+        id
+    };
+    let murder = zero_cost_spell(&mut scenario, "Murder", MURDER);
+    let mut runner = scenario.build();
+    let pending = runner
+        .cast(murder)
+        .target_object(victim)
+        .commit()
+        .try_resolve()
+        .expect("a singleton destroy pause is not an error");
+    assert!(
+        matches!(
+            pending.final_waiting_for(),
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "premise: the singleton destroy is parked on its own replacement, got {:?}",
+        pending.final_waiting_for()
+    );
+    assert!(
+        !pending
+            .state()
+            .resolution_stack
+            .iter()
+            .any(|frame| matches!(
+                frame,
+                engine::types::resolution::ResolutionFrame::BatchDelivery(_)
+            )),
+        "a one-member destroy population parks no staged owner while it is live"
     );
 }
 
@@ -953,10 +1072,6 @@ fn c4_targeted_later_member_pause_keeps_every_return() {
 /// group, cursor), not a legacy singleton boundary.
 #[test]
 fn d8_staged_destroy_pause_round_trips_and_resumes() {
-    use engine::game::engine::apply_as_current;
-    use engine::types::actions::GameAction;
-    use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let shielded = {
@@ -1070,10 +1185,6 @@ fn c9_empty_mass_population_is_a_no_op() {
 /// prompt, and leaves the sentinels above the moved cards.
 #[test]
 fn c11_random_order_bottom_placement_has_no_prompt_and_exact_region() {
-    use engine::types::ability::MassLibraryShuffleMode;
-    use engine::types::game_state::GameState;
-    use engine::types::zones::EtbTapState;
-
     let mut state = GameState::new_two_player(42);
     state.active_player = PlayerId(0);
     state.priority_player = PlayerId(0);
@@ -1162,12 +1273,6 @@ fn c11_random_order_bottom_placement_has_no_prompt_and_exact_region() {
 /// population.
 #[test]
 fn c2_structural_mass_entry_applies_counters_and_profile_once() {
-    use engine::types::ability::{
-        ControllerRef, FaceDownProfile, MassLibraryShuffleMode, QuantityExpr,
-    };
-    use engine::types::game_state::GameState;
-    use engine::types::zones::EtbTapState;
-
     let mut state = GameState::new_two_player(42);
     state.active_player = PlayerId(0);
     state.priority_player = PlayerId(0);
@@ -1239,10 +1344,6 @@ fn c2_structural_mass_entry_applies_counters_and_profile_once() {
 /// count; a targeted Hand→Exile twin never increments the mass counter.
 #[test]
 fn c13a_mass_hand_exile_counts_only_moved_members() {
-    use engine::types::ability::MassLibraryShuffleMode;
-    use engine::types::game_state::GameState;
-    use engine::types::zones::EtbTapState;
-
     fn hand_card(state: &mut GameState, card: u64, name: &str) -> ObjectId {
         create_object(
             state,
@@ -1401,7 +1502,11 @@ fn c10_paused_targeted_population_pins_count_stamp_and_moved_ledger() {
     };
     let second = scenario.add_land_to_graveyard(P0, "Island").id();
     let third = scenario.add_land_to_graveyard(P0, "Mountain").id();
-    let regrowth = zero_cost_spell(&mut scenario, "Vengeful Regrowth", VENGEFUL_REGROWTH);
+    let regrowth = zero_cost_spell(
+        &mut scenario,
+        "Vengeful Regrowth",
+        VENGEFUL_REGROWTH_RETURN_ONLY,
+    );
     let mut runner = scenario.build();
     let outcome = runner
         .cast(regrowth)
@@ -1484,14 +1589,18 @@ fn c10_paused_mass_population_pins_non_abandoned_count_and_ledger() {
 /// Infrastructure/helper evidence: this row installs `forward_result` and the
 /// sub-ability on a directly constructed `ResolvedAbility` and drives
 /// `resolve_ability_chain`; it is not a public producer path.
+///
+/// Permitted exception, stated explicitly: no printed card in the reviewed
+/// corpus produces this exact shape (a staged ChangeZone whose forwarded result
+/// a chained referent consumes after a replacement pause), so there is no
+/// full-card witness to substitute. The row is retained as infrastructure
+/// evidence because the consumer it exercises — `settle_forwarded_zone_result`
+/// plus the ChangeZone completion's marker retirement — is the engine's real
+/// implementation, not a test double; the public producers of that completion
+/// are the mass/targeted/choice ChangeZone paths covered by C1, C5, C10 and
+/// C13a.
 #[test]
 fn c12_forwarded_zone_result_binds_staged_arrivals_after_pause() {
-    use engine::game::engine::apply_as_current;
-    use engine::types::ability::{EffectKind, QuantityExpr};
-    use engine::types::actions::GameAction;
-    use engine::types::game_state::{GameState, WaitingFor};
-    use engine::types::zones::EtbTapState;
-
     fn graveyard_creature(
         state: &mut GameState,
         card_id: u64,

@@ -10157,13 +10157,35 @@ pub(super) fn parse_shuffle_ast(
         if owner_library || owner_context {
             let mut trial = ctx.clone_throwaway();
             let (target, rest) = parse_target_with_ctx(&object, &mut trial);
-            if rest.trim().is_empty()
-                && matches!(target, TargetFilter::ParentTarget | TargetFilter::SelfRef)
-            {
-                return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
-                    target,
-                    owner_library: true,
-                });
+            if rest.trim().is_empty() {
+                // CR 400.7e + CR 603.6: a bare "it" whose ability has NOT
+                // established a chosen/announced antecedent names the ability's
+                // own source object — or, in a departure trigger, the object it
+                // became in the zone it moved to. `SelfRef` is exactly that
+                // binding in the engine (`self_ref_is_current`), whereas the
+                // selected `ParentTarget` population has no source fallback and
+                // would resolve to an empty set (Alabaster Dragon, Serra
+                // Avatar, Dread: "shuffle it into its owner's library").
+                //
+                // CR 608.2c: once the chain HAS established a chosen referent,
+                // `ParentTarget` stays authoritative — "Tap target creature.
+                // Shuffle it into its owner's library" must move the chosen
+                // creature, not the source.
+                let target = match target {
+                    TargetFilter::ParentTarget if !ctx.parent_target_available => {
+                        Some(TargetFilter::SelfRef)
+                    }
+                    TargetFilter::ParentTarget | TargetFilter::SelfRef => Some(target),
+                    // Not an object anaphor this arm owns (e.g. an explicit
+                    // typed phrase) — fall through to the arms below.
+                    _ => None,
+                };
+                if let Some(target) = target {
+                    return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+                        target,
+                        owner_library: true,
+                    });
+                }
             }
         }
     }

@@ -366,6 +366,20 @@ pub(crate) fn eliminate_players(
     // directly above — which is why this cannot live in `do_eliminate`.
     remove_stack_objects_controlled_by_leaving_players(state, &leave_nodes, events);
 
+    // CR 800.4a: the whole object/context retirement transaction is done, so a
+    // component child whose captured parent boundary it removed can finally
+    // retire its handoff. Deferring it to here is what lets every leaver-owned
+    // member retired above still reach its original parent.
+    if let Err(error) = state
+        .resolution_stack
+        .release_canceled_component_delivery_handoff()
+    {
+        debug_assert!(
+            false,
+            "component delivery handoff was not released: {error:?}"
+        );
+    }
+
     // CR 800.4a + CR 101.4: A player that leaves during an APNAP unless poll
     // neither answers nor remains an eligible future chooser. Preserve the
     // aggregate for the surviving seats, advancing past a departed current
@@ -699,16 +713,22 @@ pub(crate) fn eliminate_players(
         // CR 800.4a + CR 101.4: a staged batch's surviving members, groups and
         // prompt are reconciled after every departure sweep and before the
         // generic dead-actor repoint, which would otherwise strand a
-        // batch-owned arrangement prompt or drop a surviving delivery.
-        if let Err(error) =
-            super::zone_pipeline::reconcile_staged_batch_after_departure(state, events)
-        {
-            tracing::error!(%error, "staged batch delivery was not reconciled after a departure");
-            debug_assert!(
-                false,
-                "staged batch delivery was not reconciled after a departure: {error}"
-            );
-        }
+        // batch-owned arrangement prompt or drop a surviving delivery. The
+        // reconciliation reports whether the departure itself settled the
+        // instruction, so the resolving-spell retirement below can tell a
+        // settled instruction from an abandoned unanswered one.
+        let staged_batch_settlement =
+            match super::zone_pipeline::reconcile_staged_batch_after_departure(state, events) {
+                Ok(settlement) => settlement,
+                Err(error) => {
+                    tracing::error!(%error, "staged batch delivery was not reconciled after a departure");
+                    debug_assert!(
+                        false,
+                        "staged batch delivery was not reconciled after a departure: {error}"
+                    );
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                }
+            };
 
         if let Some(waiting_pid) = state.waiting_for.acting_player() {
             if !players::is_alive(state, waiting_pid) {
@@ -722,8 +742,8 @@ pub(crate) fn eliminate_players(
         // resolution is still live because the departed player's unanswered
         // question was its last instruction, its carrier is retired here as
         // `Eliminated`, and the spell is never reported resolved. An owner
-        // arrangement or player-scope sacrifice the departure itself settled is not
-        // that case: the departure
+        // arrangement, a player-scope sacrifice, or a staged population the
+        // departure itself settled is not that case: the departure
         // answered the question and the settlement ran the remaining instructions,
         // so the carrier, which still owes its final part, is left to the action
         // boundary's final-part convergence, which reports the spell resolved once
@@ -743,6 +763,10 @@ pub(crate) fn eliminate_players(
                 )
                 && matches!(
                     player_scope_sacrifice,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
+                && matches!(
+                    staged_batch_settlement,
                     super::engine_resolution_choices::DepartureSettlement::NotSettled
                 )
                 && state
@@ -1189,6 +1213,11 @@ fn abandon_pending_zone_change_member_for_player_left(
     identity: ObjectIncarnationRef,
     leaving_player: PlayerId,
 ) {
+    // CR 101.4: capture the exact staged owner (its group and, for a linked
+    // component batch, the parent boundary it captured) before the retirement
+    // transaction mutates anything, so the second visit below names the same
+    // frame rather than re-deriving an owner from the nearest staged frame.
+    let staged_owner = state.resolution_stack.staged_owner_identity();
     let mut canceled_pauses = Vec::new();
     if let Some(pending) = state
         .active_change_zone_frame_mut()
@@ -1242,34 +1271,36 @@ fn abandon_pending_zone_change_member_for_player_left(
             crate::game::zone_pipeline::prune_staged_member_for_player_left(pending, identity);
         })
         .expect("elimination visits only an identified component delivery pair");
-    {
+    if let Some(staged_owner) = staged_owner {
         // R4b: an approved member's delivery pause buries the staged owner
         // below a top `PostReplacement` child; the pair visitor above only
         // reaches the top batch, so visit that exact parent too.
-        state.resolution_stack.visit_staged_batch_mut(|pending| {
-            pending
-                .logical_zone_change_group
-                .record_abandoned_by_player_left(identity)
-                .expect("buried staged batch owns a coherent logical group");
-            pending.remaining.retain(|id| *id != identity.object_id);
-            pending
-                .requests
-                .retain(|request| request.object_id != identity.object_id);
-            // CR 800.4a + CR 616.1: cancel the exact live child boundary
-            // before abandoning the member, then prune the abandoned slot.
-            if pending.paused_current.as_ref().is_some_and(|paused| {
-                paused.member == identity && paused.terminal_completion.is_none()
-            }) {
-                canceled_pauses.push(
-                    pending
-                        .paused_current
-                        .take()
-                        .expect("checked paused delivery is present")
-                        .expected_event,
-                );
-            }
-            crate::game::zone_pipeline::prune_staged_member_for_player_left(pending, identity);
-        });
+        state
+            .resolution_stack
+            .visit_staged_batch_owner_mut(&staged_owner, |pending| {
+                pending
+                    .logical_zone_change_group
+                    .record_abandoned_by_player_left(identity)
+                    .expect("buried staged batch owns a coherent logical group");
+                pending.remaining.retain(|id| *id != identity.object_id);
+                pending
+                    .requests
+                    .retain(|request| request.object_id != identity.object_id);
+                // CR 800.4a + CR 616.1: cancel the exact live child boundary
+                // before abandoning the member, then prune the abandoned slot.
+                if pending.paused_current.as_ref().is_some_and(|paused| {
+                    paused.member == identity && paused.terminal_completion.is_none()
+                }) {
+                    canceled_pauses.push(
+                        pending
+                            .paused_current
+                            .take()
+                            .expect("checked paused delivery is present")
+                            .expected_event,
+                    );
+                }
+                crate::game::zone_pipeline::prune_staged_member_for_player_left(pending, identity);
+            });
     }
 
     for expected_event in canceled_pauses {
@@ -2211,6 +2242,7 @@ mod tests {
     use crate::types::actions::GameAction;
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
+    use crate::types::game_state::PendingComponentDeliveryParent;
     use crate::types::game_state::{
         ActivePlayerControl, CastingVariant, ExtraTurn, NamedChoiceSource,
         NamedChoiceSourceBinding, OpponentGuessOwner, OpponentGuessSource, PendingCast,
@@ -2697,8 +2729,6 @@ mod tests {
     /// each surviving tail continues independently.
     #[test]
     fn leaving_original_member_retires_linked_component_pair_obligation() {
-        use crate::types::game_state::PendingComponentDeliveryParent;
-
         let mut state = setup_three_player();
         let leaving = create_object(
             &mut state,
@@ -2714,7 +2744,18 @@ mod tests {
             "Surviving original tail".to_string(),
             Zone::Battlefield,
         );
-        let mut parent_group = state.allocate_logical_zone_change_group(&[leaving, surviving]);
+        // A LATER leaver-owned tail member of the same original parent: the
+        // first leaver member's retirement cancels the parent's pause, and this
+        // one must still reach that parent afterwards.
+        let later_leaving = create_object(
+            &mut state,
+            CardId(718),
+            PlayerId(1),
+            "Later leaving original tail".to_string(),
+            Zone::Battlefield,
+        );
+        let mut parent_group =
+            state.allocate_logical_zone_change_group(&[leaving, later_leaving, surviving]);
         parent_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parent group latches");
@@ -2737,7 +2778,7 @@ mod tests {
             component_delivery_parent: None,
             logical_zone_change_group: parent_group,
             paused_current: Some(paused.clone()),
-            remaining: vec![surviving],
+            remaining: vec![later_leaving, surviving],
             destination: Zone::Graveyard,
             source_id: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -2746,7 +2787,7 @@ mod tests {
             completion: None,
             replacement_applied: HashSet::new(),
             requests: Vec::new(),
-            attempted: vec![leaving, surviving],
+            attempted: vec![leaving, later_leaving, surviving],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
             staged: None,
@@ -2809,7 +2850,8 @@ mod tests {
         );
         assert_eq!(
             frames[0]["data"]["remaining"],
-            serde_json::to_value(vec![surviving]).expect("surviving id serializes")
+            serde_json::to_value(vec![surviving]).expect("surviving id serializes"),
+            "every leaver-owned tail member is retired from the original owner"
         );
         let abandoned = serde_json::to_value(
             crate::types::game_state::LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft,
@@ -2821,8 +2863,8 @@ mod tests {
         .expect("pending outcome serializes");
         assert_eq!(
             frames[0]["data"]["logical_zone_change_group"]["terminal_outcomes"],
-            serde_json::json!([abandoned.clone(), pending]),
-            "the original group retires the leaving member and keeps its surviving tail"
+            serde_json::json!([abandoned.clone(), abandoned.clone(), pending]),
+            "the original group retires BOTH leaving members and keeps its surviving tail"
         );
         assert_eq!(
             frames[1]["data"]["logical_zone_change_group"]["terminal_outcomes"],
@@ -2838,6 +2880,7 @@ mod tests {
         crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut state, &mut events);
         assert!(state.active_batch_delivery().is_none());
         assert_eq!(state.objects[&leaving].zone, Zone::Exile);
+        assert_eq!(state.objects[&later_leaving].zone, Zone::Exile);
         assert_eq!(state.objects[&surviving].zone, Zone::Graveyard);
     }
 
@@ -5607,7 +5650,6 @@ mod r4b_staged_elimination_tests {
             members,
             arrangements,
             arrangement_cursor: 0,
-            change_zone: None,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             component_delivery_parent: None,
@@ -5745,7 +5787,6 @@ mod r4b_staged_elimination_tests {
                 members,
                 arrangements,
                 arrangement_cursor: 0,
-                change_zone: None,
             }),
         });
         state.waiting_for = WaitingFor::new_dig_rest_split_for_batch(

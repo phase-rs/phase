@@ -52815,10 +52815,7 @@ pub mod tests {
             .iter()
             .find_map(|frame| match frame {
                 crate::types::resolution::ResolutionFrame::BatchDelivery(batch)
-                    if batch
-                        .staged
-                        .as_ref()
-                        .is_some_and(|staged| staged.change_zone.is_some())
+                    if batch.is_change_zone_population()
                         && batch.logical_zone_change_group.logical_group_id == group_id =>
                 {
                     Some(&**batch)

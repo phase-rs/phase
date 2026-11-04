@@ -1896,8 +1896,11 @@ fn parse_source_and_target_subjects(
     Some((primary_application, secondary_application))
 }
 
-/// CR 702.26a + CR 702.26h: resolve both subjects in one phasing batch; only
-/// the second conjunct is targeted (CR 115.1), even if the source has shroud.
+/// CR 702.26a + CR 702.26b: phasing out changes the permanent's status to
+/// "phased out.", and both conjuncts phase out in one phasing batch. Only the
+/// second conjunct is targeted (CR 115.1), even if the source has shroud.
+/// CR 702.26g/h govern attachment / indirect phasing, which this clause does
+/// not model.
 pub(super) fn try_parse_source_and_target_phase_out(
     text: &str,
     ctx: &mut ParseContext,

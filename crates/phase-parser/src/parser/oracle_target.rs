@@ -1391,12 +1391,24 @@ pub fn parse_target_with_syntax<'a>(
         // separator compositionally, then delegate the complete object tail to
         // the shared type-phrase grammar so controller/type qualifiers retain
         // their ordinary semantics.
+        // CR 115.1a + CR 601.2c: A one-slot player target declaration. The
+        // noun grammar is word-bounded over SINGULAR and PLURAL forms, because
+        // Oracle prints the plural only after a cardinality quantifier
+        // ("choose any number of target players", "up to two target
+        // opponents"). The quantifier is stripped into `multi_target`
+        // upstream; consuming the plural noun here is what lets the peeled
+        // declaration reach strict exhaustion instead of stranding an "s".
+        // The returned filter stays the singular player/opponent reference —
+        // cardinality belongs to `multi_target`, not to the filter.
         if let Ok((after_player, player_filter)) = alt((
             value(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                tag::<_, _, OracleError<'_>>("opponent"),
+                alt((tag::<_, _, OracleError<'_>>("opponents"), tag("opponent"))),
             ),
-            value(TargetFilter::Player, tag("player")),
+            value(
+                TargetFilter::Player,
+                alt((tag::<_, _, OracleError<'_>>("players"), tag("player"))),
+            ),
         ))
         .parse(after_target)
         {

@@ -16850,14 +16850,17 @@ fn effect_shuffle_their_library() {
 #[test]
 fn compound_shuffle_it_into_library() {
     let def = parse_effect_chain("Shuffle it into its owner's library", AbilityKind::Spell);
+    // CR 400.7e + CR 608.2c: with no chosen/announced antecedent in the clause,
+    // the bare "it" names the ability's own source, not a selected population
+    // (`ChangeZoneAll { ParentTarget }` would resolve to nothing).
     assert!(
         matches!(
             &*def.effect,
-            Effect::ChangeZoneAll {
+            Effect::ChangeZone {
                 origin: None,
                 destination: Zone::Library,
-                target: TargetFilter::ParentTarget,
-                library_shuffle: crate::types::ability::MassLibraryShuffleMode::TerminalShuffle,
+                target: TargetFilter::SelfRef,
+                owner_library: true,
                 ..
             }
         ),
@@ -95479,11 +95482,13 @@ fn compound_shuffle_self_and_graveyard_moves_whole_zone() {
             Effect::ChangeZoneAll {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Library,
-                target: TargetFilter::ParentTargetOwner,
+                target: TargetFilter::Controller,
                 ..
             }
         ),
-        "got {:?}",
+        "CR 109.5 + CR 400.3: 'your graveyard' is the ACTIVATING player's \
+         graveyard; the terminal owner-scoped shuffle must not rebind the \
+         population this instruction printed, got {:?}",
         zone_move.effect
     );
     let shuffle = zone_move.sub_ability.as_ref().expect("terminal shuffle");
@@ -95532,11 +95537,13 @@ fn compound_shuffle_this_artifact_and_graveyard_moves_whole_zone() {
             Effect::ChangeZoneAll {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Library,
-                target: TargetFilter::ParentTargetOwner,
+                target: TargetFilter::Controller,
                 ..
             }
         ),
-        "got {:?}",
+        "CR 109.5 + CR 400.3: 'your graveyard' is the ACTIVATING player's \
+         graveyard; the terminal owner-scoped shuffle must not rebind the \
+         population this instruction printed, got {:?}",
         zone_move.effect
     );
     let shuffle = zone_move.sub_ability.as_ref().expect("terminal shuffle");
@@ -95815,4 +95822,295 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
             "reveal-choice return keeps its pre-routing outcome, got {parsed:?} for {line:?}"
         );
     }
+}
+
+/// CR 400.7e + CR 603.6: "When this creature dies, shuffle it into its owner's
+/// library." — the bare "it" names the object the trigger's own event moved to
+/// the graveyard, never a selected `ParentTarget` population (which resolves to
+/// an empty set for an untargeted trigger and would lose the move entirely).
+#[test]
+fn self_death_shuffle_binds_the_event_successor_not_a_selected_population() {
+    let parsed = parse_card(
+        "When this creature dies, shuffle it into its owner's library.",
+        "Alabaster Dragon",
+        &[],
+        &["Creature"],
+    );
+    let execute = parsed.triggers[0].execute.as_ref().expect("dies trigger");
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                owner_library: true,
+                target: TargetFilter::SelfRef | TargetFilter::TriggeringSource,
+                ..
+            }
+        ),
+        "the move must bind the source / event successor, got {:?}",
+        execute.effect
+    );
+    assert!(
+        !matches!(&*execute.effect, Effect::ChangeZoneAll { .. }),
+        "an untargeted self shuffle must not lower to a selected-name population: {:?}",
+        execute.effect
+    );
+    assert!(
+        outer_gap_names(&parsed).is_empty(),
+        "the dies-shuffle chain must not carry an Unimplemented node: {:?}",
+        outer_gap_names(&parsed)
+    );
+}
+
+/// CR 400.7e + CR 603.6: the same binding for every other self-subject trigger
+/// (no departure event, so no CR 603.6 successor is needed — the source is still
+/// the object "it" names). Pre-change this lowered to the selected
+/// `ChangeZoneAll { ParentTarget }`, which has no source fallback.
+#[test]
+fn self_trigger_shuffle_without_chosen_antecedent_binds_the_source() {
+    let parsed = parse_card(
+        "Whenever this creature attacks, shuffle it into its owner's library.",
+        "Self Shuffle Fixture",
+        &[],
+        &["Creature"],
+    );
+    let execute = parsed.triggers[0]
+        .execute
+        .as_ref()
+        .expect("attacks trigger");
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                owner_library: true,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "the untargeted self shuffle names the source, got {:?}",
+        execute.effect
+    );
+}
+
+/// CR 608.2c: an established chosen antecedent still owns the bare "it" — the
+/// source/event fallback must never override a selected referent.
+#[test]
+fn chosen_antecedent_shuffle_still_names_the_selected_target() {
+    let def = parse_effect_chain(
+        "Tap target creature. Shuffle it into its owner's library.",
+        AbilityKind::Spell,
+    );
+    let shuffle = def.sub_ability.as_ref().expect("shuffle continuation");
+    assert!(
+        matches!(
+            &*shuffle.effect,
+            Effect::ChangeZoneAll {
+                destination: Zone::Library,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "a chosen antecedent keeps the selected `ParentTarget` population, got {:?}",
+        shuffle.effect
+    );
+}
+
+/// CR 115.10a + CR 400.3: "This creature's owner shuffles it into their
+/// library." — the possessive subject names the SOURCE, and nothing becomes a
+/// target. The move must carry `SelfRef`, not a selected population.
+#[test]
+fn source_possessive_owner_shuffle_moves_the_source_without_a_target_slot() {
+    let parsed = parse_card(
+        "{U}: This creature's owner shuffles it into their library.",
+        "Cerulean Sphinx",
+        &[],
+        &["Creature"],
+    );
+    let ability = &parsed.abilities[0];
+    assert!(
+        matches!(
+            &*ability.effect,
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                owner_library: true,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "the Sphinx's own owner shuffles the Sphinx, got {:?}",
+        ability.effect
+    );
+    assert!(
+        !matches!(&*ability.effect, Effect::TargetOnly { .. }),
+        "being affected does not make the source a target: {:?}",
+        ability.effect
+    );
+    assert!(outer_gap_names(&parsed).is_empty());
+}
+
+/// CR 115.10a + CR 400.3: "Enchanted creature's owner shuffles it into their
+/// library." — the possessive subject names the HOST (CR 303.4), and no target
+/// slot is announced.
+#[test]
+fn host_possessive_owner_shuffle_moves_the_host_without_a_target_slot() {
+    let parsed = parse_card(
+        "Enchant creature\nWaterbend {5}: Enchanted creature's owner shuffles it into their library.",
+        "Watery Grasp",
+        &[],
+        &["Enchantment"],
+    );
+    let ability = &parsed.abilities[0];
+    let Effect::ChangeZone {
+        destination: Zone::Library,
+        owner_library: true,
+        target: TargetFilter::Typed(filter),
+        ..
+    } = &*ability.effect
+    else {
+        panic!(
+            "the host-owner shuffle must move the enchanted host, got {:?}",
+            ability.effect
+        );
+    };
+    assert!(
+        filter.properties.contains(&FilterProp::EnchantedBy),
+        "the moved object is the Aura's host, got {filter:?}"
+    );
+    assert!(
+        filter.controller.is_none(),
+        "the host filter names no controller and no target slot: {filter:?}"
+    );
+    assert!(
+        !matches!(&*ability.effect, Effect::TargetOnly { .. }),
+        "being affected does not make the host a target: {:?}",
+        ability.effect
+    );
+    assert!(outer_gap_names(&parsed).is_empty());
+}
+
+/// CR 115.1a + CR 601.2c: a plural player/opponent noun carries its printed
+/// cardinality. The noun itself is plural ONLY because the quantifier
+/// ("two"/"up to two"/"any number of") precedes it.
+#[test]
+fn plural_player_target_noun_carries_its_declared_cardinality() {
+    let fixed = parse_effect_chain("Choose two target players.", AbilityKind::Spell);
+    assert!(
+        matches!(
+            &*fixed.effect,
+            Effect::TargetOnly {
+                target: TargetFilter::Player
+            }
+        ),
+        "got {:?}",
+        fixed.effect
+    );
+    assert_eq!(fixed.multi_target, Some(MultiTargetSpec::fixed(2, 2)));
+
+    let fixed_opponents = parse_effect_chain("Choose two target opponents.", AbilityKind::Spell);
+    assert!(
+        matches!(
+            &*fixed_opponents.effect,
+            Effect::TargetOnly { target: TargetFilter::Typed(filter) }
+                if filter.type_filters.is_empty()
+                    && filter.controller == Some(ControllerRef::Opponent)
+        ),
+        "got {:?}",
+        fixed_opponents.effect
+    );
+    assert_eq!(
+        fixed_opponents.multi_target,
+        Some(MultiTargetSpec::fixed(2, 2))
+    );
+
+    let up_to = parse_effect_chain("Choose up to two target players.", AbilityKind::Spell);
+    assert!(
+        matches!(
+            &*up_to.effect,
+            Effect::TargetOnly {
+                target: TargetFilter::Player
+            }
+        ),
+        "got {:?}",
+        up_to.effect
+    );
+    assert_eq!(
+        up_to.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 }))
+    );
+
+    // The already-peeled unlimited form: the chain loop strips "any number of "
+    // into the ability's `multi_target`, so the clause sees only the plural
+    // noun. It must still reach strict exhaustion and declare the slot.
+    let unlimited = parse_effect_chain("Choose target players.", AbilityKind::Spell);
+    assert!(
+        matches!(
+            &*unlimited.effect,
+            Effect::TargetOnly {
+                target: TargetFilter::Player
+            }
+        ),
+        "the peeled declaration must survive, got {:?}",
+        unlimited.effect
+    );
+}
+
+/// CR 115.1a + CR 115.6: Officious Interrogation prints the unlimited plural
+/// player declaration. The declaration must survive the chain-level quantifier
+/// peel with `min: 0, max: None` instead of becoming an unparsed verb argument.
+#[test]
+fn officious_interrogation_plural_player_declaration_survives_the_peel() {
+    let parsed = parse_card(
+        "Choose any number of target players. Investigate X times, where X is \
+         the total number of creatures those players control.",
+        "Officious Interrogation",
+        &[],
+        &["Instant"],
+    );
+    let ability = &parsed.abilities[0];
+    assert!(
+        matches!(
+            &*ability.effect,
+            Effect::TargetOnly {
+                target: TargetFilter::Player
+            }
+        ),
+        "the declaration must survive, got {:?}",
+        ability.effect
+    );
+    assert_eq!(ability.multi_target, Some(MultiTargetSpec::unlimited(0)));
+    assert!(
+        !matches!(&*ability.effect, Effect::Unimplemented { .. }),
+        "the declaration must not be an Unimplemented node"
+    );
+}
+
+/// CR 115.1a + CR 115.6: Call the Coppercoats prints the unlimited plural
+/// OPPONENT declaration; the opponent-typed filter and zero-minimum
+/// cardinality must both survive the peel.
+#[test]
+fn call_the_coppercoats_plural_opponent_declaration_survives_the_peel() {
+    let parsed = parse_card(
+        "Choose any number of target opponents. Create X 1/1 white Human Soldier \
+         creature tokens, where X is the number of creatures those opponents control.",
+        "Call the Coppercoats",
+        &[],
+        &["Instant"],
+    );
+    let ability = &parsed.abilities[0];
+    assert!(
+        matches!(
+            &*ability.effect,
+            Effect::TargetOnly { target: TargetFilter::Typed(filter) }
+                if filter.type_filters.is_empty()
+                    && filter.controller == Some(ControllerRef::Opponent)
+        ),
+        "the opponent declaration must survive, got {:?}",
+        ability.effect
+    );
+    assert_eq!(ability.multi_target, Some(MultiTargetSpec::unlimited(0)));
+    assert!(
+        !matches!(&*ability.effect, Effect::Unimplemented { .. }),
+        "the declaration must not be an Unimplemented node"
+    );
 }

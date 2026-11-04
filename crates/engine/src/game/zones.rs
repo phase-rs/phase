@@ -3458,6 +3458,7 @@ mod tests {
 
     use super::*;
     use crate::game::game_object::CleaveFormState;
+    use crate::types::ability::LibraryPosition;
     use crate::types::ability::{
         ContinuousModification, ControllerRef, FilterProp, StaticCondition, StaticDefinition,
         TargetFilter, TypeFilter, TypedFilter,
@@ -5277,7 +5278,6 @@ mod tests {
     /// subtracts already-delivered higher ranks from the post-removal length.
     #[test]
     fn arranged_library_slot_counts_delivered_ranks_at_the_anchored_end() {
-        use crate::types::ability::LibraryPosition;
         assert_eq!(
             arranged_library_slot(5, [2usize, 4].into_iter(), 3, &LibraryPosition::Top),
             1
@@ -5324,7 +5324,6 @@ mod tests {
     /// emits no `ZoneChanged`, and never bumps an incarnation.
     #[test]
     fn arranged_bottom_slot_reproduces_library_origin_append_order() {
-        use crate::types::ability::LibraryPosition;
         let mut state = setup();
         let sentinel = create_object(
             &mut state,
@@ -5397,7 +5396,6 @@ mod tests {
     /// emit exactly one each.
     #[test]
     fn arranged_bottom_slot_handles_mixed_cross_zone_and_library_origin_members() {
-        use crate::types::ability::LibraryPosition;
         let mut state = setup();
         let p = create_object(
             &mut state,
@@ -5464,7 +5462,6 @@ mod tests {
     /// pre-R4b append-after-removal result and needs no prompt.
     #[test]
     fn arranged_bottom_slot_reproduces_request_origin_announcement_order() {
-        use crate::types::ability::LibraryPosition;
         let mut state = setup();
         let p = create_object(
             &mut state,

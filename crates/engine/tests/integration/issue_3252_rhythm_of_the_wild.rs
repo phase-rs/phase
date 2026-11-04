@@ -102,19 +102,22 @@ fn rhythm_of_the_wild_grants_riot_on_library_to_battlefield_put() {
     resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0).unwrap();
 
     assert_riot_replacement_choice(&runner);
-    // R4c: the staged population parks the marker + batch child (a
-    // one-member population keeps the legacy carrier).
-    assert!(
-        runner.state().active_change_zone_frame().is_some()
-            || runner.state().resolution_stack.iter().any(|frame| matches!(
-                frame,
-                engine::types::resolution::ResolutionFrame::BatchDelivery(batch)
-                    if batch
-                        .staged
-                        .as_ref()
-                        .is_some_and(|staged| staged.change_zone.is_some())
-            )),
-        "the real ChangeZone delivery must park its resume carrier at the replacement choice"
+    // R4c: exactly one resume representation is parked. A one-member
+    // population keeps the legacy carrier; a multi-member population parks the
+    // staged marker + batch child. Accepting either here without counting would
+    // let both — or neither — pass.
+    let legacy_carrier = usize::from(runner.state().active_change_zone_frame().is_some());
+    let staged_carrier = usize::from(runner.state().resolution_stack.iter().any(|frame| {
+        matches!(
+            frame,
+            engine::types::resolution::ResolutionFrame::BatchDelivery(batch)
+                if batch.is_change_zone_population()
+        )
+    }));
+    assert_eq!(
+        legacy_carrier + staged_carrier,
+        1,
+        "the real ChangeZone delivery must park exactly one resume carrier at the replacement choice"
     );
 
     runner

@@ -39,6 +39,7 @@ use crate::types::zones::{EtbTapState, Zone};
 use crate::game::effects::change_zone::shuffle_library;
 use crate::game::game_object::{AttachTarget, GameObject};
 use crate::types::ability::FaceDownProfile;
+use crate::types::game_state::LogicalZoneChangeTerminalOutcome;
 
 /// Why this zone change is happening. Determines pipeline engagement (PLAN §3)
 /// and is carried onto `ProposedEvent::ZoneChange.cause` / `ZoneChangeRecord`.
@@ -1682,7 +1683,6 @@ fn new_staged_batch(state: &GameState, reqs: &[ZoneMoveRequest]) -> StagedBatchD
         cursor: 0,
         arrangements: Vec::new(),
         arrangement_cursor: 0,
-        change_zone: None,
     }
 }
 
@@ -1807,7 +1807,7 @@ fn run_staged_batch(
                 StagedConsult::Continue => continue,
                 StagedConsult::Paused => return StagedStop::Paused,
                 StagedConsult::AllConsulted => {
-                    begin_staged_arrangement(owner);
+                    begin_staged_arrangement(state, owner);
                     continue;
                 }
             },
@@ -2166,6 +2166,18 @@ fn mark_staged_member_terminal(
     terminal: ZoneMoveCompletion,
     events: &mut Vec<GameEvent>,
 ) {
+    // CR 608.2c: the mass hand-exile counter is the completion's typed
+    // `MassAllMembers` policy; a targeted or choice-selected population never
+    // increments it. The per-member exile link is the member request's own
+    // typed tracking, not a parallel batch flag.
+    let count_hand_exile = matches!(
+        owner.completion.as_ref(),
+        Some(crate::types::game_state::BatchCompletion::ChangeZonePopulationSettled { tail, .. })
+            if matches!(
+                tail.count,
+                crate::types::game_state::ChangeZoneCountPolicy::MassAllMembers
+            )
+    );
     let mut destroyed = None;
     let mut change_zone_bookkeeping = None;
     if let Some(staged) = owner.staged.as_mut() {
@@ -2174,11 +2186,14 @@ fn mark_staged_member_terminal(
                 if member.outer_destroy_approved {
                     destroyed = Some((member.identity.object_id, operation.source));
                 }
-            } else if let Some(meta) = staged.change_zone {
+            } else {
                 change_zone_bookkeeping = Some((
                     member.identity.object_id,
                     member.approved_event.clone(),
-                    meta,
+                    matches!(
+                        member.request.exile_tracking,
+                        ZoneDeliveryExileTracking::TrackBySource
+                    ),
                 ));
             }
             member.state = StagedBatchMemberState::Terminal;
@@ -2197,8 +2212,15 @@ fn mark_staged_member_terminal(
             source_id: Some(source_id),
         });
     }
-    if let Some((object_id, approved_event, meta)) = change_zone_bookkeeping {
-        note_change_zone_member_terminal(state, object_id, approved_event.as_ref(), terminal, meta);
+    if let Some((object_id, approved_event, exiled_by_source)) = change_zone_bookkeeping {
+        note_change_zone_member_terminal(
+            state,
+            object_id,
+            approved_event.as_ref(),
+            terminal,
+            count_hand_exile,
+            exiled_by_source,
+        );
     }
 }
 
@@ -2209,9 +2231,10 @@ fn note_change_zone_member_terminal(
     object_id: ObjectId,
     approved_event: Option<&ProposedEvent>,
     terminal: ZoneMoveCompletion,
-    meta: crate::types::game_state::ChangeZoneBatchMeta,
+    count_hand_exile: bool,
+    exiled_by_source: bool,
 ) {
-    if meta.count_hand_exile && terminal == ZoneMoveCompletion::Moved {
+    if count_hand_exile && terminal == ZoneMoveCompletion::Moved {
         let hand_to_exile = matches!(
             approved_event,
             Some(ProposedEvent::ZoneChange {
@@ -2225,7 +2248,7 @@ fn note_change_zone_member_terminal(
                 state.exiled_from_hand_this_resolution.saturating_add(1);
         }
     }
-    if meta.exiled_by_source {
+    if exiled_by_source {
         state.exile_links.retain(|link| link.exiled_id != object_id);
     }
 }
@@ -2233,7 +2256,7 @@ fn note_change_zone_member_terminal(
 /// CR 401.4 + CR 101.4: derive the private owner/position groups from final
 /// approvals. Only Library Top/Bottom lands are grouped; request-origin groups
 /// replay the legacy insertion order without a prompt.
-fn begin_staged_arrangement(owner: &mut PendingBatchDeliveries) {
+fn begin_staged_arrangement(state: &GameState, owner: &mut PendingBatchDeliveries) {
     let Some(staged) = owner.staged.as_mut() else {
         return;
     };
@@ -2311,6 +2334,18 @@ fn begin_staged_arrangement(owner: &mut PendingBatchDeliveries) {
             },
         });
     }
+    // CR 101.4: store the groups in APNAP order, so the monotone arrangement
+    // cursor IS the publication order and a later submission cannot skip a
+    // still-awaiting earlier owner. The sort is stable, so an owner's own
+    // groups keep the order they were announced in, and every group keeps its
+    // within-group member order untouched.
+    let apnap = crate::game::players::apnap_order(state);
+    arrangements.sort_by_key(|arrangement| {
+        apnap
+            .iter()
+            .position(|player| *player == arrangement.batch.owner)
+            .unwrap_or(usize::MAX)
+    });
     staged.arrangements = arrangements;
     staged.arrangement_cursor = 0;
     // The shared cursor restarts for delivery: every member has been consulted,
@@ -2341,29 +2376,22 @@ fn staged_member_placement_is_replacement(member: &StagedBatchMember) -> bool {
     *to != member.request.destination || library_placement != &member.request.library_placement
 }
 
-/// CR 401.4: publish the cursor group's owner-addressed arrangement prompt.
-/// Returns `Some(Arranging)` when a prompt was set, `None` when every group is
-/// already final (the stage then becomes `Delivering`).
+/// CR 401.4 + CR 101.4: publish the cursor group's owner-addressed arrangement
+/// prompt. Returns `Some(Arranging)` when a prompt was set, `None` when every
+/// group is already final (the stage then becomes `Delivering`).
+///
+/// `begin_staged_arrangement` stored the groups in APNAP order, so the first
+/// still-`Awaiting` group is the APNAP-earliest one AND the monotone cursor the
+/// submission validator checks against. Nothing here may reorder them.
 fn publish_next_staged_arrangement(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
 ) -> Option<StagedStop> {
     let staged = owner.staged.as_mut()?;
-    // CR 101.4: offer owner-arrangement prompts in APNAP order, not in the
-    // incidental order the populations were announced.
-    let apnap = crate::game::players::apnap_order(state);
     let index = staged
         .arrangements
         .iter()
-        .enumerate()
-        .filter(|(_, arrangement)| arrangement.status == StagedArrangementStatus::Awaiting)
-        .min_by_key(|(_, arrangement)| {
-            apnap
-                .iter()
-                .position(|player| *player == arrangement.batch.owner)
-                .unwrap_or(usize::MAX)
-        })
-        .map(|(index, _)| index);
+        .position(|arrangement| arrangement.status == StagedArrangementStatus::Awaiting);
     let Some(index) = index else {
         staged.stage = BatchDeliveryStage::Delivering;
         owner.paused_current = None;
@@ -2694,14 +2722,12 @@ pub(crate) fn deliver_staged_change_zone_batch(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
     logical_zone_change_group: LogicalZoneChangeGroup,
-    meta: crate::types::game_state::ChangeZoneBatchMeta,
     tail: crate::types::game_state::ChangeZoneBatchTail,
     events: &mut Vec<GameEvent>,
 ) -> StagedChangeZoneOutcome {
     let event_start = events.len();
     let group_id = logical_zone_change_group.logical_group_id;
-    let mut staged = new_staged_batch(state, &reqs);
-    staged.change_zone = Some(meta);
+    let staged = new_staged_batch(state, &reqs);
     // CR 614.13a: absorb a Devour-only frame for this exact move; the marker
     // replaces it (and keeps its eligibility snapshot across a pause).
     let devour_eligible_snapshot = if state.active_change_zone_frame().is_some_and(|frame| {
@@ -3256,17 +3282,23 @@ pub(crate) fn prune_staged_member_for_player_left(
 pub(crate) fn reconcile_staged_batch_after_departure(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
-) -> Result<(), String> {
-    if let Some(group_id) = state.active_batch_delivery().and_then(|pending| {
-        pending
-            .staged
-            .as_ref()
-            .map(|_| pending.logical_zone_change_group.logical_group_id)
-    }) {
+) -> Result<crate::game::engine_resolution_choices::DepartureSettlement, String> {
+    // CR 101.4: capture exactly which staged frame owns this action — its
+    // logical group and, when it is a linked component batch, the parent
+    // boundary it captured. Every mutation below names that same frame; none of
+    // them re-derives the owner from a census or from the nearest staged frame.
+    let Some(identity) = state.resolution_stack.staged_owner_identity() else {
+        return Ok(crate::game::engine_resolution_choices::DepartureSettlement::NotSettled);
+    };
+    let is_active_owner = state.active_batch_delivery().is_some_and(|pending| {
+        pending.logical_zone_change_group.logical_group_id == identity.group
+            && pending.component_delivery_parent == identity.component
+    });
+    if is_active_owner {
         let Ok(Some(mut owner)) = state.resolution_stack.take_active_batch_delivery() else {
-            return Ok(());
+            return Ok(crate::game::engine_resolution_choices::DepartureSettlement::NotSettled);
         };
-        if reconcile_staged_owner(state, &mut owner, group_id, events) {
+        if reconcile_staged_owner(state, &mut owner, identity.group, events) {
             // Settle against the batch's own buffer only: the caller's events
             // belong to the departure sweep and include unrelated ZoneChanged
             // records that must not enter this group.
@@ -3274,25 +3306,30 @@ pub(crate) fn reconcile_staged_batch_after_departure(
             let mut batch_events = Vec::new();
             settle_batch_owner(state, owner, deferred_events, &mut batch_events);
             events.append(&mut batch_events);
-        } else {
-            state
-                .resolution_stack
-                .park_batch_owner(owner)
-                .expect("reconciled staged batch re-parks its exact owner");
+            // CR 608.2m: the departure completed this instruction through the
+            // typed settlement, so the resolving spell keeps its owed final
+            // part instead of being retired as an unanswered question.
+            return Ok(crate::game::engine_resolution_choices::DepartureSettlement::Settled);
         }
-        return Ok(());
+        state
+            .resolution_stack
+            .park_batch_owner(owner)
+            .expect("reconciled staged batch re-parks its exact owner");
+        return Ok(crate::game::engine_resolution_choices::DepartureSettlement::NotSettled);
     }
 
     // The staged owner may be buried below a top PostReplacement delivery child.
     let mut buried = None;
-    state
+    if !state
         .resolution_stack
-        .visit_staged_batch_mut(|pending| buried = Some(pending.clone()));
+        .visit_staged_batch_owner_mut(&identity, |pending| buried = Some(pending.clone()))
+    {
+        return Ok(crate::game::engine_resolution_choices::DepartureSettlement::NotSettled);
+    }
     let Some(mut owner) = buried else {
-        return Ok(());
+        return Ok(crate::game::engine_resolution_choices::DepartureSettlement::NotSettled);
     };
-    let group_id = owner.logical_zone_change_group.logical_group_id;
-    let settle = reconcile_staged_owner(state, &mut owner, group_id, events);
+    let settle = reconcile_staged_owner(state, &mut owner, identity.group, events);
     // A buried owner cannot be popped here: the child frame owns the stack.
     // All abandoned slots were already recorded by the departure sweep, so the
     // batch is coherent; the child's resume reaches `BatchDelivery` and settles
@@ -3300,8 +3337,11 @@ pub(crate) fn reconcile_staged_batch_after_departure(
     let _ = settle;
     state
         .resolution_stack
-        .visit_staged_batch_mut(|pending| *pending = owner.clone());
-    Ok(())
+        .visit_staged_batch_owner_mut(&identity, |pending| *pending = owner.clone());
+    // A buried owner is not settled here: the child frame owns the stack, so
+    // its own resume performs the settlement and the owed final part is still
+    // outstanding for the ordinary convergence.
+    Ok(crate::game::engine_resolution_choices::DepartureSettlement::NotSettled)
 }
 
 /// Shared reconcile of one staged owner (top or buried). Returns whether the
@@ -3445,7 +3485,6 @@ fn settle_batch_owner(
             .iter()
             .position(|member| member.identity == link.member)
             .expect("component group retains original incarnation");
-        use crate::types::game_state::LogicalZoneChangeTerminalOutcome;
         let terminal = match pending.logical_zone_change_group.terminal_outcomes[index] {
             LogicalZoneChangeTerminalOutcome::Moved { .. } => ZoneMoveCompletion::Moved,
             LogicalZoneChangeTerminalOutcome::Prevented => ZoneMoveCompletion::Prevented,
@@ -3478,10 +3517,13 @@ fn settle_batch_owner(
         .as_ref()
         .map(|staged| staged.members.clone())
         .unwrap_or_default();
-    let change_zone_family = pending
-        .staged
-        .as_ref()
-        .is_some_and(|staged| staged.change_zone.is_some());
+    // CR 608.2c: the typed completion IS the family authority — a
+    // `ChangeZonePopulationSettled` tail is carried only by the ChangeZone
+    // family, and every such batch carries one.
+    let change_zone_family = matches!(
+        completion.as_ref(),
+        Some(crate::types::game_state::BatchCompletion::ChangeZonePopulationSettled { .. })
+    );
     if let Some(mut completion) = completion {
         crate::types::game_state::settle_batch_delivery_outcome(
             &mut completion,
@@ -5084,10 +5126,16 @@ pub(crate) fn attach_chosen_entering_aura_host(
 mod entering_aura_attachment_tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ChosenAttribute, ReplacementDefinition,
+    };
     use crate::types::ability::{ControllerRef, TypeFilter, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
+    use crate::types::keywords::ProtectionTarget;
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::statics::StaticMode;
 
     const P0: PlayerId = PlayerId(0);
     const P1: PlayerId = PlayerId(1);
@@ -5472,9 +5520,6 @@ mod entering_aura_attachment_tests {
     /// `engine_replacement::prevented_etb_graveyard_fallback_consults_moved_redirects`.
     #[test]
     fn the_stack_origin_graveyard_placement_consults_moved_redirects() {
-        use crate::types::ability::{AbilityDefinition, AbilityKind, ReplacementDefinition};
-        use crate::types::replacements::ReplacementEvent;
-
         let mut state = GameState::new_two_player(1);
         // Rest in Peace-class redirect. Deliberately NOT a creature: a creature
         // would be a legal host for `enchant creature` and CR 303.4g would never
@@ -5546,9 +5591,6 @@ mod entering_aura_attachment_tests {
     /// and swept by some other rule).
     #[test]
     fn a_moved_redirect_does_not_disturb_a_hosted_entry() {
-        use crate::types::ability::{AbilityDefinition, AbilityKind, ReplacementDefinition};
-        use crate::types::replacements::ReplacementEvent;
-
         let mut state = GameState::new_two_player(1);
         let rip = create_object(
             &mut state,
@@ -5714,10 +5756,6 @@ mod entering_aura_attachment_tests {
         controller: PlayerId,
         chosen: CoreType,
     ) -> ObjectId {
-        use crate::types::ability::ChosenAttribute;
-        use crate::types::keywords::ProtectionTarget;
-        use crate::types::statics::StaticMode;
-
         let id = create_object(
             state,
             CardId(90_400),
@@ -7371,14 +7409,23 @@ mod announced_spell_residency_tests {
 #[cfg(test)]
 mod w3_library_placement_tests {
     use super::*;
+    use crate::game::effects::resolve_ability_chain;
+    use crate::game::engine::{apply, apply_as_current};
+    use crate::game::scenario::{GameScenario, P0};
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, QuantityExpr, ReplacementDefinition, ReplacementMode,
         SearchSelectionConstraint, TargetFilter,
     };
+    use crate::types::ability::{ReplacementCondition, TypeFilter, TypedFilter};
+    use crate::types::actions::{AlternativeCastDecision, GameAction};
+    use crate::types::game_state::{CastingVariant, PersistedGameState};
     use crate::types::identifiers::CardId;
+    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::phase::Phase;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::resolution::ResolutionFrame;
+    use crate::types::resolution::ResolutionStateWire;
 
     fn event_placement(event: &ProposedEvent) -> Option<LibraryPosition> {
         let ProposedEvent::ZoneChange {
@@ -7511,8 +7558,6 @@ mod w3_library_placement_tests {
 
     #[test]
     fn canonical_placement_is_seeded_by_both_producers_before_consultation() {
-        use crate::game::engine::apply_as_current;
-        use crate::types::actions::GameAction;
         for position in [
             LibraryPosition::Top,
             LibraryPosition::Bottom,
@@ -7688,8 +7733,6 @@ mod w3_library_placement_tests {
 
     #[test]
     fn paused_producer_restoration_distinguishes_absent_null_and_current_position() {
-        use crate::game::engine::apply_as_current;
-        use crate::types::actions::GameAction;
         let (mut state, card, sentinels) = library_fixture(3);
         let source = install_optional_library_redirect(&mut state);
         move_object(
@@ -7765,8 +7808,6 @@ mod w3_library_placement_tests {
     /// before consultation; no board mutation occurs between answers.
     #[test]
     fn canonical_placement_survives_public_repeated_choices() {
-        use crate::game::engine::apply_as_current;
-        use crate::types::actions::GameAction;
         let (mut state, card, sentinels) = library_fixture(3);
         let first = install_optional_library_redirect(&mut state);
         let second = create_object(
@@ -7847,11 +7888,6 @@ mod w3_library_placement_tests {
         ObjectId,
         Vec<ObjectId>,
     ) {
-        use crate::game::scenario::{GameScenario, P0};
-        use crate::types::actions::{AlternativeCastDecision, GameAction};
-        use crate::types::game_state::CastingVariant;
-        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
-        use crate::types::phase::Phase;
         // Verbatim AtomicCards Oracle, including the complete mutate reminder.
         const OCTOPUS: &str = "Mutate {1}{U} (If you cast this spell for its mutate cost, put it over or under target non-Human creature you own. They mutate into the creature on top plus all abilities from under it.)\nFlash\nWhenever this creature deals combat damage to a player, draw a card.";
         let mut scenario = GameScenario::new();
@@ -8034,8 +8070,6 @@ mod w3_library_placement_tests {
 
     #[test]
     fn positioned_mutate_component_pause_preserves_applied_identity_and_split_provenance() {
-        use crate::types::ability::{TypeFilter, TypedFilter};
-        use crate::types::actions::GameAction;
         let (mut runner, bears, octopus, lost, sentinels) = totally_lost_mutate_fixture();
         let inherited_source = install_optional_library_redirect(runner.state_mut());
         let component_source = create_object(
@@ -8140,7 +8174,6 @@ mod w3_library_placement_tests {
 
     #[test]
     fn positioned_commander_component_redirect_keeps_ordinary_sibling_position() {
-        use crate::types::actions::GameAction;
         // Infrastructure sibling: commander designation is fixture metadata,
         // not a claim that Sea-Dasher Octopus is a legal printed commander.
         let (mut runner, bears, octopus, lost, sentinels) = totally_lost_mutate_fixture();
@@ -8342,9 +8375,6 @@ mod w3_library_placement_tests {
 
     #[test]
     fn face_down_exile_single_replacement_enters_battlefield_face_up_and_public() {
-        use crate::game::engine::apply_as_current;
-        use crate::types::actions::GameAction;
-
         let mut state = GameState::new_two_player(42);
         let redirect_source = create_object(
             &mut state,
@@ -8436,10 +8466,6 @@ mod w3_library_placement_tests {
 
     #[test]
     fn face_down_exile_chained_away_and_back_keeps_exact_hidden_authority() {
-        use crate::game::effects::resolve_ability_chain;
-        use crate::game::engine::{apply, apply_as_current};
-        use crate::types::actions::GameAction;
-
         let mut state = GameState::new_two_player(42);
         let first_redirect = create_object(
             &mut state,
@@ -8556,10 +8582,6 @@ mod w3_library_placement_tests {
 
     #[test]
     fn face_down_exile_chained_battlefield_replacements_preserve_printed_face() {
-        use crate::game::effects::resolve_ability_chain;
-        use crate::game::engine::{apply, apply_as_current};
-        use crate::types::actions::GameAction;
-
         let mut state = GameState::new_two_player(42);
         let first_redirect = create_object(
             &mut state,
@@ -8837,10 +8859,6 @@ mod w3_library_placement_tests {
     /// the requested position.
     #[test]
     fn library_placement_parked_resume_honors_position() {
-        use crate::game::engine::apply_as_current;
-        use crate::types::ability::ReplacementMode;
-        use crate::types::actions::GameAction;
-
         let mut state = GameState::new_two_player(42);
         let a = create_object(
             &mut state,
@@ -8983,8 +9001,6 @@ mod w3_library_placement_tests {
     /// optional Library→Exile redirect. Returns the untouched library sentinels
     /// so callers can assert the final bottom order.
     fn positioned_batch_fixture() -> (GameState, ObjectId, ObjectId, Vec<ObjectId>) {
-        use crate::types::ability::ReplacementMode;
-
         let mut state = GameState::new_two_player(42);
         let a = create_object(
             &mut state,
@@ -9064,9 +9080,6 @@ mod w3_library_placement_tests {
     /// second final delivery becomes a plain Library move and auto-shuffles.
     #[test]
     fn batch_library_placement_tail_survives_pause() {
-        use crate::game::engine::apply_as_current;
-        use crate::types::actions::GameAction;
-
         let (mut state, first, second, sentinels) = positioned_batch_fixture();
         let reqs = vec![
             ZoneMoveRequest::effect(first, Zone::Library, first)
@@ -9164,11 +9177,6 @@ mod w3_library_placement_tests {
     /// choices must still place both members exactly once.
     #[test]
     fn legacy_positioned_batch_migration_normalizes_every_exact_owner_copy() {
-        use crate::game::engine::apply_as_current;
-        use crate::types::actions::GameAction;
-        use crate::types::game_state::PersistedGameState;
-        use crate::types::resolution::ResolutionStateWire;
-
         fn strip_event_placement(event: &mut serde_json::Value) {
             if let Some(zone) = event
                 .get_mut("ZoneChange")
@@ -9561,12 +9569,6 @@ mod w3_library_placement_tests {
     /// seed-identity permutation false-pass).
     #[test]
     fn library_placement_survives_two_sequential_parks() {
-        use crate::game::engine::apply_as_current;
-        use crate::types::ability::{
-            ReplacementCondition, ReplacementMode, TypeFilter, TypedFilter,
-        };
-        use crate::types::actions::GameAction;
-
         fn optional_library_exile_redirect(
             condition: Option<ReplacementCondition>,
         ) -> ReplacementDefinition {
@@ -10648,6 +10650,7 @@ mod layers_incremental_flush_tests {
 #[cfg(test)]
 mod effect_driven_transformed_entry_tests {
     use super::*;
+    use crate::game::game_object::BackFaceData;
     use crate::game::layers::{evaluate_layers, flush_layers, mark_layers_full};
     use crate::game::zones::create_object;
     use crate::types::ability::{
@@ -10725,8 +10728,6 @@ mod effect_driven_transformed_entry_tests {
     /// must still fire after the guarded entry.
     #[test]
     fn mdfc_permanent_front_transformed_entry_still_lands() {
-        use crate::game::game_object::BackFaceData;
-
         let mut state = GameState::new_two_player(42);
         let object_id = create_object(
             &mut state,
@@ -11328,7 +11329,13 @@ mod staged_batch_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::LibraryPosition;
+    use crate::types::ability::{Effect, ResolvedAbility};
+    use crate::types::game_state::{
+        BatchCompletion, StagedBatchMemberState, StagedDestroyOperation, StagedMemberOperation,
+        ZoneMoveCompletion,
+    };
     use crate::types::identifiers::CardId;
+    use crate::types::keywords::Keyword;
 
     fn effect_source(state: &mut GameState) -> ObjectId {
         create_object(
@@ -11481,7 +11488,6 @@ mod staged_batch_tests {
             members,
             arrangements: Vec::new(),
             arrangement_cursor: 0,
-            change_zone: None,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             component_delivery_parent: None,
@@ -11553,7 +11559,7 @@ mod staged_batch_tests {
         assert_eq!(state.objects[&b].zone, Zone::Graveyard);
 
         let mut owner = take_owner(&mut state, group_id);
-        begin_staged_arrangement(&mut owner);
+        begin_staged_arrangement(&state, &mut owner);
         put_owner(&mut state, owner);
         assert_eq!(
             state
@@ -11624,7 +11630,7 @@ mod staged_batch_tests {
         let b = graveyard_card(&mut state, 2);
         let group_id = replacement_origin_group(&mut state, &[a, b], LibraryPosition::Top);
         let mut owner = take_owner(&mut state, group_id);
-        begin_staged_arrangement(&mut owner);
+        begin_staged_arrangement(&state, &mut owner);
         assert_eq!(
             owner.staged.as_ref().unwrap().stage,
             BatchDeliveryStage::Arranging
@@ -11663,6 +11669,140 @@ mod staged_batch_tests {
         );
     }
 
+    /// CR 101.4 + CR 401.4: the stored arrangement groups are APNAP-ordered, so the
+    /// monotone cursor IS the publication order even when the populations were
+    /// announced by a later seat first. Both nonidentity submissions then settle.
+    #[test]
+    fn arrangement_groups_store_and_publish_in_apnap_order() {
+        let mut state = GameState::new_two_player(42);
+        effect_source(&mut state);
+        // Announced by P1 FIRST, then P0.
+        let p1_a = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(1),
+            "P1 graveyard A".to_string(),
+            Zone::Graveyard,
+        );
+        let p1_b = create_object(
+            &mut state,
+            CardId(32),
+            PlayerId(1),
+            "P1 graveyard B".to_string(),
+            Zone::Graveyard,
+        );
+        let p0_a = graveyard_card(&mut state, 33);
+        let p0_b = graveyard_card(&mut state, 34);
+        let members = [p1_a, p1_b, p0_a, p0_b]
+            .into_iter()
+            .map(|id| {
+                staged_member(
+                    &state,
+                    id,
+                    Some(approved_library_event(&state, id, LibraryPosition::Bottom)),
+                    StagedBatchMemberState::Approved,
+                    Zone::Library,
+                    None,
+                )
+            })
+            .collect();
+        let group_id = push_approved_staged(&mut state, members, BatchDeliveryStage::Approving);
+        let mut owner = take_owner(&mut state, group_id);
+        begin_staged_arrangement(&state, &mut owner);
+        {
+            let staged = owner.staged.as_ref().expect("staged payload");
+            assert_eq!(staged.stage, BatchDeliveryStage::Arranging);
+            let owners: Vec<PlayerId> = staged
+                .arrangements
+                .iter()
+                .map(|arrangement| arrangement.batch.owner)
+                .collect();
+            assert_eq!(
+                owners,
+                vec![PlayerId(0), PlayerId(1)],
+                "the active player is stored first even though P1 announced first"
+            );
+            let p1_order: Vec<ObjectId> = staged.arrangements[1]
+                .batch
+                .members
+                .iter()
+                .map(|member| member.identity.object_id)
+                .collect();
+            assert_eq!(
+                p1_order,
+                vec![p1_a, p1_b],
+                "within-group announcement order is preserved"
+            );
+        }
+
+        // The first publication is the AP's group, at the monotone cursor.
+        assert!(publish_next_staged_arrangement(&mut state, &mut owner).is_some());
+        assert!(
+            matches!(&state.waiting_for, WaitingFor::DigRestSplitChoice { player, .. } if *player == PlayerId(0)),
+            "the AP's arrangement is offered first, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(owner.staged.as_ref().unwrap().arrangement_cursor, 0);
+        put_owner(&mut state, owner);
+
+        let (offered, top_count) = arrangement_prompt(&state);
+        assert_eq!(offered, [p0_a, p0_b]);
+        let mut events = Vec::new();
+        submit_staged_batch_arrangement(
+            &mut state,
+            group_id,
+            PlayerId(0),
+            &offered,
+            top_count,
+            DigRestSplitScope::OrderOnly,
+            &[p0_b, p0_a],
+            &mut events,
+        )
+        .expect("the AP's nonidentity order is legal");
+
+        // The next publication must be the NAP's still-awaiting group — a
+        // submission never skips an earlier owner, and the cursor advanced by one.
+        assert!(
+            matches!(&state.waiting_for, WaitingFor::DigRestSplitChoice { player, .. } if *player == PlayerId(1)),
+            "the NAP's arrangement follows, got {:?}",
+            state.waiting_for
+        );
+        let (offered, top_count) = arrangement_prompt(&state);
+        assert_eq!(offered, [p1_a, p1_b]);
+        submit_staged_batch_arrangement(
+            &mut state,
+            group_id,
+            PlayerId(1),
+            &offered,
+            top_count,
+            DigRestSplitScope::OrderOnly,
+            &[p1_b, p1_a],
+            &mut events,
+        )
+        .expect("the NAP's nonidentity order is legal");
+
+        assert!(
+            state.active_batch_delivery().is_none(),
+            "every group submitted, so the batch settles"
+        );
+        let p0_library: Vec<ObjectId> = state.library_of(PlayerId(0)).iter().copied().collect();
+        let p1_library: Vec<ObjectId> = state.library_of(PlayerId(1)).iter().copied().collect();
+        for (library, bottom, above) in [(&p0_library, p0_a, p0_b), (&p1_library, p1_a, p1_b)] {
+            let bottom = library
+                .iter()
+                .position(|id| *id == bottom)
+                .expect("card placed");
+            let above = library
+                .iter()
+                .position(|id| *id == above)
+                .expect("card placed");
+            assert!(
+                bottom > above,
+                "each owner's submitted Bottom order is the delivered order"
+            );
+        }
+    }
+
     #[test]
     fn staged_arrangement_rejects_every_invalid_submission_before_mutating() {
         let mut state = GameState::new_two_player(42);
@@ -11672,7 +11812,7 @@ mod staged_batch_tests {
         let foreign = graveyard_card(&mut state, 3);
         let group_id = replacement_origin_group(&mut state, &[a, b], LibraryPosition::Bottom);
         let mut owner = take_owner(&mut state, group_id);
-        begin_staged_arrangement(&mut owner);
+        begin_staged_arrangement(&state, &mut owner);
         assert!(publish_next_staged_arrangement(&mut state, &mut owner).is_some());
         put_owner(&mut state, owner);
         let (offered, top_count) = arrangement_prompt(&state);
@@ -11728,7 +11868,7 @@ mod staged_batch_tests {
         let a = graveyard_card(&mut state, 1);
         let group_id = replacement_origin_group(&mut state, &[a], LibraryPosition::Top);
         let mut owner = take_owner(&mut state, group_id);
-        begin_staged_arrangement(&mut owner);
+        begin_staged_arrangement(&state, &mut owner);
         put_owner(&mut state, owner);
         let staged = state
             .active_batch_delivery()
@@ -11783,7 +11923,6 @@ mod staged_batch_tests {
             members,
             arrangements: Vec::new(),
             arrangement_cursor: 0,
-            change_zone: None,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             component_delivery_parent: None,
@@ -11877,7 +12016,7 @@ mod staged_batch_tests {
         let b = graveyard_card(&mut state, 2);
         let group_id = replacement_origin_group(&mut state, &[a, b], LibraryPosition::Bottom);
         let mut owner = take_owner(&mut state, group_id);
-        begin_staged_arrangement(&mut owner);
+        begin_staged_arrangement(&state, &mut owner);
         assert!(publish_next_staged_arrangement(&mut state, &mut owner).is_some());
         put_owner(&mut state, owner);
         let (offered, _) = arrangement_prompt(&state);
@@ -12143,7 +12282,7 @@ mod staged_batch_tests {
         let b = graveyard_card(&mut state, 2);
         let group_id = replacement_origin_group(&mut state, &[a, b], LibraryPosition::Bottom);
         let mut owner = take_owner(&mut state, group_id);
-        begin_staged_arrangement(&mut owner);
+        begin_staged_arrangement(&state, &mut owner);
         assert!(publish_next_staged_arrangement(&mut state, &mut owner).is_some());
         owner.completion = Some(BatchCompletion::ReturnAsAuraNoTargetComplete { source_id: a });
         owner.attempted = vec![a, b];
@@ -12269,7 +12408,7 @@ mod staged_batch_tests {
         let b = graveyard_card(&mut state, 2);
         let group_id = replacement_origin_group(&mut state, &[a, b], LibraryPosition::Top);
         let mut owner = take_owner(&mut state, group_id);
-        begin_staged_arrangement(&mut owner);
+        begin_staged_arrangement(&state, &mut owner);
         assert!(publish_next_staged_arrangement(&mut state, &mut owner).is_some());
         put_owner(&mut state, owner);
         let (offered, top_count) = arrangement_prompt(&state);
@@ -12516,7 +12655,7 @@ mod staged_batch_tests {
         let b = graveyard_card(&mut state, 2);
         let group_id = replacement_origin_group(&mut state, &[a, b], LibraryPosition::Top);
         let mut owner = take_owner(&mut state, group_id);
-        begin_staged_arrangement(&mut owner);
+        begin_staged_arrangement(&state, &mut owner);
         assert!(publish_next_staged_arrangement(&mut state, &mut owner).is_some());
         put_owner(&mut state, owner);
         let (offered, top_count) = arrangement_prompt(&state);
@@ -12722,7 +12861,7 @@ mod staged_batch_tests {
             .collect();
         let group_id = push_approved_staged(&mut state, members, BatchDeliveryStage::Approving);
         let mut owner = take_owner(&mut state, group_id);
-        begin_staged_arrangement(&mut owner);
+        begin_staged_arrangement(&state, &mut owner);
         assert!(publish_next_staged_arrangement(&mut state, &mut owner).is_some());
         put_owner(&mut state, owner);
         let (top_cards, top_count) = arrangement_prompt(&state);
@@ -12827,7 +12966,7 @@ mod staged_batch_tests {
         let b = graveyard_card(&mut state, 2);
         let group_id = replacement_origin_group(&mut state, &[a, b], LibraryPosition::Bottom);
         let mut owner = take_owner(&mut state, group_id);
-        begin_staged_arrangement(&mut owner);
+        begin_staged_arrangement(&state, &mut owner);
         assert!(publish_next_staged_arrangement(&mut state, &mut owner).is_some());
         put_owner(&mut state, owner);
         let (offered, top_count) = arrangement_prompt(&state);
@@ -12888,7 +13027,7 @@ mod staged_batch_tests {
         let group_id =
             push_approved_staged(&mut state, vec![member], BatchDeliveryStage::Approving);
         let mut owner = take_owner(&mut state, group_id);
-        begin_staged_arrangement(&mut owner);
+        begin_staged_arrangement(&state, &mut owner);
         assert!(owner.staged.as_ref().unwrap().arrangements.is_empty());
         assert_eq!(
             owner.staged.as_ref().unwrap().stage,
@@ -12969,13 +13108,6 @@ mod staged_batch_tests {
     /// publishes the same set as `settled_destroyed`.
     #[test]
     fn d10_staged_destroy_terminal_mapping_and_creature_destroyed() {
-        use crate::types::ability::{Effect, ResolvedAbility};
-        use crate::types::game_state::{
-            BatchCompletion, StagedBatchMemberState, StagedDestroyOperation, StagedMemberOperation,
-            ZoneMoveCompletion,
-        };
-        use crate::types::keywords::Keyword;
-
         fn battlefield_object(state: &mut GameState, card: u64, name: &str) -> ObjectId {
             create_object(
                 state,

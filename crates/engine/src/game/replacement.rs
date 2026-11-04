@@ -14065,6 +14065,7 @@ mod tests {
     use super::*;
     use crate::game::effects::token::apply_create_token_after_replacement;
     use crate::game::game_object::{AttachTarget, GameObject};
+    use crate::types::ability::LibraryPosition;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, CastManaObjectScope, CastManaSpentMetric,
         ChooseOneOfKind, ChosenAttribute, Comparator, ContinuousModification, ControllerRef,
@@ -21664,8 +21665,6 @@ mod tests {
     // overwrites that no printed-card support claim is being made for here.
     #[test]
     fn canonical_library_placement_clears_on_every_destination_write() {
-        use crate::types::ability::LibraryPosition;
-
         for destination in [Zone::Exile, Zone::Library] {
             let source = ObjectId(10);
             let mut state =
@@ -21712,8 +21711,6 @@ mod tests {
 
     #[test]
     fn canonical_library_placement_survives_non_destination_modifier_and_decline() {
-        use crate::types::ability::LibraryPosition;
-
         let source = ObjectId(10);
         let mut state =
             test_state_with_object(source, Zone::Hand, vec![tap_self_moved_replacement()]);
@@ -21776,8 +21773,6 @@ mod tests {
 
     #[test]
     fn canonical_library_placement_commander_accept_clears_decline_preserves() {
-        use crate::types::ability::LibraryPosition;
-
         let commander = ObjectId(10);
         for (choice, expected_zone, expected_placement) in [
             (0, Zone::Command, None),

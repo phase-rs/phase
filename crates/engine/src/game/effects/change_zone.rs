@@ -1513,12 +1513,10 @@ pub fn resolve(
             pending_return_result_producer: None,
             stamp_this_way: true,
         };
-        let meta = crate::types::game_state::ChangeZoneBatchMeta::default();
         match crate::game::zone_pipeline::deliver_staged_change_zone_batch(
             state,
             requests,
             logical_zone_change_group,
-            meta,
             tail,
             events,
         ) {
@@ -3292,10 +3290,6 @@ pub fn resolve_all(
             })
             .collect();
         let requests = change_zone_member_requests(&ctx, &member_entries);
-        let meta = crate::types::game_state::ChangeZoneBatchMeta {
-            exiled_by_source: matches!(effective_filter, TargetFilter::ExiledBySource),
-            count_hand_exile: true,
-        };
         let tail = crate::types::game_state::ChangeZoneBatchTail {
             group_id: logical_zone_change_group.logical_group_id,
             effect_kind: EffectKind::from(&ability.effect),
@@ -3310,7 +3304,6 @@ pub fn resolve_all(
             state,
             requests,
             logical_zone_change_group,
-            meta,
             tail,
             events,
         ) {
@@ -3633,6 +3626,7 @@ mod tests {
     use super::*;
     use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
+    use crate::types::ability::EffectResolutionResult;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ControllerRef, FilterProp, MultiTargetSpec, PlayerFilter,
         PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
@@ -3643,11 +3637,16 @@ mod tests {
     use crate::types::card::PrintedLoyalty;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
+    use crate::types::game_state::{
+        BatchCompletion, ChangeZoneBatchTail, ChangeZoneCountPolicy, ChangeZoneSettled,
+        PendingContinuation,
+    };
     use crate::types::game_state::{ExileLinkKind, StackEntry, StackEntryKind, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
+    use crate::types::resolution::AbilityContinuationFrame;
     use crate::types::statics::{ProhibitionScope, StaticMode};
     use std::sync::Arc;
 
@@ -5907,10 +5906,7 @@ mod tests {
     ) -> Option<&crate::types::game_state::PendingBatchDeliveries> {
         state.resolution_stack.iter().find_map(|frame| match frame {
             crate::types::resolution::ResolutionFrame::BatchDelivery(batch)
-                if batch
-                    .staged
-                    .as_ref()
-                    .is_some_and(|staged| staged.change_zone.is_some()) =>
+                if batch.is_change_zone_population() =>
             {
                 Some(&**batch)
             }
@@ -6529,7 +6525,7 @@ mod tests {
             commit.state().resolution_stack.iter().any(|frame| matches!(
                 frame,
                 crate::types::resolution::ResolutionFrame::BatchDelivery(batch)
-                    if batch.staged.as_ref().is_some_and(|staged| staged.change_zone.is_some())
+                    if batch.is_change_zone_population()
             )),
             "premise: the production producer parks the staged ChangeZone owner"
         );
@@ -14557,13 +14553,6 @@ mod tests {
     /// `stamp_active_player_action_completion` is a production no-op there.
     #[test]
     fn staged_change_zone_completion_stamps_the_complete_player_action_arrival_count() {
-        use crate::types::ability::{EffectResolutionResult, ThisWayCause};
-        use crate::types::game_state::{
-            BatchCompletion, ChangeZoneBatchTail, ChangeZoneCountPolicy, ChangeZoneSettled,
-            PendingContinuation,
-        };
-        use crate::types::resolution::AbilityContinuationFrame;
-
         let mut state = GameState::new_two_player(42);
         let source = ObjectId(9_900);
         let required = EffectResolutionResult {

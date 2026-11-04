@@ -16197,8 +16197,13 @@ fn apply_non_priority_pass_action(
                     // single canonical `EffectResolved` after delivery.
                     let staged_change_zone_owns_completion = state
                         .active_batch_delivery()
-                        .and_then(|batch| batch.staged.as_ref())
-                        .is_some_and(|staged| staged.change_zone.is_some());
+                        .and_then(|batch| batch.completion.as_ref())
+                        .is_some_and(|completion| {
+                            matches!(
+                                completion,
+                                crate::types::game_state::BatchCompletion::ChangeZonePopulationSettled { .. }
+                            )
+                        });
                     if !resumes_change_zone_iteration && !staged_change_zone_owns_completion {
                         events.push(crate::types::events::GameEvent::EffectResolved {
                             kind: crate::types::ability::EffectKind::ChangeZone,

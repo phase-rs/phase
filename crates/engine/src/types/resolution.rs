@@ -23,15 +23,16 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AbilityOnsetRecord, ChangeZoneMemberEntry, CostResume, DrainStatus, DrawSequenceStack,
     GameState, GameStateDecode, GameStateDecodeMode, PayCostKind, PendingBatchDeliveries,
-    PendingChangeZoneIteration, PendingChooseOneOf, PendingConniveReentry, PendingContinuation,
-    PendingCopyTokenResolution, PendingCounterAdditionQueue, PendingCounterMoveQueue,
-    PendingCounterRemoval, PendingCounterRemovalInFlight, PendingCounterRemovalQueue,
-    PendingDebugCardEntries, PendingEachPlayerCopyChosen, PendingLifeTotalAssignment,
-    PendingMultiDraw, PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice,
-    PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
-    PostReplacementDrain, PostReplacementDrainDispatch, PostReplacementDrainStack,
-    PostReplacementFrameId, RepeatIterationChoice, ResidentDrainPolicy, ResolvingTriggerContext,
-    WaitingFor, ABILITY_ONSET_RECORD_FIELD,
+    PendingChangeZoneIteration, PendingChooseOneOf, PendingComponentDeliveryParent,
+    PendingConniveReentry, PendingContinuation, PendingCopyTokenResolution,
+    PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemoval,
+    PendingCounterRemovalInFlight, PendingCounterRemovalQueue, PendingDebugCardEntries,
+    PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMultiDraw,
+    PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
+    PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
+    PostReplacementDrainDispatch, PostReplacementDrainStack, PostReplacementFrameId,
+    RepeatIterationChoice, ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
+    ABILITY_ONSET_RECORD_FIELD,
 };
 use crate::types::identifiers::{
     DiscardFrameId, LogicalZoneChangeGroupId, ObjectId, ObjectIncarnationRef,
@@ -636,7 +637,7 @@ pub struct ChangeZoneFrame {
         serialize_with = "crate::types::deterministic_serde::option_hash_set"
     )]
     pub devour_eligible_snapshot: Option<HashSet<ObjectId>>,
-    /// CR 101.4 + CR 608.2c: the ChangeZone family's structural parent for one
+    /// CR 608.2c: the ChangeZone family's structural parent for one
     /// staged batch child. Mutually exclusive with `pending`; holds no group,
     /// suffix or tail (the child owns the group and the completion owns the
     /// tail).
@@ -644,7 +645,8 @@ pub struct ChangeZoneFrame {
     pub awaiting_batch: Option<ChangeZoneBatchMarker>,
 }
 
-/// CR 101.4: identifies the staged batch a ChangeZone parent frame awaits.
+/// Identifies the staged batch a ChangeZone parent frame awaits. Structural
+/// identity only: the marker holds no choice of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangeZoneBatchMarker {
     pub group_id: LogicalZoneChangeGroupId,
@@ -1096,6 +1098,18 @@ impl IdentifiedPostReplacementDispatch {
     }
 }
 
+/// CR 800.4a: the exact staged owner of one action, captured once.
+///
+/// `component` is the child's captured parent boundary when the owner is a
+/// linked component batch. It is part of the identity, so a later mutation can
+/// never land on a different staged frame that merely shares the bounded top
+/// window. Both parts come from the frame itself — never from a root census.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct StagedOwnerIdentity {
+    pub group: crate::types::identifiers::LogicalZoneChangeGroupId,
+    pub component: Option<PendingComponentDeliveryParent>,
+}
+
 impl ResolutionStack {
     pub fn is_empty(&self) -> bool {
         self.frames.is_empty()
@@ -1242,18 +1256,21 @@ impl ResolutionStack {
     /// without its Devour sidecar. The derived stack equality remains strict for
     /// wire round-trip validation.
     pub(crate) fn game_state_eq(&self, other: &Self) -> bool {
-        let mut left = self.frames.iter().filter(|frame| {
-            !matches!(
+        // Only a Devour-only sidecar (no iteration, no batch marker) is omitted.
+        // An awaiting-batch marker is retained state: two states that differ in
+        // marker presence or group must not compare equal.
+        let is_devour_sidecar = |frame: &ResolutionFrame| {
+            matches!(
                 frame,
-                ResolutionFrame::ChangeZone(change_zone) if change_zone.pending.is_none()
+                ResolutionFrame::ChangeZone(change_zone)
+                    if change_zone.pending.is_none() && change_zone.awaiting_batch.is_none()
             )
-        });
-        let mut right = other.frames.iter().filter(|frame| {
-            !matches!(
-                frame,
-                ResolutionFrame::ChangeZone(change_zone) if change_zone.pending.is_none()
-            )
-        });
+        };
+        let mut left = self.frames.iter().filter(|frame| !is_devour_sidecar(frame));
+        let mut right = other
+            .frames
+            .iter()
+            .filter(|frame| !is_devour_sidecar(frame));
 
         loop {
             match (left.next(), right.next()) {
@@ -1262,7 +1279,8 @@ impl ResolutionStack {
                     Some(ResolutionFrame::ChangeZone(left)),
                     Some(ResolutionFrame::ChangeZone(right)),
                 ) => {
-                    if left.pending != right.pending {
+                    if left.pending != right.pending || left.awaiting_batch != right.awaiting_batch
+                    {
                         return false;
                     }
                 }
@@ -1829,7 +1847,7 @@ impl ResolutionStack {
         Ok(())
     }
 
-    /// CR 101.4 + CR 608.2c: retire the ChangeZone marker that awaits exactly
+    /// CR 608.2c: retire the ChangeZone marker that awaits exactly
     /// `group_id` when it owns the stack top or when it is the immediate parent
     /// of the resolving ability continuation spliced above it by the staged
     /// delivery. Returns whether a frame was consumed.
@@ -1956,6 +1974,38 @@ impl ResolutionStack {
         Ok(batch)
     }
 
+    /// The immediate parent of the active component child, identified by group
+    /// only.
+    ///
+    /// CR 800.4a: during one departure transaction the parent's paused boundary
+    /// may already be canceled by an earlier member, so this bounded lookup
+    /// deliberately does not re-validate the child's capture relation. `validate`
+    /// owns that invariant at save time, and
+    /// [`Self::release_canceled_component_delivery_handoff`] retires the link
+    /// before the transaction ends.
+    fn linked_component_parent_mut(
+        &mut self,
+        parent_group_id: LogicalZoneChangeGroupId,
+    ) -> Result<&mut PendingBatchDeliveries, ResolutionStackError> {
+        let top = self.frames.top().ok_or(ResolutionStackError::Empty)?;
+        let below = self
+            .frames
+            .below(top)
+            .ok_or(ResolutionStackError::NoActiveChild)?;
+        let slot = match self.frames.get(below) {
+            Some(ResolutionFrame::BatchDelivery(parent))
+                if parent.logical_zone_change_group.logical_group_id == parent_group_id =>
+            {
+                below
+            }
+            _ => return Err(ResolutionStackError::NoActiveChild),
+        };
+        let Some(ResolutionFrame::BatchDelivery(parent)) = self.frames.get_mut(slot) else {
+            unreachable!("checked immediate parent is a batch frame")
+        };
+        Ok(parent)
+    }
+
     /// Install a synchronous original owner below its explicitly named child,
     /// or replace that same owner when its next member delegates a delivery.
     pub(crate) fn park_batch_owner(
@@ -2005,6 +2055,15 @@ impl ResolutionStack {
     }
 
     /// Mutably accesses a BatchDelivery owner while its exact active
+    /// pair — the identified original parent and the component child linked to
+    /// it — stays reachable.
+    ///
+    /// CR 800.4a: this deliberately does NOT retire the child's handoff when the
+    /// visit cancels the parent boundary. A departure retires several objects
+    /// owned by one leaver in sequence; the first of them may cancel the
+    /// parent's pause, but every later one must still reach that original
+    /// parent. [`Self::release_canceled_component_delivery_handoff`] retires the
+    /// link once the whole transaction is done.
     pub(crate) fn visit_active_component_delivery_pair_mut(
         &mut self,
         mut visit: impl FnMut(&mut PendingBatchDeliveries),
@@ -2013,18 +2072,11 @@ impl ResolutionStack {
             .active_batch_delivery()
             .and_then(|child| child.component_delivery_parent.clone());
         if let Some(link) = linked {
-            let parent = self.batch_delivery_owner_mut(link.parent_group_id)?;
+            let parent = self.linked_component_parent_mut(link.parent_group_id)?;
             visit(parent);
-            let canceled = parent
-                .paused_current
-                .as_ref()
-                .is_none_or(|paused| !paused.captures(link.member, &link.expected_event));
             let child = self
                 .active_batch_delivery_mut()
                 .expect("checked active child");
-            if canceled {
-                child.component_delivery_parent = None;
-            }
             visit(child);
         } else if let Some(active) = self.active_batch_delivery_mut() {
             visit(active);
@@ -2032,40 +2084,90 @@ impl ResolutionStack {
         Ok(())
     }
 
-    /// R4b elimination seam: mutably visit the staged BatchDelivery owner when
-    /// it is the stack top or the immediate parent of a top `PostReplacement`
-    /// delivery child. Deliberately bounded: no search for a buried batch frame.
-    pub(crate) fn visit_staged_batch_mut(
+    /// CR 800.4a: retire an active component child's handoff once the departure
+    /// transaction has removed the parent boundary it captured. Called after
+    /// every leaver-owned object has retired, so no later member was denied its
+    /// original parent; a handoff whose parent still captures the member is
+    /// kept.
+    pub(crate) fn release_canceled_component_delivery_handoff(
         &mut self,
+    ) -> Result<(), ResolutionStackError> {
+        let Some(link) = self
+            .active_batch_delivery()
+            .and_then(|child| child.component_delivery_parent.clone())
+        else {
+            return Ok(());
+        };
+        let canceled = {
+            let parent = self.linked_component_parent_mut(link.parent_group_id)?;
+            parent
+                .paused_current
+                .as_ref()
+                .is_none_or(|paused| !paused.captures(link.member, &link.expected_event))
+        };
+        if canceled {
+            let child = self
+                .active_batch_delivery_mut()
+                .expect("checked active child");
+            child.component_delivery_parent = None;
+        }
+        Ok(())
+    }
+
+    /// Identify the staged owner of this action in the bounded top window: the
+    /// stack top when it is a staged batch, or the immediate predecessor of a
+    /// top `PostReplacement` delivery child. Never a scan and never a root
+    /// census.
+    pub(crate) fn staged_owner_identity(&self) -> Option<StagedOwnerIdentity> {
+        let slot = self.bounded_staged_owner_slot()?;
+        let Some(ResolutionFrame::BatchDelivery(batch)) = self.frames.get(slot) else {
+            return None;
+        };
+        Some(StagedOwnerIdentity {
+            group: batch.logical_zone_change_group.logical_group_id,
+            component: batch.component_delivery_parent.clone(),
+        })
+    }
+
+    /// The bounded slot holding the staged owner: the top, or the immediate
+    /// predecessor of the top.
+    fn bounded_staged_owner_slot(&self) -> Option<FrameSlot> {
+        let top = self.frames.top()?;
+        [Some(top), self.frames.below(top)]
+            .into_iter()
+            .flatten()
+            .find(|slot| {
+                matches!(
+                    self.frames.get(*slot),
+                    Some(ResolutionFrame::BatchDelivery(batch)) if batch.staged.is_some()
+                )
+            })
+    }
+
+    /// R4b elimination seam: mutably visit exactly the identified staged
+    /// BatchDelivery owner, and detach the component handoffs of any member that
+    /// visit abandoned. Returns whether a frame was visited.
+    pub(crate) fn visit_staged_batch_owner_mut(
+        &mut self,
+        identity: &StagedOwnerIdentity,
         mut visit: impl FnMut(&mut PendingBatchDeliveries),
     ) -> bool {
-        // There is at most one staged owner per action (no second owner or
-        // queue). Walk down from the top to the nearest BatchDelivery carrying
-        // `staged`, skipping component children (`staged: None`) and any
-        // transient delivery frames that bury it.
-        let Some(top) = self.frames.top() else {
+        let Some(slot) = self.bounded_staged_owner_slot() else {
             return false;
         };
-        let mut cursor = Some(top);
-        let mut found = None;
-        while let Some(id) = cursor {
-            if matches!(
-                self.frames.get(id),
-                Some(ResolutionFrame::BatchDelivery(batch)) if batch.staged.is_some()
-            ) {
-                found = Some(id);
-                break;
-            }
-            cursor = self.frames.below(id);
+        let selected = matches!(
+            self.frames.get(slot),
+            Some(ResolutionFrame::BatchDelivery(batch))
+                if batch.staged.is_some()
+                    && batch.logical_zone_change_group.logical_group_id == identity.group
+                    && batch.component_delivery_parent == identity.component
+        );
+        if !selected {
+            return false;
         }
-        let Some(id) = found else {
-            return false;
-        };
         let mut abandoned = Vec::new();
-        let mut group = None;
-        if let Some(ResolutionFrame::BatchDelivery(frame)) = self.frames.get_mut(id) {
+        if let Some(ResolutionFrame::BatchDelivery(frame)) = self.frames.get_mut(slot) {
             visit(frame);
-            group = Some(frame.logical_zone_change_group.logical_group_id);
             if let Some(staged) = &frame.staged {
                 abandoned = staged
                     .members
@@ -2083,14 +2185,15 @@ impl ResolutionStack {
         // CR 800.4a: a component child's validated parent boundary is gone once
         // the parent member is pruned. Detach exactly those links so the
         // post-elimination save validates without inventing a parent pause.
-        if let (Some(group), false) = (group, abandoned.is_empty()) {
+        if !abandoned.is_empty() {
             for frame in self.frames.iter_mut() {
                 if let ResolutionFrame::BatchDelivery(child) = frame {
                     if child
                         .component_delivery_parent
                         .as_ref()
                         .is_some_and(|link| {
-                            link.parent_group_id == group && abandoned.contains(&link.member)
+                            link.parent_group_id == identity.group
+                                && abandoned.contains(&link.member)
                         })
                     {
                         child.component_delivery_parent = None;
@@ -2098,7 +2201,7 @@ impl ResolutionStack {
                 }
             }
         }
-        group.is_some()
+        true
     }
 
     /// Mutably accesses a BatchDelivery owner while its exact active
@@ -4244,10 +4347,12 @@ impl ResolutionStack {
             });
         }
         let has_multi_draw = multi_draw_count == 1;
-        // CR 101.4 + CR 608.2c: at most one staged BatchDelivery owns an
-        // action. The elimination/reconcile seam selects that owner by a
-        // bounded stack walk; enforcing uniqueness here makes the selection
-        // exact instead of incidental.
+        // Structural identity: at most one staged ROOT BatchDelivery owns an
+        // action (a linked staged component child is a distinct frame named by
+        // its own parent boundary). The elimination/reconcile seam selects the
+        // owner by a bounded top/immediate-parent window and matches that exact
+        // identity; enforcing root uniqueness here keeps the topology exact
+        // instead of incidental.
         let staged_owner_count = self
             .frames
             .iter()
@@ -4290,6 +4395,20 @@ impl ResolutionStack {
                         });
                     };
                     Self::validate_component_parent(child, parent)?;
+                    // Structural: a linked staged component child answers to
+                    // the single staged ROOT, so the staged lookup population is
+                    // exactly {root} ∪ {its linked children} — never a second,
+                    // independent owner.
+                    if child.staged.is_some()
+                        && !(parent.staged.is_some()
+                            && parent.component_delivery_parent.is_none())
+                    {
+                        return Err(ResolutionStackError::InvalidPayload {
+                            frame: FrameKind::BatchDelivery,
+                            message:
+                                "a staged component child has no staged original owner".into(),
+                        });
+                    }
                     for id in [
                         link.parent_group_id,
                         child.logical_zone_change_group.logical_group_id,
@@ -4302,9 +4421,8 @@ impl ResolutionStack {
                 }
             }
             if let ResolutionFrame::ChangeZone(change_zone) = frame {
-                // CR 101.4 + CR 608.2c: an awaiting-batch marker is the
-                // structural parent of one staged batch child and owns no
-                // iteration of its own.
+                // Structural: an awaiting-batch marker is the parent frame of
+                // one staged batch child and owns no iteration of its own.
                 if let Some(marker) = change_zone.awaiting_batch {
                     if change_zone.pending.is_some() {
                         return Err(ResolutionStackError::InvalidPayload {
@@ -4313,7 +4431,7 @@ impl ResolutionStack {
                                 .to_string(),
                         });
                     }
-                    // CR 101.4: exactly one marker may await one batch, or
+                    // Structural: exactly one marker may await one batch, or
                     // retirement would leave a frame that fails the next
                     // validation.
                     if self
@@ -4335,15 +4453,21 @@ impl ResolutionStack {
                         });
                     }
                     // R4c addendum (a): the marker need not be the batch's
-                    // IMMEDIATE parent. A resolving continuation or a
-                    // post-replacement drain may be spliced between them by the
-                    // delivery chain itself; nothing else may intervene, and
-                    // exactly one matching batch must exist above. Everything
-                    // above that batch is the batch's own delivery child stack
-                    // (a CounterAdditions direct-choice child, a nested
-                    // continuation) and is not "between" the marker and it.
+                    // IMMEDIATE parent. Exactly ONE resolving continuation may
+                    // be spliced between them by the delivery chain itself; the
+                    // retirement authority
+                    // (`take_change_zone_batch_marker_at_top_or_parent`)
+                    // recognises the marker at the top or beneath exactly one
+                    // continuation, so a second one would strand the marker
+                    // after the batch completed. Nothing else may intervene,
+                    // and exactly one matching batch must exist above.
+                    // Everything above that batch is the batch's own delivery
+                    // child stack (a CounterAdditions direct-choice child, a
+                    // nested continuation) and is not "between" the marker and
+                    // it.
                     let mut matching: Option<&PendingBatchDeliveries> = None;
                     let mut reached_child_stack = false;
+                    let mut pre_batch_continuations = 0usize;
                     for above in self.frames.iter().skip(index + 1) {
                         match above {
                             ResolutionFrame::BatchDelivery(batch)
@@ -4359,7 +4483,17 @@ impl ResolutionStack {
                                 matching = Some(batch);
                                 reached_child_stack = true;
                             }
-                            ResolutionFrame::AbilityContinuation(_) => {}
+                            ResolutionFrame::AbilityContinuation(_) => {
+                                if !reached_child_stack {
+                                    pre_batch_continuations += 1;
+                                    if pre_batch_continuations > 1 {
+                                        return Err(ResolutionStackError::InvalidPayload {
+                                            frame: FrameKind::ChangeZone,
+                                            message: "more than one continuation sits between a batch-awaiting ChangeZone marker and its batch".to_string(),
+                                        });
+                                    }
+                                }
+                            }
                             _ if reached_child_stack => {}
                             frame => {
                                 return Err(ResolutionStackError::InvalidPayload {
@@ -7007,6 +7141,8 @@ mod tests {
         ZoneDeliveryExileTracking,
     };
 
+    use crate::types::game_state::{PendingComponentDeliveryParent, PendingZoneChangeDelivery};
+    use crate::types::identifiers::ObjectIncarnationRef;
     use crate::types::identifiers::{CardId, LogicalZoneChangeGroupId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::proposed_event::{ProposedEvent, ReplacementId};
@@ -7258,9 +7394,6 @@ mod tests {
         crate::types::identifiers::ObjectIncarnationRef,
         ProposedEvent,
     ) {
-        use crate::types::game_state::{PendingComponentDeliveryParent, PendingZoneChangeDelivery};
-        use crate::types::identifiers::ObjectIncarnationRef;
-
         let mut state = GameState::new_two_player(seed);
         let object = crate::game::zones::create_object(
             &mut state,
@@ -7321,7 +7454,6 @@ mod tests {
 
     #[test]
     fn component_delivery_relation_requires_exact_parent_and_member() {
-        use crate::types::game_state::PendingZoneChangeDelivery;
         let waiting = WaitingFor::Priority {
             player: PlayerId(0),
         };
@@ -7643,6 +7775,72 @@ mod tests {
         assert!(
             stack.validate(&priority()).is_ok(),
             "the delivery chain's own continuation may sit between marker and batch"
+        );
+    }
+
+    #[test]
+    fn batch_awaiting_marker_rejects_a_second_pre_batch_continuation() {
+        let (marker, batch, seed) = marker_and_batch(317);
+        let mut stack = marker_stack(marker);
+        stack.push_inner(continuation_frame(seed.0));
+        stack.push_inner(continuation_frame(seed.0 + 1));
+        stack.push_inner(batch);
+        assert!(
+            stack.validate(&priority()).is_err(),
+            "the marker retirement authority only reaches one continuation above the batch; a second would strand the marker"
+        );
+    }
+
+    #[test]
+    fn batch_awaiting_marker_accepts_continuations_above_the_batch() {
+        let (marker, batch, seed) = marker_and_batch(318);
+        let mut stack = marker_stack(marker);
+        stack.push_inner(continuation_frame(seed.0));
+        stack.push_inner(batch);
+        stack.push_inner(continuation_frame(seed.0 + 1));
+        assert!(
+            stack.validate(&priority()).is_ok(),
+            "frames above the batch are its own delivery child stack, not 'between'"
+        );
+    }
+
+    /// CR 101.4 + CR 608.2c: an awaiting-batch marker is retained state. Two
+    /// stacks that differ only in marker presence or group must not compare
+    /// equal; only a Devour-only sidecar stays excluded from `GameState`
+    /// equality.
+    #[test]
+    fn game_state_eq_includes_awaiting_batch_markers() {
+        let (marker, _batch, seed) = marker_and_batch(319);
+        let bare = ResolutionStack::default();
+        let with_marker = marker_stack(marker);
+        assert!(
+            !bare.game_state_eq(&with_marker),
+            "a retained marker is not equal to no marker"
+        );
+        assert!(!with_marker.game_state_eq(&bare));
+
+        let other_group = ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
+            pending: None,
+            devour_eligible_snapshot: None,
+            awaiting_batch: Some(ChangeZoneBatchMarker {
+                group_id: crate::types::identifiers::LogicalZoneChangeGroupId(seed.0 + 1),
+            }),
+        }));
+        assert!(
+            !marker_stack(other_group).game_state_eq(&with_marker),
+            "markers of different groups are different states"
+        );
+
+        // The legacy Devour-only sidecar keeps its exclusion.
+        let mut sidecar = ResolutionStack::default();
+        sidecar.push_inner(ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
+            pending: None,
+            devour_eligible_snapshot: Some(HashSet::from([ObjectId(1)])),
+            awaiting_batch: None,
+        })));
+        assert!(
+            bare.game_state_eq(&sidecar),
+            "a Devour-only sidecar remains excluded from equality"
         );
     }
 

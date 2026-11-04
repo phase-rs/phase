@@ -7159,12 +7159,10 @@ pub(super) fn handle_resolution_choice(
                             pending_return_result_producer,
                             stamp_this_way: true,
                         };
-                            let meta = crate::types::game_state::ChangeZoneBatchMeta::default();
                             match crate::game::zone_pipeline::deliver_staged_change_zone_batch(
                                 state,
                                 requests,
                                 logical_zone_change_group,
-                                meta,
                                 tail,
                                 events,
                             ) {

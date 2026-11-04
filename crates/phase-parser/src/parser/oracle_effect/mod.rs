@@ -11479,9 +11479,17 @@ fn parse_effect_clause_inner_with_damage_context(
         });
     }
 
-    // CR 115.1c + CR 115.6: "Choose two target players." is a pure
+    // CR 115.1a + CR 601.2c: "Choose two target players." is a pure
     // exact-count target declaration (Scheming Symmetry); carry the count on
-    // the clause so the engine opens that many distinct target slots.
+    // the clause so the engine opens that many distinct target slots. CR 115.6
+    // permits zero when the printed range includes it.
+    //
+    // The noun is plural BECAUSE a cardinality quantifier precedes it. That
+    // quantifier is either local ("two", "up to two") or already peeled into
+    // the ability-level `multi_target` ("any number of" — Officious
+    // Interrogation, Call the Coppercoats), in which case this clause sees only
+    // the bare plural noun and must still declare the slot rather than strand
+    // it as an unparsed verb argument.
     let lower = text.to_ascii_lowercase();
     if let Ok((after_choose, _)) = tag::<_, _, OracleError<'_>>("choose ").parse(lower.as_str()) {
         let consumed = lower.len() - after_choose.len();
@@ -11490,18 +11498,7 @@ fn parse_effect_clause_inner_with_damage_context(
         if let Some(multi) = multi {
             let inner = after_choose.len() - stripped_lower.len();
             let target_input = &after_orig[inner..];
-            // CR 115.1: the target grammar spells the singular; the clause's
-            // multi_target count carries the plural slot count.
-            let singular;
-            let target_text = if let Ok((rest, _)) =
-                tag::<_, _, OracleError<'_>>("target players").parse(target_input)
-            {
-                singular = format!("target player{rest}");
-                singular.as_str()
-            } else {
-                target_input
-            };
-            let (target, remainder) = parse_target_with_ctx(target_text, ctx);
+            let (target, remainder) = parse_target_with_ctx(target_input, ctx);
             if remainder.trim().is_empty()
                 && !matches!(&target, TargetFilter::Typed(filter)
                     if filter.type_filters.is_empty() && filter.controller.is_none())
@@ -11509,6 +11506,22 @@ fn parse_effect_clause_inner_with_damage_context(
                 let mut clause = parsed_clause(Effect::TargetOnly { target });
                 clause.multi_target = Some(multi);
                 return clause;
+            }
+        } else if let Ok((after_target_word, _)) =
+            tag::<_, _, OracleError<'_>>("target ").parse(after_choose)
+        {
+            // Strict exhaustion over the PLURAL noun only: no effect text may be
+            // dropped by turning a longer "Choose target players, then …" clause
+            // into a declaration.
+            if let Ok((tail, _)) = alt((tag::<_, _, OracleError<'_>>("players"), tag("opponents")))
+                .parse(after_target_word)
+            {
+                if tail.trim().is_empty() {
+                    let (target, remainder) = parse_target_with_ctx(after_orig, ctx);
+                    if remainder.trim().is_empty() && target_filter_can_target_player(&target) {
+                        return parsed_clause(Effect::TargetOnly { target });
+                    }
+                }
             }
         }
     }
@@ -16141,8 +16154,22 @@ fn try_parse_owner_of_target_shuffle(
         None => return None,
     };
 
+    // CR 115.10a + CR 400.3: a possessive anaphor subject ("this creature's
+    // owner", "that creature's owner", "enchanted creature's owner") announces
+    // no target — being affected does not make the object a target. The
+    // possessor phrase therefore has to carry the object into the move itself;
+    // reusing the selected `ParentTarget` population here would resolve to
+    // nothing (Cerulean Sphinx, Watery Grasp) because that population is only
+    // ever an announced/chosen referent. The DECLARED form ("the owner of
+    // target permanent") keeps `ParentTarget`: there the declared slot IS the
+    // object the move names.
+    let movement_target = if possessive_anaphor {
+        target.clone()
+    } else {
+        TargetFilter::ParentTarget
+    };
     let movement = imperative::lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
-        target: TargetFilter::ParentTarget,
+        target: movement_target,
         owner_library: true,
     });
     let mut bound_move = AbilityDefinition::new(AbilityKind::Spell, movement.effect);
@@ -31258,7 +31285,20 @@ fn repeat_for_each_this_way_suffix(pred_lower: &str) -> Option<QuantityExpr> {
 /// (`Controller`), a bare "that player" placeholder (`Player`), or the generic
 /// subject-parser default (`ParentTargetController`). Does not touch effects
 /// that already carry an explicit owner anaphor (`ParentTargetOwner`).
-fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherits_anchor: bool) {
+///
+/// `rebind_population` distinguishes an anchor carried in from an EARLIER
+/// clause (a continuation, `true`) from the anchor a clause just established
+/// for its own instruction chain (`false`). A mass move's population can be
+/// explicit in the clause that prints it ("shuffle this artifact and YOUR
+/// graveyard into their owner's library" — Elixir of Immortality), so a
+/// same-clause owner anchor must not rewrite it; the anchor still governs the
+/// following continuation, which is what the carried value is for.
+fn apply_anchor_subject(
+    effect: &mut Effect,
+    anchor: &TargetFilter,
+    draw_inherits_anchor: bool,
+    rebind_population: bool,
+) {
     // `ParentTarget` reaches this chain-local applier only from
     // `extract_player_anchor_in_chain`'s player-only `TargetOnly` wrapper
     // branch. It is a player reference there, but remains excluded from the
@@ -31301,11 +31341,12 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherit
             destination: Zone::Library,
             target,
             ..
-        } if *target == TargetFilter::Controller => {
+        } if rebind_population && *target == TargetFilter::Controller => {
             *target = anchor.clone();
         }
         Effect::ChangeZoneAll { target, .. }
-            if !matches!(anchor, TargetFilter::ParentTarget)
+            if rebind_population
+                && !matches!(anchor, TargetFilter::ParentTarget)
                 && *target == TargetFilter::Controller =>
         {
             *target = anchor.clone();
@@ -31346,14 +31387,25 @@ fn apply_anchor_subject_to_clause(
     clause: &mut ParsedEffectClause,
     anchor: &TargetFilter,
     text_lower: &str,
+    rebind_population: bool,
 ) {
     let draw_inherits_anchor = chunk_continues_anchored_subject(text_lower);
     apply_their_library_reveal_anchor(&mut clause.effect, anchor, text_lower);
-    apply_anchor_subject(&mut clause.effect, anchor, draw_inherits_anchor);
+    apply_anchor_subject(
+        &mut clause.effect,
+        anchor,
+        draw_inherits_anchor,
+        rebind_population,
+    );
     let mut sub = clause.sub_ability.as_deref_mut();
     while let Some(def) = sub {
         apply_their_library_reveal_anchor(def.effect.as_mut(), anchor, text_lower);
-        apply_anchor_subject(def.effect.as_mut(), anchor, draw_inherits_anchor);
+        apply_anchor_subject(
+            def.effect.as_mut(),
+            anchor,
+            draw_inherits_anchor,
+            rebind_population,
+        );
         sub = def.sub_ability.as_deref_mut();
     }
 }
@@ -49191,7 +49243,7 @@ fn parse_effect_chain_ir_body(
             .and_then(CarriedPlayerSubject::chain_reference)
         {
             let text_lower_for_anchor = text.to_lowercase();
-            apply_anchor_subject_to_clause(&mut clause, anchor, &text_lower_for_anchor);
+            apply_anchor_subject_to_clause(&mut clause, anchor, &text_lower_for_anchor, true);
         }
 
         // Update anchor from this clause's subject (e.g., SearchLibrary.target_player
@@ -49209,8 +49261,15 @@ fn parse_effect_chain_ir_body(
                 next_clause_index,
             )
         }) {
+            // CR 608.2c + CR 400.3: the anchor this clause just established
+            // governs its CONTINUATION, not its own population. The instruction
+            // that printed "your graveyard" keeps it, even when it also ends in
+            // an owner-scoped shuffle ("Shuffle this artifact and your graveyard
+            // into their owner's library" — Elixir of Immortality, where "your"
+            // is the activating player per CR 109.5). Rebinding here moved the
+            // owner's graveyard instead of the controller's.
             let text_lower_for_anchor = text.to_lowercase();
-            apply_anchor_subject_to_clause(&mut clause, &extracted, &text_lower_for_anchor);
+            apply_anchor_subject_to_clause(&mut clause, &extracted, &text_lower_for_anchor, false);
             carried_player = Some(CarriedPlayerSubject::antecedent(extracted));
         }
 

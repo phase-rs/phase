@@ -28977,6 +28977,7 @@ mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
     use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::TargetFilter::{Or, ParentTarget, SelfRef};
     use crate::types::ability::{
         ChooseOneOfKind, CoinFlipRun, LibraryInstructionActor, LibraryPosition,
         ParentTargetMissingReason, SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
@@ -28984,7 +28985,6 @@ mod tests {
 
     #[test]
     fn phase_out_context_union_dependency_proof_is_bounded() {
-        use TargetFilter::{Or, ParentTarget, SelfRef};
         for (target, expected) in [
             (
                 Or {
@@ -29084,7 +29084,6 @@ mod tests {
     // CR 115.6 + CR 608.2c + CR 609.3: zero targets omit only dependent work.
     #[test]
     fn phase_out_optional_parent_chain_preserves_independent_tail() {
-        use TargetFilter::{Or, ParentTarget, SelfRef};
         for (target, selected, stale, reaches, phases_source) in [
             (ParentTarget, false, false, false, false),
             (ParentTarget, true, false, true, false),
