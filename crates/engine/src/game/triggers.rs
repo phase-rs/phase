@@ -7483,14 +7483,13 @@ fn drop_auto_inert_noop_trigger(state: &mut GameState, ctx: &PendingTriggerConte
         origin,
     };
     match state.may_trigger_auto_choice_for_live_prompt(&key) {
-        Some(AutoMayChoice::Decline) => {
-            // CR 603.5: the remembered decline is the controller's optional choice.
-            state.record_loop_decision(crate::game::play_trace::AnswerOptionality::Optional);
-            true
-        }
+        // CR 603.5: an optional trigger goes on the stack regardless of whether
+        // its controller intends to exercise the option; the remembered decline
+        // is applied when the ability resolves. While it waits on the stack,
+        // players receive priority and it can be targeted (Strionic Resonator).
+        Some(AutoMayChoice::Decline) | None => false,
         // CR 603.3d: no legal target means no choice was offered, so nothing is recorded.
         Some(AutoMayChoice::Accept) => pending_trigger_has_no_legal_resolution_targets(state, ctx),
-        None => false,
     }
 }
 
@@ -11144,6 +11143,7 @@ fn dispatch_pending_trigger_context_core(
                                     total,
                                     targets: assigned_targets,
                                     unit,
+                                    scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
                                 };
                             restore_trigger_event_context(state, context_snapshot);
                             return TriggerDispatchDisposition::Paused;
@@ -11427,8 +11427,8 @@ pub(crate) fn collect_mana_action_trigger_batch(
 ///
 /// The collected state records what observing bound (`ActivationObservers`):
 /// any admitted trigger, counted at match time — before an auto-inert context
-/// (a remembered decline) is pruned, since admission alone may have spent a
-/// "triggers only once each turn" limit. A bound observation revokes any undo
+/// (a remembered accept with no legal target) is pruned, since admission alone
+/// may have spent a "triggers only once each turn" limit. A bound observation revokes any undo
 /// already recorded for this source (CR 605.3b; a replacement-paused
 /// activation reaches this boundary only on resume), and
 /// `mana_sources::record_undoable_mana_tap` never records one for it.
@@ -12187,7 +12187,14 @@ pub(super) fn is_trigger_construction_prompt(
             | WaitingFor::OptionalEffectChoice { .. }
             | WaitingFor::AbilityModeChoice { .. }
             | WaitingFor::TriggerTargetSelection { .. }
-            | WaitingFor::DistributeAmong { .. }
+            // CR 603.3d + CR 601.2d: only an announce-time division is part of
+            // putting a trigger on the stack. A CR 608.2d resolution-time division
+            // (`ResolutionCandidates`) is a choice made while the effect is applied,
+            // not a construction prompt.
+            | WaitingFor::DistributeAmong {
+                scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
+                ..
+            }
     )
 }
 
@@ -45335,8 +45342,55 @@ pub mod tests {
                 total: 2,
                 targets: Vec::new(),
                 unit: crate::types::game_state::DistributionUnit::Damage,
+                scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
             },
         ]
+    }
+
+    /// D5 / C2.6: the construction census keeps today's classification of an
+    /// announce-time (CR 603.3d + CR 601.2d) division and excludes a CR 608.2d
+    /// resolution-time division, which is chosen while the effect is applied.
+    #[test]
+    fn trigger_construction_prompt_census_excludes_resolution_time_division() {
+        let targets = vec![
+            TargetRef::Object(ObjectId(11)),
+            TargetRef::Object(ObjectId(12)),
+        ];
+        let announced = WaitingFor::DistributeAmong {
+            player: PlayerId(0),
+            total: 3,
+            targets: targets.clone(),
+            unit: DistributionUnit::Damage,
+            scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
+        };
+        assert!(
+            is_trigger_construction_prompt(&announced),
+            "announce-time division stays a construction prompt"
+        );
+        let pending = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        let resolution = WaitingFor::DistributeAmong {
+            player: PlayerId(0),
+            total: 3,
+            targets,
+            unit: DistributionUnit::Damage,
+            scope: crate::types::game_state::DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            },
+        };
+        assert!(
+            !is_trigger_construction_prompt(&resolution),
+            "CR 608.2d resolution-time division is not a construction prompt"
+        );
     }
 
     /// Round-20 closure map, "Exact preserve/finish contract" clause 1: with no
