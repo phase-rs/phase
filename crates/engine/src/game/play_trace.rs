@@ -169,7 +169,8 @@ pub enum SpanSource {
     Carried(usize),
 }
 
-/// A period begun in an earlier window: the entries from its key's last occurrence there on.
+/// A period begun in an earlier window: the entries from its key's last occurrence there on, or
+/// from the window's first entry for an extra-turn period.
 #[derive(Clone, Debug)]
 struct CarriedSpan {
     key: NodeKey,
@@ -719,7 +720,7 @@ fn trace_mut(state: &mut GameState) -> &mut PlayTrace {
 
 /// CR 500.2: the first touch of a new window ends the old one's trace. Each node of the old
 /// window whose key its seat's carrying index carries begins a carried span from its last
-/// occurrence there, and a carried span runs on while its reach admits the new window and its key
+/// occurrence there (an extra-turn span from the window's start), and a carried span runs on while its reach admits the new window and its key
 /// is still carried.
 fn roll(state: &mut GameState) {
     let window = WindowKey::of(state);
@@ -764,6 +765,13 @@ fn roll(state: &mut GameState) {
         let key = &old.nodes[node];
         let Some(reach) = next.carrying.get(&seat).and_then(|index| index.reach(key)) else {
             continue;
+        };
+        // CR 500.7: an extra turn repeats every play of its turn, so its span starts at the
+        // window's first entry.
+        let at = if reach == PeriodReach::ExtraTurn {
+            0
+        } else {
+            at
         };
         let mut trace = PlayTrace::new(old.window);
         for (from, entry) in old.entries.iter().enumerate().skip(at) {
@@ -2117,6 +2125,12 @@ fn carried_cause(state: &GameState, holder: PlayerId, span: &CarriedSpan) -> Opt
             && span.trace.optional_triggers.contains(&node))
         .then_some(NamingCause::TriggerTop),
         None => {
+            // CR 500.7 + CR 732.2a: an extra-turn period comes round in the step it began in.
+            if span.reach == PeriodReach::ExtraTurn
+                && WindowKey::of(state).phase() != span.trace.window.phase()
+            {
+                return None;
+            }
             let &at = span.trace.last.get(&node)?;
             let EntryKind::Play { locus, .. } = span.trace.entries.get(at)?.kind else {
                 return None;

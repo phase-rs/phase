@@ -918,10 +918,10 @@ fn rebind_convoke(
     Ok(Some(tapped))
 }
 
-/// CR 400.7 + CR 601.2h: a recorded cost selection whose objects the prompt does not offer,
-/// with each such object replaced by an unused offered object of the same name; `rebound` is
-/// the recorded selection with the objects minted in the period already replaced, and `chosen`
-/// the name each recorded object had when it was chosen.
+/// CR 400.7 + CR 601.2h + CR 514.1: a recorded cost or cleanup-discard selection whose objects
+/// the prompt does not offer, with each such object replaced by an unused offered object of the
+/// same name; `rebound` is the recorded selection with the objects minted in the period already
+/// replaced, and `chosen` the name each recorded object had when it was chosen.
 fn rebind_cost_selection(
     recorded: &GameAction,
     rebound: GameAction,
@@ -931,7 +931,7 @@ fn rebind_cost_selection(
     let (
         GameAction::SelectCards { cards: original },
         GameAction::SelectCards { cards },
-        WaitingFor::PayCost { choices, .. },
+        WaitingFor::PayCost { choices, .. } | WaitingFor::DiscardToHandSize { cards: choices, .. },
     ) = (recorded, &rebound, &replay.waiting_for)
     else {
         return rebound;

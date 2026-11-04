@@ -4100,28 +4100,54 @@ fn warp_windows(library: usize, turns: u32, db: &CardDatabase) -> Vec<(GameState
     panic!("the Time Warp drive did not end");
 }
 
+/// How many cards named `name` P0 holds.
+fn in_hand(state: &GameState, name: &str) -> u32 {
+    state.players[0]
+        .hand
+        .iter()
+        .filter(|id| state.objects[id].name == name)
+        .count() as u32
+}
+
 /// CR 514.1 + CR 704.5b + CR 732.2a: at every window of both libraries' drives an offer suggests
 /// the lesser of the hand and library terms, and stands exactly where the two periods the
 /// confirmer replays both end before a discard and a draw from an empty library, or the first
 /// does and the second draws from an empty library, a repetition its caster leaves the game in.
+/// Once the span records a cleanup discard the hand term is the Islands in hand, since a further
+/// discard would name a card still face down in the library (CR 401.2).
 #[test]
 fn every_archaeomancer_window_is_offered_the_lesser_of_its_hand_and_library_terms() {
     let db = shared_card_db().expect("card db");
+    let mut discard_windows = Vec::new();
     for library in [25, 4] {
         let windows = warp_windows(library, 8, db);
         let offered = windows.iter().filter(|(_, count)| count.is_some()).count();
         assert!(offered >= 2, "reach: {library} offers more than once");
         for (state, count) in &windows[1..] {
-            let replayable = hand_term(state).min(state.players[0].library.len() as u32);
+            // An Island reaches P0's graveyard on this board only by a cleanup discard.
+            let discarded = state.players[0]
+                .graveyard
+                .iter()
+                .any(|id| state.objects[id].name == "Island");
+            let known = if discarded {
+                discard_windows.push((in_hand(state, "Island"), library_term(state), *count));
+                in_hand(state, "Island")
+            } else {
+                hand_term(state)
+            };
+            let replayable = known.min(library_term(state));
             let last_card = replayable == 1 && library_term(state) == 1;
             assert_eq!(
                 *count,
-                (replayable >= 2 || last_card).then(|| hand_term(state).min(library_term(state))),
+                (replayable >= 2 || last_card).then_some(replayable),
                 "{library} cards, turn {}",
                 state.turn_number
             );
         }
     }
+    // The first window after a discard holds Time Warp, Ghostly Flicker and six Islands, with 18
+    // cards left in the library.
+    assert_eq!(discard_windows.first(), Some(&(6, 18, Some(6))));
 }
 
 /// A board whose turns come round naturally: Grizzly Bears and two Islands, or Time Sieve with five
@@ -7681,41 +7707,63 @@ fn a_moldervine_altar_of_the_brood_period_previews_its_mills_and_draws() {
     }
 }
 
-/// CR 400.7 + CR 601.2h + CR 732.2a: Time Sieve ("{T}, Sacrifice five artifacts: Take an extra
-/// turn after this one.") sacrificing the five Thopters Thopter Assembly ("At the beginning of
-/// your upkeep, if you control no Thopters other than this creature, return this creature to its
-/// owner's hand and create five 1/1 colorless Thopter artifact creature tokens with flying.")
-/// makes each turn: the replay answers the Sieve's sacrifice from the Thopters the span recorded,
-/// so no span stops at that prompt — each stops later, at an activation its repetition cannot pay
-/// or at a cleanup discard it recorded no answer for (CR 514.1).
-#[test]
-fn a_time_sieve_thopter_assembly_replay_answers_the_recorded_sacrifice() {
-    let Some(db) = shared_card_db() else { return };
+/// P0's precombat main with Time Sieve ("{T}, Sacrifice five artifacts: Take an extra turn after
+/// this one.") and six Islands on P0's battlefield, Thopter Assembly ("At the beginning of your
+/// upkeep, if you control no Thopters other than this creature, return this creature to its owner's
+/// hand and create five 1/1 colorless Thopter artifact creature tokens with flying.") in hand,
+/// `library` Islands in P0's library and `stage` applied; the runner, the Sieve and the Assembly.
+fn sieve_board(
+    library: usize,
+    stage: impl FnOnce(&mut GameScenario),
+    db: &CardDatabase,
+) -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_library_top(P0, &["Island"; 25]);
+    // Real Islands: a card still in the library is face down to its holder (CR 401.2).
+    for _ in 0..library {
+        scenario.add_real_card(P0, "Island", Zone::Library, db);
+    }
     scenario.with_library_top(P1, &["Island"; 25]);
     let sieve = scenario.add_real_card(P0, "Time Sieve", Zone::Battlefield, db);
     for _ in 0..6 {
         scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
     }
     let assembly = scenario.add_real_card(P0, "Thopter Assembly", Zone::Hand, db);
+    stage(&mut scenario);
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
-    let start = runner.state().turn_number;
-    let mut verdicts = Vec::new();
-    while runner.state().turn_number <= start + 8 {
+    (runner, sieve, assembly)
+}
+
+/// Drives the Time Sieve board until turn `last` ends, casting Thopter Assembly and sacrificing
+/// its Thopters to the Sieve each main phase, discarding an Island at cleanup and declining every
+/// offer; each offer's turn and count, and each of P0's precombat-main windows.
+fn sieve_windows(
+    (mut runner, sieve, assembly): (GameRunner, ObjectId, ObjectId),
+    last: u32,
+) -> (Vec<(u32, u32)>, Vec<GameState>) {
+    let (mut offers, mut windows) = (Vec::new(), Vec::<GameState>::new());
+    for _ in 0..40_000 {
         let state = runner.state();
+        if state.turn_number > last || matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+            return (offers, windows);
+        }
+        if is_offer(state) {
+            assert_eq!(state.phase, Phase::PreCombatMain, "{}", state.turn_number);
+            offers.push((state.turn_number, fixed(&offer_of(state).1)));
+            act(&mut runner, GameAction::DeclineShortcut);
+            continue;
+        }
         let priority = matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
             && state.stack.is_empty();
-        if priority {
-            verdicts.extend(
-                confirm_for_tests(state)
-                    .into_iter()
-                    .map(|(_, verdict)| verdict),
-            );
-        }
         let main = priority && state.active_player == P0 && state.phase == Phase::PreCombatMain;
+        if main
+            && windows
+                .last()
+                .is_none_or(|window| window.turn_number != state.turn_number)
+        {
+            windows.push(state.clone());
+        }
         let untapped_islands = state
             .battlefield
             .iter()
@@ -7751,7 +7799,12 @@ fn a_time_sieve_thopter_assembly_replay_answers_the_recorded_sacrifice() {
                     .collect(),
             },
             WaitingFor::DiscardToHandSize { cards, count, .. } => GameAction::SelectCards {
-                cards: cards.iter().copied().take(*count).collect(),
+                cards: cards
+                    .iter()
+                    .copied()
+                    .filter(|id| state.objects[id].name == "Island")
+                    .take(*count)
+                    .collect(),
             },
             WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
                 attacks: vec![],
@@ -7764,9 +7817,132 @@ fn a_time_sieve_thopter_assembly_replay_answers_the_recorded_sacrifice() {
         };
         act(&mut runner, action);
     }
-    let mut expected = vec![Err(OfferRefusal::IllegalReplayedPlay); 5];
-    expected.push(Err(OfferRefusal::UnanswerablePrompt));
-    assert_eq!(verdicts, expected);
+    panic!("the Time Sieve drive did not end");
+}
+
+/// The window of turn `turn` among `windows`.
+fn window_of(windows: &[GameState], turn: u32) -> &GameState {
+    windows
+        .iter()
+        .find(|window| window.turn_number == turn)
+        .unwrap_or_else(|| panic!("no window at turn {turn}"))
+}
+
+/// CR 500.7 + CR 514.1 + CR 732.2a: the Sieve's extra-turn period repeats its whole turn, casting
+/// Thopter Assembly and sacrificing its Thopters, and is offered at the next turn's precombat
+/// main, counted to the first cleanup that would discard (CR 401.2: what that discard names is
+/// not yet drawn). The first window holds two Islands and the Assembly; its turn ends holding two
+/// cards and each repetition adds one, so the sixth would end holding eight: 6. Each declined
+/// window is one repetition nearer: 5, 4, 3, 2, then none.
+#[test]
+fn a_time_sieve_thopter_assembly_period_is_offered_to_its_first_cleanup_discard() {
+    let Some(db) = shared_card_db() else { return };
+    let board = sieve_board(25, |_| {}, db);
+    let start = board.0.state().turn_number;
+    let (offers, windows) = sieve_windows(board, start + 9);
+    assert_eq!(in_hand(window_of(&windows, start + 3), "Island"), 2);
+    assert_eq!(
+        offers,
+        (3..8)
+            .map(|turn| (start + turn, 9 - turn))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        windows.iter().any(|window| window.turn_number == start + 9),
+        "reach: the drive passes the windows that offer nothing"
+    );
+}
+
+/// The count offered at the first window whose span records a cleanup discard, with that window.
+fn first_discard_offer(
+    library: usize,
+    stage: impl FnOnce(&mut GameScenario),
+    db: &CardDatabase,
+) -> (Option<u32>, GameState) {
+    let board = sieve_board(library, stage, db);
+    let start = board.0.state().turn_number;
+    let (offers, windows) = sieve_windows(board, start + 10);
+    assert!(
+        offers.contains(&(start + 3, 6)),
+        "reach: the first window is offered, {offers:?}"
+    );
+    let window = window_of(&windows, start + 10).clone();
+    assert!(
+        window.players[0]
+            .graveyard
+            .iter()
+            .any(|id| window.objects[id].name == "Island"),
+        "reach: an Island was discarded before the window"
+    );
+    let count = offers
+        .iter()
+        .find(|(turn, _)| *turn == start + 10)
+        .map(|(_, count)| *count);
+    (count, window)
+}
+
+/// CR 514.1 + CR 401.2 + CR 504.1 + CR 704.5b + CR 732.2a: once the span records a cleanup
+/// discard, the count is the lesser of the cards in hand sharing the discarded card's name, which
+/// the recorded discard can name, and the cards left to draw. With 25 cards the window holds eight
+/// Islands and the Assembly over a 16-card library: 8. With 14 cards the library holds 5: 5.
+#[test]
+fn a_recorded_cleanup_discard_window_is_offered_the_lesser_of_its_named_hand_and_library() {
+    let Some(db) = shared_card_db() else { return };
+    for (library, named, left, count) in [(25, 8, 16, 8), (14, 8, 5, 5)] {
+        let (offered, window) = first_discard_offer(library, |_| {}, db);
+        assert_eq!(
+            (in_hand(&window, "Island"), library_term(&window)),
+            (named, left),
+            "{library}"
+        );
+        assert_eq!(offered, Some(count), "{library}");
+    }
+}
+
+/// CR 514.1 + CR 603.4: Mysterio's Mirage ("At the beginning of your end step, if you discarded a
+/// card this turn, create a 3/3 blue Illusion Villain creature token.") reads the turn's discards,
+/// and Boneyard Wurm ("Boneyard Wurm's power and toughness are each equal to the number of creature
+/// cards in your graveyard.", Grizzly Bears in that graveyard) reads the graveyard's contents, so
+/// beside either the discarded card is not put back and the recorded-discard window is not offered.
+#[test]
+fn a_discard_or_graveyard_reader_keeps_the_recorded_discard_window_unoffered() {
+    let Some(db) = shared_card_db() else { return };
+    let (mirage, _) = first_discard_offer(
+        25,
+        |scenario| {
+            scenario.add_enchantment_from_oracle(
+                P0,
+                "Mysterio's Mirage",
+                "At the beginning of your end step, if you discarded a card this turn, create a \
+                 3/3 blue Illusion Villain creature token.",
+            );
+        },
+        db,
+    );
+    assert_eq!(mirage, None);
+    let (wurm, window) = first_discard_offer(
+        25,
+        |scenario| {
+            scenario.add_real_card(P0, "Grizzly Bears", Zone::Graveyard, db);
+            scenario.add_creature_from_oracle(
+                P0,
+                "Boneyard Wurm",
+                0,
+                0,
+                "Boneyard Wurm's power and toughness are each equal to the number of creature \
+                 cards in your graveyard.",
+            );
+        },
+        db,
+    );
+    assert!(
+        window
+            .battlefield
+            .iter()
+            .any(|id| window.objects[id].name == "Boneyard Wurm"),
+        "reach: the Wurm survives to the window"
+    );
+    assert_eq!(wurm, None);
 }
 
 /// Cauldron Familiar ("When this creature enters, each opponent loses 1 life and you gain 1 life.

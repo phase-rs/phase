@@ -170,6 +170,15 @@ impl<'a> Axes<'a> {
         }
     }
 
+    /// CR 404.1: a count of the cards in `zone`, which reads a graveyard's contents.
+    fn zone_count(zone: crate::types::zones::Zone) -> Self {
+        if zone == crate::types::zones::Zone::Graveyard {
+            Axes::history_of(HistoryMember::PlayerGraveyards)
+        } else {
+            Axes::NONE
+        }
+    }
+
     fn or(self, other: Axes<'a>) -> Axes<'a> {
         Axes {
             event: self.event || other.event,
@@ -2575,7 +2584,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             acc
         }
         QuantityRef::GraveyardSize { player, .. } => {
-            let mut acc = Axes::NONE;
+            let mut acc = Axes::zone_count(crate::types::zones::Zone::Graveyard);
             acc = acc.or(scan_player_scope(player));
             acc
         }
@@ -2847,10 +2856,10 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
         // `binding` selects which announced choice the count reads; it reads
         // no game state itself, so the axis verdict is unchanged.
         QuantityRef::TargetZoneCardCount {
-            zone: _,
+            zone,
             scope: _,
             binding: _,
-        } => Axes::NONE,
+        } => Axes::zone_count(zone.zone()),
         QuantityRef::Devotion { .. } => Axes {
             event: false,
             sibling: SiblingReads::Any,
@@ -2878,10 +2887,10 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
         QuantityRef::ZoneCardCount {
             filter,
             scope,
-            zone: _,
+            zone,
             card_types: _,
         } => {
-            let mut acc = Axes::NONE;
+            let mut acc = Axes::zone_count(zone.zone());
             if let Some(x) = filter {
                 acc = acc.or(scan_target_filter(
                     x,
@@ -3889,23 +3898,23 @@ fn scan_parsed_condition(x: &ParsedCondition, mode: ScanMode) -> Axes<'_> {
             controller,
             keyword: _,
         } => CENSUS.or(scan_controller_ref(controller)),
-        ParsedCondition::YouControlSubtypeOrGraveyardCardSubtype { subtype: _ } => {
-            CENSUS.or(scan_count_scope(&CountScope::Controller))
-        }
+        ParsedCondition::YouControlSubtypeOrGraveyardCardSubtype { subtype: _ } => CENSUS
+            .or(scan_count_scope(&CountScope::Controller))
+            .or(Axes::zone_count(crate::types::zones::Zone::Graveyard)),
         // Only a graveyard, hand or library is counted, never the battlefield.
-        ParsedCondition::ZoneCardCountAtLeast { zone: _, count: _ }
-        | ParsedCondition::ZoneCardTypeCountAtLeast { zone: _, count: _ }
+        ParsedCondition::ZoneCardCountAtLeast { zone, count: _ }
+        | ParsedCondition::ZoneCardTypeCountAtLeast { zone, count: _ }
         | ParsedCondition::ZoneCoreTypeCardCountAtLeast {
-            zone: _,
+            zone,
             core_type: _,
             count: _,
         }
         | ParsedCondition::ZoneSubtypeCardCountAtLeast {
-            zone: _,
+            zone,
             subtype: _,
             count: _,
-        }
-        | ParsedCondition::HandSizeExact { count: _ }
+        } => Axes::zone_count(*zone).or(scan_count_scope(&CountScope::Controller)),
+        ParsedCondition::HandSizeExact { count: _ }
         | ParsedCondition::HandSizeOneOf { counts: _ } => scan_count_scope(&CountScope::Controller),
         ParsedCondition::SourceAttackedThisTurn => {
             Axes::history_of(HistoryMember::CreaturesAttackedThisTurn)
@@ -8472,7 +8481,10 @@ mod tests {
             .cost_reduction
             .expect("reach: Butcher's reduction");
         assert!(reduction.condition.is_none(), "reach: Butcher's is ungated");
-        assert_eq!(ability_definition_history(&butcher()), HistoryReads::NONE);
+        assert_eq!(
+            ability_definition_history(&butcher()),
+            HistoryReads::of(HistoryMember::PlayerGraveyards)
+        );
         // No printed activated ability's reduction counts a per-turn history, so Butcher's
         // reduction is given Hollow One's count.
         let StaticMode::ModifyCost {
@@ -8673,18 +8685,68 @@ mod tests {
         );
     }
 
-    /// A parsed gate counting the player's graveyard, hand or library reads no axis.
+    /// CR 404.1: a parsed gate counting the player's graveyard reads the graveyard member; one
+    /// counting its hand or library reads no axis.
     #[test]
     fn a_parsed_zone_count_gate_reads_its_scope() {
-        for gate in [
-            ParsedCondition::ZoneCardCountAtLeast {
-                zone: Zone::Graveyard,
-                count: 7,
-            },
-            ParsedCondition::HandSizeExact { count: 0 },
+        for (gate, history) in [
+            (
+                ParsedCondition::ZoneCardCountAtLeast {
+                    zone: Zone::Graveyard,
+                    count: 7,
+                },
+                HistoryReads::of(HistoryMember::PlayerGraveyards),
+            ),
+            (
+                ParsedCondition::ZoneCardCountAtLeast {
+                    zone: Zone::Library,
+                    count: 7,
+                },
+                HistoryReads::NONE,
+            ),
+            (
+                ParsedCondition::HandSizeExact { count: 0 },
+                HistoryReads::NONE,
+            ),
         ] {
-            assert_eq!(gate_reads(gate.clone()), reads(Axes::NONE), "{gate:?}");
+            assert_eq!(
+                gate_reads(gate.clone()),
+                (false, false, false, history),
+                "{gate:?}"
+            );
         }
+    }
+
+    /// CR 404.1 + CR 604.3: Anurid Barkripper's threshold (`GraveyardSize`) and Boneyard Wurm's
+    /// characteristic-defining count (`ZoneCardCount` over the graveyard) read the graveyard
+    /// member; Hollow One's discard count does not.
+    #[test]
+    fn a_graveyard_count_reads_the_graveyard_member() {
+        let static_of = |name, oracle| printed_creature(name, oracle).statics.remove(0);
+        for (name, oracle) in [
+            (
+                "Anurid Barkripper",
+                "Threshold — This creature gets +2/+2 as long as there are seven or more cards \
+                 in your graveyard.",
+            ),
+            (
+                "Boneyard Wurm",
+                "Boneyard Wurm's power and toughness are each equal to the number of creature \
+                 cards in your graveyard.",
+            ),
+        ] {
+            assert!(
+                static_definition_history(&static_of(name, oracle))
+                    .reads(HistoryMember::PlayerGraveyards),
+                "{name}"
+            );
+        }
+        let hollow = static_definition_history(&hollow_one());
+        assert!(
+            hollow.reads(HistoryMember::CardsDiscardedThisTurnByPlayer),
+            "reach: Hollow One reads its discards"
+        );
+        assert!(!hollow.reads(HistoryMember::PlayerGraveyards));
     }
 
     /// "As long as you control a creature with flying" is a battlefield census.

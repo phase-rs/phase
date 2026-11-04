@@ -5830,10 +5830,14 @@ macro_rules! history_members {
             TrackedObjectSets,
             /// The id-keyed last-known records of objects that left their zone (CR 608.2h).
             LastKnownRecords,
+            /// Each player's graveyard (CR 404.1), read as a count of its cards. The comparand
+            /// compares the zone itself, so no cover equalizes it; only its readers are recorded.
+            PlayerGraveyards,
         }
 
         impl HistoryMember {
-            /// Copies this member from `from` into `into`; whether the two differed.
+            /// Copies this member from `from` into `into`; whether the two differed. A graveyard is
+            /// never copied.
             fn equalize(self, into: &mut GameState, from: &GameState) -> bool {
                 match self {
                     $(HistoryMember::$sv => equalize_field(&mut into.$sf, &from.$sf),)*
@@ -5864,6 +5868,7 @@ macro_rules! history_members {
                         equalize_field(&mut into.lki_copiable_values, &from.lki_copiable_values)
                             || records
                     }
+                    HistoryMember::PlayerGraveyards => false,
                 }
             }
 
@@ -5884,6 +5889,12 @@ macro_rules! history_members {
                         rise(&prior.tracked_object_sets, &current.tracked_object_sets)
                     }
                     HistoryMember::LastKnownRecords => rise(&prior.lki_cache, &current.lki_cache),
+                    HistoryMember::PlayerGraveyards => prior
+                        .players
+                        .iter()
+                        .zip(&current.players)
+                        .map(|(prior, current)| rise(&prior.graveyard, &current.graveyard))
+                        .sum(),
                 }
             }
 
@@ -5896,6 +5907,7 @@ macro_rules! history_members {
                     $(HistoryMember::$pv => $pa,)*
                     HistoryMember::TrackedObjectSets => true,
                     HistoryMember::LastKnownRecords => false,
+                    HistoryMember::PlayerGraveyards => true,
                 }
             }
         }
@@ -6280,10 +6292,11 @@ pub fn history_covers_for_tests(prior: &GameState, current: &GameState) -> bool 
 /// CR 500.1 + CR 504.1 + CR 732.2a: `current` covers `prior` once the caster's own turns between
 /// them are equalized. The caster is active in both frames; the turn count and the caster's turns
 /// taken grew alike; no other player took a turn or changed hand or library; the caster's only
-/// library-to-hand moves are at most one draw per turn, off the library's top; and each object keeps
-/// its turn stamps' relation to its frame's turn and its summoning sickness (CR 302.6). Then no live
-/// surface may read a grown turn member, and the equalized copy must pass the comparand or the
-/// history cover.
+/// library-to-hand moves are at most one draw per turn, off the library's top; its cleanup discards
+/// are put back when no live surface reads discard or graveyard history (CR 514.1); and each object
+/// keeps its turn stamps' relation to its frame's turn and its summoning sickness (CR 302.6). Then
+/// no live surface may read a grown turn member, and the equalized copy must pass the comparand or
+/// the history cover.
 pub(crate) fn turn_cycle_covers(prior: &GameState, current: &GameState, caster: PlayerId) -> bool {
     use strum::IntoEnumIterator;
     let Some(turns) = current
@@ -6322,7 +6335,6 @@ pub(crate) fn turn_cycle_covers(prior: &GameState, current: &GameState, caster: 
         || after.turns_taken.checked_sub(before.turns_taken) != Some(turns)
         || !others_still
         || drawn.len() > turns as usize
-        || !turn_stamps_keep_their_relation(prior, current)
     {
         return false;
     }
@@ -6338,10 +6350,28 @@ pub(crate) fn turn_cycle_covers(prior: &GameState, current: &GameState, caster: 
     if copy.library_of(caster) != before_library {
         return false;
     }
+    let mut read = None;
+    let discarded = discards_since(prior, &copy, caster);
+    if !discarded.is_empty() {
+        const DISCARDS: [HistoryMember; 3] = [
+            HistoryMember::CardsDiscardedThisTurnByPlayer,
+            HistoryMember::PlayersWhoDiscardedCardThisTurn,
+            HistoryMember::PlayerGraveyards,
+        ];
+        let reads = *read.insert(frame_history_reads(prior, current));
+        if DISCARDS.iter().any(|member| reads.reads(*member))
+            || discards_restored(prior, &mut copy, caster, &discarded).is_none()
+        {
+            return false;
+        }
+    }
+    if !turn_stamps_keep_their_relation(prior, &copy) {
+        return false;
+    }
     let grown: Vec<HistoryMember> = HistoryMember::iter()
         .filter(|member| member.turn_cycle() && member.equalize(&mut copy, prior))
         .collect();
-    let reads = frame_history_reads(prior, current);
+    let reads = read.unwrap_or_else(|| frame_history_reads(prior, current));
     if grown.iter().any(|member| reads.reads(*member)) {
         return false;
     }
@@ -6410,6 +6440,53 @@ fn library_departures_restored(
         *copy.objects.get_mut(id)? = prior.objects.get(id)?.clone();
     }
     Some(copy)
+}
+
+/// CR 514.1: the cards of `prior`'s hand that the caster has since discarded to its graveyard in
+/// `current`; the discard stamp is cleared on any later zone change (CR 400.7).
+fn discards_since(prior: &GameState, current: &GameState, caster: PlayerId) -> Vec<ObjectId> {
+    let Some(before) = prior.players.iter().find(|p| p.id == caster) else {
+        return Vec::new();
+    };
+    current
+        .graveyard_of(caster)
+        .iter()
+        .filter(|id| {
+            before.hand.contains(id)
+                && current
+                    .objects
+                    .get(id)
+                    .is_some_and(|object| object.discarded_turn.is_some())
+        })
+        .copied()
+        .collect()
+}
+
+/// CR 514.1 + CR 400.7: `copy` with `discarded`, cards of `prior`'s hand, put back as `prior` held
+/// them, in `prior`'s hand order.
+fn discards_restored(
+    prior: &GameState,
+    copy: &mut GameState,
+    caster: PlayerId,
+    discarded: &[ObjectId],
+) -> Option<()> {
+    let before = &prior.players.iter().find(|p| p.id == caster)?.hand;
+    let seat = copy.players.iter().position(|p| p.id == caster)?;
+    let hand = &copy.players[seat].hand;
+    let restored: im::Vector<ObjectId> = before
+        .iter()
+        .filter(|id| discarded.contains(id) || hand.contains(id))
+        .chain(hand.iter().filter(|id| !before.contains(id)))
+        .copied()
+        .collect();
+    // allow-raw-zone: equalizes the caster's discards in a discarded comparison clone, not a gameplay zone event.
+    copy.graveyard_of_mut(caster)
+        .retain(|id| !discarded.contains(id));
+    copy.players[seat].hand = restored;
+    for id in discarded {
+        *copy.objects.get_mut(id)? = prior.objects.get(id)?.clone();
+    }
+    Some(())
 }
 
 /// CR 121.1: [`library_departures_restored`] within one turn, with the draw count equalized, when no
