@@ -6956,10 +6956,22 @@ pub(crate) fn parse_block_pairing_clause(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BlockHistoryClause {
     pub(crate) direction: BlockPairDirection,
-    /// `None`: the clause names a partner no subject word covers ("a Zombie",
-    /// "target Wall", "one of those creatures").
-    pub(crate) partner: Option<CombatRelationSubjectWord>,
+    pub(crate) partner: HistoryPartner,
     pub(crate) scope: CombatHistoryScope,
+}
+
+/// The partner a block-history clause names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HistoryPartner {
+    /// A subject word the relation can bind ("it", "~", "that creature").
+    Subject(CombatRelationSubjectWord),
+    /// An indefinite filter phrase ("a Zombie", "a legendary creature"): any creature
+    /// of a kind, not one object. The relation does not represent it, and neither the
+    /// duration guard nor the swallow audit claims the clause; this form is left for a
+    /// separate change.
+    Filter,
+    /// Any other phrase no subject word covers ("target Wall", "one of those creatures").
+    Unbound,
 }
 
 /// CR 511.3 + CR 500.8: " this combat" / " this turn", with a word boundary after it.
@@ -6985,10 +6997,8 @@ fn parse_partner_word(input: &str) -> OracleResult<'_, &str> {
 
 /// The partner and window of a history clause. "or" heads a coordination, not a noun
 /// phrase, so the unary "that blocked or was blocked this turn" (Heat Stroke) names no
-/// partner and is no history clause.
-fn parse_history_partner(
-    input: &str,
-) -> OracleResult<'_, (Option<CombatRelationSubjectWord>, CombatHistoryScope)> {
+/// partner and is no history clause. An indefinite article heads a filter phrase.
+fn parse_history_partner(input: &str) -> OracleResult<'_, (HistoryPartner, CombatHistoryScope)> {
     alt((
         map(
             (
@@ -7001,14 +7011,20 @@ fn parse_history_partner(
                 )),
                 parse_history_window,
             ),
-            |(word, scope)| (Some(word), scope),
+            |(word, scope)| (HistoryPartner::Subject(word), scope),
         ),
         map(
-            preceded(
-                (not(tag("or ")), parse_partner_word),
-                many_till(preceded(tag(" "), parse_partner_word), parse_history_window),
+            (
+                alt((
+                    value(HistoryPartner::Filter, alt((tag("a "), tag("an ")))),
+                    success(HistoryPartner::Unbound),
+                )),
+                preceded(
+                    (not(tag("or ")), parse_partner_word),
+                    many_till(preceded(tag(" "), parse_partner_word), parse_history_window),
+                ),
             ),
-            |(_, scope)| (None, scope),
+            |(partner, (_, scope))| (partner, scope),
         ),
     ))
     .parse(input)
@@ -7037,7 +7053,7 @@ pub(crate) fn parse_block_history_clause(input: &str) -> OracleResult<'_, BlockH
             ),
             |(_, word, scope)| BlockHistoryClause {
                 direction: BlockPairDirection::SubjectIsBlocker,
-                partner: Some(word),
+                partner: HistoryPartner::Subject(word),
                 scope,
             },
         ),
@@ -7107,7 +7123,7 @@ pub(crate) fn population_drops_block_history_clause(
     while let Some((_, clause, rest)) =
         nom_primitives::scan_preceded(remaining, parse_block_history_clause)
     {
-        let represented = clause.partner.is_some()
+        let represented = matches!(clause.partner, HistoryPartner::Subject(_))
             && populations.iter().any(|population| {
                 filter_contains_filter_prop(population, &|prop| {
                     matches!(
@@ -7208,13 +7224,16 @@ fn resolve_relation_subject(
 /// relations and every subject.
 fn parse_combat_relation_suffix(text: &str, ctx: &ParseContext) -> Option<(FilterProp, usize)> {
     if let Ok((rest, clause)) = preceded(tag(" "), parse_block_history_clause).parse(text) {
+        let HistoryPartner::Subject(word) = clause.partner else {
+            return None;
+        };
         return Some((
             FilterProp::CombatRelation {
                 relation: CombatRelation::BlockPairing {
                     direction: clause.direction,
                     scope: Some(clause.scope),
                 },
-                subject: resolve_relation_subject(clause.partner?, CombatClauseKind::History, ctx)?,
+                subject: resolve_relation_subject(word, CombatClauseKind::History, ctx)?,
             },
             text.len() - rest.len(),
         ));
@@ -12751,8 +12770,9 @@ mod tests {
     /// CR 509.1g + CR 509.4 + CR 608.2i: the block-history clause combinator over
     /// its full input range — every form × every named partner word × both
     /// windows × the boundary tails — returns the direction, partner and window
-    /// and leaves the boundary character in the remainder. A partner no subject
-    /// word covers gives `partner: None`. A missing window, a non-boundary
+    /// and leaves the boundary character in the remainder. An indefinite filter
+    /// phrase gives `HistoryPartner::Filter`, and any other partner no subject
+    /// word covers gives `HistoryPartner::Unbound`. A missing window, a non-boundary
     /// continuation, a unary clause, a different verb or voice, a typed subject,
     /// and a missing subject all decline.
     #[test]
@@ -12784,7 +12804,7 @@ mod tests {
                             &format!("{relative}{subject_text} blocked {window_text}{tail}"),
                             BlockHistoryClause {
                                 direction: SubjectIsBlocker,
-                                partner: Some(subject),
+                                partner: HistoryPartner::Subject(subject),
                                 scope,
                             },
                             tail,
@@ -12796,13 +12816,16 @@ mod tests {
 
         // The relative forms with a partner: two-way, passive, active.
         let named_partners = [
-            ("it", Some(Pronoun)),
-            ("~", Some(SelfName)),
-            ("this creature", Some(SelfName)),
-            ("that creature", Some(Demonstrative)),
-            ("a zombie", None),
-            ("target wall", None),
-            ("one of those creatures", None),
+            ("it", HistoryPartner::Subject(Pronoun)),
+            ("~", HistoryPartner::Subject(SelfName)),
+            ("this creature", HistoryPartner::Subject(SelfName)),
+            ("that creature", HistoryPartner::Subject(Demonstrative)),
+            ("a zombie", HistoryPartner::Filter),
+            ("a legendary creature", HistoryPartner::Filter),
+            ("an elf", HistoryPartner::Filter),
+            ("another creature", HistoryPartner::Unbound),
+            ("target wall", HistoryPartner::Unbound),
+            ("one of those creatures", HistoryPartner::Unbound),
         ];
         for (head, direction) in [
             ("that blocked or was blocked by ", Either),

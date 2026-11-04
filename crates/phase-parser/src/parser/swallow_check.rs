@@ -33,7 +33,7 @@ use super::oracle_nom::error::OracleError;
 use super::oracle_nom::primitives::{scan_contains, scan_preceded, split_sentence_units};
 use super::oracle_target::{
     parse_block_history_clause, parse_block_pairing_clause, BlockPairingForm,
-    CombatRelationSubjectWord,
+    CombatRelationSubjectWord, HistoryPartner,
 };
 use super::oracle_trigger::parse_distributed_x_cost_condition;
 use super::swallow_evidence::UnitEvidence;
@@ -6286,13 +6286,19 @@ fn detect_damage_subject_conjunction(
 /// combat", "all creatures that blocked or were blocked by it this turn",
 /// "creatures that were blocked by that creature this combat") is a look-back
 /// restriction on the affected object set. Every clause the shared recognizer
-/// `parse_block_history_clause` finds, whatever its partner, must surface as a
+/// `parse_block_history_clause` finds, but the filter-subject form below, must surface as a
 /// `CombatRelation::BlockPairing` filter with the clause's own direction and
 /// window, so a one-way filter cannot vouch for a two-way clause; otherwise the
 /// relative clause was dropped and the effect silently widened (#9179). The
 /// duration-ownership guard in `strip_trailing_duration` keeps the window from
 /// reappearing as a spurious effect duration, so without this detector a
 /// declined clause would leave no trace at all.
+///
+/// A clause whose partner is an indefinite filter phrase ("blocked by a Zombie
+/// this turn": Time to Reflect, You Cannot Pass!) is not counted: the relation
+/// declines that form by design and the duration guard does not claim its
+/// window, so it keeps the reading it had before the clause was recognized.
+/// Representing it is left for a separate change.
 fn detect_combat_history_relation(
     cleaned: &str,
     original: &str,
@@ -6316,7 +6322,8 @@ fn detect_combat_history_relation(
     let mut remaining = cleaned;
     let mut swallowed = false;
     while let Some((_, clause, rest)) = scan_preceded(remaining, parse_block_history_clause) {
-        swallowed |= !represented(clause.direction, clause.scope);
+        swallowed |= clause.partner != HistoryPartner::Filter
+            && !represented(clause.direction, clause.scope);
         remaining = rest;
     }
     if swallowed {
@@ -6989,12 +6996,13 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         );
     }
 
-    /// The ten detector labels that pass `None` and are measured present in the phase-base
-    /// corpus. `ActivateLimit` and `ModalDynamicMaxDropped` are deliberately absent: neither
-    /// has a corpus warning, so no corpus fixture can reach them. They are bought by the
-    /// compiler instead — the constructor's new parameter makes omission a compile error.
-    /// `CombatHistoryRelation` reports a history clause whose partner no subject word
-    /// covers on a single target (Time to Reflect: "a Zombie").
+    /// The nine detector labels that pass `None` and are measured present in the phase-base
+    /// corpus. `ActivateLimit`, `ModalDynamicMaxDropped` and `CombatHistoryRelation` are
+    /// deliberately absent: none has a corpus warning (every printed `CombatHistoryRelation`
+    /// clause is represented or fails closed, and its filter-subject form — Time to
+    /// Reflect, You Cannot Pass! — is deliberately not counted), so no corpus fixture can
+    /// reach them. They are bought by the compiler instead — the constructor's new
+    /// parameter makes omission a compile error.
     ///
     /// "Non-phrase" here means "no gap axis wired at the push site", NOT "no phrase is
     /// nameable". `Replacement` is in this set and its axis names phrases perfectly well —
@@ -7008,7 +7016,6 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     const EXPECTED_NON_PHRASE: &[&str] = &[
         "APNAP",
         "ActivateOnlyDuring",
-        "CombatHistoryRelation",
         "CombatPairingRelation",
         "Duration_NextTurn",
         "Duration_ThisTurn",
@@ -7029,7 +7036,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     /// A detector with no gap axis wired at its push site passes `None`.
     ///
     /// The reach guard is a SET EQUALITY, not a count and not `!is_empty()`. An
-    /// `assert!(!observed.is_empty())` here would be satisfied by nine of the ten
+    /// `assert!(!observed.is_empty())` here would be satisfied by eight of the nine
     /// ceasing to fire, which is the "guarded assertion satisfied by the guarded paths
     /// ceasing to fire" shape this suite has shipped before. This is red the moment any
     /// one of them stops.
@@ -7039,17 +7046,16 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         // also fire a phrase-bearing detector; those records are filtered out below, so a
         // card carrying both is fine.
         //
-        // NOTE (merge): the set below omits main's `DamageSubjectConjunction`:
+        // NOTE (merge): the set below stays at nine rather than main's ten:
         // this branch's `try_parse_damage` compound-connector guard fails
         // conjunction-tailed damage closed (Burns/Disorder class), so
         // `DamageSubjectConjunction` has no firing witness while the guard
         // stands. See the deliberately-absent note on the expected set.
-        // `CombatHistoryRelation` joins it, with Time to Reflect as its fixture.
         //
         // The `Duration_UntilEndOfTurn` fixture is Savage Punch, not the former Dragon Egg
         // fixture: Dragon Egg's token grant now carries its duration in the AST (CR 602.1a
         // + CR 611.2a), so it no longer fires this detector and cannot reach it. The set
-        // below stays at ten — a detector that stops firing here needs a different corpus
+        // below stays at nine — a detector that stops firing here needs a different corpus
         // card, never a shrunken set (the `DamageSubjectConjunction` removal above is
         // the branch's guard stance, not a stop-firing: see its note).
         let fixtures: &[(&str, &str, &[&str])] = &[
@@ -7062,7 +7068,6 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             ("Ballot Broker", "While voting, you may vote an additional time. (The votes can be for different choices or for the same choice.)", &["Creature"]),
             ("Vortex Elemental", "{U}: Put this creature and each creature blocking or blocked by it on top of their owners' libraries, then those players shuffle.\n{3}{U}{U}: Target creature blocks this creature this turn if able.", &["Creature"]),
             ("Mikey & Don, Party Planners", "Ward {2}\nYou may look at the top card of your library any time.\nYou may play lands and cast Mutant, Ninja, or Turtle spells from the top of your library. If you cast a creature spell this way, that creature enters with an additional +1/+1 counter on it.", &["Creature"]),
-            ("Time to Reflect", "Exile target creature that blocked or was blocked by a Zombie this turn.", &["Instant"]),
         ];
 
         let mut observed: BTreeSet<String> = BTreeSet::new();
@@ -7091,7 +7096,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
                 .iter()
                 .map(|d| (*d).to_string())
                 .collect::<BTreeSet<_>>(),
-            "observed non-phrase detector set differs from the corpus-measured ten; \
+            "observed non-phrase detector set differs from the corpus-measured nine; \
              observed = {observed:?}"
         );
 
@@ -15391,11 +15396,13 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     /// CR 608.2c + CR 608.2i: a history clause whose partner no subject word
     /// covers fails closed. On a mass instruction the instruction becomes
     /// `Unimplemented { block_history_partner }` with no widened mass effect
-    /// left behind (Triton Tactics, Glyph of Reincarnation); on a single target
-    /// the detector reports it (Time to Reflect, You Cannot Pass!). In each the
-    /// clause owns its window, so no spurious duration appears. A unary clause
-    /// is no history clause and raises no new warning (Heat Stroke, Sizzling
-    /// Barrage).
+    /// left behind (Triton Tactics, Glyph of Reincarnation), and the clause owns
+    /// its window, so no spurious duration appears. A partner that is an
+    /// indefinite filter phrase (Time to Reflect, You Cannot Pass!) is seen but
+    /// deliberately not counted: the cards parse as they did before the clause
+    /// was recognized, with no warning; this form is left for a separate change.
+    /// A unary clause is no history clause and raises no new warning (Heat
+    /// Stroke, Sizzling Barrage).
     #[test]
     fn unbound_block_history_partner_fails_closed() {
         // The failed instruction carries no duration: its window stays with the clause.
@@ -15458,18 +15465,55 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 "Destroy target creature that blocked or was blocked by a legendary creature this turn.",
             ),
         ] {
+            // Reach guard: the recognizer sees the clause and names its partner a filter.
+            let cleaned = text.to_ascii_lowercase();
+            let (_, clause, _) = crate::parser::oracle_nom::primitives::scan_preceded(
+                &cleaned,
+                crate::parser::oracle_target::parse_block_history_clause,
+            )
+            .unwrap_or_else(|| panic!("{name}: reach guard — the recognizer must find the clause"));
+            assert_eq!(
+                clause.partner,
+                crate::parser::oracle_target::HistoryPartner::Filter,
+                "{name}"
+            );
+            // The detector does not count it even with no evidence at all.
+            let mut diagnostics = Vec::new();
+            super::detect_combat_history_relation(
+                &cleaned,
+                text,
+                &UnitEvidence::from_json_for_test("[]"),
+                &mut diagnostics,
+            );
+            assert!(diagnostics.is_empty(), "{name}: {diagnostics:?}");
+
             let parsed = parse_named(text, name, &["Instant"]);
             assert!(
-                has_swallowed_detector(&parsed, "CombatHistoryRelation"),
+                !any_ability_has_unimplemented(&parsed),
+                "{name}: reach guard — the unit is audited; {:?}",
+                parsed.abilities
+            );
+            assert!(
+                parsed.parse_warnings.is_empty(),
                 "{name}: {:?}",
                 parsed.parse_warnings
             );
-            assert!(
-                !UnitEvidence::of(&parsed).any_duration(|_| true),
-                "{name}: the window is not a duration; {:?}",
-                parsed.abilities
-            );
         }
+
+        // The same evidence-free audit reports a partner no subject word covers that is
+        // not a filter phrase: only the filter form is exempt.
+        let unbound_single = "exile target creature that was blocked by target wall this turn.";
+        let mut diagnostics = Vec::new();
+        super::detect_combat_history_relation(
+            unbound_single,
+            unbound_single,
+            &UnitEvidence::from_json_for_test("[]"),
+            &mut diagnostics,
+        );
+        assert!(
+            !diagnostics.is_empty(),
+            "an unbound partner that is no filter phrase is still reported"
+        );
 
         for (name, text, types) in [
             (
