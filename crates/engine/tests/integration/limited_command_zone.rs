@@ -1532,6 +1532,21 @@ fn game_end_reveal_hides_an_unanswered_double_agenda_count() {
         controller_wire.contains("\"agenda_name_count\":2"),
         "the controller keeps the count of their own unanswered agenda"
     );
+
+    // The seam redacts over the final object set, so it must hold for a wire
+    // with no seat as well: a spectator is a third viewer class, not a player
+    // whose private access could be read from `seat_order`.
+    let spectator_view = filter_state_for_unseated_viewer(&state);
+    assert_eq!(
+        spectator_view.objects[&bond_id].agenda_name_count, 0,
+        "CR 702.106f: an unanswered double agenda does not disclose its count to a spectator"
+    );
+    let spectator_wire = serde_json::to_string(&ClientGameStateRef::wrap(&state, None))
+        .expect("spectator wire state serializes");
+    assert!(
+        !spectator_wire.contains("agenda_name_count"),
+        "the spectator's wire carries no agenda name count"
+    );
 }
 
 /// CR 702.106e + CR 800.4a: a named agenda whose controller leaves is revealed
