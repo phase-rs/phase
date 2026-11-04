@@ -26582,13 +26582,13 @@ pub(crate) mod replacement_library_placement_wire_tests {
         let pending = state
             .pending_replacement
             .as_ref()
-            .or_else(|| match state.pending_deferred_life_cost_resume.as_ref() {
+            .or(match state.pending_deferred_life_cost_resume.as_ref() {
                 Some(DeferredLifeCostResume::PayAmount { pending_entry, .. }) => {
                     pending_entry.as_deref()
                 }
                 _ => None,
             })
-            .or_else(|| match state.pending_cost_move_resume.as_ref() {
+            .or(match state.pending_cost_move_resume.as_ref() {
                 Some(PendingCostMoveResume::ReplacementMayCost {
                     outer_replacement, ..
                 }) => outer_replacement.as_deref(),
