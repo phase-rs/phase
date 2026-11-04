@@ -27,10 +27,10 @@ use crate::parser::oracle_nom::target::chain_text_mentions_chosen_object;
 use crate::types::ability::{
     effect_variant_name, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
     AggregateFunction, CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId,
-    Comparator, ControllerRef, DamageChannel, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId,
-    SharedQuality, SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink,
-    TapStateChange, TargetFilter, TypedFilter,
+    Comparator, ControllerRef, DamageChannel, DigRestOrder, DigSource, Effect, EffectOutcomeSignal,
+    EffectScope, FilterProp, LibraryPosition, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    RepeatContinuation, ReturnResultId, SharedQuality, SharedQualityRelation, SiblingCondition,
+    StaticCondition, SubAbilityLink, TapStateChange, TargetFilter, TypedFilter,
 };
 use crate::types::game_state_kinds::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -63,14 +63,16 @@ use super::lower::{
     patch_self_ref_head_tap_anaphor, rebind_zone_changed_this_way_pronoun_to_moved_object,
     relink_gated_token_referent_consumers, relink_gated_tracked_set_consumers,
     resolve_populated_token_anaphors, resolve_populated_unsuspect_anaphors,
-    resolve_prior_look_library_bottom_anaphors, resolve_those_tokens_anaphors,
-    rewire_result_anchored_subchain, rewrite_counter_instead_target_from_antecedent,
-    rewrite_else_event_context_to_stable, rewrite_else_parent_target_to_self_ref,
-    rewrite_player_anaphor_targets_in_definition, rewrite_those_tokens_from_antecedent,
-    rewrite_two_target_counter_chain, target_choice_timing_for_clause,
-    thread_chosen_damage_source_into_oneshot_effects, timed_clause_sub_chain,
+    resolve_those_tokens_anaphors, rewire_result_anchored_subchain,
+    rewrite_counter_instead_target_from_antecedent, rewrite_else_event_context_to_stable,
+    rewrite_else_parent_target_to_self_ref, rewrite_player_anaphor_targets_in_definition,
+    rewrite_those_tokens_from_antecedent, rewrite_two_target_counter_chain,
+    target_choice_timing_for_clause, thread_chosen_damage_source_into_oneshot_effects,
+    timed_clause_sub_chain,
 };
-use super::sequence::{apply_clause_continuation, def_bears_retargetable_copy};
+use super::sequence::{
+    apply_clause_continuation, clause_is_dig_lookback_transparent, def_bears_retargetable_copy,
+};
 use super::{
     append_to_deepest_sub_ability, apply_player_scope_rewrites,
     attach_alt_cost_to_prior_cast_from_zone, attach_mana_retention_to_prior_mana,
@@ -92,9 +94,10 @@ use super::{
     rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set,
     rewrite_plural_library_recall_to_tracked_set, rewrite_rounding_mode,
     rewrite_singular_battlefield_recall_to_self, rewrite_that_type_mana_instead,
-    singular_battlefield_recall, stamp_delayed_returns, starts_with_plural_subject_anaphor,
-    starts_with_singular_subject_anaphor, try_fold_token_repeat_into_count,
-    wire_optional_cast_decline_fallback, PrintedColorCarrier, PrintedColorCarrierScope,
+    scan_contains_phrase, singular_battlefield_recall, stamp_delayed_returns,
+    starts_with_plural_subject_anaphor, starts_with_singular_subject_anaphor,
+    try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback, PrintedColorCarrier,
+    PrintedColorCarrierScope,
 };
 
 /// CR 601.2c: True when the assembled head chose one or more players at
@@ -2153,6 +2156,98 @@ fn mark_independent_mana_spent_gates(defs: &mut [AbilityDefinition]) {
     }
 }
 
+/// CR 701.20e + CR 608.2c: In "Look at the top N cards of your library. You
+/// may put those cards on the bottom of your library in any order" (Petals of
+/// Insight / Lim-Dûl's Vault class), "those cards" names the set the look
+/// instruction showed the player (CR 701.20e: a looked-at card is shown only to
+/// the specified player). The placement lowers as an imperative
+/// `PutAtLibraryPosition` over a `TrackedSet`; rebind it to a `DigSource::PriorLook`
+/// Dig that routes the looked-at set to the bottom via the shared ledger.
+///
+/// This is the SOURCE-ORDER binding authority: `defs` holds only the clauses
+/// assembled before this one, so the selected producer cannot be a later
+/// instruction. Every clause emitted between the producer and this consumer must
+/// be lookback-transparent — otherwise "those cards" is no longer anchored to
+/// that look and the placement keeps its declarative shape. The producer's
+/// player authority is carried onto the consumer (a look at "target player's
+/// library" places that library's cards, not the controller's), and the
+/// consumer's own clause text decides the rest order. The separate optional
+/// instruction and its "if you do" chain are preserved: only the effect is
+/// rebound, the def's other fields are untouched.
+///
+/// Returns true when the placement was rebound.
+fn bind_those_cards_bottom_to_prior_look(
+    current: &mut AbilityDefinition,
+    defs: &[AbilityDefinition],
+    clause_text_lower: &str,
+    env: &AssemblyEnv,
+) -> bool {
+    let Effect::PutAtLibraryPosition {
+        position: LibraryPosition::Bottom,
+        target: TargetFilter::TrackedSet { .. },
+        arranger,
+        ..
+    } = &*current.effect
+    else {
+        return false;
+    };
+    // CR 401.4: "in any order" is the player's arrangement instruction, not the
+    // looked-at order; "in a random order" is a distinct randomization.
+    let rest_order = if scan_contains_phrase(clause_text_lower, "in a random order") {
+        DigRestOrder::Random
+    } else if arranger.is_some() || scan_contains_phrase(clause_text_lower, "in any order") {
+        DigRestOrder::PlayerChoice
+    } else {
+        DigRestOrder::Preserve
+    };
+    let Some(bound_index) = env.resolve(
+        defs,
+        AntecedentSelector::LastWithRole(AntecedentRole::DigBarePrivatePeek),
+        None,
+        OnMiss::Ignore,
+    ) else {
+        return false;
+    };
+    // CR 608.2c: instructions are followed in the order written. A clause that
+    // resolves between the look and this placement either is lookback-transparent
+    // or breaks the anaphor's anchor.
+    if !defs[bound_index + 1..]
+        .iter()
+        .all(|d| clause_is_dig_lookback_transparent(&d.effect))
+    {
+        return false;
+    }
+    let Effect::Dig {
+        player: producer_player,
+        source: DigSource::Library,
+        ..
+    } = &*defs[bound_index].effect
+    else {
+        return false;
+    };
+    *current.effect = Effect::Dig {
+        player: producer_player.clone(),
+        count: QuantityExpr::Fixed { value: 0 },
+        keep_count: Some(0),
+        keep_count_expr: None,
+        up_to: false,
+        filter: TargetFilter::Any,
+        destination: None,
+        rest_destination: Some(Zone::Library),
+        rest_split_top_count: None,
+        rest_order,
+        reveal: false,
+        enter_tapped: false,
+        enters_attacking: false,
+        source: DigSource::PriorLook,
+    };
+    if current.description.is_none() {
+        current.description =
+            Some("Put those cards on the bottom of your library in any order".to_string());
+    }
+    true
+}
+
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     let _chain = tracing::debug_span!(target: "engine::parser::binding", "chain", kind = ?ir.kind, clauses = ir.clauses.len()).entered();
     let kind = ir.kind;
@@ -3935,6 +4030,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 }
             }
 
+            // CR 701.20e + CR 608.2c: bind "those cards" in "you may put those
+            // cards on the bottom of your library" to the look instruction that
+            // showed them. This runs while the consumer's own clause is being
+            // assembled, so the producer is selected from written order alone.
+            if scan_contains_phrase(&source_text_lower, "those cards") {
+                for current in &mut current_defs {
+                    bind_those_cards_bottom_to_prior_look(current, &defs, &source_text_lower, &env);
+                }
+            }
+
             // CR 608.2c: Re-anchor this clause's set-anaphor AGGREGATE ("their
             // total power", "the greatest power among them") to the set an
             // EARLIER clause published, overriding the leaf combinator's
@@ -4222,7 +4327,6 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // updated count (Rite of Replication / Saproling Migration / Krothuss).
     resolve_those_tokens_anaphors(&mut defs);
     resolve_populated_unsuspect_anaphors(&mut defs);
-    resolve_prior_look_library_bottom_anaphors(&mut defs, &env);
 
     // CR 701.36a + CR 603.7c: Resolve "the token created this way …" and the
     // "sacrifice it" anaphors that follow a token-creating effect (Populate,

@@ -42,13 +42,13 @@ use crate::types::ability::{
     AttackSubject, CardTypeSetSource, CastCostModifier, CastFromZoneDriver,
     CastPermissionConstraint, CastingPermission, CoinFlipRun, CombatHistoryScope, Comparator,
     ConjureSource, ContinuousEffectOnset, ContinuousModification, ControllerRef, CountBinding,
-    DamageChannel, DamageSource, DelayedTriggerCondition, DigRestOrder, DigSource, Duration,
-    Effect, EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
-    MultiTargetSpec, NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter,
-    PlayerRelation, PreventionAmount, PreventionScope, PropertyAggregate, PtValue, QuantityExpr,
-    QuantityRef, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
-    TargetSelectionMode, TypeFilter, TypedFilter,
+    DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
+    ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
+    NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter, PlayerRelation,
+    PreventionAmount, PreventionScope, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
+    RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement, StaticCondition,
+    StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
+    TypeFilter, TypedFilter,
 };
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
@@ -67,7 +67,6 @@ use super::{
     parse_for_each_object_copy_parts, refine_damage_target_remainder, replace_player_anaphor,
     scan_contains_phrase, target_filter_controller_ref, ParsedEffectClause,
 };
-use crate::parser::oracle_effect::assembly::{AntecedentRole, AntecedentSelector, OnMiss};
 use crate::types::ability::generic_effect_population_filter;
 
 pub(super) fn rewrite_player_anaphor_targets_in_definition(def: &mut AbilityDefinition) {
@@ -3736,104 +3735,6 @@ pub(super) fn resolve_those_tokens_anaphors(defs: &mut [AbilityDefinition]) {
         let prev = &prev_rest[i - 1];
         let cur = &mut cur_rest[0];
         rewrite_those_tokens_from_antecedent(&mut cur.effect, &prev.effect);
-    }
-}
-
-/// CR 701.20e + CR 608.2c: In "Look at the top N cards ... You may put those cards
-/// on the bottom of your library in any order" (Petals of Insight / Lim-Dûl's Vault),
-/// "those cards" refers to the cards looked at by the preceding private peek Dig.
-/// The subsequent placement on the bottom of the library lowers as an imperative
-/// `PutAtLibraryPosition` targeting `TrackedSet` (the noun "those cards").
-/// Rebind it to a `DigSource::PriorLook` Dig with `keep_count: Some(0)` and
-/// `rest_destination: Some(Zone::Library)` so it reads `state.private_look_ids`
-/// and routes all looked-at cards to the bottom of the library via the shared
-/// rest-partition pipeline.
-///
-/// Uses the named-antecedent binding mechanism (`AntecedentRole::DigBarePrivatePeek`)
-/// instead of a positional scan, so the rewrite is resilient to intervening clauses
-/// and matches the recognizers' emission logic exactly.
-///
-/// Cards covered by this pattern (11 total):
-/// - Petals of Insight
-/// - Harper Recruiter
-/// - Advice from the Fae
-/// - Ancestral Knowledge
-/// - Bamboozle
-/// - Clone Shell
-/// - Durnan of the Yawning Portal
-/// - Orcish Librarian
-/// - Psychic Surgery
-/// - Sealed Fate
-/// - Vivien, Champion of the Wilds
-pub(super) fn resolve_prior_look_library_bottom_anaphors(
-    defs: &mut [AbilityDefinition],
-    env: &crate::parser::oracle_effect::assembly::AssemblyEnv,
-) {
-    for i in 0..defs.len() {
-        if let Effect::PutAtLibraryPosition {
-            position: LibraryPosition::Bottom,
-            target,
-            arranger,
-            ..
-        } = &*defs[i].effect
-        {
-            if matches!(target, TargetFilter::TrackedSet { .. }) {
-                // Bind to the most recent bare private peek Dig using the named
-                // antecedent role. The recognizers only emit this continuation
-                // after a bare private peek, so the role matches exactly that shape.
-                if let Some(antecedent_index) = env.resolve(
-                    defs,
-                    AntecedentSelector::LastWithRole(AntecedentRole::DigBarePrivatePeek),
-                    None,
-                    OnMiss::Ignore,
-                ) {
-                    // Verify the antecedent is a bare private peek Dig (the role
-                    // guarantees this, but we double-check for defense in depth).
-                    let is_bare_peek = matches!(
-                        &*defs[antecedent_index].effect,
-                        Effect::Dig {
-                            keep_count: Some(0),
-                            destination: None,
-                            rest_destination: None,
-                            reveal: false,
-                            source,
-                            ..
-                        } if source.is_library()
-                    );
-                    if !is_bare_peek {
-                        continue;
-                    }
-
-                    let rest_order = if arranger.is_some() {
-                        DigRestOrder::PlayerChoice
-                    } else {
-                        DigRestOrder::Preserve
-                    };
-                    *defs[i].effect = Effect::Dig {
-                        player: TargetFilter::Controller,
-                        count: QuantityExpr::Fixed { value: 0 },
-                        keep_count: Some(0),
-                        keep_count_expr: None,
-                        up_to: false,
-                        filter: TargetFilter::Any,
-                        destination: None,
-                        rest_destination: Some(Zone::Library),
-                        rest_split_top_count: None,
-                        rest_order,
-                        reveal: false,
-                        enter_tapped: false,
-                        enters_attacking: false,
-                        source: DigSource::PriorLook,
-                    };
-                    if defs[i].description.is_none() {
-                        defs[i].description = Some(
-                            "Put those cards on the bottom of your library in any order"
-                                .to_string(),
-                        );
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -16607,80 +16508,6 @@ mod tests {
             &frame(tap(you()), TargetChoiceTiming::Resolution),
             &conditioned,
         ));
-    }
-
-    /// CR 701.20e: only a private peek ("look at") records `private_look_ids`,
-    /// so only a private peek may bind a following "put those cards on the
-    /// bottom" to a `DigSource::PriorLook` placement. A revealed dig (CR 701.20a)
-    /// keeps its imperative placement; a PriorLook rewrite there would read an
-    /// empty ledger and move nothing.
-    #[test]
-    fn prior_look_bottom_rewrite_requires_private_peek() {
-        use super::resolve_prior_look_library_bottom_anaphors;
-        use crate::types::ability::{
-            AbilityDefinition, AbilityKind, DigRestOrder, DigSource, Effect, LibraryPosition,
-            QuantityExpr, TargetFilter,
-        };
-        use crate::types::identifiers::TrackedSetId;
-        use crate::types::zones::Zone;
-
-        fn chain(reveal: bool) -> Vec<AbilityDefinition> {
-            let peek = Effect::Dig {
-                player: TargetFilter::Controller,
-                count: QuantityExpr::Fixed { value: 3 },
-                keep_count: Some(0),
-                keep_count_expr: None,
-                up_to: false,
-                filter: TargetFilter::Any,
-                destination: None,
-                rest_destination: None,
-                rest_split_top_count: None,
-                rest_order: DigRestOrder::Preserve,
-                reveal,
-                enter_tapped: false,
-                enters_attacking: false,
-                source: DigSource::Library,
-            };
-            let bottom = Effect::PutAtLibraryPosition {
-                target: TargetFilter::TrackedSet {
-                    id: TrackedSetId(0),
-                },
-                count: QuantityExpr::Fixed { value: 3 },
-                position: LibraryPosition::Bottom,
-                arranger: Some(TargetFilter::Controller),
-            };
-            vec![
-                AbilityDefinition::new(AbilityKind::Spell, peek),
-                AbilityDefinition::new(AbilityKind::Spell, bottom),
-            ]
-        }
-
-        let mut looked = chain(false);
-        let env = crate::parser::oracle_effect::assembly::AssemblyEnv::default();
-        resolve_prior_look_library_bottom_anaphors(&mut looked, &env);
-        assert!(
-            matches!(
-                looked[1].effect.as_ref(),
-                Effect::Dig {
-                    source: DigSource::PriorLook,
-                    keep_count: Some(0),
-                    rest_destination: Some(Zone::Library),
-                    rest_order: DigRestOrder::PlayerChoice,
-                    ..
-                }
-            ),
-            "a private peek binds the bottom placement, got {:?}",
-            looked[1].effect
-        );
-
-        let mut revealed = chain(true);
-        let before = revealed[1].effect.clone();
-        let env = crate::parser::oracle_effect::assembly::AssemblyEnv::default();
-        resolve_prior_look_library_bottom_anaphors(&mut revealed, &env);
-        assert_eq!(
-            revealed[1].effect, before,
-            "a revealed dig must not be rewritten to a PriorLook placement"
-        );
     }
 }
 #[cfg(test)]

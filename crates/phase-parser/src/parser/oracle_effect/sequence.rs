@@ -15162,7 +15162,6 @@ mod tests {
 
     #[test]
     fn test_petals_of_insight_parse() {
-        use super::super::parse_effect_chain;
         let def = parse_effect_chain(
             "Look at the top three cards of your library. You may put those cards on the bottom of your library in any order. If you do, return ~ to its owner's hand. Otherwise, draw three cards.",
             AbilityKind::Spell,
@@ -15234,6 +15233,87 @@ mod tests {
             panic!("otherwise effect must be Draw, got {:?}", otherwise.effect);
         };
         assert_eq!(*draw_count, QuantityExpr::Fixed { value: 3 });
+    }
+
+    #[test]
+    fn revealed_look_does_not_bind_prior_look_bottom() {
+        let def = parse_effect_chain(
+            "Reveal the top three cards of your library. You may put those cards on the bottom of your library in any order.",
+            AbilityKind::Spell,
+        );
+        let sub = def.sub_ability.as_deref().expect("must have sub_ability");
+        assert!(
+            !matches!(
+                &*sub.effect,
+                Effect::Dig {
+                    source: DigSource::PriorLook,
+                    ..
+                }
+            ),
+            "revealed top cards must not bind to private PriorLook Dig, got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
+    fn competing_future_producer_does_not_rebind_prior_look_bottom() {
+        let def = parse_effect_chain(
+            "Look at the top three cards of target player's library. You may put those cards on the bottom of that player's library in any order. Look at the top five cards of your library.",
+            AbilityKind::Spell,
+        );
+        let Effect::Dig {
+            player: first_player,
+            source: first_src,
+            ..
+        } = def.effect.as_ref()
+        else {
+            panic!("first effect must be Dig, got {:?}", def.effect);
+        };
+        assert_eq!(*first_src, DigSource::Library);
+        assert_eq!(*first_player, TargetFilter::Player);
+
+        let sub = def.sub_ability.as_deref().expect("must have sub_ability");
+        let Effect::Dig {
+            player: second_player,
+            source: second_src,
+            ..
+        } = sub.effect.as_ref()
+        else {
+            panic!("second effect must be PriorLook Dig, got {:?}", sub.effect);
+        };
+        assert_eq!(*second_src, DigSource::PriorLook);
+        assert_eq!(
+            *second_player,
+            TargetFilter::Player,
+            "must bind preceding producer's target player, not future producer"
+        );
+    }
+
+    #[test]
+    fn intervening_nontransparent_clause_prevents_prior_look_binding() {
+        let def = parse_effect_chain(
+            "Look at the top three cards of your library. Draw a card. You may put those cards on the bottom of your library in any order.",
+            AbilityKind::Spell,
+        );
+        let mut curr = Some(&def);
+        let mut found_prior_look = false;
+        while let Some(node) = curr {
+            if matches!(
+                &*node.effect,
+                Effect::Dig {
+                    source: DigSource::PriorLook,
+                    ..
+                }
+            ) {
+                found_prior_look = true;
+                break;
+            }
+            curr = node.sub_ability.as_deref();
+        }
+        assert!(
+            !found_prior_look,
+            "intervening Draw clause must prevent PriorLook rewrite"
+        );
     }
 
     #[test]
