@@ -6718,8 +6718,10 @@ fn stack_entry_reads_growing_class(entry: &StackEntry) -> bool {
     }
 }
 
-/// CR 601.2f + CR 732.2a: does ANY cost surface reference the growing class? ONE predicate
-/// over EVERY cost surface on the FLUSHED current:
+/// CR 601.2f + CR 732.2a: does ANY cost surface reference the growing class — a board
+/// aggregate or a projected per-turn journal (both halves of
+/// [`crate::game::ability_scan`]'s `reads_growing_class`)? ONE predicate over EVERY cost
+/// surface on the FLUSHED current:
 /// (1) the cost-KEYWORD family — a board/graveyard-referencing cost reducer or
 /// tap/sacrifice aggregate (Affinity/Convoke/Crew/Delve/Emerge/…) on ANY object (a
 /// recast loop's keyword rides an off-battlefield card), printed or granted;
@@ -6802,6 +6804,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
     use crate::game::ability_scan::{
         ability_cost_references_sibling_mutable as cost_reads,
         keyword_cost_reads_growing_class as kw_reads,
+        quantity_ref_references_projected_resource as qty_reads_projected,
         quantity_ref_references_sibling_mutable as qty_reads,
     };
     use crate::types::statics::StaticMode;
@@ -6810,12 +6813,16 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         // `dynamic_count: Option<QuantityRef>` ("for each X you control"). An
         // `ObjectCount` of the grown class reads |G|, so route it fail-closed — for
         // BOTH directions: `Raise`+`ObjectCount` is the false-positive-∞ case, and
-        // `Reduce` is the keystone-REJECT case. `amount` (a fixed `ManaCost`) and
-        // every other field are read-free.
+        // `Reduce` is the keystone-REJECT case. A PROJECTED read (a per-turn journal
+        // such as Blaster Hulk's `EnergyPaidOrLostThisTurn`) is the same hazard one
+        // axis over: it grows with every repeat while `project_out_resources` zeroes
+        // it, so the cost changes per iteration and the cover must not certify the
+        // recurrence. `amount` (a fixed `ManaCost`) and every other field are
+        // read-free.
         StaticMode::ModifyCost { dynamic_count, .. }
-        | StaticMode::ReduceAbilityCost { dynamic_count, .. } => {
-            dynamic_count.as_ref().is_some_and(qty_reads)
-        }
+        | StaticMode::ReduceAbilityCost { dynamic_count, .. } => dynamic_count
+            .as_ref()
+            .is_some_and(|q| qty_reads(q) || qty_reads_projected(q)),
         // CR 118.8 / CR 118.9 / CR 601.2f: variants carrying an `AbilityCost` payment
         // — the additional/alternative cast cost — route it through the exhaustive
         // `AbilityCost` scanner (a `PayLife`/`ManaDynamic`/… reading `ObjectCount`
@@ -14495,6 +14502,33 @@ mod tests {
         assert!(
             cover_with_static_on_stable(modify(None)),
             "R-e2 control: a fixed (dynamic_count = None) ModifyCost must COVER"
+        );
+    }
+
+    /// A `ModifyCost { dynamic_count: Some(<projected per-turn journal>) }` static on
+    /// a STABLE object over a growing board REJECTs: `EnergyPaidOrLostThisTurn`
+    /// (Blaster Hulk's multiplier) grows with every repeat of a loop while
+    /// `project_out_resources` zeroes it, so the cost reads a different value each
+    /// iteration and the cover must not certify the recurrence. Non-vacuous: the same
+    /// static with `dynamic_count: None` (a fixed reduction) COVERS.
+    #[test]
+    fn object_growth_r_e2_modifycost_projected_dynamic_rejects() {
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+        let modify = |dynamic_count| StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::default(),
+            spell_filter: None,
+            dynamic_count,
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+        };
+        assert!(
+            !cover_with_static_on_stable(modify(Some(QuantityRef::EnergyPaidOrLostThisTurn))),
+            "R-e2-projected: ModifyCost.dynamic_count reading a projected journal must REJECT"
+        );
+        assert!(
+            cover_with_static_on_stable(modify(None)),
+            "R-e2-projected control: a fixed (dynamic_count = None) ModifyCost must COVER"
         );
     }
 

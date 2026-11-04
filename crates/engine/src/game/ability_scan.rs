@@ -5903,6 +5903,19 @@ pub(crate) fn quantity_ref_references_sibling_mutable(qty: &QuantityRef) -> bool
     scan_quantity_ref(qty, ScanMode::Conservative).sibling
 }
 
+/// Axis 3 on a bare `QuantityRef` — the dynamic cost multiplier
+/// (`dynamic_count: Option<QuantityRef>`) carried by CR 601.2f cost-modification
+/// statics (`StaticMode::ModifyCost` / `StaticMode::ReduceAbilityCost`). Thin
+/// `.projected` projection of the exhaustive [`scan_quantity_ref`] scanner: a
+/// per-turn journal read there (Blaster Hulk's
+/// `EnergyPaidOrLostThisTurn`) grows with every repeat of a loop while
+/// `project_out_resources` zeroes it, so a cost that reads it changes per
+/// iteration and must be caught by the cost-affordability firewall exactly as a
+/// board aggregate is.
+pub(crate) fn quantity_ref_references_projected_resource(qty: &QuantityRef) -> bool {
+    scan_quantity_ref(qty, ScanMode::Conservative).projected
+}
+
 fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes {
     match cost {
         AbilityCost::ManaDynamic { quantity } => scan_quantity_expr(quantity, mode),
@@ -10043,6 +10056,10 @@ mod tests {
             QuantityRef::LifeGainedThisTurn {
                 player: PlayerScope::Controller
             }
+        )));
+        // Energy paid/lost journal (CR 107.14) — Blaster Hulk's cost multiplier.
+        assert!(ability_reads_projected_resource(&ability_with_amount(
+            QuantityRef::EnergyPaidOrLostThisTurn
         )));
         // Cast journal (spells cast this turn, cleared by project_out_resources).
         assert!(ability_reads_projected_resource(&ability_with_amount(
