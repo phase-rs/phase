@@ -92,6 +92,7 @@
 //! for the conflict model and its CR 603.3b commutation argument.
 
 use crate::analysis::resource::{HistoryMember, HistoryReads};
+use crate::game::filter::{shared_quality_characteristic_reads, CharacteristicKinds};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AttachCardinality, AttachSelection,
     AttachmentReferent, AttackSubject, CardTypeSetSource, CastingPermission,
@@ -112,15 +113,15 @@ use crate::types::statics::CastFrequency;
 /// The three independent classification axes, accumulated over one AST walk.
 /// `true` on an axis means "reads (or may read) that dimension"; the fail-safe
 /// direction for every consumer.
-#[derive(Clone, Copy)]
-struct Axes {
+#[derive(Clone)]
+struct Axes<'a> {
     /// Reads a concrete-triggering-event / cost-paid-object characteristic
     /// (CR 603.4 / CR 608.2k). Used by trigger ordering to keep distinct-event
     /// groups from auto-resolving.
     event: bool,
     /// Reads a source/recipient or board-scoped mutable aggregate a sibling copy
     /// could mutate (CR 603.3b ordering-relevance).
-    sibling: bool,
+    sibling: SiblingReads<'a>,
     /// Reads a player-level monotone resource / per-turn journal that
     /// `project_out_resources` neutralizes (CR 106.1 / CR 119 / CR 122.1).
     projected: bool,
@@ -129,19 +130,19 @@ struct Axes {
     history: HistoryReads,
 }
 
-impl Axes {
+impl<'a> Axes<'a> {
     /// No read on any axis.
-    const NONE: Axes = Axes {
+    const NONE: Self = Axes {
         event: false,
-        sibling: false,
+        sibling: SiblingReads::None,
         projected: false,
         history: HistoryReads::NONE,
     };
     /// A subtree the walk does not descend into but which can transitively express
     /// a read — classified as reading everything (fail-closed / fail-safe).
-    const CONSERVATIVE: Axes = Axes {
+    const CONSERVATIVE: Self = Axes {
         event: true,
-        sibling: true,
+        sibling: SiblingReads::Any,
         projected: true,
         history: HistoryReads::ALL,
     };
@@ -155,26 +156,105 @@ impl Axes {
     /// A `LoopFirewall` consult must ask both. The CR 603.3b trigger-ordering gate
     /// (`game::triggers`) asks a different question and consults `.event` and `.sibling`
     /// as separate single-axis projections, never this disjunction.
-    fn reads_growing_class(self) -> bool {
-        self.sibling || self.projected
+    fn reads_growing_class(&self) -> bool {
+        self.sibling.is_read() || self.projected
     }
 
     /// A read of one history member and nothing else.
-    const fn history_of(member: HistoryMember) -> Axes {
+    const fn history_of(member: HistoryMember) -> Self {
         Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::of(member),
         }
     }
 
-    fn or(self, other: Axes) -> Axes {
+    fn or(self, other: Axes<'a>) -> Axes<'a> {
         Axes {
             event: self.event || other.event,
-            sibling: self.sibling || other.sibling,
+            sibling: self.sibling.or(other.sibling),
             projected: self.projected || other.projected,
             history: self.history.or(other.history),
+        }
+    }
+
+    /// For a scan of a filter built at the call site: its borrowed reads widen to `Any`.
+    fn detached(self) -> Axes<'static> {
+        let Axes {
+            event,
+            sibling,
+            projected,
+            history,
+        } = self;
+        let sibling = match sibling {
+            SiblingReads::None => SiblingReads::None,
+            SiblingReads::Any | SiblingReads::Reads(_) => SiblingReads::Any,
+        };
+        Axes {
+            event,
+            sibling,
+            projected,
+            history,
+        }
+    }
+}
+
+/// What a `sibling` read reads. `Any` is every object and every property, the reading
+/// a payload-free `sibling` read has always had.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SiblingReads<'a> {
+    None,
+    Any,
+    /// Never empty.
+    Reads(Vec<SiblingRead<'a>>),
+}
+
+/// One object read, borrowed from the scanned definition.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum SiblingRead<'a> {
+    /// A census or aggregate over the objects `filter` admits: their membership plus
+    /// `aggregate`.
+    Filtered {
+        filter: &'a TargetFilter,
+        aggregate: CharacteristicKinds,
+    },
+    /// The one object `scope` names: its `aggregate`.
+    Scoped {
+        scope: &'a ObjectScope,
+        aggregate: CharacteristicKinds,
+    },
+}
+
+impl<'a> SiblingReads<'a> {
+    pub(crate) fn is_read(&self) -> bool {
+        !matches!(self, SiblingReads::None)
+    }
+
+    /// Payloads feed only the `LoopFirewall` consult, so `Conservative` records `Any`.
+    fn filtered(filter: &'a TargetFilter, aggregate: CharacteristicKinds, mode: ScanMode) -> Self {
+        Self::recorded(SiblingRead::Filtered { filter, aggregate }, mode)
+    }
+
+    fn scoped(scope: &'a ObjectScope, aggregate: CharacteristicKinds, mode: ScanMode) -> Self {
+        Self::recorded(SiblingRead::Scoped { scope, aggregate }, mode)
+    }
+
+    fn recorded(read: SiblingRead<'a>, mode: ScanMode) -> Self {
+        match mode {
+            ScanMode::Conservative => SiblingReads::Any,
+            ScanMode::LoopFirewall => SiblingReads::Reads(vec![read]),
+        }
+    }
+
+    fn or(self, other: SiblingReads<'a>) -> SiblingReads<'a> {
+        match (self, other) {
+            (SiblingReads::Any, _) | (_, SiblingReads::Any) => SiblingReads::Any,
+            (SiblingReads::None, reads) | (reads, SiblingReads::None) => reads,
+            (SiblingReads::Reads(mut left), SiblingReads::Reads(right)) => {
+                left.extend(right);
+                SiblingReads::Reads(left)
+            }
         }
     }
 }
@@ -236,7 +316,7 @@ pub(crate) enum FilterReadContext {
 /// `ResolvedAbility` fails to compile here until it is classified, closing the
 /// "unread aux field" hole class at compile time (not just `multi_target` /
 /// `target_constraints`).
-fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
+fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes<'_> {
     let ResolvedAbility {
         // ---- read-bearing: scanned into `acc` below ----
         effect,
@@ -414,7 +494,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
 /// CR 608.2c / CR 107.1c: a loop-continuation predicate. Only `WhileCondition`
 /// re-reads game state (per-iteration re-evaluation); the controller-prompted and
 /// boolean-stop variants read no dynamic resource.
-fn scan_repeat_continuation(r: &RepeatContinuation, mode: ScanMode) -> Axes {
+fn scan_repeat_continuation(r: &RepeatContinuation, mode: ScanMode) -> Axes<'_> {
     match r {
         RepeatContinuation::ControllerChoice => Axes::NONE,
         RepeatContinuation::UntilStopConditions {
@@ -433,7 +513,7 @@ fn scan_repeat_continuation(r: &RepeatContinuation, mode: ScanMode) -> Axes {
 /// remaining fields are cast/announce-time metadata (concrete counts, costs, and
 /// static cast-time predicates) that do not express a resolution-time dynamic read.
 /// Destructured without `..` — a future `ModalChoice` field must be classified here.
-fn scan_modal_choice(m: &ModalChoice, mode: ScanMode) -> Axes {
+fn scan_modal_choice(m: &ModalChoice, mode: ScanMode) -> Axes<'_> {
     let ModalChoice {
         dynamic_max_choices,
         chooser,
@@ -486,7 +566,7 @@ fn modal_constraint_history(c: &ModalSelectionConstraint, mode: ScanMode) -> His
 /// carries a read — its `value` is a `QuantityExpr` documented to hold the where-X
 /// `EventContextAmount` (axis 1); the `Different*` variants are pure structural
 /// predicates over the chosen set with no dynamic read.
-fn scan_target_selection_constraint(c: &TargetSelectionConstraint, mode: ScanMode) -> Axes {
+fn scan_target_selection_constraint(c: &TargetSelectionConstraint, mode: ScanMode) -> Axes<'_> {
     match c {
         TargetSelectionConstraint::DifferentTargetPlayers => Axes::NONE,
         TargetSelectionConstraint::DifferentObjectControllers => Axes::NONE,
@@ -511,7 +591,7 @@ fn scan_target_selection_constraint(c: &TargetSelectionConstraint, mode: ScanMod
 fn scan_zone_choice_candidate_source(
     candidate_source: ZoneChoiceCandidateSource,
     zone: crate::types::zones::Zone,
-) -> Axes {
+) -> Axes<'static> {
     match candidate_source {
         // `LibraryTop` is `Direct` narrowed to the library's top edge: a read of
         // a non-battlefield zone.
@@ -519,7 +599,7 @@ fn scan_zone_choice_candidate_source(
             if zone == crate::types::zones::Zone::Battlefield {
                 Axes {
                     event: true,
-                    sibling: true,
+                    sibling: SiblingReads::Any,
                     projected: false,
                     history: HistoryReads::NONE,
                 }
@@ -543,14 +623,14 @@ fn scan_zone_choice_candidate_source(
 /// A reciprocal consumer reads the fresh set published by its producer. The
 /// producer writes that continuation-local set but performs no corresponding
 /// read, so it is read-free on this walk's three axes.
-fn scan_reciprocal_zone_choice_role(role: Option<ReciprocalZoneChoiceRole>) -> Axes {
+fn scan_reciprocal_zone_choice_role(role: Option<ReciprocalZoneChoiceRole>) -> Axes<'static> {
     match role {
         None | Some(ReciprocalZoneChoiceRole::Produce) => Axes::NONE,
         Some(ReciprocalZoneChoiceRole::Consume) => Axes::CONSERVATIVE,
     }
 }
 
-fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
+fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
     // The census discipline for THIS effect's target reads, derived ONCE
     // (depends only on the effect variant + mode). Passed to every effect-TARGET
     // `scan_target_filter` call below. The mode-divergent `Token`/`Mana` arms pass
@@ -2381,14 +2461,15 @@ fn casting_permission_history(permission: &CastingPermission, mode: ScanMode) ->
     }
 }
 
-fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) -> Axes {
+fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) -> Axes<'_> {
     let mut axes = Axes::NONE;
     let complete =
         source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
-            axes = axes.or(match leaf {
+            // A member's borrow ends with this callback, so its reads widen to `Any`.
+            axes = std::mem::replace(&mut axes, Axes::NONE).or(match leaf {
                 CardTypeSetSource::Objects { filter } => Axes {
                     event: false,
-                    sibling: true,
+                    sibling: SiblingReads::Any,
                     projected: false,
                     history: HistoryReads::NONE,
                 }
@@ -2409,7 +2490,7 @@ fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) ->
                     filter: _,
                 } => Axes {
                     event: true,
-                    sibling: false,
+                    sibling: SiblingReads::None,
                     projected: false,
                     history: HistoryReads::NONE,
                 },
@@ -2425,7 +2506,7 @@ fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) ->
                 // triggering event and must participate in trigger ordering.
                 CardTypeSetSource::TurnJournal { filter, .. } => Axes {
                     event: false,
-                    sibling: false,
+                    sibling: SiblingReads::None,
                     projected: true,
                     history: HistoryReads::NONE,
                 }
@@ -2440,7 +2521,7 @@ fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) ->
                 // own `{event: true}` classification.
                 CardTypeSetSource::TargetedObjects { slot } => Axes {
                     event: false,
-                    sibling: true,
+                    sibling: SiblingReads::Any,
                     projected: false,
                     history: HistoryReads::NONE,
                 }
@@ -2448,12 +2529,14 @@ fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) ->
                     &CardTypeSetSource::targeted_objects_filter(slot),
                     FilterReadContext::LiveBoardCensus,
                     mode,
-                )),
+                )
+                .detached()),
                 CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => {
                     Axes::CONSERVATIVE
                 }
                 CardTypeSetSource::AnyOf { .. } => Axes::NONE,
-            });
+            }
+            .detached());
         });
     if complete {
         axes
@@ -2462,7 +2545,7 @@ fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) ->
     }
 }
 
-fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
+fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
     match x {
         QuantityRef::HandSize { player, .. } => {
             let mut acc = Axes::NONE;
@@ -2472,7 +2555,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::LifeTotal { player } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -2486,7 +2569,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         }
         QuantityRef::LifeAboveStarting => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
@@ -2500,14 +2583,14 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         // `QuantityRef::EventContextAmount` below.
         QuantityRef::TriggeringScryLookCount | QuantityRef::TriggeringScryBottomCount => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         QuantityRef::ObjectCount { filter } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::filtered(filter, CharacteristicKinds::EMPTY, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -2518,13 +2601,16 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             ));
             acc
         }
-        QuantityRef::ObjectCountDistinct {
-            filter,
-            qualities: _,
-        } => {
+        QuantityRef::ObjectCountDistinct { filter, qualities } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::filtered(
+                    filter,
+                    qualities.iter().fold(CharacteristicKinds::EMPTY, |acc, q| {
+                        acc.union(shared_quality_characteristic_reads(q))
+                    }),
+                    mode,
+                ),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -2537,12 +2623,16 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         }
         QuantityRef::ObjectCountBySharedQuality {
             filter,
-            quality: _,
+            quality,
             aggregate: _,
         } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::filtered(
+                    filter,
+                    shared_quality_characteristic_reads(quality),
+                    mode,
+                ),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -2561,7 +2651,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::EventContextPlayerCount { filter } => {
             let mut acc = Axes {
                 event: true,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -2571,7 +2661,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::CountersOn { scope, .. } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::scoped(scope, CharacteristicKinds::EMPTY, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -2584,7 +2674,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::filtered(filter, CharacteristicKinds::EMPTY, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -2598,7 +2688,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::PlayerCounter { scope, kind: _ } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -2614,7 +2704,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::Power { scope, .. } | QuantityRef::BasePower { scope, .. } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::scoped(scope, CharacteristicKinds::POWER_TOUGHNESS, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -2624,7 +2714,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::Intensity { scope, .. } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::scoped(scope, CharacteristicKinds::EMPTY, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -2634,7 +2724,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::Toughness { scope, .. } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::scoped(scope, CharacteristicKinds::POWER_TOUGHNESS, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -2644,7 +2734,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::ObjectManaValue { scope, .. } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::scoped(scope, CharacteristicKinds::MANA_COST, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -2654,7 +2744,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::TargetObjectManaValue { filter } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::filtered(filter, CharacteristicKinds::MANA_COST, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -2668,7 +2758,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::ObjectColorCount { scope, .. } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::scoped(scope, CharacteristicKinds::COLOR, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -2678,7 +2768,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::ObjectNameWordCount { scope, .. } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::scoped(scope, CharacteristicKinds::NAME_TEXT, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -2693,7 +2783,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::scoped(scope, CharacteristicKinds::EMPTY, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -2703,7 +2793,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::ObjectTypelineComponentCount { scope, .. } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::scoped(scope, CharacteristicKinds::CARD_TYPES, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -2713,7 +2803,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::ManaSymbolsInManaCost { scope, .. } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::scoped(scope, CharacteristicKinds::MANA_COST, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -2731,7 +2821,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::filtered(filter, CharacteristicKinds::CONTROLLER, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -2751,7 +2841,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         } => Axes::NONE,
         QuantityRef::Devotion { .. } => Axes {
             event: false,
-            sibling: true,
+            sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -2835,7 +2925,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::LifeLostThisTurn { player } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -2849,7 +2939,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         }
         QuantityRef::UnspentMana { color: _ } => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
@@ -2860,7 +2950,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         }
         QuantityRef::EventContextAmount => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -2873,7 +2963,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         }
         QuantityRef::EventContextSourceCostX => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -2881,14 +2971,14 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         // EventContextSourceCostX and TimesCostPaidThisResolution).
         QuantityRef::EventContextSourceModesChosen => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         QuantityRef::SpellsCastThisTurn { scope, filter } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -2905,7 +2995,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::SpellsCastBeforeTriggeringSpell { scope, filter } => {
             let mut acc = Axes {
                 event: true,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -2922,7 +3012,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::EnteredThisTurn { filter } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::filtered(filter, CharacteristicKinds::EMPTY, mode),
                 projected: true,
                 history: HistoryReads::of(HistoryMember::TurnNumber),
             };
@@ -2936,7 +3026,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::SacrificedThisTurn { player, filter } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -2957,7 +3047,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::LifeGainedThisTurn { player } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -2967,7 +3057,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::CardsDrawnThisTurn { player } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::of(HistoryMember::CardsDrawnThisTurn),
             };
@@ -2977,7 +3067,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::CardsDrawnLastTurn { player } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -2987,7 +3077,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::OpponentSpellsCastSinceLastTurn { player } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -3011,7 +3101,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             // it is matched against a `BattlefieldEntryRecord`, never a live board.
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::Any,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -3040,7 +3130,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -3060,7 +3150,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -3081,7 +3171,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -3121,7 +3211,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -3130,14 +3220,14 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         }
         QuantityRef::SpellsCastLastTurn => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
         QuantityRef::SpellsCastThisGame { scope, filter } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -3158,7 +3248,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -3178,7 +3268,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::TokensCreatedThisTurn { player, filter } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -3193,7 +3283,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::PlayerActionsThisTurn { player, action: _ } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -3211,7 +3301,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         QuantityRef::ConvokedCreatureCount => Axes::NONE,
         QuantityRef::TimesCostPaidThisResolution => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -3230,7 +3320,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             crate::types::ability::CardTypeSetSource::Objects { filter } => {
                 let mut acc = Axes {
                     event: false,
-                    sibling: true,
+                    sibling: SiblingReads::filtered(filter, CharacteristicKinds::COLOR, mode),
                     projected: false,
                     history: HistoryReads::NONE,
                 };
@@ -3258,7 +3348,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             crate::types::ability::CardTypeSetSource::TargetedObjects { slot } => {
                 let mut acc = Axes {
                     event: false,
-                    sibling: true,
+                    sibling: SiblingReads::Any,
                     projected: false,
                     history: HistoryReads::NONE,
                 };
@@ -3266,14 +3356,15 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
                     &crate::types::ability::CardTypeSetSource::targeted_objects_filter(slot),
                     FilterReadContext::LiveBoardCensus,
                     mode,
-                ));
+                )
+                .detached());
                 acc
             }
         },
         QuantityRef::DistinctCounterKindsAmong { filter } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::filtered(filter, CharacteristicKinds::EMPTY, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -3288,7 +3379,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
     }
 }
 
-fn scan_quantity_expr(x: &QuantityExpr, mode: ScanMode) -> Axes {
+fn scan_quantity_expr(x: &QuantityExpr, mode: ScanMode) -> Axes<'_> {
     match x {
         QuantityExpr::Ref { qty } => {
             let mut acc = Axes::NONE;
@@ -3353,12 +3444,12 @@ fn scan_quantity_expr(x: &QuantityExpr, mode: ScanMode) -> Axes {
     }
 }
 
-fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
+fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes<'_> {
     match x {
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
         | AbilityCondition::TriggerEventTargetExploitedBySource => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -3414,7 +3505,7 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
         }
         AbilityCondition::SourceEnteredThisTurn => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::of(HistoryMember::TurnNumber),
         },
@@ -3463,7 +3554,7 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
         // `TriggerCondition` mirror does) so a future field forces a re-audit here.
         AbilityCondition::ControlsCommander { ownership: _ } => Axes {
             event: false,
-            sibling: true,
+            sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -3501,7 +3592,7 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
         AbilityCondition::TriggeringSpellTargetsFilter { filter } => {
             let mut acc = Axes {
                 event: true,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -3525,7 +3616,7 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
         AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter } => {
             let mut acc = Axes {
                 event: true,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -3543,7 +3634,7 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
         } => {
             let mut acc = Axes {
                 event: true,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -3580,19 +3671,19 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
         }
         AbilityCondition::SpellCastWithVariantThisTurn { variant: _ } => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
         AbilityCondition::FirstCombatPhaseOfTurn => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
         AbilityCondition::FirstEndStepOfTurn => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
@@ -3604,7 +3695,7 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
         } => {
             let mut acc = Axes {
                 event: true,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -3663,7 +3754,7 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
             n: _,
         } => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
@@ -3680,20 +3771,28 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
 /// it is checked. A leaf sharing its name with an `AbilityCondition` or `StaticCondition` arm
 /// reads what that arm reads; every other leaf reads what `restrictions::evaluate_condition`
 /// reads for it.
-fn scan_parsed_condition(x: &ParsedCondition, mode: ScanMode) -> Axes {
+fn scan_parsed_condition(x: &ParsedCondition, mode: ScanMode) -> Axes<'_> {
     // A battlefield census with no filter to scan.
     const CENSUS: Axes = Axes {
         event: false,
-        sibling: true,
+        sibling: SiblingReads::Any,
         projected: false,
         history: HistoryReads::NONE,
     };
     // A per-turn or per-game journal `project_out_resources` clears.
     const JOURNAL: Axes = Axes {
         event: false,
-        sibling: false,
+        sibling: SiblingReads::None,
         projected: true,
         history: HistoryReads::NONE,
+    };
+    // The source's own characteristics.
+    let source_read = |aggregate| {
+        Axes {
+            sibling: SiblingReads::scoped(&ObjectScope::Source, aggregate, mode),
+            ..CENSUS
+        }
+        .or(scan_object_scope(&ObjectScope::Source))
     };
     match x {
         ParsedCondition::SourceIsAttacking => {
@@ -3736,16 +3835,18 @@ fn scan_parsed_condition(x: &ParsedCondition, mode: ScanMode) -> Axes {
         // As `StaticCondition::OpponentPoisonAtLeast` (CR 122.1).
         ParsedCondition::OpponentPoisonAtLeast { count: _ } => JOURNAL,
         // The source's own power, counters, types or colors.
-        ParsedCondition::SourcePowerAtLeast { minimum: _ }
-        | ParsedCondition::SourceHasCounterAtLeast {
+        ParsedCondition::SourcePowerAtLeast { minimum: _ } => {
+            source_read(CharacteristicKinds::POWER_TOUGHNESS)
+        }
+        ParsedCondition::SourceHasCounterAtLeast {
             counter_type: _,
             count: _,
         }
-        | ParsedCondition::SourceHasNoCounter { counter_type: _ }
-        | ParsedCondition::SourceIsCreature
-        | ParsedCondition::SourceIsColor { color: _ } => {
-            CENSUS.or(scan_object_scope(&ObjectScope::Source))
+        | ParsedCondition::SourceHasNoCounter { counter_type: _ } => {
+            source_read(CharacteristicKinds::EMPTY)
         }
+        ParsedCondition::SourceIsCreature => source_read(CharacteristicKinds::CARD_TYPES),
+        ParsedCondition::SourceIsColor { color: _ } => source_read(CharacteristicKinds::COLOR),
         // The host's types and tapped state, an object other than the source.
         ParsedCondition::SourceAttachedTo { required_type: _ }
         | ParsedCondition::SourceUntappedAttachedTo { required_type: _ } => CENSUS,
@@ -3869,7 +3970,7 @@ fn scan_parsed_condition(x: &ParsedCondition, mode: ScanMode) -> Axes {
     }
 }
 
-fn scan_guess_subject(x: &GuessSubject, mode: ScanMode) -> Axes {
+fn scan_guess_subject(x: &GuessSubject, mode: ScanMode) -> Axes<'_> {
     match x {
         GuessSubject::CommittedChoice { choice_type: _ } => Axes::NONE,
         GuessSubject::Proposition {
@@ -3885,7 +3986,7 @@ fn scan_guess_subject(x: &GuessSubject, mode: ScanMode) -> Axes {
     }
 }
 
-fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) -> Axes {
+fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) -> Axes<'_> {
     // CR 732.2a firewall census discipline. `LiveBoardCensus`: this CALL
     // SITE counts/tests battlefield membership ⇒ `sibling` is the census's OWN read,
     // injected here independent of the filter's shape (also fixing the latent
@@ -3896,7 +3997,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
     let base = match ctx {
         FilterReadContext::LiveBoardCensus => Axes {
             event: false,
-            sibling: true,
+            sibling: SiblingReads::filtered(x, CharacteristicKinds::EMPTY, mode),
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -3946,7 +4047,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
                     ScanMode::LoopFirewall => props.event,
                 },
                 sibling: match mode {
-                    ScanMode::Conservative => true,
+                    ScanMode::Conservative => SiblingReads::Any,
                     ScanMode::LoopFirewall => props.sibling,
                 },
                 projected: props.projected,
@@ -3992,7 +4093,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         TargetFilter::AmassedArmy => Axes::NONE,
         TargetFilter::CostPaidObject => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -4011,37 +4112,37 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         TargetFilter::ExiledCardByIndex { index: _ } => Axes::NONE,
         TargetFilter::TriggeringSpellController => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         TargetFilter::TriggeringSpellOwner => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         TargetFilter::TriggeringPlayer => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         TargetFilter::TriggeringSource | TargetFilter::CastingSpell => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         TargetFilter::EventTarget => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         TargetFilter::TriggeringSourceController => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -4050,31 +4151,31 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         // and `TriggeringSourceController`. Not a rules decision.
         TargetFilter::EventTargetController => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         TargetFilter::ParentTarget => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         TargetFilter::ParentTargetSlot { .. } | TargetFilter::DeclaredPlayer { .. } => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         TargetFilter::ParentTargetController => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         TargetFilter::ParentTargetOwner => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -4088,26 +4189,26 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         TargetFilter::OriginalController => Axes::NONE,
         TargetFilter::PostReplacementSourceController => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         // CR 615.5: resolves the prevented event's damage source — an event read.
         TargetFilter::PostReplacementDamageSource => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         TargetFilter::PostReplacementDamageTarget => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         TargetFilter::PostReplacementDamageTargetOwner => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -4117,7 +4218,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         // receives, so a sibling trigger can interact: sibling). Not DefendingPlayer's NONE.
         TargetFilter::AttackedPlayerOrPlaneswalker => Axes {
             event: true,
-            sibling: true,
+            sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -4125,7 +4226,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         TargetFilter::ChosenDamageSource { filter } => {
             let mut acc = Axes {
                 event: true,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -4148,20 +4249,20 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
     })
 }
 
-fn scan_object_scope(x: &ObjectScope) -> Axes {
+fn scan_object_scope(x: &ObjectScope) -> Axes<'_> {
     match x {
         ObjectScope::Source => Axes::NONE,
         ObjectScope::Target => Axes::NONE,
         ObjectScope::Recipient => Axes::NONE,
         ObjectScope::EventSource => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         ObjectScope::CostPaidObject => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -4187,7 +4288,7 @@ fn scan_object_scope(x: &ObjectScope) -> Axes {
         ObjectScope::GrantingObject | ObjectScope::SpecificObject { .. } => Axes::NONE,
         ObjectScope::EventTarget => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -4215,7 +4316,7 @@ fn scan_object_scope(x: &ObjectScope) -> Axes {
 /// [`ability_definition_axes`] and [`resolved_ability_axes`] use: a FUTURE
 /// `TriggerDefinition` field fails to compile here until it is classified as
 /// scanned or read-free. Every `_` binding below carries its justification.
-fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes {
+fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes<'_> {
     let TriggerDefinition {
         // ---- read-bearing: scanned into `acc` below ----
         execute,
@@ -4400,7 +4501,7 @@ fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes {
 ///     consistency fix while silently deleting level 2. A `filter` field added to
 ///     a SECOND `TriggerConstraint` variant is exactly how this walker would go
 ///     stale, and level 2 is the only thing that would catch it.
-fn scan_trigger_constraint(x: &TriggerConstraint, mode: ScanMode) -> Axes {
+fn scan_trigger_constraint(x: &TriggerConstraint, mode: ScanMode) -> Axes<'_> {
     match x {
         // CR 603.2: a filtered spell-count gate — "your second [qualifier] spell
         // each turn" counts only spells matching `filter`. A newly-added
@@ -4450,17 +4551,17 @@ fn scan_trigger_constraint(x: &TriggerConstraint, mode: ScanMode) -> Axes {
     }
 }
 
-fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
+fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
     match x {
         TriggerCondition::GainedLife { minimum: _ } => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
         TriggerCondition::LostLife => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
@@ -4468,7 +4569,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         TriggerCondition::ControlsType { filter } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::filtered(filter, CharacteristicKinds::EMPTY, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -4481,13 +4582,13 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         }
         TriggerCondition::NoSpellsCastLastTurn => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
         TriggerCondition::TwoOrMoreSpellsCastLastTurn => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
@@ -4498,13 +4599,13 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         }
         TriggerCondition::SourceEnteredThisTurn => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::of(HistoryMember::TurnNumber),
         },
         TriggerCondition::SourceAttackedThisCombat => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
@@ -4553,14 +4654,14 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         TriggerCondition::ActivatedAbilityIsNonMana => Axes::NONE,
         TriggerCondition::DealtDamageBySourceThisTurn => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
         TriggerCondition::DealtDamageThisTurnBySource { source } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -4575,14 +4676,14 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         TriggerCondition::WasType { card_type: _ } => Axes::NONE,
         TriggerCondition::LifeTotalGE { minimum: _ } => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
         TriggerCondition::ControlCount { filter, minimum: _ } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::filtered(filter, CharacteristicKinds::EMPTY, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -4609,7 +4710,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         // temptation's immutable chosen bearer.
         TriggerCondition::ChoseOtherRingBearer => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -4617,20 +4718,20 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         // the chosen bearer live on the triggering temptation event.
         TriggerCondition::ChoseRingBearer => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         TriggerCondition::FirstCombatPhaseOfTurn => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
         TriggerCondition::CastSpellThisTurn { filter } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -4675,7 +4776,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         }
         TriggerCondition::SpellCastWithVariantThisTurn { variant: _ } => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
@@ -4689,7 +4790,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         TriggerCondition::SourceInZone { zone: _ } => Axes::NONE,
         TriggerCondition::CounterAddedThisTurn => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
@@ -4699,13 +4800,13 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         // detector must see the projected read (fail-open otherwise).
         TriggerCondition::FirstTimeObjectCountersAddedThisTurn => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
         TriggerCondition::LostLifeLastTurn => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::of(HistoryMember::PlayerLifeLostLastTurn),
         },
@@ -4729,19 +4830,19 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             minimum: _,
         } => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
         TriggerCondition::ManaSpentCondition { text: _ } => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
         TriggerCondition::HadCounters { .. } => Axes {
             event: false,
-            sibling: true,
+            sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -4749,14 +4850,14 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         // `AbilityCondition` / `StaticCondition` mirrors of this printed clause.
         TriggerCondition::ControlsCommander { ownership: _ } => Axes {
             event: false,
-            sibling: true,
+            sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
         },
         TriggerCondition::IsRenowned { subject: _ } => Axes::NONE,
         TriggerCondition::HasCounters { .. } => Axes {
             event: false,
-            sibling: true,
+            sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -4767,7 +4868,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         } => {
             let mut acc = Axes {
                 event: true,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -4780,7 +4881,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         }
         TriggerCondition::ZoneChangeObjectIsTapped => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -4796,7 +4897,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         TriggerCondition::EventDamageSourceMatchesFilter { filter } => {
             let mut acc = Axes {
                 event: true,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -4810,7 +4911,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         TriggerCondition::EventObjectMatchesFilter { filter } => {
             let mut acc = Axes {
                 event: true,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -4823,7 +4924,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         }
         TriggerCondition::DamagedPlayerIsEventSourceOwner => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -4839,14 +4940,14 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         // trigger is live.
         TriggerCondition::AddedManaWithThisAbilityThisTurn => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
         TriggerCondition::TriggeringSpellTargetsFilter { filter } => {
             let mut acc = Axes {
                 event: true,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -4860,7 +4961,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         TriggerCondition::TriggeringSpellMatchesFilter { filter } => {
             let mut acc = Axes {
                 event: true,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -4904,7 +5005,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
 /// payload type. EXHAUSTIVE, NO `_` wildcard and NO `..` field rest, so a NEW
 /// `DelayedTriggerCondition` variant or field is a compile error rather than a silent
 /// read-free classification.
-fn scan_delayed_trigger_condition(c: &DelayedTriggerCondition, mode: ScanMode) -> Axes {
+fn scan_delayed_trigger_condition(c: &DelayedTriggerCondition, mode: ScanMode) -> Axes<'_> {
     match c {
         // A phase coordinate. No payload position reaches a `TargetFilter` or a
         // `QuantityExpr`, so there is nothing to walk.
@@ -4964,7 +5065,7 @@ fn scan_delayed_trigger_condition(c: &DelayedTriggerCondition, mode: ScanMode) -
     }
 }
 
-fn scan_duration(x: &Duration, mode: ScanMode) -> Axes {
+fn scan_duration(x: &Duration, mode: ScanMode) -> Axes<'_> {
     match x {
         Duration::UntilEndOfTurn => Axes::NONE,
         Duration::UntilEndOfCombat => Axes::NONE,
@@ -5003,11 +5104,11 @@ fn scan_duration(x: &Duration, mode: ScanMode) -> Axes {
     }
 }
 
-fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
+fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
     match x {
         StaticCondition::DevotionGE { .. } => Axes {
             event: false,
-            sibling: true,
+            sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -5062,14 +5163,14 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
         StaticCondition::DayNightIs { state: _ } => Axes::NONE,
         StaticCondition::HasCounters { .. } => Axes {
             event: false,
-            sibling: true,
+            sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
         },
         StaticCondition::CastVariantPaid { variant: _ } => Axes::NONE,
         StaticCondition::RecipientHasCounters { .. } => Axes {
             event: false,
-            sibling: true,
+            sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -5103,7 +5204,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
         }
         StaticCondition::SpellCastWithVariantThisTurn { variant: _ } => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
@@ -5111,13 +5212,13 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
         // mirrors `SpellCastWithVariantThisTurn` (projected, not event/sibling).
         StaticCondition::AnyPlayerAttackedYouLastTurn { .. } => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
         StaticCondition::OpponentPoisonAtLeast { count: _ } => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
@@ -5128,14 +5229,14 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
         StaticCondition::SharesColorWithMostCommonColorAmongPermanents => Axes::NONE,
         StaticCondition::SourceEnteredThisTurn => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::of(HistoryMember::TurnNumber),
         },
         StaticCondition::SourceExertedThisTurn => Axes::CONSERVATIVE,
         StaticCondition::SourceHasDealtDamage => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
@@ -5146,7 +5247,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
         // `AbilityCondition` / `TriggerCondition` mirrors of this printed clause.
         StaticCondition::ControlsCommander { ownership: _ } => Axes {
             event: false,
-            sibling: true,
+            sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -5199,7 +5300,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
         StaticCondition::CastingAsVariant { variant: _ } => Axes::NONE,
         StaticCondition::FirstCombatPhaseOfTurn => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
@@ -5217,7 +5318,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
 /// keeps `sibling:true` (fail-closed). The prop descent passes `LiveBoardCensus` to
 /// `scan_filter_prop`'s nested `scan_target_filter` reads (a bare-`Typed` canary has
 /// no such props so is unaffected).
-fn typed_filter_axes(tf: &TypedFilter, mode: ScanMode) -> Axes {
+fn typed_filter_axes(tf: &TypedFilter, mode: ScanMode) -> Axes<'_> {
     let mut acc = tf
         .controller
         .as_ref()
@@ -5236,7 +5337,7 @@ fn typed_filter_axes(tf: &TypedFilter, mode: ScanMode) -> Axes {
 /// `ControllerMatches { OpponentLostLife }`, `Targets { Typed{..} }`, …) is not
 /// lost. The projected-axis authority is `project_out_resources`
 /// (analysis/resource.rs): a field is projected iff that fn clears it.
-fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
+fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes<'_> {
     match x {
         // --- board / object / printed-characteristic leaves: no player resource.
         // Their drift breaks the board-equality gate (item 1), not the item-4 scan.
@@ -5417,20 +5518,20 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
     }
 }
 
-fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
+fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes<'_> {
     match x {
         PlayerFilter::Controller => Axes::NONE,
         PlayerFilter::Opponent => Axes::NONE,
         PlayerFilter::DefendingPlayer => Axes::NONE,
         PlayerFilter::OpponentLostLife => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
         PlayerFilter::OpponentGainedLife => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
@@ -5447,7 +5548,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
         } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -5466,7 +5567,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
             AttackSubject::You | AttackSubject::Source => Axes::NONE,
             AttackSubject::EventAttackers => Axes {
                 event: true,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
             },
@@ -5500,32 +5601,32 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
         PlayerFilter::OwnersOfCardsExiledBySource => Axes::NONE,
         PlayerFilter::TriggeringPlayer => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         PlayerFilter::OpponentOtherThanTriggering => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         PlayerFilter::OpponentOfTriggeringPlayer => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         PlayerFilter::VotedFor { choice_index: _ } => Axes::NONE,
         PlayerFilter::ParentObjectTargetController => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -5537,7 +5638,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
         } => {
             let mut acc = Axes {
                 event: false,
-                sibling: true,
+                sibling: SiblingReads::filtered(filter, CharacteristicKinds::CONTROLLER, mode),
                 projected: false,
                 history: HistoryReads::NONE,
             };
@@ -5557,7 +5658,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
         } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -5568,7 +5669,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
         PlayerFilter::ChosenPlayer { index: _ } => Axes::NONE,
         PlayerFilter::ParentObjectTargetOwner | PlayerFilter::GrantingObjectCaster => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -5584,7 +5685,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
             caused_by: _,
         } => Axes {
             event: false,
-            sibling: true,
+            sibling: SiblingReads::filtered(filter, CharacteristicKinds::CONTROLLER, mode),
             projected: false,
             history: HistoryReads::NONE,
         }
@@ -5596,7 +5697,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
     }
 }
 
-fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes {
+fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes<'_> {
     match x {
         ReplacementCondition::And { conditions } => {
             let mut acc = Axes::NONE;
@@ -5610,7 +5711,7 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes 
         // signal, no board census and no projected resource.
         ReplacementCondition::TurnUpCostSourcePaid { source: _ } => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -5628,7 +5729,7 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes 
         // CR 732.2a: no disjointness arm matches this variant.
         ReplacementCondition::UnlessControlsSubtype { subtypes: _ } => Axes {
             event: false,
-            sibling: true,
+            sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -5653,7 +5754,7 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes 
         }
         ReplacementCondition::UnlessPlayerLifeAtMost { amount: _ } => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
@@ -5699,13 +5800,13 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes 
         } => Axes::NONE,
         ReplacementCondition::YouAttackedThisTurn => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
         ReplacementCondition::OpponentDamagedThisTurn => Axes {
             event: false,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
         },
@@ -5717,7 +5818,7 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes 
         ReplacementCondition::DealtDamageThisTurnBySource { source } => {
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
             };
@@ -5765,7 +5866,7 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes 
     }
 }
 
-fn scan_player_scope(x: &PlayerScope) -> Axes {
+fn scan_player_scope(x: &PlayerScope) -> Axes<'_> {
     match x {
         PlayerScope::Controller => Axes::NONE,
         PlayerScope::ScopedPlayer => Axes::NONE,
@@ -5782,7 +5883,7 @@ fn scan_player_scope(x: &PlayerScope) -> Axes {
         PlayerScope::DefendingPlayer => Axes::NONE,
         PlayerScope::ParentObjectTarget { .. } => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -5797,7 +5898,7 @@ fn scan_player_scope(x: &PlayerScope) -> Axes {
 }
 
 /// CR 508.4: the reads of the defender a token instruction names.
-fn scan_token_attack_destination(x: &TokenAttackDestination, mode: ScanMode) -> Axes {
+fn scan_token_attack_destination(x: &TokenAttackDestination, mode: ScanMode) -> Axes<'_> {
     match x {
         TokenAttackDestination::ControllerChooses => Axes::NONE,
         TokenAttackDestination::Player { player, scope: _ } => scan_controller_ref(player),
@@ -5805,7 +5906,7 @@ fn scan_token_attack_destination(x: &TokenAttackDestination, mode: ScanMode) -> 
     }
 }
 
-fn scan_controller_ref(x: &ControllerRef) -> Axes {
+fn scan_controller_ref(x: &ControllerRef) -> Axes<'_> {
     match x {
         ControllerRef::You => Axes::NONE,
         ControllerRef::Opponent => Axes::NONE,
@@ -5817,20 +5918,20 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes {
         ControllerRef::TargetOpponent => Axes::NONE,
         ControllerRef::DeclaredPlayer { .. } | ControllerRef::ParentTargetController => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         // Engine classification: event-axis read, same as the sibling above.
         ControllerRef::EventTargetController => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
         ControllerRef::ParentTargetOwner => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -5839,7 +5940,7 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes {
         ControllerRef::SourceChosenPlayer => Axes::NONE,
         ControllerRef::TriggeringPlayer => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -5852,7 +5953,7 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes {
     }
 }
 
-fn scan_count_scope(x: &CountScope) -> Axes {
+fn scan_count_scope(x: &CountScope) -> Axes<'_> {
     match x {
         CountScope::Controller => Axes::NONE,
         CountScope::Owner => Axes::NONE,
@@ -5885,7 +5986,9 @@ pub(crate) fn ability_uses_event_context(ability: &ResolvedAbility, mode: ScanMo
 /// distinct-event auto-resolve gate — the Rubblebelt Rioters / Orcish
 /// Siegemaster exclusion.)
 pub(crate) fn ability_reads_sibling_mutable(ability: &ResolvedAbility) -> bool {
-    resolved_ability_axes(ability, ScanMode::Conservative).sibling
+    resolved_ability_axes(ability, ScanMode::Conservative)
+        .sibling
+        .is_read()
 }
 
 /// Axis 3 on a bare trigger fire-time `condition` (CR 603.4 intervening-if) —
@@ -5944,7 +6047,7 @@ pub(crate) fn duration_reads_projected_resource(duration: &Duration) -> bool {
 /// a def handed to this walker through [`scan_trigger_definition`] or the
 /// `Effect::CreateDelayedTrigger` arm. Those two carriers, not this binding, are
 /// where a trigger-body cost surface has to be argued.
-fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
+fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes<'_> {
     let AbilityDefinition {
         // ---- read-bearing ----
         effect,
@@ -6100,29 +6203,39 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
 /// `obj.abilities` def regardless of `kind`, granted-ability bodies, and the
 /// pending/delayed store bodies).
 pub(crate) fn ability_definition_reads_sibling_mutable(def: &AbilityDefinition) -> bool {
-    ability_definition_axes(def, ScanMode::Conservative).sibling
+    ability_definition_axes(def, ScanMode::Conservative)
+        .sibling
+        .is_read()
 }
 
 /// Axis 2 on a bare trigger fire-time `condition` (CR 603.4 intervening-if).
 pub(crate) fn trigger_condition_reads_sibling_mutable(condition: &TriggerCondition) -> bool {
-    scan_trigger_condition(condition, ScanMode::Conservative).sibling
+    scan_trigger_condition(condition, ScanMode::Conservative)
+        .sibling
+        .is_read()
 }
 
 /// Axis 2 on a condition-gated static's `condition` (CR 604.1 / CR 613.1).
 pub(crate) fn static_condition_reads_sibling_mutable(condition: &StaticCondition) -> bool {
-    scan_static_condition(condition, ScanMode::Conservative).sibling
+    scan_static_condition(condition, ScanMode::Conservative)
+        .sibling
+        .is_read()
 }
 
 /// Axis 2 on a replacement effect's `condition` (CR 614.1).
 pub(crate) fn replacement_condition_reads_sibling_mutable(
     condition: &ReplacementCondition,
 ) -> bool {
-    scan_replacement_condition(condition, ScanMode::Conservative).sibling
+    scan_replacement_condition(condition, ScanMode::Conservative)
+        .sibling
+        .is_read()
 }
 
 /// Axis 2 on a transient `Duration::ForAsLongAs` condition (CR 604.1).
 pub(crate) fn duration_reads_sibling_mutable(duration: &Duration) -> bool {
-    scan_duration(duration, ScanMode::Conservative).sibling
+    scan_duration(duration, ScanMode::Conservative)
+        .sibling
+        .is_read()
 }
 
 /// Axis 2 on any cost surface: EXHAUSTIVE `AbilityCost` match,
@@ -6133,7 +6246,9 @@ pub(crate) fn duration_reads_sibling_mutable(duration: &Duration) -> bool {
 /// (Affinity/Convoke/…) are IMPLICIT — they carry no scannable `QuantityExpr`, so
 /// they are classified separately by [`keyword_cost_reads_growing_class`].
 pub(crate) fn ability_cost_references_sibling_mutable(cost: &AbilityCost) -> bool {
-    scan_ability_cost(cost, ScanMode::Conservative).sibling
+    scan_ability_cost(cost, ScanMode::Conservative)
+        .sibling
+        .is_read()
 }
 
 /// Axis 2 on a bare `QuantityRef` — the dynamic cost multiplier
@@ -6143,10 +6258,12 @@ pub(crate) fn ability_cost_references_sibling_mutable(cost: &AbilityCost) -> boo
 /// board-reading `ObjectCount` "for each X you control" multiplier is caught by the
 /// object-growth cost firewall.
 pub(crate) fn quantity_ref_references_sibling_mutable(qty: &QuantityRef) -> bool {
-    scan_quantity_ref(qty, ScanMode::Conservative).sibling
+    scan_quantity_ref(qty, ScanMode::Conservative)
+        .sibling
+        .is_read()
 }
 
-fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes {
+fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes<'_> {
     match cost {
         AbilityCost::ManaDynamic { quantity } => scan_quantity_expr(quantity, mode),
         AbilityCost::PayLife { amount } => scan_quantity_expr(amount, mode),
@@ -6476,7 +6593,7 @@ pub(crate) fn modification_grants_growing_cost_keyword(m: &ContinuousModificatio
 
 /// A token's `power`/`toughness` (CR 208). A dynamic `Quantity` P/T reads its
 /// `QuantityExpr`; a fixed or `*`-placeholder P/T reads nothing here.
-fn scan_pt_value(pt: &PtValue, mode: ScanMode) -> Axes {
+fn scan_pt_value(pt: &PtValue, mode: ScanMode) -> Axes<'_> {
     match pt {
         PtValue::Fixed(_) => Axes::NONE,
         PtValue::Variable(_) => Axes::NONE,
@@ -6492,12 +6609,12 @@ fn scan_pt_value(pt: &PtValue, mode: ScanMode) -> Axes {
 /// `.or()` a descent of the few keyword PAYLOADS that carry a scannable
 /// `QuantityExpr` / `TargetFilter` / `AbilityCost`. EXHAUSTIVE, NO `_` wildcard —
 /// a new payload-bearing keyword fails to compile until classified.
-fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes {
+fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes<'_> {
     // Axis-2 cost surface: fully exhaustive & fail-closed on new variants.
     let cost_read = if keyword_cost_reads_growing_class(kw) {
         Axes {
             event: false,
-            sibling: true,
+            sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
         }
@@ -6721,7 +6838,7 @@ fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes {
 /// `ObjectCount` arm), while a color/type-FROM-BOARD aggregate must self-assert
 /// its OWN `sibling:true` (see the invariant at `scan_target_filter`'s `Typed`
 /// arm). EXHAUSTIVE over every variant, NO `_` wildcard.
-fn scan_mana_production(p: &ManaProduction, mode: ScanMode) -> Axes {
+fn scan_mana_production(p: &ManaProduction, mode: ScanMode) -> Axes<'_> {
     match p {
         // COUNT-DRIVEN: any board read lives inside `count`; NO own sibling literal.
         ManaProduction::Colorless { count }
@@ -6736,7 +6853,7 @@ fn scan_mana_production(p: &ManaProduction, mode: ScanMode) -> Axes {
         // `Effect::NoteManaSpent`, so sibling activations can affect its value.
         ManaProduction::NotedType { count } => Axes {
             event: false,
-            sibling: true,
+            sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
         }
@@ -6752,7 +6869,7 @@ fn scan_mana_production(p: &ManaProduction, mode: ScanMode) -> Axes {
         // `Typed` arm of `scan_target_filter`).
         ManaProduction::DistinctColorsAmongPermanents { filter } => Axes {
             event: false,
-            sibling: true,
+            sibling: SiblingReads::filtered(filter, CharacteristicKinds::COLOR, mode),
             projected: false,
             history: HistoryReads::NONE,
         }
@@ -6763,7 +6880,7 @@ fn scan_mana_production(p: &ManaProduction, mode: ScanMode) -> Axes {
         )),
         ManaProduction::AnyOneColorAmongPermanents { count, filter, .. } => Axes {
             event: false,
-            sibling: true,
+            sibling: SiblingReads::filtered(filter, CharacteristicKinds::COLOR, mode),
             projected: false,
             history: HistoryReads::NONE,
         }
@@ -6775,7 +6892,7 @@ fn scan_mana_production(p: &ManaProduction, mode: ScanMode) -> Axes {
         )),
         ManaProduction::AnyTypeProduceableBy { count, land_filter } => Axes {
             event: false,
-            sibling: true,
+            sibling: SiblingReads::filtered(land_filter, CharacteristicKinds::ABILITIES, mode),
             projected: false,
             history: HistoryReads::NONE,
         }
@@ -6788,7 +6905,7 @@ fn scan_mana_production(p: &ManaProduction, mode: ScanMode) -> Axes {
         // CR 106.3: reads the triggering `ManaAdded` event (event axis).
         ManaProduction::TriggerEventManaType => Axes {
             event: true,
-            sibling: false,
+            sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
         },
@@ -6808,7 +6925,7 @@ fn scan_mana_production(p: &ManaProduction, mode: ScanMode) -> Axes {
 /// descents (`GrantAbility` / `GrantTrigger`) so a token body inside a grant is
 /// classified in the same mode. The AST is finite and acyclic, so the mutual
 /// recursion terminates.
-fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> Axes {
+fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> Axes<'_> {
     match m {
         // descend the dynamic P/T / dynamic-keyword / enter-counter QuantityExpr
         ContinuousModification::SetDynamicPower { value }
@@ -6918,7 +7035,7 @@ fn particular_object_ctx(filter: &TargetFilter) -> FilterReadContext {
 fn scan_resolved_continuous_static(
     sd: &crate::types::ability::StaticDefinition,
     mode: ScanMode,
-) -> Axes {
+) -> Axes<'_> {
     let crate::types::ability::StaticDefinition {
         mode: static_mode,
         affected,
@@ -7003,7 +7120,9 @@ fn scan_resolved_continuous_static(
 
 /// The CR 732.2a firewall's `sibling` axis on a resolved ability — a stack entry's body.
 pub(crate) fn resolved_ability_reads_sibling_mutable_for_loop(ability: &ResolvedAbility) -> bool {
-    resolved_ability_axes(ability, ScanMode::LoopFirewall).sibling
+    resolved_ability_axes(ability, ScanMode::LoopFirewall)
+        .sibling
+        .is_read()
 }
 
 /// CR 603.7 + CR 732.2a: does a stored delayed trigger's firing condition or body read the
@@ -7064,7 +7183,7 @@ pub(crate) fn ability_definition_history(def: &AbilityDefinition) -> HistoryRead
 fn scan_activation_restriction(
     r: &crate::types::ability::ActivationRestriction,
     mode: ScanMode,
-) -> Axes {
+) -> Axes<'_> {
     use crate::types::ability::ActivationRestriction;
     match r {
         ActivationRestriction::RequiresCondition { condition } => {
@@ -7117,11 +7236,11 @@ pub(crate) fn replacement_definition_history(
 }
 
 /// CR 614.1: a replacement definition's reads, destructured with no `..`.
-fn replacement_definition_axes(
-    def: &crate::types::ability::ReplacementDefinition,
-    rider: Option<&ResolvedAbility>,
+fn replacement_definition_axes<'a>(
+    def: &'a crate::types::ability::ReplacementDefinition,
+    rider: Option<&'a ResolvedAbility>,
     mode: ScanMode,
-) -> Axes {
+) -> Axes<'a> {
     use crate::types::ability::{DamageModification, PreventionFormula, ReplacementMode};
     let crate::types::ability::ReplacementDefinition {
         execute,
@@ -7302,7 +7421,9 @@ pub(crate) fn ability_definition_reads_growing_class_for_loop(def: &AbilityDefin
 /// `analysis::resource::fire_time_conditions_read_growing_class`'s live
 /// continuous-modification descent.
 pub(crate) fn continuous_modification_reads_sibling_mutable(m: &ContinuousModification) -> bool {
-    scan_continuous_modification(m, ScanMode::LoopFirewall).sibling
+    scan_continuous_modification(m, ScanMode::LoopFirewall)
+        .sibling
+        .is_read()
 }
 
 /// CR 106.1 / CR 119 / CR 122.1 + CR 732.2a: does a live continuous modification
@@ -8156,9 +8277,11 @@ mod tests {
             ),
             "reach: Hellkite Charger pays a fixed mana cost"
         );
-        let relieved = scan_effect(&charger(), ScanMode::LoopFirewall);
-        assert!(!relieved.sibling && !relieved.event && relieved.projected);
-        assert!(scan_effect(&charger(), ScanMode::Conservative).sibling);
+        let relieved = scan_effect(&charger(), ScanMode::LoopFirewall).detached();
+        assert!(!relieved.sibling.is_read() && !relieved.event && relieved.projected);
+        assert!(scan_effect(&charger(), ScanMode::Conservative)
+            .sibling
+            .is_read());
         let caesar = printed_trigger_payment(
             "Caesar, Legion's Emperor",
             "Whenever you attack, you may sacrifice another creature. When you do, choose two \
@@ -8176,7 +8299,9 @@ mod tests {
             ),
             "reach: Caesar pays a sacrifice"
         );
-        assert!(scan_effect(&caesar, ScanMode::LoopFirewall).sibling);
+        assert!(scan_effect(&caesar, ScanMode::LoopFirewall)
+            .sibling
+            .is_read());
     }
 
     /// CR 732.2a: Worldgorger Dragon's "exile all other permanents you control" reads what its
@@ -8197,10 +8322,11 @@ mod tests {
             })
         };
         let effect = |json| -> Effect { serde_json::from_value(json).expect("a mass move") };
-        let fail_closed =
-            |a: Axes| a.event && a.sibling && a.projected && a.history == HistoryReads::ALL;
-        let axes = scan_effect(&effect(worldgorger()), ScanMode::LoopFirewall);
-        assert!(!fail_closed(axes));
+        let fail_closed = |a: Axes| {
+            a.event && a.sibling.is_read() && a.projected && a.history == HistoryReads::ALL
+        };
+        let axes = scan_effect(&effect(worldgorger()), ScanMode::LoopFirewall).detached();
+        assert!(!fail_closed(axes.clone()));
         assert_eq!(axes.history, HistoryReads::NONE);
         assert!(fail_closed(scan_effect(
             &effect(worldgorger()),
@@ -8210,6 +8336,72 @@ mod tests {
         face_down["face_down_profile"] = serde_json::json!({});
         let face_down = effect(face_down);
         assert!(fail_closed(scan_effect(&face_down, ScanMode::LoopFirewall)));
+    }
+
+    /// Human Torch's "if you control another Hero" records the census filter it holds;
+    /// Gray Merchant's devotion holds no filter and records `Any`.
+    #[test]
+    fn a_sibling_read_records_the_filter_its_site_holds() {
+        let torch = printed_creature(
+            "Human Torch, Johnny Storm",
+            "Flying\nWhenever you draw a card, if you control another Hero, Human Torch deals 1 \
+             damage to target opponent.\nPower-up — {6}{R}: Put three +1/+1 counters on Human \
+             Torch. (Activate each power-up ability only once. Reduce the cost by his mana cost \
+             if he entered this turn.)",
+        );
+        let condition = torch.triggers[0]
+            .condition
+            .as_ref()
+            .expect("reach: the intervening-if");
+        let TriggerCondition::ControlsType { filter } = condition else {
+            panic!("reach: a ControlsType census, got {condition:?}");
+        };
+        let SiblingReads::Reads(reads) =
+            scan_trigger_condition(condition, ScanMode::LoopFirewall).sibling
+        else {
+            panic!("the census records its reads");
+        };
+        assert!(!reads.is_empty());
+        for read in &reads {
+            assert!(
+                matches!(
+                    read,
+                    SiblingRead::Filtered { filter: recorded, aggregate }
+                        if std::ptr::eq(*recorded, filter)
+                            && *aggregate == CharacteristicKinds::EMPTY
+                ),
+                "{read:?}"
+            );
+        }
+        assert_eq!(
+            scan_trigger_condition(condition, ScanMode::Conservative).sibling,
+            SiblingReads::Any
+        );
+
+        let merchant = printed_creature(
+            "Gray Merchant of Asphodel",
+            "When this creature enters, each opponent loses X life, where X is your devotion to \
+             black. You gain life equal to the life lost this way. (Each {B} in the mana costs of \
+             permanents you control counts toward your devotion to black.)",
+        );
+        let body = merchant.triggers[0]
+            .execute
+            .as_deref()
+            .expect("reach: the enters trigger's body");
+        let Effect::LoseLife {
+            amount:
+                QuantityExpr::Ref {
+                    qty: devotion @ QuantityRef::Devotion { .. },
+                },
+            ..
+        } = &*body.effect
+        else {
+            panic!("reach: X is a devotion count, got {:?}", body.effect);
+        };
+        assert_eq!(
+            scan_quantity_ref(devotion, ScanMode::LoopFirewall).sibling,
+            SiblingReads::Any
+        );
     }
 
     /// CR 601.2f + CR 602.2b: Battlefield Butcher's cost reduction reads what its count reads;
@@ -8290,7 +8482,12 @@ mod tests {
 
     /// The four axes, comparable.
     fn reads(axes: Axes) -> (bool, bool, bool, HistoryReads) {
-        (axes.event, axes.sibling, axes.projected, axes.history)
+        (
+            axes.event,
+            axes.sibling.is_read(),
+            axes.projected,
+            axes.history,
+        )
     }
 
     /// What `gate` reads, hosted as the Power-up's cost-reduction gate. The host reads nothing
@@ -8601,6 +8798,7 @@ mod tests {
                 },
                 ScanMode::Conservative,
             )
+            .detached()
         };
         assert!(scan(AttackSubject::EventAttackers).event);
         assert!(!scan(AttackSubject::You).event);
@@ -8645,7 +8843,7 @@ mod tests {
     /// even though their direct graveyard/filter payloads are inert.
     #[test]
     fn zone_choice_provenance_and_reciprocal_reads_are_classified() {
-        let axes = |effect| scan_effect(&effect, ScanMode::LoopFirewall);
+        let axes = |effect| scan_effect(&effect, ScanMode::LoopFirewall).detached();
         assert_eq!(
             {
                 let x = axes(zone_choice_for_scan(
@@ -8653,7 +8851,7 @@ mod tests {
                     ZoneChoiceCandidateSource::Direct,
                     None,
                 ));
-                (x.event, x.sibling, x.projected)
+                (x.event, x.sibling.is_read(), x.projected)
             },
             (false, false, false),
             "a direct graveyard scan has no growing-class read"
@@ -8678,7 +8876,7 @@ mod tests {
         ] {
             let x = axes(effect);
             assert_eq!(
-                (x.event, x.sibling, x.projected),
+                (x.event, x.sibling.is_read(), x.projected),
                 (true, true, true),
                 "{label} must fail closed because it consumes a resolution-chain set"
             );
@@ -8689,7 +8887,11 @@ mod tests {
             Some(ReciprocalZoneChoiceRole::Produce),
         ));
         assert_eq!(
-            (producer.event, producer.sibling, producer.projected),
+            (
+                producer.event,
+                producer.sibling.is_read(),
+                producer.projected
+            ),
             (false, false, false),
             "a reciprocal producer publishes, but does not read, its fresh tracked set"
         );
@@ -8701,7 +8903,7 @@ mod tests {
         assert_eq!(
             (
                 battlefield.event,
-                battlefield.sibling,
+                battlefield.sibling.is_read(),
                 battlefield.projected
             ),
             (true, true, false),
@@ -8743,7 +8945,7 @@ mod tests {
                 },
                 Axes {
                     event: false,
-                    sibling: true,
+                    sibling: SiblingReads::Any,
                     projected: false,
                     history: HistoryReads::NONE,
                 },
@@ -8756,7 +8958,7 @@ mod tests {
                 },
                 Axes {
                     event: true,
-                    sibling: false,
+                    sibling: SiblingReads::None,
                     projected: false,
                     history: HistoryReads::NONE,
                 },
@@ -8766,7 +8968,7 @@ mod tests {
                 journal.clone(),
                 Axes {
                     event: false,
-                    sibling: false,
+                    sibling: SiblingReads::None,
                     projected: true,
                     history: HistoryReads::NONE,
                 },
@@ -8775,7 +8977,7 @@ mod tests {
                 event_filtered_journal,
                 Axes {
                     event: true,
-                    sibling: false,
+                    sibling: SiblingReads::None,
                     projected: true,
                     history: HistoryReads::NONE,
                 },
@@ -8788,7 +8990,7 @@ mod tests {
                 event_filtered_chain,
                 Axes {
                     event: true,
-                    sibling: true,
+                    sibling: SiblingReads::Any,
                     projected: false,
                     history: HistoryReads::NONE,
                 },
@@ -8805,7 +9007,7 @@ mod tests {
                 CardTypeSetSource::any_of(vec![chain, journal]).unwrap(),
                 Axes {
                     event: false,
-                    sibling: false,
+                    sibling: SiblingReads::None,
                     projected: true,
                     history: HistoryReads::NONE,
                 },
@@ -8822,8 +9024,12 @@ mod tests {
             );
             let actual = scan_quantity_ref(&qty, ScanMode::Conservative);
             assert_eq!(
-                (actual.event, actual.sibling, actual.projected),
-                (expected.event, expected.sibling, expected.projected),
+                (actual.event, actual.sibling.is_read(), actual.projected),
+                (
+                    expected.event,
+                    expected.sibling.is_read(),
+                    expected.projected
+                ),
                 "{source:?}"
             );
         }
@@ -8862,10 +9068,14 @@ mod tests {
         let base_axes = resolved_ability_axes(&base, ScanMode::Conservative);
         let divided_axes = resolved_ability_axes(&divided, ScanMode::Conservative);
         assert_eq!(
-            (base_axes.event, base_axes.sibling, base_axes.projected),
+            (
+                base_axes.event,
+                base_axes.sibling.is_read(),
+                base_axes.projected
+            ),
             (
                 divided_axes.event,
-                divided_axes.sibling,
+                divided_axes.sibling.is_read(),
                 divided_axes.projected
             )
         );
@@ -8943,18 +9153,24 @@ mod tests {
             ("Token", &token as &dyn Fn(Option<ControllerRef>) -> Effect),
             ("CopyTokenOf", &copy),
         ] {
-            let unnamed = scan_effect(&build(None), ScanMode::LoopFirewall);
+            let unnamed = scan_effect(&build(None), ScanMode::LoopFirewall).detached();
             let defending = scan_effect(
                 &build(Some(ControllerRef::DefendingPlayer)),
                 ScanMode::LoopFirewall,
-            );
+            )
+            .detached();
             let triggering = scan_effect(
                 &build(Some(ControllerRef::TriggeringPlayer)),
                 ScanMode::LoopFirewall,
-            );
+            )
+            .detached();
             assert_eq!(
-                (defending.event, defending.sibling, defending.projected),
-                (unnamed.event, unnamed.sibling, unnamed.projected),
+                (
+                    defending.event,
+                    defending.sibling.is_read(),
+                    defending.projected
+                ),
+                (unnamed.event, unnamed.sibling.is_read(), unnamed.projected),
                 "{label}: the defending player adds no axis"
             );
             assert!(
@@ -8997,16 +9213,22 @@ mod tests {
             ("Token", &token as &dyn Fn(Option<PlayerFilter>) -> Effect),
             ("CopyTokenOf", &copy),
         ] {
-            let unnamed = scan_effect(&build(None), ScanMode::LoopFirewall);
+            let unnamed = scan_effect(&build(None), ScanMode::LoopFirewall).detached();
             let opponents =
-                scan_effect(&build(Some(PlayerFilter::Opponent)), ScanMode::LoopFirewall);
+                scan_effect(&build(Some(PlayerFilter::Opponent)), ScanMode::LoopFirewall)
+                    .detached();
             let lost_life = scan_effect(
                 &build(Some(PlayerFilter::OpponentLostLife)),
                 ScanMode::LoopFirewall,
-            );
+            )
+            .detached();
             assert_eq!(
-                (opponents.event, opponents.sibling, opponents.projected),
-                (unnamed.event, unnamed.sibling, unnamed.projected),
+                (
+                    opponents.event,
+                    opponents.sibling.is_read(),
+                    opponents.projected
+                ),
+                (unnamed.event, unnamed.sibling.is_read(), unnamed.projected),
                 "{label}: each opponent adds no axis"
             );
             assert!(
@@ -9020,8 +9242,8 @@ mod tests {
     /// Revert-probe: make the Token arm descend unconditionally ⇒ `event` flips false.
     #[test]
     fn conservative_mode_token_axes_are_unchanged() {
-        let axes = scan_effect(&vanilla_token(), ScanMode::Conservative);
-        assert!(axes.event && axes.sibling && axes.projected);
+        let axes = scan_effect(&vanilla_token(), ScanMode::Conservative).detached();
+        assert!(axes.event && axes.sibling.is_read() && axes.projected);
     }
 
     /// Same for `Effect::Mana`.
@@ -9038,7 +9260,7 @@ mod tests {
             target: None,
         };
         let axes = scan_effect(&mana, ScanMode::Conservative);
-        assert!(axes.event && axes.sibling && axes.projected);
+        assert!(axes.event && axes.sibling.is_read() && axes.projected);
     }
 
     /// The CR 603.3b trigger-ordering gate is byte-identical for a token-bodied
@@ -9063,14 +9285,16 @@ mod tests {
     /// Revert-probe: bind `count` to `_` in the Token arm ⇒ the dynamic assertion flips.
     #[test]
     fn loop_firewall_mode_token_axes_descend() {
-        let axes = scan_effect(&vanilla_token(), ScanMode::LoopFirewall);
-        assert!(!axes.event && !axes.sibling && !axes.projected);
+        let axes = scan_effect(&vanilla_token(), ScanMode::LoopFirewall).detached();
+        assert!(!axes.event && !axes.sibling.is_read() && !axes.projected);
 
         let mut dyn_tok = vanilla_token();
         if let Effect::Token { count, .. } = &mut dyn_tok {
             *count = object_count();
         }
-        assert!(scan_effect(&dyn_tok, ScanMode::LoopFirewall).sibling);
+        assert!(scan_effect(&dyn_tok, ScanMode::LoopFirewall)
+            .sibling
+            .is_read());
     }
 
     // ---- the `Effect::Pump` blanket becomes a mode-split descent ----
@@ -9159,7 +9383,7 @@ mod tests {
         let inert = read_free_pump(TargetFilter::SelfRef);
         let axes = scan_effect(&inert, ScanMode::LoopFirewall);
         assert_eq!(
-            (axes.event, axes.sibling, axes.projected),
+            (axes.event, axes.sibling.is_read(), axes.projected),
             (false, false, false),
             "CR 732.2a: a `Pump` with two `PtValue::Fixed` halves and a `SelfRef` target \
              reads NOTHING — an AST property, since `PtValue::Fixed` is a literal, and \
@@ -9176,7 +9400,7 @@ mod tests {
         let hawk = hawk_attack_pump();
         let hawk_axes = scan_effect(&hawk, ScanMode::LoopFirewall);
         assert_eq!(
-            (hawk_axes.event, hawk_axes.sibling, hawk_axes.projected),
+            (hawk_axes.event, hawk_axes.sibling.is_read(), hawk_axes.projected),
             (false, true, false),
             "SOUNDNESS — CR 608.2h, operative here and not decorative: this pump requires \
              \"information from the game (such as the number of creatures on the \
@@ -9205,7 +9429,7 @@ mod tests {
     ///
     /// REVERT-PROBE: restore the `if acc.projected { Axes::CONSERVATIVE }` escalation ⇒
     /// the projected pump reports `(true, true, true)` ⇒ **FAILS**; narrow
-    /// [`ability_definition_reads_growing_class_for_loop`] to `.sibling` ⇒ **FAILS**.
+    /// [`ability_definition_reads_growing_class_for_loop`] to `.sibling.is_read()` ⇒ **FAILS**.
     #[test]
     fn projected_reading_pump_reports_its_axes_precisely_and_the_consumer_sees_them() {
         let projected_half = PtValue::Quantity(QuantityExpr::Ref {
@@ -9217,10 +9441,10 @@ mod tests {
         // ── AXIS ISOLATION: the payload is projected-ONLY, which is the whole hazard ──
         let half = scan_pt_value(&projected_half, ScanMode::LoopFirewall);
         assert_eq!(
-            (half.event, half.sibling, half.projected),
+            (half.event, half.sibling.is_read(), half.projected),
             (false, false, true),
             "AXIS ISOLATION: `QuantityRef::LifeTotal` is classified projected-ONLY. It is \
-             the `sibling: false` half that makes this dangerous — a `.sibling`-only consult \
+             the `sibling: false` half that makes this dangerous — a `.sibling.is_read()`-only consult \
              could not see it. If this triple ever changes, the consult's `projected` half \
              stops being the thing under test"
         );
@@ -9232,7 +9456,7 @@ mod tests {
         };
         let axes = scan_effect(&projected_pump, ScanMode::LoopFirewall);
         assert_eq!(
-            (axes.event, axes.sibling, axes.projected),
+            (axes.event, axes.sibling.is_read(), axes.projected),
             (false, false, true),
             "CR 608.2h + CR 732.2a: a pump scaled by a life total requires \"information \
              from the game\", \"determined only once, when the effect is applied\", so each \
@@ -9252,7 +9476,7 @@ mod tests {
                 projected_pump.clone(),
             )),
             "the consult must see the `projected` half: `analysis::resource`'s blocks (1b) \
-             and (2) ask this predicate and nothing else, so a `.sibling`-only reader would \
+             and (2) ask this predicate and nothing else, so a `.sibling.is_read()`-only reader would \
              relieve a life-total-scaled pump the pre-descent blanket vetoed"
         );
 
@@ -9260,7 +9484,8 @@ mod tests {
         let inert = scan_effect(
             &read_free_pump(TargetFilter::SelfRef),
             ScanMode::LoopFirewall,
-        );
+        )
+        .detached();
         assert!(
             !ability_definition_reads_growing_class_for_loop(&AbilityDefinition::new(
                 AbilityKind::Activated,
@@ -9270,7 +9495,7 @@ mod tests {
              consult relieves it and the widening cannot have become a blanket"
         );
         assert_eq!(
-            (inert.event, inert.sibling, inert.projected),
+            (inert.event, inert.sibling.is_read(), inert.projected),
             (false, false, false),
             "the arm relieves on the payload, so a read-free pump is still relieved. If \
              this flips, the narrowing became an all-or-nothing veto and P3's whole \
@@ -9278,9 +9503,9 @@ mod tests {
         );
 
         // ── CONTROL 2: precision on the SIBLING axis survives the descent ──────────
-        let hawk = scan_effect(&hawk_attack_pump(), ScanMode::LoopFirewall);
+        let hawk = scan_effect(&hawk_attack_pump(), ScanMode::LoopFirewall).detached();
         assert_eq!(
-            (hawk.event, hawk.sibling, hawk.projected),
+            (hawk.event, hawk.sibling.is_read(), hawk.projected),
             (false, true, false),
             "the aggregate pump's PRECISE triple must survive: this arm classifies the \
              payload, never \"reads anything\""
@@ -9315,7 +9540,8 @@ mod tests {
         let by_condition = scan_ability_condition(
             &AbilityCondition::nth_resolution_this_turn(2),
             ScanMode::LoopFirewall,
-        );
+        )
+        .detached();
         let refs = [
             (
                 "LifeGainedThisTurn",
@@ -9359,11 +9585,11 @@ mod tests {
             // way. The growing class is `sibling` ∨ `projected` (CR 732.2a) and that
             // pair is what these rows rest on.
             assert_eq!(
-                (axes.sibling, axes.projected),
+                (axes.sibling.is_read(), axes.projected),
                 (false, true),
                 "AXIS ISOLATION ({label}): CR 732.2a — this shape is classified \
                  projected-ONLY, and the `sibling: false` half is exactly what makes it a \
-                 hazard a `.sibling`-only consult could not see. If it ever gains \
+                 hazard a `.sibling.is_read()`-only consult could not see. If it ever gains \
                  `sibling`, `analysis::resource`'s projected-surface rows stop testing the \
                  axis they name"
             );
@@ -9387,7 +9613,7 @@ mod tests {
         ] {
             let axes = scan_effect(&effect, ScanMode::Conservative);
             assert_eq!(
-                (axes.event, axes.sibling, axes.projected),
+                (axes.event, axes.sibling.is_read(), axes.projected),
                 (true, true, true),
                 "{label}: CR 603.3b — under `Conservative` the `Effect::Pump` arm must stay \
                  the byte-identical fail-closed blanket every non-firewall consumer already \
@@ -9435,9 +9661,10 @@ mod tests {
                 true,
             ),
         ] {
-            let axes = scan_effect(&read_free_pump(target), ScanMode::LoopFirewall);
+            let axes = scan_effect(&read_free_pump(target), ScanMode::LoopFirewall).detached();
             assert_eq!(
-                axes.sibling, expected,
+                axes.sibling.is_read(),
+                expected,
                 "{label}: the P/T halves are `PtValue::Fixed` on all three, so this verdict \
                  is the TARGET leg's and nothing else. CR 732.2a: a target naming a live \
                  board population reads the growing class; a self-reference and a bare \
@@ -9540,7 +9767,9 @@ mod tests {
         };
         *power = PtValue::Quantity(object_count());
         assert!(
-            ability_definition_axes(&reading, ScanMode::LoopFirewall).sibling,
+            ability_definition_axes(&reading, ScanMode::LoopFirewall)
+                .sibling
+                .is_read(),
             "reach guard: with the granted trigger's pump scaled by a board `ObjectCount`, \
              the SAME four-segment descent must still read the sibling axis. If this flips, \
              the relief below is a global kill switch rather than a payload descent and \
@@ -9549,7 +9778,9 @@ mod tests {
 
         // THE CLAIM.
         assert!(
-            !ability_definition_axes(&parsed.abilities[1], ScanMode::LoopFirewall).sibling,
+            !ability_definition_axes(&parsed.abilities[1], ScanMode::LoopFirewall)
+                .sibling
+                .is_read(),
             "CR 732.2a: the granted trigger's body is a `Pump{{Fixed(1), Fixed(0), \
              SelfRef}}`. That it requires no information from the game is an AST property \
              (both `PtValue`s are literals), not a rules one, so no CR is cited for it. \
@@ -9566,7 +9797,7 @@ mod tests {
             &ContinuousModification::AddPower { value: 2 },
             ScanMode::LoopFirewall,
         );
-        assert!(!axes.event && !axes.sibling && !axes.projected);
+        assert!(!axes.event && !axes.sibling.is_read() && !axes.projected);
     }
 
     /// A dynamic-P/T modification reads a sibling aggregate.
@@ -9576,7 +9807,9 @@ mod tests {
         let m = ContinuousModification::SetDynamicPower {
             value: object_count(),
         };
-        assert!(scan_continuous_modification(&m, ScanMode::LoopFirewall).sibling);
+        assert!(scan_continuous_modification(&m, ScanMode::LoopFirewall)
+            .sibling
+            .is_read());
     }
 
     /// A token whose `enter_with_counters` count is a board `ObjectCount`
@@ -9593,7 +9826,7 @@ mod tests {
         {
             *enter_with_counters = vec![(CounterType::Plus1Plus1, object_count())];
         }
-        assert!(scan_effect(&tok, ScanMode::LoopFirewall).sibling);
+        assert!(scan_effect(&tok, ScanMode::LoopFirewall).sibling.is_read());
     }
 
     /// A token whose granted static ability carries a dynamic-P/T modification
@@ -9612,7 +9845,7 @@ mod tests {
                 },
             ])];
         }
-        assert!(scan_effect(&tok, ScanMode::LoopFirewall).sibling);
+        assert!(scan_effect(&tok, ScanMode::LoopFirewall).sibling.is_read());
     }
 
     /// A token carrying a growing-cost keyword (Convoke — a UNIT variant
@@ -9625,7 +9858,7 @@ mod tests {
         if let Effect::Token { keywords, .. } = &mut tok {
             *keywords = vec![Keyword::Convoke];
         }
-        assert!(scan_effect(&tok, ScanMode::LoopFirewall).sibling);
+        assert!(scan_effect(&tok, ScanMode::LoopFirewall).sibling.is_read());
     }
 
     /// `AddCounterOnEnter` with a dynamic count reads sibling — it looks
@@ -9638,7 +9871,9 @@ mod tests {
             count: object_count(),
             if_type: None,
         };
-        assert!(scan_continuous_modification(&m, ScanMode::LoopFirewall).sibling);
+        assert!(scan_continuous_modification(&m, ScanMode::LoopFirewall)
+            .sibling
+            .is_read());
     }
 
     /// A board-color aggregate self-asserts its OWN `sibling`, even
@@ -9651,7 +9886,9 @@ mod tests {
         let p = ManaProduction::DistinctColorsAmongPermanents {
             filter: TargetFilter::Controller,
         };
-        assert!(scan_mana_production(&p, ScanMode::LoopFirewall).sibling);
+        assert!(scan_mana_production(&p, ScanMode::LoopFirewall)
+            .sibling
+            .is_read());
     }
 
     /// `TriggerEventManaType` reads the triggering event (event axis).
@@ -9679,7 +9916,9 @@ mod tests {
             color_options: vec![ManaColor::Green],
             contribution: ManaContribution::Base,
         };
-        assert!(scan_mana_production(&p, ScanMode::LoopFirewall).sibling);
+        assert!(scan_mana_production(&p, ScanMode::LoopFirewall)
+            .sibling
+            .is_read());
     }
 
     // ---- CR 732.2a Typed-precision census discipline ----
@@ -9695,19 +9934,27 @@ mod tests {
         use FilterReadContext::{LiveBoardCensus, SnapshotOrEvent};
         use ScanMode::LoopFirewall;
         let bare = TargetFilter::Typed(TypedFilter::creature());
-        assert!(!scan_target_filter(&bare, SnapshotOrEvent, LoopFirewall).sibling);
+        assert!(!scan_target_filter(&bare, SnapshotOrEvent, LoopFirewall)
+            .sibling
+            .is_read());
         let notf = TargetFilter::Not {
             filter: Box::new(bare.clone()),
         };
-        assert!(!scan_target_filter(&notf, SnapshotOrEvent, LoopFirewall).sibling);
+        assert!(!scan_target_filter(&notf, SnapshotOrEvent, LoopFirewall)
+            .sibling
+            .is_read());
         let orf = TargetFilter::Or {
             filters: vec![bare.clone()],
         };
-        assert!(!scan_target_filter(&orf, SnapshotOrEvent, LoopFirewall).sibling);
+        assert!(!scan_target_filter(&orf, SnapshotOrEvent, LoopFirewall)
+            .sibling
+            .is_read());
         let andf = TargetFilter::And {
             filters: vec![bare.clone()],
         };
-        assert!(!scan_target_filter(&andf, SnapshotOrEvent, LoopFirewall).sibling);
+        assert!(!scan_target_filter(&andf, SnapshotOrEvent, LoopFirewall)
+            .sibling
+            .is_read());
         // A board-reading property (nested `Targets{Typed}`) keeps sibling:true even
         // under SnapshotOrEvent (a journal/board-reading prop still vetoes).
         let prop_typed =
@@ -9716,13 +9963,25 @@ mod tests {
                     filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
                 }]),
             );
-        assert!(scan_target_filter(&prop_typed, SnapshotOrEvent, LoopFirewall).sibling);
-        // LiveBoardCensus ⇒ sibling:true for ANY shape (census base / bug-(a) fix).
-        assert!(scan_target_filter(&bare, LiveBoardCensus, LoopFirewall).sibling);
         assert!(
-            scan_target_filter(&TargetFilter::Controller, LiveBoardCensus, LoopFirewall).sibling
+            scan_target_filter(&prop_typed, SnapshotOrEvent, LoopFirewall)
+                .sibling
+                .is_read()
         );
-        assert!(scan_target_filter(&TargetFilter::Any, LiveBoardCensus, LoopFirewall).sibling);
+        // LiveBoardCensus ⇒ sibling:true for ANY shape (census base / bug-(a) fix).
+        assert!(scan_target_filter(&bare, LiveBoardCensus, LoopFirewall)
+            .sibling
+            .is_read());
+        assert!(
+            scan_target_filter(&TargetFilter::Controller, LiveBoardCensus, LoopFirewall)
+                .sibling
+                .is_read()
+        );
+        assert!(
+            scan_target_filter(&TargetFilter::Any, LiveBoardCensus, LoopFirewall)
+                .sibling
+                .is_read()
+        );
     }
 
     /// Each `LiveBoardCensus` HOLE arm (including `ControllerControlsMatching`
@@ -9742,106 +10001,97 @@ mod tests {
         use ScanMode::LoopFirewall;
         let ct = || TargetFilter::Typed(TypedFilter::creature());
         // Control: SnapshotOrEvent relaxes this exact filter (non-vacuity anchor).
-        assert!(!scan_target_filter(&ct(), SnapshotOrEvent, LoopFirewall).sibling);
+        assert!(!scan_target_filter(&ct(), SnapshotOrEvent, LoopFirewall)
+            .sibling
+            .is_read());
 
-        assert!(
-            scan_static_condition(
-                &StaticCondition::IsPresent { filter: Some(ct()) },
-                LoopFirewall
-            )
-            .sibling
-        );
-        assert!(
-            scan_static_condition(
-                &StaticCondition::DefendingPlayerControls { filter: ct() },
-                LoopFirewall
-            )
-            .sibling
-        );
-        assert!(
-            scan_trigger_condition(
-                &TriggerCondition::MinCoAttackers {
-                    minimum: 1,
-                    filter: Some(ct())
-                },
-                LoopFirewall
-            )
-            .sibling
-        );
-        assert!(
-            scan_trigger_condition(
-                &TriggerCondition::ControlsNone { filter: ct() },
-                LoopFirewall
-            )
-            .sibling
-        );
-        assert!(
-            scan_trigger_condition(
-                &TriggerCondition::DefendingPlayerControlsNone { filter: ct() },
-                LoopFirewall
-            )
-            .sibling
-        );
-        assert!(
-            scan_replacement_condition(
-                &ReplacementCondition::UnlessControlsMatching { filter: ct() },
-                LoopFirewall
-            )
-            .sibling
-        );
-        assert!(
-            scan_replacement_condition(
-                &ReplacementCondition::UnlessControlsCountMatching {
-                    minimum: 1,
-                    filter: ct()
-                },
-                LoopFirewall
-            )
-            .sibling
-        );
-        assert!(
-            scan_replacement_condition(
-                &ReplacementCondition::IfControlsMatching {
-                    minimum: 1,
-                    filter: ct()
-                },
-                LoopFirewall
-            )
-            .sibling
-        );
+        assert!(scan_static_condition(
+            &StaticCondition::IsPresent { filter: Some(ct()) },
+            LoopFirewall
+        )
+        .sibling
+        .is_read());
+        assert!(scan_static_condition(
+            &StaticCondition::DefendingPlayerControls { filter: ct() },
+            LoopFirewall
+        )
+        .sibling
+        .is_read());
+        assert!(scan_trigger_condition(
+            &TriggerCondition::MinCoAttackers {
+                minimum: 1,
+                filter: Some(ct())
+            },
+            LoopFirewall
+        )
+        .sibling
+        .is_read());
+        assert!(scan_trigger_condition(
+            &TriggerCondition::ControlsNone { filter: ct() },
+            LoopFirewall
+        )
+        .sibling
+        .is_read());
+        assert!(scan_trigger_condition(
+            &TriggerCondition::DefendingPlayerControlsNone { filter: ct() },
+            LoopFirewall
+        )
+        .sibling
+        .is_read());
+        assert!(scan_replacement_condition(
+            &ReplacementCondition::UnlessControlsMatching { filter: ct() },
+            LoopFirewall
+        )
+        .sibling
+        .is_read());
+        assert!(scan_replacement_condition(
+            &ReplacementCondition::UnlessControlsCountMatching {
+                minimum: 1,
+                filter: ct()
+            },
+            LoopFirewall
+        )
+        .sibling
+        .is_read());
+        assert!(scan_replacement_condition(
+            &ReplacementCondition::IfControlsMatching {
+                minimum: 1,
+                filter: ct()
+            },
+            LoopFirewall
+        )
+        .sibling
+        .is_read());
         // ControllerControlsMatching (a live board census).
-        assert!(
-            scan_ability_condition(
-                &AbilityCondition::ControllerControlsMatching { filter: ct() },
-                LoopFirewall
-            )
-            .sibling
-        );
+        assert!(scan_ability_condition(
+            &AbilityCondition::ControllerControlsMatching { filter: ct() },
+            LoopFirewall
+        )
+        .sibling
+        .is_read());
         // Dual-read ObjectsShareQuality (subject + reference both census).
-        assert!(
-            scan_ability_condition(
-                &AbilityCondition::ObjectsShareQuality {
-                    subject: ct(),
-                    reference: ct(),
-                    quality: SharedQuality::Name,
-                },
-                LoopFirewall
-            )
-            .sibling
-        );
+        assert!(scan_ability_condition(
+            &AbilityCondition::ObjectsShareQuality {
+                subject: ct(),
+                reference: ct(),
+                quality: SharedQuality::Name,
+            },
+            LoopFirewall
+        )
+        .sibling
+        .is_read());
         // ZoneCardCount (a battlefield-scoped census, unconditional fail-closed).
-        assert!(
-            scan_quantity_ref(
-                &QuantityRef::ZoneCardCount {
-                    zone: ZoneRef::Graveyard,
-                    card_types: vec![],
-                    filter: Some(ct()),
-                    scope: CountScope::Controller,
-                },
-                LoopFirewall
-            )
-            .sibling
-        );
+        assert!(scan_quantity_ref(
+            &QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Graveyard,
+                card_types: vec![],
+                filter: Some(ct()),
+                scope: CountScope::Controller,
+            },
+            LoopFirewall
+        )
+        .sibling
+        .is_read());
         // CR 608.2c: the same filter over a set one exile produced "this way" reads no census.
         let tracked = |caused_by| {
             scan_quantity_ref(
@@ -9852,6 +10102,7 @@ mod tests {
                 LoopFirewall,
             )
             .sibling
+            .is_read()
         };
         assert_eq!(
             (
@@ -9882,7 +10133,7 @@ mod tests {
         for mode in [ScanMode::Conservative, ScanMode::LoopFirewall] {
             let axes = scan_replacement_condition(&dragonskull, mode);
             assert!(
-                axes.sibling,
+                axes.sibling.is_read(),
                 "the evaluator walks the battlefield for another controlled permanent carrying \
                  a listed subtype, so the scan must report the sibling axis in every mode"
             );
@@ -9956,9 +10207,10 @@ mod tests {
                 filter: TypedFilter::land(),
             },
             ScanMode::Conservative,
-        );
+        )
+        .detached();
         assert!(
-            leq.sibling && leq.projected && leq.event,
+            leq.sibling.is_read() && leq.projected && leq.event,
             "untouched cluster sibling: a red here says the edit reached this arm too, i.e. the \
              whole `UnlessControls*` cluster was retuned rather than the one arm this row pins"
         );
@@ -10753,20 +11005,20 @@ mod tests {
         let oc = QuantityRef::ObjectCount {
             filter: TargetFilter::Typed(TypedFilter::creature()),
         };
-        assert!(scan_quantity_ref(&oc, Conservative).sibling);
-        assert!(scan_quantity_ref(&oc, LoopFirewall).sibling);
+        assert!(scan_quantity_ref(&oc, Conservative).sibling.is_read());
+        assert!(scan_quantity_ref(&oc, LoopFirewall).sibling.is_read());
         let oc2 = QuantityRef::ObjectCount {
             filter: TargetFilter::Controller,
         };
-        assert!(scan_quantity_ref(&oc2, Conservative).sibling);
-        assert!(scan_quantity_ref(&oc2, LoopFirewall).sibling);
+        assert!(scan_quantity_ref(&oc2, Conservative).sibling.is_read());
+        assert!(scan_quantity_ref(&oc2, LoopFirewall).sibling.is_read());
     }
 
     #[test]
     fn noted_mana_effect_is_read_free_and_deterministic() {
         let effect = Effect::NoteManaSpent;
         let axes = scan_effect(&effect, ScanMode::LoopFirewall);
-        assert!(!axes.event && !axes.sibling && !axes.projected);
+        assert!(!axes.event && !axes.sibling.is_read() && !axes.projected);
         assert_eq!(
             effect_target_ctx(&effect, ScanMode::LoopFirewall),
             FilterReadContext::SnapshotOrEvent
@@ -11008,7 +11260,7 @@ mod tests {
         // keeps the delta explicit.
         let generic_axes = scan_ability_condition(&generic, ScanMode::Conservative);
         assert!(generic_axes.event);
-        assert!(generic_axes.sibling);
+        assert!(generic_axes.sibling.is_read());
         assert!(generic_axes.projected);
         // The public projection consumed by `analysis::resource` agrees.
         assert!(ability_condition_reads_projected_resource(&generic));
@@ -11023,7 +11275,7 @@ mod tests {
         };
         let legacy_axes = scan_ability_condition(&legacy, ScanMode::Conservative);
         assert!(!legacy_axes.event);
-        assert!(!legacy_axes.sibling);
+        assert!(!legacy_axes.sibling.is_read());
         assert!(!legacy_axes.projected);
         assert!(!ability_condition_reads_projected_resource(&legacy));
     }
@@ -11125,7 +11377,9 @@ mod tests {
         // (2) THE DISCRIMINATOR — the SIBLING half of the growing class, under
         // LoopFirewall, the CR 732.2a firewall's mode.
         assert!(
-            ability_definition_axes(&ledger, ScanMode::LoopFirewall).sibling,
+            ability_definition_axes(&ledger, ScanMode::LoopFirewall)
+                .sibling
+                .is_read(),
             "(2) CR 732.2a: the ledger read must carry the SIBLING axis under \
              LoopFirewall, the mode the two `..._for_loop` scan sites in \
              `analysis::resource` use. Those sites read `sibling ∨ projected`, and \
@@ -11137,11 +11391,15 @@ mod tests {
         assert_eq!(
             (
                 ability_definition_reads_sibling_mutable(&ledger),
-                ability_definition_axes(&ledger, ScanMode::LoopFirewall).sibling,
+                ability_definition_axes(&ledger, ScanMode::LoopFirewall)
+                    .sibling
+                    .is_read(),
             ),
             (
                 ability_definition_reads_sibling_mutable(&live),
-                ability_definition_axes(&live, ScanMode::LoopFirewall).sibling,
+                ability_definition_axes(&live, ScanMode::LoopFirewall)
+                    .sibling
+                    .is_read(),
             ),
             "(3) parity: `BattlefieldEntriesThisTurn` and `EnteredThisTurn` are the \
              same board-aggregate class on the sibling axis, in both scan modes",
@@ -11201,7 +11459,9 @@ mod tests {
         // calls. That site reads `sibling ∨ projected`, which is green on the
         // `projected` half alone and so cannot be this row's instrument.
         assert!(
-            ability_definition_axes(execute, ScanMode::LoopFirewall).sibling,
+            ability_definition_axes(execute, ScanMode::LoopFirewall)
+                .sibling
+                .is_read(),
             "(2) CR 732.2a: a shipped ledger observer must veto an object-growth \
              certificate on the SIBLING axis — its `projected` half predates Step 0c \
              and cannot tell this body from one that never reads the board",
@@ -11275,7 +11535,7 @@ mod tests {
             ScanMode::Conservative,
         );
         assert!(axes.event);
-        assert!(!axes.sibling);
+        assert!(!axes.sibling.is_read());
         assert!(!axes.projected);
     }
 
@@ -11310,17 +11570,18 @@ mod tests {
             },
             FilterReadContext::SnapshotOrEvent,
             ScanMode::Conservative,
-        );
+        )
+        .detached();
         let direct = scan_player_filter(&payload, ScanMode::Conservative);
 
         // The carrier must report exactly what its payload reports, on every axis.
         assert_eq!(scanned.event, direct.event);
-        assert_eq!(scanned.sibling, direct.sibling);
+        assert_eq!(scanned.sibling.is_read(), direct.sibling.is_read());
         assert_eq!(scanned.projected, direct.projected);
         // …and that report must be non-empty: a life-total predicate reads
         // projected per-player state, so `Axes::NONE` would be a blind default.
         assert!(
-            scanned.event || scanned.sibling || scanned.projected,
+            scanned.event || scanned.sibling.is_read() || scanned.projected,
             "PlayerMatching over a life-total predicate must not scan as NONE"
         );
     }
@@ -11337,7 +11598,7 @@ mod tests {
             ScanMode::Conservative,
         );
         assert!(axes.event, "must be event-bound");
-        assert!(!axes.sibling);
+        assert!(!axes.sibling.is_read());
         assert!(!axes.projected);
     }
 
@@ -11350,7 +11611,7 @@ mod tests {
         let axes =
             scan_trigger_condition(&TriggerCondition::ChoseRingBearer, ScanMode::Conservative);
         assert!(axes.event, "must be event-bound");
-        assert!(!axes.sibling);
+        assert!(!axes.sibling.is_read());
         assert!(!axes.projected);
     }
 
@@ -11371,7 +11632,7 @@ mod tests {
     /// the `Typed` arm -> `typed_filter_axes` -> `scan_filter_prop` ->
     /// `FilterProp::Targets` -> `scan_target_filter(.., LiveBoardCensus, ..)`,
     /// whose `base` injects `sibling: true`. A bare `Typed{Creature}` would NOT
-    /// do: under `LoopFirewall` the `Typed` arm relaxes to `props.sibling`.
+    /// do: under `LoopFirewall` the `Typed` arm relaxes to `props.sibling.is_read()`.
     fn census_asserting_filter() -> TargetFilter {
         TargetFilter::Typed(TypedFilter {
             properties: vec![FilterProp::Targets {
@@ -11408,7 +11669,8 @@ mod tests {
                 FilterReadContext::SnapshotOrEvent,
                 ScanMode::LoopFirewall,
             )
-            .sibling,
+            .sibling
+            .is_read(),
             "fixture filter must self-assert sibling from its OWN shape (relaxed ctx)"
         );
         // Control on the shape that would make the population degenerate.
@@ -11418,7 +11680,8 @@ mod tests {
                 FilterReadContext::SnapshotOrEvent,
                 ScanMode::LoopFirewall,
             )
-            .sibling,
+            .sibling
+            .is_read(),
             "a bare Typed{{Creature}} must RELAX under LoopFirewall — if it does not, \
              the fixture above proves nothing about FilterProp recursion"
         );
@@ -11449,7 +11712,9 @@ mod tests {
     }
 
     fn sibling_of(m: &ContinuousModification) -> bool {
-        scan_continuous_modification(m, ScanMode::LoopFirewall).sibling
+        scan_continuous_modification(m, ScanMode::LoopFirewall)
+            .sibling
+            .is_read()
     }
 
     // ── B-1 (POSITIVE) ──────────────────────────────────────────────────────
@@ -11499,7 +11764,8 @@ mod tests {
                     FilterReadContext::SnapshotOrEvent,
                     ScanMode::LoopFirewall
                 )
-                .sibling,
+                .sibling
+                .is_read(),
                 "population is DEGENERATE: this filter would not self-assert sibling \
                  even if the path were scanned, so the row below proves nothing"
             );
@@ -11643,7 +11909,7 @@ mod tests {
              resolution-time event read (CR 603.4) the ordering term consumes"
         );
         assert!(
-            axes.sibling,
+            axes.sibling.is_read(),
             "paired positive: the SAME matcher's board read still propagates, so the \
              mask above is axis-scoped and not a re-muted path"
         );
@@ -11872,7 +12138,7 @@ mod tests {
         let payload = class_reading_trigger();
         let payload_axes = scan_trigger_definition(&payload, ScanMode::LoopFirewall);
         assert!(
-            payload_axes.sibling,
+            payload_axes.sibling.is_read(),
             "payload DEGENERATE: the trigger fixture the delegating cases carry must scan \
              non-inert through the very function those arms call, or deleting the delegation \
              would be invisible here"
@@ -11949,7 +12215,7 @@ mod tests {
         for (label, condition) in &cases {
             let axes = scan_delayed_trigger_condition(condition, ScanMode::LoopFirewall);
             assert_eq!(
-                (axes.event, axes.sibling, axes.projected),
+                (axes.event, axes.sibling.is_read(), axes.projected),
                 expected_delayed_axes(condition),
                 "{label}: CR 732.2a — this variant's exact read-axis triple. A constant \
                  implementation in either direction fails some case in this table"
@@ -11973,7 +12239,11 @@ mod tests {
         let body = inert_delayed_body();
         let body_axes = ability_definition_axes(&body, ScanMode::LoopFirewall);
         assert_eq!(
-            (body_axes.event, body_axes.sibling, body_axes.projected),
+            (
+                body_axes.event,
+                body_axes.sibling.is_read(),
+                body_axes.projected
+            ),
             (false, false, false),
             "reach guard: the delayed body must read nothing, or the veto below could be \
              the body leg's rather than the condition leg's"
@@ -11981,7 +12251,9 @@ mod tests {
 
         let alt = class_reading_trigger();
         assert!(
-            scan_trigger_definition(&alt, ScanMode::LoopFirewall).sibling,
+            scan_trigger_definition(&alt, ScanMode::LoopFirewall)
+                .sibling
+                .is_read(),
             "population is DEGENERATE: the alternate matcher must itself read the growing \
              class, or a dropped `or_trigger` leg would be invisible here"
         );
@@ -11995,7 +12267,7 @@ mod tests {
             body.clone(),
         );
         assert!(
-            scan_effect(&node, ScanMode::LoopFirewall).sibling,
+            scan_effect(&node, ScanMode::LoopFirewall).sibling.is_read(),
             "CR 732.2a: \"when you next [event] OR [event]\" carries TWO matchers of equal \
              authority. Classifying only the first lets a board-reading alternate matcher \
              through the object-growth firewall"
@@ -12013,7 +12285,7 @@ mod tests {
         );
         let axes = scan_effect(&relieved, ScanMode::LoopFirewall);
         assert_eq!(
-            (axes.event, axes.sibling, axes.projected),
+            (axes.event, axes.sibling.is_read(), axes.projected),
             (false, false, false),
             "paired positive: with the alternate matcher gone the identical shape is \
              relieved, so the veto above is the `or_trigger` leg's"
@@ -12034,7 +12306,11 @@ mod tests {
         let body = inert_delayed_body();
         let body_axes = ability_definition_axes(&body, ScanMode::LoopFirewall);
         assert_eq!(
-            (body_axes.event, body_axes.sibling, body_axes.projected),
+            (
+                body_axes.event,
+                body_axes.sibling.is_read(),
+                body_axes.projected
+            ),
             (false, false, false),
             "reach guard: the delayed body must read nothing, so each triple below is the \
              condition's"
@@ -12076,9 +12352,10 @@ mod tests {
                 let axes = scan_effect(
                     &delayed_node(condition, body.clone()),
                     ScanMode::LoopFirewall,
-                );
+                )
+                .detached();
                 assert_eq!(
-                    (axes.event, axes.sibling, axes.projected),
+                    (axes.event, axes.sibling.is_read(), axes.projected),
                     expected,
                     "{variant} / {label}: only a population matcher reads the growing class"
                 );
@@ -12093,9 +12370,10 @@ mod tests {
                 body,
             ),
             ScanMode::LoopFirewall,
-        );
+        )
+        .detached();
         assert_eq!(
-            (axes.event, axes.sibling, axes.projected),
+            (axes.event, axes.sibling.is_read(), axes.projected),
             (false, false, false),
             "paired positive: a phase coordinate reaches no filter, so the identical node \
              shape is relieved"
@@ -12123,7 +12401,7 @@ mod tests {
 
         let axes = scan_effect(&flipped, ScanMode::LoopFirewall);
         assert_eq!(
-            (axes.event, axes.sibling, axes.projected),
+            (axes.event, axes.sibling.is_read(), axes.projected),
             (true, true, true),
             "CR 732.2a: the tracked object set belongs to the PARENT ability's resolution, \
              so this definition carries no way to classify what the body will resolve \
@@ -12132,9 +12410,9 @@ mod tests {
 
         // PAIRED POSITIVE: the same printed definition without the flag is relieved, so the
         // veto above is the flag's and not the payload's.
-        let printed = scan_effect(&chocobo_delayed_node(), ScanMode::LoopFirewall);
+        let printed = scan_effect(&chocobo_delayed_node(), ScanMode::LoopFirewall).detached();
         assert_eq!(
-            (printed.event, printed.sibling, printed.projected),
+            (printed.event, printed.sibling.is_read(), printed.projected),
             (false, false, false),
             "paired positive: one field apart, the printed definition is relieved"
         );
@@ -12159,7 +12437,7 @@ mod tests {
         ] {
             let axes = scan_effect(&node, ScanMode::Conservative);
             assert_eq!(
-                (axes.event, axes.sibling, axes.projected),
+                (axes.event, axes.sibling.is_read(), axes.projected),
                 (true, true, true),
                 "{label}: CR 603.3b — under `Conservative` this arm must stay the \
                  byte-identical fail-closed blanket every non-firewall consumer already \
@@ -12169,9 +12447,13 @@ mod tests {
 
         // PAIRED POSITIVE: the same printed definition under `LoopFirewall` descends, so the
         // row above is byte-identity and not an assertion that nothing ever descends.
-        let firewall = scan_effect(&chocobo_delayed_node(), ScanMode::LoopFirewall);
+        let firewall = scan_effect(&chocobo_delayed_node(), ScanMode::LoopFirewall).detached();
         assert_eq!(
-            (firewall.event, firewall.sibling, firewall.projected),
+            (
+                firewall.event,
+                firewall.sibling.is_read(),
+                firewall.projected
+            ),
             (false, false, false),
             "paired positive: the identical node descends under `LoopFirewall`"
         );
@@ -12212,10 +12494,14 @@ mod tests {
         // this row is about stops being under test.
         let body_axes = ability_definition_axes(&projected_body, ScanMode::LoopFirewall);
         assert_eq!(
-            (body_axes.event, body_axes.sibling, body_axes.projected),
+            (
+                body_axes.event,
+                body_axes.sibling.is_read(),
+                body_axes.projected
+            ),
             (false, false, true),
             "AXIS ISOLATION: the delayed body must be projected-ONLY. The `sibling: false` \
-             half is what makes it invisible to a `.sibling`-only consult"
+             half is what makes it invisible to a `.sibling.is_read()`-only consult"
         );
 
         let carrier = |body: AbilityDefinition| {
@@ -12235,7 +12521,7 @@ mod tests {
         assert!(
             !continuous_modification_reads_sibling_mutable(&m),
             "CR 732.2a: the delayed body reads a projected player resource and no board \
-             aggregate, so the `.sibling` entry point must report the relief this descent \
+             aggregate, so the `.sibling.is_read()` entry point must report the relief this descent \
              delivers on the granted-trigger carrier"
         );
         assert!(
@@ -12473,7 +12759,7 @@ mod tests {
         for m in &survivors {
             let axes = scan_continuous_modification(m, ScanMode::LoopFirewall);
             assert!(
-                axes.event && axes.sibling && axes.projected,
+                axes.event && axes.sibling.is_read() && axes.projected,
                 "B-5: blanket member must stay fail-closed CONSERVATIVE"
             );
         }
@@ -12481,7 +12767,7 @@ mod tests {
 
     fn loop_axes(effect: &Effect) -> (bool, bool, bool) {
         let axes = scan_effect(effect, ScanMode::LoopFirewall);
-        (axes.event, axes.sibling, axes.projected)
+        (axes.event, axes.sibling.is_read(), axes.projected)
     }
 
     fn move_onto_battlefield_with(edit: impl FnOnce(&mut Effect)) -> (bool, bool, bool) {
@@ -12667,13 +12953,16 @@ mod attacked_referent_scan_tests {
         let f = TargetFilter::AttackedPlayerOrPlaneswalker;
         for mode in [ScanMode::Conservative, ScanMode::LoopFirewall] {
             let axes = scan_target_filter(&f, FilterReadContext::SnapshotOrEvent, mode);
-            assert!(axes.event && axes.sibling && !axes.projected, "{mode:?}");
+            assert!(
+                axes.event && axes.sibling.is_read() && !axes.projected,
+                "{mode:?}"
+            );
             let none = scan_target_filter(
                 &TargetFilter::DefendingPlayer,
                 FilterReadContext::SnapshotOrEvent,
                 mode,
             );
-            assert!(!none.event && !none.sibling, "contrast: {mode:?}");
+            assert!(!none.event && !none.sibling.is_read(), "contrast: {mode:?}");
         }
     }
 }
