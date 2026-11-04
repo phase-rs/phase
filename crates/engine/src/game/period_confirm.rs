@@ -1840,6 +1840,15 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         {
             Ok(PeriodSign::Spend)
         }
+        // CR 704.5b + CR 800.4a + CR 732.2a: so was a second cycle its holder left the game in, a
+        // repetition the counting replay counts but does not offer; that cycle's pair compares a
+        // frame with itself, so the cover is read on the first pair alone.
+        (
+            Err(OfferRefusal::Cover(_)) | Ok(PeriodSign::Unbounded(_) | PeriodSign::LossAxis(_)),
+            Err(_),
+        ) if !crate::game::players::is_alive(&replay, holder) && first_pair_certifies(&verdict) => {
+            period_sign_check(&s_n, &s_n1, holder, library_cost).map(|_| PeriodSign::Spend)
+        }
         (sign, _) => sign,
     };
     let mut performed_reaches = Vec::new();
@@ -1995,6 +2004,15 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         performed,
         bounded,
     })
+}
+
+/// CR 732.2a: whether the cover certified the first of a verdict's two frame pairs; only a
+/// fodder-growth verdict reports its pairs apart.
+fn first_pair_certifies(verdict: &ObjectGrowthVerdict) -> bool {
+    match verdict {
+        ObjectGrowthVerdict::FodderGrowth([first, _]) => first.is_empty(),
+        verdict => verdict.certifies(),
+    }
 }
 
 /// What a held mandatory period's replay shows besides its recurrence.
@@ -2968,6 +2986,52 @@ mod tests {
                 Halt::Ends
             )
         );
+    }
+
+    /// CR 732.2a: a departure's second cycle excuses only the refusal its self-compared pair
+    /// makes, never one the first pair makes.
+    #[test]
+    fn only_the_first_pairs_cover_is_read_for_a_departed_second_cycle() {
+        use crate::analysis::resource::FodderCoverRefusal::BoardCover;
+        assert_eq!(
+            [vec![], vec![BoardCover]].map(|second| first_pair_certifies(
+                &ObjectGrowthVerdict::FodderGrowth([vec![], second])
+            )),
+            [true, true]
+        );
+        assert!(!first_pair_certifies(&ObjectGrowthVerdict::FodderGrowth([
+            vec![BoardCover],
+            vec![]
+        ])));
+        assert!(!first_pair_certifies(
+            &ObjectGrowthVerdict::ResourceRecurrence(None)
+        ));
+        assert!(first_pair_certifies(
+            &ObjectGrowthVerdict::ResourceRecurrence(Some(RecurrenceCover::GrowthRead))
+        ));
+    }
+
+    /// CR 603.3d + CR 732.2a: a mandatory answer is excused only when the replay went past it to
+    /// a later made item, so a two-occurrence period whose second target answer is still owed has
+    /// not come round at its half-period frame.
+    #[test]
+    fn a_trailing_mandatory_answer_is_owed_while_one_the_replay_went_past_is_not() {
+        let item = |play: bool, mandatory_answer: bool| PeriodItem {
+            seat: PlayerId(0),
+            action: GameAction::PassPriority,
+            play: play.then_some((0, PromptClass::Priority)),
+            mandatory_answer,
+            next_object_id: 0,
+            minted_since: 0,
+            cost_move: None,
+            point: None,
+        };
+        let alternating = [item(false, true), item(false, true)];
+        assert!(!cycle_complete(&alternating, &[true, false]));
+        assert!(cycle_complete(&alternating, &[true, true]));
+        let went_past = [item(false, true), item(true, false)];
+        assert!(cycle_complete(&went_past, &[false, true]));
+        assert!(!cycle_complete(&went_past, &[true, false]));
     }
 
     /// CR 405.5 + CR 400.7: a floor keeps the entries the next frame holds unchanged, so a

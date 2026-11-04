@@ -1446,6 +1446,43 @@ fn a_moldervine_altar_of_the_brood_period_is_counted_to_the_casters_library() {
     assert!(after.game_end.is_none() && eliminated(&after).is_empty());
 }
 
+/// CR 121.1 + CR 704.5b + CR 732.2a: the same period with one card left in P0's library at the
+/// offer draws it once, so one repetition is offered, and taking it leaves P0 in the game.
+#[test]
+fn a_moldervine_altar_of_the_brood_period_with_one_card_left_is_offered_one_repetition() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board(Some("Altar of the Brood"), db);
+    let state = runner.state_mut();
+    place(state, P0, "Moldervine Reclamation", db);
+    for (seat, keep) in [(P0, state.players[0].library.len() - 8), (P1, 3)] {
+        let cut: Vec<ObjectId> = state.players[seat.0 as usize]
+            .library
+            .iter()
+            .skip(keep)
+            .copied()
+            .collect();
+        for id in cut {
+            remove_from_zone(state, id, Zone::Library, seat);
+            state.objects.remove(&id);
+        }
+    }
+    drive_altar_offers(&mut runner, (altar, gravecrawler), 1, |_| false);
+    let state = runner.state();
+    assert_eq!(
+        [0, 1].map(|seat| state.players[seat].library.len()),
+        [1, 2],
+        "reach: the offer's libraries"
+    );
+    let WaitingFor::LoopShortcut { schema, road, .. } = &state.waiting_for else {
+        panic!("an offer");
+    };
+    assert_eq!(*road, OfferRoad::RecordedPeriod);
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(1));
+    let after = taken(state, 1);
+    assert_eq!(after.players[0].library.len(), 0);
+    assert!(after.game_end.is_none() && eliminated(&after).is_empty());
+}
+
 /// CR 732.1b: once both rotations of the Altar + Gravecrawler period are named, each later cycle
 /// asks and drives the same number of spans, every span a window names being confirmed afresh.
 #[test]
@@ -4065,7 +4102,8 @@ fn warp_windows(library: usize, turns: u32, db: &CardDatabase) -> Vec<(GameState
 
 /// CR 514.1 + CR 704.5b + CR 732.2a: at every window of both libraries' drives an offer suggests
 /// the lesser of the hand and library terms, and stands exactly where the two periods the
-/// confirmer replays both end before a discard and a draw from an empty library.
+/// confirmer replays both end before a discard and a draw from an empty library, or the first
+/// does and the second draws from an empty library, a repetition its caster leaves the game in.
 #[test]
 fn every_archaeomancer_window_is_offered_the_lesser_of_its_hand_and_library_terms() {
     let db = shared_card_db().expect("card db");
@@ -4075,9 +4113,10 @@ fn every_archaeomancer_window_is_offered_the_lesser_of_its_hand_and_library_term
         assert!(offered >= 2, "reach: {library} offers more than once");
         for (state, count) in &windows[1..] {
             let replayable = hand_term(state).min(state.players[0].library.len() as u32);
+            let last_card = replayable == 1 && library_term(state) == 1;
             assert_eq!(
                 *count,
-                (replayable >= 2).then(|| hand_term(state).min(library_term(state))),
+                (replayable >= 2 || last_card).then(|| hand_term(state).min(library_term(state))),
                 "{library} cards, turn {}",
                 state.turn_number
             );

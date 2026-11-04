@@ -9477,9 +9477,10 @@ fn untargeted_offer_board() -> (GameState, PlayerId) {
 ///
 /// # The two legs, in ONE invocation
 ///
-/// The ALLOCATED class publishes a charged victim slot, so a witness declaration can re-aim it
-/// after the first crossing and exhibit a longer cascade than the offer's own declaration drives —
-/// the pair DIFFERS. The UNTARGETED class publishes no charged slot, so there is no aim to move and
+/// On the F4 board with one card left at the offer (CR 121.1 + CR 704.5b), the second repetition
+/// draws from an empty library: declaring it is legal, but its proposer leaves in it, so the
+/// ceiling is 2 and the suggestion — the most repetitions the proposer survives — is 1, and the
+/// pair DIFFERS. The UNTARGETED class's proposer survives every repetition its ceiling admits, so
 /// the two COINCIDE. Both are asserted, so neither leg is satisfied by a difference that exists
 /// everywhere or by an equality that does.
 ///
@@ -9492,12 +9493,11 @@ fn untargeted_offer_board() -> (GameState, PlayerId) {
 /// # Discrimination
 ///
 /// Have the producer set both fields from one integer — which is what it did before this phase —
-/// and the allocated leg's strict inequality FAILS while the untargeted leg stays green. Publish
-/// the witness count as the suggestion too and the untargeted leg still passes while the allocated
-/// leg's `suggested < max` becomes an equality and fails.
+/// and the one-card leg's strict inequality FAILS while the untargeted leg stays green.
 #[test]
 fn the_count_pickers_ceiling_and_suggestion_are_two_numbers() {
-    let (allocated, allocated_proposer) = f4_offer_board();
+    let mut one_card = crate::fantastic_four_bounded_loop::f4_library_at_offer(1);
+    bind(&mut one_card, "interaction-contract-one-card-count-pair");
     let (untargeted, untargeted_proposer) = untargeted_offer_board();
 
     let pair = |state: &GameState, proposer: PlayerId, label: &str| -> (u32, u32, u32) {
@@ -9525,15 +9525,15 @@ fn the_count_pickers_ceiling_and_suggestion_are_two_numbers() {
         (min, suggested, max)
     };
 
-    // ── THE DIFFER LEG — the allocated class, whose charged slot a witness can re-aim.
-    let (_, allocated_suggested, allocated_max) =
-        pair(&allocated, allocated_proposer, "allocated class");
-    assert!(
-        allocated_suggested < allocated_max,
+    // ── THE DIFFER LEG — the proposer leaves in the last repetition the ceiling admits.
+    let (_, one_card_suggested, one_card_max) =
+        pair(&one_card, PlayerId(0), "one card at the offer");
+    assert_eq!(
+        (one_card_suggested, one_card_max),
+        (1, 2),
         "CR 732.2a: the ceiling is what SOME legal declaration may specify and the suggestion is \
-         what the offer's OWN declaration drives, so on a board where re-aiming the charged slot \
-         reaches a later crossing the two are different numbers; got suggested \
-         {allocated_suggested} vs max {allocated_max}"
+         the most repetitions the proposer survives, so with one card left they are different \
+         numbers"
     );
 
     // ── THE EQUAL LEG, in this same invocation — the untargeted class has no aim to move.

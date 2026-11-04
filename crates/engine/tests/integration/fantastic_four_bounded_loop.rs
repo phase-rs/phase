@@ -51,12 +51,11 @@ use engine::analysis::decision_template::{
 };
 use engine::analysis::resource::{AnnouncedLead, ChargeBound, PeriodicDelta, ResourceVector};
 use engine::game::engine::apply;
-use engine::types::ability::{ReplacementMode, TargetRef};
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, PersistedGameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
-use engine::types::replacements::ReplacementEvent;
 
 use crate::loop_shortcut_drain_boards::rederive_live_offer_bound;
 
@@ -505,15 +504,6 @@ fn f4_allocation_template(
         }
     }
     template
-}
-
-/// Restore the `Priority` window the reconcile bridge consumed when it raised the offer, so
-/// the mint can be re-run on the offer beat's OWN board. Every caller proves the
-/// reconstruction faithful by requiring the same outcome the production path produced.
-fn replay_at_priority(state: &GameState, proposer: PlayerId) -> GameState {
-    let mut replay = state.clone();
-    replay.waiting_for = WaitingFor::Priority { player: proposer };
-    replay
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -1538,354 +1528,6 @@ fn r23_5_reach_no_may_beat_of_the_f4_drive_carries_a_construction_cursor() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
-// R9 — the environmental discharge, on the production path
-// ─────────────────────────────────────────────────────────────────────────────────────────
-
-/// §6 R9 — **the environmental-discharge row round 2's def-scan design could not fail** — with
-/// its keying RE-DERIVED from measurement.
-///
-/// # What the row asserts
-///
-/// CR ANCHORS, CORRECTED: this row cited **CR 614.1a** for the choice. `614.1a` is
-/// "effects that use the word *instead*" — a sub-rule, and not the one that makes an
-/// optional replacement a choice. **CR 614.1** is the DEFINITION (replacement effects watch
-/// for an event and replace it) and **CR 732.2a** is the LOAD-BEARING half: a shortcut
-/// "can't include conditional actions, where the outcome of a game event determines the next
-/// action a player takes". CR 616.1 stays where it belongs — the two-or-more ORDERING branch.
-///
-/// On the offer-beat board, ONE CR 614.1 replacement definition that the resolver's OWN
-/// derivation draws turns the OFFER into `UnspecifiedChoiceWindow`; six definitions the
-/// resolver's derivation does NOT draw leave the offer standing. That contrast IS the claim:
-/// the obligation is **event-derived**, read off what the resolution proposes through
-/// `find_applicable_replacements`, and is NOT a scan over `def.event` NAMES. A name scan
-/// cannot distinguish the seven definitions below — they differ only in their `event` name.
-///
-/// # MEASURED PLAN CORRECTION — the plan's ChangeZone/token keying does not fire
-///
-/// §6 R9 keys this row on *"a def carrying `event: ReplacementEvent::ChangeZone` … because
-/// Sue's `ProposedEvent::CreateToken` draws it via the `ChangeZone` registry key"*. Measured on
-/// this board, that def leaves the offer standing — and the reason is already on record in this
-/// lane: U1-fin measured that `Effect::Token` never sets `CreateToken.copy`, and
-/// `apply_create_token_after_replacement_with_created_ids` gates the whole `TokenEntry` route
-/// on `if let Some(copy) = copy`, so **an `Effect::Token` resolution derives no token-entry
-/// event at all** (the same fact that re-keyed R19a). Sue's trigger IS an `Effect::Token`
-/// (`Wall` 0/4), so the plan's board cannot reach its own stated mechanism.
-///
-/// The row is therefore re-keyed onto the announced entry whose derivation the resolver DOES
-/// produce: **The Thing's mandatory `PutCounter P1P1 ×2`, deriving `ProposedEvent::AddCounter`**
-/// — same class, same seam, same conjunct, on the same real board. The falsified keys are not
-/// dropped: they ship as arm (b), where their NON-firing is the discriminator.
-///
-/// # Arms
-///
-/// * **(pos)** the UNMODIFIED offer-beat board OFFERS through the metered seam — asserted
-///   FIRST, so every refusal below is attributable to the definition and not to the replay.
-/// * **(a)** one OPTIONAL `AddCounter` definition ⇒ `UnspecifiedChoiceWindow` (CR 732.2a +
-///   CR 614.1: an optional replacement is a genuine resolution-time choice, and a described
-///   sequence may not contain one ⇒ the period is not choice-free).
-/// * **(a′)** the SAME definition, MANDATORY ⇒ still OFFERS. CR 616.1: a lone quantity
-///   modification commutes with nothing, so there is no ordering choice to make. This is what
-///   keeps (a) keyed to OPTIONALITY rather than to "a definition exists".
-/// * **(b)** six definitions whose events this board's resolutions never propose
-///   (`ChangeZone`, `Moved`, `CreateToken`, `Draw`, `DamageDone`, `RemoveCounter`), each
-///   OPTIONAL ⇒ all still OFFER. A `def.event`-name scan would have to refuse these too.
-///
-/// # Reach-guard
-///
-/// The live candidate authority is asked directly for the `ProposedEvent::AddCounter` The
-/// Thing's resolution proposes, and must return a non-empty set — otherwise (a)'s refusal
-/// could belong to some other conjunct.
-///
-/// # REVERT-PROBES — RUN, and the FIRST FOUR MEASURED **NOT** TO FLIP, which is the finding
-///
-/// The refusal is carried by **two independent authorities**, and each one alone is sufficient:
-///
-/// | probe (one production edit) | (a) |
-/// |---|---|
-/// | delete `resolution_events_are_discharged`'s `!causes.is_empty()` conjunct | still REFUSES |
-/// | disable `probe_resolution`'s `waiting_for`-discriminant arm | still REFUSES |
-/// | … + its `events.is_empty()` arm | still REFUSES |
-/// | … + its `event_is_accounted` arm (all three prompt arms) | still REFUSES |
-/// | **all three prompt arms AND the discharge conjunct** | **OFFERS ⇒ (a) FAILS** |
-///
-/// Measured at the seam with a throwaway instrument (run, read, deleted): on the unprobed tree
-/// The Thing's entry classifies `MayPrompt` — the resolver's OWN probe detects the pending
-/// optional replacement — and a MANDATORY entry publishes no `may`, so
-/// `pinned_may_choice_relief` returns `None` and conjunct (6) refuses there. Disable that
-/// detection and the entry classifies `FreeUnlessReplacements([AddCounter])`, whereupon the
-/// CR 732.2a + CR 614.1 discharge conjunct refuses instead. Defence in depth is the property; a row that
-/// flipped on either single edit would have been asserting over only one of the two.
-///
-/// ⚠ §6 R9's stated probe (*"swap `proposed_event_prompt_cause` back to a def-scan over
-/// `def.event` names"*) is not runnable — that scan and its class map were DELETED at U1 — and
-/// its predicted single-edit flip is refuted by the table above. Arm (b) covers what that probe
-/// was for: it exhibits six definitions a name scan could not distinguish from (a)'s.
-#[test]
-fn r9_the_offer_refuses_on_a_derived_replacement_obligation_not_on_a_definition_name() {
-    use engine::game::engine::{try_offer_bounded_cycle_shortcut_metered, ProbeCap};
-    use engine::types::ability::{QuantityModification, ReplacementDefinition};
-    use engine::types::counter::CounterType;
-    use engine::types::proposed_event::{CounterPlacement, ProposedEvent};
-
-    let mut state = load_f4();
-    let thing = resolve_by_name(&state, THING);
-    drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
-    let (proposer, _certificate, _schema) = offer_parts(&state);
-
-    // ── (pos) the matched positive, asserted first ──
-    let healthy = replay_at_priority(&state, proposer);
-    let (healthy_out, healthy_meter) =
-        try_offer_bounded_cycle_shortcut_metered(&healthy, false, ProbeCap::Shipped);
-    assert!(
-        healthy_out.is_ok(),
-        "matched positive: the UNMODIFIED offer-beat board must still OFFER through the \
-         metered seam, else every negative below is asserted over a board that refuses \
-         anyway. got {healthy_out:?}, meter {healthy_meter:?}"
-    );
-
-    // One definition, installed on an EXISTING P0-controlled permanent (never a new object),
-    // so board membership — and therefore every certification premise — is untouched.
-    // CR ANCHOR CORRECTED with the two above it: this said "CR 614.1a scopes a definition to
-    // its controller's events". It does not — `614.1a` is the "effects that use the word
-    // *instead*" sub-rule and says nothing about controllers. CR 614.1 is the definition a
-    // replacement definition answers to: it watches for the event its own text names.
-    let with_def = |event: ReplacementEvent, optional: bool| -> GameState {
-        let mut hostile = healthy.clone();
-        let mut def = ReplacementDefinition::new(event.clone());
-        if optional {
-            def.mode = ReplacementMode::Optional { decline: None };
-        }
-        if matches!(event, ReplacementEvent::Draw) {
-            // CR 121.2: a Draw definition must declare its stage or the pipeline debug-asserts.
-            def.draw_scope = Some(engine::types::ability::DrawReplacementScope::IndividualDraw);
-        }
-        def.quantity_modification = Some(QuantityModification::Plus { value: 1 });
-        hostile
-            .objects
-            .get_mut(&thing)
-            .expect("The Thing is on the battlefield")
-            .replacement_definitions
-            .push(def);
-        hostile
-    };
-    let outcome = |board: &GameState| {
-        try_offer_bounded_cycle_shortcut_metered(board, false, ProbeCap::Shipped)
-    };
-
-    // ── reach-guard: the LIVE candidate authority draws the optional AddCounter definition
-    //    for the very event The Thing's announced resolution proposes ──
-    let optional_counter_board = with_def(ReplacementEvent::AddCounter, true);
-    let proposed = ProposedEvent::AddCounter {
-        placement: CounterPlacement::Object {
-            actor: proposer,
-            object_id: thing,
-            counter_type: CounterType::Plus1Plus1,
-        },
-        count: 2,
-        applied: Default::default(),
-    };
-    let candidates = engine::game::replacement::find_applicable_replacements(
-        &optional_counter_board,
-        &proposed,
-        engine::game::replacement::replacement_registry(),
-    );
-    assert!(
-        !candidates.is_empty(),
-        "reach-guard: the live candidate authority must draw the definition for the \
-         `ProposedEvent::AddCounter` The Thing's `PutCounter P1P1 x2` proposes — a refusal \
-         over an EMPTY candidate set would belong to some other conjunct entirely"
-    );
-
-    // ── (a) the optional definition refuses ──
-    let (a_out, a_meter) = outcome(&optional_counter_board);
-    assert!(
-        matches!(
-            a_out,
-            Err(engine::game::engine::BoundedOfferRefusal::UnspecifiedChoiceWindow)
-        ),
-        "(a) CR 732.2a + CR 614.1: an OPTIONAL replacement candidate applicable to an \
-         ANNOUNCED entry's DERIVED event is a real resolution-time choice, so the period is \
-         not choice-free and the offer must be refused. got {a_out:?}, meter {a_meter:?}"
-    );
-
-    // ── (a′) the same definition, mandatory, still offers ──
-    let (a2_out, a2_meter) = outcome(&with_def(ReplacementEvent::AddCounter, false));
-    assert!(
-        a2_out.is_ok(),
-        "(a′) CR 616.1: a LONE mandatory quantity modification commutes with nothing, so it \
-         opens no ordering choice and the offer stands. Without this arm (a) would be keyed \
-         to `a definition exists` rather than to OPTIONALITY. got {a2_out:?}, meter {a2_meter:?}"
-    );
-
-    // ── (b) the def-NAME discriminator, RE-DERIVED: the one optional definition whose event
-    //    this board's announced resolutions still never propose ──
-    let b_event = ReplacementEvent::RemoveCounter;
-    let (b_out, b_meter) = outcome(&with_def(b_event.clone(), true));
-    assert!(
-        b_out.is_ok(),
-        "(b) {b_event:?}: this board's announced resolutions never PROPOSE this event, so an \
-         event-derived obligation must ignore the definition entirely and the offer must \
-         stand. A scan over `def.event` NAMES would refuse here exactly as it refuses in (a), \
-         which is what makes this arm the discriminator. got {b_out:?}, meter {b_meter:?}"
-    );
-
-    // ── (b′) the five events the WIDENED announced set really does propose ──
-    // Once Torch's damage and Reed's draw are announced, `ChangeZone`/`Moved`/`CreateToken`/
-    // `Draw`/`DamageDone` are genuinely derivable from this period's resolutions, so an
-    // OPTIONAL definition on any of them is a real CR 616.1 choice and must refuse. This arm
-    // is the paired positive control for (b): without it, (b) shrinking to one event could be
-    // read as the obligation going blind rather than as the proposal set widening.
-    for event in [
-        ReplacementEvent::ChangeZone,
-        ReplacementEvent::Moved,
-        ReplacementEvent::CreateToken,
-        ReplacementEvent::Draw,
-        ReplacementEvent::DamageDone,
-    ] {
-        let (c_out, c_meter) = outcome(&with_def(event.clone(), true));
-        assert!(
-            matches!(
-                c_out,
-                Err(engine::game::engine::BoundedOfferRefusal::UnspecifiedChoiceWindow)
-            ),
-            "(b′) {event:?}: the widened announced set PROPOSES this event, so an OPTIONAL \
-             replacement applicable to it is a genuine resolution-time choice and the offer \
-             must refuse. got {c_out:?}, meter {c_meter:?}"
-        );
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────
-// R16 — the probe budget does not starve the F4 acceptance fixture
-// ─────────────────────────────────────────────────────────────────────────────────────────
-
-/// §6 R16 (i) + the exact-demand pin, on the newly tracked F4 fixture.
-///
-/// The shipped `PROBE_BUDGET` was re-derived at U3 from dina's offering beat (demand 13). F4
-/// was UNTRACKED then, so the acceptance fixture this whole lane exists for had never been
-/// measured against the budget at all. Measured here, at F4's own offering beat, through the
-/// metered seam:
-///
-/// * the demand is EXACT — `Lowered(d)` offers and every `Lowered(n < d)` refuses, over the
-///   seam's closed cap domain. That is a sweep, not a single reading, so the number cannot be
-///   an artifact of one call;
-/// * `denied == false` at the shipped cap — the budget is not binding on this fixture;
-/// * the certification basis at that beat is recorded (`ResourceSignatureOnly`, basis B),
-///   because the meter is the only surface on which the basis is observable.
-///
-/// # (iii-b) THE ORDERING PIN, re-keyed onto an instrument that exists
-///
-/// §6 R16 (iii-b) asks for *"the honest count is 1"* at a beat carrying a non-exempt `optional`
-/// entry, with the revert *"move `try_charge_one` above the `optional` gate ⇒ the entry burns a
-/// charge in its primary pass as well as its residual pass ⇒ the count rises 1 → 2"*. The
-/// count-per-entry is not a `MintMeter` field, but the property is: the meter carries BOTH
-/// `spent` and `conjunct6_asks`, so **`spent == conjunct6_asks`** says exactly "every ask
-/// charged once", which is the invariant the ordering protects. Under the stated revert an
-/// `optional` ask charges twice and `spent > asks`.
-///
-/// Its reach-guard is the population the plan asks for: at least one entry the door is asked
-/// about must be CR 603.5 `optional` — asserted on the retained window, since Sue's announced
-/// entries are the optional ones (the current stack's single entry is The Thing's mandatory
-/// `PutCounter`).
-///
-/// # (iii-a) — DISCLOSED, the plan's instrument does not exist on this tree
-///
-/// §6 R16 (iii-a) pins the *"CURRENT-FRAME charge subcount"* at 1. `MintMeter` has no
-/// current-frame subcount, and adding one is a production change with no other consumer. What
-/// this row establishes instead, and states as a derivation rather than a reading: the offering
-/// beat's `current.stack` holds exactly ONE entry (asserted) and every ask charges exactly once
-/// (asserted above) ⇒ the current frame contributes exactly one charge. The unqualified TOTAL
-/// is (ii-a)'s figure and is measured directly by the sweep below.
-#[test]
-fn r16_the_f4_offering_beats_probe_demand_is_exactly_measured() {
-    use engine::game::engine::{try_offer_bounded_cycle_shortcut_metered, ProbeCap};
-
-    let mut state = load_f4();
-    drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
-    let (proposer, _certificate, _schema) = offer_parts(&state);
-    let replay = replay_at_priority(&state, proposer);
-
-    let (shipped_out, shipped) =
-        try_offer_bounded_cycle_shortcut_metered(&replay, false, ProbeCap::Shipped);
-    assert!(
-        shipped_out.is_ok(),
-        "reach-guard: the replay must reproduce the production OFFER, else every figure below \
-         is measured on a different board. got {shipped_out:?}"
-    );
-    assert!(
-        !shipped.denied,
-        "R16 (i): the shipped budget must not STARVE the acceptance fixture — a denied budget \
-         at the one beat this corpus offers on is the defect U3's re-derivation fixed for \
-         dina, measured here for F4. meter {shipped:?}"
-    );
-    assert_eq!(
-        shipped.certification,
-        Some(engine::analysis::resource::PeriodCertification::ResourceSignatureOnly),
-        "the F4 offering beat certifies through BASIS B; the meter is the only surface on \
-         which that is observable (both bases publish `frames_per_period`)"
-    );
-
-    // ── (iii-b) the ordering pin: every ask charges EXACTLY ONE ──
-    let optional_in_window = state
-        .loop_detect_ring
-        .iter()
-        .map(|f| optional_entries(&f.live))
-        .sum::<usize>();
-    assert!(
-        optional_in_window > 0,
-        "(iii-b) reach-guard: the door must be asked about at least one CR 603.5 `optional` \
-         entry, else the ordering property below is asserted over a population that never \
-         reaches the `optional` gate at all — the exact defect §6 R16's ROUND-10 (MED-2) \
-         re-keying was about"
-    );
-    assert!(
-        shipped.conjunct6_asks > 0,
-        "(iii-b) reach-guard: conjunct (6) must actually ASK, else `spent == asks` is `0 == 0`"
-    );
-    assert_eq!(
-        shipped.spent, shipped.conjunct6_asks,
-        "(iii-b) CR 603.5: `try_charge_one` sits BELOW the `optional` gate, so an entry pays \
-         for its residual pass and never additionally for a primary pass it exits early. \
-         Hoisting the charge above that gate makes every optional ask charge TWICE and \
-         `spent` exceed `asks`. meter {shipped:?}"
-    );
-    assert_eq!(
-        state.stack.len(),
-        1,
-        "(iii-a) the derivation's premise: the offering beat's current frame holds exactly ONE \
-         entry, so with `spent == asks` the current frame contributes exactly one charge. \
-         (`MintMeter` has no current-frame subcount — see this row's doc.)"
-    );
-
-    // ── the exact-demand sweep over the seam's closed cap domain ──
-    let demand = shipped.spent;
-    assert!(
-        demand > 0,
-        "reach-guard: a zero-demand beat would make every `Lowered(n)` below identical to \
-         `Lowered(0)` and the sweep vacuous"
-    );
-    let (at_demand, _) =
-        try_offer_bounded_cycle_shortcut_metered(&replay, false, ProbeCap::Lowered(demand));
-    assert!(
-        at_demand.is_ok(),
-        "the measured demand {demand} must be SUFFICIENT — `Lowered(demand)` still offers"
-    );
-    for n in 0..demand {
-        let (out, meter) =
-            try_offer_bounded_cycle_shortcut_metered(&replay, false, ProbeCap::Lowered(n));
-        assert!(
-            matches!(
-                out,
-                Err(engine::game::engine::BoundedOfferRefusal::UnspecifiedChoiceWindow)
-            ) && meter.denied,
-            "every cap BELOW the measured demand must exhaust and refuse FAIL-CLOSED, so the \
-             demand figure is a boundary and not one lucky reading. cap {n} gave {out:?}, \
-             meter {meter:?}"
-        );
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────
 // R27 (a1) — the F4 arm of the split-sample row
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
@@ -2563,11 +2205,14 @@ fn d1p_provenance_at_seat(aimed: PlayerId) {
 /// `before` on the conflicting beat must already be `Uniform { Take }`: that proves the beat
 /// really was a REPEAT of an already-journalled pair, so a drive that never repeated cannot
 /// satisfy this row.
+///
+/// The board is cut to no card at the offer beat: uncut, every cycle ends on an offer whose
+/// answer clears the window before a source prompts again.
 #[test]
 fn c1_row2b_one_seat_answering_one_source_two_ways_latches_conflicted() {
     use engine::analysis::decision_template::{LoopAnswer, LoopAnswerValue, MayChoiceOption};
 
-    let mut state = load_f4();
+    let mut state = f4_library_cut(0);
     let beats = drive_f4_may_beats(&mut state, 400, MayPolicy::DeclineOnRepeat);
     let last = beats
         .last()
@@ -2617,7 +2262,7 @@ fn c1_row2b_one_seat_answering_one_source_two_ways_latches_conflicted() {
 fn c1_row2b_sibling_an_identical_second_answer_stays_uniform() {
     use engine::analysis::decision_template::{LoopAnswer, LoopAnswerValue, MayChoiceOption};
 
-    let mut state = load_f4();
+    let mut state = f4_library_cut(0);
     let beats = drive_f4_may_beats(&mut state, 400, MayPolicy::TakeUntilRepeat);
     let last = beats
         .last()
@@ -2810,23 +2455,6 @@ fn c1_every_ring_clear_site_also_clears_the_loop_answer_journal() {
         WINDOW_METHODS.into_iter().collect::<BTreeSet<_>>(),
         "reach: each window method must exist in {AUTHORITY} and clear the ring"
     );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────
-// helpers used by more than one row
-// ─────────────────────────────────────────────────────────────────────────────────────────
-
-/// Count the stack entries whose triggered ability is CR 603.5 `optional`. Used as a reach
-/// guard where a row's claim is about the optional gate.
-fn optional_entries(state: &GameState) -> usize {
-    state
-        .stack
-        .iter()
-        .filter(|e| match &e.kind {
-            StackEntryKind::TriggeredAbility { ability, .. } => ability.optional,
-            _ => false,
-        })
-        .count()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -9414,11 +9042,14 @@ fn a_count_above_the_published_capacity_opens_no_window_while_the_capacity_itsel
 /// Park the real F4 dump at an open CR 732.2b window over a TWO-SEGMENT declaration whose
 /// accepted count contains a predicted CR 704 crossing, returning that count and the repetition
 /// the crossing lands on. Built from the offer's own published numbers, never a transcribed pair.
+/// Each responder holds Relic of Progenitus ("{T}: Target player exiles a card from their
+/// graveyard."), so it has a game choice at every place it may name (CR 732.2b).
 pub(crate) fn f4_cascade_spanning_window() -> (GameState, u32, u32) {
     use engine::game::interaction::resolve_interaction_response;
 
     let mut state = load_f4();
     let offer = f4_allocation_offer(&mut state);
+    crate::loop_shortcut::arm_responders(&mut state);
     let (_proposer, certificate, _schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
@@ -9582,7 +9213,7 @@ fn f4_accept_suggested(state: &mut GameState) {
 
 /// The F4 dump standing at its offer with P0's library holding `cards` there. The unmodified
 /// drive reaches the offer holding 88 and draws from the top, so the cut comes off the bottom.
-fn f4_library_at_offer(cards: usize) -> GameState {
+pub(crate) fn f4_library_at_offer(cards: usize) -> GameState {
     let mut state = f4_library_cut(cards);
     drive_f4_to_offer(&mut state, 400).expect("reach-guard: the cut board still offers");
     assert_eq!(
@@ -9635,13 +9266,38 @@ fn a_proposer_who_survives_no_repetition_is_offered_no_shortcut() {
     );
 }
 
-/// CR 704.5b: the paired control — one card left at the offer beat is one repetition offered,
-/// and taking it leaves P0 in the game.
+/// CR 121.1 + CR 704.5b: the paired control — one card left at the offer beat is one repetition
+/// offered, and taking it leaves P0 in the game.
 #[test]
 fn a_proposer_with_one_card_left_is_offered_one_repetition() {
     let mut state = f4_library_at_offer(1);
     let (_, _, schema) = offer_parts(&state);
     assert_eq!(schema.iteration_count, IterationCount::Fixed(1));
+    let declares: Vec<GameAction> = engine::ai_support::legal_actions(&state)
+        .into_iter()
+        .filter(|action| matches!(action, GameAction::DeclareShortcut { .. }))
+        .collect();
+    let [declare @ GameAction::DeclareShortcut { count, .. }] = declares.as_slice() else {
+        panic!("the AI has one bounded declare candidate, got {declares:?}");
+    };
+    assert_eq!(*count, IterationCount::Fixed(1));
+    apply(&mut state, P0, declare.clone()).expect("the AI's candidate is dispatched");
+    assert!(
+        accept_all_opponents(&mut state) > 0,
+        "the respond window opens"
+    );
+    assert!(!f4_eliminated(&state, P0));
+    assert_eq!(state.library_of(P0).len(), 0);
+}
+
+/// CR 121.1 + CR 704.5b: with two cards left both replayed cycles come round, so the offer
+/// publishes its own declaration at 2, and taking the suggestion leaves P0 in the game.
+#[test]
+fn a_proposer_with_two_cards_left_is_offered_two_repetitions_on_the_published_declaration() {
+    let mut state = f4_library_at_offer(2);
+    let (_, _, schema) = offer_parts(&state);
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(2));
+    assert_eq!(published_declaration_count(&state), 2);
     f4_accept_suggested(&mut state);
     assert!(!f4_eliminated(&state, P0));
     assert_eq!(state.library_of(P0).len(), 0);
