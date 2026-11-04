@@ -13,6 +13,7 @@ mod active_damage_trigger_recipient_anaphor;
 mod adapter_contract_fixtures;
 mod additional_cost_declaration_tail;
 mod agent_frank_horrigan_attacked_this_turn_indestructible;
+mod all_good_things_shared_card_type;
 mod ancient_brass_dragon_roll_d20;
 mod ancient_bronze_dragon_roll_d20;
 mod ancient_copper_dragon_roll_d20;

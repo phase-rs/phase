@@ -628,6 +628,10 @@ fn parse_remaining_state_presence_conditions_tail(
         parse_no_cards_in_your_zone,
         parse_no_cards_in_that_graveyard,
         parse_card_exiled_with_source_condition,
+        // CR 205.2a + CR 607.2a: "all cards exiled with ~ share a <quality>" —
+        // anchored on the literal "all cards exiled with " head, disjoint from
+        // every other arm in this group.
+        parse_all_cards_exiled_with_source_share_quality,
         parse_there_are_conditions,
         parse_there_exists_compound_zone_condition,
         parse_there_exists_condition,
@@ -10602,6 +10606,58 @@ fn parse_card_exiled_with_source_condition(input: &str) -> OracleResult<'_, Stat
     Ok((
         rest,
         make_quantity_comparison(QuantityRef::CardsExiledBySource, comparator, n),
+    ))
+}
+
+/// CR 205.2a + CR 607.2a + CR 603.4: "all cards exiled with [source] share a
+/// <quality>" — a universal shared-characteristic gate over the source's
+/// linked-exile pool (All Good Things...: "If all cards exiled with this Saga
+/// share a card type, you gain 10 life").
+///
+/// The pool shares a quality exactly when one quality value is held by EVERY
+/// card in it, i.e. when the largest same-value bucket
+/// (`ObjectCountBySharedQuality { aggregate: Max }`) is as large as the pool
+/// itself (`CardsExiledBySource`). The bucket can never exceed the pool, so the
+/// GE comparison is the equality test. The pool must also be non-empty: an
+/// empty set of cards has no card type to share, so "all cards exiled with ~
+/// share a card type" is false when nothing was exiled with it (the vacuous
+/// reading would award the life for exiling nothing).
+///
+/// The quality axis reuses `parse_shared_quality` (card type, color, creature
+/// type, mana value, name, ...), so every "share a <quality>" wording over the
+/// linked pool lowers through this one production.
+fn parse_all_cards_exiled_with_source_share_quality(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("all cards exiled with ").parse(input)?;
+    let (rest, _) = parse_exiled_with_source_self_ref(rest)?;
+    let (rest, _) = tag(" share a ").parse(rest)?;
+    let (rest, quality) = parse_shared_quality(rest)?;
+    let pool = || QuantityExpr::Ref {
+        qty: QuantityRef::CardsExiledBySource,
+    };
+    Ok((
+        rest,
+        StaticCondition::And {
+            conditions: vec![
+                StaticCondition::QuantityComparison {
+                    lhs: pool(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                },
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCountBySharedQuality {
+                            filter: TargetFilter::ExiledBySource,
+                            quality,
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: pool(),
+                },
+            ],
+        },
     ))
 }
 
@@ -22327,6 +22383,61 @@ mod tests {
                 )));
             }
             other => panic!("expected owned permanent battlefield-to-hand count, got {other:?}"),
+        }
+    }
+
+    /// CR 205.2a + CR 607.2a: "all cards exiled with ~ share a <quality>" is a
+    /// non-empty linked pool whose largest same-quality bucket covers the whole
+    /// pool, across every `parse_shared_quality` axis.
+    #[test]
+    fn all_cards_exiled_with_source_share_quality() {
+        for (text, expected) in [
+            (
+                "all cards exiled with ~ share a card type",
+                SharedQuality::CardType,
+            ),
+            (
+                "all cards exiled with ~ share a color",
+                SharedQuality::Color,
+            ),
+            (
+                "all cards exiled with it share a creature type",
+                SharedQuality::CreatureType,
+            ),
+            (
+                "all cards exiled with ~ share a mana value",
+                SharedQuality::ManaValue,
+            ),
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "{text}");
+            let pool = QuantityExpr::Ref {
+                qty: QuantityRef::CardsExiledBySource,
+            };
+            assert_eq!(
+                c,
+                StaticCondition::And {
+                    conditions: vec![
+                        StaticCondition::QuantityComparison {
+                            lhs: pool.clone(),
+                            comparator: Comparator::GE,
+                            rhs: QuantityExpr::Fixed { value: 1 },
+                        },
+                        StaticCondition::QuantityComparison {
+                            lhs: QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCountBySharedQuality {
+                                    filter: TargetFilter::ExiledBySource,
+                                    quality: expected,
+                                    aggregate: AggregateFunction::Max,
+                                },
+                            },
+                            comparator: Comparator::GE,
+                            rhs: pool,
+                        },
+                    ],
+                },
+                "{text}"
+            );
         }
     }
 
