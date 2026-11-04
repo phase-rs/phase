@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ReplacementDefinition gains counter_recipient (CR 122.1 player-only AddCounter replacements); an old peer drops it and applies Winding Constrictor's player clause to permanents"
+}

@@ -4898,11 +4898,11 @@ fn add_counter_applier(
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
     use crate::types::ability::QuantityModification;
-    let modification = state
-        .objects
-        .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
-        .and_then(|def| def.quantity_modification.clone());
+    // CR 611.2a + CR 614.1a: the definition lives on its host object, or — for a
+    // counter replacement created by a resolved spell or ability (Brad Boimler,
+    // Prairie Dog) — in the floating store under the `ObjectId(0)` sentinel.
+    let modification =
+        replacement_choice_definition(state, rid).and_then(|def| def.quantity_modification.clone());
     let Some(modification) = modification else {
         return ApplyResult::Modified(event);
     };
@@ -8091,101 +8091,7 @@ fn object_replacement_candidate_applies(
     if !draw_scope_matches_event_stage(repl_def, event) {
         return false;
     }
-    if let ProposedEvent::AddCounter { placement, .. } = event {
-        // CR 109.2 + CR 110.1 (issue #8795): a counter replacement that carries
-        // no `valid_card` describes its object as a permanent — "on a permanent
-        // or player" (Vorinclex, Halving Season, Innkeeper's Talent), "a
-        // permanent you control" (Doc Samson), "a permanent your team controls"
-        // (Pir), "on ~" (Mowu); MEASURED over `card-data.json`, every corpus
-        // `AddCounter` replacement without a `valid_card` that names an object
-        // reads so (Solemnity's "Players can't get counters" names none). Like the
-        // typed-`valid_card` gate in `replacement_valid_card_matches`, it does
-        // not reach a card outside the battlefield: Delay's three time counters
-        // under the countered spell's controller's Vorinclex stay three, not
-        // six (or one under the counter's controller's). A placement on a
-        // player has no object and is untouched.
-        if repl_def.valid_card.is_none()
-            && placement
-                .object_id()
-                .and_then(|id| state.objects.get(&id))
-                .is_some_and(|affected| affected.zone != Zone::Battlefield)
-        {
-            return false;
-        }
-        // CR 614.1a: `valid_player` is a *relative* scope; the subject axis selects
-        // whom it is relative to. Actor-scoped replacements (Vorinclex/Halving
-        // Season — "If you/an opponent would put …") compare against
-        // `CounterPlacement::actor` (who puts the counters), per the official
-        // Vorinclex ruling. Recipient-scoped replacements (the default) compare
-        // against the affected player / affected permanent's controller.
-        use crate::types::ability::CounterReplacementSubject;
-        if placement.player_id().is_some() {
-            // CR 614.1a: player-counter replacements require an explicit player scope.
-            let Some(valid_player) = &repl_def.valid_player else {
-                return false;
-            };
-            let scope_player = match repl_def.counter_replacement_subject {
-                CounterReplacementSubject::Actor => placement.actor(),
-                CounterReplacementSubject::Recipient => placement
-                    .player_id()
-                    .expect("CounterPlacement::player_id is Some for player counter events"),
-            };
-            let player_ok = match valid_player {
-                crate::types::ability::ReplacementPlayerScope::Opponent => {
-                    scope_player != obj.controller
-                }
-                crate::types::ability::ReplacementPlayerScope::You => {
-                    scope_player == obj.controller
-                }
-                crate::types::ability::ReplacementPlayerScope::AnyPlayer => true,
-            };
-            if !player_ok {
-                return false;
-            }
-        } else if let Some(valid_player) = &repl_def.valid_player {
-            // CR 614.1a: quantity-modifying counter replacements may scope by
-            // the affected permanent's controller (recipient) or, for
-            // actor-scoped replacements, by the player putting the counters.
-            // The quantity-mod guard is preserved verbatim: a prevention
-            // replacement (Solemnity — no `quantity_modification`) still returns
-            // false here, matching pre-existing behavior.
-            if !matches!(
-                repl_def.quantity_modification,
-                Some(
-                    QuantityModification::Times { .. }
-                        | QuantityModification::Half
-                        | QuantityModification::Plus { .. }
-                        | QuantityModification::Minus { .. }
-                )
-            ) {
-                return false;
-            }
-            let Some(object_id) = placement.object_id() else {
-                return false;
-            };
-            let scope_player = match repl_def.counter_replacement_subject {
-                CounterReplacementSubject::Actor => placement.actor(),
-                CounterReplacementSubject::Recipient => {
-                    match state.objects.get(&object_id).map(|o| o.controller) {
-                        Some(c) => c,
-                        None => return false,
-                    }
-                }
-            };
-            let player_ok = match valid_player {
-                crate::types::ability::ReplacementPlayerScope::Opponent => {
-                    scope_player != obj.controller
-                }
-                crate::types::ability::ReplacementPlayerScope::You => {
-                    scope_player == obj.controller
-                }
-                crate::types::ability::ReplacementPlayerScope::AnyPlayer => true,
-            };
-            if !player_ok {
-                return false;
-            }
-        }
-    } else if repl_def.event == ReplacementEvent::AddCounter && repl_def.valid_player.is_some() {
+    if !add_counter_replacement_scope_matches(repl_def, event, state, obj.controller) {
         return false;
     }
     if replacement_mode_is_optional(&repl_def.mode)
@@ -8231,8 +8137,138 @@ fn object_replacement_candidate_applies(
         }
     }
 
-    // CR 122.1a + CR 614.1a: counter-type filters restrict counter replacements
-    // to the named counter type.
+    if !counter_type_filter_matches(repl_def, event) {
+        return false;
+    }
+
+    true
+}
+
+/// CR 614.1a + CR 122.6: the `AddCounter`-specific applicability gates shared
+/// by object-hosted and floating (`ObjectId(0)` sentinel) counter replacements:
+/// the battlefield-only default for an unscoped object recipient, and the
+/// `valid_player` scope read against either the counter actor or the recipient
+/// (`CounterReplacementSubject`). `scope_controller` is the player the
+/// replacement's "you" refers to — the hosting object's controller, or the
+/// installing player latched in `source_controller` for a floating replacement
+/// created by a resolved spell or ability (Brad Boimler, Prairie Dog).
+fn add_counter_replacement_scope_matches(
+    repl_def: &ReplacementDefinition,
+    event: &ProposedEvent,
+    state: &GameState,
+    scope_controller: PlayerId,
+) -> bool {
+    if let ProposedEvent::AddCounter { placement, .. } = event {
+        // CR 122.1: a clause naming only players ("If you would get one or more
+        // counters" — Winding Constrictor) never reaches counters put on an
+        // object.
+        if repl_def.counter_recipient == crate::types::ability::CounterRecipient::Player
+            && placement.object_id().is_some()
+        {
+            return false;
+        }
+        // CR 109.2 + CR 110.1 (issue #8795): a counter replacement that carries
+        // no `valid_card` describes its object as a permanent — "on a permanent
+        // or player" (Vorinclex, Halving Season, Innkeeper's Talent), "a
+        // permanent you control" (Doc Samson), "a permanent your team controls"
+        // (Pir), "on ~" (Mowu); MEASURED over `card-data.json`, every corpus
+        // `AddCounter` replacement without a `valid_card` that names an object
+        // reads so (Solemnity's "Players can't get counters" names none). Like the
+        // typed-`valid_card` gate in `replacement_valid_card_matches`, it does
+        // not reach a card outside the battlefield: Delay's three time counters
+        // under the countered spell's controller's Vorinclex stay three, not
+        // six (or one under the counter's controller's). A placement on a
+        // player has no object and is untouched.
+        if repl_def.valid_card.is_none()
+            && placement
+                .object_id()
+                .and_then(|id| state.objects.get(&id))
+                .is_some_and(|affected| affected.zone != Zone::Battlefield)
+        {
+            return false;
+        }
+        // CR 614.1a: `valid_player` is a *relative* scope; the subject axis selects
+        // whom it is relative to. Actor-scoped replacements (Vorinclex/Halving
+        // Season — "If you/an opponent would put …") compare against
+        // `CounterPlacement::actor` (who puts the counters), per the official
+        // Vorinclex ruling. Recipient-scoped replacements (the default) compare
+        // against the affected player / affected permanent's controller.
+        use crate::types::ability::CounterReplacementSubject;
+        if placement.player_id().is_some() {
+            // CR 614.1a: player-counter replacements require an explicit player scope.
+            let Some(valid_player) = &repl_def.valid_player else {
+                return false;
+            };
+            let scope_player = match repl_def.counter_replacement_subject {
+                CounterReplacementSubject::Actor => placement.actor(),
+                CounterReplacementSubject::Recipient => placement
+                    .player_id()
+                    .expect("CounterPlacement::player_id is Some for player counter events"),
+            };
+            let player_ok = match valid_player {
+                crate::types::ability::ReplacementPlayerScope::Opponent => {
+                    scope_player != scope_controller
+                }
+                crate::types::ability::ReplacementPlayerScope::You => {
+                    scope_player == scope_controller
+                }
+                crate::types::ability::ReplacementPlayerScope::AnyPlayer => true,
+            };
+            if !player_ok {
+                return false;
+            }
+        } else if let Some(valid_player) = &repl_def.valid_player {
+            // CR 614.1a: quantity-modifying counter replacements may scope by
+            // the affected permanent's controller (recipient) or, for
+            // actor-scoped replacements, by the player putting the counters.
+            // The quantity-mod guard is preserved verbatim: a prevention
+            // replacement (Solemnity — no `quantity_modification`) still returns
+            // false here, matching pre-existing behavior.
+            if !matches!(
+                repl_def.quantity_modification,
+                Some(
+                    QuantityModification::Times { .. }
+                        | QuantityModification::Half
+                        | QuantityModification::Plus { .. }
+                        | QuantityModification::Minus { .. }
+                )
+            ) {
+                return false;
+            }
+            let Some(object_id) = placement.object_id() else {
+                return false;
+            };
+            let scope_player = match repl_def.counter_replacement_subject {
+                CounterReplacementSubject::Actor => placement.actor(),
+                CounterReplacementSubject::Recipient => {
+                    match state.objects.get(&object_id).map(|o| o.controller) {
+                        Some(c) => c,
+                        None => return false,
+                    }
+                }
+            };
+            let player_ok = match valid_player {
+                crate::types::ability::ReplacementPlayerScope::Opponent => {
+                    scope_player != scope_controller
+                }
+                crate::types::ability::ReplacementPlayerScope::You => {
+                    scope_player == scope_controller
+                }
+                crate::types::ability::ReplacementPlayerScope::AnyPlayer => true,
+            };
+            if !player_ok {
+                return false;
+            }
+        }
+    } else if repl_def.event == ReplacementEvent::AddCounter && repl_def.valid_player.is_some() {
+        return false;
+    }
+    true
+}
+
+/// CR 122.1a + CR 614.1a: a counter replacement naming a counter type
+/// ("+1/+1 counters", "charge counters") applies only to that type.
+fn counter_type_filter_matches(repl_def: &ReplacementDefinition, event: &ProposedEvent) -> bool {
     let event_counter_type = match (&repl_def.event, event) {
         (
             ReplacementEvent::AddCounter,
@@ -8270,13 +8306,10 @@ fn object_replacement_candidate_applies(
         ) => Some(ev_ct),
         _ => None,
     };
-    if let (Some(m), Some(ev_ct)) = (&repl_def.counter_match, event_counter_type) {
-        if !m.matches(ev_ct) {
-            return false;
-        }
+    match (&repl_def.counter_match, event_counter_type) {
+        (Some(m), Some(ev_ct)) => m.matches(ev_ct),
+        _ => true,
     }
-
-    true
 }
 
 /// CR 614.12: identify a not-yet-committed battlefield entry whose projected
@@ -9291,6 +9324,20 @@ pub fn find_applicable_replacements(
                         source_controller,
                         state,
                     ) {
+                        continue;
+                    }
+                    // CR 614.1a + CR 122.6: a floating counter replacement
+                    // (Brad Boimler's / Prairie Dog's until-end-of-turn
+                    // "that many plus one") runs the same actor/recipient scope
+                    // and counter-type gates as an object-hosted one, with "you"
+                    // read as the installing player.
+                    if !add_counter_replacement_scope_matches(
+                        repl_def,
+                        event,
+                        state,
+                        source_controller,
+                    ) || !counter_type_filter_matches(repl_def, event)
+                    {
                         continue;
                     }
                 }

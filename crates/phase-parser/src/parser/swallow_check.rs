@@ -804,6 +804,17 @@ fn detect_duration_until_eot(
     if unit_has_end_of_turn_mana_expiry(parsed) {
         return;
     }
+    // CR 611.2a + CR 514.2: a replacement created by a resolving spell or ability
+    // ("Until end of turn, if one or more tokens would be created …" — Kaya, Geist
+    // Hunter; "until end of turn, if one or more counters would be put …" — Brad
+    // Boimler, Prairie Dog) carries its window as `ReplacementDefinition::expiry`,
+    // typed `RestrictionExpiry` — a different type than `Duration`. Key-anchored on
+    // `expiry` like the `Duration_ThisTurn` leg.
+    if evidence
+        .any_at::<RestrictionExpiry>(&["expiry"], |e| matches!(e, RestrictionExpiry::EndOfTurn))
+    {
+        return;
+    }
     // CR 614.6 + CR 514.2: a one-shot DAMAGE replacement created by a resolving spell
     // ("Until end of turn, all damage that would be dealt to you ... is dealt to that
     // creature instead" — Heroic Sacrifice) has NO duration field at all —
@@ -12635,6 +12646,24 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             parsed.abilities.len()
         );
         assert!(!has_swallowed_detector(&parsed, "Optional_MayHave"));
+    }
+
+    /// CR 611.2a + CR 514.2: an until-end-of-turn replacement installed by a
+    /// resolving ability carries its window as `ReplacementDefinition::expiry`;
+    /// that is the represented duration (Prairie Dog's activation).
+    #[test]
+    fn duration_until_eot_installed_replacement_expiry() {
+        let parsed = parse_named(
+            "{4}{W}: Until end of turn, if you would put one or more +1/+1 counters on a creature you control, put that many plus one +1/+1 counters on it instead.",
+            "Prairie Dog",
+            &["Creature"],
+        );
+        // Reach guard: the clause lowered to a replacement install.
+        assert!(parsed
+            .abilities
+            .iter()
+            .any(|a| matches!(*a.effect, Effect::AddTargetReplacement { .. })));
+        assert!(!has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"));
     }
 
     /// Issue #2235 regression: representative cards whose Oracle text contains

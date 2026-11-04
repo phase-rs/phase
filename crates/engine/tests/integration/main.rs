@@ -43,6 +43,7 @@ mod combat_celebrant_exert;
 mod combat_damage_order_triggers_no_hang;
 mod combat_lifelink_replacement_ordering;
 mod combo_infinite_pile;
+mod counter_placement_replacements;
 mod cross_slot_target_binding;
 mod crossway_troublemakers_attacking_keywords;
 mod cunning_rhetoric_attacks_you_scope_4736;

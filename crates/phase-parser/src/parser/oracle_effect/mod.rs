@@ -3805,12 +3805,14 @@ fn parse_token_creation_replacement_effect(lower: &str) -> Option<Effect> {
     // the EOT lifetime is carried explicitly on the def below, so the remainder
     // (the token-creation replacement clause) is what we hand to the shared
     // builder.
-    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("until end of turn"))
-        .parse(lower)
-        .ok()?;
-    let (rest, _) = opt(alt((tag::<_, _, OracleError<'_>>(", "), tag(" "))))
-        .parse(rest)
-        .ok()?;
+    let (rest, _) = strip_until_end_of_turn_prefix(lower)?;
+    // CR 111.1: only a clause about creating tokens lowers to a `CreateToken`
+    // replacement. Without this gate the shared builder's bare "twice that
+    // many" arm claimed counter doublers (Lt. Cmdr. Geordi La Forge) as token
+    // doublers.
+    if !crate::parser::oracle_replacement::is_token_creation_replacement_antecedent(rest) {
+        return None;
+    }
 
     let mut def = crate::parser::oracle_replacement::parse_token_replacement(rest, rest)?;
     // CR 514.2: The installed replacement lasts "until end of turn"; stamp the
@@ -3818,6 +3820,52 @@ fn parse_token_creation_replacement_effect(lower: &str) -> Option<Effect> {
     // ability frame's duration threading) — mirrors `try_parse_die_exile_rider`.
     def.expiry = Some(RestrictionExpiry::EndOfTurn);
 
+    Some(Effect::AddTargetReplacement {
+        replacement: Box::new(def),
+        target: TargetFilter::None,
+    })
+}
+
+/// Strip an optional leading "until end of turn[, ]" from a replacement-install
+/// clause. Returns the remainder and whether the duration was stated in the
+/// clause itself (it is usually lifted onto the ability frame's `duration`
+/// first, in which case the install seam stamps the expiry from there).
+fn strip_until_end_of_turn_prefix(lower: &str) -> Option<(&str, bool)> {
+    let (rest, stated) = opt(tag::<_, _, OracleError<'_>>("until end of turn"))
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = opt(alt((tag::<_, _, OracleError<'_>>(", "), tag(" "))))
+        .parse(rest)
+        .ok()?;
+    Some((rest, stated.is_some()))
+}
+
+/// CR 614.1a + CR 122.6 + CR 611.2a: Install a counter-placement replacement
+/// created by a resolving spell or ability — Brad Boimler, Eager Ensign's
+/// trigger ("until end of turn, if one or more counters would be put on a
+/// permanent you control, that many plus one of each of those kinds of counters
+/// are put on that permanent instead") and Prairie Dog's activation ("Until end
+/// of turn, if you would put one or more +1/+1 counters on a creature you
+/// control, put that many plus one +1/+1 counters on it instead").
+///
+/// Unlike Hardened Scales (an object-hosted static replacement), the effect is
+/// created by a resolution, so it outlives its source and lasts as long as the
+/// ability states (CR 611.2a). It is installed as a controller-anchored
+/// floating replacement (`AddTargetReplacement { target: None }`), and the
+/// counter-replacement shape (modification, recipient filter, actor scope,
+/// counter type) is built by the same `parse_counter_replacement` building block
+/// the printed-static form uses.
+fn parse_counter_placement_replacement_effect(lower: &str) -> Option<Effect> {
+    let (rest, stated_eot) = strip_until_end_of_turn_prefix(lower)?;
+    if !crate::parser::oracle_replacement::is_counter_placement_replacement_antecedent(rest) {
+        return None;
+    }
+    let mut def = crate::parser::oracle_replacement::parse_counter_replacement(rest, rest)?;
+    // CR 514.2: a duration stated inside the clause is stamped directly; a
+    // duration lifted onto the ability frame is stamped by the install seam.
+    if stated_eot {
+        def.expiry = Some(RestrictionExpiry::EndOfTurn);
+    }
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(def),
         target: TargetFilter::None,
@@ -11707,6 +11755,9 @@ fn parse_effect_clause_inner_with_damage_context(
     // replacement. Routed here beside the other replacement-installing effect
     // helpers, before the generic clause dispatch / Unimplemented fallback.
     if let Some(effect) = parse_token_creation_replacement_effect(&lower) {
+        return parsed_clause(effect);
+    }
+    if let Some(effect) = parse_counter_placement_replacement_effect(&lower) {
         return parsed_clause(effect);
     }
     // CR 614.1a + CR 614.12 + CR 707.2: Mystic Reflection-style resolving-spell

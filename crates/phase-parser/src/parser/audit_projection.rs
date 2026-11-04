@@ -141,6 +141,7 @@ const REPLACEMENT_KEYS: &[&str] = &[
     "source_object",
     "origin",
     "counter_replacement_subject",
+    "counter_recipient",
 ];
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]

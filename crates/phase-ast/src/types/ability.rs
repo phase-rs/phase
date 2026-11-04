@@ -41269,6 +41269,26 @@ impl CounterReplacementSubject {
     }
 }
 
+/// CR 122.1: which kind of counter recipient an `AddCounter` replacement
+/// describes. Counters can be put on objects and on players; a clause that
+/// names only players ("If you would get one or more counters" — Winding
+/// Constrictor's second ability) must not reach counters put on permanents.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CounterRecipient {
+    /// The recipient is described by `valid_card` / `valid_player`; with no
+    /// `valid_card`, a permanent or a player (Vorinclex, Doubling Season).
+    #[default]
+    PermanentOrPlayer,
+    /// Only counters a player gets (poison, experience, energy, …).
+    Player,
+}
+
+impl CounterRecipient {
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::PermanentOrPlayer)
+    }
+}
+
 /// Whether a replacement effect is mandatory or offers the affected player a choice.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -41689,6 +41709,11 @@ pub struct ReplacementDefinition {
     /// official Vorinclex ruling). Ignored by every non-`AddCounter` event.
     #[serde(default, skip_serializing_if = "CounterReplacementSubject::is_default")]
     pub counter_replacement_subject: CounterReplacementSubject,
+    /// CR 122.1: For `AddCounter` replacements, whether the clause names only
+    /// players as recipients (Winding Constrictor's "If you would get …").
+    /// Ignored by every non-`AddCounter` event.
+    #[serde(default, skip_serializing_if = "CounterRecipient::is_default")]
+    pub counter_recipient: CounterRecipient,
     /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granting_object: Option<ObjectIncarnationRef>,
@@ -41813,6 +41838,7 @@ impl ReplacementDefinition {
             source_object: None,
             origin: ReplacementOrigin::Characteristic,
             counter_replacement_subject: CounterReplacementSubject::Recipient,
+            counter_recipient: CounterRecipient::PermanentOrPlayer,
             granting_object: None,
             entry_payment_max: None,
         }
