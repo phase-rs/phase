@@ -28,7 +28,7 @@ use super::super::oracle_quantity::{
 use super::super::oracle_target::{
     parse_bare_was_dealt_damage_suffix, parse_block_history_clause, parse_target,
     parse_target_with_ctx, parse_target_with_syntax, parse_that_clause_suffix,
-    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, HistoryPartner, TargetSyntax,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, TargetSyntax,
 };
 use super::super::oracle_util::{
     parse_comparator_prefix, parse_count_expr, parse_count_expr_combinator, strip_after, TextPair,
@@ -7903,19 +7903,17 @@ fn spell_history_relative_clause_owns_suffix(input: &str) -> bool {
 /// purpose: when the target parser declines to bind the clause's partner (a bare
 /// "it" with no antecedent, or a partner no subject word covers, such as Triton
 /// Tactics' "one of those creatures"), the window still belongs to the clause,
-/// so no spurious duration appears and the clause is reported instead. A clause
-/// whose partner is an indefinite filter phrase ("a Zombie": Time to Reflect)
-/// does not claim its window: that form is left for a separate change and keeps
-/// the reading it had before the clause was recognized.
+/// so no spurious duration appears and the instruction fails closed instead
+/// (`instruction_drops_block_partner`). The same holds for a partner that is an
+/// indefinite filter phrase ("a Zombie": Time to Reflect), which no relation
+/// represents yet.
 /// Recognition is delegated to `parse_block_history_clause`, the clause's single
 /// authority, and the clause must run to end of input, so a genuine OUTER
 /// duration after it leaves a non-empty remainder and still strips.
 fn combat_history_relative_clause_owns_suffix(input: &str) -> bool {
     nom_primitives::scan_at_word_boundaries(input, |i| {
         terminated(
-            verify(parse_block_history_clause, |clause| {
-                clause.partner != HistoryPartner::Filter
-            }),
+            parse_block_history_clause,
             (
                 multispace0,
                 opt(alt((tag("."), tag(",")))),

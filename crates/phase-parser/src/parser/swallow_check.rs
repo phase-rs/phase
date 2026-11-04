@@ -33,7 +33,7 @@ use super::oracle_nom::error::OracleError;
 use super::oracle_nom::primitives::{scan_contains, scan_preceded, split_sentence_units};
 use super::oracle_target::{
     parse_block_history_clause, parse_block_pairing_clause, BlockPairingForm,
-    CombatRelationSubjectWord, HistoryPartner,
+    CombatRelationSubjectWord,
 };
 use super::oracle_trigger::parse_distributed_x_cost_condition;
 use super::swallow_evidence::UnitEvidence;
@@ -6286,19 +6286,15 @@ fn detect_damage_subject_conjunction(
 /// combat", "all creatures that blocked or were blocked by it this turn",
 /// "creatures that were blocked by that creature this combat") is a look-back
 /// restriction on the affected object set. Every clause the shared recognizer
-/// `parse_block_history_clause` finds, but the filter-subject form below, must surface as a
+/// `parse_block_history_clause` finds, whatever its partner, must surface as a
 /// `CombatRelation::BlockPairing` filter with the clause's own direction and
 /// window, so a one-way filter cannot vouch for a two-way clause; otherwise the
 /// relative clause was dropped and the effect silently widened (#9179). The
 /// duration-ownership guard in `strip_trailing_duration` keeps the window from
 /// reappearing as a spurious effect duration, so without this detector a
-/// declined clause would leave no trace at all.
-///
-/// A clause whose partner is an indefinite filter phrase ("blocked by a Zombie
-/// this turn": Time to Reflect, You Cannot Pass!) is not counted: the relation
-/// declines that form by design and the duration guard does not claim its
-/// window, so it keeps the reading it had before the clause was recognized.
-/// Representing it is left for a separate change.
+/// declined clause would leave no trace at all. An effect instruction that drops
+/// the clause already fails closed (`instruction_drops_block_partner`) and is
+/// skipped before this runs; the detector is the backstop for every other path.
 fn detect_combat_history_relation(
     cleaned: &str,
     original: &str,
@@ -6322,8 +6318,7 @@ fn detect_combat_history_relation(
     let mut remaining = cleaned;
     let mut swallowed = false;
     while let Some((_, clause, rest)) = scan_preceded(remaining, parse_block_history_clause) {
-        swallowed |= clause.partner != HistoryPartner::Filter
-            && !represented(clause.direction, clause.scope);
+        swallowed |= !represented(clause.direction, clause.scope);
         remaining = rest;
     }
     if swallowed {
@@ -7000,9 +6995,8 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     /// The nine detector labels that pass `None` and are measured present in the phase-base
     /// corpus. `ActivateLimit`, `ModalDynamicMaxDropped` and `CombatHistoryRelation` are
     /// deliberately absent: none has a corpus warning (every printed `CombatHistoryRelation`
-    /// clause is represented or fails closed, and its filter-subject form — Time to
-    /// Reflect, You Cannot Pass! — is deliberately not counted), so no corpus fixture can
-    /// reach them. They are bought by the compiler instead — the constructor's new
+    /// clause is represented or fails closed, its filter-subject form — Time to Reflect,
+    /// You Cannot Pass! — included), so no corpus fixture can reach them. They are bought by the compiler instead — the constructor's new
     /// parameter makes omission a compile error.
     ///
     /// "Non-phrase" here means "no gap axis wired at the push site", NOT "no phrase is
@@ -15392,16 +15386,15 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         );
     }
 
-    /// CR 608.2c + CR 608.2i: a history clause whose partner no subject word
-    /// covers fails closed. On a mass instruction the instruction becomes
-    /// `Unimplemented { block_history_partner }` with no widened mass effect
-    /// left behind (Triton Tactics, Glyph of Reincarnation), and the clause owns
-    /// its window, so no spurious duration appears. A partner that is an
-    /// indefinite filter phrase (Time to Reflect, You Cannot Pass!) is seen but
-    /// deliberately not counted: the cards parse as they did before the clause
-    /// was recognized, with no warning; this form is left for a separate change.
-    /// A unary clause is no history clause and raises no new warning (Heat
-    /// Stroke, Sizzling Barrage).
+    /// CR 608.2c + CR 608.2i + CR 115.1a: a history clause whose partner no
+    /// subject word covers fails its instruction closed as `Unimplemented {
+    /// block_history_partner }`, and the clause owns its window, so no spurious
+    /// duration appears. On a mass instruction no widened mass effect is left
+    /// behind (Triton Tactics, Glyph of Reincarnation); on a single target no
+    /// targeted effect is left behind with the restriction dropped — for a
+    /// partner that is an indefinite filter phrase (Time to Reflect, You Cannot
+    /// Pass!) and for any other unbound partner alike. A unary clause is no
+    /// history clause and raises no new warning (Heat Stroke, Sizzling Barrage).
     #[test]
     fn unbound_block_history_partner_fails_closed() {
         // The failed instruction carries no duration: its window stays with the clause.
@@ -15454,29 +15447,35 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             "Glyph of Reincarnation: no widened destroy may remain"
         );
 
-        for (name, text) in [
+        // A single-target instruction: the filter-phrase partner of the printed cards and,
+        // as the control, an unbound partner. The recognizer tells them apart, and both
+        // fail closed: the filter form is not exempt.
+        for (name, text, partner) in [
             (
                 "Time to Reflect",
                 "Exile target creature that blocked or was blocked by a Zombie this turn.",
+                crate::parser::oracle_target::HistoryPartner::Filter,
             ),
             (
                 "You Cannot Pass!",
                 "Destroy target creature that blocked or was blocked by a legendary creature this turn.",
+                crate::parser::oracle_target::HistoryPartner::Filter,
+            ),
+            (
+                "Test Card",
+                "Exile target creature that was blocked by target Wall this turn.",
+                crate::parser::oracle_target::HistoryPartner::Unbound,
             ),
         ] {
-            // Reach guard: the recognizer sees the clause and names its partner a filter.
+            // Reach guard: the recognizer sees the clause and classifies its partner.
             let cleaned = text.to_ascii_lowercase();
             let (_, clause, _) = crate::parser::oracle_nom::primitives::scan_preceded(
                 &cleaned,
                 crate::parser::oracle_target::parse_block_history_clause,
             )
             .unwrap_or_else(|| panic!("{name}: reach guard — the recognizer must find the clause"));
-            assert_eq!(
-                clause.partner,
-                crate::parser::oracle_target::HistoryPartner::Filter,
-                "{name}"
-            );
-            // The detector does not count it even with no evidence at all.
+            assert_eq!(clause.partner, partner, "{name}");
+            // Detector Q has no exemption: with no evidence it reports either partner.
             let mut diagnostics = Vec::new();
             super::detect_combat_history_relation(
                 &cleaned,
@@ -15484,35 +15483,23 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 &UnitEvidence::from_json_for_test("[]"),
                 &mut diagnostics,
             );
-            assert!(diagnostics.is_empty(), "{name}: {diagnostics:?}");
+            assert!(
+                !diagnostics.is_empty(),
+                "{name}: an unrepresented partner is reported"
+            );
 
             let parsed = parse_named(text, name, &["Instant"]);
             assert!(
-                !any_ability_has_unimplemented(&parsed),
-                "{name}: reach guard — the unit is audited; {:?}",
+                unbound(&parsed),
+                "{name}: the instruction must fail closed; {:?}",
                 parsed.abilities
             );
             assert!(
-                parsed.parse_warnings.is_empty(),
-                "{name}: {:?}",
-                parsed.parse_warnings
+                !UnitEvidence::of(&parsed).any_effect(|effect| effect.target_filter().is_some()),
+                "{name}: no targeted effect may remain with its restriction dropped; {:?}",
+                parsed.abilities
             );
         }
-
-        // The same evidence-free audit reports a partner no subject word covers that is
-        // not a filter phrase: only the filter form is exempt.
-        let unbound_single = "exile target creature that was blocked by target wall this turn.";
-        let mut diagnostics = Vec::new();
-        super::detect_combat_history_relation(
-            unbound_single,
-            unbound_single,
-            &UnitEvidence::from_json_for_test("[]"),
-            &mut diagnostics,
-        );
-        assert!(
-            !diagnostics.is_empty(),
-            "an unbound partner that is no filter phrase is still reported"
-        );
 
         for (name, text, types) in [
             (

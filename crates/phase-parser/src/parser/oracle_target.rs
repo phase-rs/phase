@@ -6966,9 +6966,10 @@ pub(crate) enum HistoryPartner {
     /// A subject word the relation can bind ("it", "~", "that creature").
     Subject(CombatRelationSubjectWord),
     /// An indefinite filter phrase ("a Zombie", "a legendary creature"): any creature
-    /// of a kind, not one object. The relation does not represent it, and neither the
-    /// duration guard nor the swallow audit claims the clause; this form is left for a
-    /// separate change.
+    /// of a kind, not one object. No relation represents it yet, so like `Unbound` it
+    /// fails its instruction closed (Time to Reflect, You Cannot Pass!); it is kept
+    /// distinct because a filter-subject relation could represent it, which an unbound
+    /// partner cannot.
     Filter,
     /// Any other phrase no subject word covers ("target Wall", "one of those creatures").
     Unbound,
@@ -7112,9 +7113,9 @@ pub(crate) fn strip_block_history_clauses(lower: &str) -> String {
 /// CR 608.2c + CR 608.2i: does `lower` hold a block-history clause that none of
 /// `populations` carries as a `BlockPairing` filter of the clause's own direction and window?
 /// Both ways a parse drops the clause land here: a partner no subject word covers
-/// (Triton Tactics: "one of those creatures"), and a recognized "it" or "that creature"
-/// whose antecedent `resolve_relation_subject` rejects ("destroy target creature and all
-/// creatures it blocked this turn").
+/// (Triton Tactics: "one of those creatures"; Time to Reflect's filter phrase "a Zombie"),
+/// and a recognized "it" or "that creature" whose antecedent `resolve_relation_subject`
+/// rejects ("destroy target creature and all creatures it blocked this turn").
 pub(crate) fn population_drops_block_history_clause(
     lower: &str,
     populations: &[&TargetFilter],

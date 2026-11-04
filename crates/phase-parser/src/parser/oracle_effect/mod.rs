@@ -26791,14 +26791,17 @@ fn anaphor_rewrite_would_drop_this_way_binding(text_lower: &str, effect: &Effect
             .is_some_and(TargetFilter::references_tracked_set)
 }
 
-/// CR 608.2c + CR 608.2i: a mass instruction whose population is defined by a block-history
-/// clause its population filter does not carry — a partner no subject word covers, or a
-/// recognized partner with no source or earlier-target antecedent. Representing it without
-/// the clause would widen it to every creature (Triton Tactics: "tap each creature that was
-/// blocked by one of those creatures this turn"), so the caller fails the instruction closed.
-/// The populations are read across the clause's compound "and" chain, where a mass
-/// conjunct sits ("destroy it and all creatures it blocked this turn").
-fn mass_instruction_drops_block_partner(clause: &ParsedEffectClause, lower: &str) -> bool {
+/// CR 608.2c + CR 608.2i + CR 115.1a: an instruction whose affected objects — a mass
+/// population or a target — are defined by a block-history clause their filter does not
+/// carry: a partner that is an indefinite filter phrase (Time to Reflect: "target creature
+/// that blocked or was blocked by a Zombie this turn"), any other partner no subject word
+/// covers (Triton Tactics: "each creature that was blocked by one of those creatures this
+/// turn"), or a recognized partner with no source or earlier-target antecedent.
+/// Representing it without the clause would widen it to every creature, or every creature
+/// as a legal target, so the caller fails the instruction closed. The populations are read
+/// across the clause's compound "and" chain, where a mass conjunct sits ("destroy it and
+/// all creatures it blocked this turn").
+fn instruction_drops_block_partner(clause: &ParsedEffectClause, lower: &str) -> bool {
     let populations: Vec<&TargetFilter> = std::iter::once(&clause.effect)
         .chain(
             std::iter::successors(clause.sub_ability.as_deref(), |def| {
@@ -26806,13 +26809,16 @@ fn mass_instruction_drops_block_partner(clause: &ParsedEffectClause, lower: &str
             })
             .map(|def| &*def.effect),
         )
-        .filter_map(|effect| match effect {
-            Effect::SetTapState {
-                scope: EffectScope::All,
-                target,
-                ..
-            } => Some(target),
-            _ => mass_population_target(effect),
+        .flat_map(|effect| {
+            let population = match effect {
+                Effect::SetTapState {
+                    scope: EffectScope::All,
+                    target,
+                    ..
+                } => Some(target),
+                _ => mass_population_target(effect),
+            };
+            population.into_iter().chain(effect.target_filter())
         })
         .collect();
     !populations.is_empty() && population_drops_block_history_clause(lower, &populations)
@@ -49326,7 +49332,7 @@ fn parse_effect_chain_ir_body(
                 replace_target_with_parent(&mut clause.effect);
             }
         }
-        if mass_instruction_drops_block_partner(&clause, &text_lower) {
+        if instruction_drops_block_partner(&clause, &text_lower) {
             clause.effect = Effect::unimplemented("block_history_partner", text.as_str());
             clause.sub_ability = None;
             clause.multi_target = None;
