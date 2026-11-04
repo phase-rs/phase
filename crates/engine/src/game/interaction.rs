@@ -5737,6 +5737,7 @@ fn project_casting_variant(
         CastingVariant::Freerunning => "Freerunning",
         CastingVariant::Prowl => "Prowl",
         CastingVariant::JumpStart => "JumpStart",
+        CastingVariant::BeamMeUp => "BeamMeUp",
         CastingVariant::Fuse => "Fuse",
         CastingVariant::Surge => "Surge",
         CastingVariant::FaceDown => "FaceDown",

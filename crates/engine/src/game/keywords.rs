@@ -313,6 +313,20 @@ pub fn effective_harmonize_cost(state: &GameState, object_id: ObjectId) -> Optio
     }
 }
 
+/// CR 118.9 + CR 601.3: Effective beam me up alternative cost for a card in a
+/// graveyard, honoring off-zone keyword grants in addition to a printed
+/// `Keyword::BeamMeUp`. Resolves `ManaCost::SelfManaCost` (a grant whose cost
+/// equals the card's mana cost, e.g. Scotty, Miracle Worker) via
+/// `resolve_keyword_mana_cost`, mirroring `effective_harmonize_cost`. The
+/// keyword's rule number needs manual verification.
+pub fn effective_beam_me_up_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
+    let keyword = effective_keyword_for_object(state, object_id, KeywordKind::BeamMeUp)?;
+    match keyword {
+        Keyword::BeamMeUp(cost) => Some(resolve_keyword_mana_cost(state, object_id, &cost)),
+        _ => None,
+    }
+}
+
 /// CR 702.190a: Effective Sneak alt-cost for an object, honoring off-zone characteristic
 /// grants (e.g., Ninja Teen's "creature cards in your graveyard have sneak {cost}").
 pub fn effective_sneak_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
@@ -371,6 +385,7 @@ pub fn effective_keyword_mana_cost(
         KeywordKind::Mayhem => effective_mayhem_cost(state, object_id),
         KeywordKind::Harmonize => effective_harmonize_cost(state, object_id),
         KeywordKind::Disturb => effective_disturb_cost(state, object_id),
+        KeywordKind::BeamMeUp => effective_beam_me_up_cost(state, object_id),
         _ => None,
     }
 }

@@ -1796,8 +1796,9 @@ fn graveyard_spell_objects_available_to_cast(
         }
 
         // CR 702.34 / CR 702.81 / CR 702.127 / CR 702.138 / CR 702.180:
-        // Cards in graveyard with graveyard-cast keywords. Escape and Retrace
-        // must have enough eligible non-mana additional-cost material available.
+        // Cards in graveyard with graveyard-cast keywords. Escape, Retrace,
+        // Jump-start and beam me up must have enough eligible non-mana
+        // additional-cost material available.
         if has_effective_graveyard_cast_keyword(state, player, obj_id, obj)
             && (has_harmonize_keyword(state, obj_id)
                 || has_flashback_keyword(state, obj_id)
@@ -1805,6 +1806,7 @@ fn graveyard_spell_objects_available_to_cast(
                 || has_disturb_keyword(state, obj_id)
                 || retrace_has_discardable_land(state, player, obj_id)
                 || jumpstart_has_discardable_card(state, player, obj_id)
+                || beam_me_up_has_returnable_creature(state, player, obj_id)
                 || can_pay_escape_additional_cost(state, player, obj_id)
                 // CR 702.187b: Mayhem is eligible only while the card was
                 // discarded this turn.
@@ -1954,6 +1956,29 @@ fn jumpstart_has_discardable_card(
 ) -> bool {
     jumpstart_castable_from_graveyard(state, object_id)
         && casting_costs::can_pay_jumpstart_additional_cost(state, player, object_id)
+}
+
+/// CR 601.3: beam me up is a permission to cast the card from a graveyard,
+/// keyed on the effective (printed or granted) keyword cost. Unlike CR 702.133a,
+/// the printed reminder carries no instant/sorcery gate, so none is imposed
+/// here; a grant that restricts card types carries its own restriction. The
+/// keyword's rule number needs manual verification.
+fn beam_me_up_castable_from_graveyard(state: &GameState, object_id: ObjectId) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        obj.zone == Zone::Graveyard
+            && super::keywords::effective_beam_me_up_cost(state, object_id).is_some()
+    })
+}
+
+/// CR 118.3 + CR 601.2h: a beam me up cast also returns a creature you control
+/// that can be beamed up, so it is offered only while one exists.
+fn beam_me_up_has_returnable_creature(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    beam_me_up_castable_from_graveyard(state, object_id)
+        && casting_costs::can_pay_beam_me_up_additional_cost(state, player, object_id)
 }
 
 /// CR 702.146: Check if an object has the Disturb keyword.
@@ -2616,7 +2641,8 @@ pub(crate) fn complete_foretell_cost_move(
 
 // CR 702.34 (Flashback) / CR 702.81 (Retrace) / CR 702.127 (Aftermath) /
 // CR 702.133 (Jump-start) / CR 702.138 (Escape) / CR 702.146 (Disturb) /
-// CR 702.180 (Harmonize): graveyard-cast alternative permissions. Sneak
+// CR 702.180 (Harmonize) / beam me up (rule number needs manual verification):
+// graveyard-cast alternative permissions. Sneak
 // (CR 702.190a) is a HAND-cast alt-cost and is deliberately NOT listed here —
 // including it would misclassify graveyard objects with a granted Sneak as
 // castable from the graveyard, which the rules do not permit.
@@ -2631,6 +2657,7 @@ fn has_effective_graveyard_cast_keyword(
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Escape)
         || has_retrace_keyword(state, object_id)
         || jumpstart_castable_from_graveyard(state, object_id)
+        || beam_me_up_castable_from_graveyard(state, object_id)
         || has_harmonize_keyword(state, object_id)
         || has_flashback_keyword(state, object_id)
         || has_aftermath_keyword(state, object_id)
@@ -2641,7 +2668,8 @@ fn has_effective_graveyard_cast_keyword(
 }
 
 /// CR 109.5 + CR 702.34a / CR 702.81a / CR 702.127a / CR 702.133a / CR 702.138a /
-/// CR 702.146a / CR 702.180a: each graveyard-cast keyword means "you may cast
+/// CR 702.146a / CR 702.180a (and beam me up, rule number needs manual
+/// verification): each graveyard-cast keyword means "you may cast
 /// this card from your graveyard", and "you" is the player attempting the cast,
 /// whose graveyard is the container that player reads (the shared pile when the
 /// format shares graveyards). A card outside it (castable only through an
@@ -4305,7 +4333,8 @@ pub(crate) fn castable_from_current_zone(
                         .keywords
                         .iter()
                         .any(|k| matches!(k, crate::types::keywords::Keyword::Madness(_))))))
-        // CR 109.5 + CR 702.34 / CR 702.81 / CR 702.138 / CR 702.180: graveyard-cast
+        // CR 109.5 + CR 702.34 / CR 702.81 / CR 702.138 / CR 702.180 (and beam me
+        // up, rule number needs manual verification): graveyard-cast
         // keywords and timed graveyard grants read "your graveyard" as the
         // container the caster reads, so this sits outside the owner block above.
         || (state.object_in_players_zone(obj, Zone::Graveyard, player)
@@ -6878,8 +6907,8 @@ impl From<GraveyardAuthorityError> for EngineError {
 ///   `Ambiguous`, and the cast goes through the announcement menu.
 ///
 /// Never called for a graveyard route that is its own authority (Escape,
-/// Flashback, Retrace, Harmonize, Mayhem, Aftermath, Jump-start, Disturb, a
-/// timed alternative cost).
+/// Flashback, Retrace, Harmonize, Mayhem, Aftermath, Jump-start, Beam me up,
+/// Disturb, a timed alternative cost).
 fn resolve_graveyard_authority(
     state: &GameState,
     player: PlayerId,
@@ -8707,6 +8736,7 @@ fn prepare_casting_variant(
         | CastingVariant::Freerunning
         | CastingVariant::Prowl
         | CastingVariant::JumpStart
+        | CastingVariant::BeamMeUp
         | CastingVariant::Surge => {}
         CastingVariant::Fuse => {
             if let Some(object) = transformed_state.objects.get_mut(&object_id) {
@@ -9192,6 +9222,9 @@ fn casting_candidates(
         }
         if jumpstart_castable_from_graveyard(state, object_id) {
             candidates.push(CastingVariant::JumpStart);
+        }
+        if beam_me_up_castable_from_graveyard(state, object_id) {
+            candidates.push(CastingVariant::BeamMeUp);
         }
         if super::keywords::effective_disturb_cost(state, object_id).is_some() {
             candidates.push(CastingVariant::Disturb);
@@ -10020,6 +10053,14 @@ fn prepare_spell_cast_announced(
         None
     };
 
+    // CR 118.9 + CR 601.3: beam me up — use the beam me up cost when casting
+    // from your graveyard (rule number needs manual verification).
+    let beam_me_up_cost = if graveyard_keywords_open {
+        super::keywords::effective_beam_me_up_cost(state, object_id)
+    } else {
+        None
+    };
+
     // CR 702.187b: Mayhem — use the mayhem mana cost when casting from graveyard,
     // but only while the card was discarded this turn. The cost may be granted to
     // graveyard cards by a static (Green Goblin), so use the off-zone-aware lookup.
@@ -10060,7 +10101,7 @@ fn prepare_spell_cast_announced(
         split_flashback_cost_components(flashback_cost.as_ref());
 
     // Precedence: Escape > Retrace > Harmonize > Mayhem > Flashback > Aftermath >
-    // Disturb > Jump-start > GraveyardPermission > Warp > Normal.
+    // Jump-start > Beam me up > Disturb > GraveyardPermission > Warp > Normal.
     // No standard card has multiple graveyard-cast keywords; if one did, the card's own
     // keyword overrides an external source's grant (GraveyardPermission).
     //
@@ -10135,6 +10176,8 @@ fn prepare_spell_cast_announced(
             CastingVariant::Aftermath
         } else if graveyard_keywords_open && jumpstart_castable_from_graveyard(state, object_id) {
             CastingVariant::JumpStart
+        } else if beam_me_up_cost.is_some() {
+            CastingVariant::BeamMeUp
         } else if disturb_cost.is_some() {
             CastingVariant::Disturb
         } else if let Some(resolution) = graveyard_permission_route
@@ -10631,6 +10674,11 @@ fn prepare_spell_cast_announced(
     } else {
         None
     };
+    let effective_beam_me_up_cost_for_path = if casting_variant == CastingVariant::BeamMeUp {
+        beam_me_up_cost
+    } else {
+        None
+    };
     let mut mana_cost = if energy_cost_from_exile
         || hand_cast_free
         || next_spell_without_paying
@@ -10662,6 +10710,7 @@ fn prepare_spell_cast_announced(
             .or(effective_mayhem_cost_for_path)
             .or(effective_flashback_mana_cost_for_path)
             .or(effective_disturb_cost_for_path)
+            .or(effective_beam_me_up_cost_for_path)
             .or(effective_sneak_cost_for_path)
             .or(effective_web_slinging_cost_for_path)
             .or(alt_cost_from_exile)
@@ -21458,6 +21507,14 @@ fn can_cast_prepared_now_with_probe(
     // CR 702.133a: Jump-start requires a discardable card (any card) in hand.
     if prepared.casting_variant == CastingVariant::JumpStart
         && !casting_costs::can_pay_jumpstart_additional_cost(state, player, prepared.object_id)
+    {
+        return false;
+    }
+
+    // CR 118.3 + CR 601.2h: beam me up requires a creature you control that
+    // can be beamed up, to return as its additional cost.
+    if prepared.casting_variant == CastingVariant::BeamMeUp
+        && !casting_costs::can_pay_beam_me_up_additional_cost(state, player, prepared.object_id)
     {
         return false;
     }

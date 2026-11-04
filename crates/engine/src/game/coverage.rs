@@ -5814,10 +5814,6 @@ enum KeywordGap<'a> {
     MorphUnsupportedCost,
     /// CR 702.16i: "protection from each [set]" is one protection per member; the engine never expands a face (or copied) keyword's set, so it protects from nothing.
     ProtectionColorSetUnexpanded,
-    /// CR 601.3 + CR 118.9: beam me up's graveyard cast route is not
-    /// implemented (TRK; the keyword's rule number needs manual
-    /// verification). Strict-failure hold; removed when the route lands.
-    BeamMeUpCastRouteUnimplemented,
 }
 
 impl<'a> KeywordGap<'a> {
@@ -5828,7 +5824,6 @@ impl<'a> KeywordGap<'a> {
             KeywordGap::CumulativeUpkeepUnsupportedCost => "CumulativeUpkeepUnsupportedCost",
             KeywordGap::MorphUnsupportedCost => "MorphUnsupportedCost",
             KeywordGap::ProtectionColorSetUnexpanded => "ProtectionColorSetUnexpanded",
-            KeywordGap::BeamMeUpCastRouteUnimplemented => "BeamMeUpCastRouteUnimplemented",
         }
     }
 }
@@ -5844,7 +5839,6 @@ fn keyword_gap(kw: &Keyword) -> Option<KeywordGap<'_>> {
         kw if printed_color_set_protection_is_unexpanded(kw) => {
             Some(KeywordGap::ProtectionColorSetUnexpanded)
         }
-        Keyword::BeamMeUp(_) => Some(KeywordGap::BeamMeUpCastRouteUnimplemented),
         _ => None,
     }
 }
@@ -24614,12 +24608,11 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         )
     }
 
-    /// D2.3 hold: until beam me up's graveyard cast route lands (CR 601.3 +
-    /// CR 118.9; the keyword's rule number needs manual verification), every
-    /// coverage consumer reports each printed carrier unsupported, and the hold
-    /// is the card's only gap.
+    /// The cast route landed (CR 601.3 + CR 118.9; the keyword's rule number
+    /// needs manual verification): each printed carrier is supported in every
+    /// coverage consumer.
     #[test]
-    fn beam_me_up_cards_are_held_unsupported_in_every_coverage_consumer() {
+    fn beam_me_up_cards_are_supported_in_every_coverage_consumer() {
         for (name, oracle, mana_cost, color) in BEAM_ME_UP_CARDS {
             let face = beam_me_up_face(name, oracle, mana_cost, color);
             // Reach guard: the printed line really is the typed keyword.
@@ -24632,38 +24625,34 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             );
 
             let card = coverage_result_for_face(face.clone());
-            assert!(!card.supported, "[{name}] must stay unsupported");
-            let mut handlers: Vec<&str> = card
-                .gap_details
-                .iter()
-                .map(|gap| gap.handler.as_str())
-                .collect();
-            handlers.sort_unstable();
-            assert_eq!(
-                handlers,
-                vec!["Keyword:BeamMeUp", "Keyword:BeamMeUpCastRouteUnimplemented"],
-                "[{name}] the hold is the only gap: {:?}",
+            assert!(
+                card.supported,
+                "[{name}] must be supported: {:?}",
                 card.gap_details
             );
-            assert_eq!(card.gap_count, 2, "[{name}] gap count");
+            assert!(
+                card.gap_details.is_empty(),
+                "[{name}] gaps: {:?}",
+                card.gap_details
+            );
+            assert_eq!(card.gap_count, 0, "[{name}] gap count");
             let keyword_item = card
                 .parse_details
                 .iter()
                 .find(|item| item.category == ParseCategory::Keyword)
                 .expect("keyword parse item");
             assert_eq!(keyword_item.label, "BeamMeUp", "[{name}] keyword label");
-            assert!(!keyword_item.supported, "[{name}] keyword item held");
+            assert!(keyword_item.supported, "[{name}] keyword item supported");
 
             assert!(
-                card_face_has_unimplemented_parts(&face),
-                "[{name}] precon playability reads the hold"
+                !card_face_has_unimplemented_parts(&face),
+                "[{name}] precon playability"
             );
             let (playable, warnings) = playability_and_object_warnings(&face);
-            assert!(!playable, "[{name}] must not be precon-playable");
-            assert_eq!(
-                warnings,
-                vec!["Keyword: BeamMeUpCastRouteUnimplemented".to_string()],
-                "[{name}] in-game warning"
+            assert!(playable, "[{name}] must be precon-playable");
+            assert!(
+                warnings.is_empty(),
+                "[{name}] in-game warnings: {warnings:?}"
             );
         }
 

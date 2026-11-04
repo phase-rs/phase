@@ -1128,6 +1128,7 @@ export type CastingVariant =
   | { type: "Mayhem" }
   | { type: "Flashback" }
   | { type: "Aftermath" }
+  | { type: "BeamMeUp" }
   | {
       type: "GraveyardPermission";
       data: {

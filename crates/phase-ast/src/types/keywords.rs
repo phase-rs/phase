@@ -1172,9 +1172,8 @@ pub enum Keyword {
     /// manual verification. The cost is an alternative cost (CR 118.9), the
     /// return is an additional cost (CR 118.8) paid per CR 601.2h, and the
     /// keyword is the CR 601.3 permission to cast from the graveyard.
-    /// RUNTIME: TODO — the graveyard cast route is not wired yet; coverage holds
-    /// every card carrying this keyword unsupported (`coverage.rs`
-    /// `KeywordGap::BeamMeUpCastRouteUnimplemented`).
+    /// Runtime: `CastingVariant::BeamMeUp` (`engine::game::casting`), cost via
+    /// `keywords::effective_beam_me_up_cost`.
     BeamMeUp(ManaCost),
     /// Mobilize N — when this creature attacks, create N 1/1 red Warrior tokens
     /// tapped and attacking, sacrifice them at end of combat.

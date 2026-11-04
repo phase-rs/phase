@@ -10305,6 +10305,8 @@ fn encode_declaration_exit(
 ///   cards from your graveyard"; possibly a Composite, Lunar Hatchling).
 /// - CR 702.81a: Retrace's land discard.
 /// - CR 702.133a: Jump-start's discard.
+/// - Beam me up's return of a creature you control (CR 118.8; rule number
+///   needs manual verification).
 /// - A card's own compound alternative cost (`alternative_cost_residual`).
 fn cast_variant_cost_residual(
     state: &GameState,
@@ -10337,6 +10339,7 @@ fn cast_variant_cost_residual(
         }
         CastingVariant::Retrace => return Some(retrace_discard_land_cost()),
         CastingVariant::JumpStart => return Some(jumpstart_discard_card_cost()),
+        CastingVariant::BeamMeUp => return Some(beam_me_up_return_creature_cost()),
         _ => {}
     }
     alternative_cost_residual(state, player, object_id, casting_variant)
@@ -13019,6 +13022,32 @@ pub(super) fn can_pay_jumpstart_additional_cost(
 ) -> bool {
     // CR 702.133a: any card in hand can be discarded for the jump-start cost.
     !super::casting::find_eligible_discard_targets(state, player, object_id, None, None).is_empty()
+}
+
+/// The single constructor of beam me up's additional cost, read by both the
+/// payment residual (`cast_variant_cost_residual`) and the affordability
+/// precheck (`can_pay_beam_me_up_additional_cost`), so they cannot diverge.
+// CR 118.8 + CR 601.2h: "if you also return a creature you control to its owner's hand"; CR 101.2: FilterProp::CanBeBeamedUp honors "can't be beamed up". Beam me up rule number needs manual verification.
+pub(super) fn beam_me_up_return_creature_cost() -> AbilityCost {
+    AbilityCost::ReturnToHand {
+        count: 1,
+        filter: Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(crate::types::ability::ControllerRef::You)
+                .properties(vec![crate::types::ability::FilterProp::CanBeBeamedUp]),
+        )),
+        from_zone: None,
+    }
+}
+
+/// CR 118.3: a beam me up cast is legal only while its additional cost can be
+/// paid fully — a creature you control that can be beamed up.
+pub(super) fn can_pay_beam_me_up_additional_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    beam_me_up_return_creature_cost().is_payable_for_spell(state, player, object_id)
 }
 
 /// CR 601.2f: What the lock seam at the head of [`pay_and_push_with_lock`] needs
