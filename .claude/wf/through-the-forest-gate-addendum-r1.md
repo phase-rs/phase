@@ -20,8 +20,8 @@ pass. It is a typed enum carried on the effect and on every pause point that re-
 
 - `DigRestRemainder { Route, StayInLibrary }` — `crates/phase-ast/src/types/ability.rs:21551`
   - `Effect::Dig.rest_remainder` (`ability.rs:22480`), `#[serde(default, skip_serializing_if = "DigRestRemainder::is_route")]`
-  - `WaitingFor::DigChoice.rest_remainder` — `crates/engine/src/types/game_state.rs:17467`
-  - `BatchCompletion::RevealRestPile.rest_remainder` — `game_state.rs:7322`
+  - `WaitingFor::DigChoice.rest_remainder` — `crates/engine/src/types/game_state.rs`
+  - `BatchCompletion::RevealRestPile.rest_remainder` — `game_state.rs`
 - The policy is lowered **once, at assembly**, by `declared_selection_remainder`
   (`crates/phase-parser/src/parser/oracle_effect/sequence.rs:7066`). It answers `StayInLibrary` only when the
   clause names a kept destination, keeps a non-zero count, and names **no** remainder destination and **no**
@@ -32,10 +32,16 @@ pass. It is a typed enum carried on the effect and on every pause point that re-
 - A later explicit "put the rest …" clause owns the remainder by **re-declaring** `Route` in its existing
   authority, `patch_rest_destination_recursively` (`sequence.rs:7111`). No new rest-handling authority was added.
 
-Runtime consumers: the interactive `DigChoice` path (`engine_resolution_choices.rs`) now leaves unchosen
-looked-at cards in place instead of falling through `rest_destination.unwrap_or(Zone::Graveyard)`, and the
-mass path (`effects/dig.rs`) reads the same policy. This is what makes Through the Forest Gate keep the
-unchosen 20 looked-at cards in the library, shuffle, and gain 8 life.
+Runtime consumers: both Dig paths live in `crates/engine/src/game/effects/dig.rs` —
+`resolve_from_prior_look` (the interactive `WaitingFor::DigChoice`) and `resolve_mass_put_all` (the mass put).
+Each now gates the rest pile on `rest_remainder.is_route()`: a non-route remainder produces an empty rest pile
+and no destination, so the unchosen looked-at cards are never routed through
+`rest_destination.unwrap_or(Zone::Graveyard)` (`engine_resolution_choices.rs:4977` and `:5052`). The mass path
+then calls the new `end_reveal_for_cards_left_in_library` (`engine_resolution_choices.rs:461`) so the reveal
+ends with the instruction instead of publishing the positions a later shuffle gives those cards
+(CR 701.20a + CR 401.2). The submission arms are in `engine_resolution_choices.rs::handle_resolution_choice`
+and `run_batch_completion`. This is what makes Through the Forest Gate keep the unchosen 20 looked-at cards in
+the library, shuffle, and gain 8 life.
 
 ### 1b. Whole-set selection assembly for "put those cards"
 
