@@ -10807,6 +10807,19 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         person: SubjectPerson,
     ) -> OracleResult<'_, Option<TargetFilter>> {
         let (rest, _) = (tag("an "), opt(tag("activated ")), tag("ability")).parse(input)?;
+        // CR 113.7 + CR 201.2a: "of a source with the chosen name" (Kai Winn,
+        // Faithless Leader) narrows the activated source to an object whose name
+        // equals the name this permanent chose (`ChosenAttribute::CardName`). "A
+        // source" names no zone, so no zone restriction is added: an ability
+        // activated from a graveyard or hand qualifies too.
+        if let Ok((rest, filter)) = value(
+            TargetFilter::HasChosenName,
+            tag::<_, _, OracleError<'_>>(" of a source with the chosen name"),
+        )
+        .parse(rest)
+        {
+            return Ok((rest, Some(filter)));
+        }
         // CR 602.1a + CR 113.7: Optional source-object filter narrows the
         // trigger to abilities whose source matches a type filter ("of an
         // artifact or creature", "of a creature or land", "of a permanent").
@@ -14906,6 +14919,26 @@ fn parse_spell_designation_adjective(i: &str) -> OracleResult<'_, FilterProp> {
 /// `parse_spell_designation_adjective` to the built spell filter (`None` leaves
 /// the filter unchanged). Every cast-trigger branch (`you cast`, `<who> casts`)
 /// attaches through here, before owner scoping, so the branches cannot drift.
+/// CR 601.2 + CR 603.2: Does a cast trigger's parsed spell filter narrow which
+/// spells qualify? A bare "a spell" folds to an unconstrained `Typed` filter and
+/// is left off `valid_card` (every spell matches). A disjunction ("instant or
+/// sorcery spell") always narrows. A conjunction carries a refinement leg the
+/// type-phrase parser attached after the type word — "a spell with the chosen
+/// name" (CR 201.2a: `And[Typed, HasChosenName]`, Kai Winn) — so it narrows
+/// whenever any leg does; dropping it would fire the trigger on every spell.
+fn spell_filter_constrains(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
+        TargetFilter::Or { .. } => true,
+        TargetFilter::And { filters } => filters.iter().any(|leg| match leg {
+            TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
+            TargetFilter::Any => false,
+            _ => true,
+        }),
+        _ => false,
+    }
+}
+
 fn with_spell_designation(filter: TargetFilter, designation: Option<FilterProp>) -> TargetFilter {
     match designation {
         Some(prop) => conjoin_filter_property(filter, prop),
@@ -21132,13 +21165,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         } else {
             filter
         };
-        let is_meaningful = match &filter {
-            TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
-            // Or-filters are always meaningful (e.g. "instant or sorcery spell")
-            TargetFilter::Or { .. } => true,
-            _ => false,
-        };
-        if is_meaningful || spell_not_owned_by_you {
+        if spell_filter_constrains(&filter) || spell_not_owned_by_you {
             def.valid_card = Some(filter);
         }
         return Some((TriggerMode::SpellCast, def));
@@ -21255,11 +21282,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             } else {
                 let (filter, _rest) = parse_type_phrase_folding(spell_clause);
                 let filter = with_spell_designation(filter, designation);
-                let is_meaningful = match &filter {
-                    TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
-                    TargetFilter::Or { .. } => true,
-                    _ => false,
-                };
+                let is_meaningful = spell_filter_constrains(&filter);
                 let filter = if spell_not_owned_by_caster {
                     with_owner_scope(filter, ControllerRef::Opponent)
                 } else {

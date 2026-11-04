@@ -258,6 +258,7 @@ mod conquerors_galleon_end_of_combat_transform;
 mod dromokas_command_spell_prevention;
 mod enchant_tapped_creature;
 mod impulsive_maneuvers_batch_shield;
+mod kai_winn_chosen_name_cast_or_activate;
 mod kang_dynasty_until_next_turn_rider;
 mod keyword_anaphor_subject_binding;
 mod koh_chosen_card_still_requires_exile;
