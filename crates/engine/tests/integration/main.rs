@@ -224,6 +224,7 @@ pub mod support;
 mod swallow_optional_you_may;
 mod target_instance_identity_9280;
 mod terra_herald_optional_prompt;
+mod tezzeret_cruel_captain_emblem;
 mod thoughtweft_trample_regression;
 mod total_war_attacking_player_scope;
 mod types_ability;
@@ -288,5 +289,6 @@ mod controller_anaphor_binds_through_context;
 
 mod resolution_progress_contract;
 
+mod ignite_memories_random_reveal;
 mod risky_move_gain_control_trigger;
 mod token_attack_destination;

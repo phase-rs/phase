@@ -141,10 +141,26 @@ function setupRandomAvatars(playerCount: number, seed: string, preservePlayerNam
   );
 }
 
+/**
+ * Install one commander-derived identity per owner, and report whether it did.
+ *
+ * Derived from EVERY `is_commander` object in the state — deliberately NOT from
+ * `command_zone`, which is only the cards sitting in the command zone at this
+ * instant (`viewmodel/commanderColumn.ts` reads it that way). A commander that
+ * has been cast, that died, or that was exiled is still its owner's commander
+ * (CR 903.3), but it no longer appears in `command_zone` — so gating on that
+ * list made a mid-game reload skip this derivation entirely and keep the random
+ * planeswalker identities `setupRandomAvatars` seeded, swapping every seat's
+ * name and avatar on refresh (issue #8053).
+ *
+ * A state with no commander object at all — a non-Commander game, or a snapshot
+ * that has not loaded yet — writes NOTHING and answers `false`, so a caller's
+ * existing fallback identities survive instead of being erased to empty maps.
+ */
 function setupCommanderAvatars(
   gameState: { objects: Record<number, { name: string; owner: number; is_commander?: boolean }> },
   preservePlayerNames = false,
-) {
+): boolean {
   const names = new Map<number, string>();
   const commanderNames = new Map<number, string>();
   const playerAvatars = new Map<number, PlayerAvatarIdentity>();
@@ -155,6 +171,8 @@ function setupCommanderAvatars(
     commanderNames.set(obj.owner, obj.name);
   }
 
+  if (commanderNames.size === 0) return false;
+
   for (const [playerId, cardName] of commanderNames) {
     names.set(playerId, cardName.split(",")[0].split(" //")[0]);
     playerAvatars.set(playerId, { kind: "card", cardName });
@@ -163,6 +181,7 @@ function setupCommanderAvatars(
   useMultiplayerStore.setState(
     preservePlayerNames ? { playerAvatars } : { playerNames: names, playerAvatars },
   );
+  return true;
 }
 
 function setupDraftMatchAvatars(seed: string) {
@@ -747,10 +766,13 @@ export function GameProvider({
   useEffect(() => {
     if (mode !== "ai") return;
     let applied = false;
+    // Applies as soon as the state carries a commander, in whatever zone it is
+    // in — see `setupCommanderAvatars` for why the command zone is the wrong
+    // gate. Waits (by answering `false`, so the subscription keeps listening)
+    // until a commander object exists.
     const applyCommanderAvatars = (state: ReturnType<typeof useGameStore.getState>) => {
-      if (state.gameId !== gameId || !state.gameState?.command_zone?.length) return false;
-      setupCommanderAvatars(state.gameState);
-      return true;
+      if (state.gameId !== gameId || !state.gameState) return false;
+      return setupCommanderAvatars(state.gameState);
     };
     const unsub = useGameStore.subscribe((state) => {
       if (applied || !applyCommanderAvatars(state)) return;
@@ -801,12 +823,16 @@ export function GameProvider({
     }
     let appliedCommanderAvatars = false;
     const applyCommanderAvatars = (gameState: typeof state) => {
-      if (!gameState?.format_config?.uses_commander || !gameState.command_zone?.length) return;
-      appliedCommanderAvatars = true;
+      if (!gameState?.format_config?.uses_commander) return;
+      // Same zone-independent derivation as the AI path: `command_zone` is
+      // empty as soon as a commander is on the battlefield, and gating on it
+      // made a mid-game reload keep the random identities (issue #8053).
       // The lobby modes keep their names; the Commander pod game has none to
       // keep and takes commander-derived ones for every seat. Never `false` for
       // `setupRandomAvatars` above — that one would write a literal "You".
-      setupCommanderAvatars(gameState, !isCommanderDraftMatch);
+      if (setupCommanderAvatars(gameState, !isCommanderDraftMatch)) {
+        appliedCommanderAvatars = true;
+      }
     };
     applyCommanderAvatars(state);
     const unsub = useGameStore.subscribe((next) => {
