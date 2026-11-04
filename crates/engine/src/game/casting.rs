@@ -32822,7 +32822,12 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
             to: AttachmentReferent::DeclaredTarget { .. },
         } => read.includes_bindable(),
         FilterProp::CombatRelation { subject, .. } => {
-            read.includes_bindable() && matches!(subject, CombatRelationSubject::ParentTarget)
+            read.includes_bindable()
+                && match subject {
+                    CombatRelationSubject::ParentTarget
+                    | CombatRelationSubject::AnaphoricTarget => true,
+                    CombatRelationSubject::Source => false,
+                }
         }
         FilterProp::ControllerMatches { player } => player_filter_reads_chosen_target(player, read),
         FilterProp::DealtDamageThisTurn { recipient, .. } => recipient

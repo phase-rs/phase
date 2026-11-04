@@ -110,7 +110,8 @@ use super::oracle_target::{
     parse_event_context_ref, parse_fight_target, parse_parent_target_controller_population,
     parse_target, parse_target_with_ctx, parse_target_with_disjunctive_restriction,
     parse_target_with_syntax, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
-    resolve_singular_exiled_card_target, unique_slot_for_anaphor, AnaphorNoun, AnaphorZoneClass,
+    population_drops_block_history_clause, resolve_singular_exiled_card_target,
+    strip_block_history_clauses, unique_slot_for_anaphor, AnaphorNoun, AnaphorZoneClass,
     DefiniteAnaphor, TargetSyntax,
 };
 use super::oracle_util::{
@@ -123,31 +124,31 @@ use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
 use crate::types::ability::{
     effect_has_stack_target_declaration, effect_owns_resolution_zone_choice,
     effect_parent_ref_slot_count, effect_refs_parent_target, effect_requires_parent_target_object,
-    extract_target_filter_from_effect, instruction_object_reach, payer_is_declared_target,
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
-    AttachCardinality, AttachSelection, AttackSubject, BounceSelection, CardPlayMode,
-    CardTypeSetSource, CastFromZoneDriver, CastMechanism, CastPermissionConstraint,
-    CastingPermission, ChoiceType, ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
-    ChosenGroupId, CoinFlipRun, CombatDamageScope, CombatHistoryScope, Comparator, ConjureCard,
-    ConjureSource, ContinuousEffectOnset, ContinuousModification, ControlWindow, ControllerRef,
-    CopyChooseScope, CopyRetargetPermission, CopyScale, DamageModification, DamageSource,
-    DelayedTriggerCondition, DelayedTriggerLifetime, DieResultBranch, DigRestOrder, Duration,
-    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, ExtraPhaseRecipient, FilterProp,
-    GameRestriction, GuardReading, GuessSubject, IntensityScope, IterationKindBinding,
-    KeeperConstraint, KeeperCounterMark, LibraryPosition, ManaProduction, ManaSpendPermission,
-    ManaTargetRole, MassLibraryShuffleMode, MultiTargetSpec, NameStickerSet, NumberDistinctness,
-    ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope, PerpetualModification,
-    PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter, PlayerRelation,
-    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue,
-    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, ReplacementCondition,
-    ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope,
-    RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition,
-    SkipScope, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
-    SubAbilityLink, TapStateChange, TargetFilter, TargetReadOrigin, TargetSelectionMode,
-    ThisWayCause, TokenAttackDestination, TrackedAnaphorSource, TriggerCondition,
-    TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier, UnloweredGuard,
-    UntilCondition, VoteSubject, WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser,
-    ZoneChoiceGatherRole, ZoneOwner,
+    extract_target_filter_from_effect, instruction_object_reach, mass_population_target,
+    payer_is_declared_target, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
+    AbilityTag, AggregateFunction, AttachCardinality, AttachSelection, AttackSubject,
+    BounceSelection, CardPlayMode, CardTypeSetSource, CastFromZoneDriver, CastMechanism,
+    CastPermissionConstraint, CastingPermission, ChoiceType, ChooseFromZoneConstraint,
+    ChooseOneOfKind, Chooser, ChosenGroupId, CoinFlipRun, CombatDamageScope, CombatHistoryScope,
+    Comparator, ConjureCard, ConjureSource, ContinuousEffectOnset, ContinuousModification,
+    ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission, CopyScale,
+    DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
+    DieResultBranch, DigRestOrder, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
+    EffectScope, ExtraPhaseRecipient, FilterProp, GameRestriction, GuardReading, GuessSubject,
+    IntensityScope, IterationKindBinding, KeeperConstraint, KeeperCounterMark, LibraryPosition,
+    ManaProduction, ManaSpendPermission, ManaTargetRole, MassLibraryShuffleMode, MultiTargetSpec,
+    NameStickerSet, NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint,
+    PerPlayerScope, PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness,
+    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
+    ReciprocalZoneChoiceRole, ReplacementCondition, ReplacementDefinition, ResolutionCastWindow,
+    RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
+    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
+    TargetFilter, TargetReadOrigin, TargetSelectionMode, ThisWayCause, TokenAttackDestination,
+    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
+    UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry,
+    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneChoiceGatherRole, ZoneOwner,
 };
 // `DoubleTarget` has no production use in this module since the counter-doubling
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
@@ -26790,6 +26791,228 @@ fn anaphor_rewrite_would_drop_this_way_binding(text_lower: &str, effect: &Effect
             .is_some_and(TargetFilter::references_tracked_set)
 }
 
+/// CR 608.2c + CR 608.2i + CR 115.1a: an instruction whose affected objects — a mass
+/// population or a target — are defined by a block-history clause their filter does not
+/// carry: a partner that is an indefinite filter phrase (Time to Reflect: "target creature
+/// that blocked or was blocked by a Zombie this turn"), any other partner no subject word
+/// covers (Triton Tactics: "each creature that was blocked by one of those creatures this
+/// turn"), or a recognized partner with no source or earlier-target antecedent.
+/// Representing it without the clause would widen it to every creature, or every creature
+/// as a legal target, so the caller fails the instruction closed. The populations are read
+/// across the clause's compound "and" chain, where a mass conjunct sits ("destroy it and
+/// all creatures it blocked this turn"), and from a broadcast grant's statics.
+fn instruction_drops_block_partner(clause: &ParsedEffectClause, lower: &str) -> bool {
+    let populations: Vec<&TargetFilter> = std::iter::once(&clause.effect)
+        .chain(
+            std::iter::successors(clause.sub_ability.as_deref(), |def| {
+                def.sub_ability.as_deref()
+            })
+            .map(|def| &*def.effect),
+        )
+        .flat_map(|effect| {
+            // `mass_population_target` adds `ChangeZoneAll`, which the parser-side
+            // list does not carry. CR 701.27a + CR 115.10a: a scope-`All` Transform
+            // ("transform all Humans") keeps a population neither shared list names,
+            // and its `target_filter()` is `None`. It is read here only, so the
+            // chain-prior population the shared lists feed is unchanged.
+            let population = mass_population_filter(effect)
+                .or_else(|| mass_population_target(effect))
+                .or(match effect {
+                    Effect::Transform {
+                        scope: EffectScope::All,
+                        target,
+                    } => Some(target),
+                    _ => None,
+                });
+            // CR 611.2c: an untargeted continuous grant over a broadcast population
+            // ("creatures that were blocked by that creature this combat gain
+            // trample", Ride Down) keeps that population in its statics' `affected`,
+            // which neither shared list nor `target_filter()` names. Read here only.
+            let grant_populations = match effect {
+                Effect::GenericEffect {
+                    static_abilities,
+                    target: None,
+                    ..
+                } => static_abilities.as_slice(),
+                _ => &[],
+            }
+            .iter()
+            .filter_map(|static_def| static_def.affected.as_ref())
+            .filter(|filter| is_broadcast_population_filter(filter));
+            population
+                .into_iter()
+                .chain(grant_populations)
+                .chain(effect.target_filter())
+        })
+        .collect();
+    !populations.is_empty() && population_drops_block_history_clause(lower, &populations)
+}
+
+#[cfg(test)]
+mod instruction_drops_block_partner_tests {
+    use super::{instruction_drops_block_partner, parse_effect_chain, parsed_clause};
+    use crate::types::ability::{
+        AbilityKind, BlockPairDirection, CombatHistoryScope, CombatRelation, CombatRelationSubject,
+        Effect, EffectScope, FilterProp, TargetFilter, TypedFilter,
+    };
+
+    /// "Creatures ~ blocked this turn", as `parse_block_history_clause` binds it.
+    fn blocked_by_source_this_turn() -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::CombatRelation {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: Some(CombatHistoryScope::ThisTurn),
+                },
+                subject: CombatRelationSubject::Source,
+            }]),
+        )
+    }
+
+    /// The guard's three outcomes for one mass population: a history clause its
+    /// filter carries binds; the same clause over the bare population (a declined
+    /// "it") and a partner no subject word covers both fail closed.
+    fn assert_guard_reads_population(population: fn(TargetFilter) -> Effect, verb: &str) {
+        let bare = TargetFilter::Typed(TypedFilter::creature());
+        let represented = format!("{verb} all creatures it blocked this turn.");
+        let unbound =
+            format!("{verb} each creature that was blocked by one of those creatures this turn.");
+        assert!(
+            !instruction_drops_block_partner(
+                &parsed_clause(population(blocked_by_source_this_turn())),
+                &represented
+            ),
+            "{verb}: a represented partner binds"
+        );
+        assert!(
+            instruction_drops_block_partner(&parsed_clause(population(bare.clone())), &represented),
+            "{verb}: a declined partner fails closed"
+        );
+        assert!(
+            instruction_drops_block_partner(&parsed_clause(population(bare)), &unbound),
+            "{verb}: an unbound partner fails closed"
+        );
+    }
+
+    /// Synthetic guard control: no printed card puts a history clause on a mass
+    /// transform (Moonmist's "Transform all Humans" has none). CR 608.2c + CR 608.2i:
+    /// a scope-`All` Transform hides its population from `target_filter()` and from
+    /// both shared population accessors, so the guard reads it itself.
+    #[test]
+    fn transform_all_population_binds_or_fails_closed() {
+        assert_guard_reads_population(
+            |target| Effect::Transform {
+                target,
+                scope: EffectScope::All,
+            },
+            "transform",
+        );
+    }
+
+    /// Synthetic guard control: no printed card puts a history clause on an explore
+    /// population. CR 608.2c + CR 608.2i: `ExploreAll` reaches the guard through the
+    /// parser-side population accessor, which `mass_population_target` lacks.
+    #[test]
+    fn explore_all_population_binds_or_fails_closed() {
+        assert_guard_reads_population(|filter| Effect::ExploreAll { filter }, "explore");
+    }
+
+    /// Parser shape only. CR 608.2c + CR 608.2i: an "each <type> ... explores"
+    /// population reaches the guard through the shared mass-population accessor,
+    /// so a history clause its filter does not carry fails the instruction closed
+    /// instead of leaving every creature to explore. Hand-built: no printed card
+    /// puts a history clause on an explore population.
+    #[test]
+    fn explore_population_with_an_unbound_partner_fails_closed() {
+        let def = parse_effect_chain(
+            "Each creature that was blocked by a Zombie this turn explores.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::Unimplemented { name, .. } if name == "block_history_partner"
+            ),
+            "{def:?}"
+        );
+        // Reach guard: without the clause the same subject parses as an explore population.
+        let bare = parse_effect_chain("Each creature explores.", AbilityKind::Spell);
+        assert!(
+            matches!(&*bare.effect, Effect::ExploreAll { .. }),
+            "{bare:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2c: a broadcast grant keeps its population in its statics'
+    /// `affected`. Ride Down's bound partner ("that creature", the earlier target)
+    /// binds. Synthetic: an "each creature" grant over a partner no subject word
+    /// covers (an indefinite "a Zombie", or "one of those creatures") parses its
+    /// population bare, so it fails closed instead of granting trample to every
+    /// creature. No printed card has these shapes; Ride Down is the nearest printed
+    /// card.
+    #[test]
+    fn broadcast_grant_population_binds_or_fails_closed() {
+        let ride_down = parse_effect_chain(
+            "Destroy target blocking creature. Creatures that were blocked by that creature this combat gain trample until end of turn.",
+            AbilityKind::Spell,
+        );
+        let grant = ride_down.sub_ability.as_deref().expect("Ride Down's grant");
+        let Effect::GenericEffect {
+            static_abilities,
+            target: None,
+            ..
+        } = &*grant.effect
+        else {
+            panic!("Ride Down's grant binds: {grant:?}");
+        };
+        assert!(
+            static_abilities
+                .iter()
+                .any(|static_def| static_def
+                    .affected
+                    .as_ref()
+                    .is_some_and(|affected| matches!(
+                        affected,
+                        TargetFilter::Typed(typed) if typed.properties.iter().any(|prop| matches!(
+                            prop,
+                            FilterProp::CombatRelation {
+                                subject: CombatRelationSubject::AnaphoricTarget,
+                                ..
+                            }
+                        ))
+                    ))),
+            "Ride Down's grant carries its partner: {grant:?}"
+        );
+
+        for partner in ["a Zombie", "one of those creatures"] {
+            let text = format!(
+                "Each creature that was blocked by {partner} this turn gains trample until end of turn."
+            );
+            let def = parse_effect_chain(&text, AbilityKind::Spell);
+            assert!(
+                matches!(
+                    &*def.effect,
+                    Effect::Unimplemented { name, .. } if name == "block_history_partner"
+                ),
+                "{partner}: {def:?}"
+            );
+        }
+        // Reach guard: without the clause the same subject parses as a broadcast grant.
+        let bare = parse_effect_chain(
+            "Each creature gains trample until end of turn.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*bare.effect,
+                Effect::GenericEffect { target: None, static_abilities, .. }
+                    if static_abilities.iter().any(|static_def| static_def.affected.is_some())
+            ),
+            "{bare:?}"
+        );
+    }
+}
+
 /// CR 608.2c: whether a gate counts members of the chain's tracked set.
 fn condition_measures_tracked_set(condition: &AbilityCondition) -> bool {
     condition.any_quantity_expr(&|expr| {
@@ -27826,6 +28049,9 @@ fn has_typed_target_widened(effect: &Effect) -> bool {
         | Effect::TargetOnly { target, .. }
         | Effect::CastFromZone { target, .. }
         | Effect::Counter { target, .. }
+        // CR 701.19a + CR 608.2c: "Regenerate target creature." announces a referent for
+        // later text (Gaze of the Gorgon's "it").
+        | Effect::Regenerate { target }
         // CR 608.2c regression (review round on PR #8494): `Effect::SetLifeTotal`
         // is also the "a stat becomes equal to/becomes N" setter for a NAMED
         // TARGET object, not only a player's life total (Baffling Defenses:
@@ -49086,7 +49312,7 @@ fn parse_effect_chain_ir_body(
         // reads the clause without that definition, or "put X counters on target
         // creature you control, where X is that card's mana value" would have
         // its explicit target clobbered to the parent's referent.
-        let recipient_anaphor_lower = strip_trailing_where_x(TextPair::new(&text, &text_lower))
+        let where_x_lower = strip_trailing_where_x(TextPair::new(&text, &text_lower))
             .0
             .lower
             .to_string();
@@ -49099,8 +49325,12 @@ fn parse_effect_chain_ir_body(
         // out of recipient detection, that referent silently misbound the
         // target; now that the explicit target binds, fail the clause closed so
         // coverage does not claim the ruling's timing.
-        let where_x_referent_was_the_only_anaphor = has_anaphoric_reference(&text_lower)
-            && !has_anaphoric_reference(&recipient_anaphor_lower);
+        let where_x_referent_was_the_only_anaphor =
+            has_anaphoric_reference(&text_lower) && !has_anaphoric_reference(&where_x_lower);
+        // CR 608.2c: a block-history clause's partner belongs to a population. It never
+        // names this clause's recipient, or Ride Down's grant would bind to the creature it
+        // just destroyed instead of the attackers.
+        let recipient_anaphor_lower = strip_block_history_clauses(&where_x_lower);
         let normalized_lower = normalized_text.to_lowercase();
         let reflexive_when_head = tag::<_, _, OracleError<'_>>("when ")
             .parse(normalized_lower.as_str())
@@ -49290,6 +49520,12 @@ fn parse_effect_chain_ir_body(
             } else {
                 replace_target_with_parent(&mut clause.effect);
             }
+        }
+        if instruction_drops_block_partner(&clause, &text_lower) {
+            clause.effect = Effect::unimplemented("block_history_partner", text.as_str());
+            clause.sub_ability = None;
+            clause.multi_target = None;
+            clause.distribute = None;
         }
         let player_anaphor = has_player_anaphoric_reference(&text_lower)
             || (ctx.prior_player_declaration && has_they_pronoun(&text_lower));

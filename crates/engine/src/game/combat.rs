@@ -379,11 +379,11 @@ pub struct CombatState {
         serialize_with = "crate::types::deterministic_serde::hash_set"
     )]
     pub attacking_incarnations_this_combat: HashSet<ObjectIncarnationRef>,
-    /// CR 509.1g + CR 400.7: Every blocker/attacker pair recorded as blocking
-    /// this combat, each side pinned to its exact incarnation. Historical
-    /// record, not live blocker membership: CR 506.4 does not prune it, so a
-    /// trigger that resolves after either creature left combat can still read
-    /// it.
+    /// CR 509.1g + CR 400.7: Every blocker/attacker pair created by declaring
+    /// blockers this combat, including band members (CR 702.22h), each side
+    /// pinned to its exact incarnation. Historical record, not live blocker
+    /// membership: CR 506.4 does not prune it, so a trigger that resolves after
+    /// either creature left combat can still read it.
     #[serde(
         default,
         serialize_with = "crate::types::deterministic_serde::hash_set"
@@ -1046,11 +1046,11 @@ fn record_combat_membership_edit(
 }
 
 /// CR 509.1g + CR 400.7: Records one (blocker, attacker) pair into the
-/// block-history windows. Single authority, so the live declaration path, the
-/// CR 506.3e put-onto-the-battlefield-blocking path and the CR 733 replay applier
-/// cannot drift. The caller supplies the blocker's exact incarnation from its
-/// own authority; the attacker's is captured from the live object, and an
-/// attacker with no live object records nothing.
+/// block-history windows. `declare_blockers_for_player` is the only caller:
+/// CR 509.4 keeps a creature put onto the battlefield blocking out of this
+/// history. The caller supplies the blocker's exact incarnation from its own
+/// authority; the attacker's is captured from the live object, and an attacker
+/// with no live object records nothing.
 fn record_block_history(
     state: &mut GameState,
     blocker: ObjectIncarnationRef,
@@ -1393,9 +1393,12 @@ pub fn choose_entry_attack_target_or_enter(
     }
 }
 
-/// CR 509.1g + CR 506.3e + CR 509.1h: Put a permanent onto the battlefield as a
-/// blocking creature for `attacker_id`. Used by effects that create or place a
-/// creature already "blocking that creature" (Mirror Match's copy tokens).
+/// CR 509.4 + CR 506.3e + CR 509.1g + CR 509.1h: Put a permanent onto the
+/// battlefield as a blocking creature for `attacker_id`. Used by effects that
+/// create or place a creature already "blocking that creature" (Mirror Match's
+/// copy tokens). Per CR 509.4 the creature is "blocking" but never "blocked"; an
+/// effect that makes an existing creature block (CR 509.3a) is a different event
+/// and must not reuse this function.
 ///
 /// Per CR 506.3e, the creature only becomes a blocking creature if `attacker_id`
 /// is attacking the blocker's controller (or a planeswalker/battle they control,
@@ -1442,11 +1445,9 @@ pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: 
         .entry(attacker_id)
         .or_default()
         .push(blocker_id);
-    // CR 509.1a tracking: record the blocker for per-turn "blocked this turn" queries.
-    state.creatures_blocked_this_turn.insert(blocker_id);
-    // CR 509.1g + CR 400.7: record the pair into the block-history
-    // windows through the single write authority.
-    record_block_history(state, reference, attacker_id);
+    // CR 509.4: put onto the battlefield blocking, this creature is "blocking" but
+    // never "blocked", so neither the per-turn blocked set nor the block history
+    // records it. Declaration is the only writer of those ledgers.
     // CR 506.4 + CR 613.1f: a new blocking creature can satisfy Layer 6
     // `FilterProp::Blocking` grants; re-evaluate continuous effects.
     state.layers_dirty.mark_full();
@@ -1635,8 +1636,6 @@ pub fn apply_resolved_combat_membership(
                 .entry(*resulting_attacker)
                 .or_default()
                 .push(object_id);
-            state.creatures_blocked_this_turn.insert(object_id);
-            record_block_history(state, command.object, *resulting_attacker);
         }
         ResolvedCombatMembershipEdit::MarkBlocked => {
             let combat = state

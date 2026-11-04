@@ -227,6 +227,7 @@ mod talon_gates_from_hand_activation;
 mod tam_the_possibility;
 mod tamiyo_inquisitive_student_flip;
 mod tap_cost_another_self_exclusion;
+mod target_block_history;
 mod target_choice_kind_7692;
 mod target_controller_population;
 mod target_incarnation_revalidation;
