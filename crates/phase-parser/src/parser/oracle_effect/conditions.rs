@@ -3851,6 +3851,32 @@ fn build_zone_change_past_counter_condition(
     )
 }
 
+/// CR 608.2k + CR 122.1: the counter kind a condition counts on the ability
+/// SOURCE ("if there are three or more promotion counters on her" →
+/// `promotion`), which a later counter anaphor in the same instruction ("remove
+/// those counters") refers back to. `None` for a condition that counts no typed
+/// source counters — including an any-kind count ("three or more counters on
+/// it"), whose anaphor already means every kind.
+pub(super) fn source_counter_kind_counted_by(condition: &AbilityCondition) -> Option<CounterType> {
+    match condition {
+        AbilityCondition::QuantityCheck {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::CountersOn {
+                            scope: ObjectScope::Source,
+                            counter_type: Some(counter_type),
+                        },
+                },
+            ..
+        } => Some(counter_type.clone()),
+        AbilityCondition::And { conditions } => {
+            conditions.iter().find_map(source_counter_kind_counted_by)
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn strip_counter_conditional(
     text: &str,
     ctx: CounterConditionalContext,

@@ -11,6 +11,7 @@
 
 use engine::parser::oracle::{parse_oracle_text, ParsedAbilities};
 use engine::types::ability::{AbilityDefinition, Effect, QuantityExpr};
+use engine::types::counter::{parse_counter_type, CounterType};
 
 fn parse(name: &str, text: &str) -> ParsedAbilities {
     parse_oracle_text(
@@ -49,19 +50,28 @@ fn trigger_effects(parsed: &ParsedAbilities) -> Vec<Effect> {
 /// `Unimplemented`. Unrelated clauses in the same card (e.g. a dynamic
 /// put-counter quantity) are intentionally not asserted here.
 ///
+/// `kind` is the counter kind the anaphor names: CR 608.2k binds "those
+/// counters" / "them" to the counters an in-chain condition counted ("Then if it
+/// has seven or more ember counters on it, remove them" → ember only), and
+/// `None` keeps the every-kind reading where no such in-chain antecedent exists.
+///
 /// `remove_clause` is the card's OWN anaphoric removal clause, lowercased — the two
 /// phrasings in this file ("remove all of them" / "remove them") are different
 /// clauses, so the caller supplies the one its card prints rather than this helper
 /// keying on a bare verb that both happen to start with.
-fn assert_remove_all_then_transform(effects: &[Effect], remove_clause: &str) {
+fn assert_remove_all_then_transform(
+    effects: &[Effect],
+    remove_clause: &str,
+    kind: Option<CounterType>,
+) {
     assert!(
         effects.iter().any(|e| matches!(
             e,
             Effect::RemoveCounter {
-                counter_type: None,
+                counter_type,
                 count: QuantityExpr::Fixed { value: -1 },
                 ..
-            }
+            } if *counter_type == kind
         )),
         "expected RemoveCounter remove-all sentinel; got {effects:#?}"
     );
@@ -103,7 +113,7 @@ fn ludevic_test_subject_remove_all_and_transform() {
             .any(|e| matches!(e, Effect::Unimplemented { .. })),
         "Ludevic: clause should not contain Unimplemented; got {effects:#?}"
     );
-    assert_remove_all_then_transform(&effects, "remove all of them");
+    assert_remove_all_then_transform(&effects, "remove all of them", None);
 }
 
 #[test]
@@ -119,5 +129,5 @@ counters on ~ equal to the amount of mana spent to cast that spell. Then if it \
 has seven or more ember counters on it, remove them and transform it.",
     );
     let effects = trigger_effects(&parsed);
-    assert_remove_all_then_transform(&effects, "remove them");
+    assert_remove_all_then_transform(&effects, "remove them", Some(parse_counter_type("ember")));
 }

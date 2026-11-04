@@ -42566,3 +42566,62 @@ fn peel_trailing_cast_mana_source_splits_only_a_trailing_self_reference() {
         ("spell using mana produced by a treasure", None)
     );
 }
+
+/// CR 201.5 + CR 608.2k + CR 122.1: a counter-threshold continuation whose
+/// subject is a gendered self-reference ("on her") gates the rest of the
+/// instruction, and its "remove those counters" anaphor names the counted KIND
+/// (promotion / ribbon), not every counter on the source. Verbatim Oracle text.
+#[test]
+fn counter_threshold_continuation_binds_remove_those_counters_to_counted_kind() {
+    let cases = [
+        (
+            "First strike\nReckless Behavior \u{2014} Whenever Beckett Mariner becomes tapped, put a promotion counter on her. Then if there are three or more promotion counters on her, remove those counters and she deals 2 damage to each opponent.",
+            "Beckett Mariner, Impetuous Ensign",
+            "promotion",
+            3,
+        ),
+        (
+            "Whenever you gain life, put that many ribbon counters on this creature. Then if there are three or more ribbon counters on this creature, remove those counters and untap it.\n{T}: Add one mana of any color.",
+            "Prize Pig",
+            "ribbon",
+            3,
+        ),
+    ];
+    for (text, name, kind, threshold) in cases {
+        let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let parsed = parse_oracle_text(text, name, &[], &owned(&["Creature"]), &[]);
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{name}: {:?}",
+            parsed.parse_warnings
+        );
+        assert_eq!(parsed.triggers.len(), 1, "{name}");
+        let execute = parsed.triggers[0].execute.as_deref().expect("trigger body");
+        assert_no_unimplemented(execute);
+        let remove = execute.sub_ability.as_deref().expect("gated continuation");
+        let counter_type = crate::types::counter::parse_counter_type(kind);
+        assert_eq!(
+            remove.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(counter_type.clone()),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: threshold },
+            }),
+            "{name}"
+        );
+        assert_eq!(
+            *remove.effect,
+            Effect::RemoveCounter {
+                counter_type: Some(counter_type),
+                count: QuantityExpr::Fixed { value: -1 },
+                target: TargetFilter::SelfRef,
+            },
+            "{name}"
+        );
+    }
+}

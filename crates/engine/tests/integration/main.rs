@@ -27,6 +27,7 @@ mod banding_combat;
 mod batched_trigger_subject_count;
 mod battlefield_entry_authority_census;
 mod bbfu7_attacks_if_able_not_goad;
+mod beckett_mariner_promotion_counters;
 mod betor_lifelink_counters_repro;
 mod bishop_of_binding_where_x_exiled_card_power;
 mod blitz_em_dash_graveyard_cast;

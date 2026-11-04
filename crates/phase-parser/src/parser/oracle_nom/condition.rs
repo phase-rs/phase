@@ -24,8 +24,9 @@ use super::quantity as nom_quantity;
 use super::target as nom_target;
 use super::target::{controller_phrase_among, ControllerPhrase};
 use crate::parser::oracle_target::{
-    cast_capable_zones_except, parse_shared_quality, parse_type_phrase_folding, parse_zone_suffix,
-    parse_zone_word, peek_zone_boundary, superlative_property_filter_prop,
+    cast_capable_zones_except, parse_shared_quality, parse_source_anaphoric_pronoun,
+    parse_type_phrase_folding, parse_zone_suffix, parse_zone_word, peek_zone_boundary,
+    superlative_property_filter_prop,
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
@@ -10898,9 +10899,14 @@ fn parse_there_are_counters_on_source(input: &str) -> OracleResult<'_, StaticCon
 /// SELF_REF normalization set: `~` plus the long-form noun phrases that survive
 /// normalization in some Oracle prints. Bare `"it"` is included for the
 /// continuation form ("Then if there are N or more counters on it") used by
-/// Brass's Tunnel-Grinder and similar.
+/// Brass's Tunnel-Grinder and similar. CR 201.5: a gendered pronoun ("him" /
+/// "her") on a personified card is that card's printed-name self-reference
+/// (Beckett Mariner, Impetuous Ensign: "if there are three or more promotion
+/// counters on her"), so it names the source exactly as "~" does — routed
+/// through the shared `parse_source_anaphoric_pronoun` authority.
 fn parse_counter_on_source_subject(input: &str) -> OracleResult<'_, &str> {
     alt((
+        recognize(parse_source_anaphoric_pronoun),
         tag("~"),
         tag("this creature"),
         tag("this permanent"),

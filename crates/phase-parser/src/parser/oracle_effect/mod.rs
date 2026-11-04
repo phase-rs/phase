@@ -48188,6 +48188,12 @@ fn parse_effect_chain_ir_body(
             in_trigger: ctx.in_trigger,
             bare_card_aggregate_source,
             nearest_dig_rest_zone,
+            // CR 608.2k + CR 122.1: a bare counter anaphor in this chunk's body
+            // ("remove those counters") names the counter kind its own condition
+            // counted on the source.
+            counter_anaphor_kind: condition
+                .as_ref()
+                .and_then(conditions::source_counter_kind_counted_by),
             // CR 611.2a: this chunk's leading duration was peeled by
             // `sequence::expand_leading_duration_chunks` before the chunk text was
             // handed to the body parser, so the body can no longer see it. Publish
