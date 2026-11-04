@@ -1736,25 +1736,6 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             {
                 drain_pending_continuation(state, events);
             }
-            // CR 615.5 + CR 608.2c: the retired dispatch can expose its frame's
-            // outer paused dispatch with nothing above it. Its own instruction
-            // finished while the nested continuation was still active (Swans of
-            // Bryn Argoll's draw, both of whose cards Abundance replaced), so
-            // `draw::resume_draw_sequence_outcome` left it resident, and no later
-            // continuation will retire it. Retire it now, and run the work queued
-            // behind it, through the frame's own resume arm.
-            if !waits_for_resolution_choice(&state.waiting_for)
-                && matches!(
-                    state.resolution_stack.last(),
-                    Some(ResolutionFrame::PostReplacement(drains))
-                        if matches!(
-                            drains.resident().map(|drain| &drain.status),
-                            Some(crate::types::game_state::DrainStatus::Paused)
-                        )
-                )
-            {
-                resume_resolution_frames(state, events);
-            }
         }
     }
     // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
@@ -2014,13 +1995,18 @@ pub(crate) fn sweep_ownerless_post_replacement_strand(state: &mut GameState) {
 /// run once those finish.
 ///
 /// Stops at the first pause (`waiting_for` leaves `Priority`), when other work sits on top of
-/// the frame, or when the frame is exhausted, which removes it.
+/// the frame, or once the frame is gone: exhausted, which removes it. A post-replacement frame
+/// it then exposes beneath is not this frame's work and is left to its own resume.
 fn dispatch_resident_post_replacement_work(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let frame_depth = state.resolution_stack.len();
     loop {
         let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
             state, None, None, None, events,
         );
         sweep_ownerless_post_replacement_strand(state);
+        if state.resolution_stack.len() < frame_depth {
+            return;
+        }
         let Some(ResolutionFrame::PostReplacement(drains)) = state.resolution_stack.last() else {
             return;
         };
@@ -2044,6 +2030,9 @@ fn dispatch_resident_post_replacement_work(state: &mut GameState, events: &mut V
 /// paused `PostReplacement` drain is a paired child; all other `MultiDraw`
 /// frames are independent roots. Both delegate to `draw::resume_draw_sequence`,
 /// which retires only its exact completed child and paired paused parent.
+///
+/// A step that exposes a finished paused dispatch resumes again
+/// (`exposes_finished_paused_dispatch`), so that dispatch retires in the same pass.
 pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         if waits_for_resolution_choice(&state.waiting_for) {
@@ -2061,6 +2050,7 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
     let Some(frame) = state.resolution_stack.last().cloned() else {
         return;
     };
+    let entry_position = ResolutionPosition::at(state);
 
     match frame {
         ResolutionFrame::AbilityContinuation(_) | ResolutionFrame::ChangeZone(_) => {
@@ -2217,9 +2207,78 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         }
     }
 
+    // CR 615.5 + CR 608.2c: this step can retire a nested dispatch and expose
+    // the outer paused dispatch of the same frame with nothing above it. Swans
+    // of Bryn Argoll's draw finishes while an Abundance reveal that replaced one
+    // of its cards is still running, so the reveal's end, whether the draw's
+    // last step or the bottom order, exposes the Swans' rider. Nothing above it
+    // is left to run, so its instruction is over: resume again, so the frame's
+    // own arm retires that dispatch and runs the work queued behind it before
+    // the game moves on. Every route that finishes a resolution step passes
+    // through here.
+    if exposes_finished_paused_dispatch(state, entry_position) {
+        resume_resolution_frames(state, events);
+    }
+
     clear_post_replacement_token_choice_seed_if_resolution_drained(state);
     if waits_for_resolution_choice(&state.waiting_for) {
         state.resolution_stack.note_repeat_until_descendant_choice();
+    }
+}
+
+/// Whether a `resume_resolution_frames` step that began at `entry` left a paused
+/// post-replacement dispatch as the top frame's resident, with `waiting_for` back
+/// at `Priority`.
+///
+/// The step must have made progress (`ResolutionPosition::is_strictly_inside`),
+/// so a dispatch the step itself paused, which pushes rather than pops, is never
+/// taken for a finished one, and the re-resume terminates. A pending life
+/// payment's resume owns its resolution depth (CR 118.3b + CR 119.4 + CR 616.1,
+/// `engine::resume_pending_continuation_pass`), so a dispatch at or below that
+/// depth is left to the payment's own boundary.
+fn exposes_finished_paused_dispatch(state: &GameState, entry: ResolutionPosition) -> bool {
+    matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && ResolutionPosition::at(state).is_strictly_inside(&entry)
+        && state
+            .pending_deferred_life_cost_resume
+            .as_ref()
+            .is_none_or(|resume| state.resolution_stack.len() > resume.resume_at_resolution_depth())
+        && matches!(
+            state.resolution_stack.last(),
+            Some(ResolutionFrame::PostReplacement(drains))
+                if matches!(
+                    drains.resident().map(|drain| &drain.status),
+                    Some(crate::types::game_state::DrainStatus::Paused)
+                )
+        )
+}
+
+/// How much resolution work is left: stack depth, then the drain count of the
+/// active post-replacement frame, ordered lexicographically. The same measure
+/// as the priority boundary's `engine::SubtreePosition`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolutionPosition {
+    resolution_depth: usize,
+    active_post_replacement_drains: usize,
+}
+
+impl ResolutionPosition {
+    fn at(state: &GameState) -> Self {
+        Self {
+            resolution_depth: state.resolution_stack.len(),
+            active_post_replacement_drains: state
+                .active_post_replacement_drains()
+                .map_or(0, crate::types::game_state::PostReplacementDrainStack::len),
+        }
+    }
+
+    /// Strictly less work remains than at `before`.
+    fn is_strictly_inside(&self, before: &Self) -> bool {
+        (self.resolution_depth, self.active_post_replacement_drains)
+            < (
+                before.resolution_depth,
+                before.active_post_replacement_drains,
+            )
     }
 }
 

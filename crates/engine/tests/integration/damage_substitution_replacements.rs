@@ -1822,6 +1822,19 @@ fn a_rider_draw_replaced_card_by_card_finishes_and_runs_the_work_behind_it() {
 
         let (mut accepted, mut chosen) = (0, 0);
         loop {
+            // The queued work waits behind the whole draw: nothing at any of its prompts.
+            if let Some((hydra, lichenthrope)) = substitutes {
+                if matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ReplacementChoice { .. } | WaitingFor::NamedChoice { .. }
+                ) {
+                    assert_eq!(plus_counters(&runner, hydra), 0);
+                    assert_eq!(
+                        counters(&runner, lichenthrope, &CounterType::Minus1Minus1),
+                        0
+                    );
+                }
+            }
             match &runner.state().waiting_for {
                 WaitingFor::ReplacementChoice { .. } => {
                     accepted += 1;
@@ -1859,6 +1872,133 @@ fn a_rider_draw_replaced_card_by_card_finishes_and_runs_the_work_behind_it() {
             assert_eq!(damage(&runner, lichenthrope), 0);
         }
         assert_at_rest(&runner);
+    }
+}
+
+const SWELTERING_SUNS: &str = "Sweltering Suns deals 3 damage to each creature.\nCycling {3} ({3}, Discard this card: Draw a card.)";
+
+/// The Swans' draw under Abundance where P0 takes some cards and declines a later one, so the
+/// last answer of the draw is not an Abundance reveal's land-or-nonland choice: Pyroclasm's 2
+/// (take, decline), and Sweltering Suns' 3 (take, decline, decline; take, take, decline; decline,
+/// take, decline). The Swans' draw is over with its last card (CR 121.2, CR 615.5), so its rider
+/// retires then, and the work behind it runs before the spell finishes (CR 608.2c).
+///
+/// Phytohydra, under P1's Hardened Scales and Doubling Season, waits behind the draw: no counter
+/// at any prompt of the draw, then the damage as +1/+1 counters, Hardened Scales first:
+/// (2 + 1) × 2 = 6, (3 + 1) × 2 = 8. With a 0/9 in its place nothing waits, and the spell still
+/// finishes.
+///
+/// P0 should end with one card for each card of the draw: 2 from Pyroclasm, 3 from Sweltering
+/// Suns. These flows end a card short (Command Zone #178), so these rows assert no draw count.
+#[test]
+fn a_rider_draw_with_a_declined_replacement_finishes_and_runs_the_work_behind_it() {
+    for (name, text, amount, plan) in [
+        ("Pyroclasm", PYROCLASM, 2, vec![true, false]),
+        (
+            "Sweltering Suns",
+            SWELTERING_SUNS,
+            3,
+            vec![true, false, false],
+        ),
+        (
+            "Sweltering Suns",
+            SWELTERING_SUNS,
+            3,
+            vec![true, true, false],
+        ),
+        (
+            "Sweltering Suns",
+            SWELTERING_SUNS,
+            3,
+            vec![false, true, false],
+        ),
+    ] {
+        for queued in [false, true] {
+            let mut scenario = self::scenario();
+            for index in 0..8 {
+                scenario.add_spell_to_library_top(P0, &format!("Library Filler {index}"), true);
+            }
+            let abundance = scenario
+                .add_enchantment_from_oracle(P0, "Abundance", ABUNDANCE)
+                .id();
+            let swans = scenario
+                .add_creature_from_oracle(P1, "Swans of Bryn Argoll", 4, 3, SWANS_OF_BRYN_ARGOLL)
+                .from_oracle_text_with_keywords(&["Flying"], SWANS_OF_BRYN_ARGOLL)
+                .id();
+            let recipient = if queued {
+                phytohydra(&mut scenario, P1)
+            } else {
+                scenario.add_creature(P1, "Wall", 0, 9).id()
+            };
+            let scales = scenario
+                .add_enchantment_from_oracle(P1, "Hardened Scales", HARDENED_SCALES)
+                .id();
+            scenario.add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON);
+            let spell = sorcery(&mut scenario, name, text);
+            let mut runner = scenario.build();
+            let mut events = cast(&mut runner, spell, vec![]);
+
+            let row = format!("{name} {plan:?} queued: {queued}");
+            let (mut answered, mut chosen, mut orders) = (0, 0, 0);
+            loop {
+                let waiting_for = runner.state().waiting_for.clone();
+                let abundance_prompt = matches!(
+                    &waiting_for,
+                    WaitingFor::ReplacementChoice { candidates, .. }
+                        if candidates.iter().any(|candidate| candidate.source_id == abundance)
+                );
+                if abundance_prompt
+                    || matches!(
+                        waiting_for,
+                        WaitingFor::NamedChoice { .. } | WaitingFor::RevealUntilBottomOrder { .. }
+                    )
+                {
+                    assert_eq!(plus_counters(&runner, recipient), 0, "{row}");
+                }
+                match waiting_for {
+                    WaitingFor::ReplacementChoice { .. } if abundance_prompt => {
+                        let take = plan.get(answered).copied().expect("one prompt per card");
+                        answered += 1;
+                        let description = if take { "Accept" } else { "Decline" };
+                        choose(&mut runner, &mut events, |candidate| {
+                            candidate.source_id == abundance && candidate.description == description
+                        });
+                    }
+                    // Phytohydra's counters: the order of Hardened Scales and Doubling Season.
+                    WaitingFor::ReplacementChoice { .. } => {
+                        assert_eq!(answered, plan.len(), "{row}: the draw is over first");
+                        orders += 1;
+                        choose_source(&mut runner, &mut events, scales);
+                    }
+                    WaitingFor::NamedChoice { .. } => {
+                        chosen += 1;
+                        let choice = "Nonland".to_string();
+                        answer(
+                            &mut runner,
+                            GameAction::ChooseOption { choice },
+                            &mut events,
+                        );
+                    }
+                    WaitingFor::RevealUntilBottomOrder { cards, .. } => {
+                        answer(&mut runner, GameAction::SelectCards { cards }, &mut events);
+                    }
+                    _ => break,
+                }
+            }
+
+            let taken = plan.iter().filter(|take| **take).count();
+            assert_eq!((answered, chosen), (plan.len(), taken), "{row}");
+            assert_eq!(damage(&runner, swans), 0, "{row}");
+            if queued {
+                assert_eq!(orders, 1, "{row}");
+                assert_eq!(plus_counters(&runner, recipient), (amount + 1) * 2, "{row}");
+                assert_eq!(damage(&runner, recipient), 0, "{row}");
+            } else {
+                assert_eq!(orders, 0, "{row}");
+                assert_eq!(damage(&runner, recipient), amount, "{row}");
+            }
+            assert_at_rest(&runner);
+        }
     }
 }
 
