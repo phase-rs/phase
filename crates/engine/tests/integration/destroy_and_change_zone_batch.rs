@@ -12,9 +12,10 @@
 //!   trigger; `control_change_evidence_never_reaches_a_viewer` stays green.
 //! - C8 (ChangeZone saves): the migrated trigger rows serialize/deserialize a
 //!   parked staged ChangeZone at consultation and delivery; the extended C6b
-//!   fixture pins the post-completion moved ledger. D8 here covers a raw
-//!   staged Destroy save. A direct marker+batch wire round-trip row remains a
-//!   carried gap.
+//!   fixture pins the pre-pause negative and completion counts, not the
+//!   post-completion moved ledger (the chained consumer's per-effect publish
+//!   overwrites it). D8 here covers a raw staged Destroy save. A direct
+//!   marker+batch wire round-trip row remains a carried gap.
 //! - V1 (privacy): `zone_pipeline::staged_arrangement_prompt_and_payload_are_redacted_for_every_viewer`
 //!   (R4b batch-owned Library Top/Bottom arrangement) plus
 //!   `a_public_concession_settles_a_staged_arrangement_prompt`.
