@@ -3240,6 +3240,20 @@ fn spend_two_or_more_color_source_eligible(
                 })
                 .flatten()
         })
+        .or_else(|| {
+            // Prefer a complete quality allocation even if a later color may
+            // need life payment. An incomplete pool must still reduce Z below:
+            // auto-tap can supply the remaining Snow from another source.
+            (quality_demand.snow > 0)
+                .then(|| {
+                    pool.first_where(|unit| {
+                        unit.source_could_produce_two_or_more_colors
+                            && spell_permits_unit(spell, unit)
+                            && quality_demand.preserves_after(pool, unit, spell)
+                    })
+                })
+                .flatten()
+        })
         .or_else(|| match spell {
             Some(ctx) => pool.first_where(|unit| {
                 unit.source_could_produce_two_or_more_colors && ctx_permits_unit(ctx, unit)

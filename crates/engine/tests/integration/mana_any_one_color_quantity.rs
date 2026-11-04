@@ -689,6 +689,193 @@ fn snow_pool_payment_preserves_later_z_mana() {
 }
 
 #[test]
+fn snow_pool_z_fallback_preserves_snow_before_phyrexian_life() {
+    // Supplemental combined shape, not a printed-card claim: Experiment Five
+    // supplies Z, Wowzer supplies Snow, and Gitaxian Probe supplies U/P.
+    // No printed card combines these requirements. CR 107.4f + CR 107.4h:
+    // spend ordinary U on Z, snow G on S, and two life on U/P.
+    let pool = ManaPool::from_units(vec![
+        ManaUnit {
+            supertype: Some(ManaSupertype::Snow),
+            source_could_produce_two_or_more_colors: true,
+            ..snow_regression_unit(ManaType::Green, 1)
+        },
+        ManaUnit {
+            source_could_produce_two_or_more_colors: true,
+            ..snow_regression_unit(ManaType::Blue, 2)
+        },
+    ]);
+    for context in [None, Some(PaymentContext::Effect)] {
+        for (text, phyrexian_index) in [("{Z}{U/P}{S}", 1), ("{S}{Z}{U/P}", 2), ("{U/P}{S}{Z}", 0)]
+        {
+            let cost = parse_mtgjson_mana_cost(text);
+            let permissions = CostPermissionContext {
+                max_life: 1,
+                ..Default::default()
+            };
+            assert!(can_pay_for_spell(
+                &pool,
+                &cost,
+                context.as_ref(),
+                permissions
+            ));
+            // CR 118.3: the same pool cannot pay the cost without two life.
+            assert!(!can_pay_for_spell(
+                &pool,
+                &cost,
+                context.as_ref(),
+                CostPermissionContext::default(),
+            ));
+            let preview = compute_phyrexian_shards(&pool, &cost, context.as_ref(), permissions);
+            assert_eq!(preview.len(), 1);
+            assert_eq!(preview[0].shard_index, phyrexian_index);
+            assert_eq!(preview[0].options, ShardOptions::LifeOnly);
+            for choices in [None, Some([ShardChoice::PayLife])] {
+                let mut payment_pool = pool.clone();
+                let (spent, life) = pay_cost_with_demand_and_choices(
+                    &mut payment_pool,
+                    &cost,
+                    None,
+                    context.as_ref(),
+                    None,
+                    choices.as_ref().map(|choices| choices.as_slice()),
+                    LifePaymentColors::EMPTY,
+                    &[],
+                )
+                .unwrap();
+                assert_eq!(
+                    spent.iter().map(|unit| unit.pip_id.0).collect::<Vec<_>>(),
+                    vec![2, 1]
+                );
+                assert_eq!(life.len(), 1);
+                assert_eq!(life[0].amount, 2);
+                assert!(payment_pool.is_empty());
+            }
+        }
+
+        // With no Snow cost, retain the first Z source and pay U/P with mana.
+        // An explicit pin still selects that source when spare Snow makes the
+        // full cost payable. Both controls preserve the original source order.
+        for (text, pins, extra_snow, expected_pips) in [
+            ("{Z}{U/P}", vec![], false, vec![1, 2]),
+            ("{Z}{U/P}{S}", vec![ManaPipId(1)], true, vec![1, 3, 2]),
+        ] {
+            let mut payment_pool = pool.clone();
+            if extra_snow {
+                payment_pool.add(ManaUnit {
+                    supertype: Some(ManaSupertype::Snow),
+                    ..snow_regression_unit(ManaType::Red, 3)
+                });
+            }
+            let (spent, life) = pay_cost_with_demand_and_choices(
+                &mut payment_pool,
+                &parse_mtgjson_mana_cost(text),
+                None,
+                context.as_ref(),
+                None,
+                None,
+                LifePaymentColors::EMPTY,
+                &pins,
+            )
+            .unwrap();
+            assert_eq!(
+                spent.iter().map(|unit| unit.pip_id.0).collect::<Vec<_>>(),
+                expected_pips
+            );
+            assert!(life.is_empty());
+            assert!(payment_pool.is_empty());
+        }
+    }
+}
+
+#[test]
+fn snow_pool_z_partial_payment_leaves_snow_for_auto_tap() {
+    // Supplemental Z/S composition: no printed card combines Experiment
+    // Five's Z with Wowzer's S. Highland Forest supplies a real Snow/Z unit.
+    // CR 601.2g + CR 107.4h: reserve that floating unit for Z and auto-tap
+    // Snow-Covered Forest for S. An ordinary Forest cannot supply the deficit.
+    for with_snow_forest in [true, false] {
+        let mut s = board();
+        let highland = s
+            .add_land_from_oracle(
+                P0,
+                "Highland Forest",
+                "({T}: Add {R} or {G}.)\nThis land enters tapped.",
+            )
+            .as_snow()
+            .with_subtypes(vec!["Mountain", "Forest"])
+            .id();
+        let forest = with_snow_forest.then(|| snow_forest(&mut s));
+        let ordinary_forest = s.add_basic_land(P0, ManaColor::Green);
+        let creature = s
+            .add_creature_to_hand_from_oracle(P0, "Supplemental Z/S payment", 1, 1, "")
+            .with_mana_cost(parse_mtgjson_mana_cost("{Z}{S}"))
+            .id();
+        let mut r = s.build();
+        if let Some(forest) = forest {
+            finish_snow_forest(&mut r, forest);
+        }
+        // Start on a later turn, after Highland Forest has untapped.
+        r.state_mut().objects.get_mut(&highland).unwrap().tapped = false;
+        evaluate_layers(r.state_mut());
+        let (_, _, grouped) = legal_actions_full(r.state());
+        let action = grouped[&highland]
+            .iter()
+            .find(|action| {
+                matches!(action, GameAction::TapLandForMana { selection }
+                    if selection.mana_type == ManaType::Green)
+            })
+            .expect("Highland Forest exposes its green mana action")
+            .clone();
+        r.act(action).unwrap();
+        assert_complete(&r, 1);
+        assert!(r.state().objects[&highland].tapped);
+        let floating = r.state().players[0].mana_pool.units().next().unwrap();
+        assert_eq!(floating.source_id, highland);
+        assert_eq!(floating.supertype, Some(ManaSupertype::Snow));
+        assert!(floating.source_could_produce_two_or_more_colors);
+
+        let card_id = r.state().objects[&creature].card_id;
+        let result = r.act(GameAction::CastSpell {
+            object_id: creature,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        });
+        assert!(
+            !r.state().objects[&ordinary_forest].tapped,
+            "ordinary green cannot fill the Snow or Z deficit"
+        );
+        if let Some(forest) = forest {
+            result.expect("floating Z plus auto-tapped Snow pays the full cost");
+            assert!(r.state().objects[&forest].tapped);
+            assert_eq!(r.state().stack.len(), 1);
+            assert!(r.state().players[0].mana_pool.is_empty());
+            r.advance_until_stack_empty();
+            assert_eq!(r.state().objects[&creature].zone, Zone::Battlefield);
+            assert_complete(&r, 0);
+        } else {
+            assert!(
+                result.is_err(),
+                "ordinary Forest cannot replace the Snow source"
+            );
+            assert_eq!(r.state().objects[&creature].zone, Zone::Hand);
+            assert_eq!(
+                r.state().players[0]
+                    .mana_pool
+                    .units()
+                    .next()
+                    .unwrap()
+                    .pip_id,
+                floating.pip_id,
+                "failed payment preserves the pre-floated unit"
+            );
+            assert_complete(&r, 1);
+        }
+    }
+}
+
+#[test]
 fn mycosynth_lattice_preserves_snow_for_printed_wowzer() {
     // CR 609.4b + CR 107.4h: Lattice lets ordinary R pay U, but cannot turn
     // that R into snow mana. Keep the snow Island's U for Wowzer's printed S.
