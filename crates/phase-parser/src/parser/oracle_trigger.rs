@@ -5103,6 +5103,27 @@ fn extract_unless_pay_modifier(
     }
 }
 
+/// The sentence of `lower` that directly contains the " unless " at
+/// `unless_pos`: forward-scans past each preceding sentence boundary.
+fn unless_enclosing_sentence(lower: &str, unless_pos: usize) -> &str {
+    let mut enclosing = &lower[..unless_pos];
+    while let Ok((_, (_, after))) = nom_primitives::split_once_on(enclosing, ". ") {
+        enclosing = after;
+    }
+    enclosing
+}
+
+/// CR 608.2c: instructions are followed in the order written, and an "unless"
+/// binds to the instruction that carries it. True when an earlier instruction
+/// precedes that one — a previous sentence, or a ", then " sequencer inside the
+/// unless-bearing sentence — so hoisting the "unless" onto the whole trigger
+/// would wrongly gate the earlier instructions too. Single authority shared by
+/// the unless-payment hoist and the game-state unless hoist.
+fn unless_binds_to_later_instruction(lower: &str, unless_pos: usize) -> bool {
+    let enclosing = unless_enclosing_sentence(lower, unless_pos);
+    enclosing.len() < unless_pos || nom_primitives::split_once_on(enclosing, ", then ").is_ok()
+}
+
 /// CR 118.12: Detect "unless [player] pays {cost}" in trigger effect text.
 /// Returns (cleaned effect text without the unless clause, optional UnlessPayModifier).
 ///
@@ -5137,34 +5158,21 @@ fn hoist_unless_pay_modifier(
     // `split_once_on` combinator) so `enclosing` is just the sentence that
     // directly contains it; the byte offset back into `text` preserves original
     // case for `strip_temporal_prefix`.
-    let mut enclosing = &lower[..unless_pos];
-    while let Ok((_, (_, after))) = nom_primitives::split_once_on(enclosing, ". ") {
-        enclosing = after;
-    }
-    let unless_sentence_start = unless_pos - enclosing.len();
-    // CR 118.12a + CR 608.2c: an "unless" binds to the sentence that contains it.
-    // Hoisting one from a later sentence would gate the whole trigger — including
-    // the earlier sentences' instructions — on the payment (Delaying Shield: paying
-    // {1}{W} would skip removing the delay counters). Decline; the per-clause path
-    // (`extract_resolution_unless_pay_modifier`) attaches the cost to its own clause.
-    if unless_sentence_start > 0 {
+    let enclosing = unless_enclosing_sentence(&lower, unless_pos);
+    // CR 118.12a + CR 608.2c: an "unless" binds to its own instruction. Hoisting
+    // one from a later sentence (Delaying Shield: paying {1}{W} would skip
+    // removing the delay counters) or from after a ", then " sequencer (Cyclone,
+    // Phantasmal Sphere: the prompt must follow the counter) would gate the
+    // earlier instructions on the payment. Decline; the per-clause path
+    // (`extract_resolution_unless_pay_modifier`) attaches the cost to its own
+    // clause.
+    if unless_binds_to_later_instruction(&lower, unless_pos) {
         return (text.to_string(), None);
     }
-    if crate::parser::oracle_effect::lower::strip_temporal_prefix(
-        text[unless_sentence_start..].trim_start(),
-    )
-    .1
-    .is_some()
+    if crate::parser::oracle_effect::lower::strip_temporal_prefix(text.trim_start())
+        .1
+        .is_some()
     {
-        return (text.to_string(), None);
-    }
-    // CR 608.2c + CR 118.12a: instructions are followed in the order written, and an
-    // "unless" binds to its own instruction. When the unless-bearing sentence sequences
-    // instructions with ", then ", hoisting the unless to the trigger root would ask for
-    // the payment before the earlier instructions run (Cyclone, Phantasmal Sphere: the
-    // prompt must follow the counter). Decline; the per-clause path
-    // (`extract_resolution_unless_pay_modifier`) attaches it to its own clause.
-    if nom_primitives::split_once_on(enclosing, ", then ").is_ok() {
         return (text.to_string(), None);
     }
 
@@ -8964,13 +8972,13 @@ fn extract_if_condition_with_card_name(
     // downstream re-homer (`strip_suffix_conditional`) can attach it as a
     // clause-level `AbilityCondition`, hoisted only when it cannot be re-homed.
     //
-    // CR 603.5: A trailing `unless` is NOT a CR 603.4 intervening predicate —
-    // it is resolution-checked, not trigger-gated. We hoist it via
-    // `PostEffectPolicy::AlwaysHoist` as a pragmatic engine simplification:
-    // there is no reachable downstream re-homer for `unless`, and the guard at
-    // the head of trigger-effect lowering turns any leftover "unless" into
-    // `Effect::Unimplemented`. `unless` is the negation of `if`, so wrap the
-    // parsed predicate in `Not`. Cost-form `unless` ("unless you pay {2}",
+    // CR 608.2c: A trailing `unless` is NOT a CR 603.4 intervening predicate —
+    // it is resolution-checked, not trigger-gated. When it binds to the
+    // trigger's first instruction we hoist it via
+    // `PostEffectPolicy::DeferIfLaterInstruction` as a pragmatic engine
+    // simplification; one bound to a later instruction (CR 608.2c) stays in the
+    // effect text for `strip_unless_entered_suffix` to attach to that clause.
+    // `unless` is the negation of `if`, so wrap the parsed predicate in `Not`. Cost-form `unless` ("unless you pay {2}",
     // "unless you sacrifice a creature") is already stripped upstream by
     // `extract_unless_pay_modifier`.
     if let Some((stripped, cond)) = try_extract_spell_targets_intervening_if(&tp, &lower, text) {
@@ -9027,7 +9035,7 @@ fn extract_if_condition_with_card_name(
         &lower,
         text,
         " unless ",
-        PostEffectPolicy::AlwaysHoist,
+        PostEffectPolicy::DeferIfLaterInstruction,
         source_is_self,
         |c| TriggerCondition::Not {
             condition: Box::new(c),
@@ -10364,10 +10372,11 @@ enum PostEffectPolicy {
     /// `strip_suffix_conditional` to re-home onto a clause-level
     /// `AbilityCondition`; hoist only non-re-homeable (source-referential) ones.
     DeferIfRehomeable,
-    /// `unless`: always hoist. `unless` has no reachable downstream re-homer —
-    /// the trigger-effect lowering guard turns any leftover "unless" into
-    /// `Effect::Unimplemented` before `parse_effect_chain_ir` runs.
-    AlwaysHoist,
+    /// `unless`: hoist when the "unless" binds to the trigger's first
+    /// instruction; defer when it binds to a later one (CR 608.2c), leaving it
+    /// in the effect text for the clause-level re-homer
+    /// (`strip_unless_entered_suffix`) to attach to its own instruction.
+    DeferIfLaterInstruction,
 }
 
 /// Try to extract an intervening predicate introduced by `keyword`.
@@ -10394,8 +10403,11 @@ enum PostEffectPolicy {
 ///   Wilds' "if its power is greater than each other creature's power") has no
 ///   `AbilityCondition` form, so it is hoisted to the trigger-level condition
 ///   instead. Re-homeability is decided by `condition_text_is_rehomeable`.
-/// - `PostEffectPolicy::AlwaysHoist` (the `unless` path): always hoist. There
-///   is no reachable downstream re-homer for `unless`.
+/// - `PostEffectPolicy::DeferIfLaterInstruction` (the `unless` path): hoist
+///   only when the "unless" binds to the first instruction. One bound to a
+///   later instruction (Seven of Nine, Unassimilated: "draw a card. Then
+///   discard a card unless ...") is left for the clause-level re-homer so the
+///   earlier instructions stay unconditional (CR 608.2c).
 fn try_extract_spell_targets_intervening_if(
     _tp: &TextPair<'_>,
     lower: &str,
@@ -10503,14 +10515,22 @@ fn try_extract_intervening(
     // true intervening predicate; always hoist. A post-effect occurrence is
     // gated by policy.
     if !is_leading {
-        if let PostEffectPolicy::DeferIfRehomeable = policy {
-            let condition_text = lower[pos + keyword.len()..].trim_end_matches('.').trim();
-            if condition_text_is_rehomeable(condition_text) {
-                // leave it for strip_suffix_conditional to re-home
-                return InterveningExtraction::Absent;
+        match policy {
+            PostEffectPolicy::DeferIfRehomeable => {
+                let condition_text = lower[pos + keyword.len()..].trim_end_matches('.').trim();
+                if condition_text_is_rehomeable(condition_text) {
+                    // leave it for strip_suffix_conditional to re-home
+                    return InterveningExtraction::Absent;
+                }
+            }
+            PostEffectPolicy::DeferIfLaterInstruction => {
+                if unless_binds_to_later_instruction(lower, pos) {
+                    // leave it for strip_unless_entered_suffix to re-home
+                    return InterveningExtraction::Absent;
+                }
             }
         }
-        // AlwaysHoist, or non-re-homeable: fall through and hoist as before.
+        // Non-re-homeable, or bound to the first instruction: hoist.
     }
     let cond_fragment = &lower[pos + keyword.len()..];
     // CR 113.6b: the source-bound contraction in a leading intervening-if

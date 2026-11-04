@@ -214,6 +214,7 @@ mod ring_equipped_creature_color_condition;
 mod rules;
 mod screaming_nemesis_combat_damage_multi_trigger;
 mod self_exile_cast_permission;
+mod seven_of_nine_differently_named_lands;
 mod sliver_static_grants;
 mod smaug_noncombat_damage_treasure;
 mod sovereign_okinec_ahau;

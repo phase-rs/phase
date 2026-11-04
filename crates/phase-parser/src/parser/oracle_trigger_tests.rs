@@ -18785,6 +18785,37 @@ fn trigger_unless_intervening_controls_creature() {
     }
 }
 
+/// CR 608.2c: an "unless" bound to a LATER instruction gates only that
+/// instruction. Hoisting it onto the trigger would also skip the earlier
+/// instruction — both for a later sentence ("draw a card. Then discard a card
+/// unless ...") and for a ", then " sequencer inside one sentence.
+#[test]
+fn trigger_unless_bound_to_later_instruction_is_not_hoisted() {
+    for text in [
+        "At the beginning of your upkeep, draw a card. Then discard a card unless you control a creature.",
+        "At the beginning of your upkeep, draw a card, then discard a card unless you control a creature.",
+    ] {
+        let def = parse_trigger_line(text, "Test");
+        assert!(
+            def.condition.is_none(),
+            "later-instruction unless must not gate the trigger: {text}"
+        );
+        let execute = def.execute.as_ref().expect("trigger effect");
+        assert!(
+            matches!(*execute.effect, Effect::Draw { .. }),
+            "draw stays the unconditional first instruction: {text}"
+        );
+        assert!(execute.condition.is_none(), "draw is unconditional: {text}");
+        let discard = execute.sub_ability.as_ref().expect("discard instruction");
+        assert!(matches!(*discard.effect, Effect::Discard { .. }));
+        assert!(
+            matches!(discard.condition, Some(AbilityCondition::Not { .. }) | Some(AbilityCondition::QuantityCheck { .. })),
+            "the unless gate attaches to the discard: {:?}",
+            discard.condition
+        );
+    }
+}
+
 #[test]
 fn trigger_unless_intervening_does_not_swallow_unless_pay() {
     // Sanity: "unless you pay {2}" must remain captured by
