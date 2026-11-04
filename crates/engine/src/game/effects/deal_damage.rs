@@ -8965,6 +8965,9 @@ mod tests {
         );
 
         let mut events = Vec::new();
+        state.waiting_for = WaitingFor::Priority {
+            player: state.active_player,
+        };
         resume_resolution_division(
             &mut state,
             &pending_effect,
