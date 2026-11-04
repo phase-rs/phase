@@ -15235,6 +15235,14 @@ mod tests {
         assert_eq!(*draw_count, QuantityExpr::Fixed { value: 3 });
     }
 
+    // SHAPE: The next three tests are synthetic perturbations for the private-look
+    // binding mechanism (CR 608.2c: follow instructions in written order), not
+    // support claims for additional cards. No printed card in the inspected
+    // AtomicCards pool has these exact revealed-look, future-producer or
+    // intervening-Draw sequences. The nearest printed card is Petals of Insight:
+    // "Look at the top three cards of your library. You may put those cards on the
+    // bottom of your library in any order. If you do, return Petals of Insight to
+    // its owner's hand. Otherwise, draw three cards."
     #[test]
     fn revealed_look_does_not_bind_prior_look_bottom() {
         let def = parse_effect_chain(
