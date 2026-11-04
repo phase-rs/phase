@@ -8132,25 +8132,43 @@ mod replay_bridge_tests {
             "the engine source-bound creator owns the audit event"
         );
         assert_eq!(
-            result.log_entries.len(),
+            result
+                .log_entries
+                .iter()
+                .filter(|entry| entry.category == engine::types::log::LogCategory::Debug)
+                .count(),
             1,
             "the engine source-bound creator resolves the local audit log entry"
         );
+        assert_eq!(
+            result.log_entries.len(),
+            1 + 2 * 2,
+            "each forced token narrates its entry (a `from: None` ZoneChanged and a \
+             TokenCreated), on top of the single Debug audit entry"
+        );
         with_state(|state| {
+            let created: Vec<&engine::game::GameObject> = state
+                .objects
+                .values()
+                .filter(|object| object.name == "Test Card")
+                .collect();
             assert_eq!(
-                state
-                    .objects
-                    .values()
-                    .filter(|object| object.name == "Test Card")
-                    .count(),
+                created.len(),
                 2,
                 "a raw battlefield debug CreateCard batch materializes each token"
             );
-            let card = state
-                .objects
-                .values()
-                .find(|object| object.name == "Test Card")
-                .expect("debug-created card should exist");
+            for object in &created {
+                assert_eq!(
+                    object.zone,
+                    engine::types::zones::Zone::Battlefield,
+                    "CR 111.1: a battlefield token is created ON the battlefield"
+                );
+                assert!(
+                    state.battlefield.contains(&object.id),
+                    "the created token is on the battlefield list"
+                );
+            }
+            let card = created.first().expect("debug-created card should exist");
             assert!(card.is_token, "the WASM boundary must preserve Token");
             assert!(!card
                 .card_types

@@ -1417,7 +1417,8 @@ pub(crate) enum ExiledBySourceBinding {
 /// form): the cards an unbound `ExiledBySource` cast/play instruction binds as
 /// it resolves. The single binding authority read by [`resolve`] (no-target,
 /// non-`ResolutionWindow` arm) and by the optional-effect feasibility probe, so
-/// the probe asks about exactly the cards resolution would act on.
+/// the probe asks about exactly the cards resolution would act on. Its empty
+/// `LinkedExile` verdict is read through [`exiled_card_link_is_empty`].
 pub(crate) fn exiled_by_source_fallback_binding(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -1468,6 +1469,44 @@ pub(crate) fn exiled_by_source_fallback_binding(
         );
     }
     ExiledBySourceBinding::LinkedExile(linked_ids)
+}
+
+/// CR 406.6 + CR 607.2a + CR 400.7 + CR 608.2d + CR 609.3: an unbound singular
+/// "the exiled card" instruction that resolves now (Hideaway: Mosswort Bridge,
+/// Shelldock Isle, Fight Rigging; Smuggler's Buggy's cast) refers only to the
+/// card its linked ability exiled that is still in exile. When the source's
+/// linked exile binds no such card (Hideaway exiled nothing, or the hidden card
+/// was already played and left exile), the instruction names nothing, so
+/// `resolve` reaches its "nothing to cast" tail; choosing it is choosing an
+/// impossible option. Mirrors exactly the guards under which `resolve` takes
+/// the `ExiledBySource` fallback and reaches that tail: no object target, no
+/// multi-slot group, a `DuringResolution` driver (never `ResolutionWindow`,
+/// whose batch authority differs), and an exile-scoped filter (a hand/graveyard
+/// scoped tail would open a pick instead). A looked-at-library binding (Kiora,
+/// CR 701.20e) is a real private selection and is never empty-linked here.
+/// `None` when this ability is not that shape.
+pub(crate) fn exiled_card_link_is_empty(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<bool> {
+    let Effect::CastFromZone { target, driver, .. } = &ability.effect else {
+        return None;
+    };
+    if !driver.is_during_resolution()
+        || !target.references_exiled_by_source()
+        || target.extract_in_zone() != Some(Zone::Exile)
+        || ability
+            .targets
+            .iter()
+            .any(|t| matches!(t, TargetRef::Object(_)))
+        || !cast_slot_group(ability).is_empty()
+    {
+        return None;
+    }
+    Some(matches!(
+        exiled_by_source_fallback_binding(state, ability, target),
+        ExiledBySourceBinding::LinkedExile(ids) if ids.is_empty()
+    ))
 }
 
 /// CR 608.2g + CR 701.18b: the cardinality authority for a free
@@ -6973,6 +7012,144 @@ mod tests {
             exiled_by_source_fallback_binding(&state, &ability, &TargetFilter::ExiledBySource),
             ExiledBySourceBinding::LookedAtLibrary(_)
         ));
+    }
+
+    /// Issue #10325 — CR 406.6 + CR 607.2a + CR 400.7 + CR 608.2d: the
+    /// empty-link predicate reads the same binding authority `resolve` uses, and
+    /// answers only for the unbound resolve-now exile shape.
+    #[test]
+    fn exiled_card_link_is_empty_mirrors_the_fallback_binding() {
+        fn instruction(
+            source: ObjectId,
+            target: TargetFilter,
+            driver: CastFromZoneDriver,
+            targets: Vec<TargetRef>,
+        ) -> ResolvedAbility {
+            ResolvedAbility::new(
+                Effect::CastFromZone {
+                    target,
+                    without_paying_mana_cost: true,
+                    mode: CardPlayMode::Play,
+                    cast_transformed: false,
+                    alt_ability_cost: None,
+                    constraint: None,
+                    duration: None,
+                    driver,
+                    mana_spend_permission: None,
+                    additional_cost: None,
+                    cast_cost_modifier: None,
+                },
+                targets,
+                source,
+                PlayerId(0),
+            )
+        }
+
+        let mut state = make_test_state();
+        let source = create_object(
+            &mut state,
+            CardId(9_190),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let land = add_exiled_land(&mut state, CardId(9_191));
+        let unbound = instruction(
+            source,
+            TargetFilter::ExiledBySource,
+            CastFromZoneDriver::DuringResolution,
+            vec![],
+        );
+
+        assert_eq!(
+            exiled_card_link_is_empty(&state, &unbound),
+            Some(true),
+            "no link: the instruction names no card"
+        );
+
+        state.exile_links.push(ExileLink {
+            exiled_id: land,
+            source_id: source,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+        assert_eq!(
+            exiled_card_link_is_empty(&state, &unbound),
+            Some(false),
+            "reach-guard: a live link to a card in exile binds it"
+        );
+
+        // CR 400.7: the linked card left exile, so it is a new object the
+        // instruction no longer refers to.
+        state.objects.get_mut(&land).unwrap().zone = Zone::Graveyard;
+        assert_eq!(
+            exiled_card_link_is_empty(&state, &unbound),
+            Some(true),
+            "a linked card that left exile binds nothing"
+        );
+
+        // CR 701.20e: a looked-at library card is a real private selection.
+        state.exile_links.clear();
+        let looked = create_object(
+            &mut state,
+            CardId(9_192),
+            PlayerId(0),
+            "Looked Card".to_string(),
+            Zone::Library,
+        );
+        state.last_revealed_ids = vec![looked];
+        assert_eq!(
+            exiled_card_link_is_empty(&state, &unbound),
+            Some(false),
+            "a looked-at library binding is never empty-linked"
+        );
+        state.last_revealed_ids.clear();
+
+        for (shape, ability) in [
+            (
+                "a lingering grant",
+                instruction(
+                    source,
+                    TargetFilter::ExiledBySource,
+                    CastFromZoneDriver::LingeringPermission,
+                    vec![],
+                ),
+            ),
+            (
+                "a resolution window",
+                instruction(
+                    source,
+                    TargetFilter::ExiledBySource,
+                    CastFromZoneDriver::ResolutionWindow {
+                        bounds: ResolutionCastWindow::default(),
+                    },
+                    vec![],
+                ),
+            ),
+            (
+                "a pre-bound object target",
+                instruction(
+                    source,
+                    TargetFilter::ExiledBySource,
+                    CastFromZoneDriver::DuringResolution,
+                    vec![TargetRef::Object(land)],
+                ),
+            ),
+            (
+                "a parent-target hand-off",
+                instruction(
+                    source,
+                    TargetFilter::ParentTarget,
+                    CastFromZoneDriver::DuringResolution,
+                    vec![],
+                ),
+            ),
+        ] {
+            assert_eq!(
+                exiled_card_link_is_empty(&state, &ability),
+                None,
+                "{shape} is outside the predicate"
+            );
+        }
     }
 
     /// B6 — CR 701.18b + CR 712.8a + CR 712.12: the per-card Play route. Only a
