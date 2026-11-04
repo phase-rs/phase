@@ -3436,10 +3436,14 @@ fn cover_projection(state: &GameState) -> GameState {
 /// colour, card types and abilities.
 ///
 /// INHERITED EXTRAPOLATION ASSUMPTION: this constant-depth path extrapolates the per-cycle
-/// delta over unboundedly many cycles with NO syntactic guard on either fire-time read
-/// surface. A dormant intervening-if / static / replacement reading a projected resource
-/// could arm mid-extrapolation; the shipped 2p drain detection depends on this behaviour
-/// and is regression-pinned. [`loop_states_cover_modulo_growth`] closes both surfaces by
+/// delta over unboundedly many cycles and does not guard every fire-time read surface. The
+/// cost-CONSTANCY half is closed structurally: a live cost modifier whose `dynamic_count`
+/// reads a projected journal vetoes the comparison outright
+/// ([`cost_modifier_reads_projected_resource`]), because such a modifier prices the next
+/// repeat differently from the one it extrapolates. The remaining assumption is a dormant
+/// intervening-if / static / replacement CONDITION reading a projected resource, which could
+/// arm mid-extrapolation; the shipped 2p drain detection depends on this behaviour and is
+/// regression-pinned. [`loop_states_cover_modulo_growth`] closes both surfaces by
 /// construction rather than inheriting the assumption.
 pub fn loop_states_equal_modulo_resources(a: &GameState, b: &GameState) -> bool {
     loop_states_equal_modulo_resources_side(a, b)
@@ -3457,6 +3461,13 @@ pub(crate) fn loop_states_equal_modulo_resources_side<'a, C: CurrentSide<'a>>(
     b: C,
 ) -> bool {
     bump_loop_detect_cost(|cost| cost.compares_equal_modulo_resources += 1);
+    // CR 601.2f + CR 732.2a: a live cost modifier that reads a projected journal (Blaster
+    // Hulk's `EnergyPaidOrLostThisTurn`) prices the next repeat differently even when the
+    // projected-out reserve is restored, so the recurrence is not constant. Reject before
+    // projecting — `a` carries the same statics as any state this comparison could accept.
+    if cost_modifier_reads_projected_resource(a) {
+        return false;
+    }
     let pa = project_out_resources(a);
     let pb = b.projected();
     // CR 606.3: the per-object loyalty-activation count (and the per-permanent
@@ -3485,6 +3496,38 @@ fn loyalty_activation_counts_match(a: &GameState, b: &GameState) -> bool {
         b.objects.get(id).is_none_or(|ob| {
             oa.loyalty_activations_this_turn == ob.loyalty_activations_this_turn
                 && oa.extra_loyalty_activations_this_turn == ob.extra_loyalty_activations_this_turn
+        })
+    })
+}
+
+/// CR 601.2f + CR 732.2a: does a LIVE cost-MODIFIER static read, through its `dynamic_count`
+/// multiplier, a resource [`project_out_resources`] zeroes? A `ModifyCost` /
+/// `ReduceAbilityCost` whose multiplier is a per-turn journal (`EnergyPaidOrLostThisTurn`,
+/// Blaster Hulk) changes value on EVERY repeat of a loop that pays energy — even when the
+/// loop restores the same energy total, because the journal is a cumulative tally, not the
+/// reserve. Both compared frames have the journal projected out, so without this veto a
+/// constant-depth comparison would certify a recurrence whose cost is not constant.
+///
+/// Narrow by design: the question is membership in the cost-modifier variant pair, not a
+/// classification of every `StaticMode` (the exhaustive totality gate for cost surfaces is
+/// [`static_mode_references_growing_class`], which the growth covers consult). A new
+/// non-modifier variant is answerable here without an edit; a new MODIFIER that carries its
+/// multiplier on another field would have to be added.
+fn cost_modifier_reads_projected_resource(state: &GameState) -> bool {
+    use crate::game::ability_scan::quantity_ref_references_projected_resource as reads_projected;
+    use crate::types::statics::StaticMode;
+    state.objects.values().any(|obj| {
+        obj.static_definitions.iter_all().any(|def| {
+            // CR 113.6: a static that does not function in its source's zone modifies no
+            // cost, so an inert copy (in hand, in a graveyard it does not function from)
+            // is not a live cost dependency.
+            crate::game::functioning_abilities::static_functions_in_zone(obj, def)
+                && matches!(
+                    &def.mode,
+                    StaticMode::ModifyCost { dynamic_count: Some(q), .. }
+                        | StaticMode::ReduceAbilityCost { dynamic_count: Some(q), .. }
+                        if reads_projected(q)
+                )
         })
     })
 }
@@ -4320,7 +4363,10 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a, C: CurrentSide<'a>>(
     pa.stack_trigger_firings.clear();
     if !(loop_states_equal(&pa, &pb)
         && loyalty_activation_counts_match(&pa, &pb)
-        && object_resource_axes_match(prior, current))
+        && object_resource_axes_match(prior, current)
+        // CR 601.2f + CR 732.2a: a live cost modifier reading a projected journal makes the
+        // next repeat cost something else, so the covered recurrence is not constant.
+        && !cost_modifier_reads_projected_resource(current))
     {
         return false;
     }
@@ -14581,6 +14627,52 @@ mod tests {
         assert!(
             cover_with_static_on_stable(reduce(None)),
             "R-e2-reduceability control: a fixed ReduceAbilityCost must COVER"
+        );
+    }
+
+    /// A cost modifier reading a PROJECTED journal (`EnergyPaidOrLostThisTurn`) REJECTs the
+    /// constant-depth recurrence: the loop can pay {E} and restore the same reserve while the
+    /// cumulative journal grows, and the projection zeroes the journal out of both frames, so
+    /// without the veto the pair certifies a recurrence whose reduction changes every repeat.
+    /// Non-vacuous: the SAME static with `dynamic_count: None` (a fixed reduction) leaves the
+    /// pair EQUAL, proving the dynamic-multiplier scan — not the mere presence of a cost
+    /// static — is the differentiator.
+    #[test]
+    fn constant_depth_projected_cost_modifier_rejects() {
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+        let board = |dynamic_count| {
+            let mut state = GameState::new_two_player(7);
+            let sid = inert_token(&mut state, 600, 0, "StaticSource");
+            state
+                .objects
+                .get_mut(&sid)
+                .unwrap()
+                .static_definitions
+                .push(StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::default(),
+                    spell_filter: None,
+                    dynamic_count,
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+                }));
+            state
+        };
+        // One cycle's payment: the journal grows, the reserve is what the projection zeroes.
+        let paid_two = |state: &GameState| {
+            let mut next = state.clone();
+            next.players[0].energy_paid_or_lost_this_turn = 2;
+            next
+        };
+        let fixed = board(None);
+        assert!(
+            loop_states_equal_modulo_resources(&fixed, &paid_two(&fixed)),
+            "control: with no journal reader the per-turn journal is pure history ⇒ EQUAL"
+        );
+        let projected = board(Some(QuantityRef::EnergyPaidOrLostThisTurn));
+        assert!(
+            !loop_states_equal_modulo_resources(&projected, &paid_two(&projected)),
+            "a cost modifier reading the projected journal changes price every repeat ⇒ REJECT"
         );
     }
 
