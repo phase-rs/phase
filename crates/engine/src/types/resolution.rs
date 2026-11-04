@@ -2061,11 +2061,44 @@ impl ResolutionStack {
         let Some(id) = found else {
             return false;
         };
+        let mut abandoned = Vec::new();
+        let mut group = None;
         if let Some(ResolutionFrame::BatchDelivery(frame)) = self.frames.get_mut(id) {
             visit(frame);
-            return true;
+            group = Some(frame.logical_zone_change_group.logical_group_id);
+            if let Some(staged) = &frame.staged {
+                abandoned = staged
+                    .members
+                    .iter()
+                    .filter(|member| {
+                        matches!(
+                            member.state,
+                            crate::types::game_state::StagedBatchMemberState::Abandoned
+                        )
+                    })
+                    .map(|member| member.identity)
+                    .collect();
+            }
         }
-        false
+        // CR 800.4a: a component child's validated parent boundary is gone once
+        // the parent member is pruned. Detach exactly those links so the
+        // post-elimination save validates without inventing a parent pause.
+        if let (Some(group), false) = (group, abandoned.is_empty()) {
+            for frame in self.frames.iter_mut() {
+                if let ResolutionFrame::BatchDelivery(child) = frame {
+                    if child
+                        .component_delivery_parent
+                        .as_ref()
+                        .is_some_and(|link| {
+                            link.parent_group_id == group && abandoned.contains(&link.member)
+                        })
+                    {
+                        child.component_delivery_parent = None;
+                    }
+                }
+            }
+        }
+        group.is_some()
     }
 
     /// Mutably accesses a BatchDelivery owner while its exact active
