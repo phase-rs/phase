@@ -53,7 +53,7 @@ graveyard routing — that is exactly what the bump covers.
 
 ## 2. Real path surface
 
-**39 paths, +2321 / −122** (not four):
+**39 code paths, +2321 / −122** (not four), plus this record file:
 
 | Group | Paths | What it is |
 |---|---|---|
@@ -64,6 +64,7 @@ graveyard routing — that is exactly what the bump covers.
 | `crates/phase-ast/src/types/ability.rs` | 1 | the enum and the `Dig`/pause fields |
 | `crates/server-core/src/session.rs` | 1 | pause payload re-encode |
 | `protocol/changes/7e2fb31c-….json` | 1 | wire/full-game bump record |
+| `.claude/wf/through-the-forest-gate-addendum-r1.md` | 1 | this addendum (documentation only, no source) |
 
 ## 3. Measured parse impact — all seven movers
 
