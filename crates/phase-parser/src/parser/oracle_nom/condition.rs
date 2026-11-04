@@ -7395,13 +7395,20 @@ fn parse_subtype_cards_in_your_graveyard(input: &str) -> OracleResult<'_, Quanti
     ))
 }
 
+/// CR 400.7 + CR 400.3 + CR 603.4: "a[n] <type> was put into | returned to your
+/// hand from the battlefield this turn" — a per-turn battlefield-to-hand
+/// zone-change count over objects you OWN (a card can only go to its owner's
+/// hand, CR 400.3), so "your hand" binds the owner, not the controller.
+/// "Returned to" (Miles O'Brien, Transporter Ops) and "put into" (Barrin,
+/// Tolarian Archmage) are the same zone change; only the verb differs.
 fn parse_permanent_put_into_your_hand_from_battlefield_this_turn(
     input: &str,
 ) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_article(input)?;
-    let (rest, type_text) =
-        take_until(" was put into your hand from the battlefield this turn").parse(rest)?;
-    let (rest, _) = tag(" was put into your hand from the battlefield this turn").parse(rest)?;
+    let (rest, type_text) = take_until(" was ").parse(rest)?;
+    let (rest, _) = tag(" was ").parse(rest)?;
+    let (rest, _) = alt((tag("put into"), tag("returned to"))).parse(rest)?;
+    let (rest, _) = tag(" your hand from the battlefield this turn").parse(rest)?;
     let (filter, leftover) = parse_type_phrase_folding(type_text.trim());
     if !leftover.trim().is_empty() || filter == TargetFilter::Any {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -22361,11 +22368,18 @@ mod tests {
 
     #[test]
     fn test_permanent_put_into_your_hand_from_battlefield_this_turn() {
-        let (rest, c) = parse_inner_condition(
+        // "put into" (Barrin) and "returned to" (Miles O'Brien) are one verb axis.
+        for text in [
             "a permanent was put into your hand from the battlefield this turn",
-        )
-        .unwrap();
-        assert_eq!(rest, "");
+            "a permanent was returned to your hand from the battlefield this turn",
+        ] {
+            assert_owned_permanent_battlefield_to_hand_count(text);
+        }
+    }
+
+    fn assert_owned_permanent_battlefield_to_hand_count(text: &str) {
+        let (rest, c) = parse_inner_condition(text).unwrap();
+        assert_eq!(rest, "", "{text}");
         match c {
             StaticCondition::QuantityComparison {
                 lhs:
