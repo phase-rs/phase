@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::ability::{Comparator, QuantityExpr, TargetRef};
-use super::identifiers::ObjectId;
+use super::identifiers::{ObjectId, ObjectIncarnationRef};
 use super::keywords::{Keyword, KeywordKind};
 use super::player::PlayerId;
 use super::zones::Zone;
@@ -379,7 +379,17 @@ pub enum CastingVariant {
     /// Like `Flashback`, exiled instead of going anywhere else any time it
     /// would leave the stack (reminder "Then exile this spell"). The keyword's
     /// rule number needs manual verification.
-    BeamMeUp,
+    ///
+    /// `granted_by` latches, at announcement (CR 601.2b), the exact object whose
+    /// static granted the beam me up being used — the card leaves the graveyard
+    /// for the stack (CR 601.2a), so the grant no longer applies when the
+    /// creature is chosen at payment (CR 601.2h). It scopes that object's "can't
+    /// be beamed up to cast a spell this way" prohibition (Scotty, Miracle
+    /// Worker). `None` for a printed beam me up.
+    BeamMeUp {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        granted_by: Option<ObjectIncarnationRef>,
+    },
     /// CR 702.102a-d: Both halves of a split card cast from hand as a fused
     /// split spell. The mana cost is the combined cost of both halves
     /// (CR 702.102c). On resolution, the left half's instructions are followed
@@ -446,7 +456,7 @@ impl CastingVariant {
             CastingVariant::Mutate => Some(KeywordKind::Mutate),
             CastingVariant::Freerunning => Some(KeywordKind::Freerunning),
             CastingVariant::JumpStart => Some(KeywordKind::JumpStart),
-            CastingVariant::BeamMeUp => Some(KeywordKind::BeamMeUp),
+            CastingVariant::BeamMeUp { .. } => Some(KeywordKind::BeamMeUp),
             CastingVariant::Fuse => Some(KeywordKind::Fuse),
             CastingVariant::Normal
             | CastingVariant::Adventure
@@ -520,7 +530,7 @@ impl CastingVariant {
             // one alternative casting method may apply (CR 118.9a).
             | CastingVariant::FaceDown
             // CR 118.9 + CR 118.9a: the beam me up cost is paid rather than the mana cost, so no other alternative cost may apply (beam me up rule number needs manual verification).
-            | CastingVariant::BeamMeUp
+            | CastingVariant::BeamMeUp { .. }
             | CastingVariant::Freerunning => true,
             CastingVariant::Normal
             | CastingVariant::Adventure
@@ -605,7 +615,7 @@ impl CastingVariant {
             | CastingVariant::Escape
             | CastingVariant::Flashback
             | CastingVariant::Harmonize
-            | CastingVariant::BeamMeUp
+            | CastingVariant::BeamMeUp { .. }
             | CastingVariant::Mayhem
             | CastingVariant::Disturb
             | CastingVariant::GraveyardPermission { .. }
@@ -625,7 +635,7 @@ impl CastingVariant {
                 | CastingVariant::JumpStart
                 // Beam me up: reminder "Then exile this spell"; mirrors
                 // CR 702.180a — beam me up rule number needs manual verification.
-                | CastingVariant::BeamMeUp
+                | CastingVariant::BeamMeUp { .. }
         )
     }
 

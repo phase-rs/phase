@@ -8,6 +8,7 @@ use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
 use crate::parser::oracle_nom::target::{controller_phrase_among_mixed_case, ControllerPhrase};
 #[allow(unused_imports)]
 use crate::types::ability::AttachmentReferent;
+use crate::types::statics::BeamMeUpProhibitionScope;
 
 /// CR 509.1b / CR 702.111b: "<N> or more creatures" minimum-blocker phrase.
 /// Composed from `parse_number` + `tag(" or more creatures")`.
@@ -1727,7 +1728,12 @@ pub(crate) fn try_split_and_terminal_object_prohibition(
                 ),
                 // CR 101.2 + CR 604.1: Marooned (beam me up rule number needs
                 // manual verification).
-                value(StaticMode::CantBeBeamedUp, tag::<_, _, VE>("beamed up")),
+                value(
+                    StaticMode::CantBeBeamedUp {
+                        scope: BeamMeUpProhibitionScope::AnyCast,
+                    },
+                    tag::<_, _, VE>("beamed up"),
+                ),
             )),
         )
         .parse(i)

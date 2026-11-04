@@ -48,6 +48,9 @@ pub(crate) fn parse_graveyard_granted_keyword_kind(
         value(GrantedCastKeywordKind::Scavenge, tag("scavenge")),
         value(GrantedCastKeywordKind::Encore, tag("encore")),
         value(GrantedCastKeywordKind::Embalm, tag("embalm")),
+        // Beam me up (TRK, rule number needs manual verification): Scotty,
+        // Miracle Worker grants it to every card in your graveyard.
+        value(GrantedCastKeywordKind::BeamMeUp, tag("beam me up")),
         // CR 702.143a / CR 702.94a: Dream Devourer grants foretell, Aminatou
         // grants miracle — hand-zone cast keywords (gated by `grant_zone`).
         value(GrantedCastKeywordKind::Foretell, tag("foretell")),
@@ -126,6 +129,7 @@ fn graveyard_granted_kind_for_keyword(keyword: &Keyword) -> Option<GrantedCastKe
         GrantedCastKeywordKind::Embalm,
         GrantedCastKeywordKind::Foretell,
         GrantedCastKeywordKind::Miracle,
+        GrantedCastKeywordKind::BeamMeUp,
     ]
     .into_iter()
     .find(|kind| kind.matches_keyword(keyword))
@@ -175,12 +179,11 @@ pub(crate) fn try_parse_graveyard_keyword_grant_static(line: &str) -> Option<Sta
         return None;
     }
 
-    let (turn_condition, grant_prefix) = nom_on_lower(&stripped, &lower, |input| {
-        value(StaticCondition::DuringYourTurn, tag("during your turn, ")).parse(input)
-    })
-    .map_or((None, stripped.as_str()), |(condition, rest)| {
-        (Some(condition), rest)
-    });
+    let (turn_condition, grant_prefix) =
+        nom_on_lower(&stripped, &lower, parse_graveyard_grant_timing_prefix)
+            .map_or((None, stripped.as_str()), |(condition, rest)| {
+                (Some(condition), rest)
+            });
 
     let (affected, kind, keyword_text) = try_parse_graveyard_keyword_grant_clause(grant_prefix)?;
     let keyword = parse_graveyard_granted_keyword_phrase(&keyword_text, kind)?;
@@ -193,6 +196,71 @@ pub(crate) fn try_parse_graveyard_keyword_grant_static(line: &str) -> Option<Sta
         def = def.condition(condition);
     }
     Some(def)
+}
+
+/// CR 102.1 + CR 500.1 + CR 505.1 + CR 109.5: the leading timing window of a
+/// graveyard keyword grant — "during your turn, " (Lurrus-style turn scope) or
+/// "during your <phase/step>, " (Scotty, Miracle Worker: "During your main
+/// phase, …"). The possessive "your" is the static's controller's turn
+/// (`DuringYourTurn`), composed with the live phase gate for the phase form.
+/// The phase name is the shared `parse_phase_name_set` authority, so every named
+/// phase or step is covered, not just the main phase. Shared by the inline and
+/// continuation-sentence grant parsers.
+pub(crate) fn parse_graveyard_grant_timing_prefix(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    terminated(
+        preceded(
+            tag("during your "),
+            alt((
+                value(StaticCondition::DuringYourTurn, tag("turn")),
+                map(
+                    crate::parser::oracle_effect::conditions::parse_phase_name_set,
+                    |phases| StaticCondition::And {
+                        conditions: vec![
+                            StaticCondition::DuringYourTurn,
+                            StaticCondition::CurrentPhaseIs { phases },
+                        ],
+                    },
+                ),
+            )),
+        ),
+        tag(", "),
+    )
+    .parse(input)
+}
+
+/// Beam me up (TRK; rule number needs manual verification) + CR 101.2 + CR
+/// 604.1: the rider sentence that scopes a graveyard keyword grant's own route
+/// — "~ can't be beamed up to cast a spell this way." (Scotty, Miracle Worker).
+/// "This way" links the prohibition to the beam me up the same ability grants,
+/// so it lowers to `StaticMode::CantBeBeamedUp { scope: GrantedBySource }` on
+/// the source itself, not a blanket prohibition that would bar every beam me
+/// up cast. Only a beam me up grant carries this rider; any other kind
+/// declines.
+pub(crate) fn parse_graveyard_grant_route_rider(
+    text: &str,
+    kind: GrantedCastKeywordKind,
+) -> Option<StaticDefinition> {
+    if kind != GrantedCastKeywordKind::BeamMeUp {
+        return None;
+    }
+    let lower = text.trim().to_lowercase();
+    all_consuming((
+        super::grammar::parse_self_subject,
+        alt((tag(" can't be "), tag(" can\u{2019}t be "))),
+        tag("beamed up to cast a spell this way"),
+        opt(tag(".")),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    Some(
+        StaticDefinition::new(StaticMode::CantBeBeamedUp {
+            scope: crate::types::statics::BeamMeUpProhibitionScope::GrantedBySource,
+        })
+        .affected(TargetFilter::SelfRef)
+        .description(text.trim().to_string()),
+    )
 }
 
 pub(crate) fn parse_keyword_with_where_x(input: &str) -> Option<(Keyword, Option<QuantityRef>)> {

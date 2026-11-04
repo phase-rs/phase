@@ -15,7 +15,7 @@ use engine::ai_support::legal_actions;
 use engine::game::casting::current_casting_variant_choice_options;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::AttachTarget;
-use engine::game::keywords::{can_be_beamed_up, effective_beam_me_up_cost};
+use engine::game::keywords::{beam_me_up_granted_by, can_be_beamed_up, effective_beam_me_up_cost};
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
@@ -27,15 +27,19 @@ use engine::types::counter::CounterType;
 use engine::types::game_state::{
     CastPaymentMode, CastingVariant, CastingVariantChoiceOption, PayCostKind, WaitingFor,
 };
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::statics::StaticMode;
+use engine::types::statics::{BeamMeUpProhibitionScope, StaticMode};
 use engine::types::zones::Zone;
 
 const MAROONED: &str = "Enchant artifact or creature\nWhen this Aura enters, you may pay {3}. If you do, tap enchanted permanent.\nEnchanted permanent doesn't untap during its controller's untap step and can't be beamed up.";
+/// Marooned's blanket prohibition (every beam me up cast).
+const MAROONED_PROHIBITION: StaticMode = StaticMode::CantBeBeamedUp {
+    scope: BeamMeUpProhibitionScope::AnyCast,
+};
 const MALFUNCTION: &str = "Enchant artifact or creature\nWhen this Aura enters, tap enchanted permanent.\nEnchanted permanent doesn't untap during its controller's untap step.";
 
 /// Stage an Aura on the battlefield with its Oracle text run through the
@@ -90,7 +94,9 @@ fn detach(runner: &mut GameRunner, attachment: ObjectId, host: ObjectId) {
 
 /// The beam me up eligibility probe: "creature … that can be beamed up".
 fn beamable_creature() -> TargetFilter {
-    TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::CanBeBeamedUp]))
+    TargetFilter::Typed(
+        TypedFilter::creature().properties(vec![FilterProp::CanBeBeamedUp { granted_by: None }]),
+    )
 }
 
 fn probe_admits(runner: &GameRunner, source: ObjectId, id: ObjectId) -> bool {
@@ -145,18 +151,18 @@ fn marooned_host_cannot_be_beamed_up_but_another_creature_can() {
         aura,
     } = board(P1, "Marooned", MAROONED);
     assert!(
-        has_static(&runner, aura, &StaticMode::CantBeBeamedUp),
+        has_static(&runner, aura, &MAROONED_PROHIBITION),
         "REACH: Marooned must carry the parsed CantBeBeamedUp static"
     );
 
     // Reach control: unattached Marooned names no host.
-    assert!(can_be_beamed_up(runner.state(), a));
+    assert!(can_be_beamed_up(runner.state(), a, None));
     assert!(probe_admits(&runner, a, a));
 
     attach(&mut runner, aura, a);
 
     assert!(
-        !can_be_beamed_up(runner.state(), a),
+        !can_be_beamed_up(runner.state(), a, None),
         "Marooned's host can't be beamed up"
     );
     assert!(
@@ -164,7 +170,7 @@ fn marooned_host_cannot_be_beamed_up_but_another_creature_can() {
         "FilterProp::CanBeBeamedUp must reject Marooned's host"
     );
     // Paired positive: the evaluator runs and answers true for another creature.
-    assert!(can_be_beamed_up(runner.state(), b));
+    assert!(can_be_beamed_up(runner.state(), b, None));
     assert!(probe_admits(&runner, a, b));
 }
 
@@ -183,13 +189,13 @@ fn malfunction_host_can_still_be_beamed_up() {
         has_static(&runner, aura, &StaticMode::CantUntap),
         "REACH: Malfunction must carry its parsed CantUntap static"
     );
-    assert!(!has_static(&runner, aura, &StaticMode::CantBeBeamedUp));
+    assert!(!has_static(&runner, aura, &MAROONED_PROHIBITION));
 
     attach(&mut runner, aura, a);
 
-    assert!(can_be_beamed_up(runner.state(), a));
+    assert!(can_be_beamed_up(runner.state(), a, None));
     assert!(probe_admits(&runner, a, a));
-    assert!(can_be_beamed_up(runner.state(), b));
+    assert!(can_be_beamed_up(runner.state(), b, None));
 }
 
 /// P1-R7a (CR 611.3a): the binding is live and source-relative. Moving Marooned
@@ -203,19 +209,19 @@ fn moving_marooned_moves_the_prohibition() {
         aura,
     } = board(P1, "Marooned", MAROONED);
     attach(&mut runner, aura, a);
-    assert!(!can_be_beamed_up(runner.state(), a));
-    assert!(can_be_beamed_up(runner.state(), b));
+    assert!(!can_be_beamed_up(runner.state(), a, None));
+    assert!(can_be_beamed_up(runner.state(), b, None));
 
     detach(&mut runner, aura, a);
     attach(&mut runner, aura, b);
 
     assert!(
-        can_be_beamed_up(runner.state(), a),
+        can_be_beamed_up(runner.state(), a, None),
         "A is no longer enchanted by Marooned"
     );
     assert!(probe_admits(&runner, a, a));
     assert!(
-        !can_be_beamed_up(runner.state(), b),
+        !can_be_beamed_up(runner.state(), b, None),
         "Marooned's new host can't be beamed up"
     );
     assert!(!probe_admits(&runner, a, b));
@@ -233,9 +239,9 @@ fn own_marooned_still_blocks_its_host() {
     } = board(P0, "Marooned", MAROONED);
     attach(&mut runner, aura, a);
 
-    assert!(!can_be_beamed_up(runner.state(), a));
+    assert!(!can_be_beamed_up(runner.state(), a, None));
     assert!(!probe_admits(&runner, a, a));
-    assert!(can_be_beamed_up(runner.state(), b));
+    assert!(can_be_beamed_up(runner.state(), b, None));
 }
 
 const OPEN_COMMUNICATIONS: &str = "Draw a card.\nBeam me up {2}{U} (You may cast this card from your graveyard for {2}{U} if you also return a creature you control to its owner's hand. Then exile this spell.)";
@@ -1281,7 +1287,7 @@ fn kess_offers_printed_and_beam_me_up_casts_of_a_graveyard_sorcery() {
     assert_eq!(options.len(), 2, "two methods: {options:?}");
     let beam: Vec<_> = options
         .iter()
-        .filter(|o| o.variant == CastingVariant::BeamMeUp)
+        .filter(|o| matches!(o.variant, CastingVariant::BeamMeUp { granted_by: None }))
         .collect();
     assert_eq!(beam.len(), 1, "one beam me up option");
     assert_eq!(beam[0].mana_cost, cost(3, &[ManaCostShard::Blue]));
@@ -1329,7 +1335,7 @@ fn kess_offers_printed_and_beam_me_up_casts_of_a_graveyard_sorcery() {
             targets: &targets,
             returned: Some(bear),
             distribution: None,
-            variant: Some(|v| *v == CastingVariant::BeamMeUp),
+            variant: Some(|v| matches!(v, CastingVariant::BeamMeUp { granted_by: None })),
         },
     );
     assert_eq!(
@@ -1449,7 +1455,7 @@ fn marooned_host_is_not_a_beam_me_up_choice() {
     evaluate_layers(runner.state_mut());
     attach(&mut runner, aura, a);
     assert!(
-        !can_be_beamed_up(runner.state(), a),
+        !can_be_beamed_up(runner.state(), a, None),
         "REACH: A is Marooned's host"
     );
     cast_with(
@@ -1476,4 +1482,280 @@ fn marooned_host_is_not_a_beam_me_up_choice() {
         "Familiar's Ruse may return Marooned's host"
     );
     assert_eq!(zone(&runner, a), Zone::Hand);
+}
+
+// ---------------------------------------------------------------------------
+// Scotty, Miracle Worker: a granted beam me up (CR 613.1f grant of a keyword to
+// graveyard cards, CR 113.6b), gated to your main phase (CR 505.1 + CR 109.5),
+// at the spell's own mana cost (CR 118.9), only for instants and sorceries, and
+// never returning Scotty itself ("Scotty can't be beamed up to cast a spell this
+// way"; CR 101.2). Beam me up rule number needs manual verification.
+// ---------------------------------------------------------------------------
+
+const SCOTTY: &str = "During your main phase, each card in your graveyard has beam me up. The beam me up cost is equal to that spell's mana cost. Scotty can't be beamed up to cast a spell this way. (Only instant and sorcery spells can be cast this way. You may cast a card from your graveyard for its beam me up cost if you also return another creature you control to its owner's hand. Then exile that spell.)";
+const DIVINATION: &str = "Draw two cards.";
+const QUICK_STUDY: &str = "Draw two cards.";
+
+struct ScottyBoard {
+    runner: GameRunner,
+    scotty: ObjectId,
+    bears: Option<ObjectId>,
+    sorcery: ObjectId,
+    instant: ObjectId,
+    creature_card: ObjectId,
+}
+
+/// P0 controls Scotty (full Oracle text through the production parser) and,
+/// when `with_bears`, Grizzly Bears. P0's graveyard holds Divination ({2}{U}
+/// sorcery), Quick Study ({2}{U} instant) and a Grizzly Bears creature card
+/// ({1}{G}) — none with a printed beam me up. P0 has `blue` blue mana and two
+/// green.
+fn scotty_board(phase: Phase, with_bears: bool, blue: usize) -> ScottyBoard {
+    let mut sc = GameScenario::new();
+    sc.at_phase(phase);
+    let scotty = sc
+        .add_creature_from_oracle(P0, "Scotty, Miracle Worker", 2, 3, SCOTTY)
+        .as_legendary()
+        .with_mana_cost(cost(1, &[ManaCostShard::Blue, ManaCostShard::Blue]))
+        .id();
+    let bears = with_bears.then(|| sc.add_creature(P0, "Grizzly Bears", 2, 2).id());
+    let sorcery = sorcery_in_graveyard(
+        &mut sc,
+        P0,
+        "Divination",
+        cost(2, &[ManaCostShard::Blue]),
+        DIVINATION,
+    );
+    let instant = sc
+        .add_spell_to_graveyard(P0, "Quick Study", true)
+        .with_mana_cost(cost(2, &[ManaCostShard::Blue]))
+        .from_oracle_text(QUICK_STUDY)
+        .id();
+    let creature_card = sc
+        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .with_mana_cost(cost(1, &[ManaCostShard::Green]))
+        .id();
+    sc.add_card_to_library_top(P0, "Library Card A");
+    sc.add_card_to_library_top(P0, "Library Card B");
+    let mut pool = mana(ManaType::Blue, blue);
+    pool.extend(mana(ManaType::Green, 2));
+    sc.with_mana_pool(P0, pool);
+    let mut runner = sc.build();
+    runner.state_mut().layers_dirty.mark_full();
+    evaluate_layers(runner.state_mut());
+    ScottyBoard {
+        runner,
+        scotty,
+        bears,
+        sorcery,
+        instant,
+        creature_card,
+    }
+}
+
+/// S1 (CR 118.9 + CR 601.2h + CR 400.3): during your main phase a graveyard
+/// sorcery is cast for its own mana cost by returning another creature; Scotty
+/// is not a return choice, and the spell is exiled after it resolves.
+#[test]
+fn scotty_casts_a_graveyard_sorcery_for_its_mana_cost_returning_another_creature() {
+    let ScottyBoard {
+        mut runner,
+        scotty,
+        bears,
+        sorcery,
+        ..
+    } = scotty_board(Phase::PreCombatMain, true, 3);
+    let bears = bears.unwrap();
+    let scotty_ref = ObjectIncarnationRef::of(scotty, runner.state().objects[&scotty].incarnation);
+    assert_eq!(
+        effective_beam_me_up_cost(runner.state(), sorcery),
+        Some(cost(2, &[ManaCostShard::Blue])),
+        "the beam me up cost is the spell's own mana cost"
+    );
+    assert_eq!(
+        beam_me_up_granted_by(runner.state(), sorcery),
+        Some(scotty_ref),
+        "the grant is Scotty's"
+    );
+    assert!(offers_cast_of(&runner, sorcery), "Divination is offered");
+
+    let record = cast_with(&mut runner, sorcery, CastIntent::returning(bears));
+    assert_eq!(
+        record.return_choices,
+        Some(vec![bears]),
+        "Scotty can't be beamed up to cast a spell this way"
+    );
+    assert_eq!(zone(&runner, bears), Zone::Hand, "Bears returned");
+    assert_eq!(zone(&runner, scotty), Zone::Battlefield, "Scotty stays");
+    assert_eq!(
+        pool_total(&runner, P0),
+        2,
+        "exactly {{2}}{{U}} paid: three blue gone, two green left"
+    );
+
+    pass_until_prompt(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(hand(&runner, P0).len(), 3, "Bears plus two drawn cards");
+    assert_eq!(zone(&runner, sorcery), Zone::Exile, "then exile that spell");
+}
+
+/// S2 (CR 505.1 + CR 109.5): the grant applies only during your main phase —
+/// both main phases offer the graveyard instant; your end step and an
+/// opponent's main phase do not, and the card then has no beam me up at all.
+#[test]
+fn scotty_grant_applies_only_during_your_main_phase() {
+    for phase in [Phase::PreCombatMain, Phase::PostCombatMain] {
+        let board = scotty_board(phase, true, 3);
+        assert!(
+            offers_cast_of(&board.runner, board.instant),
+            "{phase:?}: Quick Study is offered"
+        );
+    }
+
+    let board = scotty_board(Phase::End, true, 3);
+    assert!(
+        effective_beam_me_up_cost(board.runner.state(), board.instant).is_none(),
+        "no beam me up outside your main phase"
+    );
+    assert!(
+        !offers_cast_of(&board.runner, board.instant),
+        "your end step: not offered"
+    );
+
+    // An opponent's precombat main phase, P0 holding priority.
+    let mut board = scotty_board(Phase::PreCombatMain, true, 3);
+    let state = board.runner.state_mut();
+    state.active_player = P1;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    state.layers_dirty.mark_full();
+    evaluate_layers(state);
+    assert!(
+        effective_beam_me_up_cost(board.runner.state(), board.instant).is_none(),
+        "an opponent's main phase is not your main phase"
+    );
+    assert!(
+        !offers_cast_of(&board.runner, board.instant),
+        "an opponent's main phase: not offered"
+    );
+}
+
+/// S3 (CR 207.2a reminder: "Only instant and sorcery spells can be cast this
+/// way."): every card in your graveyard has beam me up, but a creature card
+/// can't be cast with it.
+#[test]
+fn scotty_grant_casts_only_instants_and_sorceries() {
+    let board = scotty_board(Phase::PreCombatMain, true, 3);
+    assert_eq!(
+        effective_beam_me_up_cost(board.runner.state(), board.creature_card),
+        Some(cost(1, &[ManaCostShard::Green])),
+        "REACH: the creature card has beam me up too"
+    );
+    assert!(
+        !offers_cast_of(&board.runner, board.creature_card),
+        "a creature card is not cast with beam me up"
+    );
+    assert!(
+        offers_cast_of(&board.runner, board.sorcery),
+        "paired positive: the sorcery is"
+    );
+}
+
+/// S4 (CR 118.3 + CR 101.2): with Scotty as your only creature the cost can't
+/// be paid — Scotty is never the returned creature — so nothing is offered;
+/// without the spell's mana cost it is unpayable too.
+#[test]
+fn scotty_alone_or_short_mana_offers_nothing() {
+    let board = scotty_board(Phase::PreCombatMain, false, 3);
+    assert!(
+        !can_be_beamed_up(
+            board.runner.state(),
+            board.scotty,
+            beam_me_up_granted_by(board.runner.state(), board.sorcery)
+        ),
+        "Scotty can't be beamed up through its own grant"
+    );
+    assert!(
+        !offers_cast_of(&board.runner, board.sorcery),
+        "no other creature"
+    );
+    assert!(
+        !offers_cast_of(&board.runner, board.instant),
+        "no other creature"
+    );
+
+    // Two green and no blue can't pay {2}{U}.
+    let board = scotty_board(Phase::PreCombatMain, true, 0);
+    assert!(
+        !offers_cast_of(&board.runner, board.sorcery),
+        "short of {{2}}{{U}}"
+    );
+}
+
+/// S5 (CR 101.2 + CR 400.7): Scotty's prohibition is scoped to its own grant.
+/// A printed beam me up or another object's grant may return Scotty, and a
+/// stale incarnation of the granter binds nothing.
+#[test]
+fn scotty_prohibition_binds_only_casts_through_scottys_grant() {
+    let board = scotty_board(Phase::PreCombatMain, true, 3);
+    let state = board.runner.state();
+    let scotty_ref =
+        ObjectIncarnationRef::of(board.scotty, state.objects[&board.scotty].incarnation);
+    assert!(!can_be_beamed_up(state, board.scotty, Some(scotty_ref)));
+    assert!(
+        can_be_beamed_up(state, board.scotty, None),
+        "a printed beam me up may return Scotty"
+    );
+    assert!(
+        can_be_beamed_up(state, board.bears.unwrap(), Some(scotty_ref)),
+        "another creature may be returned through Scotty's grant"
+    );
+    let stale = ObjectIncarnationRef::of(board.scotty, scotty_ref.incarnation + 1);
+    assert!(
+        can_be_beamed_up(state, board.scotty, Some(stale)),
+        "a different incarnation is not the granter"
+    );
+}
+
+/// S6 (CR 101.2): Marooned's blanket prohibition composes with Scotty's
+/// "this way" one: with Marooned on Bears, Scotty excluded and no third
+/// creature, nothing is offered; adding Savannah Lions makes it the only
+/// return choice.
+#[test]
+fn scotty_and_marooned_prohibitions_compose() {
+    fn stage(with_lions: bool) -> (GameRunner, ObjectId, Option<ObjectId>) {
+        let mut sc = GameScenario::new();
+        sc.at_phase(Phase::PreCombatMain);
+        sc.add_creature_from_oracle(P0, "Scotty, Miracle Worker", 2, 3, SCOTTY)
+            .as_legendary();
+        let bears = sc.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let lions = with_lions.then(|| sc.add_creature(P0, "Savannah Lions", 2, 1).id());
+        let aura = aura_on_battlefield(&mut sc, P1, "Marooned", MAROONED);
+        let sorcery = sorcery_in_graveyard(
+            &mut sc,
+            P0,
+            "Divination",
+            cost(2, &[ManaCostShard::Blue]),
+            DIVINATION,
+        );
+        sc.add_card_to_library_top(P0, "Library Card A");
+        sc.add_card_to_library_top(P0, "Library Card B");
+        sc.with_mana_pool(P0, mana(ManaType::Blue, 3));
+        let mut runner = sc.build();
+        runner.state_mut().layers_dirty.mark_full();
+        evaluate_layers(runner.state_mut());
+        attach(&mut runner, aura, bears);
+        (runner, sorcery, lions)
+    }
+
+    let (runner, sorcery, _) = stage(false);
+    assert!(
+        !offers_cast_of(&runner, sorcery),
+        "Marooned's host and Scotty are both excluded"
+    );
+
+    let (mut runner, sorcery, lions) = stage(true);
+    let lions = lions.unwrap();
+    let record = cast_with(&mut runner, sorcery, CastIntent::returning(lions));
+    assert_eq!(record.return_choices, Some(vec![lions]));
 }

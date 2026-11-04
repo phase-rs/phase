@@ -2,16 +2,17 @@ use std::str::FromStr;
 
 use crate::game::casting_costs::cost_has_x;
 use crate::game::combat::AttackTarget;
-use crate::game::game_object::GameObject;
+use crate::game::game_object::{GameObject, ObjectIncarnationRefExt};
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, CastVariantPaid, Effect, NinjutsuVariant, RuntimeHandler,
+    TriggerProducerOrigin,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{
     BestowCost, BlitzCost, EmbalmCost, EmergeCost, EternalizeCost, EvokeCost, FlashbackCost,
     GiftKind, Keyword, KeywordKind, ProtectionColorSet, ProtectionTarget,
@@ -19,7 +20,7 @@ use crate::types::keywords::{
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::statics::{CostModifyMode, StaticMode};
+use crate::types::statics::{BeamMeUpProhibitionScope, CostModifyMode, StaticMode};
 use crate::types::zones::Zone;
 
 use super::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
@@ -144,20 +145,48 @@ pub fn stack_has_split_second(state: &GameState) -> bool {
 }
 
 /// CR 101.2 + CR 604.1 + CR 611.3a: whether `object_id` may be returned to pay a
-/// beam me up cost — false while any functioning `StaticMode::CantBeBeamedUp`
-/// applies to it (Marooned: "Enchanted permanent … can't be beamed up."). The
-/// single reader of that mode; `FilterProp::CanBeBeamedUp` delegates here. The
-/// static's `affected` resolves from its own source, so `EnchantedBy` binds to
-/// the Aura's live host. Beam me up rule number: needs manual verification.
-pub fn can_be_beamed_up(state: &GameState, object_id: ObjectId) -> bool {
-    !check_static_ability(
+/// beam me up cost — false while a functioning `StaticMode::CantBeBeamedUp`
+/// binding this cast applies to it. The single reader of that mode;
+/// `FilterProp::CanBeBeamedUp` delegates here. The static's `affected` resolves
+/// from its own source, so `EnchantedBy` binds to the Aura's live host.
+///
+/// - `BeamMeUpProhibitionScope::AnyCast` binds every beam me up cast (Marooned:
+///   "Enchanted permanent … can't be beamed up.").
+/// - `BeamMeUpProhibitionScope::GrantedBySource` binds only a cast through the
+///   beam me up `granted_by` grants (Scotty, Miracle Worker: "Scotty can't be
+///   beamed up to cast a spell this way."). CR 400.7: `granted_by` names one
+///   incarnation, so a granter that has since changed zones binds nothing.
+///
+/// Beam me up rule number: needs manual verification.
+pub fn can_be_beamed_up(
+    state: &GameState,
+    object_id: ObjectId,
+    granted_by: Option<ObjectIncarnationRef>,
+) -> bool {
+    let context = StaticCheckContext {
+        target_id: Some(object_id),
+        ..Default::default()
+    };
+    if check_static_ability(
         state,
-        StaticMode::CantBeBeamedUp,
-        &StaticCheckContext {
-            target_id: Some(object_id),
-            ..Default::default()
+        StaticMode::CantBeBeamedUp {
+            scope: BeamMeUpProhibitionScope::AnyCast,
         },
-    )
+        &context,
+    ) {
+        return false;
+    }
+    !granted_by.is_some_and(|granter| {
+        granter.is_current(state)
+            && crate::game::static_abilities::carrier_static_applies(
+                state,
+                granter.object_id,
+                &StaticMode::CantBeBeamedUp {
+                    scope: BeamMeUpProhibitionScope::GrantedBySource,
+                },
+                &context,
+            )
+    })
 }
 
 pub fn effective_flashback_cost(state: &GameState, object_id: ObjectId) -> Option<FlashbackCost> {
@@ -325,6 +354,36 @@ pub fn effective_beam_me_up_cost(state: &GameState, object_id: ObjectId) -> Opti
         Keyword::BeamMeUp(cost) => Some(resolve_keyword_mana_cost(state, object_id, &cost)),
         _ => None,
     }
+}
+
+/// CR 601.2b + CR 613.1f: the object whose static grants the beam me up
+/// `object_id` would be cast with — `None` for a printed beam me up (or none at
+/// all). Read off the same off-zone keyword contribution
+/// `effective_beam_me_up_cost` resolves, so the latched granter and the cost
+/// always come from one beam me up instance. Latched on
+/// `CastingVariant::BeamMeUp { granted_by }` at announcement, because the card
+/// leaves the graveyard for the stack (CR 601.2a) before the return is paid.
+/// Beam me up rule number: needs manual verification.
+pub fn beam_me_up_granted_by(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<ObjectIncarnationRef> {
+    let obj = state.objects.get(&object_id)?;
+    if obj.zone == Zone::Battlefield {
+        return None;
+    }
+    crate::game::off_zone_characteristics::effective_off_zone_keyword_contributions(
+        state, object_id,
+    )
+    .into_iter()
+    .find(|entry| entry.keyword.kind() == KeywordKind::BeamMeUp)
+    .and_then(|entry| match entry.origin {
+        Some(TriggerProducerOrigin::Static { source, .. }) => Some(source),
+        // A transient grant's source is a resolved spell or ability, which
+        // carries no functioning "this way" prohibition; a printed keyword has
+        // no granter.
+        Some(TriggerProducerOrigin::Transient { .. }) | None => None,
+    })
 }
 
 /// CR 702.190a: Effective Sneak alt-cost for an object, honoring off-zone characteristic

@@ -171,7 +171,8 @@ pub(crate) use grammar::typed_filter_for_subtype;
 pub use keyword_grant::{classify_quoted_inner, parse_quoted_ability_modifications};
 pub(crate) use keyword_grant::{
     find_refused_loyalty_grant_sentence, parse_chosen_qualifier_subject,
-    parse_continuous_modifications, parse_graveyard_granted_keyword_kind, split_keyword_list,
+    parse_continuous_modifications, parse_graveyard_grant_route_rider,
+    parse_graveyard_grant_timing_prefix, parse_graveyard_granted_keyword_kind, split_keyword_list,
     try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
 };
 pub(crate) use mana_transform::{

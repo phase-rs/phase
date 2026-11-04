@@ -6391,6 +6391,10 @@ pub(crate) fn static_condition_to_ability_condition(
         // CR 500.8 + CR 506.1 + CR 608.2c: the shared phase-occurrence gate
         // bridges 1:1 (the possessive composition arrives as an `And`).
         StaticCondition::FirstCombatPhaseOfTurn => Some(AbilityCondition::FirstCombatPhaseOfTurn),
+        // CR 500.1: the current-phase gate bridges 1:1.
+        StaticCondition::CurrentPhaseIs { phases } => Some(AbilityCondition::CurrentPhaseIs {
+            phases: phases.clone(),
+        }),
         StaticCondition::QuantityComparison {
             lhs,
             comparator,

@@ -4969,6 +4969,13 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
             projected: true,
             history: HistoryReads::NONE,
         },
+        // CR 500.1: a live phase read, like the first-combat gate above.
+        StaticCondition::CurrentPhaseIs { phases: _ } => Axes {
+            event: false,
+            sibling: false,
+            projected: true,
+            history: HistoryReads::NONE,
+        },
         StaticCondition::None => Axes::NONE,
     }
 }
@@ -5063,7 +5070,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         // board/object axis.
         | FilterProp::Goaded
         // CR 101.2 + CR 611.3a: CanBeBeamedUp reads other permanents' functioning statics — a board read with no player resource, like EnchantedBy.
-        | FilterProp::CanBeBeamedUp
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InTrackedSet { .. }

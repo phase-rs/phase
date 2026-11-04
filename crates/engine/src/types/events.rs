@@ -881,7 +881,7 @@ impl EventObjectSnapshot {
             // (option a): snapshot goaded onto EventObjectSnapshot + ZoneChangeRecord.
             FilterProp::Goaded
             // CR 101.2 + CR 611.3a: beam me up eligibility reads other permanents' live statics, which no event snapshot carries.
-            | FilterProp::CanBeBeamedUp
+            | FilterProp::CanBeBeamedUp { .. }
             // CR 722.3a: prepared is a designation on the LIVE permanent
             // (`GameObject::prepared`). The departure ledger carries it
             // (`LKISnapshot` / `ZoneChangeRecord::was_prepared`, read by the

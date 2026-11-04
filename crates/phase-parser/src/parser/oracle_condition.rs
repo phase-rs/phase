@@ -364,6 +364,10 @@ fn static_condition_to_restriction_condition(
         // no exact restriction-surface representation, so it fails closed here
         // rather than approximating.
         StaticCondition::FirstCombatPhaseOfTurn => None,
+        // CR 500.1: the current-phase gate has an exact restriction twin.
+        StaticCondition::CurrentPhaseIs { phases } => Some(ParsedCondition::CurrentPhaseIs {
+            phases: phases.clone(),
+        }),
         StaticCondition::None => None,
         // CR 118.12a + CR 508.1d + CR 509.1c: an optional-cost combat tax, resolved via a
         // `WaitingFor::CombatTaxPayment` round-trip at declaration time. It is not a

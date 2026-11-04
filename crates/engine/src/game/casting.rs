@@ -1959,13 +1959,24 @@ fn jumpstart_has_discardable_card(
 }
 
 /// CR 601.3: beam me up is a permission to cast the card from a graveyard,
-/// keyed on the effective (printed or granted) keyword cost. Unlike CR 702.133a,
-/// the printed reminder carries no instant/sorcery gate, so none is imposed
-/// here; a grant that restricts card types carries its own restriction. The
-/// keyword's rule number needs manual verification.
+/// keyed on the effective (printed or granted) keyword cost. Like CR 702.34a
+/// and CR 702.133a, it applies only if the resulting spell is an instant or
+/// sorcery spell: Scotty, Miracle Worker's reminder text — which, per CR
+/// 207.2a, summarizes the beam me up rule rather than adding one — reads "Only
+/// instant and sorcery spells can be cast this way." Every printed beam me up
+/// card is a sorcery, so the gate only binds a granted beam me up (Scotty grants
+/// it to every card in your graveyard). The keyword's rule number needs manual
+/// verification.
 fn beam_me_up_castable_from_graveyard(state: &GameState, object_id: ObjectId) -> bool {
     state.objects.get(&object_id).is_some_and(|obj| {
         obj.zone == Zone::Graveyard
+            && obj.card_types.core_types.iter().any(|ct| {
+                matches!(
+                    ct,
+                    crate::types::card_type::CoreType::Instant
+                        | crate::types::card_type::CoreType::Sorcery
+                )
+            })
             && super::keywords::effective_beam_me_up_cost(state, object_id).is_some()
     })
 }
@@ -1978,7 +1989,12 @@ fn beam_me_up_has_returnable_creature(
     object_id: ObjectId,
 ) -> bool {
     beam_me_up_castable_from_graveyard(state, object_id)
-        && casting_costs::can_pay_beam_me_up_additional_cost(state, player, object_id)
+        && casting_costs::can_pay_beam_me_up_additional_cost(
+            state,
+            player,
+            object_id,
+            super::keywords::beam_me_up_granted_by(state, object_id),
+        )
 }
 
 /// CR 702.146: Check if an object has the Disturb keyword.
@@ -6518,6 +6534,7 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
         StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::FirstCombatPhaseOfTurn
+        | StaticCondition::CurrentPhaseIs { .. }
         | StaticCondition::IsPresent { .. } => true,
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
             conditions.iter().all(holder_bound_condition_is_modeled)
@@ -8736,7 +8753,7 @@ fn prepare_casting_variant(
         | CastingVariant::Freerunning
         | CastingVariant::Prowl
         | CastingVariant::JumpStart
-        | CastingVariant::BeamMeUp
+        | CastingVariant::BeamMeUp { .. }
         | CastingVariant::Surge => {}
         CastingVariant::Fuse => {
             if let Some(object) = transformed_state.objects.get_mut(&object_id) {
@@ -9224,7 +9241,9 @@ fn casting_candidates(
             candidates.push(CastingVariant::JumpStart);
         }
         if beam_me_up_castable_from_graveyard(state, object_id) {
-            candidates.push(CastingVariant::BeamMeUp);
+            candidates.push(CastingVariant::BeamMeUp {
+                granted_by: super::keywords::beam_me_up_granted_by(state, object_id),
+            });
         }
         if super::keywords::effective_disturb_cost(state, object_id).is_some() {
             candidates.push(CastingVariant::Disturb);
@@ -10176,8 +10195,11 @@ fn prepare_spell_cast_announced(
             CastingVariant::Aftermath
         } else if graveyard_keywords_open && jumpstart_castable_from_graveyard(state, object_id) {
             CastingVariant::JumpStart
-        } else if beam_me_up_cost.is_some() {
-            CastingVariant::BeamMeUp
+        } else if beam_me_up_cost.is_some() && beam_me_up_castable_from_graveyard(state, object_id)
+        {
+            CastingVariant::BeamMeUp {
+                granted_by: super::keywords::beam_me_up_granted_by(state, object_id),
+            }
         } else if disturb_cost.is_some() {
             CastingVariant::Disturb
         } else if let Some(resolution) = graveyard_permission_route
@@ -10674,11 +10696,12 @@ fn prepare_spell_cast_announced(
     } else {
         None
     };
-    let effective_beam_me_up_cost_for_path = if casting_variant == CastingVariant::BeamMeUp {
-        beam_me_up_cost
-    } else {
-        None
-    };
+    let effective_beam_me_up_cost_for_path =
+        if matches!(casting_variant, CastingVariant::BeamMeUp { .. }) {
+            beam_me_up_cost
+        } else {
+            None
+        };
     let mut mana_cost = if energy_cost_from_exile
         || hand_cast_free
         || next_spell_without_paying
@@ -21513,10 +21536,15 @@ fn can_cast_prepared_now_with_probe(
 
     // CR 118.3 + CR 601.2h: beam me up requires a creature you control that
     // can be beamed up, to return as its additional cost.
-    if prepared.casting_variant == CastingVariant::BeamMeUp
-        && !casting_costs::can_pay_beam_me_up_additional_cost(state, player, prepared.object_id)
-    {
-        return false;
+    if let CastingVariant::BeamMeUp { granted_by } = prepared.casting_variant {
+        if !casting_costs::can_pay_beam_me_up_additional_cost(
+            state,
+            player,
+            prepared.object_id,
+            granted_by,
+        ) {
+            return false;
+        }
     }
 
     // CR 702.187b: Mayhem requires that you discarded this card this turn.
@@ -32981,7 +33009,7 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
-        | FilterProp::CanBeBeamedUp
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InTrackedSet { .. }

@@ -3106,7 +3106,12 @@ fn cant_be_beamed_up_static_splits_from_untap_restriction() {
         let defs = parse_static_line_multi(line);
         assert_eq!(
             defs.iter().map(|d| d.mode.clone()).collect::<Vec<_>>(),
-            vec![StaticMode::CantUntap, StaticMode::CantBeBeamedUp],
+            vec![
+                StaticMode::CantUntap,
+                StaticMode::CantBeBeamedUp {
+                    scope: crate::types::statics::BeamMeUpProhibitionScope::AnyCast,
+                },
+            ],
             "expected CantUntap + CantBeBeamedUp for {line:?}, got {defs:?}"
         );
         // Reach guard: the first conjunct parsed with the enchanted-permanent scope.
@@ -3145,7 +3150,12 @@ fn marooned_card_parse_emits_cant_be_beamed_up() {
             .iter()
             .map(|d| d.mode.clone())
             .collect::<Vec<_>>(),
-        vec![StaticMode::CantUntap, StaticMode::CantBeBeamedUp],
+        vec![
+            StaticMode::CantUntap,
+            StaticMode::CantBeBeamedUp {
+                scope: crate::types::statics::BeamMeUpProhibitionScope::AnyCast,
+            },
+        ],
         "Marooned statics, got {:?}",
         parsed.statics
     );

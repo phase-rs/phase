@@ -10339,7 +10339,9 @@ fn cast_variant_cost_residual(
         }
         CastingVariant::Retrace => return Some(retrace_discard_land_cost()),
         CastingVariant::JumpStart => return Some(jumpstart_discard_card_cost()),
-        CastingVariant::BeamMeUp => return Some(beam_me_up_return_creature_cost()),
+        CastingVariant::BeamMeUp { granted_by } => {
+            return Some(beam_me_up_return_creature_cost(granted_by))
+        }
         _ => {}
     }
     alternative_cost_residual(state, player, object_id, casting_variant)
@@ -13027,14 +13029,21 @@ pub(super) fn can_pay_jumpstart_additional_cost(
 /// The single constructor of beam me up's additional cost, read by both the
 /// payment residual (`cast_variant_cost_residual`) and the affordability
 /// precheck (`can_pay_beam_me_up_additional_cost`), so they cannot diverge.
+/// `granted_by` is the latched granter of the beam me up being cast (`None`
+/// when printed); it scopes that granter's "can't be beamed up to cast a spell
+/// this way" prohibition (Scotty, Miracle Worker's "return another creature").
 // CR 118.8 + CR 601.2h: "if you also return a creature you control to its owner's hand"; CR 101.2: FilterProp::CanBeBeamedUp honors "can't be beamed up". Beam me up rule number needs manual verification.
-pub(super) fn beam_me_up_return_creature_cost() -> AbilityCost {
+pub(super) fn beam_me_up_return_creature_cost(
+    granted_by: Option<crate::types::identifiers::ObjectIncarnationRef>,
+) -> AbilityCost {
     AbilityCost::ReturnToHand {
         count: 1,
         filter: Some(TargetFilter::Typed(
             TypedFilter::creature()
                 .controller(crate::types::ability::ControllerRef::You)
-                .properties(vec![crate::types::ability::FilterProp::CanBeBeamedUp]),
+                .properties(vec![crate::types::ability::FilterProp::CanBeBeamedUp {
+                    granted_by,
+                }]),
         )),
         from_zone: None,
     }
@@ -13046,8 +13055,9 @@ pub(super) fn can_pay_beam_me_up_additional_cost(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
+    granted_by: Option<crate::types::identifiers::ObjectIncarnationRef>,
 ) -> bool {
-    beam_me_up_return_creature_cost().is_payable_for_spell(state, player, object_id)
+    beam_me_up_return_creature_cost(granted_by).is_payable_for_spell(state, player, object_id)
 }
 
 /// CR 601.2f: What the lock seam at the head of [`pay_and_push_with_lock`] needs

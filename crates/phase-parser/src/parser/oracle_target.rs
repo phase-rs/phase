@@ -5962,7 +5962,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
-        | FilterProp::CanBeBeamedUp
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::InTrackedSet { .. }
         | FilterProp::Modified
         | FilterProp::Historic

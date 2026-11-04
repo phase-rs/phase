@@ -12915,7 +12915,7 @@ fn latched_property_kind(
         | FilterProp::Suspected
         | FilterProp::Renowned
         | FilterProp::Goaded
-        | FilterProp::CanBeBeamedUp
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::Prepared
         | FilterProp::PowerExceedsBase
         | FilterProp::InTrackedSet { .. }
@@ -14892,7 +14892,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
-        | FilterProp::CanBeBeamedUp
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::Modified
         | FilterProp::IsSaddled
         | FilterProp::Unpaired

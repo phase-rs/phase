@@ -284,7 +284,7 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // beam me up cost (Marooned). Runtime enforcement is
             // keywords::can_be_beamed_up, read through FilterProp::CanBeBeamedUp.
             // Not registry-keyed.
-            | StaticMode::CantBeBeamedUp
+            | StaticMode::CantBeBeamedUp { .. }
             // CR 122.1d + CR 101.2: CountersCantBeRemoved carries the
             // `CounterType` axis (Fear of Sleep Paralysis = Stun). Runtime
             // enforcement is in turns.rs::counter_removal_blocked. Not
@@ -1184,7 +1184,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             // CR 701.15b/c
             FilterProp::Goaded => parts.push("goaded".into()),
             // CR 101.2 + CR 604.1
-            FilterProp::CanBeBeamedUp => parts.push("that can be beamed up".into()),
+            FilterProp::CanBeBeamedUp { .. } => parts.push("that can be beamed up".into()),
             // CR 700.9
             FilterProp::Modified => parts.push("modified".into()),
             // CR 700.6
@@ -5417,6 +5417,10 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::AdditionalCostPaid => "additional cost was paid".into(),
         SC::CastingAsVariant { variant } => format!("casting as {variant:?}"),
         SC::FirstCombatPhaseOfTurn => "it's the first combat phase of the turn".into(),
+        SC::CurrentPhaseIs { phases } => {
+            let parts: Vec<&str> = phases.iter().map(fmt_phase).collect();
+            format!("during {}", parts.join(" or "))
+        }
         SC::None => "none".into(),
     }
 }
@@ -11430,6 +11434,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),
         StaticCondition::DuringYourTurn => ("DuringYourTurn", Handled),
         StaticCondition::FirstCombatPhaseOfTurn => ("FirstCombatPhaseOfTurn", Handled),
+        StaticCondition::CurrentPhaseIs { .. } => ("CurrentPhaseIs", Handled),
         StaticCondition::DuringOpponentsTurn => ("DuringOpponentsTurn", Handled),
         StaticCondition::DayNightIs { .. } => ("DayNightIs", Handled),
         StaticCondition::SharesColorWithMostCommonColorAmongPermanents => {
@@ -26320,9 +26325,12 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         face.replacements = parsed.replacements.clone();
 
         assert!(
-            face.static_abilities
-                .iter()
-                .any(|def| def.mode == StaticMode::CantBeBeamedUp),
+            face.static_abilities.iter().any(|def| matches!(
+                def.mode,
+                StaticMode::CantBeBeamedUp {
+                    scope: crate::types::statics::BeamMeUpProhibitionScope::AnyCast
+                }
+            )),
             "REACH: Marooned must parse a CantBeBeamedUp static, got {:?}",
             face.static_abilities
         );

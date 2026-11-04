@@ -21202,12 +21202,136 @@ fn green_goblin_goblin_formula_line_grants_mayhem() {
     );
 }
 
+const SCOTTY_MIRACLE_WORKER: &str = "During your main phase, each card in your graveyard has beam me up. The beam me up cost is equal to that spell's mana cost. Scotty can't be beamed up to cast a spell this way. (Only instant and sorcery spells can be cast this way. You may cast a card from your graveyard for its beam me up cost if you also return another creature you control to its owner's hand. Then exile that spell.)";
+
+/// Beam me up (TRK; rule number needs manual verification): Scotty's line is a
+/// main-phase-scoped graveyard grant of beam me up at the card's own mana cost,
+/// plus a "this way" prohibition on Scotty itself — never a blanket
+/// `CantBeBeamedUp { AnyCast }`, which would bar every beam me up cast.
+#[test]
+fn scotty_grants_main_phase_beam_me_up_and_scopes_its_own_prohibition() {
+    use crate::types::statics::BeamMeUpProhibitionScope;
+    let result = parse(
+        SCOTTY_MIRACLE_WORKER,
+        "Scotty, Miracle Worker",
+        &[],
+        &["Creature"],
+        &["Human", "Artificer"],
+    );
+    assert!(
+        result.abilities.is_empty(),
+        "no Unimplemented fallback: {:?}",
+        result.abilities
+    );
+    let [grant, rider] = result.statics.as_slice() else {
+        panic!("expected grant + rider statics, got {:?}", result.statics);
+    };
+    assert_eq!(
+        grant.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::BeamMeUp(ManaCost::SelfManaCost),
+        }]
+    );
+    assert_eq!(
+        grant.condition,
+        Some(StaticCondition::And {
+            conditions: vec![
+                StaticCondition::DuringYourTurn,
+                StaticCondition::CurrentPhaseIs {
+                    phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+                },
+            ],
+        })
+    );
+    assert!(
+        crate::parser::oracle_static::target_filter_is_your_graveyard(
+            grant.affected.as_ref().expect("grant has an affected set")
+        ),
+        "the grant covers cards in your graveyard: {:?}",
+        grant.affected
+    );
+    assert_eq!(
+        rider.mode,
+        StaticMode::CantBeBeamedUp {
+            scope: BeamMeUpProhibitionScope::GrantedBySource,
+        }
+    );
+    assert_eq!(rider.affected, Some(TargetFilter::SelfRef));
+}
+
+/// The grant's timing prefix is the shared phase-name authority, not a
+/// main-phase literal: "during your turn" stays `DuringYourTurn`, and any named
+/// phase composes the live phase gate.
+#[test]
+fn graveyard_grant_timing_prefix_covers_turn_and_named_phases() {
+    use crate::parser::oracle_static::parse_graveyard_grant_timing_prefix;
+    assert_eq!(
+        parse_graveyard_grant_timing_prefix("during your turn, each"),
+        Ok(("each", StaticCondition::DuringYourTurn))
+    );
+    let your_phase = |phases: Vec<Phase>| StaticCondition::And {
+        conditions: vec![
+            StaticCondition::DuringYourTurn,
+            StaticCondition::CurrentPhaseIs { phases },
+        ],
+    };
+    assert_eq!(
+        parse_graveyard_grant_timing_prefix("during your main phase, each"),
+        Ok((
+            "each",
+            your_phase(vec![Phase::PreCombatMain, Phase::PostCombatMain])
+        ))
+    );
+    assert_eq!(
+        parse_graveyard_grant_timing_prefix("during your end step, each"),
+        Ok(("each", your_phase(vec![Phase::End])))
+    );
+    assert!(parse_graveyard_grant_timing_prefix("during each turn, each").is_err());
+}
+
+/// The route rider belongs to a beam me up grant only, and a qualified or
+/// blanket prohibition is not the "this way" rider.
+#[test]
+fn graveyard_grant_route_rider_is_scoped_to_beam_me_up_this_way() {
+    use crate::parser::oracle_static::parse_graveyard_grant_route_rider;
+    let rider = "~ can't be beamed up to cast a spell this way.";
+    assert!(parse_graveyard_grant_route_rider(rider, GrantedCastKeywordKind::BeamMeUp).is_some());
+    assert!(parse_graveyard_grant_route_rider(rider, GrantedCastKeywordKind::Flashback).is_none());
+    assert!(parse_graveyard_grant_route_rider(
+        "~ can't be beamed up.",
+        GrantedCastKeywordKind::BeamMeUp
+    )
+    .is_none());
+    assert!(parse_graveyard_grant_route_rider(
+        "~ can't be beamed up to cast a spell this way unless you pay {2}.",
+        GrantedCastKeywordKind::BeamMeUp
+    )
+    .is_none());
+}
+
+#[test]
+fn beam_me_up_continuation_resolves_to_the_spells_own_mana_cost() {
+    for text in [
+        "The beam me up cost is equal to that spell's mana cost.",
+        "The beam me up cost is equal to its mana cost.",
+    ] {
+        assert_eq!(
+            parse_graveyard_keyword_continuation(text, GrantedCastKeywordKind::BeamMeUp),
+            Some(Keyword::BeamMeUp(ManaCost::SelfManaCost)),
+            "{text}"
+        );
+    }
+}
+
 #[test]
 fn helper_parses_same_line_escape_grant_continuation() {
     let static_def = try_parse_graveyard_keyword_static_with_continuation(
             "Each nonland card in your graveyard has escape. The escape cost is equal to the card's mana cost plus exile three other cards from your graveyard.",
         )
         .expect("helper should parse same-line escape continuation");
+    let [static_def] = static_def.as_slice() else {
+        panic!("an escape grant with no rider is one static: {static_def:?}");
+    };
     assert!(
         static_def
             .modifications

@@ -4113,7 +4113,8 @@ mod tests {
     }
 
     /// A bare "beam me up" (no cost) and Scotty's grant sentence are not the
-    /// printed keyword line; Scotty stays honestly unimplemented.
+    /// printed keyword line; Scotty's grant is a graveyard keyword-grant static
+    /// (`oracle_tests::scotty_grants_main_phase_beam_me_up_and_scopes_its_own_prohibition`).
     #[test]
     fn beam_me_up_without_a_cost_is_not_the_keyword_line() {
         use crate::parser::oracle::parse_oracle_text;
@@ -4137,10 +4138,14 @@ mod tests {
             "Scotty's grant sentence must not become the printed keyword: {:?}",
             scotty.extracted_keywords
         );
-        let json = serde_json::to_value(&scotty).unwrap();
         assert!(
-            json_has_unimplemented(&json),
-            "Scotty's grant stays honestly unimplemented (next cluster): {json}"
+            scotty.statics.iter().any(|def| def.modifications.contains(
+                &crate::types::ability::ContinuousModification::AddKeyword {
+                    keyword: Keyword::BeamMeUp(ManaCost::SelfManaCost),
+                }
+            )),
+            "Scotty grants beam me up through a static: {:?}",
+            scotty.statics
         );
     }
 

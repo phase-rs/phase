@@ -7118,6 +7118,10 @@ pub fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Tri
         StaticCondition::FirstCombatPhaseOfTurn => {
             Some(TriggerCondition::FirstCombatPhaseOfTurn)
         }
+        // CR 500.1: the current-phase gate maps to its trigger-condition twin.
+        StaticCondition::CurrentPhaseIs { phases } => Some(TriggerCondition::CurrentPhaseIs {
+            phases: phases.clone(),
+        }),
         StaticCondition::DayNightIs { .. } => None,
         StaticCondition::SharesColorWithMostCommonColorAmongPermanents => None,
 
