@@ -4064,23 +4064,37 @@ pub(crate) fn dispatch_pending_post_replacement_effect(
     // (on unwind profiles) a panic. While it is held, the priority-boundary
     // sweeper must not treat a `Dispatching` resident as ownerless.
     let _live_dispatch = LiveDispatchGuard::enter();
-    let waiting_for = match continuation {
-        PostReplacementContinuation::Resolved(resolved) => {
-            apply_post_replacement_resolved_effect(state, &resolved, replacement_applied, events)
-        }
-        PostReplacementContinuation::Template(effect_def) => apply_post_replacement_effect(
-            state,
-            &effect_def,
-            ContinuationSubjects {
-                affected: source,
-                controller: replacement_controller,
-            },
-            spell_resolution,
-            event.as_ref(),
-            replacement_applied,
-            events,
-        ),
-    };
+    // CR 614.6 + CR 615.5: the continuation is the replacement's own action, so its "that many"
+    // is the amount the replacement replaced or prevented (stamped above, or by the applier just
+    // before an inline drain), never the event of a triggered ability that is resolving around
+    // it. Shockmaw Dragon: "Whenever this creature deals combat damage to a player, it deals 1
+    // damage to each creature that player controls." After 4 combat damage, Phytohydra ("put that
+    // many +1/+1 counters on it instead") gets 1 counter, not 4. The scope suppresses only the
+    // enclosing trigger's amount tiers of `EventContextAmount`, as it does for a reflexive
+    // trigger's own amount (CR 603.12).
+    let waiting_for =
+        crate::game::quantity::with_reflexive_resolution_scope(|| match continuation {
+            PostReplacementContinuation::Resolved(resolved) => {
+                apply_post_replacement_resolved_effect(
+                    state,
+                    &resolved,
+                    replacement_applied,
+                    events,
+                )
+            }
+            PostReplacementContinuation::Template(effect_def) => apply_post_replacement_effect(
+                state,
+                &effect_def,
+                ContinuationSubjects {
+                    affected: source,
+                    controller: replacement_controller,
+                },
+                spell_resolution,
+                event.as_ref(),
+                replacement_applied,
+                events,
+            ),
+        });
     // CR 614.12a + CR 616.1g: classify by what OWNS the outstanding prompt, never
     // by whether the two-deep positional accessor can currently see this frame.
     // The predecessor asked `active_post_replacement_drains()`, which returns None

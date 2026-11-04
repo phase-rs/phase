@@ -3729,6 +3729,11 @@ std::thread_local! {
 /// `with_detection_trigger_event`'s save/restore-previous-value discipline
 /// (not a hard reset to `false`) so nested reflexive-in-reflexive
 /// construction, if it ever occurs, composes correctly.
+///
+/// CR 614.6 + CR 615.5: a post-replacement continuation runs in the same scope
+/// (`engine_replacement::dispatch_pending_post_replacement_effect`), so a
+/// replacement's action reads the amount it replaced or prevented, never the
+/// event of a trigger resolving around it.
 pub(crate) fn with_reflexive_resolution_scope<R>(f: impl FnOnce() -> R) -> R {
     let prev = SUPPRESS_ENCLOSING_TRIGGER_EVENT_AMOUNT.with(|c| c.replace(true));
     let result = f();

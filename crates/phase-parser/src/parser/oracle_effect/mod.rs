@@ -14582,6 +14582,18 @@ fn try_parse_conjure(tp: TextPair) -> Option<(Effect, Option<AbilityDefinition>)
         Err(_) => (zone_rest, false),
     };
 
+    // CR 303.4f: "onto the battlefield attached to <object>" names what each conjured Aura
+    // enchants as it enters (Perforator Crocodile: "conjure a card named Stab Wound onto the
+    // battlefield attached to that creature"). That attachment is not modeled yet (Command
+    // Zone #177); a conjure that drops it no longer says what each Stab Wound enchants.
+    // Decline, so the clause lands as a gap rather than a supported conjure.
+    if tag::<_, _, OracleError<'_>>(" attached to ")
+        .parse(zone_rest)
+        .is_ok()
+    {
+        return None;
+    }
+
     // CR 701.3a + CR 608.2c: "and attach them to ~" names exactly what this conjure just
     // created, so the operand is the determined set `LastCreated` publishes (Outfitted
     // Jouster: "conjure a card named Steelclaw Lance and a card named Brawler's Plate onto
@@ -14671,42 +14683,22 @@ mod conjure_attach_parser_tests {
 
     /// Conjures with no "and attach them to ~" tail keep no `Attach` sub. Perforator
     /// Crocodile's "for each creature your opponents control, conjure a card named Stab
-    /// Wound onto the battlefield attached to that creature" is a different shape: a Stab
-    /// Wound conjure repeated per opponent's creature, with no `Attach` (its attachment is
-    /// not parsed yet, Command Zone #177).
+    /// Wound onto the battlefield attached to that creature" names what each Stab Wound
+    /// enchants (CR 303.4f). That attachment is not parsed yet (Command Zone #177), so the
+    /// clause is a gap, never a conjure that drops it.
     #[test]
-    fn conjure_without_an_attach_tail_has_no_attach_sub() {
+    fn an_unmodeled_attachment_declines_and_a_bare_conjure_has_no_attach_sub() {
         let crocodile = first_trigger_body(
             "When Perforator Crocodile enters, for each creature your opponents control, conjure a card named Stab Wound onto the battlefield attached to that creature.\nCycling {1}{B}",
             "Perforator Crocodile",
         );
-        let Effect::Conjure {
-            cards, destination, ..
-        } = &*crocodile.effect
-        else {
-            panic!("expected Conjure, got {:?}", crocodile.effect);
-        };
-        assert_eq!(*destination, Zone::Battlefield);
-        assert_eq!(
-            cards.iter().map(|c| c.named_name()).collect::<Vec<_>>(),
-            vec![Some("Stab Wound")]
-        );
-        assert!(
-            matches!(
-                &crocodile.repeat_for,
-                Some(QuantityExpr::Ref {
-                    qty: QuantityRef::ObjectCount { .. }
-                })
-            ),
-            "the conjure repeats for each creature your opponents control: {:?}",
-            crocodile.repeat_for
-        );
         let mut node = Some(&crocodile);
+        let mut gap = false;
         while let Some(ability) = node {
             assert!(
                 !matches!(
                     &*ability.effect,
-                    Effect::Unimplemented { .. }
+                    Effect::Conjure { .. }
                         | Effect::Attach {
                             attachment: TargetFilter::LastCreated,
                             ..
@@ -14714,8 +14706,15 @@ mod conjure_attach_parser_tests {
                 ),
                 "got {crocodile:?}"
             );
+            gap |= matches!(&*ability.effect, Effect::Unimplemented { .. });
             node = ability.sub_ability.as_deref();
         }
+        assert!(gap, "the attached conjure is a gap: {crocodile:?}");
+        assert!(try_parse_conjure(TextPair::new(
+            "conjure a card named Stab Wound onto the battlefield attached to that creature",
+            "conjure a card named stab wound onto the battlefield attached to that creature",
+        ))
+        .is_none());
 
         let (effect, attach) = try_parse_conjure(TextPair::new(
             "conjure a card named Regal Force onto the battlefield",

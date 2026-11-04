@@ -14564,6 +14564,8 @@ pub(crate) enum PreventionFailClosed {
     CoordinatedConjunct,
     /// Additional effects listed after a comma.
     ListedRider,
+    /// A printed "while <state>" guard that does not lift to a `ReplacementCondition`.
+    WhileGuard,
 }
 
 impl PreventionFailClosed {
@@ -14573,6 +14575,7 @@ impl PreventionFailClosed {
             Self::SourceScope => "prevention_source_scope",
             Self::CoordinatedConjunct => "prevention_conjunct",
             Self::ListedRider => "prevention_listed_rider",
+            Self::WhileGuard => "prevention_while_guard",
         }
     }
 }
@@ -15046,7 +15049,8 @@ fn parse_damage_prevention_replacement(
     // effect isn't applicable (CR 615.12) while the state doesn't hold: Jared Carthalion
     // outside the monarchy takes the damage and gains nothing. `valid_card` scopes the
     // pronoun: "it" is the source only on a self-scoped shield. An uncarriable guard
-    // must not become an unconditional shield.
+    // must not become an unconditional shield, here or in a later route: it fails
+    // closed, and the route lands the line as `Effect::unimplemented`.
     let while_condition = while_antecedent_clause(working_lower, "would ")
         .map(|clause| {
             crate::parser::oracle_static::parse_affected_scoped_static_condition(
@@ -15056,7 +15060,9 @@ fn parse_damage_prevention_replacement(
             .and_then(|condition| {
                 replacement_condition_from_static(condition, GatePolarity::OnlyIf)
             })
-            .ok_or(PreventionDecline::NotThisShape)
+            .ok_or(PreventionDecline::FailsClosed(
+                PreventionFailClosed::WhileGuard,
+            ))
         })
         .transpose()?;
     if let Some(vc) = valid_card_filter {
@@ -32714,6 +32720,40 @@ mod tests {
                 parsed.replacements
             );
         }
+    }
+
+    /// CR 604.2 + CR 611.3a: a "while <state>" guard that does not lift to a
+    /// `ReplacementCondition` fails closed as a line-owned gap, never an unconditional
+    /// shield. Every printed guarded prevention line lifts its guard (Jared Carthalion,
+    /// "If damage would be dealt to Jared Carthalion while you're the monarch, prevent that
+    /// damage and put that many +1/+1 counters on it.", in
+    /// `printed_while_guards_gate_their_prevention_shields`), so this building-block test
+    /// uses a guard no printed card has.
+    #[test]
+    fn an_uncarriable_while_guard_fails_closed() {
+        const LINE: &str =
+            "If damage would be dealt to this creature while it's attacking, prevent that damage.";
+        assert_eq!(
+            damage_prevention_fails_closed(LINE, "Probe Card"),
+            Some(PreventionFailClosed::WhileGuard)
+        );
+        let parsed = parse_oracle_text(LINE, "Probe Card", &[], &["Creature".to_string()], &[]);
+        assert!(
+            parsed
+                .replacements
+                .iter()
+                .all(|r| r.event != ReplacementEvent::DamageDone),
+            "{:?}",
+            parsed.replacements
+        );
+        assert!(
+            parsed.abilities.iter().any(|a| matches!(
+                &*a.effect,
+                Effect::Unimplemented { name, .. } if name == "prevention_while_guard"
+            )),
+            "{:?}",
+            parsed.abilities
+        );
     }
 
     /// CR 604.2 + CR 611.3a: an unbridgeable "as long as" gate on a replacement

@@ -1744,6 +1744,90 @@ fn every_rider_queued_behind_a_paused_rider_runs() {
     assert_at_rest(&runner);
 }
 
+const SHOCKMAW_DRAGON: &str = "Flying\nWhenever this creature deals combat damage to a player, it deals 1 damage to each creature that player controls.";
+
+/// Shockmaw Dragon: "Whenever this creature deals combat damage to a player, it deals 1 damage
+/// to each creature that player controls." The trigger's event is 4 combat damage; its own
+/// damage is 1 to each creature. A replacement's action reads the amount that replacement
+/// replaced or prevented (CR 614.6, CR 615.5), not the event of the trigger resolving around
+/// it: Test of Faith's "For each 1 damage prevented this way" puts 1 counter, Phytohydra's
+/// "put that many +1/+1 counters on it instead" puts 1, and Dralnu, Lich Lord's "sacrifice that
+/// many permanents instead" sacrifices 1. Under Hardened Scales and Doubling Season the Bear's
+/// counter asks an order and Phytohydra's substitution waits behind it (CR 608.2c, CR 616.1):
+/// one counter event of 1 each, Hardened Scales first, (1 + 1) × 2 = 4.
+#[test]
+fn a_replacements_action_reads_its_own_amount_inside_a_resolving_trigger() {
+    let mut scenario = self::scenario();
+    let dragon = scenario
+        .add_creature_from_oracle(P0, "Shockmaw Dragon", 4, 4, SHOCKMAW_DRAGON)
+        .id();
+    let bear = scenario.add_creature(P1, "Bear", 2, 2).id();
+    let hydra = phytohydra(&mut scenario, P1);
+    let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let mut runner = scenario.build();
+    cast(&mut runner, faith, vec![object_target(bear)]);
+    combat_events(&mut runner, vec![dragon], vec![]);
+    assert_eq!(life(&runner, P1), 16);
+    assert_eq!(
+        (plus_counters(&runner, bear), plus_counters(&runner, hydra)),
+        (1, 1)
+    );
+    assert_eq!((damage(&runner, bear), damage(&runner, hydra)), (0, 0));
+    assert_at_rest(&runner);
+
+    let mut scenario = self::scenario();
+    let dragon = scenario
+        .add_creature_from_oracle(P0, "Shockmaw Dragon", 4, 4, SHOCKMAW_DRAGON)
+        .id();
+    let id = dralnu(&mut scenario, P1);
+    let land = lands(&mut scenario, P1, 2);
+    let mut runner = scenario.build();
+    let mut events = combat_events(&mut runner, vec![dragon], vec![]);
+    assert_eq!(zone_prompt(&runner), (1, 3));
+    answer(
+        &mut runner,
+        GameAction::SelectCards {
+            cards: vec![land[0]],
+        },
+        &mut events,
+    );
+    assert_eq!(zone(&runner, land[0]), Zone::Graveyard);
+    assert_eq!(zone(&runner, land[1]), Zone::Battlefield);
+    assert_eq!(zone(&runner, id), Zone::Battlefield);
+    assert_eq!(damage(&runner, id), 0);
+    assert_at_rest(&runner);
+
+    let mut scenario = self::scenario();
+    let dragon = scenario
+        .add_creature_from_oracle(P0, "Shockmaw Dragon", 4, 4, SHOCKMAW_DRAGON)
+        .id();
+    let bear = scenario.add_creature(P1, "Bear", 2, 2).id();
+    let hydra = phytohydra(&mut scenario, P1);
+    let scales = scenario
+        .add_enchantment_from_oracle(P1, "Hardened Scales", HARDENED_SCALES)
+        .id();
+    scenario.add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON);
+    let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let mut runner = scenario.build();
+    cast(&mut runner, faith, vec![object_target(bear)]);
+    let mut events = combat_events(&mut runner, vec![dragon], vec![]);
+    let mut seen = Vec::new();
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ) {
+        seen.push((plus_counters(&runner, bear), plus_counters(&runner, hydra)));
+        choose_source(&mut runner, &mut events, scales);
+    }
+    assert_eq!(seen, vec![(0, 0), (4, 0)]);
+    assert_eq!(
+        (plus_counters(&runner, bear), plus_counters(&runner, hydra)),
+        (4, 4)
+    );
+    assert_eq!((damage(&runner, bear), damage(&runner, hydra)), (0, 0));
+    assert_at_rest(&runner);
+}
+
 const MASTER_OF_THE_WILD_HUNT: &str = "At the beginning of your upkeep, create a 2/2 green Wolf creature token.\n{T}: Tap all untapped Wolf creatures you control. Each Wolf tapped this way deals damage equal to its power to target creature. That creature deals damage equal to its power divided as its controller chooses among any number of those Wolves.";
 
 /// Master of the Wild Hunt: "That creature deals damage equal to its power divided as its
