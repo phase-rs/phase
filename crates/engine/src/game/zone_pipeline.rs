@@ -1998,6 +1998,28 @@ fn consult_staged_destroy_outer(
             }
         }
         ReplacementResult::Prevented => {
+            // CR 616.1 + CR 702.89a: a preventer (Umbra armor) can destroy a
+            // dependent permanent as part of its replacing action; that nested
+            // move may itself be waiting on a replacement choice. Keep the
+            // member parked until the child resolves instead of consulting the
+            // next member over a live choice.
+            let live_child = state.pending_replacement.is_some()
+                || !matches!(
+                    state.waiting_for,
+                    WaitingFor::Priority { .. } | WaitingFor::ReplacementChoice { .. }
+                );
+            if live_child {
+                if let Some(member) = owner
+                    .staged
+                    .as_mut()
+                    .and_then(|staged| staged.members.get_mut(cursor))
+                {
+                    member.state = StagedBatchMemberState::PreventedWithChild;
+                    member.pending_outcome = Some(StagedMemberOutcome::Prevented);
+                }
+                sync_staged_requests(owner);
+                return StagedConsult::Paused;
+            }
             mark_staged_member_terminal(
                 state,
                 owner,
@@ -2052,6 +2074,28 @@ fn consult_staged_destroy_inner(
             StagedConsult::Continue
         }
         ReplacementResult::Prevented => {
+            // CR 616.1 + CR 702.89a: a preventer (Umbra armor) can destroy a
+            // dependent permanent as part of its replacing action; that nested
+            // move may itself be waiting on a replacement choice. Keep the
+            // member parked until the child resolves instead of consulting the
+            // next member over a live choice.
+            let live_child = state.pending_replacement.is_some()
+                || !matches!(
+                    state.waiting_for,
+                    WaitingFor::Priority { .. } | WaitingFor::ReplacementChoice { .. }
+                );
+            if live_child {
+                if let Some(member) = owner
+                    .staged
+                    .as_mut()
+                    .and_then(|staged| staged.members.get_mut(cursor))
+                {
+                    member.state = StagedBatchMemberState::PreventedWithChild;
+                    member.pending_outcome = Some(StagedMemberOutcome::Prevented);
+                }
+                sync_staged_requests(owner);
+                return StagedConsult::Paused;
+            }
             mark_staged_member_terminal(
                 state,
                 owner,
@@ -2211,10 +2255,20 @@ fn begin_staged_arrangement(owner: &mut PendingBatchDeliveries) {
             .iter()
             .map(|&index| &staged.members[index])
             .collect();
+        // CR 730.3a + CR 401.4: a merged permanent's absorbed components are
+        // new objects put into the same library; their owner arranges them
+        // even when the inherited position itself is unchanged.
+        let merged_components = announced.iter().any(|member| {
+            matches!(
+                member.request.cause,
+                crate::types::game_state::PendingBatchZoneChangeCause::MergedComponentRouting
+            )
+        });
         let needs_prompt = announced.len() >= 2
-            && announced
-                .iter()
-                .any(|member| staged_member_placement_is_replacement(member));
+            && (merged_components
+                || announced
+                    .iter()
+                    .any(|member| staged_member_placement_is_replacement(member)));
         let ordered: Vec<&StagedBatchMember> = if needs_prompt {
             announced.clone()
         } else if matches!(position, LibraryPosition::Top) {
@@ -2288,10 +2342,21 @@ fn publish_next_staged_arrangement(
     owner: &mut PendingBatchDeliveries,
 ) -> Option<StagedStop> {
     let staged = owner.staged.as_mut()?;
+    // CR 101.4: offer owner-arrangement prompts in APNAP order, not in the
+    // incidental order the populations were announced.
+    let apnap = crate::game::players::apnap_order(state);
     let index = staged
         .arrangements
         .iter()
-        .position(|arrangement| arrangement.status == StagedArrangementStatus::Awaiting);
+        .enumerate()
+        .filter(|(_, arrangement)| arrangement.status == StagedArrangementStatus::Awaiting)
+        .min_by_key(|(_, arrangement)| {
+            apnap
+                .iter()
+                .position(|player| *player == arrangement.batch.owner)
+                .unwrap_or(usize::MAX)
+        })
+        .map(|(index, _)| index);
     let Some(index) = index else {
         staged.stage = BatchDeliveryStage::Delivering;
         owner.paused_current = None;
@@ -2562,6 +2627,7 @@ pub(crate) fn deliver_staged_destroy_batch(
     cant_regenerate: bool,
     events: &mut Vec<GameEvent>,
 ) -> StagedFamilyOutcome {
+    let event_start = events.len();
     let mut staged = new_staged_batch(state, &reqs);
     for member in &mut staged.members {
         member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
@@ -2585,7 +2651,13 @@ pub(crate) fn deliver_staged_destroy_batch(
         StagedStop::Delivered => {
             record_staged_terminals_for_settlement(&mut owner);
             let deferred_events = owner.deferred_events.clone();
-            settle_batch_owner(state, owner, deferred_events, events);
+            // CR 608.2c + CR 603.2c: settle only this Destroy instruction's
+            // newly emitted slice. Settling the shared action buffer would
+            // re-collect an earlier modal instruction's ZoneChanged events.
+            let mut scoped_events = events[event_start..].to_vec();
+            settle_batch_owner(state, owner, deferred_events, &mut scoped_events);
+            events.truncate(event_start);
+            events.extend(scoped_events);
             StagedFamilyOutcome::Settled
         }
     }
@@ -3710,35 +3782,6 @@ fn drain_staged_batch(
     // the run belongs above it, so the owner must be inserted back below that
     // child (and above its ChangeZone marker).
     let repark_boundary = state.resolution_stack.capture_child_boundary();
-    // R4c residual R-c13 (bounded compensation; removal/replacement owned by
-    // R4e, which owns engine.rs): the `ReturnAsAuraTarget` resume handler
-    // treats a staged ChangeZone batch (marker below the BatchDelivery, no
-    // legacy `pending`) as "no iteration in flight" and pushes one premature
-    // `EffectResolved`. A staged ChangeZone Aura pause is the only path that can
-    // park an already-delivered member here, so absorb exactly that trailing
-    // event and let `ChangeZonePopulationSettled` emit the single canonical
-    // `EffectResolved` at the existing completion position (legacy order:
-    // remaining deliveries, then the event). The check is idempotent when the
-    // handler stops pushing.
-    if owner
-        .staged
-        .as_ref()
-        .is_some_and(|staged| staged.change_zone.is_some())
-    {
-        if let (Some(BatchCompletion::ChangeZonePopulationSettled { tail, .. }), Some(paused)) =
-            (owner.completion.as_ref(), owner.paused_current.as_ref())
-        {
-            let delivered = paused.terminal_completion_after_resume() == ZoneMoveCompletion::Moved;
-            let premature = matches!(
-                events.last(),
-                Some(GameEvent::EffectResolved { kind, source_id, .. })
-                    if *kind == tail.effect_kind && *source_id == tail.source_id
-            );
-            if delivered && premature {
-                events.pop();
-            }
-        }
-    }
     let component_delivery_parent = owner.component_delivery_parent.clone();
     let completion = owner.completion.clone();
     let attempted = owner.attempted.clone();

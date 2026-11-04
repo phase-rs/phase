@@ -16192,7 +16192,14 @@ fn apply_non_priority_pass_action(
                     let resumes_change_zone_iteration = state
                         .active_change_zone_frame()
                         .is_some_and(|frame| frame.pending.is_some());
-                    if !resumes_change_zone_iteration {
+                    // CR 608.2c: a staged ChangeZone batch owns the completion
+                    // event; its `ChangeZonePopulationSettled` tail emits the
+                    // single canonical `EffectResolved` after delivery.
+                    let staged_change_zone_owns_completion = state
+                        .active_batch_delivery()
+                        .and_then(|batch| batch.staged.as_ref())
+                        .is_some_and(|staged| staged.change_zone.is_some());
+                    if !resumes_change_zone_iteration && !staged_change_zone_owns_completion {
                         events.push(crate::types::events::GameEvent::EffectResolved {
                             kind: crate::types::ability::EffectKind::ChangeZone,
                             source_id: pending.source_id,
