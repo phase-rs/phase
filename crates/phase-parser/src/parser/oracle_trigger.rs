@@ -14188,9 +14188,10 @@ fn trigger_object_pronoun_ref_for_condition(
         return Some(TargetFilter::SelfRef);
     }
 
-    // CR 608.2k + CR 706.1: a die-roll condition ("you roll a die", "an
+    // CR 608.2c + CR 706.1: a die-roll condition ("you roll a die", "an
     // opponent rolls one or more dice") refers to a player's roll and to no
-    // object, so a bare "it" in the body names the ability's own source, which
+    // object, so read by the rules of English a bare "it" in the body names the
+    // ability's own source, which
     // the body itself names ("from this creature, then … on it", Hammer
     // Jammer). Recognition is the trigger arm's own condition grammar.
     if terminated(parse_die_roll_condition, (opt(tag(",")), eof))
