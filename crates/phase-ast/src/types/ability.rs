@@ -8052,6 +8052,14 @@ pub enum ThisWayCause {
     /// CR 701.9a: the member was discarded this way (cause survives a
     /// replacement that redirects the discard to another zone — CR 614.6).
     Discarded,
+    /// CR 701.26a: the member was tapped this way — only an actual
+    /// untapped→tapped change counts. A permanent that was already tapped, or
+    /// that a "can't become tapped" restriction kept upright, is not tapped by
+    /// the instruction and so never becomes a member of a mass tap's set (it
+    /// emits no `PermanentTapped`, and a mass tap declares no targets to fall
+    /// back to). Master of the Wild Hunt: "Each Wolf tapped this way
+    /// deals damage equal to its power to target creature."
+    Tapped,
     /// CR 608.2c + CR 400.7: the member was returned (put onto the battlefield)
     /// this way by a one-shot put-onto-battlefield instruction.
     Returned,
@@ -8083,7 +8091,9 @@ impl ThisWayCause {
     /// The origin zone the producing transition must have departed, when the
     /// action determines one. `None` for destination-named actions (Exiled,
     /// Returned, Bounced, PutIntoGraveyard, OwnerLibraryShuffleSubject),
-    /// which arrive from anywhere. The origin-stamp site requires the
+    /// which arrive from anywhere, and for `Tapped`, which names no transition
+    /// at all (callers gate on [`Self::is_zone_transition`] first). The
+    /// origin-stamp site requires the
     /// member's latest zone-change record to agree; a mismatch means the
     /// record is not the producing transition and no origin is stamped.
     pub fn expected_origin_zone(self) -> Option<crate::types::zones::Zone> {
@@ -8094,11 +8104,34 @@ impl ThisWayCause {
             ThisWayCause::Milled => Some(Zone::Library),
             // CR 701.9a: discard moves hand cards to the graveyard.
             ThisWayCause::Discarded => Some(Zone::Hand),
+            // CR 701.26a: tapping is not a zone transition (see
+            // `is_zone_transition`), so it determines no departed zone.
+            ThisWayCause::Tapped => None,
             ThisWayCause::Exiled
             | ThisWayCause::Returned
             | ThisWayCause::Bounced
             | ThisWayCause::PutIntoGraveyard
             | ThisWayCause::OwnerLibraryShuffleSubject => None,
+        }
+    }
+
+    /// CR 400.7 + CR 701.26a: does the producing action move the member between
+    /// zones? Every cause but `Tapped` names a zone-moving action; tapping
+    /// turns a permanent sideways where it is, so a tapped member's latest
+    /// zone-change record is an earlier, unrelated transition and must never be
+    /// stamped as its producing origin.
+    pub fn is_zone_transition(self) -> bool {
+        match self {
+            ThisWayCause::Tapped => false,
+            ThisWayCause::OwnerLibraryShuffleSubject
+            | ThisWayCause::Discarded
+            | ThisWayCause::Returned
+            | ThisWayCause::Exiled
+            | ThisWayCause::Milled
+            | ThisWayCause::Destroyed
+            | ThisWayCause::Sacrificed
+            | ThisWayCause::Bounced
+            | ThisWayCause::PutIntoGraveyard => true,
         }
     }
 }
@@ -8361,6 +8394,9 @@ pub enum TargetFilter {
     /// (`Some(Exiled)`) and "sacrificed this way" (`Some(Sacrificed)`)
     /// references disjointly — and a sacrifice that a replacement redirects to
     /// Exile (CR 614.6) still counts as `Sacrificed` (issue #2932).
+    /// A mass tap stamps its newly tapped members `Tapped` (CR 701.26a), so
+    /// "each Wolf tapped this way" (`Some(Tapped)`) reads exactly the
+    /// permanents the instruction tapped.
     TrackedSetFiltered {
         id: super::identifiers::TrackedSetId,
         filter: Box<TargetFilter>,
@@ -26075,6 +26111,27 @@ pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilte
     if matches!(effect, Effect::UnattachAll { .. }) {
         return None;
     }
+    // CR 115.1a + CR 119.5: "Each player's life total becomes …" (Repay in
+    // Kind, Biorhythm, Worldfire) is not a targeted spell — its text never uses
+    // the phrase "target [something]". `AllPlayers` is the resolution-time
+    // population `resolve_set_life_total` iterates in APNAP order, not a
+    // declared target. Surfacing it here would mint a required slot, but
+    // `AllPlayers` is not a shape `targeting::find_legal_targets` enumerates as a
+    // player or object target, so that slot's candidate pool is EMPTY and
+    // `build_target_slots_for_announcement` rejected the cast with
+    // "No legal targets available" before it could ever be announced
+    // (phase-rs/phase#10455). Mirrors the `UnattachAll` and
+    // `Sacrifice` carve-outs above; the single-player forms ("your" →
+    // `Controller`, "target player's" → `Player`) keep their slots untouched.
+    if matches!(
+        effect,
+        Effect::SetLifeTotal {
+            target: TargetFilter::AllPlayers,
+            ..
+        }
+    ) {
+        return None;
+    }
     // CR 115.1 + Whitemane Lion ruling: A `Bounce` whose Oracle text omitted
     // the word "target" ("return a creature you control to its owner's hand")
     // is NOT a targeted effect — the controller chooses an eligible permanent
@@ -29408,6 +29465,22 @@ impl TargetFilter {
                 // CR 201.5a + CR 115.10a: a granter named by a granted body is affected, never a
                 // declared target.
                 | TargetFilter::GrantingObject { .. }
+        )
+    }
+
+    /// CR 608.2c + CR 115.10a: true when this filter names a population bound
+    /// earlier in the same resolution ("those Wolves" — a `TrackedSet` /
+    /// `TrackedSetFiltered` published by a prior instruction), never announced
+    /// as a target. The single authority shared by the parser (a damage clause
+    /// whose recipient is such a population never takes that population as its
+    /// antecedent) and the engine (a division among such a population is chosen
+    /// while the effect is applied, CR 608.2d, not announced with the targets,
+    /// CR 601.2d). Deliberately narrower than [`Self::is_context_ref`]: a
+    /// `ParentTarget` / `ParentTargetSlot` recipient names ANNOUNCED targets.
+    pub fn is_tracked_set_population(&self) -> bool {
+        matches!(
+            self,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
         )
     }
 
@@ -35473,11 +35546,13 @@ pub struct AbilityDefinition {
     /// (Mana Clash, Goblin Lyre, Pixie Queen, Vexing Sphinx, Maddening Hex, etc.).
     /// Read at target-selection time to short-circuit `WaitingFor::TargetSelection`.
     pub target_selection_mode: TargetSelectionMode,
-    /// CR 601.2c + CR 603.3d: When set, this player (not the controller) announces
-    /// this ability's target(s) at stack placement. `None` = controller chooses
-    /// (default). Mirrors `target_selection_mode` (the same "by-whom are targets
-    /// selected" axis). Unlike `optional_player` and `optional_for`, this is a
-    /// stack-placement target choice, not a resolution-time optional actor.
+    /// CR 601.2c + CR 603.3d + CR 608.2d: the player who makes this ability
+    /// node's object choices — its targets at stack placement, or, for an
+    /// untargeted division announced while the effect is applied
+    /// (`ability_utils::resolution_time_division`), the division. `None` = the
+    /// controller (default). Mirrors `target_selection_mode` (the same "by-whom"
+    /// axis). Unlike `optional_player` and `optional_for`, this is not a
+    /// resolution-time optional actor.
     pub target_chooser: Option<TargetFilter>,
     /// CR 608.2c + CR 107.1c: per-iteration loop-continuation predicate, the
     /// non-count companion to `repeat_for`. When `Some`, the resolution chain
@@ -42931,6 +43006,49 @@ mod tests {
         assert_eq!(XModification::DOUBLE.apply(2), 4);
         assert_eq!(XModification::DOUBLE.apply(u32::MAX), u32::MAX);
         assert_eq!(XModification::Times { factor: 3 }.apply(2), 6);
+    }
+
+    /// CR 608.2c + CR 115.10a: only a tracked-set population (bound earlier in
+    /// the same resolution) is a CR 608.2d untargeted division recipient. The
+    /// wider `is_context_ref` also admits announced-target anaphors
+    /// (`ParentTarget` / `ParentTargetSlot`) and self/none references, which is
+    /// why it was rejected as the shared parser/runtime key.
+    #[test]
+    fn tracked_set_population_is_only_tracked_sets() {
+        let tracked = TargetFilter::TrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0),
+        };
+        let tracked_filtered = TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+            caused_by: None,
+        };
+        assert!(tracked.is_tracked_set_population());
+        assert!(tracked_filtered.is_tracked_set_population());
+
+        for announced_or_self in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 1 },
+            TargetFilter::SelfRef,
+            TargetFilter::None,
+            TargetFilter::LastCreated,
+            TargetFilter::Typed(TypedFilter::creature()),
+        ] {
+            assert!(
+                !announced_or_self.is_tracked_set_population(),
+                "{announced_or_self:?} is not a tracked-set population"
+            );
+        }
+        for wider in [
+            TargetFilter::ParentTarget,
+            TargetFilter::SelfRef,
+            TargetFilter::None,
+        ] {
+            assert!(
+                wider.is_context_ref(),
+                "{wider:?} IS a context ref — the wider predicate would misclassify it"
+            );
+        }
     }
 
     #[test]

@@ -6286,6 +6286,21 @@ pub(crate) fn parse_mana_from_source_spent_to_cast(input: &str) -> OracleResult<
     Ok((rest, source_filter))
 }
 
+/// CR 106.3 + CR 601.2h: the name-independent head of "using mana produced by
+/// <source>", the clause that says which source's mana paid for a spell.
+pub(crate) fn parse_using_mana_produced_by_head(input: &str) -> OracleResult<'_, &str> {
+    tag("using mana produced by ").parse(input)
+}
+
+/// CR 106.3 + CR 201.5: "using mana produced by ~", naming the trigger's own source.
+pub(crate) fn parse_using_mana_produced_by_self(input: &str) -> OracleResult<'_, ()> {
+    preceded(
+        parse_using_mana_produced_by_head,
+        super::duration::parse_self_reference_subject,
+    )
+    .parse(input)
+}
+
 pub(crate) fn parse_mana_source_filter(input: &str) -> OracleResult<'_, TargetFilter> {
     let (source_filter, rest) = parse_type_phrase_folding(input);
     if rest.len() == input.len() {
@@ -10588,6 +10603,27 @@ mod tests {
                 "wrong ref for {input:?}"
             );
         }
+    }
+
+    /// CR 106.3 + CR 201.5: the clause reads the trigger's own source, whichever
+    /// self-reference token the text uses; the head alone is name-independent.
+    #[test]
+    fn parse_using_mana_produced_by_reads_only_a_self_reference_tail() {
+        for source in ["~", "this permanent", "this land"] {
+            let clause = format!("using mana produced by {source}");
+            assert_eq!(
+                parse_using_mana_produced_by_self(&clause),
+                Ok(("", ())),
+                "{clause:?}"
+            );
+        }
+        assert!(parse_using_mana_produced_by_self("using teamwork").is_err());
+        assert!(parse_using_mana_produced_by_self("using mana produced by a treasure").is_err());
+        assert_eq!(
+            parse_using_mana_produced_by_head("using mana produced by a treasure"),
+            Ok(("a treasure", "using mana produced by "))
+        );
+        assert!(parse_using_mana_produced_by_head("using teamwork").is_err());
     }
 
     #[test]
