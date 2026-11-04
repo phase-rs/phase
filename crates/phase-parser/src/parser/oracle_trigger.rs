@@ -14616,6 +14616,31 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
             }
         }
 
+        // CR 608.2c + CR 603.7c: the neuter pronoun "it" in a delayed damage
+        // rider created by a targeted instruction names that instruction's
+        // target ("Choose target creature. Whenever it deals combat damage to a
+        // player this turn, …" — The Inner Light; "Target Giant you control gets
+        // +2/+2 … Whenever it deals combat damage to a player this turn, …" —
+        // Fire Giant's Fury), the same referent "that creature" binds above. A
+        // self-reference is normalized to `~` before this runs, so "it" here is
+        // never the source. Guarded on the following damage verb, mirroring the
+        // gendered-pronoun arm, so other delayed shapes ("whenever it next
+        // becomes tapped") are not claimed; `rest` keeps the verb for the
+        // subject-led damage arm. If the creating instruction declared no
+        // target, `ParentTarget` binds to nothing and the delayed trigger
+        // cannot fire (fail closed).
+        if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>("it ")).parse(text) {
+            if alt((
+                value((), tag::<_, _, OracleError<'_>>("deals ")),
+                value((), tag("deal ")),
+            ))
+            .parse(rest)
+            .is_ok()
+            {
+                return (TargetFilter::ParentTarget, rest);
+            }
+        }
+
         // Plural-set anaphora → `ParentTarget` (parser heuristic, no CR citation).
         // Compose the quantifier axis (one `alt`) with the noun axis (one `alt`), per the
         // "compose, don't enumerate permutations" convention. "those creatures" /
