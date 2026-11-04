@@ -43,10 +43,13 @@
 //! `create_emblem.rs` `mark_layers_full`), and every production read of derived
 //! state crosses `flush_layers` (hence a top-of-pass rebuild) first. So external
 //! inter-flush callers always observe a fresh index for the indexed buckets.
-//! The off-zone / opt-in-zone arm is NOT indexed (its generator-set changes are
-//! not all marked `layers_dirty` — a self-milled Incarnation enters the
-//! graveyard without a dirty mark) and keeps its live `state.objects` scan in
-//! `for_each_static_effect_source`.
+//! The off-zone / opt-in-zone arm is NOT indexed: a source's arrival in or
+//! departure from a zone its own `active_zones` declares now marks
+//! `layers_dirty` (#10400, via `zones::move_to_zone` and
+//! `zones::move_to_library_at_index` → `static_layer_dependency_for_zone_transition`),
+//! but the arm stays live-scanned because indexing it is a separate
+//! optimization with no measured need (`state.objects` walk over the 56 printed
+//! opt-in definitions) and keeps its scan in `for_each_static_effect_source`.
 
 use crate::types::game_state::{GameState, StaticSourceIndex};
 use crate::types::statics::StaticMode;
@@ -122,9 +125,13 @@ impl StaticSourceIndex {
                 }
             }
         }
-        // NO off-zone loop: that arm is not indexed (a self-milled Incarnation
-        // enters the graveyard without marking `layers_dirty`, which would stale
-        // a cached bucket) — `for_each_static_effect_source` live-scans it.
+        // NO off-zone loop: that arm is not indexed. Its generator-set changes
+        // NOW mark `layers_dirty` when a source crosses into or out of a zone
+        // its own `active_zones` declares (#10400, via `zones::move_to_zone` /
+        // `zones::move_to_library_at_index` →
+        // `static_layer_dependency_for_zone_transition`); it stays unindexed as
+        // a deliberate, separate optimization with no measured need, and
+        // `for_each_static_effect_source` live-scans it.
         state.static_source_index = fresh;
     }
 }
