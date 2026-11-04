@@ -908,9 +908,27 @@ pub(crate) fn discard_caused_by_effect_with_source(
     source_id: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> DiscardOutcome {
-    discard_caused_by_effect_with_source_and_frame(
+    let outcome = discard_caused_by_effect_with_source_and_frame(
         state, object_id, player, source_id, None, events,
-    )
+    );
+    // CR 400.7: a replacement choice (a CR 616.1 choice among two or more
+    // applicable effects, or a single optional "you may ... instead"
+    // replacement's apply-or-decline choice) paused this frameless discard with
+    // the card still in hand. Pin that occurrence so the resume can record the
+    // discard (CR 701.9a + CR 614.6) -- the resumed zone-change delivery
+    // records only provenance-framed discards. Batch paths call `_and_frame`
+    // and park `PendingDiscardBatch` themselves, so they never reach this
+    // install and the two carriers cannot coexist.
+    if matches!(outcome, DiscardOutcome::NeedsReplacementChoice(_)) {
+        debug_assert!(state.pending_single_discard.is_none());
+        state.pending_single_discard =
+            Some(Box::new(crate::types::game_state::PendingSingleDiscard {
+                paused_card: pin_paused_occurrence(state, object_id),
+                player,
+                source_id,
+            }));
+    }
+    outcome
 }
 
 /// Resolving-effect discard with optional operation-owned provenance.
