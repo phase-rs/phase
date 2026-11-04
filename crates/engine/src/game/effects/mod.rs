@@ -13890,6 +13890,19 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
             return true;
         }
     }
+    // CR 608.2c: an each-source damage node whose SOURCE population is the
+    // chain's tracked set ("Each Wolf tapped this way deals damage …") consumes
+    // that set. `Effect::target_filter()` surfaces only the recipient, so the
+    // source filter must be inspected here or the producer never publishes and
+    // the sources resolve to nothing. A typed source population that tests
+    // membership (`FilterProp::InTrackedSet`) consumes the set the same way.
+    if let Effect::EachSourceDealsDamage { sources, .. } = effect {
+        if filter_references_tracked_set(sources)
+            || filter_properties_reference_tracked_membership(sources)
+        {
+            return true;
+        }
+    }
     // `GrantCastingPermission` has a `target` field that is not exposed by
     // `Effect::target_filter()` (it selects objects to grant permission to,
     // not spell/ability targets). Inspect directly so "the rest" / "those
@@ -14210,8 +14223,10 @@ fn copy_spell_self_ref_keeps_resolving_spell_source(sub: &ResolvedAbility) -> bo
 ///     one is resolved by [`declared_this_way_destination`], which owns that
 ///     convention.
 ///   - ExileTop / ExileFromTopUntil → `Exiled` (CR 701.13a).
+///   - SetTapState with `TapStateChange::Tap` → `Tapped` (CR 701.26a); only
+///     the permanents that actually became tapped emit `PermanentTapped`.
 ///   - RevealUntil's kept card / counter whose CR 614.1a exile rider did not
-///     apply (see `this_way_cause_for_resolved`) / reveal / tap-untap producers do not
+///     apply (see `this_way_cause_for_resolved`) / reveal / untap producers do not
 ///     name a "<verb>ed this way" set; they carry no cause and are consumed only
 ///     by `caused_by: None` (selection-set) downstream references.
 fn affected_objects_with_causes(
@@ -14225,12 +14240,12 @@ fn affected_objects_with_causes(
     // individual member's event — so every member of this publish shares one
     // cause, except under `Effect::Counter`, whose CR 614.1a rider applies to a
     // member by its printed condition (see `this_way_cause_for_resolved`).
-    // `None` for producers that do not name a "this way" verb (reveals, taps,
+    // `None` for producers that do not name a "this way" verb (reveals, untaps,
     // counters whose exile rider did not apply, the RevealUntil kept card, and
     // zone changes to a destination no consumer references), which are read only
     // by `caused_by: None`.
     ids.into_iter()
-        .map(|id| (id, this_way_cause_for_resolved(state, effect, id)))
+        .map(|id| (id, this_way_cause_for_resolved(state, effect, events, id)))
         .collect()
 }
 
@@ -14272,9 +14287,21 @@ fn affected_objects_with_causes(
 /// LINKED-EXILE batch, and the counter path moves its spell through
 /// `counter::resolve`'s own request rather than that batch. Widening it is a
 /// separate measurement, not this change.
+///
+/// `Effect::SetTapState { state: Tap }` is likewise per-member: CR 701.26a says
+/// only untapped permanents can be tapped, so tapping an already-tapped
+/// permanent does nothing and that permanent was not "tapped this way". A
+/// single-target tap whose target was already tapped emits no
+/// `PermanentTapped`, and `affected_objects_from_events` then publishes the
+/// declared target as a fallback member for `caused_by: None` consumers
+/// ("those creatures"). The `Tapped` stamp is therefore granted only to a
+/// member that emitted `PermanentTapped` in `events` — this resolution's own
+/// tap — so a fallback member carries `None` and never becomes a
+/// "<type> tapped this way" source.
 fn this_way_cause_for_resolved(
     state: &GameState,
     effect: &Effect,
+    events: &[GameEvent],
     member: ObjectId,
 ) -> Option<ThisWayCause> {
     match effect {
@@ -14282,6 +14309,21 @@ fn this_way_cause_for_resolved(
             .exile_rider_countered_ids
             .contains(&member)
             .then(|| this_way_cause_for_zone(Zone::Exile))
+            .flatten(),
+        // CR 701.26a: only a permanent this resolution actually tapped is
+        // "tapped this way".
+        Effect::SetTapState {
+            state: TapStateChange::Tap,
+            ..
+        } => events
+            .iter()
+            .any(|event| {
+                matches!(
+                    event,
+                    GameEvent::PermanentTapped { object_id, .. } if *object_id == member
+                )
+            })
+            .then(|| this_way_cause_for_effect(effect))
             .flatten(),
         other => this_way_cause_for_effect(other),
     }
@@ -14292,10 +14334,18 @@ fn this_way_cause_for_resolved(
 /// effect kind (and its declared destination), so it is independent of any
 /// replacement that later redirects the members' landing zone.
 pub(crate) fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause> {
-    this_way_cause_for_action(
-        EffectKind::from(effect),
-        declared_this_way_destination(effect),
-    )
+    match effect {
+        // CR 701.26a: the typed tap action names its producer cause; the resolved
+        // member authority separately requires its actual PermanentTapped event.
+        Effect::SetTapState {
+            state: TapStateChange::Tap,
+            ..
+        } => Some(ThisWayCause::Tapped),
+        _ => this_way_cause_for_action(
+            EffectKind::from(effect),
+            declared_this_way_destination(effect),
+        ),
+    }
 }
 
 /// The destination a destination-bearing effect declares. `BounceAll` is the
@@ -15341,10 +15391,11 @@ pub(crate) fn publish_tracked_set_with_causes(
 /// contributed to the same merged set. The only writer of
 /// [`GameState::tracked_set_member_causes`] that adds an entry, shared by both
 /// recording publications so neither can record a cause the other cannot.
-/// Origins stamp alongside causes (same key, same overwrite policy): every
-/// `Some(cause)` names a zone-transition producer action, so the member's
-/// latest zone-change record — verified, not assumed — is its producing
-/// transition. Unverifiable members stamp no origin and keep the live read.
+/// Origins stamp alongside causes (same key, same overwrite policy): a
+/// zone-transition cause ([`ThisWayCause::is_zone_transition`]) makes the
+/// member's latest zone-change record — verified, not assumed — its producing
+/// transition; a non-moving cause (`Tapped`) has none. Unverifiable members
+/// stamp no origin and keep the live read.
 fn stamp_member_causes(state: &mut GameState, affected: Vec<(ObjectId, Option<ThisWayCause>)>) {
     if let Some(chain_id) = state.chain_tracked_set_id {
         let derived: Vec<(ObjectId, ThisWayCause, Option<TrackedMemberOrigin>)> = affected
@@ -15360,8 +15411,17 @@ fn stamp_member_causes(state: &mut GameState, affected: Vec<(ObjectId, Option<Th
             .or_default();
         for (id, cause, origin) in derived {
             causes.insert(id, cause);
-            if let Some(origin) = origin {
-                origins.insert(id, origin);
+            // The origin follows the member's latest cause: a cause with no
+            // verifiable producing transition (a tap, CR 701.26a, or an
+            // unverifiable record) clears any origin an earlier cause stamped,
+            // so a stale departure never outlives the cause that produced it.
+            match origin {
+                Some(origin) => {
+                    origins.insert(id, origin);
+                }
+                None => {
+                    origins.remove(&id);
+                }
             }
         }
     }
@@ -15379,6 +15439,10 @@ fn producing_origin_for(
     id: ObjectId,
     cause: ThisWayCause,
 ) -> Option<TrackedMemberOrigin> {
+    // CR 701.26a: a non-moving producer (a tap) has no producing transition.
+    if !cause.is_zone_transition() {
+        return None;
+    }
     let live = state.objects.get(&id)?;
     let record = state
         .zone_changes_this_turn
@@ -20456,7 +20520,13 @@ pub(crate) fn drain_pending_discard_batch(
         return Ok(PendingDiscardBatchOutcome::Idle);
     };
 
-    stamp_resumed_discard_if_unrecorded(state, &batch, events);
+    stamp_resumed_discard_if_unrecorded(
+        state,
+        batch.paused_card,
+        batch.player,
+        Some(batch.source_id),
+        events,
+    );
 
     // Finish what this seat still owes. The cursor is replaced with an empty
     // one so a re-park below installs a fresh remainder rather than mutating a
@@ -20783,10 +20853,11 @@ fn repark_discard_batch(
 /// guard.
 fn stamp_resumed_discard_if_unrecorded(
     state: &mut GameState,
-    batch: &crate::types::game_state::PendingDiscardBatch,
+    paused: ObjectIncarnationRef,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) {
-    let paused = batch.paused_card;
     let card = paused.object_id;
     let already_recorded = events.iter().any(|event| {
         matches!(
@@ -20827,7 +20898,7 @@ fn stamp_resumed_discard_if_unrecorded(
     if !left_hand {
         return;
     }
-    crate::game::restrictions::record_discard(state, batch.player);
+    crate::game::restrictions::record_discard(state, player);
     // CR 702.187b: the Mayhem marker is stamped only when the card actually
     // landed in the graveyard — a redirect leaves it elsewhere, matching the
     // un-paused path's own condition.
@@ -20835,10 +20906,26 @@ fn stamp_resumed_discard_if_unrecorded(
         crate::game::restrictions::record_card_discarded(state, card);
     }
     events.push(GameEvent::Discarded {
-        player_id: batch.player,
+        player_id: player,
         object_id: card,
-        source_id: Some(batch.source_id),
+        source_id,
     });
+}
+
+/// CR 701.9a + CR 614.6 + CR 603.2: settle a paused frameless single-card
+/// discard once its move has been delivered. The record is made at most once
+/// (shared stamp), so the `ProposedEvent::Discard` resume that already emitted
+/// `Discarded` is not double counted.
+pub(crate) fn settle_paused_single_discard(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    if let Some(paused) = state.pending_single_discard.take() {
+        stamp_resumed_discard_if_unrecorded(
+            state,
+            paused.paused_card,
+            paused.player,
+            paused.source_id,
+            events,
+        );
+    }
 }
 
 /// CR 701.57c + CR 608.2h: When a Discover pauses on its cast-or-hand offer, the
@@ -32634,6 +32721,79 @@ mod tests {
         );
     }
 
+    /// CR 701.26a + CR 400.7: a tap moves nothing, so a `Tapped` member stamps
+    /// no producing origin even when its latest zone-change record ends on the
+    /// battlefield and departed it. The same record under a zone-moving cause
+    /// that demands no origin zone (`Returned`) does stamp — the reach guard.
+    #[test]
+    fn tapped_member_stamps_no_producing_origin() {
+        let mut state = GameState::new_two_player(42);
+        let wolf = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Wolf".to_string(),
+            Zone::Battlefield,
+        );
+        state.zone_changes_this_turn.push_back(
+            crate::types::game_state::ZoneChangeRecord::test_minimal(
+                wolf,
+                Some(Zone::Battlefield),
+                Zone::Battlefield,
+            ),
+        );
+
+        let returned = publish_fresh_tracked_set_with_causes(
+            &mut state,
+            vec![wolf],
+            Some(ThisWayCause::Returned),
+        );
+        assert!(
+            state
+                .tracked_set_member_origins
+                .get(&returned)
+                .is_some_and(|origins| origins.contains_key(&wolf)),
+            "reach guard: the record verifies as a producing transition"
+        );
+
+        let tapped = publish_fresh_tracked_set_with_causes(
+            &mut state,
+            vec![wolf],
+            Some(ThisWayCause::Tapped),
+        );
+        assert!(
+            state
+                .tracked_set_member_origins
+                .get(&tapped)
+                .is_none_or(|origins| !origins.contains_key(&wolf)),
+            "a tap is not a zone transition and stamps no origin"
+        );
+
+        // Same chain set: a later tap of a member an earlier zone-moving
+        // producer stamped clears that origin along with replacing the cause.
+        let merged = publish_fresh_tracked_set_with_causes(
+            &mut state,
+            vec![wolf],
+            Some(ThisWayCause::Returned),
+        );
+        assert!(
+            state
+                .tracked_set_member_origins
+                .get(&merged)
+                .is_some_and(|origins| origins.contains_key(&wolf)),
+            "reach guard: the Returned cause stamps an origin in the merged set"
+        );
+        publish_tracked_set_with_causes(&mut state, vec![(wolf, Some(ThisWayCause::Tapped))]);
+        assert_eq!(state.chain_tracked_set_id, Some(merged), "same chain set");
+        assert!(
+            state
+                .tracked_set_member_origins
+                .get(&merged)
+                .is_none_or(|origins| !origins.contains_key(&wolf)),
+            "the Tapped cause leaves no stale Returned origin behind"
+        );
+    }
+
     /// CR 601.2c + CR 120.1: the prepended fight subject is the parent's
     /// target, so the damage child still declares only its own recipient.
     #[test]
@@ -34009,18 +34169,18 @@ mod tests {
         // `counter::resolve` put into the ledger is "exiled this way".
         state.exile_rider_countered_ids = vec![creature];
         assert_eq!(
-            this_way_cause_for_resolved(&state, &permanent_rider.effect, creature),
+            this_way_cause_for_resolved(&state, &permanent_rider.effect, &[], creature),
             Some(ThisWayCause::Exiled),
             "the recorded rider exile is the counter's declared destination"
         );
         assert_eq!(
-            this_way_cause_for_resolved(&state, &permanent_rider.effect, instant),
+            this_way_cause_for_resolved(&state, &permanent_rider.effect, &[], instant),
             None,
             "a countered card the rider did not exile is not \"exiled this way\""
         );
         state.exile_rider_countered_ids.clear();
         assert_eq!(
-            this_way_cause_for_resolved(&state, &with_rider.effect, instant),
+            this_way_cause_for_resolved(&state, &with_rider.effect, &[], instant),
             None,
             "an empty ledger stamps nothing, whatever the rider's form"
         );
@@ -62515,6 +62675,164 @@ mod tests {
             "CR 122.1: only 2 counters existed, so the re-anchoring consumer must \
              read the 2 actually removed — not the 7 the relay asked for"
         );
+    }
+
+    /// CR 701.26a + CR 608.2c: a tap instruction stamps `Tapped`; untap stays unstamped.
+    #[test]
+    fn set_tap_state_tap_stamps_tapped_cause() {
+        let wolves = TargetFilter::Typed(
+            TypedFilter::creature()
+                .subtype("Wolf".to_string())
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::Untapped]),
+        );
+        for scope in [EffectScope::All, EffectScope::Single] {
+            assert_eq!(
+                this_way_cause_for_effect(&Effect::SetTapState {
+                    target: wolves.clone(),
+                    scope,
+                    state: TapStateChange::Tap,
+                }),
+                Some(ThisWayCause::Tapped),
+            );
+        }
+        assert_eq!(
+            this_way_cause_for_effect(&Effect::SetTapState {
+                target: wolves,
+                scope: EffectScope::All,
+                state: TapStateChange::Untap,
+            }),
+            None,
+            "CR 701.26b: an untap names no consumed population"
+        );
+    }
+
+    /// CR 701.26a + CR 608.2c: the `Tapped` stamp is per-member. A single-target
+    /// tap of an already-tapped permanent does nothing (only untapped permanents
+    /// can be tapped), so its declared target is published only as a no-event
+    /// fallback member with cause `None` — it was not "tapped this way". The
+    /// paired positive: the same tap on an untapped target stamps `Tapped`.
+    #[test]
+    fn single_target_tap_stamps_tapped_only_for_members_it_tapped() {
+        let resolve_tap = |pre_tapped: bool| {
+            let mut state = GameState::new_two_player(42);
+            let creature = create_object(
+                &mut state,
+                CardId(801),
+                PlayerId(1),
+                "Target creature".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&creature).expect("creature exists");
+                obj.card_types.core_types = vec![CoreType::Creature];
+                obj.tapped = pre_tapped;
+            }
+            let ability = ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+                vec![TargetRef::Object(creature)],
+                ObjectId(900),
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+            tap_untap::resolve_set_tap_state(&mut state, &ability, &mut events)
+                .expect("tap resolves");
+            let tapped_event = events.iter().any(|event| {
+                matches!(event, GameEvent::PermanentTapped { object_id, .. } if *object_id == creature)
+            });
+            let affected = affected_objects_with_causes(&state, &ability, &ability.effect, &events);
+            (creature, tapped_event, affected)
+        };
+
+        // Reach guard: the pre-tapped tap emits no `PermanentTapped`, and the
+        // declared target still reaches the fallback publication arm.
+        let (creature, tapped_event, affected) = resolve_tap(true);
+        assert!(
+            !tapped_event,
+            "CR 701.26a: tapping a tapped permanent does nothing"
+        );
+        assert_eq!(
+            affected,
+            vec![(creature, None)],
+            "a pre-tapped fallback member was not \"tapped this way\""
+        );
+
+        let (creature, tapped_event, affected) = resolve_tap(false);
+        assert!(tapped_event, "an untapped target becomes tapped");
+        assert_eq!(
+            affected,
+            vec![(creature, Some(ThisWayCause::Tapped))],
+            "a member this resolution tapped is \"tapped this way\""
+        );
+    }
+
+    /// CR 608.2c: an each-source node whose sources are the chain tracked set
+    /// makes the preceding tap publish it; a plain typed source class does not.
+    #[test]
+    fn each_source_tracked_sources_require_tap_publication() {
+        let tap_all = || {
+            ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .subtype("Wolf".to_string())
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::Untapped]),
+                    ),
+                    scope: EffectScope::All,
+                    state: TapStateChange::Tap,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let each_source = |sources: TargetFilter| {
+            ResolvedAbility::new(
+                Effect::EachSourceDealsDamage {
+                    sources,
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::BatchSource,
+                        },
+                    },
+                    recipient: EachDamageRecipient::Shared(TargetFilter::Typed(
+                        TypedFilter::creature(),
+                    )),
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let wolf = TargetFilter::Typed(TypedFilter::default().subtype("Wolf".to_string()));
+        let tracked = TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter: Box::new(wolf.clone()),
+            caused_by: Some(ThisWayCause::Tapped),
+        };
+        assert!(next_sub_needs_tracked_set(
+            &tap_all().sub_ability(each_source(tracked))
+        ));
+        // A typed source population testing tracked-set membership consumes
+        // the set too, so the tap must publish it.
+        let member_wolf = TargetFilter::Typed(
+            TypedFilter::default()
+                .subtype("Wolf".to_string())
+                .properties(vec![FilterProp::InTrackedSet {
+                    id: TrackedSetId(0),
+                }]),
+        );
+        assert!(next_sub_needs_tracked_set(
+            &tap_all().sub_ability(each_source(member_wolf))
+        ));
+        assert!(!next_sub_needs_tracked_set(
+            &tap_all().sub_ability(each_source(wolf))
+        ));
     }
 }
 
