@@ -15,8 +15,10 @@
 //!   (CR 702.106a / CR 702.106f)
 //! - Secretly chosen names (single and double agenda) are transferred to chosen attributes
 //!   and power cost reductions when revealed
+//! - Pregame companion-reveal walks skip players who have left the game (CR 800.4a)
 
 use engine::ai_support::legal_actions;
+use engine::game::companion::check_companion_reveal;
 use engine::game::conspiracy::record_secret_agenda_choices;
 use engine::game::deck_loading::{
     create_command_zone_card_from_card_face, load_deck_into_state, DeckEntry, DeckPayload,
@@ -40,14 +42,14 @@ use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::format::{DeckSizeRule, FormatConfig, GameFormat};
-use engine::types::game_state::GameState;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CompanionDeclaration, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{
     InteractionOpportunity, InteractionOpportunityResponse, InteractionPresentationSurface,
     InteractionReasonCode, InteractionResponse, InteractionResponseSpec, InteractionRoleCode,
     InteractionSessionId, InteractionSubmission,
 };
+use engine::types::keywords::{CompanionCondition, Keyword};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -88,6 +90,22 @@ fn conspiracy_card_face(name: &str, hidden_agenda: bool) -> CardFace {
     } else {
         face.oracle_text = Some(WORLDKNIT_ORACLE.to_string());
     }
+    face
+}
+
+/// CR 702.139: a Lurrus-shaped companion — the deckbuilding keyword carrying
+/// "each permanent card in your starting deck has mana value 2 or less". The
+/// fixture decks are 40 Plains (mana value 0), so the offer is eligible without
+/// needing any other real card.
+fn companion_face() -> CardFace {
+    let mut face = CardFace {
+        name: "Lurrus of the Dream-Den".to_string(),
+        ..Default::default()
+    };
+    face.card_type.core_types.push(CoreType::Creature);
+    face.keywords.push(Keyword::Companion(
+        CompanionCondition::MaxPermanentManaValue(2),
+    ));
     face
 }
 
@@ -921,6 +939,127 @@ fn pregame_agenda_prompt_survives_a_conceding_chooser() {
             vec![p2_brago],
             vec!["Brago's Favor".to_string()]
         )],
+    );
+}
+
+/// CR 702.139a + CR 800.4a: the first companion-reveal walk (`check_all_companion_reveals`,
+/// reached from `next_pregame_decision`) must skip a departed player. The fixture gives the
+/// seat that concedes the agenda which holds pregame open *and* the eligible companion, so
+/// without the skip that seat would be offered a `CompanionReveal` it can no longer answer
+/// and the survivors would never reach their mulligans.
+#[test]
+fn eliminated_agenda_chooser_with_a_companion_is_skipped_for_mulligans() {
+    let mut state = GameState::new(FormatConfig::limited_with_command_zone(), 3, 7);
+    state.all_card_names = known_card_names();
+    let seat = |command: Vec<CardFace>, sideboard: Vec<CardFace>| PlayerDeckPayload {
+        main_deck: forty_card_main(),
+        sideboard: sideboard
+            .into_iter()
+            .map(|card| DeckEntry { card, count: 1 })
+            .collect(),
+        commander: command
+            .into_iter()
+            .map(|card| DeckEntry { card, count: 1 })
+            .collect(),
+        ..Default::default()
+    };
+    let payload = DeckPayload {
+        player: seat(
+            vec![conspiracy_card_face("Brago's Favor", true)],
+            vec![companion_face()],
+        ),
+        opponent: seat(vec![], vec![]),
+        ai_decks: vec![seat(vec![], vec![])],
+        ..Default::default()
+    };
+    load_deck_into_state(&mut state, &payload);
+    start_game_with_starting_player(&mut state, P0);
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::SecretAgendaChoice { player: P0, .. }
+    ));
+    // Reach guard: while P0 is in the game, pregame really would offer the companion.
+    assert!(matches!(
+        check_companion_reveal(&state, P0),
+        Some(WaitingFor::CompanionReveal { player, .. }) if player == P0
+    ));
+
+    apply(&mut state, P0, GameAction::Concede { player_id: P0 }).expect("P0 concedes");
+    assert!(!engine::game::players::is_alive(&state, P0));
+    // The eliminated seat's deck pool still holds the eligible companion, which is
+    // exactly what the walk must decline to offer.
+    assert!(check_companion_reveal(&state, P0).is_some());
+
+    let WaitingFor::MulliganDecision { pending, .. } = &state.waiting_for else {
+        panic!("expected MulliganDecision, got {:?}", state.waiting_for);
+    };
+    let pending_players: Vec<PlayerId> = pending.iter().map(|entry| entry.player).collect();
+    assert_eq!(
+        pending_players,
+        vec![PlayerId(1), PlayerId(2)],
+        "the departed companion holder gets no reveal prompt and no mulligan entry"
+    );
+}
+
+/// CR 702.139a + CR 800.4a: the second walk (`advance_companion_reveal`, after a
+/// player answers their own offer) must also skip a departed player later in seat
+/// order. P1 is next after P0 and holds an eligible companion, so before the fix
+/// declining P0's offer would create a `CompanionReveal` for a seat that left.
+#[test]
+fn companion_reveal_walk_skips_a_conceding_later_seat() {
+    let mut state = GameState::new(FormatConfig::limited_with_command_zone(), 3, 7);
+    state.all_card_names = known_card_names();
+    let seat = |companion: Vec<CardFace>| PlayerDeckPayload {
+        main_deck: forty_card_main(),
+        sideboard: companion
+            .into_iter()
+            .map(|card| DeckEntry { card, count: 1 })
+            .collect(),
+        ..Default::default()
+    };
+    let payload = DeckPayload {
+        player: seat(vec![companion_face()]),
+        opponent: seat(vec![companion_face()]),
+        ai_decks: vec![seat(vec![])],
+        ..Default::default()
+    };
+    load_deck_into_state(&mut state, &payload);
+    start_game_with_starting_player(&mut state, P0);
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::CompanionReveal { player: P0, .. }
+    ));
+    // Reach guard: P1, the seat the post-P0 walk would visit next, is eligible.
+    assert!(matches!(
+        check_companion_reveal(&state, P1),
+        Some(WaitingFor::CompanionReveal { player, .. }) if player == P1
+    ));
+
+    apply(&mut state, P1, GameAction::Concede { player_id: P1 }).expect("P1 concedes");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::CompanionReveal { player, .. } if player == P0),
+        "a later seat's departure leaves P0's own offer intact: {:?}",
+        state.waiting_for
+    );
+
+    let mut runner = GameRunner::from_state(state);
+    runner
+        .act(GameAction::DeclareCompanion {
+            choice: CompanionDeclaration::Decline,
+        })
+        .expect("decline P0's companion");
+
+    let WaitingFor::MulliganDecision { pending, .. } = &runner.state().waiting_for else {
+        panic!(
+            "expected MulliganDecision, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let pending_players: Vec<PlayerId> = pending.iter().map(|entry| entry.player).collect();
+    assert_eq!(
+        pending_players,
+        vec![P0, PlayerId(2)],
+        "the departed P1 is never offered its companion and gets no mulligan entry"
     );
 }
 
