@@ -17,14 +17,14 @@ use crate::types::actions::{
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
-    CastingVariant, ConvokeMode, CostResume, CounterCostRootSubtree, GameState, LandPlayRecord,
-    LoopDetectionMode, ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind,
-    PendingCostMoveCompletion, PendingCostMoveResume, PendingCounterPostAction,
-    PendingEffectResolved, PersistedRestoreError, PostReplacementDrainStack,
-    ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope,
-    RetargetSlotAddress, StackEntry, StackEntryKind, StackResolutionAutoPassOverlay,
-    StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
-    StackResolutionSession, WaitingFor,
+    CastingVariant, ConvokeMode, CostResume, CounterCostRootSubtree, DistributionScope,
+    DistributionUnit, GameState, LandPlayRecord, LoopDetectionMode, ManaAbilityResume,
+    MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveCompletion, PendingCostMoveResume,
+    PendingCounterPostAction, PendingEffectResolved, PersistedRestoreError,
+    PostReplacementDrainStack, ResolveAllConsentParticipant, ResolveAllConsentRun,
+    ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind,
+    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
+    StackResolutionPolicy, StackResolutionSession, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -42,7 +42,7 @@ use crate::types::statics::CastFrequency;
 use crate::types::zones::Zone;
 
 use super::ability_utils::{
-    begin_target_selection_for_ability, build_target_slots, cap_distribution_target_slots,
+    self, begin_target_selection_for_ability, build_target_slots, cap_distribution_target_slots,
     compute_unavailable_modes, has_legal_target_assignment_for_ability, modal_choice_for_player,
 };
 use super::casting;
@@ -1356,7 +1356,7 @@ pub(super) fn apply_action_boundary_with_stack_limit(
 struct RawActionApplication {
     result: ActionResult,
     journal_start: usize,
-    records_cast_cost: bool,
+    cast_undo_action: Option<super::engine_casting::CastUndoAction>,
     independent_cast_action: Option<(PlayerId, PlayerId, GameAction)>,
     is_actor_scoped_preference: bool,
     suppress_auto_pass_once: bool,
@@ -1518,9 +1518,10 @@ fn apply_action_boundary_core(
     let mut journal_start = state.resolved_rules_journal.entries().len();
     let independent_cast_action = matches!(&action, GameAction::Concede { .. })
         .then(|| (authenticated_actor, semantic_owner, action.clone()));
-    let records_cast_cost = independent_cast_action.is_none()
+    let cast_undo_action = (independent_cast_action.is_none()
         && !matches!(&action, GameAction::Debug(_))
-        && !action.is_submitter_scoped();
+        && !action.is_submitter_scoped())
+    .then(|| super::engine_casting::CastUndoAction::of(&action));
     let is_actor_scoped_preference = action.is_actor_scoped_preference();
     let suppress_auto_pass_once = recovered_stale_priority_pass
         || matches!(
@@ -1562,7 +1563,7 @@ fn apply_action_boundary_core(
         return Ok(RawActionApplication {
             result: ActionResult::applied(vec![], state.waiting_for.clone()),
             journal_start,
-            records_cast_cost,
+            cast_undo_action,
             independent_cast_action,
             is_actor_scoped_preference,
             suppress_auto_pass_once,
@@ -1607,12 +1608,13 @@ fn apply_action_boundary_core(
             ActionResult::reversed(WaitingFor::Priority { player })
         }
         Err(EngineError::SpellCastReversed { player, pending }) => {
-            if records_cast_cost {
+            if let Some(role) = cast_undo_action {
                 if let Err(error) = super::engine_casting::record_spell_cast_undo(
                     state,
                     &boundary_snapshot,
                     journal_start,
                     None,
+                    role,
                 ) {
                     let failure = boundary_life_change_failure(state);
                     lifecycle.discard();
@@ -1691,7 +1693,7 @@ fn apply_action_boundary_core(
         return Ok(RawActionApplication {
             result,
             journal_start,
-            records_cast_cost,
+            cast_undo_action,
             independent_cast_action,
             is_actor_scoped_preference,
             suppress_auto_pass_once,
@@ -1791,7 +1793,7 @@ fn apply_action_boundary_core(
     Ok(RawActionApplication {
         result,
         journal_start,
-        records_cast_cost,
+        cast_undo_action,
         independent_cast_action,
         is_actor_scoped_preference,
         suppress_auto_pass_once,
@@ -2313,7 +2315,7 @@ fn finish_action_boundary_with_lifecycle(
     let RawActionApplication {
         mut result,
         journal_start,
-        records_cast_cost,
+        cast_undo_action,
         independent_cast_action,
         is_actor_scoped_preference,
         suppress_auto_pass_once,
@@ -2452,7 +2454,7 @@ fn finish_action_boundary_with_lifecycle(
                 owner,
                 action,
             )?;
-        } else if records_cast_cost && !reversed {
+        } else if let Some(role) = cast_undo_action.filter(|_| !reversed) {
             let cast_start = cast_start_snapshot.as_ref().filter(|boundary| {
                 state
                     .spell_cast_reversal
@@ -2464,6 +2466,7 @@ fn finish_action_boundary_with_lifecycle(
                 &boundary_snapshot,
                 boundary_snapshot.resolved_rules_journal.entries().len(),
                 cast_start,
+                role,
             )?;
         }
         Ok::<_, EngineError>(())
@@ -14065,14 +14068,19 @@ fn apply_non_priority_pass_action(
                     }
                     // CR 701.3d + CR 608.2k: Unattach a matching attachment from the
                     // source as an activation cost (Captain America's Throw). The
-                    // handler snapshots the detached Equipment as the cost-referent,
-                    // then re-surfaces the deferred damage division.
+                    // leg's cardinality authority is the prompt built at
+                    // `casting_costs::surface_next_interactive_activation_cost_leg`
+                    // (`WaitingFor::PayCost.{min_count, count}`), which the handler
+                    // enforces before touching state; it then snapshots the detached
+                    // Equipment as the cost-referent and re-surfaces the deferred
+                    // damage division.
                     PayCostKind::UnattachFrom { filter } => {
                         casting_costs::handle_unattach_for_cost(
                             state,
                             *player,
                             filter,
                             *pending_cast.clone(),
+                            (*min_count, *count),
                             choices,
                             &chosen,
                             &mut events,
@@ -15103,6 +15111,26 @@ fn apply_non_priority_pass_action(
                 {
                     return Err(EngineError::InvalidAction(format!(
                         "X={value} cannot pay the activation cost"
+                    )));
+                }
+                // CR 601.6 + CR 601.2b + CR 202.3e: X is announced as part of
+                // the spell's proposal, and the announced spell must still be
+                // one its caster may cast. The proposal check let the cast
+                // begin because some X could evade a quality prohibition
+                // (CR 601.3a — Void Winnower and an even mana value); an X that
+                // gives the spell the prohibited quality is not a legal
+                // announcement.
+                if trial.activation_ability_index.is_none()
+                    && casting::announced_spell_is_prohibited(
+                        state,
+                        player,
+                        trial.object_id,
+                        value,
+                        trial.casting_variant == CastingVariant::Fuse,
+                    )
+                {
+                    return Err(EngineError::InvalidAction(format!(
+                        "X={value} gives this spell a quality a static ability prevents you from casting"
                     )));
                 }
                 if pending.deferred_target_selection {
@@ -17357,8 +17385,17 @@ fn apply_non_priority_pass_action(
                 &mut events,
             )?
         }
-        // CR 601.2d: Distribute among targets (casting-time distribution).
-        (WaitingFor::DistributeAmong { player, .. }, GameAction::CancelCast) => {
+        // CR 601.2d: Distribute among targets (casting-time distribution). A
+        // CR 608.2d resolution-time division belongs to a resolving ability,
+        // which cannot be cancelled — it falls to the catch-all rejection.
+        (
+            WaitingFor::DistributeAmong {
+                player,
+                scope: DistributionScope::AnnouncedTargets,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
             ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
             match state.pending_cast.as_deref().cloned() {
@@ -17377,166 +17414,201 @@ fn apply_non_priority_pass_action(
                 player,
                 total,
                 targets,
-                ..
+                unit,
+                scope,
             },
             GameAction::DistributeAmong { distribution },
         ) => {
             let p = *player;
-            let expected_total = *total;
 
-            // Validate: each target gets ≥ 1, and total matches.
-            let actual_total: u32 = distribution.iter().map(|(_, a)| *a).sum();
-            if actual_total != expected_total {
-                return Err(EngineError::InvalidAction(format!(
-                    "Distribution total {} != required {}",
-                    actual_total, expected_total
-                )));
-            }
-            for (t, amount) in &distribution {
-                if *amount == 0 {
-                    return Err(EngineError::InvalidAction(
-                        "Each target must receive at least 1".to_string(),
-                    ));
+            // CR 601.2d + CR 608.2d: the single division validator (sum, each
+            // entry ≥ 1, legal recipient, no duplicates) for both scopes.
+            ability_utils::validate_distribution(
+                &distribution,
+                *total,
+                targets,
+                ability_utils::DistributionCoverage::of(scope),
+            )
+            .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
+
+            match scope {
+                // CR 608.2d + CR 608.2c: an untargeted division chosen while the
+                // effect is applied. The damage follows the choice at once — no
+                // player receives priority in between (CR 704.3: SBAs are checked
+                // only when a player would receive priority), and afterwards the
+                // active player receives priority (CR 117.3b).
+                DistributionScope::ResolutionCandidates { pending_effect } => {
+                    let pending_effect = pending_effect.clone();
+                    let unit = unit.clone();
+                    // CR 117.3b: the placeholder is seated at the active player, who
+                    // receives priority once the ability finishes resolving — not the
+                    // chooser, who may be any player (the target's controller).
+                    let active = state.active_player;
+                    state.waiting_for = WaitingFor::Priority { player: active };
+                    state.priority_player = active;
+                    match unit {
+                        DistributionUnit::Damage => {
+                            effects::deal_damage::resume_resolution_division(
+                                state,
+                                &pending_effect,
+                                &distribution,
+                                &mut events,
+                            )
+                            .map_err(|err| EngineError::InvalidAction(err.to_string()))?
+                        }
+                        DistributionUnit::EvenSplitDamage
+                        | DistributionUnit::Counters(_)
+                        | DistributionUnit::Life => {
+                            return Err(EngineError::InvalidAction(
+                                "no resolver pauses for this division unit at resolution"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    resume_pending_continuation_if_priority(state, &mut events)?;
+                    state.waiting_for.clone()
                 }
-                if !targets.contains(t) {
-                    return Err(EngineError::InvalidAction(
-                        "Distribution target not in legal set".to_string(),
-                    ));
-                }
-            }
+                DistributionScope::AnnouncedTargets => {
+                    // Store on the pending cast's resolved ability if we're mid-casting.
+                    // The distribution will be read during effect resolution.
+                    if let Some(pending) = state.pending_cast.as_mut() {
+                        pending.ability.distribution =
+                            Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
+                    }
 
-            // Store on the pending cast's resolved ability if we're mid-casting.
-            // The distribution will be read during effect resolution.
-            if let Some(pending) = state.pending_cast.as_mut() {
-                pending.ability.distribution =
-                    Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
-            }
-
-            // CR 601.2d: Resume casting pipeline after distribution.
-            if state.pending_cast.is_some() {
-                let pending = state.pending_cast.take().unwrap();
-                if pending.activation_ability_index.is_some() {
-                    // CR 602.2b + CR 601.2d: an activated ability that divides
-                    // damage among targets goes on the stack as an ActivatedAbility
-                    // after the division is announced — not as a spell (Captain
-                    // America's Throw). The payment boundary retains the original
-                    // target-first root while it pays the residual mana leg.
-                    // The spell-only cost-determination authority used in the `else`
-                    // branch (`finish_pending_cast_cost_or_pay`) must NOT be reached
-                    // here: it routes into `finalize_cast`, which would commit the
-                    // source permanent to the stack as a spell.
-                    casting_costs::finish_target_selected_activated_ability_at_payment_boundary(
+                    // CR 601.2d: Resume casting pipeline after distribution.
+                    if state.pending_cast.is_some() {
+                        let pending = state.pending_cast.take().unwrap();
+                        if pending.activation_ability_index.is_some() {
+                            // CR 602.2b + CR 601.2d: an activated ability that divides
+                            // damage among targets goes on the stack as an ActivatedAbility
+                            // after the division is announced — not as a spell (Captain
+                            // America's Throw). The payment boundary retains the original
+                            // target-first root while it pays the residual mana leg.
+                            // The spell-only cost-determination authority used in the `else`
+                            // branch (`finish_pending_cast_cost_or_pay`) must NOT be reached
+                            // here: it routes into `finalize_cast`, which would commit the
+                            // source permanent to the stack as a spell.
+                            casting_costs::finish_target_selected_activated_ability_at_payment_boundary(
                         state,
                         p,
                         *pending,
                         &mut events,
                     )?
-                } else {
-                    // CR 601.2c + CR 601.2d + CR 601.2f: Targets and their division are now
-                    // committed, so the total cost — including any target-dependent
-                    // surcharge (Strive, CR 207.2c) — is finally determinable. Route through
-                    // the single cost-determination authority every other post-target-
-                    // selection path uses (`casting_targets::handle_select_targets` /
-                    // `handle_choose_target`) instead of calling `finalize_cast` directly
-                    // with the stale cost that was locked in at `ChooseXValue` time, before
-                    // targets (and hence any per-target surcharge) were known.
-                    //
-                    // CR 601.2h ("Unpayable costs can't be paid"): mirror
-                    // `finalize_mana_payment`'s `pending_for_restore` pattern
-                    // (casting_costs.rs ~8623-8627/8778-8787) — `finish_pending_cast_cost_or_pay`'s
-                    // downstream chain has no restore-on-error wrapper of its own, and
-                    // `state.pending_cast` is already `None` here (unlike
-                    // `handle_select_targets`, whose `pending_cast` lives inside the
-                    // `WaitingFor::TargetSelection` variant and so is never destructively
-                    // taken). Without this clone-and-restore, a recomputed cost that turns
-                    // out unpayable would return `Err` with `state.pending_cast` gone while
-                    // `state.waiting_for` still reports `DistributeAmong` — a resubmitted
-                    // `DistributeAmong` action would then fall through to the
-                    // resolution-time continuation branch below instead of being cleanly
-                    // rejected.
-                    let mut pending = pending;
-                    let pending_for_restore = pending.clone();
-                    // CR 601.2h + CR 702.66a: the delve exile is paid with the rest of the
-                    // total cost, after the division is announced.
-                    let paid = casting_costs::pay_delve_after_distribution(
-                        state,
-                        p,
-                        &mut pending,
-                        &mut events,
-                    )
-                    .and_then(|parked| match parked {
-                        Some(waiting_for) => Ok(waiting_for),
-                        None => {
-                            let ability = pending.ability.clone();
-                            let cost = pending.cost.clone();
-                            casting_costs::finish_pending_cast_cost_or_pay(
+                        } else {
+                            // CR 601.2c + CR 601.2d + CR 601.2f: Targets and their division are now
+                            // committed, so the total cost — including any target-dependent
+                            // surcharge (Strive, CR 207.2c) — is finally determinable. Route through
+                            // the single cost-determination authority every other post-target-
+                            // selection path uses (`casting_targets::handle_select_targets` /
+                            // `handle_choose_target`) instead of calling `finalize_cast` directly
+                            // with the stale cost that was locked in at `ChooseXValue` time, before
+                            // targets (and hence any per-target surcharge) were known.
+                            //
+                            // CR 601.2h ("Unpayable costs can't be paid"): mirror
+                            // `finalize_mana_payment`'s `pending_for_restore` pattern
+                            // (casting_costs.rs ~8623-8627/8778-8787) — `finish_pending_cast_cost_or_pay`'s
+                            // downstream chain has no restore-on-error wrapper of its own, and
+                            // `state.pending_cast` is already `None` here (unlike
+                            // `handle_select_targets`, whose `pending_cast` lives inside the
+                            // `WaitingFor::TargetSelection` variant and so is never destructively
+                            // taken). Without this clone-and-restore, a recomputed cost that turns
+                            // out unpayable would return `Err` with `state.pending_cast` gone while
+                            // `state.waiting_for` still reports `DistributeAmong` — a resubmitted
+                            // `DistributeAmong` action would then fall through to the
+                            // resolution-time continuation branch below instead of being cleanly
+                            // rejected.
+                            let mut pending = pending;
+                            let pending_for_restore = pending.clone();
+                            // CR 601.2h + CR 702.66a: the delve exile is paid with the rest of the
+                            // total cost, after the division is announced.
+                            let paid = casting_costs::pay_delve_after_distribution(
                                 state,
                                 p,
-                                *pending,
-                                *ability,
-                                cost,
+                                &mut pending,
                                 &mut events,
                             )
+                            .and_then(|parked| match parked {
+                                Some(waiting_for) => Ok(waiting_for),
+                                None => {
+                                    let ability = pending.ability.clone();
+                                    let cost = pending.cost.clone();
+                                    casting_costs::finish_pending_cast_cost_or_pay(
+                                        state,
+                                        p,
+                                        *pending,
+                                        *ability,
+                                        cost,
+                                        &mut events,
+                                    )
+                                }
+                            });
+                            match paid {
+                                Ok(waiting_for) => waiting_for,
+                                Err(err) => {
+                                    state.pending_cast = Some(pending_for_restore);
+                                    return Err(err);
+                                }
+                            }
                         }
-                    });
-                    match paid {
-                        Ok(waiting_for) => waiting_for,
-                        Err(err) => {
-                            state.pending_cast = Some(pending_for_restore);
-                            return Err(err);
-                        }
+                    } else if let Some(mut pending_trigger) = state.pending_trigger.take() {
+                        // CR 601.2d + CR 603.3d: Triggered abilities divide effects
+                        // while being put on the stack. The chosen per-target amounts
+                        // are resolution data on the resolved ability. The entry is
+                        // already on the stack (pushed at distribute-among pause time);
+                        // mutate its ability with the distribution and release the
+                        // construction cursors so the resolver may now fire it.
+                        pending_trigger.ability.distribution =
+                            Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
+                        let produced = if !triggers::finalize_pending_trigger_entry(
+                            state,
+                            &pending_trigger.ability,
+                        ) {
+                            // Unexpected dangling cursor: the entry is no longer on the
+                            // stack. Recover per CR 608.1 (resolution selects the
+                            // spell or ability on top of the stack, so an entry absent
+                            // from it is never selected to begin resolving) — record
+                            // the diagnostic, abandon, and return priority instead of
+                            // panicking (re-normalized next pass; CR 117.3b would give
+                            // the active player).
+                            triggers::abandon_ceased_pending_trigger(
+                                state,
+                                &pending_trigger.ability,
+                            );
+                            priority::clear_priority_passes(state);
+                            WaitingFor::Priority { player: p }
+                        } else {
+                            priority::clear_priority_passes(state);
+                            // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred
+                            // behind this distribute-among trigger so each independent
+                            // instance reaches the stack (issue #416).
+                            debug_assert!(
+                                !triggers::is_pending_trigger_construction_active(state),
+                                "deferred-trigger drain entered with construction still active",
+                            );
+                            if let Some(waiting_for) =
+                                triggers::drain_deferred_trigger_queue(state, &mut events)
+                            {
+                                waiting_for
+                            } else {
+                                WaitingFor::Priority { player: p }
+                            }
+                        };
+                        // Round-20 seam 4: the trigger-owned division arm's produced
+                        // wait — dangling recovery, deferred sibling, or success — goes
+                        // through the construction finisher exactly once. The
+                        // resolution-time and cast-time distribution arms below are not
+                        // trigger-owned and are deliberately untouched.
+                        triggers::finish_trigger_construction_action(state, &mut events, produced)
+                    } else {
+                        // CR 601.2d: an announced division is always owned by a pending
+                        // cast or a pending trigger; with neither there is nothing to
+                        // resume, so the submission is rejected rather than guessed at.
+                        return Err(EngineError::InvalidAction(
+                            "an announced division has no pending cast or trigger".to_string(),
+                        ));
                     }
                 }
-            } else if let Some(mut pending_trigger) = state.pending_trigger.take() {
-                // CR 601.2d + CR 603.3d: Triggered abilities divide effects
-                // while being put on the stack. The chosen per-target amounts
-                // are resolution data on the resolved ability. The entry is
-                // already on the stack (pushed at distribute-among pause time);
-                // mutate its ability with the distribution and release the
-                // construction cursors so the resolver may now fire it.
-                pending_trigger.ability.distribution =
-                    Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
-                let produced =
-                    if !triggers::finalize_pending_trigger_entry(state, &pending_trigger.ability) {
-                        // Unexpected dangling cursor: the entry is no longer on the
-                        // stack. Recover per CR 608.1 (resolution selects the
-                        // spell or ability on top of the stack, so an entry absent
-                        // from it is never selected to begin resolving) — record
-                        // the diagnostic, abandon, and return priority instead of
-                        // panicking (re-normalized next pass; CR 117.3b would give
-                        // the active player).
-                        triggers::abandon_ceased_pending_trigger(state, &pending_trigger.ability);
-                        priority::clear_priority_passes(state);
-                        WaitingFor::Priority { player: p }
-                    } else {
-                        priority::clear_priority_passes(state);
-                        // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred
-                        // behind this distribute-among trigger so each independent
-                        // instance reaches the stack (issue #416).
-                        debug_assert!(
-                            !triggers::is_pending_trigger_construction_active(state),
-                            "deferred-trigger drain entered with construction still active",
-                        );
-                        if let Some(waiting_for) =
-                            triggers::drain_deferred_trigger_queue(state, &mut events)
-                        {
-                            waiting_for
-                        } else {
-                            WaitingFor::Priority { player: p }
-                        }
-                    };
-                // Round-20 seam 4: the trigger-owned division arm's produced
-                // wait — dangling recovery, deferred sibling, or success — goes
-                // through the construction finisher exactly once. The
-                // resolution-time and cast-time distribution arms below are not
-                // trigger-owned and are deliberately untouched.
-                triggers::finish_trigger_construction_action(state, &mut events, produced)
-            } else {
-                // Resolution-time distribution continuation path.
-                state.waiting_for = WaitingFor::Priority { player: p };
-                state.priority_player = p;
-                resume_pending_continuation_if_priority(state, &mut events)?;
-                state.waiting_for.clone()
             }
         }
         (
@@ -17946,6 +18018,25 @@ pub fn preflight_debug_action(
         {
             return Err(EngineError::InvalidAction(
                 "Debug::CreateCard with ETB processing requires a Priority window".into(),
+            ));
+        }
+    }
+
+    // CR 616.1 + CR 603.3b: a simulated move runs the full destination
+    // pipeline whatever the destination, and two tails of it can park a private
+    // prompt: entry replacements and "as enters" choices (CR 614.12), and the
+    // state-based-action and trigger dispatch that publishes an `OrderTriggers`
+    // ordering choice, a commander-zone choice, a replacement-order choice, or
+    // a legend choice. Only a settled Priority boundary can own either frame; a
+    // second prompt opened under an open one never resumes the preempted one.
+    // The raw move (`simulate: false`) keeps its prior behavior: the debug zone
+    // pipeline never consults replacements or drains triggers, so it installs
+    // only the debug arm's characteristic counters (CR 306.5b / CR 310.4b) and
+    // opens no prompt.
+    if let DebugAction::MoveToZone { simulate: true, .. } = action {
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return Err(EngineError::InvalidAction(
+                "Debug::MoveToZone with simulated processing requires a Priority window".into(),
             ));
         }
     }

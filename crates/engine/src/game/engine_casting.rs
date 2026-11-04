@@ -6,6 +6,7 @@ use serde::{Serialize, Serializer};
 use crate::types::ability::{
     AbilityCost, AdditionalCost, BeholdCostAction, TapCreaturesSelectionMode, TargetFilter,
 };
+use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CollectEvidenceResume, GameState, PendingCast, PendingManaAbility, PlayerDeckPool,
@@ -29,6 +30,169 @@ pub(super) struct CastStartBoundary {
     pub(super) object_id: ObjectId,
     journal_start: usize,
     from_action_boundary: CastUndoLists,
+}
+
+/// CR 601.2h + CR 733.1: how one admitted action of an incomplete cast
+/// enters the cast's reversal record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CastUndoAction {
+    /// An ordinary casting action. Its journal may show part of the total
+    /// cost being paid (CR 601.2h).
+    Casting,
+    /// CR 733.1: the player reverses a mana ability they activated while
+    /// casting. Mana abilities are activated before costs are paid
+    /// (CR 601.2g), so reversing one pays no cost: it never begins the
+    /// cast's inverse, and folds into one an earlier payment began.
+    ManaAbilityReversal,
+}
+
+impl CastUndoAction {
+    /// The role of `action`. Enumerate every variant so a new action must
+    /// explicitly declare whether it can reverse a mana ability.
+    pub(super) fn of(action: &GameAction) -> Self {
+        match action {
+            GameAction::UntapLandForMana { .. } => Self::ManaAbilityReversal,
+            GameAction::PassPriority
+            | GameAction::ChooseMeldPair { .. }
+            | GameAction::ChooseEntryAttackTarget { .. }
+            | GameAction::PlayLand { .. }
+            | GameAction::CastSpell { .. }
+            | GameAction::Foretell { .. }
+            | GameAction::ActivateAbility { .. }
+            | GameAction::DeclareAttackers { .. }
+            | GameAction::DeclareBlockers { .. }
+            | GameAction::ChooseUntap { .. }
+            | GameAction::ChooseExert { .. }
+            | GameAction::ChooseEnlist { .. }
+            | GameAction::ChooseClashOpponent { .. }
+            | GameAction::ChooseZoneOpponentChooser { .. }
+            | GameAction::ChoosePileOpponent { .. }
+            | GameAction::ChooseAnnouncingOpponent { .. }
+            | GameAction::ChooseGiftRecipient { .. }
+            | GameAction::ChooseAssistPlayer { .. }
+            | GameAction::CommitAssistPayment { .. }
+            | GameAction::MulliganDecision { .. }
+            | GameAction::ReorderHand { .. }
+            | GameAction::TapLandForMana { .. }
+            | GameAction::ActivateManaSource { .. }
+            | GameAction::BackToManaPayment
+            | GameAction::SpendPoolMana { .. }
+            | GameAction::UnspendPoolMana { .. }
+            | GameAction::SelectCards { .. }
+            | GameAction::ChooseRemoveCounterCostDistribution { .. }
+            | GameAction::SelectCoinFlips { .. }
+            | GameAction::SelectDieRolls { .. }
+            | GameAction::ChooseOutsideGameCards { .. }
+            | GameAction::SelectTargets { .. }
+            | GameAction::ChooseTarget { .. }
+            | GameAction::ChooseReplacement { .. }
+            | GameAction::ChooseReplacementAndRemember { .. }
+            | GameAction::SetReplacementAutoChoice { .. }
+            | GameAction::ChooseEntryController { .. }
+            | GameAction::OrderTriggers { .. }
+            | GameAction::OrderCostReductions { .. }
+            | GameAction::CancelCast
+            | GameAction::Equip { .. }
+            | GameAction::CrewVehicle { .. }
+            | GameAction::ActivateStation { .. }
+            | GameAction::SaddleMount { .. }
+            | GameAction::Transform { .. }
+            | GameAction::PlayFaceDown { .. }
+            | GameAction::TurnFaceUp { .. }
+            | GameAction::SubmitSideboard { .. }
+            | GameAction::ChoosePlayDraw { .. }
+            | GameAction::ChooseOption { .. }
+            | GameAction::SubmitVoteCandidate { .. }
+            | GameAction::SubmitSpellbookDraft { .. }
+            | GameAction::SubmitPilePartition { .. }
+            | GameAction::ChoosePile { .. }
+            | GameAction::ChooseBranch { .. }
+            | GameAction::SubmitLifeRedistribution { .. }
+            | GameAction::ChooseDamageSource { .. }
+            | GameAction::SelectModes { .. }
+            | GameAction::DecideOptionalCost { .. }
+            | GameAction::ChooseAdventureFace { .. }
+            | GameAction::ChooseModalFace { .. }
+            | GameAction::ChooseAlternativeCast { .. }
+            | GameAction::ChooseCastingVariant { .. }
+            | GameAction::KeepAllCopyTargets
+            | GameAction::ChoosePermanentTypeSlot { .. }
+            | GameAction::ActivateNinjutsu { .. }
+            | GameAction::CastSpellAsSneak { .. }
+            | GameAction::CastSpellAsWebSlinging { .. }
+            | GameAction::CastSpellForFree { .. }
+            | GameAction::CastSpellAsMiracle { .. }
+            | GameAction::CastSpellAsMadness { .. }
+            | GameAction::DecideOptionalEffect { .. }
+            | GameAction::ChooseResolutionOptionalPaymentBranch { .. }
+            | GameAction::RespondToSpliceOffer { .. }
+            | GameAction::DecideOptionalEffectAndRemember { .. }
+            | GameAction::PayUnlessCost { .. }
+            | GameAction::ChooseUnlessCostBranch { .. }
+            | GameAction::ChooseActivationCostBranch { .. }
+            | GameAction::PayCombatTax { .. }
+            | GameAction::ChooseRingBearer { .. }
+            | GameAction::ChoosePair { .. }
+            | GameAction::ChooseDungeon { .. }
+            | GameAction::ChooseDungeonRoom { .. }
+            | GameAction::UnlockRoomDoor { .. }
+            | GameAction::RollPlanarDie
+            | GameAction::ChooseRoomDoor { .. }
+            | GameAction::TapForConvoke { .. }
+            | GameAction::HarmonizeTap { .. }
+            | GameAction::DeclareCompanion { .. }
+            | GameAction::CompanionToHand
+            | GameAction::DiscoverChoice { .. }
+            | GameAction::GraveyardPaidCastChoice { .. }
+            | GameAction::CascadeChoice { .. }
+            | GameAction::RippleChoice { .. }
+            | GameAction::FreeCastWindowChoice { .. }
+            | GameAction::ChooseTopOrBottom { .. }
+            | GameAction::ChooseMutateMergeSide { .. }
+            | GameAction::CipherEncode { .. }
+            | GameAction::ChooseLegend { .. }
+            | GameAction::ChooseBattleProtector { .. }
+            | GameAction::SetAutoPass { .. }
+            | GameAction::CancelAutoPass
+            | GameAction::SetPhaseStops { .. }
+            | GameAction::SetPriorityPassingMode { .. }
+            | GameAction::SetPriorityYield { .. }
+            | GameAction::SetMayTriggerAutoChoice { .. }
+            | GameAction::UnAction { .. }
+            | GameAction::SetTriggerOrderTemplate { .. }
+            | GameAction::AssignCombatDamage { .. }
+            | GameAction::AssignBlockerDamage { .. }
+            | GameAction::DistributeAmong { .. }
+            | GameAction::ChooseCounterMoveDistribution { .. }
+            | GameAction::ChooseCountersToRemove { .. }
+            | GameAction::SubmitPayAmount { .. }
+            | GameAction::RetargetSpell { .. }
+            | GameAction::LearnDecision { .. }
+            | GameAction::SelectCategoryPermanents { .. }
+            | GameAction::ChooseKeptCreatures { .. }
+            | GameAction::ChooseKeptPermanents { .. }
+            | GameAction::ChooseX { .. }
+            | GameAction::SubmitPhyrexianChoices { .. }
+            | GameAction::ChooseManaColor { .. }
+            | GameAction::PayManaAbilityMana { .. }
+            | GameAction::CastPreparedCopy { .. }
+            | GameAction::ChooseSpecializeColor { .. }
+            | GameAction::CastParadigmCopy { .. }
+            | GameAction::PassParadigmOffer
+            | GameAction::Debug(..)
+            | GameAction::GrantDebugPermission { .. }
+            | GameAction::RevokeDebugPermission { .. }
+            | GameAction::Concede { .. }
+            | GameAction::DeclareShortcut { .. }
+            | GameAction::RespondToShortcut { .. }
+            | GameAction::DeclineShortcut
+            | GameAction::PrecastCopyShortcut { .. }
+            | GameAction::EndContinuousEffect { .. }
+            | GameAction::BeginResolveAll { .. }
+            | GameAction::RespondResolveAllConsent { .. }
+            | GameAction::RevokeResolveAllConsent { .. } => Self::Casting,
+        }
+    }
 }
 
 /// Which serialization a cast-undo capture produces.
@@ -382,18 +546,27 @@ fn cast_has_library_barrier(state: &GameState, journal_start: usize) -> bool {
 /// is retained in the casting descriptor or written into a save. Only members
 /// that can differ from the boundary are serialized (`CastUndoMembers`); the
 /// stored inverse is the one the complete-state comparison (`cast_undo_value`)
-/// yields.
+/// yields. A mana-ability reversal records only into an inverse an earlier
+/// payment began.
 pub(super) fn record_spell_cast_undo(
     state: &mut GameState,
     before: &GameState,
     action_start: usize,
     cast_start: Option<&CastStartBoundary>,
+    role: CastUndoAction,
 ) -> Result<(), EngineError> {
     if state.spell_cast_reversal.is_none() {
         return Ok(());
     }
     let action_start = cast_start.map_or(action_start, |boundary| boundary.journal_start);
-    note_spell_cost_mutations(state, action_start);
+    match role {
+        CastUndoAction::Casting => note_spell_cost_mutations(state, action_start),
+        CastUndoAction::ManaAbilityReversal => {
+            // CR 733.1: reversing a mana ability is no payment (CR 601.2h), so it is
+            // never evidence of a cost mutation. After a real payment it is still
+            // recorded below, folded into that payment's inverse.
+        }
+    }
     let root = state.spell_cast_reversal.as_ref().unwrap();
     if !root.cost_mutations {
         return Ok(());
@@ -2027,7 +2200,14 @@ mod tests {
         now.players[0].life -= 3;
         conceal(&mut now, x);
         with_descriptor(&mut now, x, Some(Vec::new()));
-        record_spell_cast_undo(&mut now, &action_boundary, 0, Some(&boundary)).expect("recorded");
+        record_spell_cast_undo(
+            &mut now,
+            &action_boundary,
+            0,
+            Some(&boundary),
+            CastUndoAction::Casting,
+        )
+        .expect("recorded");
 
         CastStartFlow {
             boundary_lists: boundary.from_action_boundary,
@@ -2096,13 +2276,15 @@ mod tests {
         s1.players[0].life -= 2;
         conceal(&mut s1, x);
         with_descriptor(&mut s1, x, Some(Vec::new()));
-        record_spell_cast_undo(&mut s1, &pre, 0, None).expect("first action recorded");
+        record_spell_cast_undo(&mut s1, &pre, 0, None, CastUndoAction::Casting)
+            .expect("first action recorded");
         let first = s1.spell_cast_reversal.clone().expect("descriptor");
         assert!(holds_printing_of(&first.undo, x), "reach: s1 concealed X");
 
         let mut s2 = s1.clone();
         s2.players[1].life -= 2;
-        record_spell_cast_undo(&mut s2, &s1, 0, None).expect("second action recorded");
+        record_spell_cast_undo(&mut s2, &s1, 0, None, CastUndoAction::Casting)
+            .expect("second action recorded");
         let folded = s2.spell_cast_reversal.clone().expect("descriptor");
 
         let expected = direct(&pre, &s2);
@@ -2122,7 +2304,8 @@ mod tests {
         let mut state = before.clone();
         state.players[0].life -= 2;
         with_descriptor(&mut state, x, None);
-        record_spell_cast_undo(&mut state, &before, 0, None).expect("recorded");
+        record_spell_cast_undo(&mut state, &before, 0, None, CastUndoAction::Casting)
+            .expect("recorded");
         let reversal = state.spell_cast_reversal.clone().expect("descriptor");
         assert!(
             !reversal.undo.is_empty(),

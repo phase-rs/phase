@@ -4777,6 +4777,57 @@ fn static_definition_reads_zone_membership(def: &StaticDefinition, zone: Zone) -
             }))
 }
 
+/// CR 113.6 + CR 113.6b + CR 604.3 + CR 611.3a: Does the moved object's own
+/// declared zone-of-function cross `from`→`to`?
+///
+/// `active_zones` IS the CR 113.6b declaration that
+/// `functioning_abilities::static_functions_in_zone` consumes, so a definition
+/// that names either side of the transition either starts or stops functioning.
+/// Two of that authority's answers are invariant here and are deliberately not
+/// matched:
+///   * a CDA functions in every zone (CR 604.3), so no move changes whether it
+///     functions (the destination-zone application is still mark-driven, like
+///     any off-battlefield static);
+///   * an empty `active_zones` is the CR 113.6 battlefield default, and the zone
+///     pipeline already marks both battlefield entry (`mark_layers_entered`) and
+///     battlefield exit (`mark_layers_full`).
+///
+/// `mode != Continuous` definitions produce no layer effect at all
+/// (`active_continuous_effects_from_static_definitions` skips them), and the
+/// command-zone arm of `static_functions_in_zone` reads the same `active_zones`
+/// list (`static_opts_in_to_command_zone`), so a plane's declaration is covered
+/// by the identical term.
+fn static_definition_zone_of_function_crosses(
+    def: &StaticDefinition,
+    from: Zone,
+    to: Zone,
+) -> bool {
+    def.mode == StaticMode::Continuous
+        && !def.characteristic_defining
+        && (def.active_zones.contains(&from) || def.active_zones.contains(&to))
+}
+
+/// CR 113.6b + CR 400.7 + CR 611.3a: Do the MOVED object's own statics start or
+/// stop functioning because it entered or left a zone its definition declares?
+///
+/// Per-object by construction: only the moved object's declarations can change
+/// in this transition, so a resolved Anger in a graveyard does not make every
+/// later graveyard move re-evaluate the board. Read live off `state.objects`
+/// (never a snapshot); both the pre- and post-move checks call this, and either
+/// answer ORs into the transition's dirty mark.
+pub(crate) fn moved_source_zone_of_function_crosses_transition(
+    state: &GameState,
+    moved: ObjectId,
+    from: Zone,
+    to: Zone,
+) -> bool {
+    state.objects.get(&moved).is_some_and(|obj| {
+        obj.static_definitions
+            .iter_all()
+            .any(|def| static_definition_zone_of_function_crosses(def, from, to))
+    })
+}
+
 /// CR 611.3a: Is any functioning continuous static dependent on membership of
 /// `zone`? Consulted at the zone-change seam (`zones::move_to_zone`) so a card
 /// entering or leaving a relevant zone re-evaluates layers. This scans live
@@ -5521,12 +5572,29 @@ pub(crate) fn mark_layers_full_if_life_reading_static_live(state: &mut GameState
 /// of a move. A source or recipient can become visible only after the move, so a
 /// pre-move scan alone is insufficient; the post-move scan runs before trigger
 /// collection, ensuring spell-cast triggers see derived spell characteristics.
+///
+/// Two distinct questions are answered here, and both must be:
+///   * the board-wide terms (`any_active_static_reads_zone_membership`) answer
+///     "does ANOTHER object's static read this zone" through its recipient
+///     filter, enabling condition, or dynamic quantity;
+///   * the per-object term
+///     (`moved_source_zone_of_function_crosses_transition`) answers "did the
+///     moved object's OWN zone-of-function cross the transition" (CR 113.6b +
+///     CR 400.7) — a move that starts or stops a static the board-wide scan
+///     cannot see, because that scan only inspects other objects' zone reads.
+///
+/// `moved` being passed to both calls is deliberate: the pre-move call protects
+/// trigger collection and the post-move call is the face-change safety net for
+/// the board-wide terms, while the per-object term reads the same live
+/// declarations on both sides (only its zone changes, via `from`/`to`).
 pub(crate) fn static_layer_dependency_for_zone_transition(
     state: &GameState,
+    moved: ObjectId,
     from: Zone,
     to: Zone,
 ) -> bool {
-    any_active_static_reads_zone_membership(state, from)
+    moved_source_zone_of_function_crosses_transition(state, moved, from, to)
+        || any_active_static_reads_zone_membership(state, from)
         || any_active_static_reads_zone_membership(state, to)
 }
 
@@ -27074,6 +27142,160 @@ mod tests {
             !bear_obj.has_keyword(&Keyword::Haste),
             "Without a Mountain, the compound condition fails and Haste is not granted"
         );
+    }
+
+    /// CR 113.6 + CR 113.6b + CR 113.6c + CR 604.3 + CR 613.1: the per-object
+    /// zone-of-function predicate answers "does THIS definition's declared zone
+    /// set cross `from`→`to`", at the `active_zones` axis
+    /// `functioning_abilities::static_functions_in_zone` consumes.
+    ///
+    /// Table-driven so the declaration — not one card — is verified: the
+    /// hand-built Anger shape, the deeper causes that must NOT match (a CDA,
+    /// the empty-`active_zones` battlefield default, a non-Continuous mode), a
+    /// Grist-shaped CR 113.6c all-zone list, and the printed `Bant`-shaped
+    /// unconditional command-zone member.
+    #[test]
+    fn static_definition_zone_of_function_crosses_matches_declared_zones() {
+        let anger_shaped = || {
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                ))
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }])
+                .active_zones(vec![Zone::Graveyard])
+        };
+        let anger_pairs = [
+            (Zone::Library, Zone::Graveyard, true),
+            (Zone::Graveyard, Zone::Library, true),
+            (Zone::Graveyard, Zone::Exile, true),
+            (Zone::Graveyard, Zone::Battlefield, true),
+            (Zone::Library, Zone::Exile, false),
+            (Zone::Library, Zone::Hand, false),
+        ];
+        for (from, to, expected) in anger_pairs {
+            assert_eq!(
+                static_definition_zone_of_function_crosses(&anger_shaped(), from, to),
+                expected,
+                "Anger-shaped declaration ([Graveyard]) {from:?}→{to:?}"
+            );
+        }
+
+        // CR 604.3: a CDA functions in every zone, so no move changes it.
+        let mut cda = anger_shaped();
+        cda.characteristic_defining = true;
+        for (from, to, _) in anger_pairs {
+            assert!(
+                !static_definition_zone_of_function_crosses(&cda, from, to),
+                "a CDA must never be classified as a zone-of-function crossing ({from:?}→{to:?})"
+            );
+        }
+
+        // CR 113.6: an empty `active_zones` is the battlefield default, which the
+        // zone pipeline already marks on both entry and exit — it must not be
+        // swallowed into this arm.
+        let battlefield_default = StaticDefinition::continuous()
+            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+        for (from, to) in [
+            (Zone::Graveyard, Zone::Battlefield),
+            (Zone::Hand, Zone::Battlefield),
+        ] {
+            assert!(
+                !static_definition_zone_of_function_crosses(&battlefield_default, from, to),
+                "the empty-`active_zones` battlefield default must not match ({from:?}→{to:?})"
+            );
+        }
+
+        // The mode gate: a non-Continuous mode produces no layer effect, so it
+        // cannot be a layer-invalidation cause even with a matching declaration.
+        let cast_with_keyword = StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash,
+        })
+        .active_zones(vec![Zone::Battlefield]);
+        assert!(
+            !static_definition_zone_of_function_crosses(
+                &cast_with_keyword,
+                Zone::Hand,
+                Zone::Battlefield
+            ),
+            "a CastWithKeyword declaration must not invalidate layers"
+        );
+
+        // CR 113.6c: Grist's negation parses to the conservative six-zone list.
+        let grist_shaped = || {
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::SetPower { value: 1 }])
+                .active_zones(vec![
+                    Zone::Library,
+                    Zone::Hand,
+                    Zone::Graveyard,
+                    Zone::Stack,
+                    Zone::Exile,
+                    Zone::Command,
+                ])
+        };
+        assert!(static_definition_zone_of_function_crosses(
+            &grist_shaped(),
+            Zone::Library,
+            Zone::Graveyard
+        ));
+        assert!(static_definition_zone_of_function_crosses(
+            &grist_shaped(),
+            Zone::Battlefield,
+            Zone::Graveyard
+        ));
+
+        // A printed Command-zone declaration (planes, conspiracies, emblems).
+        let command_shaped = || {
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddPower { value: 2 }])
+                .active_zones(vec![Zone::Command])
+        };
+        assert!(static_definition_zone_of_function_crosses(
+            &command_shaped(),
+            Zone::Battlefield,
+            Zone::Command
+        ));
+        assert!(static_definition_zone_of_function_crosses(
+            &command_shaped(),
+            Zone::Command,
+            Zone::Exile
+        ));
+        assert!(!static_definition_zone_of_function_crosses(
+            &command_shaped(),
+            Zone::Graveyard,
+            Zone::Exile
+        ));
+
+        // The UNCONDITIONAL branch as printed data: Bant — "All creatures have
+        // exalted." — `active_zones = [Command]`, `condition: null`.
+        let bant_shaped = || {
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(TypedFilter::creature()))
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Exalted,
+                }])
+                .description("All creatures have exalted.".to_string())
+                .active_zones(vec![Zone::Command])
+        };
+        assert!(static_definition_zone_of_function_crosses(
+            &bant_shaped(),
+            Zone::Command,
+            Zone::Exile
+        ));
+        assert!(static_definition_zone_of_function_crosses(
+            &bant_shaped(),
+            Zone::Hand,
+            Zone::Command
+        ));
+        assert!(!static_definition_zone_of_function_crosses(
+            &bant_shaped(),
+            Zone::Graveyard,
+            Zone::Library
+        ));
     }
 
     /// CR 113.6a + CR 604.3: a characteristic-defining ability functions in

@@ -3418,11 +3418,12 @@ pub struct ResolvedAbility {
     /// to short-circuit `WaitingFor::TargetSelection` for `Random` abilities.
     #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
     pub target_selection_mode: TargetSelectionMode,
-    /// CR 601.2c + CR 603.3d: When set, this player (not the controller) announces
-    /// this ability's target(s) at stack placement. `None` = controller chooses
-    /// (default). Mirrors `target_selection_mode` (the same "by-whom are targets
-    /// selected" axis). Distinct from CR 608.2d resolution-time "of their choice"
-    /// sacrifices.
+    /// CR 601.2c + CR 603.3d + CR 608.2d: the player who makes this ability
+    /// node's object choices — its targets at stack placement, or, for an
+    /// untargeted division announced while the effect is applied
+    /// (`ability_utils::resolution_time_division`), the division. `None` = the
+    /// controller (default). Mirrors `target_selection_mode` (the same "by-whom"
+    /// axis). "Of their choice" sacrifices are not this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_chooser: Option<TargetFilter>,
     /// CR 608.2c + CR 109.4: Players chosen by `Effect::Choose { choice_type:
