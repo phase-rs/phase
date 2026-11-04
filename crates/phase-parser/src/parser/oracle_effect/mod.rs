@@ -31046,8 +31046,20 @@ fn extract_player_anchor_in_chain(
         {
             return Some(TargetFilter::ParentTarget);
         }
-        if let Some(anchor) = extract_player_anchor(&def.effect, declared) {
-            return Some(anchor);
+        // CR 701.24c + CR 608.2c: the terminal owner-library shuffle consumer —
+        // `Shuffle(ScopedPlayer)` under the owner-population scope — names the
+        // PROSPECTIVE OWNERS of the moved set, resolved at resolution time. It is
+        // not an acting-player anchor, so it must not be extracted as one: doing
+        // so applied `ScopedPlayer` back onto the clause it belongs to and
+        // rewrote the explicit "your graveyard" population (`Controller`) that
+        // CR 109.5 keeps with the activator (Elixir of Immortality).
+        let owner_population_consumer = def.player_scope.as_ref()
+            == Some(&imperative::owner_library_shuffle_scope())
+            && matches!(def.effect.as_ref(), Effect::Shuffle { .. });
+        if !owner_population_consumer {
+            if let Some(anchor) = extract_player_anchor(&def.effect, declared) {
+                return Some(anchor);
+            }
         }
         previous = def.effect.as_ref();
         sub = def.sub_ability.as_deref();
