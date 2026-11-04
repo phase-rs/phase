@@ -5281,6 +5281,9 @@ fn fmt_attack_target_filter(filter: &crate::types::triggers::AttackTargetFilter)
         // CR 725.1: the monarch is a player designation, and no player is the
         // monarch until an effect creates one.
         ATF::Monarch => "the monarch",
+        // CR 508.6: the source's own attack history, so the label names the
+        // history rather than a player class the card does not print.
+        ATF::PlayerAttackedBySourceThisTurn => "a player it has already attacked this turn",
     }
 }
 
@@ -16660,13 +16663,14 @@ mod tests {
             AttackTargetFilter::OwnerOrPlaneswalker,
             AttackTargetFilter::PlayerOrPermanents,
             AttackTargetFilter::Monarch,
+            AttackTargetFilter::PlayerAttackedBySourceThisTurn,
         ]
         .iter()
         .map(fmt_attack_target_filter)
         .collect();
         assert_eq!(
             labels.len(),
-            8,
+            9,
             "every AttackTargetFilter variant must map to a distinct label: {labels:?}"
         );
     }

@@ -5693,6 +5693,33 @@ pub enum PendingPlayerScopeSacrificeFollowUp {
     },
 }
 
+/// CR 701.9a + CR 614.6: a frameless single-card effect discard (connive,
+/// learn rummage) whose move paused for a replacement choice: either a
+/// CR 616.1 choice among two or more applicable replacement effects (two
+/// Rest in Peace), or the apply-or-decline choice of a single optional
+/// replacement whose own text says "you may ... instead" (Library of Leng).
+///
+/// CR 614.6: "If an event is replaced, it never happens. A modified event
+/// occurs instead." A hand -> graveyard redirect (Rest in Peace) or an optional
+/// "discard it, but ... instead" replacement (Library of Leng) therefore still
+/// discards the card; CR 701.9c presupposes the same for a card put into a
+/// hidden zone instead. The resumed zone-change delivery records a `Discarded`
+/// event only for a provenance-framed discard, so this carrier names the
+/// pre-move occurrence for the settle step to record exactly once
+/// (`effects::settle_paused_single_discard`).
+///
+/// Batches (Mind Rot) park [`PendingDiscardBatch`] instead; the two carriers
+/// are never installed together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingSingleDiscard {
+    /// CR 400.7: the pre-move hand occurrence that paused.
+    pub paused_card: ObjectIncarnationRef,
+    /// The discarding player.
+    pub player: PlayerId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<ObjectId>,
+}
+
 /// One discard instruction, parked mid-batch while an optional replacement
 /// application awaits its apply-or-decline choice.
 ///
@@ -22614,12 +22641,12 @@ fn layers_read_current_step_unknown() -> bool {
 /// continuous `static_definitions` entry (including `GrantStaticAbility` hosts)
 /// and command-zone emblems. The opt-in-zone / off-zone arm (Incarnation cycle —
 /// Anger/Brawn/Filth/Wonder/Valor, `active_zones`-gated statics functioning from
-/// the graveyard) is INTENTIONALLY NOT indexed: its generator-set changes (e.g.
-/// self-milling an Anger into the graveyard) do not all mark `layers_dirty`
-/// (`zones.rs` marks dirty only on battlefield/hand transitions; mill/effect
-/// movers add no mark), so a `layers_dirty`-gated cache of off-zone generators
-/// would go stale. That arm keeps its live `state.objects` scan in
-/// `for_each_static_effect_source`.
+/// the graveyard) is INTENTIONALLY NOT indexed. A source's arrival in or
+/// departure from a zone its own `active_zones` declares NOW marks `layers_dirty`
+/// (#10400, via `zones::move_to_zone` and `zones::move_to_library_at_index` →
+/// `static_layer_dependency_for_zone_transition`), but indexing the arm remains a
+/// separate optimization with no measured need, so it keeps its live
+/// `state.objects` scan in `for_each_static_effect_source`.
 ///
 /// Backed by `im::Vector` so `GameState::clone()` stays O(1) structural share
 /// (and `GameState: Send` is preserved — no `Rc`). Rebuilt at the TOP of
@@ -25511,6 +25538,13 @@ declare_game_state! {
     /// post-replacement funnel once the loss fully settles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_damage_post_loss: Option<Box<PendingDamagePostLoss>>,
+    /// CR 701.9a + CR 614.6: a frameless single-card effect discard (connive,
+    /// learn rummage) paused by a replacement choice. See [`PendingSingleDiscard`].
+    ///
+    /// Boxed for the same stack-budget reason as `pending_discard_batch`
+    /// (`types/game_state_size.rs`); populated only during a pause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_single_discard: Option<Box<PendingSingleDiscard>>,
     /// CR 608.2c + CR 616.1: Progress for a replacement-suspended exile loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_exile_from_top_until: Option<Box<PendingExileFromTopUntil>>,
@@ -33836,6 +33870,7 @@ impl GameState {
             pending_hero_event: None,
             pending_horde_reveal: None,
             pending_damage_post_loss: None,
+            pending_single_discard: None,
             pending_exile_from_top_until: None,
             pending_mass_library_order_choice: None,
             pending_scoped_library_search: None,
@@ -37829,6 +37864,10 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_hero_event: _,
         pending_horde_reveal: _,
         pending_damage_post_loss: _,
+        // `pending_single_discard`: COMPARED (hand-written `impl PartialEq` conjunct) — the
+        // single-card sibling of `pending_discard_batch`, `None` outside a pause, so COMPARING
+        // it can never suppress a legitimate loop's detection.
+        pending_single_discard: _,
         pending_exile_from_top_until: _,
         pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
@@ -38070,6 +38109,7 @@ impl PartialEq for GameState {
             && self.pending_discard_batch == other.pending_discard_batch
             && self.pending_damage_post_loss == other.pending_damage_post_loss
             && self.pending_hero_event == other.pending_hero_event
+            && self.pending_single_discard == other.pending_single_discard
             && self.pending_exile_from_top_until == other.pending_exile_from_top_until
             && self.pending_combat_lifelink == other.pending_combat_lifelink
             && self.pending_mass_library_order_choice

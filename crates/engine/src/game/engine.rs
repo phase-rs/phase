@@ -14,7 +14,9 @@ use crate::types::actions::{
     DebugAction, DebugCardCreationKind, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp,
     ResolveAllConsentDecision, ResolveAllScope, TriggerOrderTemplateOp,
 };
-use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
+#[cfg(test)]
+use crate::types::events::ManaTapState;
+use crate::types::events::{BendingType, ContestRound, GameEvent};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
     CastingVariant, ConvokeMode, CostResume, CounterCostRootSubtree, DistributionScope,
@@ -14098,14 +14100,19 @@ fn apply_non_priority_pass_action(
                     }
                     // CR 701.3d + CR 608.2k: Unattach a matching attachment from the
                     // source as an activation cost (Captain America's Throw). The
-                    // handler snapshots the detached Equipment as the cost-referent,
-                    // then re-surfaces the deferred damage division.
+                    // leg's cardinality authority is the prompt built at
+                    // `casting_costs::surface_next_interactive_activation_cost_leg`
+                    // (`WaitingFor::PayCost.{min_count, count}`), which the handler
+                    // enforces before touching state; it then snapshots the detached
+                    // Equipment as the cost-referent and re-surfaces the deferred
+                    // damage division.
                     PayCostKind::UnattachFrom { filter } => {
                         casting_costs::handle_unattach_for_cost(
                             state,
                             *player,
                             filter,
                             *pending_cast.clone(),
+                            (*min_count, *count),
                             choices,
                             &chosen,
                             &mut events,
@@ -15728,7 +15735,7 @@ fn apply_non_priority_pass_action(
                 convoke_mode: convoke_mode.or(Some(ConvokeMode::Delve)),
             }
         }
-        // CR 702.51a / Waterbend: Tap a creature or artifact to pay mana.
+        // CR 702.51a / CR 702.126a / CR 701.67a: Tap a creature or artifact rather than pay mana.
         // CR 702.51a + CR 302.6: Convoke taps creatures to pay mana; summoning sickness
         // (CR 302.6) is not checked because convoke does not use the tap activated-ability mechanism.
         (
@@ -15764,6 +15771,15 @@ fn apply_non_priority_pass_action(
                         .to_string(),
                 ));
             }
+            // CR 701.67a: one tap "for each generic mana in that cost"; a tap past
+            // the generic count would pay nothing.
+            if mode == ConvokeMode::Waterbend
+                && super::casting::waterbend_taps_remaining(state, *player) == 0
+            {
+                return Err(EngineError::ActionNotAllowed(
+                    "No generic mana of this cost is left for a waterbend tap".to_string(),
+                ));
+            }
             let tapped_creature_for_convoke = mode == ConvokeMode::Convoke
                 && obj
                     .card_types
@@ -15786,7 +15802,7 @@ fn apply_non_priority_pass_action(
                         crate::types::mana::ManaType::Colorless
                     }
                 }
-                // Waterbend always produces colorless
+                // CR 701.67a: Waterbend pays generic mana only — always colorless.
                 ConvokeMode::Waterbend => crate::types::mana::ManaType::Colorless,
                 // CR 702.126a: Improvise pays generic mana only — always colorless.
                 ConvokeMode::Improvise => crate::types::mana::ManaType::Colorless,
@@ -15796,36 +15812,15 @@ fn apply_non_priority_pass_action(
             // authority so a "can't become tapped" creature is refused (no
             // summoning sickness check — CR 702.51a + CR 302.6).
             crate::game::restrictions::tap_permanent_for_cost(state, object_id, &mut events)?;
-            let unit = match mode {
-                ConvokeMode::Convoke => {
-                    crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id)
-                }
-                ConvokeMode::Waterbend => crate::types::mana::ManaUnit::new(
-                    resolved_mana_type,
-                    object_id,
-                    false,
-                    Vec::new(),
-                ),
-                // CR 702.126a/b: improvise mana exists only to pay this spell's
-                // generic cost — `convoke_payment` carries the restriction that
-                // keeps it from leaking into the pool as real mana.
-                ConvokeMode::Improvise => {
-                    crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id)
-                }
-                ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
-            };
-            // CR 118.3a: stamp a pip id on pool entry. Convoke/improvise markers
-            // are consumed by the shared algorithm and never pinned (the frontend
-            // filters ConvokePayment units); Waterbend produces real pinnable mana.
+            // CR 702.51a + CR 702.126a + CR 701.67a: each mode taps the permanent
+            // "rather than pay that mana", so no mana is produced (CR 106.3).
+            // `convoke_payment` is the one marker for that substitution: it
+            // satisfies the cost while staying out of every mana-spent record.
+            let unit = crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id);
+            // CR 118.3a: stamp a pip id on pool entry. These markers are consumed
+            // by the shared algorithm and never pinned (the frontend filters
+            // ConvokePayment units).
             let _ = state.add_mana_to_pool(*player, unit);
-            if mode == ConvokeMode::Waterbend {
-                events.push(GameEvent::ManaAdded {
-                    player_id: *player,
-                    mana_type: resolved_mana_type,
-                    source_id: object_id,
-                    tap_state: ManaTapState::NotFromTap,
-                });
-            }
             if tapped_creature_for_convoke {
                 let pending = state.pending_cast.as_mut().ok_or_else(|| {
                     EngineError::InvalidAction("No pending cast for convoke".to_string())
@@ -18043,6 +18038,25 @@ pub fn preflight_debug_action(
         {
             return Err(EngineError::InvalidAction(
                 "Debug::CreateCard with ETB processing requires a Priority window".into(),
+            ));
+        }
+    }
+
+    // CR 616.1 + CR 603.3b: a simulated move runs the full destination
+    // pipeline whatever the destination, and two tails of it can park a private
+    // prompt: entry replacements and "as enters" choices (CR 614.12), and the
+    // state-based-action and trigger dispatch that publishes an `OrderTriggers`
+    // ordering choice, a commander-zone choice, a replacement-order choice, or
+    // a legend choice. Only a settled Priority boundary can own either frame; a
+    // second prompt opened under an open one never resumes the preempted one.
+    // The raw move (`simulate: false`) keeps its prior behavior: the debug zone
+    // pipeline never consults replacements or drains triggers, so it installs
+    // only the debug arm's characteristic counters (CR 306.5b / CR 310.4b) and
+    // opens no prompt.
+    if let DebugAction::MoveToZone { simulate: true, .. } = action {
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return Err(EngineError::InvalidAction(
+                "Debug::MoveToZone with simulated processing requires a Priority window".into(),
             ));
         }
     }

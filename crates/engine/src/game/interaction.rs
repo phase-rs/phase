@@ -2260,6 +2260,10 @@ fn mana_payment_direct_actions(
                     | ManaCost::SelfManaValue
                     | ManaCost::SelfManaCostReduced { .. } => None,
                 });
+            let waterbend_taps_remaining = match mode {
+                ConvokeMode::Waterbend => super::casting::waterbend_taps_remaining(state, player),
+                ConvokeMode::Convoke | ConvokeMode::Improvise | ConvokeMode::Delve => 0,
+            };
             for object_id in &state.battlefield {
                 let Some(object) = state.objects.get(object_id) else {
                     continue;
@@ -2286,7 +2290,10 @@ fn mana_payment_direct_actions(
                             }
                         }));
                     }
-                    ConvokeMode::Waterbend if object.is_waterbend_eligible(player) => {
+                    // CR 701.67a: no tap past the waterbend cost's generic count.
+                    ConvokeMode::Waterbend
+                        if object.is_waterbend_eligible(player) && waterbend_taps_remaining > 0 =>
+                    {
                         actions.push(GameAction::TapForConvoke {
                             object_id: *object_id,
                             mana_type: ManaType::Colorless,

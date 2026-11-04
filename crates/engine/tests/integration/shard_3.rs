@@ -208,6 +208,7 @@ mod foreign_subject_split_guard;
 mod foretell_pipeline;
 mod fra_bloodline_recollector;
 mod fractalize;
+mod frameless_discard_pause_records_discard;
 mod frantic_inventory_graveyard_count;
 mod freeform_deck_rules;
 mod frodo_ringbearer_must_be_blocked_gate;

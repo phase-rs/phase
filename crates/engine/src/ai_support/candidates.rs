@@ -6111,6 +6111,10 @@ fn mana_payment_actions(
         // iterating `state.battlefield` (rather than every object in the game)
         // is behavior-preserving and avoids scanning hand/library/graveyard
         // objects on go-wide token boards.
+        let waterbend_taps_remaining = match mode {
+            ConvokeMode::Waterbend => crate::game::casting::waterbend_taps_remaining(state, player),
+            ConvokeMode::Convoke | ConvokeMode::Improvise | ConvokeMode::Delve => 0,
+        };
         for &obj_id in &state.battlefield {
             let Some(obj) = state.objects.get(&obj_id) else {
                 continue;
@@ -6122,7 +6126,10 @@ fn mana_payment_actions(
                 continue;
             }
             match mode {
-                ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
+                // CR 701.67a: no tap past the waterbend cost's generic count.
+                ConvokeMode::Waterbend
+                    if obj.is_waterbend_eligible(player) && waterbend_taps_remaining > 0 =>
+                {
                     // Waterbend: always colorless
                     actions.push(candidate(
                         GameAction::TapForConvoke {
