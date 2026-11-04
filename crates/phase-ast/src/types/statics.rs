@@ -2206,6 +2206,13 @@ pub enum StaticMode {
     /// controller, so `controller: Opponent` means the source controller's
     /// opponents' permanents. Enforced in `morph::turn_face_up`.
     CantBeTurnedFaceUp,
+    /// CR 101.2 + CR 604.1: prohibition — the permanents matched by
+    /// `StaticDefinition::affected` can't be returned to pay a beam me up cost
+    /// (Marooned: "Enchanted permanent … can't be beamed up."). The beam me up
+    /// rule number is unpublished — needs manual verification. Nullary; scope
+    /// rides `affected`. Enforced only by
+    /// `engine::game::keywords::can_be_beamed_up`.
+    CantBeBeamedUp,
 
     // -- Tier 3: Parser-produced statics --
     /// CR 502.3: You may choose not to untap this permanent during your untap step.
@@ -2588,6 +2595,7 @@ pub enum StaticModeKind {
     MayLookAtTopOfLibrary,
     MayLookAtFaceDown,
     CantBeTurnedFaceUp,
+    CantBeBeamedUp,
     MayChooseNotToUntap,
     AdditionalLandDrop,
     EmblemStatic,
@@ -2757,6 +2765,7 @@ impl StaticMode {
             StaticMode::MayLookAtTopOfLibrary => StaticModeKind::MayLookAtTopOfLibrary,
             StaticMode::MayLookAtFaceDown => StaticModeKind::MayLookAtFaceDown,
             StaticMode::CantBeTurnedFaceUp => StaticModeKind::CantBeTurnedFaceUp,
+            StaticMode::CantBeBeamedUp => StaticModeKind::CantBeBeamedUp,
             StaticMode::MayChooseNotToUntap => StaticModeKind::MayChooseNotToUntap,
             StaticMode::AdditionalLandDrop { .. } => StaticModeKind::AdditionalLandDrop,
             StaticMode::EmblemStatic => StaticModeKind::EmblemStatic,
@@ -2912,6 +2921,7 @@ impl StaticMode {
             | StaticMode::MayLookAtTopOfLibrary
             | StaticMode::MayLookAtFaceDown
             | StaticMode::CantBeTurnedFaceUp
+            | StaticMode::CantBeBeamedUp
             | StaticMode::MayChooseNotToUntap
             | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::EmblemStatic
@@ -3296,6 +3306,7 @@ impl StaticMode {
             | StaticMode::MayLookAtTopOfLibrary
             | StaticMode::MayLookAtFaceDown
             | StaticMode::CantBeTurnedFaceUp
+            | StaticMode::CantBeBeamedUp
             | StaticMode::MayChooseNotToUntap
             | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::EmblemStatic
@@ -3719,6 +3730,7 @@ impl fmt::Display for StaticMode {
             StaticMode::MayLookAtTopOfLibrary => write!(f, "MayLookAtTopOfLibrary"),
             StaticMode::MayLookAtFaceDown => write!(f, "MayLookAtFaceDown"),
             StaticMode::CantBeTurnedFaceUp => write!(f, "CantBeTurnedFaceUp"),
+            StaticMode::CantBeBeamedUp => write!(f, "CantBeBeamedUp"),
             // Tier 3
             StaticMode::MayChooseNotToUntap => write!(f, "MayChooseNotToUntap"),
             StaticMode::AdditionalLandDrop { count } => {
@@ -4253,6 +4265,7 @@ impl FromStr for StaticMode {
             "MayLookAtTopOfLibrary" => StaticMode::MayLookAtTopOfLibrary,
             "MayLookAtFaceDown" => StaticMode::MayLookAtFaceDown,
             "CantBeTurnedFaceUp" => StaticMode::CantBeTurnedFaceUp,
+            "CantBeBeamedUp" => StaticMode::CantBeBeamedUp,
             // Tier 3
             "MayChooseNotToUntap" => StaticMode::MayChooseNotToUntap,
             // AdditionalLandDrop is parameterized — parsed in the `other` branch below
@@ -4965,6 +4978,7 @@ mod tests {
             StaticMode::TopOfLibraryPlotPermission,
             StaticMode::MayLookAtFaceDown,
             StaticMode::CantBeTurnedFaceUp,
+            StaticMode::CantBeBeamedUp,
             // Tier 3: parser-produced statics
             StaticMode::MayChooseNotToUntap,
             StaticMode::AdditionalLandDrop { count: 1 },

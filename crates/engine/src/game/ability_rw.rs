@@ -2723,6 +2723,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         // CR 701.15b/c: goad is a candidate-local designation, not a legacy
         // event-context or per-source member-bound referent.
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InAnyZone { .. }
@@ -3054,6 +3055,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         // CR 701.15b/c: goad is a candidate-local designation, not a legacy
         // event-context or per-source member-bound referent.
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InAnyZone { .. }

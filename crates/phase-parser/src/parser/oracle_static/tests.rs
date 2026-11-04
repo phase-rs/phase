@@ -3071,6 +3071,145 @@ fn cant_be_sacrificed_split_declines_qualified_tail() {
     );
 }
 
+/// Marooned's printed text, verbatim (MTGJSON / Scryfall).
+const MAROONED: &str = "Enchant artifact or creature\nWhen this Aura enters, you may pay {3}. If you do, tap enchanted permanent.\nEnchanted permanent doesn't untap during its controller's untap step and can't be beamed up.";
+
+/// Malfunction's printed text, verbatim (MTGJSON / Scryfall): Marooned's untap
+/// clause without the "can't be beamed up" prohibition.
+const MALFUNCTION: &str = "Enchant artifact or creature\nWhen this Aura enters, tap enchanted permanent.\nEnchanted permanent doesn't untap during its controller's untap step.";
+
+/// True when `affected` is Marooned's "Enchanted permanent" scope
+/// (`Typed{[Permanent], EnchantedBy}`; CR 303.4b).
+fn is_enchanted_permanent_scope(affected: &Option<TargetFilter>) -> bool {
+    matches!(
+        affected,
+        Some(TargetFilter::Typed(tf))
+            if tf.type_filters.contains(&TypeFilter::Permanent)
+                && tf.properties.contains(&FilterProp::EnchantedBy)
+    )
+}
+
+/// CR 502.3 + CR 101.2 + CR 604.1: Marooned's "Enchanted permanent doesn't
+/// untap during its controller's untap step and can't be beamed up." splits
+/// into the untap restriction plus a `CantBeBeamedUp` prohibition sharing the
+/// same affected set (beam me up rule number needs manual verification). Base
+/// yields one def (the prohibition was silently dropped). The typographic
+/// U+2019 apostrophe in the "can't be beamed up" tail takes the same arm.
+#[test]
+fn cant_be_beamed_up_static_splits_from_untap_restriction() {
+    for line in [
+        "Enchanted permanent doesn't untap during its controller's untap step and can't be beamed up.",
+        // The splitter's typographic U+2019 tail arm. Only the tail's apostrophe
+        // varies: the first conjunct is owned by the untap-restriction parser.
+        "Enchanted permanent doesn't untap during its controller's untap step and can\u{2019}t be beamed up.",
+    ] {
+        let defs = parse_static_line_multi(line);
+        assert_eq!(
+            defs.iter().map(|d| d.mode.clone()).collect::<Vec<_>>(),
+            vec![StaticMode::CantUntap, StaticMode::CantBeBeamedUp],
+            "expected CantUntap + CantBeBeamedUp for {line:?}, got {defs:?}"
+        );
+        // Reach guard: the first conjunct parsed with the enchanted-permanent scope.
+        assert!(
+            is_enchanted_permanent_scope(&defs[0].affected),
+            "CantUntap must scope to the enchanted permanent for {line:?}, got {:?}",
+            defs[0].affected
+        );
+        assert_eq!(
+            defs[1].affected, defs[0].affected,
+            "CantBeBeamedUp must share the untap restriction's affected set"
+        );
+        for def in &defs {
+            assert_eq!(def.description.as_deref(), Some(line));
+        }
+    }
+}
+
+/// CR 101.2 + CR 604.1 + CR 603.6a: the production card parse of Marooned
+/// reaches the trailing-prohibition splitter (not the enchanted-subject
+/// predicate that would swallow the conjunct) and keeps its single ETB trigger.
+/// Malfunction, the same untap head without the prohibition, emits no
+/// `CantBeBeamedUp`.
+#[test]
+fn marooned_card_parse_emits_cant_be_beamed_up() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        MAROONED,
+        "Marooned",
+        &["Enchant".into()],
+        &["Enchantment".into()],
+        &["Aura".into()],
+    );
+    assert_eq!(
+        parsed
+            .statics
+            .iter()
+            .map(|d| d.mode.clone())
+            .collect::<Vec<_>>(),
+        vec![StaticMode::CantUntap, StaticMode::CantBeBeamedUp],
+        "Marooned statics, got {:?}",
+        parsed.statics
+    );
+    assert_eq!(
+        parsed
+            .triggers
+            .iter()
+            .map(|t| t.mode.clone())
+            .collect::<Vec<_>>(),
+        vec![crate::types::triggers::TriggerMode::ChangesZone],
+        "Marooned keeps exactly one ETB trigger, got {:?}",
+        parsed.triggers
+    );
+
+    let malfunction = crate::parser::oracle::parse_oracle_text(
+        MALFUNCTION,
+        "Malfunction",
+        &["Enchant".into()],
+        &["Enchantment".into()],
+        &["Aura".into()],
+    );
+    assert_eq!(
+        malfunction
+            .statics
+            .iter()
+            .map(|d| d.mode.clone())
+            .collect::<Vec<_>>(),
+        vec![StaticMode::CantUntap],
+        "Malfunction prints no beam me up prohibition, got {:?}",
+        malfunction.statics
+    );
+}
+
+/// CR 701.21 + CR 613.4c: Garland, Royal Kidnapper's "Creatures you control
+/// but don't own get +2/+2 and can't be sacrificed." keeps the sacrificed arm
+/// of the generalized terminal-prohibition splitter: the pump plus an
+/// `Other("CantBeSacrificed")` companion with an equal affected set.
+#[test]
+fn cant_be_sacrificed_split_preserves_garland_pump() {
+    let defs = parse_static_line_multi(
+        "Creatures you control but don't own get +2/+2 and can't be sacrificed.",
+    );
+    let continuous = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::Continuous))
+        .expect("expected the +2/+2 grant to be preserved");
+    assert!(
+        continuous
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 })
+            && continuous
+                .modifications
+                .contains(&ContinuousModification::AddToughness { value: 2 }),
+        "expected +2/+2, got {:?}",
+        continuous.modifications
+    );
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Other("CantBeSacrificed".to_string()))
+        .expect("expected a CantBeSacrificed static");
+    assert!(cant.affected.is_some());
+    assert_eq!(cant.affected, continuous.affected);
+}
+
 /// CR 702.5: Consecrate Land — "Enchanted land has indestructible and can't be
 /// enchanted by other Auras." must decompose into BOTH the indestructible grant
 /// AND a `CantBeEnchanted` static affecting the enchanted permanent. Previously

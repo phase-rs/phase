@@ -1393,6 +1393,7 @@ fn prop_zone_truth(prop: &FilterProp, zone: Zone) -> SourceZoneTruth {
         | FilterProp::Suspected
         | FilterProp::Renowned
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp
         | FilterProp::Prepared
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
@@ -3552,10 +3553,12 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         return defs;
     }
 
-    // CR 701.21: "<grant or restriction> and can't be sacrificed" pairs a first
-    // clause with a sacrifice prohibition under one subject (Assault Suit). Split
-    // so the CantBeSacrificed clause is not dropped.
-    if let Some(defs) = try_split_and_cant_be_sacrificed(&stripped) {
+    // CR 701.21: "<grant or restriction> and can't be sacrificed" (Assault Suit)
+    // + CR 101.2 / CR 604.1: "<restriction> and can't be beamed up" (Marooned;
+    // beam me up rule number needs manual verification) pair a first clause with
+    // a terminal object prohibition under one subject. Split so the
+    // prohibition clause is not dropped.
+    if let Some(defs) = try_split_and_terminal_object_prohibition(&stripped) {
         return defs;
     }
 

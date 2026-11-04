@@ -880,6 +880,7 @@ impl EventObjectSnapshot {
             // LOUDLY rather than silently reading an ungoaded snapshot. Deferred follow-up
             // (option a): snapshot goaded onto EventObjectSnapshot + ZoneChangeRecord.
             FilterProp::Goaded
+            | FilterProp::CanBeBeamedUp
             // CR 722.3a: prepared is a designation on the LIVE permanent
             // (`GameObject::prepared`). The departure ledger carries it
             // (`LKISnapshot` / `ZoneChangeRecord::was_prepared`, read by the

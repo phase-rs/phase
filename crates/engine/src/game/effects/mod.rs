@@ -10359,6 +10359,7 @@ fn static_mode_reads_filter_population(
         | StaticMode::MayLookAtTopOfLibrary
         | StaticMode::MayLookAtFaceDown
         | StaticMode::CantBeTurnedFaceUp
+        | StaticMode::CantBeBeamedUp
         | StaticMode::MayChooseNotToUntap
         | StaticMode::AdditionalLandDrop { .. }
         | StaticMode::EmblemStatic

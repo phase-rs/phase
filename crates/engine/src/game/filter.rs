@@ -265,6 +265,9 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         // CR 701.15b: A functioning printed source elsewhere on the board can
         // designate an existing permanent, so entry/exit can change this prop.
         FilterProp::Goaded => true,
+        // CR 101.2 + CR 604.1: a functioning `CantBeBeamedUp` source elsewhere
+        // (Marooned) changes membership, so entry/exit can change this prop.
+        FilterProp::CanBeBeamedUp => true,
         // CR 603.4: "shares a quality with" a reference set is population
         // dependent ONLY when a reference filter is present — the reference set
         // is battlefield-derived. The multi-target group-share form
@@ -890,7 +893,8 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         | FilterProp::CouldBeTargetedByTriggeringSpell
         // CR 701.15b: Printed sources and their affected filters can read
         // controller, type, abilities, or other layered characteristics.
-        | FilterProp::Goaded => CharacteristicKinds::ALL,
+        | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp => CharacteristicKinds::ALL,
         // CR 701.3a: the filter-matched host axis resolves a host set from the
         // resolving chain's targets, the creation snapshot, or the trigger event,
         // then evaluates a whole inner `TargetFilter` against each host. Its read
@@ -1083,6 +1087,9 @@ fn entered_object_perturbs_filter_prop(
         // CR 701.15b: An entering printed source can goad a pre-existing
         // creature; conservatively refresh the live designation query.
         FilterProp::Goaded => true,
+        // CR 101.2 + CR 604.1: an entering Marooned can flip a pre-existing
+        // object's beam me up eligibility.
+        FilterProp::CanBeBeamedUp => true,
         // The entered object's name joins the comparison set, so any entry
         // matching the inner filter changes the "different name than each X"
         // membership for pre-existing objects. No inner filter ⇒ conservatively
@@ -3075,6 +3082,7 @@ fn filter_prop_contains_input(
             | FilterProp::Prepared
             | FilterProp::Renowned
             | FilterProp::Goaded
+            | FilterProp::CanBeBeamedUp
             | FilterProp::ToughnessGTPower
             | FilterProp::PowerExceedsBase
             | FilterProp::InTrackedSet { .. }
@@ -3854,6 +3862,7 @@ fn declared_group_controller(prop: &mut FilterProp) -> Option<&mut ControllerRef
         | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::AnyOf { .. }
@@ -4440,6 +4449,7 @@ fn absent_search_property_truth(prop: &FilterProp) -> Option<bool> {
         | FilterProp::Suspected
         | FilterProp::Renowned
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InTrackedSet { .. }
@@ -9034,6 +9044,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Renowned
         // CR 701.15b/c: a spell on the stack carries no goad designation. Fail closed.
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp
         // CR 700.9: Modified requires on-battlefield attachments/counters,
         // unavailable from a stack-snapshot record.
         | FilterProp::Modified
@@ -10749,6 +10760,8 @@ fn matches_filter_prop(
         FilterProp::Renowned => obj.is_renowned,
         // CR 701.15b/c: a creature is goaded iff at least one player has goaded it.
         FilterProp::Goaded => !combat::goading_players_for_creature(state, obj.id).is_empty(),
+        // CR 101.2 + CR 611.3a: live prohibition read (Marooned).
+        FilterProp::CanBeBeamedUp => crate::game::keywords::can_be_beamed_up(state, object_id),
         // CR 700.9: A permanent is modified if it has one or more counters on
         // it (CR 122), is equipped (CR 301.5), or is enchanted by an Aura
         // controlled by its controller (CR 303.4).
@@ -11699,6 +11712,7 @@ fn zone_change_record_matches_property(
         // CR 701.15b/c: goad is not snapshotted onto the zone-change record
         // (unlike Suspected's `record.is_suspected`). Fail closed.
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp
         // CR 700.9: Modified is a live-battlefield predicate (counters +
         // attachments) — a zone-change snapshot cannot represent it.
         | FilterProp::Modified
@@ -25396,6 +25410,7 @@ mod characteristic_read_classification_tests {
             | FilterProp::Prepared
             | FilterProp::Renowned
             | FilterProp::Goaded
+            | FilterProp::CanBeBeamedUp
             | FilterProp::ToughnessGTPower
             | FilterProp::PowerExceedsBase
             | FilterProp::AnyOf { .. }

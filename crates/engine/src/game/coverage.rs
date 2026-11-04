@@ -279,6 +279,12 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // Watchdog). Runtime enforcement is in morph::turn_face_up. Not
             // registry-keyed.
             | StaticMode::CantBeTurnedFaceUp
+            // CR 101.2 + CR 604.1: CantBeBeamedUp is a nullary prohibition whose
+            // affected filter selects the permanents that can't be returned for a
+            // beam me up cost (Marooned). Runtime enforcement is
+            // keywords::can_be_beamed_up, read through FilterProp::CanBeBeamedUp.
+            // Not registry-keyed.
+            | StaticMode::CantBeBeamedUp
             // CR 122.1d + CR 101.2: CountersCantBeRemoved carries the
             // `CounterType` axis (Fear of Sleep Paralysis = Stun). Runtime
             // enforcement is in turns.rs::counter_removal_blocked. Not
@@ -1177,6 +1183,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Prepared => parts.push("prepared".into()),
             // CR 701.15b/c
             FilterProp::Goaded => parts.push("goaded".into()),
+            // CR 101.2 + CR 604.1
+            FilterProp::CanBeBeamedUp => parts.push("that can be beamed up".into()),
             // CR 700.9
             FilterProp::Modified => parts.push("modified".into()),
             // CR 700.6
@@ -25982,6 +25990,43 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         assert!(
             card_face_gaps(&face).is_empty(),
             "CantHaveKeyword(Flying) should be covered by is_data_carrying_static()"
+        );
+    }
+
+    /// CR 101.2 + CR 604.1: Marooned's "… and can't be beamed up." parses to a
+    /// nullary `CantBeBeamedUp` static that `is_data_carrying_static()` counts
+    /// as supported (beam me up rule number needs manual verification).
+    /// Removing that arm reports `CantBeBeamedUp` as a coverage gap.
+    #[test]
+    fn cant_be_beamed_up_static_has_no_coverage_gap() {
+        const MAROONED: &str = "Enchant artifact or creature\nWhen this Aura enters, you may pay {3}. If you do, tap enchanted permanent.\nEnchanted permanent doesn't untap during its controller's untap step and can't be beamed up.";
+        let parsed = crate::parser::parse_oracle_text(
+            MAROONED,
+            "Marooned",
+            &["Enchant".into()],
+            &["Enchantment".into()],
+            &["Aura".into()],
+        );
+        let mut face = make_face();
+        face.name = "Marooned".to_string();
+        face.oracle_text = Some(MAROONED.to_string());
+        face.keywords = parsed.extracted_keywords.clone();
+        face.abilities = parsed.abilities.clone();
+        face.triggers = parsed.triggers.clone();
+        face.static_abilities = parsed.statics.clone();
+        face.replacements = parsed.replacements.clone();
+
+        assert!(
+            face.static_abilities
+                .iter()
+                .any(|def| def.mode == StaticMode::CantBeBeamedUp),
+            "REACH: Marooned must parse a CantBeBeamedUp static, got {:?}",
+            face.static_abilities
+        );
+        assert_eq!(
+            card_face_gaps(&face),
+            Vec::<String>::new(),
+            "CantBeBeamedUp should be covered by is_data_carrying_static()"
         );
     }
     /// The `fmt_quantity_ref` `PreviousEffectAmount` arms are ORDER-DEPENDENT:

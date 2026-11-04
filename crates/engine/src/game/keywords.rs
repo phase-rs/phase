@@ -3,6 +3,7 @@ use std::str::FromStr;
 use crate::game::casting_costs::cost_has_x;
 use crate::game::combat::AttackTarget;
 use crate::game::game_object::GameObject;
+use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
@@ -140,6 +141,23 @@ pub fn stack_has_split_second(state: &GameState) -> bool {
             .get(&entry.id)
             .is_some_and(|obj| has_keyword(obj, &Keyword::SplitSecond))
     })
+}
+
+/// CR 101.2 + CR 604.1 + CR 611.3a: whether `object_id` may be returned to pay a
+/// beam me up cost — false while any functioning `StaticMode::CantBeBeamedUp`
+/// applies to it (Marooned: "Enchanted permanent … can't be beamed up."). The
+/// single reader of that mode; `FilterProp::CanBeBeamedUp` delegates here. The
+/// static's `affected` resolves from its own source, so `EnchantedBy` binds to
+/// the Aura's live host. Beam me up rule number: needs manual verification.
+pub fn can_be_beamed_up(state: &GameState, object_id: ObjectId) -> bool {
+    !check_static_ability(
+        state,
+        StaticMode::CantBeBeamedUp,
+        &StaticCheckContext {
+            target_id: Some(object_id),
+            ..Default::default()
+        },
+    )
 }
 
 pub fn effective_flashback_cost(state: &GameState, object_id: ObjectId) -> Option<FlashbackCost> {
