@@ -17271,6 +17271,27 @@ mod tests {
         );
     }
 
+    /// CR 401.4: "in any order" is the owner's arrangement instruction on the
+    /// whole-line continuation combinator itself, and stays distinct from the
+    /// randomized "in a random order" mapping pinned above.
+    #[test]
+    fn put_the_rest_on_the_bottom_reads_any_order_as_player_choice() {
+        for text in [
+            "put the rest on the bottom of your library in any order",
+            "put the rest on the bottom of their library in any order",
+            "put the rest on the bottom of that library in any order.",
+            "put the rest on the bottom of that player's library in any order",
+        ] {
+            assert_eq!(
+                parse_put_rest_on_bottom_line(text)
+                    .ok()
+                    .map(|(_, order)| order),
+                Some(DigRestOrder::PlayerChoice),
+                "{text}"
+            );
+        }
+    }
+
     /// Black Cat, Cunning Thief: the number axis is the shared `parse_number`, so "two"
     /// recognizes with count 2 — and a zero count is not an exile instruction.
     #[test]
