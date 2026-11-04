@@ -28,7 +28,7 @@ use engine::analysis::resource::{
     ChargeBound, LoopDetectCost, PeriodSignature, PeriodicDelta, ResourceAxis,
 };
 use engine::game::derived_views::{FamilyCollapseState, UnboundedFamily};
-use engine::game::engine::{apply, EngineError};
+use engine::game::engine::{apply, shorten_refusal, EngineError, ShortenRefusal};
 use engine::game::perf_counters::{
     take_cost_records, take_cost_snapshot, TakeCostCounters, TakeCostRecord,
 };
@@ -2821,23 +2821,37 @@ fn low2_smart_shortcut_self_preservation() {
     let p1_response = engine::ai_support::smart_shortcut_response(runner.state(), P1);
     assert_eq!(
         p1_response,
-        ShortcutResponse::Shorten { at_iteration: 0 },
-        "P1 holds a meaningful action (Bolt) ⇒ smart_shortcut_response must self-preserve \
-         via Shorten, not Accept its own loss"
+        ShortcutResponse::Shorten { at_iteration: 1 },
+        "P1's Lightning Bolt and Mountain survive one repetition, so the take to place 1 seats \
+         P1 with Bolt castable ⇒ smart_shortcut_response self-preserves via Shorten, not Accept \
+         of its own loss"
     );
     runner
         .act(GameAction::RespondToShortcut {
             response: p1_response,
         })
         .expect("apply P1's AI decision");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::RespondToShortcut { player, .. } if player == P2
+        ),
+        "the shortened proposal is still polled to P2; got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("P2 accepts the shortened proposal");
     assert_eq!(
         runner.state().waiting_for,
         WaitingFor::Priority { player: P1 },
-        "the zero place is taken at once and its ending point is P1's — it survives"
+        "the shortened take's ending point is P1's — it survives"
     );
     assert!(
         life(&runner, P1) > 0,
-        "P1 is alive — a sequence performed zero times took nothing from it"
+        "P1 is alive — one repetition does not drain it"
     );
 
     // Control: the identical fixture/flow, but P1 Accepts (submitted manually, not via the
@@ -9176,6 +9190,7 @@ fn a_count_of_zero_performs_nothing_and_takes_the_shortcut_on_either_response() 
         "reach-guard: the mana engine must OFFER, got {:?}",
         rig.runner.state().waiting_for
     );
+    arm_responders(rig.runner.state_mut());
     rig.runner
         .act(GameAction::DeclareShortcut {
             count: IterationCount::Fixed(4),
@@ -9218,6 +9233,75 @@ fn a_count_of_zero_performs_nothing_and_takes_the_shortcut_on_either_response() 
     );
 }
 
+/// The real 4p Sprout board at its offer, with Relic of Progenitus ("{T}: Target player exiles a
+/// card from their graveyard.") on P1's battlefield, so the first responder holds a game choice at
+/// every place it may name. `None` without the card DB.
+fn relic_offer_state() -> Option<(GameState, ObjectId)> {
+    let db = super::support::shared_card_db()?;
+    let mut state = batched_offer_state();
+    let relic = crate::play_trace::place(&mut state, P1, "Relic of Progenitus", db);
+    Some((state, relic))
+}
+
+/// Relic of Progenitus ("{T}: Target player exiles a card from their graveyard.") on the
+/// battlefield of every living opponent of the offer's proposer, so each seat the offer polls holds
+/// a game choice at every place it may name (CR 732.2b).
+pub(crate) fn arm_responders(state: &mut GameState) {
+    let WaitingFor::LoopShortcut { proposer, .. } = state.waiting_for else {
+        panic!(
+            "responders are armed at the offer, got {:?}",
+            state.waiting_for
+        );
+    };
+    let db = super::support::shared_card_db().expect("the integration card fixture");
+    let responders: Vec<PlayerId> = state
+        .players
+        .iter()
+        .filter(|p| p.id != proposer && !p.is_eliminated)
+        .map(|p| p.id)
+        .collect();
+    for seat in responders {
+        crate::play_trace::place(state, seat, "Relic of Progenitus", db);
+    }
+}
+
+/// The shortener's different choice (CR 732.2c): activate Relic of Progenitus at a player whose
+/// graveyard is empty, so the ability resolves without a prompt of its own.
+fn diverge_with_relic(state: &mut GameState, shortener: PlayerId, relic: ObjectId) {
+    let ability_index = crate::play_trace::ability(state, relic, false);
+    apply(
+        state,
+        shortener,
+        GameAction::ActivateAbility {
+            source_id: relic,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("the shortener activates Relic of Progenitus");
+    if matches!(state.waiting_for, WaitingFor::TargetSelection { .. }) {
+        let seat = state
+            .players
+            .iter()
+            .find(|p| p.graveyard.is_empty())
+            .map(|p| p.id)
+            .expect("a player with an empty graveyard");
+        apply(
+            state,
+            shortener,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(seat)),
+            },
+        )
+        .expect("the shortener targets that player");
+    }
+    assert_eq!(
+        (state.stack.len(), state.waiting_for.clone()),
+        (1, WaitingFor::Priority { player: shortener }),
+        "reach: the Relic ability is on the stack and the shortener holds priority"
+    );
+}
+
 /// CR 732.2c on the object-growth subclass that REGISTERS: a shortened proposal is PERFORMED,
 /// not elided. The elision defers the growth to a CR 500.5 boundary collapse under a ceiling the
 /// accept wrote; a responder who named a place accepted no unbounded advance, so the named
@@ -9226,10 +9310,13 @@ fn a_count_of_zero_performs_nothing_and_takes_the_shortcut_on_either_response() 
 ///
 /// The Accept control is the instrument, and the stash and the prompt are the discriminators
 /// because they are exactly what the elision produces and performance does not. The two
-/// shortening lengths separate performing the named number from performing one. Reds at base,
-/// where a `Shorten` reaches no materializer at all.
+/// shortening lengths separate performing the named number from performing one. P1 holds Relic of
+/// Progenitus, so each place it names is one where it has a different game choice (CR 732.2b).
 #[test]
-fn a_shortened_sprout_loop_is_performed_while_an_accepted_one_is_stashed() {
+fn a_relic_holders_shortened_sprout_loop_is_performed_while_an_accepted_one_is_stashed() {
+    let Some((offer, relic)) = relic_offer_state() else {
+        return;
+    };
     let board = |s: &GameState| {
         (
             s.battlefield
@@ -9239,10 +9326,10 @@ fn a_shortened_sprout_loop_is_performed_while_an_accepted_one_is_stashed() {
             s.players.iter().find(|p| p.id == P0).unwrap().life as i64,
         )
     };
-    let at_offer = board(&batched_offer_state());
+    let at_offer = board(&offer);
 
     // Control: ACCEPTED at a non-zero count — the growth is deferred, not delivered.
-    let mut accepted = batched_offer_state();
+    let mut accepted = offer.clone();
     r6a_declare_and_accept_all(&mut accepted, P0, 2);
     assert_eq!(
         board(&accepted),
@@ -9271,7 +9358,7 @@ fn a_shortened_sprout_loop_is_performed_while_an_accepted_one_is_stashed() {
     );
 
     for place in [1u32, 2] {
-        let mut state = batched_offer_state();
+        let mut state = offer.clone();
         apply(
             &mut state,
             P0,
@@ -9324,6 +9411,13 @@ fn a_shortened_sprout_loop_is_performed_while_an_accepted_one_is_stashed() {
             WaitingFor::Priority { player: shortener },
             "the drive reached the place the responder named, so they hold the ending point"
         );
+        assert_eq!(shortener, P1, "reach: P1, the Relic's holder, shortened");
+        let pass = apply(&mut state.clone(), shortener, GameAction::PassPriority);
+        assert!(
+            matches!(pass, Err(EngineError::ActionNotAllowed(_))),
+            "CR 732.2c: the shortener owes a different choice than a pass; got {pass:?}"
+        );
+        diverge_with_relic(&mut state, shortener, relic);
 
         r6a_drive_to_boundary(&mut state);
         assert!(
@@ -9337,6 +9431,166 @@ fn a_shortened_sprout_loop_is_performed_while_an_accepted_one_is_stashed() {
             "nothing was stashed, so the boundary mints no collapse prompt; got {:?}",
             state.waiting_for
         );
+    }
+}
+
+/// CR 732.2b: a responder shortens by "naming a place where they will make a game choice that's
+/// different than what's been proposed". On the real 4p Sprout board P1 has no legal action but a
+/// pass at the place it names, so its `Shorten` is refused and its window survives; the same place
+/// on the same board with Relic of Progenitus on P1's battlefield is admitted.
+#[test]
+fn a_shorten_by_a_seat_with_no_other_choice_at_its_place_is_refused() {
+    let mut state = batched_offer_state();
+    apply(
+        &mut state,
+        P0,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(3),
+            template: None,
+        },
+    )
+    .expect("the proposer declares");
+    let WaitingFor::RespondToShortcut {
+        player, proposal, ..
+    } = state.waiting_for.clone()
+    else {
+        panic!("the declaration opens a responder window");
+    };
+    assert_eq!(player, P1, "reach: P1 answers first");
+    assert_eq!(
+        shorten_refusal(&state, &proposal, P1, 1),
+        Some(ShortenRefusal::NoDifferentChoice)
+    );
+    let refused = apply(
+        &mut state,
+        P1,
+        GameAction::RespondToShortcut {
+            response: ShortcutResponse::Shorten { at_iteration: 1 },
+        },
+    );
+    assert!(
+        matches!(&refused, Err(EngineError::InvalidAction(message))
+            if message.contains(ShortenRefusal::NoDifferentChoice.reason())),
+        "the refusal names its cause: {refused:?}"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::RespondToShortcut { player, .. } if player == P1),
+        "the refusal writes nothing, so P1 can still answer"
+    );
+
+    let Some((mut relic_board, _)) = relic_offer_state() else {
+        return;
+    };
+    apply(
+        &mut relic_board,
+        P0,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(3),
+            template: None,
+        },
+    )
+    .expect("the proposer declares on the Relic board");
+    let WaitingFor::RespondToShortcut { proposal, .. } = relic_board.waiting_for.clone() else {
+        panic!("the declaration opens a responder window on the Relic board");
+    };
+    assert_eq!(shorten_refusal(&relic_board, &proposal, P1, 1), None);
+}
+
+/// CR 732.2b: the published shortening range is a superset of the places `apply()` admits, so a
+/// place inside it that names no different choice is refused at the reducer with its typed reason,
+/// and the window survives for the same responder to accept.
+#[test]
+fn a_refused_place_inside_the_published_range_leaves_the_window_to_accept() {
+    let mut state = batched_offer_state();
+    apply(
+        &mut state,
+        P0,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(3),
+            template: None,
+        },
+    )
+    .expect("the proposer declares");
+    engine::game::interaction::bind_interaction_authority(
+        &mut state,
+        engine::types::interaction::InteractionSessionId("range".into()),
+    )
+    .expect("valid interaction authority binding");
+    let filtered = engine::game::visibility::filter_state_for_viewer(&state, P1);
+    let published = engine::game::interaction::derive_viewer_interaction(&state, &filtered, P1)
+        .opportunities
+        .iter()
+        .find_map(|opportunity| match &opportunity.response {
+            engine::types::interaction::InteractionOpportunityResponse::Schema {
+                spec:
+                    engine::types::interaction::InteractionResponseSpec::ShortcutReply {
+                        min_iteration,
+                        max_iteration,
+                        ..
+                    },
+                ..
+            } => Some(*min_iteration..=*max_iteration),
+            _ => None,
+        })
+        .expect("P1's window publishes a shortcut-reply range");
+    assert!(
+        published.contains(&1),
+        "place 1 is published: {published:?}"
+    );
+
+    let refused = apply(
+        &mut state,
+        P1,
+        GameAction::RespondToShortcut {
+            response: ShortcutResponse::Shorten { at_iteration: 1 },
+        },
+    );
+    assert!(
+        matches!(&refused, Err(EngineError::InvalidAction(message))
+            if message.contains(ShortenRefusal::NoDifferentChoice.reason())),
+        "the published place is refused with its typed reason: {refused:?}"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::RespondToShortcut { player, .. } if player == P1),
+        "the refusal leaves P1's window open"
+    );
+    apply(
+        &mut state,
+        P1,
+        GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        },
+    )
+    .expect("P1 accepts in the window the refusal left");
+}
+
+/// The AI responder never shortens at place 0 and never sends a `Shorten` the engine refuses. P1
+/// holds Relic of Progenitus on the real 4p Sprout board: against three repetitions it shortens at
+/// one and the engine admits it, and against one repetition, where no place but 0 is admitted, it
+/// accepts.
+#[test]
+fn the_ai_responder_shortens_only_at_an_admitted_place_past_zero() {
+    let Some((offer, _)) = relic_offer_state() else {
+        return;
+    };
+    for (count, expected) in [
+        (3, ShortcutResponse::Shorten { at_iteration: 1 }),
+        (1, ShortcutResponse::Accept),
+    ] {
+        let mut state = offer.clone();
+        apply(
+            &mut state,
+            P0,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(count),
+                template: None,
+            },
+        )
+        .expect("the proposer declares");
+        let response = engine::ai_support::smart_shortcut_response(&state, P1);
+        assert_eq!(response, expected, "against Fixed({count})");
+        apply(&mut state, P1, GameAction::RespondToShortcut { response })
+            .expect("the engine admits the AI's answer");
     }
 }
 
@@ -12054,6 +12308,7 @@ fn a_shortened_unsigned_drive_seats_the_shortener_only_where_it_reached_the_name
         "../fixtures/dina_conqueror_4p.json.gz"
     )));
     drive_to_bounded_offer(&mut base, 400).expect("the bounded offer must fire on the 4p dump");
+    arm_responders(&mut base);
     let (proposer, _certificate, schema) = bounded_offer_parts(&base);
     let honest_bound = schema.deliverable_capacity;
     let lives_before: Vec<(PlayerId, i32)> = base.players.iter().map(|p| (p.id, p.life)).collect();

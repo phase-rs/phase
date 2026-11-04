@@ -7,10 +7,10 @@
 //! zero-count proposal included: the handler floors nothing at zero, so a declaration naming it
 //! mints a proposal and opens the poll on a range that holds no place at all.
 
-use engine::ai_support::legal_actions;
+use engine::ai_support::{legal_actions, AI_SHORTEN_PLACE};
 use engine::analysis::decision_template::{IterationCount, ShortcutDecisionSchema};
 use engine::analysis::loop_check::ShortcutResponse;
-use engine::game::engine::{apply, EngineError};
+use engine::game::engine::{apply, EngineError, ShortenRefusal};
 use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
 };
@@ -29,7 +29,9 @@ use engine::types::interaction::{
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-use crate::loop_shortcut::{gunzip_dump, reach_2p_optional_drain_offer, restore_dump};
+use crate::loop_shortcut::{
+    arm_responders, gunzip_dump, reach_2p_optional_drain_offer, restore_dump,
+};
 use crate::loop_shortcut_drain_boards::weird_drain_board;
 
 /// The seat now being polled, and the seats still queued behind it.
@@ -70,10 +72,18 @@ fn shorten(state: &mut GameState, at_iteration: u32) -> Result<(), EngineError> 
     respond(state, ShortcutResponse::Shorten { at_iteration })
 }
 
-/// The restored four-seat drain dump, declared at `count` and parked at its first responder.
-/// Its offer is directly declarable, so no drive stands between the restore and the window.
+/// The restored four-seat drain dump, its responders armed, declared at `count` and parked at its
+/// first responder.
 fn weird_window(count: IterationCount) -> GameState {
+    weird_window_with(count, arm_responders)
+}
+
+/// The restored four-seat drain dump, `prepare`d at its offer, declared at `count` and parked at
+/// its first responder. Its offer is directly declarable, so no drive stands between the restore
+/// and the window.
+fn weird_window_with(count: IterationCount, prepare: fn(&mut GameState)) -> GameState {
     let mut state = weird_drain_board();
+    prepare(&mut state);
     let WaitingFor::LoopShortcut { proposer, .. } = state.waiting_for.clone() else {
         panic!(
             "the weird-drain fixture restores at its offer, got {:?}",
@@ -115,11 +125,18 @@ fn weird_offer_bound() -> u32 {
     schema.deliverable_capacity
 }
 
-/// The driven two-player optional-drain rig, declared at `count` and parked at its responder.
-/// This is the only reachable board whose schema admits `UntilLethal`: both committed dumps
-/// refuse that declaration against their bounded offers.
+/// The driven two-player optional-drain rig, its responder armed, declared at `count` and parked
+/// at its responder.
 fn rig_window(count: IterationCount) -> GameState {
+    rig_window_with(count, arm_responders)
+}
+
+/// The driven two-player optional-drain rig, `prepare`d at its offer, declared at `count` and
+/// parked at its responder. This is the only reachable board whose schema admits `UntilLethal`:
+/// both committed dumps refuse that declaration against their bounded offers.
+fn rig_window_with(count: IterationCount, prepare: fn(&mut GameState)) -> GameState {
     let (mut runner, _life, _cleric) = reach_2p_optional_drain_offer();
+    prepare(runner.state_mut());
     runner
         .act(GameAction::DeclareShortcut {
             count: count.clone(),
@@ -822,20 +839,23 @@ fn the_engine_driven_seat_can_answer_a_window_whose_range_is_empty() {
     apply(&mut state, responder, candidates[0].clone())
         .expect("the generated candidate must be one the reducer accepts");
 
-    let mut guard = rig_window(IterationCount::Fixed(1));
+    let mut guard = rig_window(IterationCount::Fixed(2));
     assert_eq!(
         admitted_places(&guard),
-        0..=0,
-        "reach-guard: a one-repetition proposal admits exactly place 0"
+        0..=1,
+        "reach-guard: a two-repetition proposal admits places 0 and 1"
     );
     let (guard_responder, _) = window(&guard);
     let guard_candidates = legal_actions(&guard);
     assert_eq!(
         guard_candidates,
         vec![GameAction::RespondToShortcut {
-            response: ShortcutResponse::Shorten { at_iteration: 0 }
+            response: ShortcutResponse::Shorten {
+                at_iteration: AI_SHORTEN_PLACE
+            }
         }],
-        "reach-guard: on a range that holds a place this seat still names one"
+        "reach-guard: on a range that holds a place this seat, seated there with Relic of \
+         Progenitus to activate, still names one"
     );
     apply(&mut guard, guard_responder, guard_candidates[0].clone())
         .expect("the named place is legal on the proposal that admits it");
@@ -933,6 +953,10 @@ fn interaction_admits(state: &GameState, at_iteration: u32) -> bool {
 /// board. CR 732.2b's published range keeps both its ends; the budget is the engine's and is not
 /// published as one.
 ///
+/// At or below the budget the reducer also refuses a published place where the responder has no
+/// game choice but passing (CR 732.2b), with that typed reason; each board is probed with its
+/// responders armed and bare, so both the agreement and that refusal are reached.
+///
 /// The at-or-below partition keeps its own counting reach-guard — a dead projection and a
 /// blanket refusal both fail it — and the above-budget partition is asserted non-empty, so
 /// routing the submission gate through the same predicate would empty it and fire.
@@ -944,14 +968,18 @@ fn the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it(
     let cap = ShortcutDecisionSchema::default().deliverable_capacity;
     let mut admitted = 0usize;
     let mut refused = 0usize;
+    let mut no_choice = 0usize;
     let mut above_budget = 0usize;
+    let bare: fn(&mut GameState) = |_| {};
 
-    for mut state in [
-        weird_window(IterationCount::Fixed(0)),
-        weird_window(IterationCount::Fixed(bound)),
-        rig_window(IterationCount::Fixed(1)),
-        rig_window(IterationCount::UntilLethal),
-    ] {
+    for mut state in [arm_responders, bare].into_iter().flat_map(|prepare| {
+        [
+            weird_window_with(IterationCount::Fixed(0), prepare),
+            weird_window_with(IterationCount::Fixed(bound), prepare),
+            rig_window_with(IterationCount::Fixed(1), prepare),
+            rig_window_with(IterationCount::UntilLethal, prepare),
+        ]
+    }) {
         bind_interaction_authority(&mut state, InteractionSessionId("shortening".to_string()))
             .expect("the responder window binds interaction authority");
         let places = admitted_places(&state);
@@ -970,17 +998,22 @@ fn the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it(
         ];
         for place in probes {
             let mut board = state.clone();
-            let honored = shorten(&mut board, place).is_ok();
+            let reply = shorten(&mut board, place);
+            let honored = reply.is_ok();
             let published = interaction_admits(&state, place);
             if place <= cap {
-                assert_eq!(
-                    published, honored,
-                    "the two layers disagree on place {place} against {places:?}"
-                );
-                if honored {
-                    admitted += 1;
-                } else {
-                    refused += 1;
+                match (published, reply) {
+                    (true, Ok(())) => admitted += 1,
+                    (false, Err(_)) => refused += 1,
+                    (true, Err(EngineError::InvalidAction(reason)))
+                        if reason.ends_with(ShortenRefusal::NoDifferentChoice.reason()) =>
+                    {
+                        no_choice += 1
+                    }
+                    (published, reply) => panic!(
+                        "the two layers disagree on place {place} against {places:?}: published \
+                         {published}, reducer {reply:?}"
+                    ),
                 }
             } else {
                 assert!(
@@ -1003,6 +1036,11 @@ fn the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it(
         "reach-guard on the agreeing partition itself: {admitted} admitted and {refused} refused \
          at or below the budget, so neither a dead projection nor a blanket refusal can satisfy \
          the agreement"
+    );
+    assert!(
+        no_choice > 0,
+        "reach-guard on the no-choice refusal: no published place was refused for a responder \
+         with nothing but a pass"
     );
     assert!(
         above_budget > 0,
@@ -1297,7 +1335,7 @@ fn colorless(state: &GameState, player: PlayerId) -> usize {
         .unwrap_or(0)
 }
 
-/// The mana engine at its offer, plus the seat that proposed it.
+/// The mana engine, its responder armed at the offer, declared at `count`.
 fn mana_engine_window(db: &engine::database::card_db::CardDatabase, count: u32) -> GameState {
     use crate::loop_shortcut_mana_engine as rig;
     let mut engine_rig = rig::setup(true, LoopDetectionMode::Interactive, db);
@@ -1314,6 +1352,7 @@ fn mana_engine_window(db: &engine::database::card_db::CardDatabase, count: u32) 
         "reach-guard: the mana engine must OFFER before a response can be tested, got {:?}",
         engine_rig.runner.state().waiting_for
     );
+    arm_responders(engine_rig.runner.state_mut());
     engine_rig
         .runner
         .act(GameAction::DeclareShortcut {

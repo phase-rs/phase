@@ -6072,9 +6072,14 @@ fn end_shortcut_at_priority(
     state.clear_loop_detect_window();
     state.play_trace = None;
     priority::reset_priority(state);
-    state.waiting_for = WaitingFor::Priority {
-        player: shortcut_ending_point_seat(state, proposal, reached_named_place),
-    };
+    let seat = shortcut_ending_point_seat(state, proposal, reached_named_place);
+    // CR 732.2c: "If the shortcut was shortened from the original proposal, the player who now
+    // has priority must make a different game choice than what was originally proposed for that
+    // player" — the proposal had them pass here, so a bare pass is refused until they act.
+    if reached_named_place && proposal.shortened_by == Some(seat) {
+        state.precast_shortcut_runtime.must_diverge = Some(seat);
+    }
+    state.waiting_for = WaitingFor::Priority { player: seat };
     result.waiting_for = state.waiting_for.clone();
 }
 
@@ -9012,10 +9017,10 @@ pub(crate) fn drive_persistent_axis_collapse(
     predicted: Option<&[crate::analysis::resource::PredictedDeparture]>,
     events: &mut Vec<GameEvent>,
 ) -> Result<u32, EngineError> {
-    let _guard = SimulationProbeGuard::enter(); // held across the whole drive
-    let _take = super::engine_casting::ConfirmedTakeGuard::enter();
     #[cfg(feature = "test-support")]
     let mut take_cost = crate::game::perf_counters::TakeCostRecorder::begin(n);
+    let _guard = SimulationProbeGuard::enter(); // held across the whole drive
+    let _take = super::engine_casting::ConfirmedTakeGuard::enter();
     // One rollback snapshot per take: every cycle drives `state` in place, and a failed cycle
     // restores the snapshot and re-drives the delivered prefix, which is deterministic from it.
     let snapshot = state.clone();
@@ -9620,6 +9625,110 @@ fn handle_decline_shortcut(
     Ok(result)
 }
 
+/// CR 732.2b: why a responder may not shorten a proposal at the place it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortenRefusal {
+    /// No counted take of the offer performs, for this cause.
+    Unperformable(crate::analysis::loop_check::UnperformableCause),
+    /// The place is at or past the proposed count, so it names no different choice.
+    OutsideProposal,
+    /// The place is inside the proposed sequence, but this engine will not drive it there.
+    Undrivable,
+    /// The responder has no game choice at the place other than the pass proposed for them.
+    NoDifferentChoice,
+}
+
+impl ShortenRefusal {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Unperformable(cause) => cause.reason(),
+            Self::OutsideProposal => "the place is outside the proposed sequence",
+            Self::Undrivable => {
+                "the place is inside the proposed sequence, but this engine will not take the \
+                 sequence there"
+            }
+            Self::NoDifferentChoice => {
+                "CR 732.2b: the responder has no game choice there other than passing"
+            }
+        }
+    }
+}
+
+/// CR 732.2b: a place `seat` may shorten a proposal at, by whether the take seats `seat` there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmittedPlace {
+    /// The take errs or never arms CR 732.2c's latch for the seat at the place.
+    Unseated,
+    /// The take arms CR 732.2c's latch for the seat, which has a meaningful priority action there.
+    Seated,
+}
+
+/// CR 732.2b: the refusal of `seat` shortening `proposal` at `place`, if any — "a place where they
+/// will make a game choice that's different than what's been proposed". A place is refused as
+/// naming no different choice only when the take there arms CR 732.2c's latch for `seat` and `seat`
+/// has no meaningful priority action; a place the take never reaches is admitted.
+pub fn shorten_refusal(
+    state: &GameState,
+    proposal: &crate::analysis::loop_check::ShortcutProposal,
+    seat: PlayerId,
+    place: u32,
+) -> Option<ShortenRefusal> {
+    shorten_admission(state, proposal, seat, place).err()
+}
+
+/// [`shorten_refusal`]'s verdict, carrying for an admitted place whether the take seats `seat`.
+pub fn shorten_admission(
+    state: &GameState,
+    proposal: &crate::analysis::loop_check::ShortcutProposal,
+    seat: PlayerId,
+    place: u32,
+) -> Result<AdmittedPlace, ShortenRefusal> {
+    if let Some(cause) = proposal.counted_take.refusal(place) {
+        return Err(ShortenRefusal::Unperformable(cause));
+    }
+    if !proposal.shortening_places().contains(&place) {
+        return Err(ShortenRefusal::OutsideProposal);
+    }
+    // Refusing keeps the answer CR 732.2b put in the responder's hands; dropping the shortcut
+    // would substitute a decline for it.
+    if !shortcut_count_is_drivable(state, proposal, place) {
+        return Err(ShortenRefusal::Undrivable);
+    }
+    match shortened_place_choice(state, proposal, seat, place) {
+        None => Ok(AdmittedPlace::Unseated),
+        Some(true) => Ok(AdmittedPlace::Seated),
+        Some(false) => Err(ShortenRefusal::NoDifferentChoice),
+    }
+}
+
+/// Performs the take to `place` on scratch: `None` unless it arms the CR 732.2c latch for `seat`
+/// (the latch is the take's own proof of reach), else whether `seat` has a meaningful priority
+/// action there.
+fn shortened_place_choice(
+    state: &GameState,
+    proposal: &crate::analysis::loop_check::ShortcutProposal,
+    seat: PlayerId,
+    place: u32,
+) -> Option<bool> {
+    let mut shortened = proposal.clone();
+    shortened.count = crate::analysis::decision_template::IterationCount::Fixed(place);
+    shortened.shortened_by = Some(seat);
+    let mut scratch = state.clone();
+    scratch.precast_shortcut_runtime.must_diverge = None;
+    let mut result = ActionResult::applied(Vec::new(), scratch.waiting_for.clone());
+    let _probe = SimulationProbeGuard::enter();
+    if materialize_fixed_shortcut(&mut scratch, &mut result, &shortened, place).is_err()
+        || scratch.precast_shortcut_runtime.must_diverge != Some(seat)
+    {
+        return None;
+    }
+    let (probe, actions) = crate::ai_support::shortcut_probe(&scratch, seat);
+    Some(crate::ai_support::has_meaningful_priority_action(
+        probe.state(),
+        &actions,
+    ))
+}
+
 /// CR 732.2b/c: one opponent answered the shortcut offer. Mirrors the
 /// `OpponentMayChoice`/`UnlessPayment` APNAP fan-out (drain-one-advance via
 /// `remaining_players`). Both answers advance the same poll, and the last of them takes the
@@ -9634,31 +9743,13 @@ fn handle_respond_to_shortcut(
     response: crate::analysis::loop_check::ShortcutResponse,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
-    // CR 732.2b: a shortening responder names "a place where they will make a game choice that's
-    // different than what's been proposed", so a place at or past the proposed count names no such
-    // choice and the proposal admits it nowhere. `apply()` is the boundary every emitter crosses,
-    // and this refusal precedes the event take and every state write, so the responder keeps the
-    // window and can answer again.
+    // `apply()` is the boundary every emitter crosses, and this refusal precedes the event take
+    // and every state write, so the responder keeps the window and can answer again.
     if let crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration } = response {
-        // The cause `shortening_places` narrows its range for is the reason the responder reads.
-        if let Some(cause) = proposal.counted_take.refusal(at_iteration) {
-            return Err(EngineError::InvalidAction(cause.reason().to_string()));
-        }
-        if !proposal.shortening_places().contains(&at_iteration) {
+        if let Some(refusal) = shorten_refusal(state, &proposal, player, at_iteration) {
             return Err(EngineError::InvalidAction(format!(
-                "Shortcut place {at_iteration} is outside the proposed sequence"
-            )));
-        }
-        // CR 732.2b gives a responder two answers — accept, or name the place the sequence ends
-        // at — and CR 732.2c takes the shortcut once the last player has given one of them.
-        // Dropping the shortcut and restarting priority substitutes a decline for the answer they
-        // gave, and spends a grant CR 732.2b put in their hands without telling them. Refuse here
-        // instead, before the event take and every state write, so the window survives and they
-        // can name a place this engine will drive.
-        if !shortcut_count_is_drivable(state, &proposal, at_iteration) {
-            return Err(EngineError::InvalidAction(format!(
-                "Shortcut place {at_iteration} is inside the proposed sequence, but this engine \
-                 will not take the sequence there"
+                "Shortcut place {at_iteration}: {}",
+                refusal.reason()
             )));
         }
     }
@@ -12347,7 +12438,7 @@ fn install_auto_pass_and_pass_priority(
     let pass_immediately = player == auto_pass_owner;
     if pass_immediately && super::precast_copy_shortcut::blocks_pass(state, player) {
         return Err(EngineError::ActionNotAllowed(
-            "A shortened pre-cast shortcut requires a different meaningful action before passing"
+            "A shortened shortcut requires a different meaningful action before passing"
                 .to_string(),
         ));
     }

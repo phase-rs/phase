@@ -1228,6 +1228,8 @@ pub fn reset_take_cost() {
 #[cfg(feature = "test-support")]
 pub(crate) struct TakeCostRecorder {
     count: u32,
+    // A take begun inside a simulation probe is a scratch take, not a real one.
+    in_probe: bool,
     take_start: TakeCostCounters,
     cycle_start: TakeCostCounters,
     cycles: Vec<TakeCostCounters>,
@@ -1239,6 +1241,7 @@ impl TakeCostRecorder {
         let now = take_cost_snapshot();
         Self {
             count,
+            in_probe: crate::game::engine::in_simulation_probe(),
             take_start: now,
             cycle_start: now,
             cycles: Vec::new(),
@@ -1255,6 +1258,9 @@ impl TakeCostRecorder {
     }
 
     pub(crate) fn finish(self, delivered: u32) {
+        if self.in_probe {
+            return;
+        }
         let record = TakeCostRecord {
             count: self.count,
             delivered,

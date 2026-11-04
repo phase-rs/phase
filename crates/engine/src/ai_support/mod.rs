@@ -1744,7 +1744,7 @@ pub fn stage_two_action_set(
 ///     HUMAN player's submitted `InteractionShortcutReply` into the action. That
 ///     one is deliberately NOT covered: running a stated human choice through an
 ///     AI heuristic would overwrite it. It is also the only site that can emit a
-///     non-zero `at_iteration` — every AI site emits `Shorten { at_iteration: 0 }`.
+///     place other than [`AI_SHORTEN_PLACE`], the one every AI site names.
 ///
 /// `candidate_actions_broad_with_probe` additionally routes
 /// `WaitingFor::RespondToPrecastCopyShortcut` here and maps the answer onto
@@ -1787,9 +1787,9 @@ pub fn stage_two_action_set(
 ///     call below; the wider phrasing would claim coverage of shapes neither
 ///     stage enumerates.
 ///
-/// Otherwise the seat still Shortens and gets its window — at the place 0 every AI site emits,
-/// the shortened proposal admits no place, so the shortcut is taken at once and CR 732.2b's new
-/// ending point IS that window, held by this seat.
+/// Otherwise the seat Shortens at [`AI_SHORTEN_PLACE`] where
+/// `game::engine::shorten_admission` finds the take seats it with a meaningful action there, and
+/// Accepts everywhere else.
 ///
 /// READ-ORDER: the proposal is read off the ORIGINAL `state`, before
 /// [`shortcut_probe`] re-parks its clone at `Priority` — the probe state carries
@@ -1860,12 +1860,31 @@ pub fn smart_shortcut_response(
         polled_player,
         &stage_two_action_set(probe.state(), &actions),
     ) {
-        // CR 732.2b: name an earlier stopping point — take my window instead of losing.
-        crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration: 0 }
+        // CR 732.2b + CR 732.2c: name an earlier stopping point only where the take seats this
+        // seat with an action to take there; a shortening that never seats it buys no window.
+        match &state.waiting_for {
+            WaitingFor::RespondToShortcut { proposal, .. }
+                if crate::game::engine::shorten_admission(
+                    state,
+                    proposal,
+                    polled_player,
+                    AI_SHORTEN_PLACE,
+                ) != Ok(crate::game::engine::AdmittedPlace::Seated) =>
+            {
+                crate::analysis::loop_check::ShortcutResponse::Accept
+            }
+            _ => crate::analysis::loop_check::ShortcutResponse::Shorten {
+                at_iteration: AI_SHORTEN_PLACE,
+            },
+        }
     } else {
         crate::analysis::loop_check::ShortcutResponse::Accept
     }
 }
+
+/// The place an AI responder shortens at: one repetition, so the proposer sees their loop land
+/// before the AI answers it (a play-style choice, not a rule).
+pub const AI_SHORTEN_PLACE: u32 = 1;
 
 fn auto_passes_initial_priority_by_default(state: &GameState) -> bool {
     state.stack.is_empty() && matches!(state.phase, Phase::Upkeep | Phase::Draw)

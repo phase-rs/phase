@@ -1833,7 +1833,7 @@ fn a_drain_with_an_out_outside_the_loop_is_offered_not_won() {
             "{drive:?}"
         );
         let leg = format!("{drive:?}");
-        let state = offered.state();
+        let state = &armed(offered.state());
         assert_eq!(counted_take(state), CountedTake::Performs, "{leg}");
         let (window, _) = admitted(state, P0, declare(IterationCount::Fixed(3)), &leg);
         assert!(responds(&window, P1), "{leg}: {:?}", window.waiting_for);
@@ -3264,10 +3264,18 @@ fn assert_viewers_read_the_take(offered: &GameState, leg: &str) {
     }
 }
 
+/// `offered` with its responders armed, so P1 holds a game choice at every place it names.
+fn armed(offered: &GameState) -> GameState {
+    let mut armed = offered.clone();
+    crate::loop_shortcut::arm_responders(&mut armed);
+    armed
+}
+
 /// Asserts the offer at `offered` carries `take`, so P0's counted and until-lethal declarations
 /// and P1's shortens past the current place are refused with the board as it was, while a
 /// declaration without end is admitted and a shorten at the current place gives P1 priority.
 pub(crate) fn assert_no_counted_take(offered: &GameState, take: CountedTake, leg: &str) {
+    let offered = &armed(offered);
     let CountedTake::Unperformable(cause) = take else {
         panic!("{leg}: a take that performs takes counts");
     };
@@ -3361,7 +3369,10 @@ fn a_without_end_offer_the_drain_delimits_takes_every_count() {
             first: Some("Soul Warden"),
             ..warden
         },
-        WOOD_ELVES,
+        Board {
+            p1_cards: P1_SHORTENER,
+            ..WOOD_ELVES
+        },
     ] {
         for drive in EVERY_DRIVE {
             let leg = format!(
@@ -3513,6 +3524,11 @@ const WOOD_ELVES: Board = Board {
     wood_elves: Some(10),
     ..PLAIN
 };
+
+/// Terramorphic Expanse ("{T}, Sacrifice this land: Search your library for a basic land card, put
+/// it onto the battlefield tapped, then shuffle."), held from the start, so P1 has a game choice
+/// at every place it may name (CR 732.2b) that reaches only its own library.
+const P1_SHORTENER: &[&str] = &["Terramorphic Expanse"];
 
 /// Asserts every drive at `board` stops at P0's offer of a draw without end over its shuffled
 /// library, that every player accepting it draws the game, and that Off runs on.
@@ -4134,7 +4150,7 @@ fn a_restored_counted_proposal_over_a_choice_refuses_a_later_place() {
         };
         let leg = format!("{:?}", board.first);
         assert_out_offer(&offered, &leg);
-        let (window, _) = admitted(offered.state(), P0, DECLARE_WITHOUT_END, &leg);
+        let (window, _) = admitted(&armed(offered.state()), P0, DECLARE_WITHOUT_END, &leg);
         for count in [IterationCount::Fixed(3), IterationCount::UntilLethal] {
             let leg = format!("{leg} {count:?}");
             let mut counted = window.clone();
@@ -4174,9 +4190,13 @@ fn a_restored_counted_proposal_over_a_choice_refuses_a_later_place() {
 /// delimiter fires in the replay beside P1's Soul Warden, so a count is taken, and fires nowhere
 /// beside P0's, so no count above zero is taken.
 fn shuffle_only_the_replay_draws_is_offered(drive: Drive) {
-    for (seat, refused) in [(P1, None), (P0, Some(UnperformableCause::UndelimitedCover))] {
+    for (seat, p1_cards, refused) in [
+        (P1, P1_SHORTENER, None),
+        (P0, &[][..], Some(UnperformableCause::UndelimitedCover)),
+    ] {
         let board = Board {
             soul_warden: Some(seat),
+            p1_cards,
             ..WOOD_ELVES
         };
         let leg = format!("{seat:?} {drive:?}");
@@ -4225,5 +4245,13 @@ fn a_shuffle_only_the_replay_draws_until_stack_empty_is_offered() {
 pub(crate) fn two_targets_without_end_window() -> Option<GameState> {
     let offered = run(TWO_TARGETS, LoopDetectionMode::Interactive, Drive::Pass, 60)?;
     assert_out_offer(&offered, "two targets");
-    Some(admitted(offered.state(), P0, DECLARE_WITHOUT_END, "two targets").0)
+    Some(
+        admitted(
+            &armed(offered.state()),
+            P0,
+            DECLARE_WITHOUT_END,
+            "two targets",
+        )
+        .0,
+    )
 }

@@ -7701,3 +7701,97 @@ fn a_time_sieve_thopter_assembly_replay_answers_the_recorded_sacrifice() {
     expected.push(Err(OfferRefusal::UnanswerablePrompt));
     assert_eq!(verdicts, expected);
 }
+
+/// Cauldron Familiar ("When this creature enters, each opponent loses 1 life and you gain 1 life.
+/// / Sacrifice a Food: Return this card from your graveyard to the battlefield.") cast beside
+/// Carrion Feeder ("Sacrifice a creature: Put a +1/+1 counter on this creature.") and Samwise
+/// Gamgee, then recurred until the loop is offered; P1 holds Relic of Progenitus ("{T}: Target
+/// player exiles a card from their graveyard."). Returns the runner and the Relic.
+fn familiar_offered(db: &CardDatabase) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P1, 20);
+    let feeder = scenario.add_real_card(P0, "Carrion Feeder", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Samwise Gamgee", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Swamp", Zone::Battlefield, db);
+    let familiar = scenario.add_real_card(P0, "Cauldron Familiar", Zone::Hand, db);
+    let relic = scenario.add_real_card(P1, "Relic of Progenitus", Zone::Battlefield, db);
+    for seat in [P0, P1] {
+        for _ in 0..10 {
+            scenario.add_real_card(seat, "Swamp", Zone::Library, db);
+        }
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let named = [familiar];
+    let score = names(&named);
+    cast(&mut runner, familiar, vec![], CastPaymentMode::Auto);
+    settle(&mut runner, &score);
+    for _ in 0..4 {
+        for source in [feeder, familiar] {
+            let index = ability(runner.state(), source, false);
+            activate(&mut runner, source, index);
+            settle(&mut runner, &score);
+            if is_offer(runner.state()) {
+                return (runner, relic);
+            }
+        }
+    }
+    panic!(
+        "no offer; latest verdict {:?}",
+        latest_verdict(runner.state())
+    );
+}
+
+/// CR 732.2c: "If the shortcut was shortened from the original proposal, the player who now has
+/// priority must make a different game choice than what was originally proposed for that
+/// player." A Familiar take P1 shortens ends at P1's priority, where P1's bare pass is refused and
+/// activating the Relic is accepted; the same take accepted outright owes its seat nothing.
+#[test]
+fn a_shortened_familiar_take_refuses_the_shorteners_bare_pass() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, relic) = familiar_offered(db);
+    act(
+        &mut runner,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(6),
+            template: None,
+        },
+    );
+    let mut accepted = GameRunner::from_state(runner.state().clone());
+    let before = lives(runner.state());
+    act(
+        &mut runner,
+        GameAction::RespondToShortcut {
+            response: ShortcutResponse::Shorten { at_iteration: 3 },
+        },
+    );
+    let state = runner.state();
+    assert_eq!(
+        (lives(state)[1], state.waiting_for.clone()),
+        (before[1] - 3, WaitingFor::Priority { player: P1 }),
+        "reach: the take performed the three cycles P1 named and ended at P1's priority"
+    );
+    let pass = engine::game::engine::apply(&mut state.clone(), P1, GameAction::PassPriority);
+    assert!(
+        matches!(pass, Err(EngineError::ActionNotAllowed(_))),
+        "the shortener's bare pass must be refused: {pass:?}"
+    );
+    let index = ability(runner.state(), relic, false);
+    activate(&mut runner, relic, index);
+
+    accept(&mut accepted);
+    let WaitingFor::Priority { player } = accepted.state().waiting_for else {
+        panic!("{}", accepted.state().waiting_for.variant_name());
+    };
+    assert!(
+        lives(accepted.state())[1] < before[1],
+        "reach: the accepted take performed its cycles"
+    );
+    let pass = engine::game::engine::apply(
+        &mut accepted.state().clone(),
+        player,
+        GameAction::PassPriority,
+    );
+    assert!(pass.is_ok(), "an accepted take latches nothing: {pass:?}");
+}

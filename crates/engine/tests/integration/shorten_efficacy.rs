@@ -237,8 +237,7 @@ fn respond_window_at(runner: &mut GameRunner, kickoff: ObjectId, seat: PlayerId)
 /// controller's library, so the window would change nothing.
 ///
 /// MUTANTS — both flip the `Accept` assertion:
-/// * DROP ⇒ `Shorten { at_iteration: 0 }` (this IS the shipped behaviour, which
-///   is the defect).
+/// * DROP ⇒ `Shorten`.
 /// * TRIVIALIZE arm (B) (`any_action_may_interfere ≡ true`) ⇒ `Shorten`.
 ///
 /// REACH-GUARDS (both are assertions): the fetchland really is enumerated, and
@@ -342,7 +341,8 @@ fn v1c_graveyard_hate_across_a_per_player_zone_keeps_its_window() {
 
     assert_eq!(
         engine::ai_support::smart_shortcut_response(runner.state(), P2),
-        ShortcutResponse::Shorten { at_iteration: 0 },
+        // After one repetition P2's Deathrite Shaman can still exile P1's land card, so the AI's place 1 is admitted.
+        ShortcutResponse::Shorten { at_iteration: 1 },
         "exiling a land card out of ANOTHER player's graveyard is real interaction — the \
          confinement predicate must require PROVEN actor ownership, not merely a zone name"
     );
@@ -402,7 +402,8 @@ fn v3_matched_pair_empty_seat_accepts_and_bolt_seat_still_shortens() {
     );
     assert_eq!(
         engine::ai_support::smart_shortcut_response(armed.state(), P2),
-        ShortcutResponse::Shorten { at_iteration: 0 },
+        // After one repetition P2 still holds Lightning Bolt and its Mountain, so the AI's place 1 is admitted.
+        ShortcutResponse::Shorten { at_iteration: 1 },
         "ACCEPTANCE (b): a seat holding real interaction must still get its priority window — \
          this is the assertion any over-broad confinement rule destroys first"
     );
@@ -822,10 +823,9 @@ fn non_pass_actions(state: &GameState, seat: PlayerId) -> Vec<String> {
 ///
 /// The defect, on this exact board: seat P2 controls **`ObjectId(203)`,
 /// "Terramorphic Expanse"**, on the battlefield. A non-mana activated ability is
-/// unconditionally "meaningful" to stage 1, so the shipped one-stage predicate
-/// answered `Shorten { at_iteration: 0 }` — handing P2 a real priority window
-/// whose only content is cracking its own fetchland, which cannot touch the
-/// drain. Stage 2 answers `Accept`.
+/// unconditionally "meaningful" to stage 1, so stage 1 alone answers `Shorten` —
+/// handing P2 a real priority window whose only content is cracking its own
+/// fetchland, which cannot touch the drain. Stage 2 answers `Accept`.
 ///
 /// **V5 — bounded offers are NOT exempt.** MEASURED on this board: the offer
 /// mints at beat 21 carrying `predicted_winner: None` and a FINITE
@@ -840,9 +840,8 @@ fn non_pass_actions(state: &GameState, seat: PlayerId) -> Vec<String> {
 /// stage 1 and are unaffected. That is the sibling control: the change is
 /// surgical, not a blanket flip to `Accept`.
 ///
-/// MUTANTS — the `Accept` assertion flips under both:
-/// * **DROP** (delete stage 2) ⇒ `Shorten { at_iteration: 0 }`, which is the
-///   shipped behaviour and therefore the defect itself;
+/// MUTANTS — the pre-cast `Accept` assertion flips under both:
+/// * **DROP** (delete stage 2) ⇒ `Shorten`;
 /// * **TRIVIALIZE** (`any_action_may_interfere ≡ true`) ⇒ `Shorten`.
 ///
 /// The opposite direction is `v1_positive_control_*` below, on this same board.
@@ -942,6 +941,11 @@ fn v1_live_path_fetchland_seat_accepts_on_the_real_4p_board() {
          must not buy a priority window with it. CR 732.2c is satisfied by ANY different \
          choice, which is exactly why satisfying it carries no efficacy"
     );
+    assert_eq!(
+        precast_response(&polled, P2),
+        ShortcutResponse::Accept,
+        "arm (B) alone answers Accept: the fetchland reaches nothing outside P2's own library"
+    );
 
     // ── sibling control: the flip set is exactly {P2} ──
     for seat in [P1, P3] {
@@ -992,7 +996,12 @@ fn v1_positive_control_interactive_seat_still_shortens_on_the_real_4p_board() {
 
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&polled, P2),
-        ShortcutResponse::Shorten { at_iteration: 0 },
+        ShortcutResponse::Accept,
+        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+    );
+    assert_eq!(
+        precast_response(&polled, P2),
+        ShortcutResponse::Shorten { at_iteration: 1 },
         "ACCEPTANCE (b), LIVE PATH: a seat holding real interaction must still get its window. \
          This is the assertion any over-broad confinement rule destroys first"
     );
@@ -1086,6 +1095,12 @@ fn as_precast_window(state: &GameState, seat: PlayerId) -> GameState {
         remaining_players: Vec::new(),
     };
     s
+}
+
+/// Arm (B)'s verdict on `state`'s board, read at the pre-cast window, where no take gates a
+/// `Shorten`: on a board whose take never seats the seat, the generic window Accepts either way.
+fn precast_response(state: &GameState, seat: PlayerId) -> ShortcutResponse {
+    engine::ai_support::smart_shortcut_response(&as_precast_window(state, seat), seat)
 }
 
 /// The pre-cast reply the PRODUCTION candidate builder emits for this state.
@@ -1382,7 +1397,8 @@ fn v9b_a_sacrifice_for_mana_seat_still_gets_its_window() {
 
     assert_eq!(
         engine::ai_support::smart_shortcut_response(runner.state(), P2),
-        ShortcutResponse::Shorten { at_iteration: 0 },
+        // After one repetition P2 can still sacrifice an artifact to Krark-Clan Ironworks, so the AI's place 1 is admitted.
+        ShortcutResponse::Shorten { at_iteration: 1 },
         "a seat whose only meaningful action is {activation:?} must keep its window: the AST does \
          not prove the sacrificed artifact is this seat's own, and stage 2 must not Accept a \
          reach it cannot rule out"
@@ -1816,7 +1832,12 @@ fn v10a_a_cast_mana_spell_that_funds_an_unaffordable_answer_keeps_its_window() {
     );
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&shorten_arm, P2),
-        ShortcutResponse::Shorten { at_iteration: 0 },
+        ShortcutResponse::Accept,
+        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+    );
+    assert_eq!(
+        precast_response(&shorten_arm, P2),
+        ShortcutResponse::Shorten { at_iteration: 1 },
         "the pair's positive arm: producing mana is REACH (CR 106.1 / CR 106.4 / CR 601.2g). \
          The ritual is the one object that differs, and accepting here surrenders a live out"
     );
@@ -1988,7 +2009,12 @@ fn v10b_an_actor_owned_sacrifice_for_mana_seat_keeps_its_window() {
     );
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&shorten_arm, P2),
-        ShortcutResponse::Shorten { at_iteration: 0 },
+        ShortcutResponse::Accept,
+        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+    );
+    assert_eq!(
+        precast_response(&shorten_arm, P2),
+        ShortcutResponse::Shorten { at_iteration: 1 },
         "the pair's positive arm: an actor-owned sacrifice-for-mana activation is two board \
          events, not a confined own resource. Stage 1 re-admits it PRECISELY because the \
          sacrifice is board-changing, so classifying it as confined here contradicted the stage \
@@ -2232,7 +2258,12 @@ fn v10c_an_untapped_fetch_that_funds_an_unaffordable_answer_keeps_its_window() {
     );
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&shorten_arm, P2),
-        ShortcutResponse::Shorten { at_iteration: 0 },
+        ShortcutResponse::Accept,
+        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+    );
+    assert_eq!(
+        precast_response(&shorten_arm, P2),
+        ShortcutResponse::Shorten { at_iteration: 1 },
         "the pair's positive arm: a fetch that puts a land onto the battlefield UNTAPPED \
          (CR 110.5b) hands the seat mana inside its own window, so accepting here surrenders a \
          live out. The Rotation is the one object that differs"
@@ -2469,7 +2500,12 @@ fn t1_2_a_controlled_but_unowned_fetchland_is_not_confined() {
     polled.objects.get_mut(&fetch).expect("just read").owner = P1;
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&polled, P2),
-        ShortcutResponse::Shorten { at_iteration: 0 },
+        ShortcutResponse::Accept,
+        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+    );
+    assert_eq!(
+        precast_response(&polled, P2),
+        ShortcutResponse::Shorten { at_iteration: 1 },
         "CR 701.21a: sacrificing a permanent P2 controls but P1 OWNS puts a card into P1's \
          graveyard. `filter_is_actor_owned` cannot see that — it proves control (CR 109.5) — so \
          the ownership fact has to be proven at board level or this Accept is unsound"
@@ -2549,7 +2585,12 @@ fn t2_1_an_opponent_owned_landfall_observer_defeats_a_confined_fetch() {
     );
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&polled, P2),
-        ShortcutResponse::Shorten { at_iteration: 0 },
+        ShortcutResponse::Accept,
+        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+    );
+    assert_eq!(
+        precast_response(&polled, P2),
+        ShortcutResponse::Shorten { at_iteration: 1 },
         "CR 603.2: P2's 'confined' fetch makes a land enter, the opponent's Crab triggers on it, \
          and its effect mills a TARGET PLAYER. The action reached outside P2's own resources \
          without P2's own AST containing anything that says so"
@@ -2588,7 +2629,7 @@ fn t2_4_a_landfall_observer_in_hand_does_not_veto_but_in_its_own_zone_it_does() 
         (Zone::Hand, ShortcutResponse::Accept),
         (
             Zone::Graveyard,
-            ShortcutResponse::Shorten { at_iteration: 0 },
+            ShortcutResponse::Shorten { at_iteration: 1 },
         ),
     ] {
         let mut staged = board.clone();
@@ -2606,6 +2647,12 @@ fn t2_4_a_landfall_observer_in_hand_does_not_veto_but_in_its_own_zone_it_does() 
         );
         assert_eq!(
             engine::ai_support::smart_shortcut_response(&polled, P2),
+            ShortcutResponse::Accept,
+            "the take to place 1 never seats P2 at priority, so shortening there buys P2 no \
+             window; at {zone:?}"
+        );
+        assert_eq!(
+            precast_response(&polled, P2),
             expected,
             "CR 113.6: the SAME trigger on the SAME card must veto from the zone it functions in \
              and not from the zone it does not; failed at {zone:?}"
@@ -2662,7 +2709,12 @@ fn t2_8_a_command_zone_emblem_observer_is_scanned() {
     );
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&polled, P2),
-        ShortcutResponse::Shorten { at_iteration: 0 },
+        ShortcutResponse::Accept,
+        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+    );
+    assert_eq!(
+        precast_response(&polled, P2),
+        ShortcutResponse::Shorten { at_iteration: 1 },
         "CR 114.1 + CR 603.2: an observer in the command zone observes. A battlefield-only scan \
          would miss every emblem and every command-zone trigger"
     );
@@ -2726,7 +2778,12 @@ fn t2_9_the_actors_own_self_referential_observer_keeps_the_veto() {
     }
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&polled, P2),
-        ShortcutResponse::Shorten { at_iteration: 0 },
+        ShortcutResponse::Accept,
+        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+    );
+    assert_eq!(
+        precast_response(&polled, P2),
+        ShortcutResponse::Shorten { at_iteration: 1 },
         "CR 109.5: 'you' on the observer means ITS controller. Once that is the actor, the actor's \
          own confined action can reach it, so the carve-out must not apply"
     );
@@ -2945,7 +3002,12 @@ fn v10d_a_tapped_graveyard_return_keeps_its_window_and_the_library_sibling_accep
     );
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&shorten_arm, P2),
-        ShortcutResponse::Shorten { at_iteration: 0 },
+        ShortcutResponse::Accept,
+        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+    );
+    assert_eq!(
+        precast_response(&shorten_arm, P2),
+        ShortcutResponse::Shorten { at_iteration: 1 },
         "the pair's positive arm: the returned card is a REAL object in the actor's graveyard \
          whose rules content this fold never classified, so `OwnResourcesOnly` would be a proof it \
          cannot discharge. The Helping Hand is the one object that differs"
@@ -3155,7 +3217,12 @@ fn v10e_an_unrestricted_land_fetch_that_can_select_bojuka_bog_keeps_its_window()
 
     assert_eq!(
         engine::ai_support::smart_shortcut_response(&shorten_arm, P2),
-        ShortcutResponse::Shorten { at_iteration: 0 },
+        ShortcutResponse::Accept,
+        "the take to place 1 never seats P2 at priority, so shortening there buys P2 no window"
+    );
+    assert_eq!(
+        precast_response(&shorten_arm, P2),
+        ShortcutResponse::Shorten { at_iteration: 1 },
         "CR 701.23a: an unrestricted land search LOOKS AT ALL CARDS in the library, and this one \
          contains Bojuka Bog, whose ETB exiles a graveyard P2 does not own. Accepting here \
          declines a window holding a live cross-player choice"
