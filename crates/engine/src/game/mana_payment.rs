@@ -1095,10 +1095,11 @@ fn remaining_payment_color_demand(
         } else {
             None
         };
-        // CR 107.4c: strict colorless is not represented by the WUBRG reserve.
+        // CR 107.4c/e: WUBRG omits colorless. Reserve the C alternative of a
+        // hybrid too, matching the colored reserve's conservative both-halves policy.
         if matches!(
             shard_to_mana_type(shards[index]),
-            ShardRequirement::Single(ManaType::Colorless)
+            ShardRequirement::Single(ManaType::Colorless) | ShardRequirement::ColorlessHybrid(_)
         ) {
             demand.required_colorless += 1;
         }

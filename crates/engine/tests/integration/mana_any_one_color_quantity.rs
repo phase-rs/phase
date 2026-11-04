@@ -814,6 +814,7 @@ fn snow_pool_z_partial_payment_leaves_snow_for_auto_tap() {
     // (CR 107.4a): Tropical Island's blue must remain available for each U.
     // CR 107.4c: Spatial Contortion's strict C axis also needs its own mana;
     // Adarkar Wastes supplies C while its W/U ability makes that source Z-eligible.
+    // Ulalek, Fused Atrocity supplies all five C/color hybrid axes (CR 107.4e).
     // No printed card is claimed to combine these Z/strict/S requirements.
     for (cost, blue_sources, colorless_sources) in [
         ("{Z}{S}", 0, 0),
@@ -822,6 +823,12 @@ fn snow_pool_z_partial_payment_leaves_snow_for_auto_tap() {
         ("{S}{U}{Z}", 1, 0),
         ("{Z}{C}{S}", 0, 1),
         ("{Z}{C}{C}{S}", 0, 2),
+        ("{Z}{C/W}{S}", 0, 1),
+        ("{Z}{C/U}{S}", 0, 1),
+        ("{Z}{C/B}{S}", 0, 1),
+        ("{Z}{C/R}{S}", 0, 1),
+        ("{Z}{C/G}{S}", 0, 1),
+        ("{Z}{C/U}{C/U}{S}", 0, 2),
     ] {
         for with_snow_forest in [true, false] {
             let mut s = board();
