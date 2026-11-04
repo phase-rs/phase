@@ -7597,8 +7597,13 @@ fn detach_after_player_scope_local_chain(
             matches!(reference, QuantityRef::PreviousEffectAmount { .. })
         });
     });
-    let next_reads_completed_scope =
-        next.player_scope.as_ref() == Some(scope) && reads_completed_action;
+    // CR 608.2e: a separately co-scoped consumer of the shared tracked set
+    // likewise runs after every player completes the preceding action. Its
+    // player scope is retained for the later fan-out. A referent introduced by
+    // this iteration remains local instead, as handled above.
+    let next_reads_completed_scope = next.player_scope.as_ref() == Some(scope)
+        && (reads_completed_action
+            || (!referent_in_scope && effect_references_tracked_set(&next.effect)));
     let next_is_local_continuation = next.sub_link == SubAbilityLink::ContinuationStep
         && (next_has_iteration_bound_actor
             || is_player_scope_local_continuation(&node.effect, &next.effect, scope))
@@ -17022,9 +17027,23 @@ fn resolve_chain_body(
         return Ok(());
     }
 
-    // CR 608.2c + CR 109.5: Only an actual scope-free instruction binds its
-    // actor. Unstarted fan-out templates and descendants retain their markers.
+    // CR 101.4 + CR 608.2c: Self-iterating effects choose each scoped player
+    // internally. Their scoped actor is not a single player to bind before that
+    // iteration; explicit actors still bind normally.
     let mut actor_bound = ability.clone();
+    if actor_bound.player_scope.is_some()
+        && matches!(
+            actor_bound.effect,
+            Effect::ChooseAndSacrificeRest { .. } | Effect::EachPlayerCopyChosen { .. }
+        )
+        && actor_bound
+            .instruction_actor
+            .as_ref()
+            .and_then(|actor| actor.as_controller())
+            == Some(&ControllerRef::ScopedPlayer)
+    {
+        actor_bound.instruction_actor = None;
+    }
     if super::ability_utils::bind_instruction_actor(state, &mut actor_bound).is_none() {
         return skip_instruction_and_dependents(state, ability, events, depth);
     }
@@ -41213,6 +41232,47 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn player_scope_shared_tracked_set_consumer_waits_for_all_players() {
+        let mut head = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), P0);
+        head.player_scope = Some(PlayerFilter::All);
+        let mut child = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Any),
+                    caused_by: Some(ThisWayCause::Exiled),
+                },
+                enters_under: None,
+                enter_tapped: Default::default(),
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                library_shuffle: Default::default(),
+                random_order: false,
+            },
+            vec![],
+            ObjectId(1),
+            P0,
+        );
+        child.instruction_actor = Some(ControllerRef::ScopedPlayer.into());
+        child.player_scope = Some(PlayerFilter::All);
+        child.sub_link = SubAbilityLink::ContinuationStep;
+        head.sub_ability = Some(Box::new(child));
+
+        let (scoped, after_scope) = split_player_scope_chain(&head, &PlayerFilter::All);
+        assert!(scoped.sub_ability.is_none());
+        assert_eq!(
+            after_scope
+                .expect("tracked consumer runs after the fan-out")
+                .player_scope,
+            Some(PlayerFilter::All)
+        );
     }
 
     /// CR 608.2c (maintainer review, #7484): the publish gate must judge the

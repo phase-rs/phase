@@ -4830,7 +4830,12 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
     );
 
     fixed_controller_gain_life
-        && instruction_actor.is_none()
+        // CR 109.5: "you" refers to the triggered ability's controller.
+        // Other authorities may resolve to a different player and remain
+        // outside this specialized candidate class.
+        && instruction_actor.as_ref().is_none_or(|actor| {
+            actor.as_controller() == Some(&crate::types::ability::ControllerRef::You)
+        })
         && targets.is_empty()
         && declares_chosen_group.is_none()
         && reads_chosen_group.is_none()
@@ -6471,7 +6476,7 @@ mod tests {
     }
 
     #[test]
-    fn instruction_actor_refuses_inert_batches_and_participates_in_recursive_identity() {
+    fn instruction_actor_limits_inert_batches_and_participates_in_recursive_identity() {
         let counter = ResolvedAbility::new(
             Effect::PutCounter {
                 counter_type: CounterType::Plus1Plus1,
@@ -6510,8 +6515,9 @@ mod tests {
             assert!(!self_counter_ability_is_batch_candidate(&a), "{actor:?}");
             let mut a = gain.clone();
             a.instruction_actor = Some(actor.clone());
-            assert!(
-                !fixed_controller_gain_life_ability_is_batch_candidate(&a),
+            assert_eq!(
+                fixed_controller_gain_life_ability_is_batch_candidate(&a),
+                actor.as_controller() == Some(&crate::types::ability::ControllerRef::You),
                 "{actor:?}"
             );
             let mut a = loss.clone();

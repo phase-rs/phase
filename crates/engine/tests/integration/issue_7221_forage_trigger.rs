@@ -431,7 +431,12 @@ fn corpseberry_exile_replacement_pause_completes_after_restore() {
     assert!(chosen
         .iter()
         .all(|card| runner.state().objects[card].zone == Zone::Exile));
-    assert_eq!(forage_action_count(&events), 1);
+    assert_eq!(
+        forage_action_count(&events),
+        1,
+        "completed exile must publish Forage; last effect count: {:?}; events: {events:?}",
+        runner.state().last_effect_count
+    );
     assert_ordered_forage_completion(&events, corpseberry);
     assert_eq!(plus_one_counters(&runner, corpseberry), 1);
 }

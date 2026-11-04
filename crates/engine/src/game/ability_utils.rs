@@ -411,6 +411,14 @@ pub(crate) fn bind_instruction_actor(
             }
         },
     )?;
+    // CR 608.2c + CR 608.2d: the player making a "may" choice can differ
+    // from the player instructed to perform its effect. Preserve the choice
+    // authority before consuming the instruction's actor metadata.
+    if ability.optional && ability.optional_for.is_none() && ability.optional_player.is_none() {
+        if let Some(player) = super::effects::optional_prompt_player(state, ability) {
+            ability.optional_player = Some(TargetFilter::SpecificPlayer { id: player });
+        }
+    }
     ability.original_controller = Some(printed_controller);
     ability.controller = actor;
     ability.instruction_actor = None;
@@ -13144,6 +13152,56 @@ mod tests {
         PreventionAmount, PreventionScope,
     };
     use crate::types::ability::{CombatRelation, CombatRelationSubject};
+
+    #[test]
+    fn binding_instruction_actor_preserves_the_optional_announcer() {
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability.instruction_actor = Some(ControllerRef::SpecificPlayer { id: PlayerId(1) }.into());
+
+        let mut explicit = ability.clone();
+        explicit.optional_player = Some(TargetFilter::SpecificPlayer { id: PlayerId(1) });
+        assert_eq!(
+            bind_instruction_actor(&state, &mut explicit),
+            Some(PlayerId(1))
+        );
+        assert_eq!(
+            super::super::effects::optional_prompt_player(&state, &explicit),
+            Some(PlayerId(1))
+        );
+
+        assert_eq!(
+            bind_instruction_actor(&state, &mut ability),
+            Some(PlayerId(1))
+        );
+        assert_eq!(
+            super::super::effects::optional_prompt_player(&state, &ability),
+            Some(PlayerId(0))
+        );
+        assert_eq!(ability.controller, PlayerId(1));
+
+        let mut ordinary = ability.clone();
+        ordinary.optional_player = None;
+        ordinary.instruction_actor = None;
+        assert_eq!(
+            bind_instruction_actor(&state, &mut ordinary),
+            Some(PlayerId(1))
+        );
+        assert_eq!(ordinary.optional_player, None);
+        assert_eq!(
+            super::super::effects::optional_prompt_player(&state, &ordinary),
+            Some(PlayerId(1))
+        );
+    }
 
     /// CR 608.2c + CR 608.2h: a previous object's metadata selects the actor,
     /// even when the new instruction has a separately chosen recipient.

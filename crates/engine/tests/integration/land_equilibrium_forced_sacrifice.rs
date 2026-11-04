@@ -431,7 +431,7 @@ fn devour_post_replacement_continuation_still_resolves() {
     };
 
     // A Devour-1 creature waiting in Exile, mirroring `synthesize_devour`:
-    // Sacrifice(any number of your creatures) → sub_ability PutCounter(EventContextAmount).
+    // Sacrifice(any number of your creatures) → sub_ability PutCounter(PreviousEffectCount).
     let devourer = {
         let id = create_object(
             &mut state,
@@ -452,7 +452,7 @@ fn devour_post_replacement_continuation_still_resolves() {
             Effect::PutCounter {
                 counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount,
+                    qty: QuantityRef::PreviousEffectCount,
                 },
                 target: TargetFilter::SelfRef,
             },

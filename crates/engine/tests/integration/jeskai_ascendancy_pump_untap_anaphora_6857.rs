@@ -653,7 +653,11 @@ fn coveted_falcon_draws_for_each_permanent_handed_over() {
         .id();
     let mut runner: GameRunner = scenario.build();
     let before = runner.state().players[0].hand.len();
-    let outcome = runner.cast(spell).target_objects(&[a]).resolve();
+    let outcome = runner
+        .cast(spell)
+        .target_player(P1)
+        .target_objects(&[a])
+        .resolve();
 
     assert_eq!(published_set(outcome.state()), ids(&[a]));
     assert_eq!(
