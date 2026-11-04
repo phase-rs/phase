@@ -16850,14 +16850,18 @@ fn effect_shuffle_their_library() {
 #[test]
 fn compound_shuffle_it_into_library() {
     let def = parse_effect_chain("Shuffle it into its owner's library", AbilityKind::Spell);
+    // CR 608.2c + CR 400.7e: a bare "it" with no announced antecedent names the
+    // ability's own source, so the move is the single-object `ChangeZone` — the
+    // selected-population `ChangeZoneAll` is reserved for an announced
+    // antecedent (see `announced_parent_target_shuffle_keeps_the_selected_population`).
     assert!(
         matches!(
             &*def.effect,
-            Effect::ChangeZoneAll {
+            Effect::ChangeZone {
                 origin: None,
                 destination: Zone::Library,
-                target: TargetFilter::ParentTarget,
-                library_shuffle: crate::types::ability::MassLibraryShuffleMode::TerminalShuffle,
+                target: TargetFilter::SelfRef,
+                owner_library: true,
                 ..
             }
         ),
@@ -95479,7 +95483,13 @@ fn compound_shuffle_self_and_graveyard_moves_whole_zone() {
             Effect::ChangeZoneAll {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Library,
-                target: TargetFilter::ParentTargetOwner,
+                // CR 109.5: "your graveyard" is the ACTIVATOR's population —
+                // the explicit `Controller` possessor the mass-move lowering
+                // emits, normalized to the controller-relative `ScopedPlayer`
+                // (which falls back to the ability controller). It is never
+                // the source owner's (`ParentTargetOwner`) unless another
+                // player activated the ability.
+                target: TargetFilter::ScopedPlayer,
                 ..
             }
         ),
@@ -95532,7 +95542,13 @@ fn compound_shuffle_this_artifact_and_graveyard_moves_whole_zone() {
             Effect::ChangeZoneAll {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Library,
-                target: TargetFilter::ParentTargetOwner,
+                // CR 109.5: "your graveyard" is the ACTIVATOR's population —
+                // the explicit `Controller` possessor the mass-move lowering
+                // emits, normalized to the controller-relative `ScopedPlayer`
+                // (which falls back to the ability controller). It is never
+                // the source owner's (`ParentTargetOwner`) unless another
+                // player activated the ability.
+                target: TargetFilter::ScopedPlayer,
                 ..
             }
         ),
@@ -95549,6 +95565,299 @@ fn compound_shuffle_this_artifact_and_graveyard_moves_whole_zone() {
         ),
         "got {:?}",
         shuffle.effect
+    );
+}
+
+/// CR 608.2c + CR 400.7e + CR 115.10a: a bare "it" in a source-departure
+/// shuffle names the ability's OWN SOURCE — the object that left is the
+/// departure event's source — so the move is the single-object `ChangeZone`.
+/// Lowering it as the selected-population `ChangeZoneAll` would move nothing,
+/// because no object was ever announced as a target (Alabaster Dragon, Dread,
+/// Serra Avatar).
+#[test]
+fn source_departure_shuffle_moves_the_source_not_a_population() {
+    let cards = [
+        (
+            "Alabaster Dragon",
+            "Flying\nWhen this creature dies, shuffle it into its owner's library.",
+        ),
+        (
+            "Dread",
+            "Whenever a creature deals damage to you, put a nightmare counter on this creature.\nWhen Dread is put into a graveyard from anywhere, shuffle it into its owner's library.",
+        ),
+        (
+            "Serra Avatar",
+            "Serra Avatar's power and toughness are each equal to your life total.\nWhen Serra Avatar is put into a graveyard from anywhere, shuffle it into its owner's library.",
+        ),
+    ];
+    for (name, text) in cards {
+        let parsed = parse_oracle_text(text, name, &[], &["Creature".to_string()], &[]);
+        let mut found: Option<&AbilityDefinition> = None;
+        for trigger in &parsed.triggers {
+            let mut current = trigger.execute.as_deref();
+            while let Some(def) = current {
+                if matches!(
+                    &*def.effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Library,
+                        target: TargetFilter::SelfRef,
+                        owner_library: true,
+                        ..
+                    }
+                ) {
+                    found = Some(def);
+                    break;
+                }
+                current = def.sub_ability.as_deref();
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        let move_clause = found
+            .unwrap_or_else(|| panic!("{name}: no source-library move: {:?}", parsed.triggers));
+        assert!(
+            move_clause.sub_ability.is_some(),
+            "{name}: CR 701.24c needs the terminal shuffle"
+        );
+        let mut cursor = Some(move_clause);
+        while let Some(def) = cursor {
+            assert!(
+                !matches!(&*def.effect, Effect::ChangeZoneAll { .. }),
+                "{name}: a departure pronoun must not lower to a selected population: {:?}",
+                def.effect
+            );
+            cursor = def.sub_ability.as_deref();
+        }
+    }
+}
+
+/// CR 608.2c + CR 601.2c + CR 115.6: once an object IS announced — including an
+/// optional "up to one" announcement that may be declined — the bare "it"
+/// names that announced object, and the chain keeps the selected-population
+/// movement. The declined case must move nothing, never fall back to the
+/// source (CR 115.6).
+#[test]
+fn announced_parent_target_shuffle_keeps_the_selected_population() {
+    for text in [
+        "Choose target creature. Shuffle it into its owner's library.",
+        "Choose up to one target creature. Shuffle it into its owner's library.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::TargetOnly {
+                    target: TargetFilter::Typed(_)
+                }
+            ),
+            "{text}: expected the announced creature slot, got {:?}",
+            def.effect
+        );
+        let movement = def.sub_ability.as_ref().expect("bound move");
+        assert!(
+            matches!(
+                &*movement.effect,
+                Effect::ChangeZoneAll {
+                    destination: Zone::Library,
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "{text}: expected the selected-population move, got {:?}",
+            movement.effect
+        );
+    }
+}
+
+/// CR 108.3 + CR 400.7e + CR 115.10a: a source-owner possessive subject
+/// ("{U}: This creature's owner shuffles it into their library" — Cerulean
+/// Sphinx) moves the SOURCE. The possessor is typed on the printed subject and
+/// declares no target slot, so the movement authority stays the single-object
+/// `ChangeZone`.
+#[test]
+fn source_owner_possessive_shuffle_moves_the_source() {
+    let parsed = parse_oracle_text(
+        "Flying\n{U}: This creature's owner shuffles it into their library.",
+        "Cerulean Sphinx",
+        &[],
+        &["Creature".to_string()],
+        &["Sphinx".to_string()],
+    );
+    let ability = parsed
+        .abilities
+        .iter()
+        .find(|ability| ability.kind == AbilityKind::Activated)
+        .unwrap_or_else(|| panic!("no activated ability: {:?}", parsed.abilities));
+    assert!(
+        matches!(
+            &*ability.effect,
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                target: TargetFilter::SelfRef,
+                owner_library: true,
+                ..
+            }
+        ),
+        "expected the source's own library move, got {:?}",
+        ability.effect
+    );
+    assert!(
+        ability.sub_ability.is_some(),
+        "CR 701.24c needs the terminal shuffle"
+    );
+}
+
+/// CR 108.3 + CR 400.7e + CR 115.10a: an untargeted attached-host possessive
+/// ("Enchanted creature's owner shuffles it..." — Watery Grasp) moves the host
+/// itself. The possessor declares no target slot, so the movement stays the
+/// single-object `ChangeZone` rather than the selected-population
+/// `ChangeZoneAll`.
+#[test]
+fn enchanted_host_owner_shuffle_moves_the_host_without_a_target_declaration() {
+    let parsed = parse_oracle_text(
+        "Enchant creature\nWaterbend {5}: Enchanted creature's owner shuffles it into their library.",
+        "Watery Grasp",
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    let ability = parsed
+        .abilities
+        .iter()
+        .find(|ability| ability.kind == AbilityKind::Activated)
+        .unwrap_or_else(|| panic!("no activated ability: {:?}", parsed.abilities));
+    assert!(
+        matches!(
+            &*ability.effect,
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                target: TargetFilter::Typed(filter),
+                owner_library: true,
+                ..
+            } if filter
+                .properties
+                .contains(&crate::types::ability::FilterProp::EnchantedBy)
+        ),
+        "expected the enchanted host's single-object library move, got {:?}",
+        ability.effect
+    );
+    let movement = ability.sub_ability.as_ref().expect("bound move");
+    assert!(
+        matches!(&*movement.effect, Effect::Shuffle { .. }),
+        "expected the terminal shuffle, got {:?}",
+        movement.effect
+    );
+}
+
+/// CR 109.5 + CR 400.6 + CR 115.10a: "Shuffle this artifact and your graveyard
+/// into their owner's library" (Elixir of Immortality) moves the ACTIVATOR's
+/// graveyard. The explicit "your" possessor is the activator's population and
+/// must not be re-read as the source owner's (CR 108.3) — that would shuffle
+/// the source owner's graveyard whoever activated the ability.
+#[test]
+fn elixir_shuffle_keeps_the_activator_graveyard_population() {
+    let parsed = parse_oracle_text(
+        "{2}, {T}: You gain 5 life. Shuffle this artifact and your graveyard into their owner's library.",
+        "Elixir of Immortality",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let mut found_population = false;
+    for ability in &parsed.abilities {
+        let mut current = Some(ability);
+        while let Some(def) = current {
+            if let Effect::ChangeZoneAll { origin, target, .. } = &*def.effect {
+                if *origin == Some(Zone::Graveyard) {
+                    found_population = true;
+                    assert!(
+                        matches!(target, TargetFilter::ScopedPlayer | TargetFilter::Controller),
+                        "the graveyard population must stay the activator-relative one, got {target:?}"
+                    );
+                }
+            }
+            assert!(
+                !matches!(
+                    &*def.effect,
+                    Effect::ChangeZoneAll {
+                        target: TargetFilter::ParentTargetOwner,
+                        ..
+                    }
+                ),
+                "the source owner's graveyard must not replace the activator's: {:?}",
+                def.effect
+            );
+            current = def.sub_ability.as_deref();
+        }
+    }
+    assert!(found_population, "no graveyard population move: {parsed:?}");
+}
+
+/// CR 115.1 + CR 115.1d + CR 601.2c: the shared target grammar reads the printed
+/// player/opponent noun as written, singular OR plural, and the count authority
+/// (`strip_optional_target_prefix` / `MultiTargetSpec`) carries the announced
+/// slot count. A leftover plural "s" must not turn the clause into a gap
+/// (Officious Interrogation, Call the Coppercoats).
+#[test]
+fn plural_player_target_nouns_share_the_target_grammar() {
+    for text in [
+        "Choose any number of target players.",
+        "Choose any number of target opponents.",
+        "Choose two target players.",
+        "Choose two target opponents.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(&*def.effect, Effect::TargetOnly { .. }),
+            "{text}: expected a pure target declaration, got {:?}",
+            def.effect
+        );
+        assert!(
+            def.multi_target.is_some(),
+            "{text}: the announced slot count was lost"
+        );
+    }
+
+    // Full-Oracle controls: the plural noun is the clause's whole payload.
+    let officious = parse_oracle_text(
+        "Choose any number of target players. Investigate X times, where X is the total number of creatures those players control.",
+        "Officious Interrogation",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert!(
+        matches!(
+            &*officious.abilities[0].effect,
+            Effect::TargetOnly {
+                target: TargetFilter::Player
+            }
+        ),
+        "Officious Interrogation: got {:?}",
+        officious.abilities[0].effect
+    );
+
+    let coppercoats = parse_oracle_text(
+        "Strive — This spell costs {1}{W} more to cast for each target beyond the first.\nChoose any number of target opponents. Create X 1/1 white Human Soldier creature tokens, where X is the number of those opponents.",
+        "Call the Coppercoats",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert!(
+        matches!(
+            &*coppercoats.abilities[0].effect,
+            Effect::TargetOnly { target }
+                if matches!(
+                    target,
+                    TargetFilter::Typed(filter)
+                        if filter.type_filters.is_empty()
+                            && filter.controller == Some(ControllerRef::Opponent)
+                )
+        ),
+        "Call the Coppercoats: got {:?}",
+        coppercoats.abilities[0].effect
     );
 }
 

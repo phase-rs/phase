@@ -11490,18 +11490,13 @@ fn parse_effect_clause_inner_with_damage_context(
         if let Some(multi) = multi {
             let inner = after_choose.len() - stripped_lower.len();
             let target_input = &after_orig[inner..];
-            // CR 115.1: the target grammar spells the singular; the clause's
-            // multi_target count carries the plural slot count.
-            let singular;
-            let target_text = if let Ok((rest, _)) =
-                tag::<_, _, OracleError<'_>>("target players").parse(target_input)
-            {
-                singular = format!("target player{rest}");
-                singular.as_str()
-            } else {
-                target_input
-            };
-            let (target, remainder) = parse_target_with_ctx(target_text, ctx);
+            // CR 115.1 + CR 601.2c: the shared target grammar reads the printed
+            // noun as written — singular OR plural ("target players",
+            // "target opponents") — and the clause's `multi_target` count
+            // carries the announced slot count. No singular rewrite belongs
+            // here: the count authority (`strip_optional_target_prefix`) and
+            // the noun authority (`parse_target`) each own their axis.
+            let (target, remainder) = parse_target_with_ctx(target_input, ctx);
             if remainder.trim().is_empty()
                 && !matches!(&target, TargetFilter::Typed(filter)
                     if filter.type_filters.is_empty() && filter.controller.is_none())
@@ -16125,6 +16120,27 @@ fn try_parse_owner_of_target_shuffle(
     .parse(&tp.lower[predicate_start..])
     .ok()?;
     let subject_text = tp.original[..predicate_start].trim();
+    // CR 108.3 + CR 400.7e + CR 115.10a: the SOURCE's owner as the possessive
+    // subject ("This creature's owner shuffles it into their library" —
+    // Cerulean Sphinx) moves the source ITSELF. CR 115.10a: being affected by
+    // the ability does not make the object a target, so the clause declares no
+    // slot and the movement authority is the single-object `ChangeZone`
+    // (`SelfRef`), never the selected-population `ChangeZoneAll`. This is a
+    // text-anchored whole-clause recognizer, matching the "its owner" form it
+    // sits beside: the possessor is typed on the printed subject, not derived
+    // from a target declaration.
+    let subject_owner_lower = subject_text.to_ascii_lowercase();
+    if all_consuming(tag::<_, _, OracleError<'_>>("~'s owner"))
+        .parse(subject_owner_lower.as_str())
+        .is_ok()
+    {
+        return Some(imperative::lower_shuffle_ast(
+            ShuffleImperativeAst::ChangeZoneToLibrary {
+                target: TargetFilter::SelfRef,
+                owner_library: true,
+            },
+        ));
+    }
     let mut trial = ctx.clone_throwaway();
     let application = subject::parse_subject_application(subject_text, &mut trial);
     // allow-noncombinator: possessive anaphor classification for the owner-shuffle shortcut.
@@ -16140,6 +16156,24 @@ fn try_parse_owner_of_target_shuffle(
         None if possessive_anaphor => extract_owner_of_target(tp, ctx)?,
         None => return None,
     };
+
+    // CR 108.3 + CR 400.7e + CR 115.10a: an ATTACHED-HOST possessor names a
+    // contextual object ("Enchanted creature's owner" — Watery Grasp), not a
+    // declared target. The recovered host filter is the single moved object, so
+    // this emits no `TargetOnly` declaration and never expands `ParentTarget`
+    // into the selected-population `ChangeZoneAll`. A demonstrative anaphor
+    // ("that creature's owner" — Weeping Angel) keeps the wrapper its
+    // replacement rewrite contracts require; the shared subject authority owns
+    // the classification.
+    let possessor_prefix = take_until::<_, _, OracleError<'_>>("'s owner")
+        .parse(subject_text)
+        .ok()
+        .map(|(_, prefix)| prefix.trim());
+    if possessor_prefix
+        .is_some_and(|prefix| subject::is_contextual_attachment_host(&prefix.to_ascii_lowercase()))
+    {
+        return Some(imperative::lower_single_object_shuffle_to_library(target));
+    }
 
     let movement = imperative::lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
         target: TargetFilter::ParentTarget,
@@ -30985,12 +31019,31 @@ fn extract_player_anchor_in_chain(
         &clause.effect,
         Effect::TargetOnly { target } if target_filter_can_target_player(target)
     );
+    // The link whose population the current link acts on; the owner anchor
+    // below is only established by a population the clause DECLARED.
+    let mut previous: &Effect = &clause.effect;
     let mut sub = clause.sub_ability.as_deref();
     while let Some(def) = sub {
-        // CR 701.24a + CR 115.1a: the bound owner-population move carries a
-        // `Shuffle(ScopedPlayer)` terminal with the owner library scope; that
-        // is the chain-level player anchor for a following chooser.
+        // CR 701.24a + CR 115.1a + CR 115.10a: a BOUND owner-population move —
+        // its population is the declared object set named by the preceding
+        // link (`ParentTarget` / `ParentTargetSlot`), never a possessor the
+        // clause states itself ("your graveyard", whose population is an
+        // explicit `Controller`) — carries a `Shuffle(ScopedPlayer)` terminal
+        // with the owner library scope. Those owners are the chain-level player
+        // anchor a following chooser may inherit ("the owners of those cards",
+        // Turn the Earth). An explicit possessor establishes nothing for a
+        // LATER clause and must not be re-read as one: the same-clause
+        // application then rewrites the population this clause just declared
+        // (Elixir of Immortality) and replaces its activator possessor
+        // (CR 109.5: the player who activated the ability) with the source's
+        // owner (CR 108.3).
         if matches!(
+            previous,
+            Effect::ChangeZoneAll {
+                target: TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. },
+                ..
+            }
+        ) && matches!(
             def.effect.as_ref(),
             Effect::Shuffle {
                 target: TargetFilter::ScopedPlayer
@@ -31014,6 +31067,7 @@ fn extract_player_anchor_in_chain(
         if let Some(anchor) = extract_player_anchor(&def.effect, declared) {
             return Some(anchor);
         }
+        previous = def.effect.as_ref();
         sub = def.sub_ability.as_deref();
     }
     None

@@ -624,9 +624,11 @@ fn parse_animation_subtype_loose(input: &str) -> OracleResult<'_, AnimationTypeT
     Ok((rest, AnimationTypeToken::Subtype(word.to_string())))
 }
 
-/// CR 205.3m: registered subtype words and plurals name the same subtype.
-/// Retain this grammar's punctuation boundary even when the registry accepts
-/// a broader word boundary, and consume multiword subtypes as one token.
+/// CR 205.3: registered subtype words name a card's subtype. The shared
+/// registry also accepts the plural spelling and canonicalizes it to the same
+/// subtype. Retain this grammar's punctuation boundary even when the registry
+/// accepts a broader word boundary, and consume multiword subtypes as one
+/// token.
 fn parse_registered_animation_subtype(input: &str) -> OracleResult<'_, AnimationTypeToken> {
     let Some((canonical, consumed)) = super::super::oracle_util::parse_subtype(input) else {
         return Err(oracle_err(input));

@@ -349,19 +349,21 @@ mod tests {
     fn compound_phase_out_batches_an_attachment_with_its_host_indirectly() {
         let mut state = GameState::new_two_player(42);
         let host = add_creature(&mut state, PlayerId(0), "Host");
-        let attachment = add_creature(&mut state, PlayerId(0), "Animated attachment");
+        let attachment = add_creature(&mut state, PlayerId(0), "Animated Equipment");
+        // CR 702.26g: only Auras, Equipment and Fortifications are cascaded, so
+        // the fixture must be an ELIGIBLE attachment or its `Indirectly`
+        // assertion cannot follow from the printing. It stays a creature (the
+        // host relation is what is under test): an animated Equipment —
+        // Creature + Artifact with the Equipment subtype.
+        //
         // Raw collector fixture: ordinary creature attachments are detached by
         // SBAs before a public priority boundary. This isolates batch precedence.
-        // An animated Equipment keeps its artifact type, so CR 702.26g cascades
-        // it with the host instead of requiring an illegal creature attachment.
-        state
-            .objects
-            .get_mut(&attachment)
-            .unwrap()
-            .card_types
-            .core_types
-            .push(CoreType::Artifact);
-        state.objects.get_mut(&attachment).unwrap().attached_to = Some(host.into());
+        {
+            let obj = state.objects.get_mut(&attachment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.attached_to = Some(host.into());
+        }
         state
             .objects
             .get_mut(&host)

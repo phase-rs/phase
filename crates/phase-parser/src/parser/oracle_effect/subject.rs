@@ -1896,8 +1896,10 @@ fn parse_source_and_target_subjects(
     Some((primary_application, secondary_application))
 }
 
-/// CR 702.26a + CR 702.26h: resolve both subjects in one phasing batch; only
-/// the second conjunct is targeted (CR 115.1), even if the source has shroud.
+/// CR 702.26b + CR 702.26h: both subjects change to phased-out status in one
+/// phasing batch, and an object that would phase out both directly and
+/// indirectly resolves as indirect (CR 702.26h). Only the second conjunct is
+/// targeted (CR 115.1), even if the source has shroud.
 pub(super) fn try_parse_source_and_target_phase_out(
     text: &str,
     ctx: &mut ParseContext,
@@ -3217,6 +3219,20 @@ enum AnaphorConsumer {
     Other,
 }
 
+/// CR 303.4 + CR 301.5: the attached-host possessors ("enchanted creature",
+/// "enchanted permanent", "equipped creature") name a contextual object, not a
+/// declared target. Shared with the owner-shuffle possessor classification so
+/// the tag list lives once.
+pub(super) fn is_contextual_attachment_host(lower: &str) -> bool {
+    alt((
+        tag::<_, _, OracleError<'_>>("enchanted creature"),
+        tag("enchanted permanent"),
+        tag("equipped creature"),
+    ))
+    .parse(lower)
+    .is_ok()
+}
+
 pub(super) fn parse_subject_application(
     subject: &str,
     ctx: &mut ParseContext,
@@ -3584,14 +3600,7 @@ fn parse_subject_application_for(
         }
         return subject_filter_application(filter, false);
     }
-    if alt((
-        tag::<_, _, OracleError<'_>>("enchanted creature"),
-        tag("enchanted permanent"),
-        tag("equipped creature"),
-    ))
-    .parse(lower.as_str())
-    .is_ok()
-    {
+    if is_contextual_attachment_host(lower.as_str()) {
         let (filter, _) =
             ctx.with_player_antecedents(|scoped| parse_target_with_ctx(subject, scoped));
         return Some(SubjectApplication {

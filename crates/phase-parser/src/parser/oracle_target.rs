@@ -1391,12 +1391,20 @@ pub fn parse_target_with_syntax<'a>(
         // separator compositionally, then delegate the complete object tail to
         // the shared type-phrase grammar so controller/type qualifiers retain
         // their ordinary semantics.
+        // CR 115.1 + CR 608.2c: the player noun is number-agnostic in this
+        // grammar — "target players" / "target opponents" name the same slot
+        // axis as their singular forms, with the clause's `MultiTargetSpec`
+        // carrying the printed count (CR 601.2c, CR 115.1d). The plural legs
+        // are matched FIRST and are word-bounded through `tag` + the caller's
+        // clause boundary check, so the leftover "s" of a half-consumed
+        // singular can no longer be mistaken for the rest of the clause
+        // (Officious Interrogation, Call the Coppercoats).
         if let Ok((after_player, player_filter)) = alt((
             value(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                tag::<_, _, OracleError<'_>>("opponent"),
+                alt((tag::<_, _, OracleError<'_>>("opponents"), tag("opponent"))),
             ),
-            value(TargetFilter::Player, tag("player")),
+            value(TargetFilter::Player, alt((tag("players"), tag("player")))),
         ))
         .parse(after_target)
         {
