@@ -28089,13 +28089,12 @@ pub struct PostReplacementDrain {
     #[serde(default)]
     pub controller: Option<crate::types::player::PlayerId>,
 
-    /// CR 614.6 + CR 615.5: the amount of the replaced event, captured when this drain is
-    /// installed to run later than the replacement that produced it. A substitution installed
-    /// behind an earlier replacement's paused rider (Dralnu, Lich Lord's "sacrifice that many
-    /// permanents instead" behind Test of Faith's counters) reads its "that many" from here,
-    /// because the rider's own events have changed `last_effect_count` by the time it runs.
-    /// `None` for a drain that runs right after its replacement, which reads the stamp the
-    /// replacement just made.
+    /// CR 614.6 + CR 615.5: the amount of the event this drain's replacement replaced or
+    /// prevented, as its applier stamped it (`replacement::stamp_replacement_amount`), or the
+    /// amount captured with the paused rider it waits behind. Dispatch binds it as the action's
+    /// owned "that many" (`quantity::with_replacement_action_scope`), ahead of the die result and
+    /// the enclosing trigger's amounts. `None` when the applier stamped no amount (an entering
+    /// object's continuation, an optional branch).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_amount: Option<u32>,
 }

@@ -3745,10 +3745,12 @@ enum NestedAmountScope {
 /// (not a hard reset) so nested scopes compose: a reflexive ability created
 /// inside a replacement's action, or a replacement applying inside either.
 fn with_nested_amount_scope<R>(scope: NestedAmountScope, f: impl FnOnce() -> R) -> R {
-    let prev = NESTED_AMOUNT_SCOPE.with(|c| c.replace(scope));
-    let result = f();
-    NESTED_AMOUNT_SCOPE.with(|c| c.set(prev));
-    result
+    // The guard restores the previous scope on unwind too: a native server reuses its
+    // threads, so a leaked replacement-action amount would answer every later "that many".
+    let _restore = ResumedReplacementAction {
+        previous: Some(NESTED_AMOUNT_SCOPE.with(|c| c.replace(scope))),
+    };
+    f()
 }
 
 /// CR 603.12: Run `f` with the enclosing trigger's own event context

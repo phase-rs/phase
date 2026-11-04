@@ -131,7 +131,7 @@ fn farideh_high_band_spares_its_controller() {
 // ---------------------------------------------------------------------------
 // A replacement's action under the roll reads the amount it replaced.
 //
-// The d20 face is recorded for the rest of Fireball's resolution (CR 706.4), but a
+// The d20 face is recorded for the rest of Fireball's resolution (CR 706.3 + CR 706.3b), but a
 // replacement that applies to one of the table row's damage events performs its own
 // action instead of that event (CR 614.1a, CR 614.6), and its "that many" is that event's
 // amount: 2. Neither the face (1 or 16) nor anything else of the resolution around it.
