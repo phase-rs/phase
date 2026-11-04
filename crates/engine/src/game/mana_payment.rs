@@ -1220,6 +1220,89 @@ struct PaymentContinuation<'a> {
     quality_demand: SourceQualityDemand,
 }
 
+impl PaymentContinuation<'_> {
+    /// CR 601.2h + CR 107.4f: necessary bounds before testing a Z allocation.
+    /// Each availability probe sees the whole pool, including the current Z
+    /// unit. It may overestimate available mana, but cannot prove a payment.
+    /// Only the actual continuation can do that. Optional life costs require
+    /// no mandatory mana; unavoidable life gives the search a lower bound.
+    fn minimum_life_after_z(
+        self,
+        pool: &ManaPool,
+        spell: Option<&PaymentContext<'_>>,
+        permission: Option<ManaSpendPermission>,
+        choices: Option<&[ShardChoice]>,
+        life_colors: crate::types::mana::LifePaymentColors,
+    ) -> Option<usize> {
+        let mut minimum_units = self.generic as usize + 1;
+        let mut minimum_life = 0;
+        let mut choice_cursor = 0;
+        for &idx in &self.order[self.next_position..] {
+            let requirement =
+                effective_shard_requirement(shard_to_mana_type(self.shards[idx]), life_colors);
+            let mana_available = match requirement {
+                ShardRequirement::Single(color) => {
+                    if !sim_phyrexian_mana_available(
+                        pool,
+                        spell,
+                        permission.is_some_and(|p| p.allows_payment_as(color)),
+                        color,
+                    ) {
+                        return None;
+                    }
+                    minimum_units += 1;
+                    continue;
+                }
+                ShardRequirement::Hybrid(..)
+                | ShardRequirement::ColorlessHybrid(..)
+                | ShardRequirement::TwoGenericHybrid(..)
+                | ShardRequirement::Snow
+                | ShardRequirement::TwoOrMoreColorSource => {
+                    minimum_units += 1;
+                    continue;
+                }
+                ShardRequirement::X => continue,
+                ShardRequirement::Phyrexian(color) => {
+                    sim_phyrexian_mana_available(pool, spell, permission.is_some(), color)
+                }
+                ShardRequirement::HybridPhyrexian(a, b) => {
+                    sim_phyrexian_mana_available(pool, spell, permission.is_some(), a)
+                        || sim_phyrexian_mana_available(pool, spell, permission.is_some(), b)
+                }
+                ShardRequirement::TwoGenericHybridPhyrexian(color) => {
+                    let mut probe = pool.clone();
+                    sim_phyrexian_mana_available(pool, spell, permission.is_some(), color)
+                        || (spend_generic_eligible(&mut probe, spell, None, &[]).is_some()
+                            && spend_generic_eligible(&mut probe, spell, None, &[]).is_some())
+                }
+            };
+            match choices.and_then(|choices| choices.get(choice_cursor)) {
+                Some(ShardChoice::PayLife) => minimum_life += 1,
+                Some(ShardChoice::PayMana) => {
+                    if !mana_available {
+                        return None;
+                    }
+                    minimum_units += 1;
+                }
+                None => minimum_life += usize::from(!mana_available),
+            }
+            choice_cursor += 1;
+        }
+        let eligible = |u: &ManaShape| spell_permits_unit(spell, u);
+        let snow = pool.count_where(|u| u.is_snow() && eligible(u));
+        let multicolor =
+            pool.count_where(|u| u.source_could_produce_two_or_more_colors && eligible(u));
+        let either = pool.count_where(|u| {
+            (u.is_snow() || u.source_could_produce_two_or_more_colors) && eligible(u)
+        });
+        (pool.count_where(eligible) >= minimum_units
+            && snow >= self.quality_demand.snow
+            && multicolor > self.quality_demand.multicolor
+            && either > self.quality_demand.snow + self.quality_demand.multicolor)
+            .then_some(minimum_life)
+    }
+}
+
 fn reduce_cost_by_pool_from(
     pool: &ManaPool,
     continuation: PaymentContinuation<'_>,
@@ -1345,12 +1428,25 @@ fn reduce_cost_by_pool_from(
                 quality_demand.multicolor -= 1;
                 let future_demand =
                     remaining_payment_color_demand(shards, &order[position + 1..], None, None);
+                let suffix = PaymentContinuation {
+                    next_position: position + 1,
+                    quality_demand,
+                    ..continuation
+                };
+                let minimum_life = suffix.minimum_life_after_z(
+                    &scratch,
+                    spell,
+                    mana_spend_permission,
+                    None,
+                    crate::types::mana::LifePaymentColors::EMPTY,
+                );
                 spend_two_or_more_color_source_eligible(
                     &mut scratch,
                     spell,
                     &[],
                     quality_demand,
                     &future_demand,
+                    minimum_life,
                     |remaining| {
                         let suffix = PaymentContinuation {
                             next_position: position + 1,
@@ -1815,12 +1911,25 @@ fn pay_cost_with_demand_and_choices_from(
                     Some(life_colors),
                     phyrexian_choices.map(|choices| &choices[choice_cursor..]),
                 );
+                let suffix = PaymentContinuation {
+                    next_position: position + 1,
+                    quality_demand,
+                    ..continuation
+                };
+                let minimum_life = suffix.minimum_life_after_z(
+                    pool,
+                    spell,
+                    mana_spend_permission,
+                    phyrexian_choices.map(|choices| &choices[choice_cursor..]),
+                    life_colors,
+                );
                 let unit = spend_two_or_more_color_source_eligible(
                     pool,
                     spell,
                     pins,
                     quality_demand,
                     &future_demand,
+                    minimum_life,
                     |remaining| {
                         pay_cost_with_demand_and_choices_from(
                             &mut remaining.clone(),
@@ -2236,12 +2345,27 @@ pub fn compute_phyrexian_shards(
                     Some(life_colors),
                     None,
                 );
+                let suffix = PaymentContinuation {
+                    shards,
+                    generic,
+                    order: &order,
+                    next_position: position + 1,
+                    quality_demand,
+                };
+                let minimum_life = suffix.minimum_life_after_z(
+                    &sim,
+                    spell,
+                    mana_spend_permission,
+                    None,
+                    life_colors,
+                );
                 let _ = spend_two_or_more_color_source_eligible(
                     &mut sim,
                     spell,
                     &[],
                     quality_demand,
                     &future_demand,
+                    minimum_life,
                     |remaining| {
                         pay_cost_with_demand_and_choices_from(
                             &mut remaining.clone(),
@@ -3386,6 +3510,7 @@ fn spend_two_or_more_color_source_eligible(
     pins: &[ManaPipId],
     quality_demand: SourceQualityDemand,
     demand: &RemainingPaymentColorDemand,
+    minimum_life: Option<usize>,
     suffix_life_payments: impl Fn(&ManaPool) -> Option<usize>,
 ) -> Option<ManaUnit> {
     // CR 118.3a: prefer a pinned {Z}-eligible unit before the first match.
@@ -3445,6 +3570,9 @@ fn spend_two_or_more_color_source_eligible(
         if quality_demand.snow == 0 {
             return Some(baseline);
         }
+        let Some(minimum_life) = minimum_life else {
+            return Some(baseline);
+        };
 
         // CR 107.4e + CR 107.4f + CR 107.4h: hybrid alternatives can leave
         // Snow available without requiring both halves at once. Prove only
@@ -3455,7 +3583,7 @@ fn spend_two_or_more_color_source_eligible(
             suffix_life_payments(&remaining)
         };
         let mut best = score(baseline).map(|life| (baseline, life));
-        if best.is_some_and(|(_, life)| life == 0) {
+        if best.is_some_and(|(_, life)| life == minimum_life) {
             return Some(baseline);
         }
         for (slot, unit) in pool.slotted_units() {
@@ -3472,7 +3600,7 @@ fn spend_two_or_more_color_source_eligible(
             if let Some(life) = score(slot) {
                 if best.is_none_or(|(_, best_life)| life < best_life) {
                     best = Some((slot, life));
-                    if life == 0 {
+                    if life == minimum_life {
                         break;
                     }
                 }
