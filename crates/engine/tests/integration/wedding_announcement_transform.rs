@@ -114,7 +114,9 @@ fn wedding_announcement_human_branch_transforms_and_applies_festivity_anthem() {
     let festivity = &state.objects[&wedding];
     assert!(
         festivity.transformed,
-        "the third invitation counter must transform the enchantment"
+        "the third invitation counter must transform the enchantment; counters: {:?}; \
+         resolved chain: {resolved:#?}; events: {events:#?}",
+        festivity.counters,
     );
     assert_eq!(festivity.name, "Wedding Festivity");
     assert_eq!(

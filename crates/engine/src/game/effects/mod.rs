@@ -17044,7 +17044,17 @@ fn resolve_chain_body(
     {
         actor_bound.instruction_actor = None;
     }
-    if super::ability_utils::bind_instruction_actor(state, &mut actor_bound).is_none() {
+    // CR 603.12 + CR 603.3d: a resumed reflexive first creates its trigger;
+    // its targets are chosen as that trigger goes on the stack. An instruction
+    // actor naming one of those targets cannot be bound until the trigger
+    // resolves. Preserve the actor on the pending trigger for that later bind.
+    let creates_reflexive = actor_bound
+        .condition
+        .as_ref()
+        .is_some_and(AbilityCondition::has_when_you_do_marker);
+    if !creates_reflexive
+        && super::ability_utils::bind_instruction_actor(state, &mut actor_bound).is_none()
+    {
         return skip_instruction_and_dependents(state, ability, events, depth);
     }
     let ability = &actor_bound;

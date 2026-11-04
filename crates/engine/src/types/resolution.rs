@@ -3054,6 +3054,28 @@ impl ResolutionStack {
         }
     }
 
+    /// Mutably access the same exact ChangeZone owner while its immediate
+    /// post-replacement child is active. This does not search buried frames.
+    pub fn active_change_zone_or_post_replacement_child_mut(
+        &mut self,
+    ) -> Option<&mut ChangeZoneFrame> {
+        let parent = self.frames.top().and_then(|top| self.frames.below(top));
+        match self.frames.last() {
+            Some(ResolutionFrame::ChangeZone(_)) => match self.frames.last_mut() {
+                Some(ResolutionFrame::ChangeZone(frame)) => Some(frame),
+                Some(_) | None => unreachable!("checked active change-zone frame must match"),
+            },
+            Some(ResolutionFrame::PostReplacement(_)) => match parent {
+                Some(parent) => match self.frames.get_mut(parent) {
+                    Some(ResolutionFrame::ChangeZone(frame)) => Some(frame),
+                    Some(_) | None => None,
+                },
+                None => None,
+            },
+            Some(_) | None => None,
+        }
+    }
+
     /// Consumes exactly the active general post-replacement frame.
     pub fn take_active_post_replacement(
         &mut self,

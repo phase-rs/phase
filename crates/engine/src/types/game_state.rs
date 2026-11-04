@@ -28120,7 +28120,8 @@ impl GameState {
     ) -> bool {
         let mut occurrence = None;
         let matched = if let Some(paused) = self
-            .active_change_zone_frame_mut()
+            .resolution_stack
+            .active_change_zone_or_post_replacement_child_mut()
             .and_then(|frame| frame.pending.as_mut())
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))

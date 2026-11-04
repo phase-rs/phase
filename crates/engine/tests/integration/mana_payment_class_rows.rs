@@ -380,6 +380,15 @@ fn drive(row: &Row) -> (bool, String) {
         flag(castable),
         if stranded { "!P" } else { "" }
     );
+    if reading != row.7 {
+        eprintln!(
+            "{}: waiting={:?}, stack={:?}, resolving={:?}",
+            row.0,
+            b.r.state().waiting_for,
+            b.r.state().stack,
+            b.r.state().resolving_stack_entry
+        );
+    }
 
     let mut c = build(row);
     let mut done = vec![false; c.acts.len()];
