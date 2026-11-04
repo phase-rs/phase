@@ -2139,10 +2139,7 @@ pub(crate) fn defending_player_for_target_or(
 /// PROTECTOR of the battle attacked. `None` when the target permanent is gone
 /// or a battle has no protector: there is then no defending player, which is a
 /// distinct answer from "player 0".
-pub(crate) fn defending_player_for_target(
-    state: &GameState,
-    target: AttackTarget,
-) -> Option<PlayerId> {
+pub fn defending_player_for_target(state: &GameState, target: AttackTarget) -> Option<PlayerId> {
     match target {
         AttackTarget::Player(pid) => Some(pid),
         AttackTarget::Planeswalker(pw_id) => state.objects.get(&pw_id).map(|pw| pw.controller),
