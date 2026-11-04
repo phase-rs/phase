@@ -812,12 +812,16 @@ fn snow_pool_z_partial_payment_leaves_snow_for_auto_tap() {
     // Snow-Covered Forest for S. An ordinary Forest cannot supply the deficit.
     // Supplemental strict-U variants combine those axes with colored costs
     // (CR 107.4a): Tropical Island's blue must remain available for each U.
-    // No printed card is claimed to combine these Z/U/S requirements.
-    for (cost, blue_sources) in [
-        ("{Z}{S}", 0),
-        ("{Z}{U}{S}", 1),
-        ("{Z}{U}{U}{S}", 2),
-        ("{S}{U}{Z}", 1),
+    // CR 107.4c: Spatial Contortion's strict C axis also needs its own mana;
+    // Adarkar Wastes supplies C while its W/U ability makes that source Z-eligible.
+    // No printed card is claimed to combine these Z/strict/S requirements.
+    for (cost, blue_sources, colorless_sources) in [
+        ("{Z}{S}", 0, 0),
+        ("{Z}{U}{S}", 1, 0),
+        ("{Z}{U}{U}{S}", 2, 0),
+        ("{S}{U}{Z}", 1, 0),
+        ("{Z}{C}{S}", 0, 1),
+        ("{Z}{C}{C}{S}", 0, 2),
     ] {
         for with_snow_forest in [true, false] {
             let mut s = board();
@@ -832,15 +836,29 @@ fn snow_pool_z_partial_payment_leaves_snow_for_auto_tap() {
                 .id();
             let forest = with_snow_forest.then(|| snow_forest(&mut s));
             let ordinary_forest = s.add_basic_land(P0, ManaColor::Green);
-            let tropicals: Vec<_> = (0..blue_sources)
+            let mut reserved_sources: Vec<_> = (0..blue_sources)
                 .map(|_| {
-                    s.add_land_from_oracle(P0, "Tropical Island", "({T}: Add {G} or {U}.)")
-                        .with_subtypes(vec!["Forest", "Island"])
-                        .id()
+                    (
+                        s.add_land_from_oracle(P0, "Tropical Island", "({T}: Add {G} or {U}.)")
+                            .with_subtypes(vec!["Forest", "Island"])
+                            .id(),
+                        ManaType::Blue,
+                    )
                 })
                 .collect();
+            reserved_sources.extend((0..colorless_sources).map(|_| {
+                (
+                    s.add_land_from_oracle(
+                        P0,
+                        "Adarkar Wastes",
+                        "{T}: Add {C}.\n{T}: Add {W} or {U}. This land deals 1 damage to you.",
+                    )
+                    .id(),
+                    ManaType::Colorless,
+                )
+            }));
             let creature = s
-                .add_creature_to_hand_from_oracle(P0, "Supplemental Z/colored/S payment", 1, 1, "")
+                .add_creature_to_hand_from_oracle(P0, "Supplemental Z/strict/S payment", 1, 1, "")
                 .with_mana_cost(parse_mtgjson_mana_cost(cost))
                 .id();
             let mut r = s.build();
@@ -866,27 +884,27 @@ fn snow_pool_z_partial_payment_leaves_snow_for_auto_tap() {
             assert_eq!(floating.source_id, highland);
             assert_eq!(floating.supertype, Some(ManaSupertype::Snow));
             assert!(floating.source_could_produce_two_or_more_colors);
-            // Append ordinary blue after the snow green, using actual mana actions.
+            // Append ordinary strict-type mana after the snow green, using actual mana actions.
             // Each source can produce two colors, so either pip could pay Z.
-            for tropical in &tropicals {
+            for (source, mana_type) in &reserved_sources {
                 let (_, _, grouped) = legal_actions_full(r.state());
-                let action = grouped[tropical]
+                let action = grouped[source]
                     .iter()
                     .find(|action| {
                         matches!(action, GameAction::TapLandForMana { selection }
-                        if selection.mana_type == ManaType::Blue)
+                        if selection.mana_type == *mana_type)
                     })
-                    .expect("Tropical Island exposes its blue mana action")
+                    .expect("source exposes its strict-type mana action")
                     .clone();
                 r.act(action).unwrap();
-                assert!(r.state().objects[tropical].tapped);
+                assert!(r.state().objects[source].tapped);
             }
             let floated: Vec<_> = r.state().players[0].mana_pool.units().collect();
-            assert_eq!(floated.len(), 1 + blue_sources);
+            assert_eq!(floated.len(), 1 + reserved_sources.len());
             assert_eq!(floated[0].source_id, highland);
-            for (unit, tropical) in floated[1..].iter().zip(&tropicals) {
-                assert_eq!(unit.source_id, *tropical);
-                assert_eq!(unit.color, ManaType::Blue);
+            for (unit, (source, mana_type)) in floated[1..].iter().zip(&reserved_sources) {
+                assert_eq!(unit.source_id, *source);
+                assert_eq!(unit.color, *mana_type);
                 assert_eq!(unit.supertype, None);
                 assert!(unit.source_could_produce_two_or_more_colors);
             }
@@ -930,7 +948,7 @@ fn snow_pool_z_partial_payment_leaves_snow_for_auto_tap() {
                     r.state().players[0].mana_pool.units().collect::<Vec<_>>(),
                     floated
                 );
-                assert_complete(&r, 1 + blue_sources);
+                assert_complete(&r, 1 + reserved_sources.len());
             }
         }
     }

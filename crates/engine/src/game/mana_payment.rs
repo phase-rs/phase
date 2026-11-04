@@ -1059,6 +1059,7 @@ fn payment_shard_order(
 struct RemainingPaymentColorDemand {
     preferred: ColorDemand,
     required: ColorDemand,
+    required_colorless: u32,
 }
 
 // CR 107.4a + CR 107.4f: distinguish colored requirements from Phyrexian
@@ -1074,6 +1075,7 @@ fn remaining_payment_color_demand(
     let mut demand = RemainingPaymentColorDemand {
         preferred: [0; 5],
         required: [0; 5],
+        required_colorless: 0,
     };
     let mut choice_cursor = 0;
     for &index in remaining_order {
@@ -1093,6 +1095,13 @@ fn remaining_payment_color_demand(
         } else {
             None
         };
+        // CR 107.4c: strict colorless is not represented by the WUBRG reserve.
+        if matches!(
+            shard_to_mana_type(shards[index]),
+            ShardRequirement::Single(ManaType::Colorless)
+        ) {
+            demand.required_colorless += 1;
+        }
         accumulate_shard_demand(&mut demand.preferred, shards[index]);
         if !is_phyrexian || choice == Some(&ShardChoice::PayMana) {
             accumulate_shard_demand(&mut demand.required, shards[index]);
@@ -3239,6 +3248,14 @@ fn spend_two_or_more_color_source_eligible(
 ) -> Option<ManaUnit> {
     // CR 118.3a: prefer a pinned {Z}-eligible unit before the first match.
     spend_selected(pool, |pool| {
+        // CR 107.4c + CR 118.10: a Z preference cannot consume the only
+        // colorless mana for a later strict C, just as it reserves strict colors.
+        let colorless_is_unreserved = |unit: &ManaUnit| {
+            unit.color != ManaType::Colorless
+                || demand.required_colorless == 0
+                || eligible_color_count(pool, ManaType::Colorless, spell)
+                    > demand.required_colorless as usize
+        };
         pool.first_pinned_where(pins, |unit| {
             unit.source_could_produce_two_or_more_colors && spell_permits_unit(spell, unit)
         })
@@ -3252,6 +3269,7 @@ fn spend_two_or_more_color_source_eligible(
                             && !unit.is_snow()
                             && spell_permits_unit(spell, unit)
                             && color_is_unreserved(pool, unit.color, spell, &demand.preferred)
+                            && colorless_is_unreserved(unit)
                     })
                 })
                 .flatten()
@@ -3267,6 +3285,7 @@ fn spend_two_or_more_color_source_eligible(
                             && spell_permits_unit(spell, unit)
                             && quality_demand.preserves_after(pool, unit, spell)
                             && color_is_unreserved(pool, unit.color, spell, &demand.required)
+                            && colorless_is_unreserved(unit)
                     })
                 })
                 .flatten()
