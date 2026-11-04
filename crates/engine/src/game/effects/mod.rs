@@ -16494,9 +16494,10 @@ fn optional_pay_cost_affordability_is_decidable(cost: &AbilityCost) -> bool {
 /// prompt at all. Each arm below proves infeasibility through its authoritative
 /// typed state: a missing chosen counter kind, no removable matching counter,
 /// an exact `ParentTarget` hand-off that records no produced object, a
-/// self-referent or event-referent move whose object can no longer move, or a
-/// reveal of a library top that would reveal no card. Suppressing the prompt
-/// lets the effect resolve as its defined no-op instead.
+/// self-referent or event-referent move whose object can no longer move, a
+/// reveal of a library top that would reveal no card, or an unbound
+/// linked-exile referent ("the exiled card") with no card in exile. Suppressing
+/// the prompt lets the effect resolve as its defined no-op instead.
 fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
     match &ability.effect {
         Effect::PutSticker { .. } => stickers::optional_is_infeasible(state, ability),
@@ -16683,6 +16684,15 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                 {
                     return true;
                 }
+                // CR 406.6 + CR 607.2a + CR 608.2d (issue #10325): "the exiled card" with
+                // an empty linked exile names no card, so neither playing nor casting it is
+                // possible; the offer is not made and `resolve_chain_body` routes the
+                // decline, keeping an "If you do" rider (Smuggler's Buggy) gated. A
+                // looked-at-library binding and every non-`ExiledBySource` pick (the
+                // Electrodominance hand cast) are outside this predicate and unchanged.
+                if let Some(true) = cast_from_zone::exiled_card_link_is_empty(state, ability) {
+                    return true;
+                }
                 // CR 608.2d: An optional hand-pick cast ("you may cast a permanent
                 // spell … from your hand") with no eligible card is impossible.
                 // This only needs to be treated as infeasible up front when the
@@ -16715,8 +16725,9 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                     .collect();
                 // CR 406.6 + CR 607.2a: an unbound "the exiled card" Play binds
                 // through the same authority `resolve` uses, so the per-card
-                // probe below asks about the card resolution would play. The
-                // private looked-at-library pick keeps the whole-ability dry run.
+                // probe below asks about the card resolution would play. An
+                // empty linked exile was already decided above. The private
+                // looked-at-library pick keeps the whole-ability dry run.
                 if bound_objects.is_empty()
                     && resolves_play_now
                     && target.references_exiled_by_source()
@@ -60054,11 +60065,94 @@ mod tests {
         let unbound = play_instruction(source, None, CastFromZoneDriver::DuringResolution);
         assert!(!optional_effect_is_infeasible(&state, &unbound));
 
-        // No link and no look: the whole-ability dry run still governs, and
-        // `resolve` reports "nothing to cast".
+        // Issue #10325: no link and no look, so "the exiled card" names no card
+        // and `resolve` would reach "nothing to cast" — an impossible option.
         let (state, source, _) = play_feasibility_board(Zone::Exile, false);
         let unbound = play_instruction(source, None, CastFromZoneDriver::DuringResolution);
-        assert!(!optional_effect_is_infeasible(&state, &unbound));
+        assert!(
+            optional_effect_is_infeasible(&state, &unbound),
+            "CR 607.2a + CR 608.2d: no linked exiled card, no offer"
+        );
+    }
+
+    /// Issue #10325 — CR 406.6 + CR 607.2a + CR 400.7 + CR 608.2d: an unbound
+    /// resolve-now "the exiled card" instruction whose linked exile binds no card
+    /// is not offered, in Play and Cast mode alike. A live linked spell, a
+    /// looked-at library card and a lingering grant stay offerable.
+    #[test]
+    fn optional_unbound_resolve_now_with_an_empty_link_is_infeasible() {
+        fn set_cast_mode(ability: &mut ResolvedAbility) {
+            if let Effect::CastFromZone { mode, .. } = &mut ability.effect {
+                *mode = CardPlayMode::Cast;
+            }
+        }
+
+        // CR 400.7: the linked card left exile, so it is a new object the
+        // instruction no longer refers to.
+        let (mut state, source, land) = play_feasibility_board(Zone::Exile, false);
+        link_exiled(&mut state, source, land);
+        state.objects.get_mut(&land).unwrap().zone = Zone::Graveyard;
+        let unbound = play_instruction(source, None, CastFromZoneDriver::DuringResolution);
+        assert!(
+            optional_effect_is_infeasible(&state, &unbound),
+            "CR 400.7: a linked card that left exile is not offered"
+        );
+
+        // Cast mode with no link (Smuggler's Buggy's shape).
+        let (state, source, _) = play_feasibility_board(Zone::Exile, false);
+        let mut cast = play_instruction(source, None, CastFromZoneDriver::DuringResolution);
+        set_cast_mode(&mut cast);
+        assert!(
+            optional_effect_is_infeasible(&state, &cast),
+            "CR 607.2a + CR 608.2d: no linked exiled card to cast, no offer"
+        );
+
+        // Reach-guard: the same Cast instruction over a live linked instant.
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(916),
+            PlayerId(0),
+            "Cast Source".to_string(),
+            Zone::Battlefield,
+        );
+        let spell = create_object(
+            &mut state,
+            CardId(917),
+            PlayerId(0),
+            "Exiled Spell".to_string(),
+            Zone::Exile,
+        );
+        {
+            let object = state.objects.get_mut(&spell).unwrap();
+            object.card_types.core_types.push(CoreType::Instant);
+            object.base_card_types = object.card_types.clone();
+        }
+        link_exiled(&mut state, source, spell);
+        let mut cast = play_instruction(source, None, CastFromZoneDriver::DuringResolution);
+        set_cast_mode(&mut cast);
+        assert!(
+            !optional_effect_is_infeasible(&state, &cast),
+            "reach-guard: a live linked instant is offered"
+        );
+
+        // CR 701.20e: no link but a looked-at library card — the whole-ability
+        // dry run still governs the private library selection.
+        let (mut state, source, looked) = play_feasibility_board(Zone::Library, false);
+        state.last_revealed_ids = vec![looked];
+        let unbound = play_instruction(source, None, CastFromZoneDriver::DuringResolution);
+        assert!(
+            !optional_effect_is_infeasible(&state, &unbound),
+            "a looked-at library binding stays offered"
+        );
+
+        // A lingering Play grant is always grantable and unprobed.
+        let (state, source, _) = play_feasibility_board(Zone::Exile, false);
+        let lingering = play_instruction(source, None, CastFromZoneDriver::LingeringPermission);
+        assert!(
+            !optional_effect_is_infeasible(&state, &lingering),
+            "a lingering Play grant with no link is not probed"
+        );
     }
 
     /// P0's main phase with a play source on the battlefield and one spell
