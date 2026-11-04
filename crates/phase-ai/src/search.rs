@@ -22,9 +22,9 @@ use engine::types::ability::{
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
-    CastOfferKind, CompanionDeclaration, CostResume, DistributionUnit, GameState, ManaChoice,
-    ManaChoiceContext, ManaChoicePrompt, MulliganDecisionPhase, PendingMulliganAction,
-    StackEntryKind, WaitingFor,
+    CastOfferKind, CompanionDeclaration, CostResume, DistributionScope, DistributionUnit,
+    GameState, ManaChoice, ManaChoiceContext, ManaChoicePrompt, MulliganDecisionPhase,
+    PendingMulliganAction, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::{ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
 use engine::types::keywords::Keyword;
@@ -4537,13 +4537,15 @@ pub(crate) fn deterministic_choice(
         return Some(action);
     }
 
-    // CR 601.2d + CR 704.5g: divided-damage split. `WaitingFor::DistributeAmong`
-    // is the tail of a target-selection sequence the AI has already committed
-    // to, and the engine offers at most two shapes for it (the even split and
-    // `ai_support`'s lethal-first split). Deciding it here on kill count keeps
-    // `quiesce` — which calls `deterministic_choice` with `context: None` —
-    // seeing through the trigger to the board that results, instead of stalling
-    // the rollout on two near-identical distribution vectors. This is the same
+    // CR 601.2d + CR 608.2d + CR 704.5g: divided-damage split.
+    // `WaitingFor::DistributeAmong` is either the tail of a target-selection
+    // sequence the AI has already committed to (CR 601.2d) or a choice made
+    // while an effect resolves (CR 608.2d), and the engine offers a bounded
+    // family of legal alternatives for it (`ai_support`'s even, lethal-first,
+    // greedy, survivable, and all-on-one shapes). Deciding it here on the kill
+    // score keeps `quiesce` — which calls `deterministic_choice` with
+    // `context: None` — seeing through the trigger to the board that results,
+    // instead of stalling the rollout on near-identical distribution vectors. This is the same
     // call that decides the ROOT prompt (the pre-search early return in
     // `score_candidates_with_session`), so the arm is context-free by
     // construction: it reads only `state` and `actions`.
@@ -5369,8 +5371,14 @@ fn validated_declare_attackers(
 /// CR 702.12b: an indestructible creature ignores the lethal-damage
 /// state-based action, so no share kills it. A body already at 0 or less
 /// toughness is dying to CR 704.5f regardless, and a player or planeswalker is
-/// not a kill at all.
-fn share_is_lethal(state: &GameState, target: &TargetRef, share: u32) -> bool {
+/// not a kill at all. CR 702.2b + CR 704.5h: from a deathtouch source any
+/// nonzero share is lethal.
+fn share_is_lethal(
+    state: &GameState,
+    target: &TargetRef,
+    share: u32,
+    source_has_deathtouch: bool,
+) -> bool {
     let TargetRef::Object(id) = target else {
         return false;
     };
@@ -5381,30 +5389,47 @@ fn share_is_lethal(state: &GameState, target: &TargetRef, share: u32) -> bool {
             // The threshold comes from `combat_damage::lethal_damage_needed`,
             // the documented single authority for how much a body absorbs; it
             // already accounts for damage already marked.
-            && share >= engine::game::combat_damage::lethal_damage_needed(state, *id, false)
+            && share
+                >= engine::game::combat_damage::lethal_damage_needed(
+                    state,
+                    *id,
+                    source_has_deathtouch,
+                )
     })
 }
 
-/// CR 601.2d: pick the offered damage division that destroys the most creature
-/// targets, keeping the engine's emission order on a tie so the even split —
-/// emitted first by `ai_support::candidate_actions` — stands when no split
-/// kills more.
+/// Strict-improvement margin for summed division scores: equal kill sets summed
+/// in a different entry order may differ by an ulp, and must still tie.
+const DIVISION_SCORE_EPSILON: f64 = 1e-9;
+
+/// CR 601.2d + CR 608.2d: pick the offered damage division with the best kill
+/// score, keeping the earlier division on a tie (the root re-sorts candidates by
+/// `cmp_stable` before this runs; unsorted callers such as quiescence keep the
+/// engine's emission order).
 ///
+/// The kill score depends on the division's scope:
+/// - `AnnouncedTargets` (CR 601.2d): each destroyed creature target counts
+///   +1 — the chooser announced those targets to destroy them.
+/// - `ResolutionCandidates` (CR 608.2d): the recipients are whoever the effect
+///   names, so each destroyed creature scores its intrinsic value, positive
+///   when an opponent of the chooser controls it and negative otherwise. A
+///   division that destroys nothing (0) beats any that destroys a friendly
+///   body, and among opposed bodies the most valuable is preferred.
+///
+/// Lethality reads the dividing source's deathtouch through the engine's
+/// `deal_damage::division_source_has_deathtouch` (CR 702.2b + CR 704.5h).
 /// Only `DistributionUnit::Damage` has a lethality notion; counter and life
-/// divisions fall through to the ordinary scoring path. Deathtouch is not
-/// modelled: `WaitingFor::DistributeAmong` carries no source id, and with a
-/// deathtouch source every share of one or more is lethal (CR 702.2b), so both
-/// offered splits tie and the even split stands anyway.
+/// divisions fall through to the ordinary scoring path.
 fn most_lethal_distribution(state: &GameState, actions: &[GameAction]) -> Option<GameAction> {
-    if !matches!(
-        state.waiting_for,
-        WaitingFor::DistributeAmong {
-            unit: DistributionUnit::Damage,
-            ..
-        }
-    ) {
+    let WaitingFor::DistributeAmong {
+        player: chooser,
+        unit: DistributionUnit::Damage,
+        scope,
+        ..
+    } = &state.waiting_for
+    else {
         return None;
-    }
+    };
     let divisions: Vec<&GameAction> = actions
         .iter()
         .filter(|action| matches!(action, GameAction::DistributeAmong { .. }))
@@ -5417,21 +5442,43 @@ fn most_lethal_distribution(state: &GameState, actions: &[GameAction]) -> Option
     if divisions.len() < 2 {
         return None;
     }
-    let mut best: Option<(usize, &GameAction)> = None;
+    let source_has_deathtouch =
+        engine::game::effects::deal_damage::division_source_has_deathtouch(state, scope);
+    let kill_score = |target: &TargetRef| -> f64 {
+        match scope {
+            DistributionScope::AnnouncedTargets => 1.0,
+            DistributionScope::ResolutionCandidates { .. } => {
+                let TargetRef::Object(id) = target else {
+                    return 0.0;
+                };
+                let Some(object) = state.objects.get(id) else {
+                    return 0.0;
+                };
+                let value = crate::eval::evaluate_creature_intrinsic(state, *id);
+                if engine::game::players::is_opponent(state, *chooser, object.controller) {
+                    value
+                } else {
+                    -value
+                }
+            }
+        }
+    };
+    let mut best: Option<(f64, &GameAction)> = None;
     for action in divisions {
         let GameAction::DistributeAmong { distribution } = action else {
             continue;
         };
-        let kills = distribution
+        let score: f64 = distribution
             .iter()
-            .filter(|(target, share)| share_is_lethal(state, target, *share))
-            .count();
+            .filter(|(target, share)| share_is_lethal(state, target, *share, source_has_deathtouch))
+            .map(|(target, _)| kill_score(target))
+            .sum();
         let is_better = match best {
-            Some((most, _)) => kills > most,
+            Some((best_score, _)) => score > best_score + DIVISION_SCORE_EPSILON,
             None => true,
         };
         if is_better {
-            best = Some((kills, action));
+            best = Some((score, action));
         }
     }
     best.map(|(_, action)| action.clone())
@@ -17312,6 +17359,7 @@ mod tests {
             total: 5,
             targets: targets.clone(),
             unit: DistributionUnit::Damage,
+            scope: engine::types::game_state::DistributionScope::AnnouncedTargets,
         };
 
         let even = GameAction::DistributeAmong {
@@ -17345,6 +17393,255 @@ mod tests {
             deterministic_choice(&state, P0, &config, &[tie_a.clone(), tie_b], None),
             Some(tie_a),
             "an equal kill count must keep the engine's emission order"
+        );
+    }
+
+    /// Park `state` at a CR 608.2d resolution-time damage division of `total`
+    /// among `targets`, chosen by `chooser`, whose paused node's damage source
+    /// is `source` (`damage_source: None` reads the ability's own source).
+    fn park_resolution_division(
+        state: &mut GameState,
+        chooser: PlayerId,
+        total: u32,
+        targets: &[TargetRef],
+        source: ObjectId,
+    ) {
+        let pending = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: engine::types::ability::QuantityExpr::Fixed {
+                    value: total as i32,
+                },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            source,
+            chooser,
+        );
+        state.waiting_for = WaitingFor::DistributeAmong {
+            player: chooser,
+            total,
+            targets: targets.to_vec(),
+            unit: DistributionUnit::Damage,
+            scope: DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            },
+        };
+    }
+
+    fn division(entries: &[(ObjectId, u32)]) -> GameAction {
+        GameAction::DistributeAmong {
+            distribution: entries
+                .iter()
+                .map(|(id, share)| (TargetRef::Object(*id), *share))
+                .collect(),
+        }
+    }
+
+    /// CR 608.2d + CR 704.5g: dividing among the chooser's OWN bodies, each
+    /// destroyed body is a loss weighted by its value — losing only the cheaper
+    /// body beats the kill-both split, and a division that destroys nothing
+    /// beats any loss.
+    #[test]
+    fn resolution_division_choice_minimises_friendly_losses() {
+        let config = AiConfig::default();
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, P1, 4, 5);
+        let timber = add_creature(&mut state, P0, 1, 1);
+        let watch = add_creature(&mut state, P0, 3, 3);
+        let (timber_value, watch_value) = (
+            crate::eval::evaluate_creature_intrinsic(&state, timber),
+            crate::eval::evaluate_creature_intrinsic(&state, watch),
+        );
+        assert!(
+            0.0 < timber_value && timber_value < watch_value,
+            "fixture premise: a 1/1 is worth less than a 3/3"
+        );
+        park_resolution_division(
+            &mut state,
+            P0,
+            4,
+            &[TargetRef::Object(timber), TargetRef::Object(watch)],
+            source,
+        );
+        let both_die = division(&[(timber, 1), (watch, 3)]);
+        let timber_dies = division(&[(timber, 4)]);
+        let watch_dies = division(&[(watch, 4)]);
+        assert_eq!(
+            deterministic_choice(
+                &state,
+                P0,
+                &config,
+                &[both_die, watch_dies, timber_dies.clone()],
+                None
+            ),
+            Some(timber_dies),
+            "the single cheaper loss wins"
+        );
+
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, P0, 4, 7);
+        let a = add_creature(&mut state, P0, 3, 3);
+        let b = add_creature(&mut state, P0, 3, 3);
+        park_resolution_division(
+            &mut state,
+            P0,
+            4,
+            &[TargetRef::Object(a), TargetRef::Object(b)],
+            source,
+        );
+        let one_dies = division(&[(a, 4)]);
+        let spread = division(&[(a, 2), (b, 2)]);
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &[one_dies, spread.clone()], None),
+            Some(spread),
+            "a no-kill division beats any friendly loss"
+        );
+    }
+
+    /// CR 608.2d: among opposed recipients the most valuable destroyed body
+    /// wins, and two divisions destroying the same set (entries in a different
+    /// order) tie — the earlier one stands.
+    #[test]
+    fn resolution_division_choice_values_opposed_kills_and_keeps_ties_stable() {
+        let config = AiConfig::default();
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, P1, 3, 3);
+        let timber = add_creature(&mut state, P0, 1, 1);
+        let watch = add_creature(&mut state, P0, 3, 3);
+        park_resolution_division(
+            &mut state,
+            P1,
+            3,
+            &[TargetRef::Object(timber), TargetRef::Object(watch)],
+            source,
+        );
+        let timber_dies = division(&[(timber, 3)]);
+        let watch_dies = division(&[(watch, 3)]);
+        assert_eq!(
+            deterministic_choice(
+                &state,
+                P1,
+                &config,
+                &[timber_dies, watch_dies.clone()],
+                None
+            ),
+            Some(watch_dies),
+            "the opposing chooser destroys the more valuable body"
+        );
+
+        park_resolution_division(
+            &mut state,
+            P1,
+            4,
+            &[TargetRef::Object(timber), TargetRef::Object(watch)],
+            source,
+        );
+        let forward = division(&[(timber, 1), (watch, 3)]);
+        let reversed = division(&[(watch, 3), (timber, 1)]);
+        assert_eq!(
+            deterministic_choice(
+                &state,
+                P1,
+                &config,
+                &[forward.clone(), reversed.clone()],
+                None
+            ),
+            Some(forward.clone()),
+            "an equal kill set keeps the earlier division"
+        );
+        assert_eq!(
+            deterministic_choice(&state, P1, &config, &[reversed.clone(), forward], None),
+            Some(reversed),
+            "an equal kill set keeps the earlier division in either order"
+        );
+    }
+
+    /// CR 702.2b + CR 704.5h: a resolution-time division whose damage source
+    /// has deathtouch makes one-point shares lethal; the same prompt without
+    /// deathtouch scores both divisions 0 and keeps the first.
+    #[test]
+    fn resolution_division_choice_reads_the_sources_deathtouch() {
+        let config = AiConfig::default();
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, P1, 2, 3);
+        let a = add_creature(&mut state, P0, 3, 3);
+        let b = add_creature(&mut state, P0, 3, 3);
+        park_resolution_division(
+            &mut state,
+            P1,
+            2,
+            &[TargetRef::Object(a), TargetRef::Object(b)],
+            source,
+        );
+        let all_on_a = division(&[(a, 2)]);
+        let spread = division(&[(a, 1), (b, 1)]);
+        assert_eq!(
+            deterministic_choice(
+                &state,
+                P1,
+                &config,
+                &[all_on_a.clone(), spread.clone()],
+                None
+            ),
+            Some(all_on_a.clone()),
+            "control: without deathtouch neither division destroys a 3/3"
+        );
+
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .keywords
+            .push(Keyword::Deathtouch);
+        assert_eq!(
+            deterministic_choice(&state, P1, &config, &[all_on_a, spread.clone()], None),
+            Some(spread),
+            "one deathtouch point destroys each 3/3"
+        );
+    }
+
+    /// CR 601.2d: announce-time divisions keep the kill-count metric — the
+    /// recipients' controller does not matter, a 2-kill beats a 1-kill, and an
+    /// equal count keeps the earlier division.
+    #[test]
+    fn announced_division_choice_keeps_kill_count() {
+        let config = AiConfig::default();
+        let mut state = GameState::new_two_player(42);
+        let frail = add_creature(&mut state, P0, 1, 1);
+        let tough = add_creature(&mut state, P0, 1, 3);
+        state.waiting_for = WaitingFor::DistributeAmong {
+            player: P0,
+            total: 4,
+            targets: vec![TargetRef::Object(frail), TargetRef::Object(tough)],
+            unit: DistributionUnit::Damage,
+            scope: DistributionScope::AnnouncedTargets,
+        };
+        let one_kill = division(&[(frail, 2), (tough, 2)]);
+        let two_kills = division(&[(frail, 1), (tough, 3)]);
+        assert_eq!(
+            deterministic_choice(
+                &state,
+                P0,
+                &config,
+                &[one_kill.clone(), two_kills.clone()],
+                None
+            ),
+            Some(two_kills),
+            "two kills beat one even when the chooser controls both bodies"
+        );
+        let other_one_kill = division(&[(frail, 3), (tough, 1)]);
+        assert_eq!(
+            deterministic_choice(
+                &state,
+                P0,
+                &config,
+                &[one_kill.clone(), other_one_kill],
+                None
+            ),
+            Some(one_kill),
+            "an equal kill count keeps the earlier division"
         );
     }
 
