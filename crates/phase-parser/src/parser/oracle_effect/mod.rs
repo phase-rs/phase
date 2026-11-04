@@ -11478,6 +11478,40 @@ fn parse_effect_clause_inner_with_damage_context(
             description: None,
         });
     }
+
+    // CR 115.1c + CR 115.6: "Choose two target players." is a pure
+    // exact-count target declaration (Scheming Symmetry); carry the count on
+    // the clause so the engine opens that many distinct target slots.
+    let lower = text.to_ascii_lowercase();
+    if let Ok((after_choose, _)) = tag::<_, _, OracleError<'_>>("choose ").parse(lower.as_str()) {
+        let consumed = lower.len() - after_choose.len();
+        let after_orig = &text[consumed..];
+        let (stripped_lower, multi) = lower::strip_optional_target_prefix(after_choose);
+        if let Some(multi) = multi {
+            let inner = after_choose.len() - stripped_lower.len();
+            let target_input = &after_orig[inner..];
+            // CR 115.1: the target grammar spells the singular; the clause's
+            // multi_target count carries the plural slot count.
+            let singular;
+            let target_text = if let Ok((rest, _)) =
+                tag::<_, _, OracleError<'_>>("target players").parse(target_input)
+            {
+                singular = format!("target player{rest}");
+                singular.as_str()
+            } else {
+                target_input
+            };
+            let (target, remainder) = parse_target_with_ctx(target_text, ctx);
+            if remainder.trim().is_empty()
+                && !matches!(&target, TargetFilter::Typed(filter)
+                    if filter.type_filters.is_empty() && filter.controller.is_none())
+            {
+                let mut clause = parsed_clause(Effect::TargetOnly { target });
+                clause.multi_target = Some(multi);
+                return clause;
+            }
+        }
+    }
     if counter_unless_payment_is_unsupported(text) {
         return parsed_unless_payment_unsupported_clause(text);
     }

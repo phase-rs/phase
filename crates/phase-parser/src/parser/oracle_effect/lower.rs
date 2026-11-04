@@ -9254,6 +9254,19 @@ pub(crate) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTar
         return (text, None);
     }
 
+    // CR 115.1c + CR 115.6: an exact count before the target article
+    // ("choose two target players") declares a fixed number of slots.
+    if let Ok((remainder, count)) = parse_multi_target_count_expr(lower.as_str()) {
+        let consumed = lower.len() - remainder.len();
+        let rest = text[consumed..].trim_start();
+        if followed_by_target_article(&rest.to_ascii_lowercase()) {
+            if let QuantityExpr::Fixed { value } = count {
+                let n = value.max(0) as usize;
+                return (rest, Some(MultiTargetSpec::fixed(n, n)));
+            }
+        }
+    }
+
     let Ok((after_up_to, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(lower.as_str()) else {
         return (text, None);
     };
