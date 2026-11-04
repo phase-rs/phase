@@ -5637,6 +5637,33 @@ pub enum PendingPlayerScopeSacrificeFollowUp {
     },
 }
 
+/// CR 701.9a + CR 614.6: a frameless single-card effect discard (connive,
+/// learn rummage) whose move paused for a replacement choice: either a
+/// CR 616.1 choice among two or more applicable replacement effects (two
+/// Rest in Peace), or the apply-or-decline choice of a single optional
+/// replacement whose own text says "you may ... instead" (Library of Leng).
+///
+/// CR 614.6: "If an event is replaced, it never happens. A modified event
+/// occurs instead." A hand -> graveyard redirect (Rest in Peace) or an optional
+/// "discard it, but ... instead" replacement (Library of Leng) therefore still
+/// discards the card; CR 701.9c presupposes the same for a card put into a
+/// hidden zone instead. The resumed zone-change delivery records a `Discarded`
+/// event only for a provenance-framed discard, so this carrier names the
+/// pre-move occurrence for the settle step to record exactly once
+/// (`effects::settle_paused_single_discard`).
+///
+/// Batches (Mind Rot) park [`PendingDiscardBatch`] instead; the two carriers
+/// are never installed together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingSingleDiscard {
+    /// CR 400.7: the pre-move hand occurrence that paused.
+    pub paused_card: ObjectIncarnationRef,
+    /// The discarding player.
+    pub player: PlayerId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<ObjectId>,
+}
+
 /// One discard instruction, parked mid-batch while an optional replacement
 /// application awaits its apply-or-decline choice.
 ///
@@ -25126,6 +25153,13 @@ declare_game_state! {
     /// box.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_discard_batch: Option<Box<PendingDiscardBatch>>,
+    /// CR 701.9a + CR 614.6: a frameless single-card effect discard (connive,
+    /// learn rummage) paused by a replacement choice. See [`PendingSingleDiscard`].
+    ///
+    /// Boxed for the same stack-budget reason as `pending_discard_batch`
+    /// (`types/game_state_size.rs`); populated only during a pause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_single_discard: Option<Box<PendingSingleDiscard>>,
     /// CR 608.2c + CR 616.1: Progress for a replacement-suspended exile loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_exile_from_top_until: Option<Box<PendingExileFromTopUntil>>,
@@ -33266,6 +33300,7 @@ impl GameState {
             pending_player_scope_sacrifice_choice: None,
             pending_player_scope_unless_payment: None,
             pending_discard_batch: None,
+            pending_single_discard: None,
             pending_exile_from_top_until: None,
             pending_mass_library_order_choice: None,
             pending_scoped_library_search: None,
@@ -37224,6 +37259,10 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_player_scope_sacrifice_choice: _,
         pending_player_scope_unless_payment: _,
         pending_discard_batch: _,
+        // `pending_single_discard`: COMPARED (hand-written `impl PartialEq` conjunct) — the
+        // single-card sibling of `pending_discard_batch`, `None` outside a pause, so COMPARING
+        // it can never suppress a legitimate loop's detection.
+        pending_single_discard: _,
         pending_exile_from_top_until: _,
         pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
@@ -37463,6 +37502,7 @@ impl PartialEq for GameState {
             && self.pending_player_scope_unless_payment
                 == other.pending_player_scope_unless_payment
             && self.pending_discard_batch == other.pending_discard_batch
+            && self.pending_single_discard == other.pending_single_discard
             && self.pending_exile_from_top_until == other.pending_exile_from_top_until
             && self.pending_combat_lifelink == other.pending_combat_lifelink
             && self.pending_mass_library_order_choice
