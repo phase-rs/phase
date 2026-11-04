@@ -1526,12 +1526,14 @@ mod tests {
     use crate::ai_support::legal_actions;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction, TargetFilter,
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution, ManaProduction,
+        TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::counter::CounterType;
     use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::HexproofFilter;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -1551,8 +1553,6 @@ mod tests {
     /// controls (or, off the battlefield, owns) it.
     #[test]
     fn player_bearer_from_player_specific_player_matches_controller_or_owner() {
-        use crate::types::ability::ControllerRef;
-
         let mut owned_source = make_obj();
         owned_source.zone = Zone::Graveyard;
         owned_source.controller = PlayerId(0);
@@ -1600,8 +1600,6 @@ mod tests {
     /// the player path reuses it.
     #[test]
     fn hexproof_filter_matches_concrete_quality_for_any_bearer() {
-        use crate::types::keywords::HexproofFilter;
-
         let mut blue_source = make_obj();
         blue_source.color = vec![ManaColor::Blue];
 

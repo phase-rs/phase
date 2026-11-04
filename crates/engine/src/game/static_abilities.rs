@@ -14,6 +14,7 @@ use crate::types::ability::{
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
+use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::statics::{
     CombatAloneAction, CombatAloneRequirement, CostPaymentProhibition, CrewAction,
@@ -1746,8 +1747,6 @@ fn transient_player_protection_from(
     player_id: PlayerId,
     source: &crate::game::game_object::GameObject,
 ) -> bool {
-    use crate::types::ability::ContinuousModification;
-    use crate::types::keywords::Keyword;
     for tce in &state.transient_continuous_effects {
         let TargetFilter::SpecificPlayer { id: affected_id } = tce.affected else {
             continue;
@@ -1793,8 +1792,6 @@ pub fn player_has_hexproof_from(
     player_id: PlayerId,
     source: &crate::game::game_object::GameObject,
 ) -> bool {
-    use crate::types::ability::ContinuousModification;
-    use crate::types::keywords::Keyword;
     for tce in &state.transient_continuous_effects {
         let TargetFilter::SpecificPlayer { id: affected_id } = tce.affected else {
             continue;
@@ -2061,7 +2058,15 @@ pub fn player_protection_from_object_with_source_name(
                 // opponents" — Absolute Virtue) is matched by the same
                 // characteristic authority the object path uses, with this
                 // player as the protected bearer.
-                _ => source.is_some_and(|source_obj| {
+                ProtectionTarget::Color(_)
+                | ProtectionTarget::CardType(_)
+                | ProtectionTarget::Quality(_)
+                | ProtectionTarget::Multicolored
+                | ProtectionTarget::ChosenColor
+                | ProtectionTarget::ChosenPlayer
+                | ProtectionTarget::Filter(_)
+                | ProtectionTarget::FromPlayer(_)
+                | ProtectionTarget::EachColor(_) => source.is_some_and(|source_obj| {
                     crate::game::keywords::source_matches_protection_target_for_player(
                         target, player_id, source_obj,
                     )

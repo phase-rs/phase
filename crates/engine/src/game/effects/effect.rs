@@ -1603,13 +1603,14 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         BasicLandType, ChoiceValue, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-        Duration, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
+        Duration, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TargetRef,
+        TypedFilter,
     };
     use crate::types::card_type::{CoreType, SubtypeSet};
     use crate::types::events::GameEvent;
     use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectIncarnationRef, TrackedSetId};
-    use crate::types::keywords::Keyword;
+    use crate::types::keywords::{Keyword, ProtectionTarget};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -1619,10 +1620,6 @@ mod tests {
     /// left unchanged and matches nothing (CR 609.3).
     #[test]
     fn player_protection_from_that_player_latches_the_declared_target() {
-        use crate::types::ability::ControllerRef;
-        use crate::types::ability::TargetRef;
-        use crate::types::keywords::{Keyword, ProtectionTarget};
-
         let state = GameState::new_two_player(42);
         let modifications = [ContinuousModification::AddKeyword {
             keyword: Keyword::Protection(ProtectionTarget::FromPlayer(ControllerRef::TargetPlayer)),
