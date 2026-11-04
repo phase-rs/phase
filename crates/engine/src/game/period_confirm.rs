@@ -1014,16 +1014,32 @@ fn replay_cycle_ordered(
     let mut performed = Vec::new();
     let mut last_priority: Option<GameState> = None;
     let start = play_trace::WindowKey::of(replay);
+    let mut seen: Vec<ObjectId> = replay.stack.iter().map(|entry| entry.id).collect();
+    let mut prompted = false;
     for beat in 0..CYCLE_BEATS {
         if replay.game_end.is_some() || !end.admits(start, replay) {
             return Err(OfferRefusal::NoRecurrence);
         }
-        let next = done.iter().position(|d| !d);
-        let next_play = next.map(|from| {
-            (from..items.len())
-                .find(|&at| !done[at] && items[at].play.is_some())
-                .unwrap_or(items.len())
-        });
+        // A trigger's targets exist only once it is on the stack, so only a priority beat that
+        // no target prompt preceded can show one the reducer targeted without asking.
+        if !prompted
+            && matches!(replay.waiting_for, WaitingFor::Priority { .. })
+            && replay
+                .stack
+                .back()
+                .is_some_and(|entry| !seen.contains(&entry.id))
+        {
+            if let Some(candidates) = pending_answers(items, &done) {
+                announced_declared(replay, items, &mut done, candidates, declared)?;
+            }
+        }
+        seen = replay.stack.iter().map(|entry| entry.id).collect();
+        prompted = matches!(
+            replay.waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        );
+        let pending = pending_answers(items, &done);
+        let next = pending.as_ref().map(|candidates| candidates.start);
         if let WaitingFor::Priority { player } = replay.waiting_for {
             if let Some(frames) = frames.as_deref_mut() {
                 frames.push(replay.clone());
@@ -1087,10 +1103,10 @@ fn replay_cycle_ordered(
             last_priority = None;
             continue;
         }
-        let answered = match next {
+        let answered = match pending {
             None => false,
-            Some(at) => {
-                let candidates = at..next_play.unwrap_or(items.len());
+            Some(candidates) => {
+                let at = candidates.start;
                 if answer_declared(
                     replay,
                     items,
@@ -1137,6 +1153,16 @@ fn replay_cycle_ordered(
         }
     }
     Err(OfferRefusal::NoRecurrence)
+}
+
+/// The unmade items from the first one up to the next unmade play: the answers the current
+/// prompt may take.
+fn pending_answers(items: &[PeriodItem], done: &[bool]) -> Option<std::ops::Range<usize>> {
+    let from = done.iter().position(|made| !made)?;
+    let to = (from..items.len())
+        .find(|&at| !done[at] && items[at].play.is_some())
+        .unwrap_or(items.len());
+    Some(from..to)
 }
 
 /// Every item is made, except mandatory answers the replay went past without being asked them.
@@ -1195,7 +1221,7 @@ fn answer_declared(
     declared: Declared<'_>,
     events: &mut Vec<GameEvent>,
 ) -> Result<bool, OfferRefusal> {
-    use crate::analysis::decision_template::{take_answer, ConcreteDecision, ConcreteTarget};
+    use crate::analysis::decision_template::take_answer;
     let Some((template, iteration)) = declared else {
         return Ok(false);
     };
@@ -1225,27 +1251,86 @@ fn answer_declared(
     }) else {
         return Ok(false);
     };
-    let ConcreteDecision::Targets { targets, .. } =
-        decision.map_err(|_| OfferRefusal::IllegalReplayedPlay)?
-    else {
-        return Err(OfferRefusal::UnanswerablePrompt);
-    };
-    let targets = targets
-        .into_iter()
-        .map(|target| match target {
-            ConcreteTarget::Object(id) => TargetRef::Object(id),
-            ConcreteTarget::Player(seat) => TargetRef::Player(seat),
-        })
-        .collect();
     step(
         replay,
         player,
-        GameAction::SelectTargets { targets },
+        GameAction::SelectTargets {
+            targets: pinned_targets(decision)?,
+        },
         OfferRefusal::IllegalReplayedPlay,
         events,
     )?;
     done[recorded] = true;
     Ok(true)
+}
+
+/// CR 603.3d + CR 601.2c: a trigger the reducer just put on the stack with its only legal target,
+/// asking no one, makes the recorded mandatory target answer among `candidates` when `declared`
+/// pins its slot and the target it got is the declaration's at this repetition.
+fn announced_declared(
+    replay: &GameState,
+    items: &[PeriodItem],
+    done: &mut [bool],
+    candidates: std::ops::Range<usize>,
+    declared: Declared<'_>,
+) -> Result<(), OfferRefusal> {
+    use crate::analysis::decision_template::take_answer;
+    let Some((template, iteration)) = declared else {
+        return Ok(());
+    };
+    let Some(StackEntryKind::TriggeredAbility {
+        source_id, ability, ..
+    }) = replay.stack.back().map(|entry| &entry.kind)
+    else {
+        return Ok(());
+    };
+    let Some(decision) = take_answer(
+        template,
+        iteration,
+        replay,
+        ChoicePoint::AnnouncedTarget,
+        |source| crate::game::engine::slot_source_prompted(replay, source, *source_id),
+    ) else {
+        return Ok(());
+    };
+    let Some(recorded) = candidates.clone().find(|&at| {
+        !done[at]
+            && items[at].mandatory_answer
+            && matches!(
+                items[at].action,
+                GameAction::SelectTargets { .. } | GameAction::ChooseTarget { .. }
+            )
+    }) else {
+        return Ok(());
+    };
+    if crate::game::ability_utils::declared_targets_in_chain(ability) != pinned_targets(decision)? {
+        return Err(OfferRefusal::IllegalReplayedPlay);
+    }
+    done[recorded] = true;
+    Ok(())
+}
+
+/// The targets a declared target pin names at this repetition; a pin that does not resolve here
+/// refuses the replayed play.
+fn pinned_targets(
+    decision: Result<
+        crate::analysis::decision_template::ConcreteDecision,
+        crate::analysis::decision_template::ReplayFailure,
+    >,
+) -> Result<Vec<TargetRef>, OfferRefusal> {
+    use crate::analysis::decision_template::{ConcreteDecision, ConcreteTarget};
+    let ConcreteDecision::Targets { targets, .. } =
+        decision.map_err(|_| OfferRefusal::IllegalReplayedPlay)?
+    else {
+        return Err(OfferRefusal::UnanswerablePrompt);
+    };
+    Ok(targets
+        .into_iter()
+        .map(|target| match target {
+            ConcreteTarget::Object(id) => TargetRef::Object(id),
+            ConcreteTarget::Player(seat) => TargetRef::Player(seat),
+        })
+        .collect())
 }
 
 /// Answers the current prompt with the first unconsumed answer among `candidates` the reducer

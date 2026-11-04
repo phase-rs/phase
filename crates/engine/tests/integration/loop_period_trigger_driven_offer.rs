@@ -705,7 +705,7 @@ fn each_apply_evaluates_the_loop_shortcut_at_most_once() {
 }
 
 /// The ring road is asked first and the recorded road mints only while the ring leaves priority
-/// standing; a ring mint over a trigger-driven record keeps the ring road.
+/// standing, on Board B and on the Fantastic Four board alike.
 #[test]
 fn the_ring_road_is_asked_before_the_recorded_road() {
     let Some((_, applies)) = offered(Board::B) else {
@@ -731,15 +731,11 @@ fn the_ring_road_is_asked_before_the_recorded_road() {
         reset_loop_detect_cost();
         crate::loop_shortcut_drain_boards::drive_one_beat(&mut state, &mut aimed_at);
         if let WaitingFor::LoopShortcut { road, .. } = state.waiting_for {
+            let cost = loop_detect_cost();
             assert_eq!(
-                road,
-                OfferRoad::Ring,
-                "the bounded-cycle mint is the ring road's"
-            );
-            assert_eq!(
-                loop_detect_cost().object_growth_calls,
-                0,
-                "the recorded road is not asked once the ring road minted"
+                (road, cost.reconcile_calls, cost.object_growth_calls),
+                (OfferRoad::RecordedPeriod, 1, 1),
+                "the ring bridge was entered and refused before the recorded road minted"
             );
             return;
         }

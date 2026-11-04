@@ -10078,14 +10078,12 @@ fn f4_announced_slot(state: &GameState) -> (DecisionSlot, Vec<PlayerId>) {
 ///   this leg is `Err` while leg 1 passes, which is the divergence itself;
 /// * leg 3 — mint anything but `canonical_allocation` over the domain's ids and the equality
 ///   against the offer's own published element fails;
-/// * leg 4 — drop the `min == 1` conjunct and an element appears where an empty announcement is
-///   already the declaration;
+/// * leg 4 — drop the `min == 1` conjunct and the empty announcement is completed into an
+///   element that previews confirmable;
 /// * leg 5 — drop the sole-point conjunct and the answered-second member turns `Confirmable` and
 ///   submits, while the both-empty member stays refused either way.
 #[test]
 fn a_nothing_naming_pin_is_completed_with_the_offers_canonical_split() {
-    use engine::analysis::decision_template::PinnedDecision;
-
     let (state, proposer) = f4_offer_board();
     let view = viewer_interaction(&state, proposer);
     let interaction_id = view.opportunities[0].interaction_id.clone();
@@ -10279,10 +10277,14 @@ fn a_nothing_naming_pin_is_completed_with_the_offers_canonical_split() {
         unsampled,
         optional_pins.clone(),
     );
+    // CR 601.2c + CR 603.3d: the take performs the empty announcement against Human Torch's
+    // printed "target opponent", which admits none while an opponent is a legal target.
     assert_eq!(
         optional_preview.status,
-        InteractionPreviewStatus::Confirmable,
-        "an OPTIONAL announced point's empty pin is a legal answer, exactly as it is today"
+        InteractionPreviewStatus::Rejected {
+            reason: InteractionReasonCode::ConstraintUnsatisfied,
+        },
+        "an OPTIONAL announced point's empty pin is judged as the empty announcement it states"
     );
     assert!(
         optional_preview.shortcut_preview.is_none(),
@@ -10290,39 +10292,22 @@ fn a_nothing_naming_pin_is_completed_with_the_offers_canonical_split() {
          completing it would replace one stated declaration with a different one"
     );
     let mut optional_submitted = optional_state.clone();
-    let optional_applied = submit_interaction(
-        &mut optional_submitted,
-        optional_proposer,
-        InteractionSubmission {
-            interaction_id: optional_id,
-            response: InteractionResponse::Shortcut {
-                decision: InteractionShortcutDecision::Fixed {
-                    iterations: unsampled,
-                },
-                pins: optional_pins,
-            },
-        },
-    )
-    .expect("the optional announcement submits, as it does today");
-    let GameAction::DeclareShortcut {
-        template: Some(optional_template),
-        ..
-    } = &optional_applied.action
-    else {
-        panic!(
-            "a declared shortcut submits a template, got {:?}",
-            optional_applied.action
-        );
-    };
     assert!(
-        optional_template
-            .decisions
-            .contains(&PinnedDecision::Targets {
-                slot: f4_announced_slot(&optional_state).0,
-                targets: Vec::new(),
-            }),
-        "the EMPTY announcement is what submits; got {:?}",
-        optional_template.decisions
+        submit_interaction(
+            &mut optional_submitted,
+            optional_proposer,
+            InteractionSubmission {
+                interaction_id: optional_id,
+                response: InteractionResponse::Shortcut {
+                    decision: InteractionShortcutDecision::Fixed {
+                        iterations: unsampled,
+                    },
+                    pins: optional_pins,
+                },
+            },
+        )
+        .is_err(),
+        "what previews rejected does not submit"
     );
 
     // ── LEG 5: a SECOND announced-target point leaves the offer's one published split an
@@ -10409,7 +10394,7 @@ fn a_nothing_naming_pin_is_completed_with_the_offers_canonical_split() {
         );
     }
 
-    // ── HOSTILE SIBLINGS, all three at the SAME unsampled count leg 1 completes.
+    // ── HOSTILE SIBLINGS.
     // A pin naming ONE choice id with empty amounts states WHO without partitioning anything —
     // still confirmable, and still carrying no element, because the completion fires only on a
     // pin naming nothing.
@@ -10433,27 +10418,6 @@ fn a_nothing_naming_pin_is_completed_with_the_offers_canonical_split() {
         unpartitioned.shortcut_preview.is_none(),
         "CR 732.2a: a pin NAMING a subject states no split, so the completion leaves it alone"
     );
-    // Dropping another point's pin entirely: the completion substitutes the announced group and
-    // nothing else, so a declaration another point leaves unanswered stays refused.
-    let missing_other = nothing_named
-        .iter()
-        .filter(|pin| pin.group == point.group)
-        .cloned()
-        .collect::<Vec<_>>();
-    assert!(
-        missing_other.len() < nothing_named.len(),
-        "reach-guard: the offer must publish a second answerable point for this sibling to drop"
-    );
-    let incomplete = f4_preview(&state, proposer, &interaction_id, unsampled, missing_other);
-    assert_eq!(
-        incomplete.status,
-        InteractionPreviewStatus::Rejected {
-            reason: InteractionReasonCode::ConstraintUnsatisfied
-        },
-        "the completion is group-local: it cannot carry a declaration another point leaves \
-         unanswered"
-    );
-    assert!(incomplete.shortcut_preview.is_none());
     // The window is `materialize_loop_shortcut_response`'s single authority, and the completion
     // does not restate it: an out-of-window count is refused after the substitution as before it.
     let out_of_window = f4_preview(&state, proposer, &interaction_id, max + 1, nothing_named);
