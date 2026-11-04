@@ -28185,18 +28185,26 @@ impl PostReplacementDrainStack {
             .is_some_and(|drain| matches!(drain.status, DrainStatus::Ready(_)))
     }
 
-    /// CR 615.5 + CR 608.2c: queue `drain` directly beneath a paused resident, so it becomes the
+    /// CR 615.5 + CR 608.2c: queue `drain` beneath a paused resident, so it becomes the
     /// resident, and runs, only once that paused work retires
     /// (`finish_paused_dispatch`). Hands `drain` back, not installed, when the resident is not
     /// paused.
+    ///
+    /// The queue is first in, first out: `drain` goes beneath the run of Ready entries already
+    /// queued directly under the resident, so work queued earlier runs earlier.
     pub fn install_behind_paused_resident(
         &mut self,
         drain: PostReplacementDrain,
     ) -> Option<PostReplacementDrain> {
         match self.drains.last().map(|resident| &resident.status) {
             Some(DrainStatus::Paused) => {
-                let depth = self.drains.len() - 1;
-                self.drains.insert(depth, drain);
+                let resident = self.drains.len() - 1;
+                let queued = self.drains[..resident]
+                    .iter()
+                    .rev()
+                    .take_while(|queued| matches!(queued.status, DrainStatus::Ready(_)))
+                    .count();
+                self.drains.insert(resident - queued, drain);
                 None
             }
             Some(DrainStatus::Ready(_) | DrainStatus::Dispatching) | None => Some(drain),
@@ -38628,11 +38636,12 @@ mod drain_stack_reentrancy_tests {
 
     /// CR 615.5 + CR 608.2c: work queued behind a paused resident is not pending work until
     /// that resident retires, so a nested stash still installs above it; then it is the
-    /// resident, and runs next.
+    /// resident, and runs next. Two queued drains run in the order they were queued.
     #[test]
     fn work_queued_behind_a_paused_resident_waits_for_it() {
         let mut stack = PostReplacementDrainStack::default();
         let queued = ready_drain("queued");
+        let second = ready_drain("second");
         assert!(
             stack
                 .install_behind_paused_resident(queued.clone())
@@ -38651,7 +38660,12 @@ mod drain_stack_reentrancy_tests {
             .expect("the earlier rider dispatches");
         assert!(stack.pause_dispatch(earlier));
 
-        assert!(stack.install_behind_paused_resident(queued).is_none());
+        assert!(stack
+            .install_behind_paused_resident(queued.clone())
+            .is_none());
+        assert!(stack
+            .install_behind_paused_resident(second.clone())
+            .is_none());
         assert!(!stack.has_ready(), "only the resident can run");
         assert!(stack.has_ready_behind_resident());
         assert!(
@@ -38663,6 +38677,19 @@ mod drain_stack_reentrancy_tests {
 
         assert!(stack.finish_paused_dispatch().is_some());
         assert!(stack.has_ready(), "the queued work is now the resident");
+        assert_eq!(
+            stack.resident(),
+            Some(&queued),
+            "the work queued first runs first"
+        );
+        assert!(stack.has_ready_behind_resident());
+        let (_, first) = stack.begin_dispatch().expect("the first queued drain runs");
+        assert!(stack.finish_dispatch(first).is_some());
+        assert_eq!(
+            stack.resident(),
+            Some(&second),
+            "the work queued second runs next"
+        );
         assert!(!stack.has_ready_behind_resident());
     }
 

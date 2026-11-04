@@ -61,6 +61,7 @@ const TEMPER: &str = "Prevent the next X damage that would be dealt to target cr
 const PHYTOHYDRA: &str =
     "If damage would be dealt to this creature, put that many +1/+1 counters on it instead.";
 const LICHENTHROPE: &str = "If damage would be dealt to this creature, put that many -1/-1 counters on it instead.\nAt the beginning of your upkeep, remove a -1/-1 counter from this creature.";
+const PHYREXIAN_HYDRA: &str = "Infect (This creature deals damage to creatures in the form of -1/-1 counters and to players in the form of poison counters.)\nIf damage would be dealt to this creature, prevent that damage. Put a -1/-1 counter on this creature for each 1 damage prevented this way.";
 const FORCE_BUBBLE: &str = "If damage would be dealt to you, put that many depletion counters on this enchantment instead.\nWhen there are four or more depletion counters on this enchantment, sacrifice it.\nAt the beginning of each end step, remove all depletion counters from this enchantment.";
 const DELAYING_SHIELD: &str = "If damage would be dealt to you, put that many delay counters on this enchantment instead.\nAt the beginning of your upkeep, remove all delay counters from this enchantment. For each delay counter removed this way, you lose 1 life unless you pay {1}{W}.";
 const CRUMBLING_SANCTUARY: &str = "If damage would be dealt to a player, that player exiles that many cards from the top of their library instead.";
@@ -1519,7 +1520,9 @@ fn an_earlier_riders_paused_counters_finish_before_the_substitution() {
     }
 
     // Phytohydra: "put that many +1/+1 counters on it instead" is one more ordered counter
-    // event, of 1, after Test of Faith's three: 12 + 4.
+    // event, of 1, after Test of Faith's counters. strict-failure: Test of Faith's three counters
+    // are three ordered events (Command Zone #174), so 12 + 4; the card puts them in one event,
+    // (3+1)×2 = 8, then 4: 12, with two orders.
     let mut scenario = self::scenario();
     let hydra = phytohydra(&mut scenario, P0);
     let scales = scenario
@@ -1680,6 +1683,102 @@ fn a_paused_rider_keeps_the_batchs_later_riders_behind_it() {
             .all(|land| zone(&runner, *land) == Zone::Graveyard));
         assert_at_rest(&runner);
     }
+}
+
+/// Pyroclasm at a Bear under Test of Faith, Phyrexian Hydra and Lichenthrope. Phyrexian Hydra:
+/// "Put a -1/-1 counter on this creature for each 1 damage prevented this way." Lichenthrope:
+/// "put that many -1/-1 counters on it instead." Both wait behind the Bear's paused counters,
+/// and both run once those finish (CR 608.2c, CR 615.5); neither asks an order, since Hardened
+/// Scales puts no -1/-1 counter. Doubling Season doubles each: 2 × 2 = 4.
+///
+/// strict-failure: Test of Faith's counters parse as one counter at a time (Command Zone #174),
+/// so the Bear's 2 prevented damage is two ordered counter events of 4 (8). The card puts two
+/// counters in one event: 6, with one order.
+#[test]
+fn every_rider_queued_behind_a_paused_rider_runs() {
+    let mut scenario = self::scenario();
+    let bear = scenario.add_creature(P1, "Bear", 2, 2).id();
+    let hydra = scenario
+        .add_creature_from_oracle(P1, "Phyrexian Hydra", 7, 7, PHYREXIAN_HYDRA)
+        .id();
+    let lichenthrope = scenario
+        .add_creature_from_oracle(P1, "Lichenthrope", 5, 5, LICHENTHROPE)
+        .id();
+    let scales = scenario
+        .add_enchantment_from_oracle(P1, "Hardened Scales", HARDENED_SCALES)
+        .id();
+    scenario.add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON);
+    let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let spell = sorcery(&mut scenario, "Pyroclasm", PYROCLASM);
+    let mut runner = scenario.build();
+    cast(&mut runner, faith, vec![object_target(bear)]);
+    let mut events = cast(&mut runner, spell, vec![]);
+    let orders = answer_counter_orders(&mut runner, &mut events, bear, scales);
+
+    assert_eq!(orders, vec![0, 4]);
+    assert_eq!(plus_counters(&runner, bear), 8);
+    assert_eq!(counters(&runner, hydra, &CounterType::Minus1Minus1), 4);
+    assert_eq!(
+        counters(&runner, lichenthrope, &CounterType::Minus1Minus1),
+        4
+    );
+    assert_eq!(damage(&runner, hydra), 0);
+    assert_eq!(damage(&runner, lichenthrope), 0);
+    assert_at_rest(&runner);
+}
+
+/// Pyroclasm at Bear A and Bear B, each under its own Test of Faith, and Dralnu, Lich Lord. The
+/// work queued behind Bear A's paused counters runs in the order it was queued (CR 608.2c,
+/// CR 615.5): Bear B's counters, then Dralnu's sacrifice. Sacrificing Hardened Scales then
+/// changes no counter event that already happened.
+///
+/// strict-failure: Test of Faith's counters parse as one counter at a time (Command Zone #174),
+/// so each Bear's 2 prevented damage is two ordered counter events of 4 (8). The card puts two
+/// counters in one event: 6, with one order.
+#[test]
+fn work_queued_behind_a_paused_rider_runs_in_the_order_it_was_queued() {
+    let mut scenario = self::scenario();
+    let a = scenario.add_creature(P1, "Bear A", 2, 2).id();
+    let b = scenario.add_creature(P1, "Bear B", 2, 2).id();
+    let id = dralnu(&mut scenario, P1);
+    let scales = scenario
+        .add_enchantment_from_oracle(P1, "Hardened Scales", HARDENED_SCALES)
+        .id();
+    scenario.add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON);
+    let land = lands(&mut scenario, P1, 2);
+    let faith_a = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let faith_b = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let spell = sorcery(&mut scenario, "Pyroclasm", PYROCLASM);
+    let mut runner = scenario.build();
+    cast(&mut runner, faith_a, vec![object_target(a)]);
+    cast(&mut runner, faith_b, vec![object_target(b)]);
+    let mut events = cast(&mut runner, spell, vec![]);
+
+    let mut orders = Vec::new();
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ) {
+        orders.push((plus_counters(&runner, a), plus_counters(&runner, b)));
+        choose_source(&mut runner, &mut events, scales);
+    }
+    assert_eq!(orders, vec![(0, 0), (4, 0), (8, 0), (8, 4)]);
+    assert_eq!(zone_prompt(&runner), (2, 7));
+    let at_sacrifice = plus_counters(&runner, b);
+    answer(
+        &mut runner,
+        GameAction::SelectCards {
+            cards: vec![scales, land[0]],
+        },
+        &mut events,
+    );
+
+    assert_eq!(zone(&runner, scales), Zone::Graveyard);
+    assert_eq!(at_sacrifice, 8);
+    assert_eq!(plus_counters(&runner, b), at_sacrifice);
+    assert_eq!(plus_counters(&runner, a), 8);
+    assert_eq!(zone(&runner, id), Zone::Battlefield);
+    assert_at_rest(&runner);
 }
 
 /// Temper with its printed {X}{1}{W}, and the mana to pay for it.
