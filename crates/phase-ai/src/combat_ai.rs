@@ -1074,8 +1074,9 @@ const MULTIPLAYER_COMPARISON_TIE_BAND: f64 = 0.25;
 /// Utility of a proposal whose only gain is an attack trigger's payoff (CR
 /// 508.3a + CR 508.3f) on a defender who prevents every attacker's damage. The
 /// comparison has no trigger value model, so this only places it above a
-/// decline: any proposal that deals damage scores at least
-/// `0.25 * 1 * 0.5`, well above it.
+/// decline (utility at most 0) and below any damage proposal whose net utility
+/// exceeds it. A proposal's damage pressure is at least `0.25 * 1 * 0.5`, but
+/// its trade losses can bring its net utility lower.
 const PAYOFF_ONLY_PROPOSAL_UTILITY: f64 = 0.01;
 
 #[cfg(test)]
