@@ -23,9 +23,9 @@ use engine::types::game_state::{
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{
-    parse_mtgjson_mana_cost, CostPermissionContext, LifePaymentColors, ManaColor, ManaPipId,
-    ManaPool, ManaRestriction, ManaSourceOutput, ManaSourceQuantity, ManaSupertype, ManaType,
-    ManaUnit, PaymentContext,
+    parse_mtgjson_mana_cost, ActivationManaColorConstraint, CostPermissionContext,
+    LifePaymentColors, ManaColor, ManaPipId, ManaPool, ManaRestriction, ManaSourceOutput,
+    ManaSourceQuantity, ManaSupertype, ManaType, ManaUnit, PaymentContext, SpellMeta,
 };
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -800,6 +800,786 @@ fn snow_pool_z_fallback_preserves_snow_before_phyrexian_life() {
             );
             assert!(life.is_empty());
             assert!(payment_pool.is_empty());
+        }
+    }
+}
+
+// Supplemental combinations of Experiment Five's Z, Ulalek's C/color,
+// Edge of the Divinity's W/B, Arcum's Astrolabe's S and Gut Shot's R/P.
+// No printed card is claimed to have these complete costs. The real land
+// Oracle below supplies every unit through public actions (CR 601.2g).
+fn float_hybrid_reserve_sources(
+    cost: &str,
+    sources: &[(&str, ManaType)],
+    life_after_activations: i32,
+) -> (GameRunner, ObjectId) {
+    let mut s = board();
+    let mut ids = Vec::new();
+    for &(name, color) in sources {
+        let (text, subtypes, snow, multicolor) = match name {
+            "Highland Forest" => (
+                "({T}: Add {R} or {G}.)\nThis land enters tapped.",
+                vec!["Mountain", "Forest"],
+                true,
+                true,
+            ),
+            "Adarkar Wastes" => (
+                "{T}: Add {C}.\n{T}: Add {W} or {U}. This land deals 1 damage to you.",
+                vec![],
+                false,
+                true,
+            ),
+            "Caves of Koilos" => (
+                "{T}: Add {C}.\n{T}: Add {W} or {B}. This land deals 1 damage to you.",
+                vec![],
+                false,
+                true,
+            ),
+            "Island" => ("({T}: Add {U}.)", vec!["Island"], false, false),
+            "Swamp" => ("({T}: Add {B}.)", vec!["Swamp"], false, false),
+            "Plains" => ("({T}: Add {W}.)", vec!["Plains"], false, false),
+            "Mountain" | "Snow-Covered Mountain" => (
+                "({T}: Add {R}.)",
+                vec!["Mountain"],
+                name == "Snow-Covered Mountain",
+                false,
+            ),
+            _ => panic!("unlisted real mana source {name}"),
+        };
+        let mut source = s.add_land_from_oracle(P0, name, text);
+        source.with_subtypes(subtypes);
+        let id = if snow {
+            source.as_snow().id()
+        } else {
+            source.id()
+        };
+        let damage = i32::from(
+            matches!(name, "Adarkar Wastes" | "Caves of Koilos") && color != ManaType::Colorless,
+        );
+        ids.push((id, color, snow, multicolor, damage));
+    }
+    let creature = s
+        .add_creature_to_hand_from_oracle(P0, "Supplemental hybrid/Z/S payment", 1, 1, "")
+        .with_mana_cost(parse_mtgjson_mana_cost(cost))
+        .id();
+    let mut r = s.build();
+    let activation_damage: i32 = ids.iter().map(|(_, _, _, _, damage)| damage).sum();
+    r.state_mut().players[0].life = life_after_activations + activation_damage;
+    for ((id, _, _, _, _), (name, _)) in ids.iter().zip(sources) {
+        // All lands have been controlled since an earlier turn. Finish the
+        // printed Basic supertype, then let the ordinary layer pass run.
+        r.state_mut().objects.get_mut(id).unwrap().tapped = false;
+        if !matches!(
+            *name,
+            "Highland Forest" | "Adarkar Wastes" | "Caves of Koilos"
+        ) {
+            finish_snow_forest(&mut r, *id);
+        }
+    }
+    evaluate_layers(r.state_mut());
+    for &(source, color, _, _, damage) in &ids {
+        let life_before = r.state().players[0].life;
+        let (_, _, grouped) = legal_actions_full(r.state());
+        let action = grouped[&source]
+            .iter()
+            .find(|action| {
+                matches!(action,
+            GameAction::TapLandForMana { selection } if selection.mana_type == color)
+            })
+            .expect("real source offers its required mana action")
+            .clone();
+        r.act(action).unwrap();
+        assert_eq!(
+            r.state().players[0].life,
+            life_before - damage,
+            "source damage is separate from Phyrexian life"
+        );
+    }
+    let units: Vec<_> = r.state().players[0].mana_pool.units().collect();
+    assert_eq!(units.len(), ids.len());
+    for (unit, &(source, color, snow, multicolor, _)) in units.iter().zip(&ids) {
+        assert_eq!(unit.source_id, source);
+        assert_eq!(unit.color, color);
+        assert_eq!(unit.is_snow(), snow);
+        assert_eq!(unit.source_could_produce_two_or_more_colors, multicolor);
+        assert!(r.state().objects[&source].tapped);
+    }
+    assert_eq!(r.state().players[0].life, life_after_activations);
+    assert_complete(&r, sources.len());
+    (r, creature)
+}
+
+fn cast_floated_hybrid_reserve(
+    mut r: GameRunner,
+    creature: ObjectId,
+    succeeds: bool,
+    phyrexian: Option<(usize, ShardOptions, ShardChoice)>,
+    life_paid: i32,
+) {
+    let pool = r.state().players[0].mana_pool.clone();
+    let pips: Vec<_> = pool.units().map(|unit| unit.pip_id).collect();
+    let life = r.state().players[0].life;
+    let result = r.act(GameAction::CastSpell {
+        object_id: creature,
+        card_id: r.state().objects[&creature].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    });
+    if !succeeds {
+        // CR 601.2h: rejection must leave the entire payment uncommitted.
+        assert!(result.is_err());
+        assert_eq!(r.state().objects[&creature].zone, Zone::Hand);
+        assert_eq!(r.state().players[0].life, life);
+        assert_eq!(r.state().players[0].mana_pool, pool);
+        assert_eq!(
+            r.state().players[0]
+                .mana_pool
+                .units()
+                .map(|unit| unit.pip_id)
+                .collect::<Vec<_>>(),
+            pips
+        );
+        assert_complete(&r, pool.total());
+        return;
+    }
+    result.expect("all-floating hybrid alternative must pay the complete cost");
+    if let Some((index, options, choice)) = phyrexian {
+        let WaitingFor::PhyrexianPayment {
+            player,
+            spell_object,
+            shards,
+        } = &r.state().waiting_for
+        else {
+            panic!("expected the public Phyrexian choice before committing life");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*spell_object, creature);
+        assert_eq!(shards.len(), 1);
+        assert_eq!(shards[0].shard_index, index);
+        assert_eq!(shards[0].options, options);
+        r.act(GameAction::SubmitPhyrexianChoices {
+            choices: vec![choice],
+        })
+        .unwrap();
+    }
+    assert_eq!(r.state().stack.len(), 1);
+    assert!(r.state().players[0].mana_pool.is_empty());
+    assert_eq!(r.state().players[0].life, life - life_paid);
+    r.advance_until_stack_empty();
+    assert_eq!(r.state().objects[&creature].zone, Zone::Battlefield);
+    assert_complete(&r, 0);
+}
+
+#[test]
+fn snow_pool_z_hybrid_fully_floated_public_casts() {
+    // H1/H2: CR 107.4e + CR 107.4h. Both alternative halves are available,
+    // but each Snow/Z/hybrid payment must consume a distinct physical unit.
+    for (cost, sources) in [
+        (
+            "{Z}{C/U}{S}",
+            vec![
+                ("Highland Forest", ManaType::Green),
+                ("Adarkar Wastes", ManaType::Colorless),
+                ("Island", ManaType::Blue),
+            ],
+        ),
+        (
+            "{Z}{W/B}{S}",
+            vec![
+                ("Highland Forest", ManaType::Green),
+                ("Caves of Koilos", ManaType::White),
+                ("Swamp", ManaType::Black),
+            ],
+        ),
+        (
+            "{Z}{Z}{C/U}{W/B}{S}",
+            vec![
+                ("Highland Forest", ManaType::Green),
+                ("Adarkar Wastes", ManaType::Colorless),
+                ("Caves of Koilos", ManaType::White),
+                ("Island", ManaType::Blue),
+                ("Swamp", ManaType::Black),
+            ],
+        ),
+    ] {
+        let (r, creature) = float_hybrid_reserve_sources(cost, &sources, 20);
+        cast_floated_hybrid_reserve(r, creature, true, None, 0);
+        // Removing the ordinary alternative cannot be rescued by an untapped land.
+        let (r, creature) = float_hybrid_reserve_sources(cost, &sources[..sources.len() - 1], 20);
+        cast_floated_hybrid_reserve(r, creature, false, None, 0);
+    }
+    let (r, creature) = float_hybrid_reserve_sources(
+        "{Z}{Z}{C/U}{W/B}{S}",
+        &[
+            ("Highland Forest", ManaType::Green),
+            ("Adarkar Wastes", ManaType::Colorless),
+            ("Plains", ManaType::White),
+            ("Island", ManaType::Blue),
+            ("Swamp", ManaType::Black),
+        ],
+        20,
+    );
+    cast_floated_hybrid_reserve(r, creature, false, None, 0);
+}
+
+#[test]
+fn snow_pool_z_hybrid_phyrexian_public_mana_life_and_budget() {
+    // H3/H4: CR 107.4f. At one life, the full-pool check must choose the
+    // zero-life route even when the old conservative tier selected snow G.
+    for (cost, index) in [("{Z}{C/U}{S}{R/P}", 3), ("{R/P}{Z}{C/U}{S}", 0)] {
+        for red_source in [None, Some("Mountain"), Some("Snow-Covered Mountain")] {
+            for life in [1, 3] {
+                let mut sources = vec![
+                    ("Highland Forest", ManaType::Green),
+                    ("Adarkar Wastes", ManaType::Colorless),
+                    ("Island", ManaType::Blue),
+                ];
+                if let Some(name) = red_source {
+                    sources.push((name, ManaType::Red));
+                }
+                let (r, creature) = float_hybrid_reserve_sources(cost, &sources, life);
+                let succeeds = red_source.is_some() || life == 3;
+                let prompt = (life == 3).then_some((
+                    index,
+                    if red_source.is_some() {
+                        ShardOptions::ManaOrLife
+                    } else {
+                        ShardOptions::LifeOnly
+                    },
+                    if red_source.is_some() {
+                        ShardChoice::PayMana
+                    } else {
+                        ShardChoice::PayLife
+                    },
+                ));
+                cast_floated_hybrid_reserve(
+                    r,
+                    creature,
+                    succeeds,
+                    prompt,
+                    if red_source.is_none() && succeeds {
+                        2
+                    } else {
+                        0
+                    },
+                );
+            }
+        }
+    }
+}
+
+fn hybrid_reserve_unit(color: ManaType, id: u64, snow: bool, multicolor: bool) -> ManaUnit {
+    ManaUnit {
+        supertype: snow.then_some(ManaSupertype::Snow),
+        source_could_produce_two_or_more_colors: multicolor,
+        ..snow_regression_unit(color, id)
+    }
+}
+
+#[test]
+fn snow_pool_z_hybrid_all_pairs_and_recursive_units() {
+    // H1/H2/H7: cover every printed two-way color pairing and C/color axis.
+    // Repeated Z controls have independently sufficient units, not duplicated
+    // pip identities. Runtime growth is measured by the parent, not a test timer.
+    let colors = [
+        ("W", ManaType::White),
+        ("U", ManaType::Blue),
+        ("B", ManaType::Black),
+        ("R", ManaType::Red),
+        ("G", ManaType::Green),
+    ];
+    for (i, &(a_text, a)) in colors.iter().enumerate() {
+        for &(b_text, b) in &colors[i + 1..] {
+            for (z, ordinary) in [(a, b), (b, a)] {
+                let pool = ManaPool::from_units(vec![
+                    hybrid_reserve_unit(ManaType::Colorless, 1, true, true),
+                    hybrid_reserve_unit(z, 2, false, true),
+                    hybrid_reserve_unit(ordinary, 3, false, false),
+                ]);
+                let mut payment = pool.clone();
+                let (spent, life) = pay_cost_with_demand_and_choices(
+                    &mut payment,
+                    &parse_mtgjson_mana_cost(&format!("{{Z}}{{{a_text}/{b_text}}}{{S}}")),
+                    None,
+                    None,
+                    None,
+                    None,
+                    LifePaymentColors::EMPTY,
+                    &[],
+                )
+                .unwrap();
+                assert_eq!(
+                    spent.iter().map(|u| u.pip_id.0).collect::<Vec<_>>(),
+                    [2, 3, 1]
+                );
+                assert!(life.is_empty());
+                assert!(payment.is_empty());
+            }
+        }
+        for count in [1, 2, 4, 8] {
+            let mut units = vec![hybrid_reserve_unit(ManaType::Green, 1, true, true)];
+            units.extend(
+                (0..count).map(|n| hybrid_reserve_unit(ManaType::Colorless, 2 + n, false, true)),
+            );
+            units.extend((0..count).map(|n| hybrid_reserve_unit(a, 20 + n, false, false)));
+            let mut pool = ManaPool::from_units(units);
+            let cost = format!(
+                "{}{}{{S}}",
+                "{Z}".repeat(count as usize),
+                format!("{{C/{a_text}}}").repeat(count as usize)
+            );
+            let (spent, life) = pay_cost_with_demand_and_choices(
+                &mut pool,
+                &parse_mtgjson_mana_cost(&cost),
+                None,
+                None,
+                None,
+                None,
+                LifePaymentColors::EMPTY,
+                &[],
+            )
+            .unwrap();
+            assert!(spent[..count as usize]
+                .iter()
+                .all(|u| u.color == ManaType::Colorless && !u.is_snow()));
+            assert!(life.is_empty());
+            assert!(pool.is_empty());
+        }
+    }
+}
+
+#[test]
+fn snow_pool_z_hybrid_life_choices_indices_and_memo() {
+    // H3/H4/H6: all explicit choices keep their original raw positions, even
+    // when the Phyrexian symbols precede Z and payment defers them.
+    for (cost, life_colors, indices) in [
+        (
+            "{R/P}{Z}{C/U}{S}{B/P}",
+            LifePaymentColors::EMPTY,
+            vec![0, 4],
+        ),
+        (
+            "{B}{Z}{C/U}{S}{R/P}",
+            [ManaColor::Black].into_iter().collect(),
+            vec![0, 4],
+        ),
+    ] {
+        let pool = ManaPool::from_units(vec![
+            hybrid_reserve_unit(ManaType::Green, 1, true, true),
+            hybrid_reserve_unit(ManaType::Colorless, 2, false, true),
+            hybrid_reserve_unit(ManaType::Blue, 3, false, false),
+            hybrid_reserve_unit(ManaType::Red, 4, true, false),
+        ]);
+        let cost = parse_mtgjson_mana_cost(cost);
+        let preview = compute_phyrexian_shards(
+            &pool,
+            &cost,
+            None,
+            CostPermissionContext {
+                max_life: 1,
+                life_colors,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            preview.iter().map(|s| s.shard_index).collect::<Vec<_>>(),
+            indices
+        );
+        let choices = if life_colors == LifePaymentColors::EMPTY {
+            [ShardChoice::PayMana, ShardChoice::PayLife]
+        } else {
+            [ShardChoice::PayLife, ShardChoice::PayMana]
+        };
+        let mut payment = pool.clone();
+        let (spent, life) = pay_cost_with_demand_and_choices(
+            &mut payment,
+            &cost,
+            None,
+            None,
+            None,
+            Some(&choices),
+            life_colors,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            spent.iter().map(|u| u.pip_id.0).collect::<Vec<_>>(),
+            [2, 3, 1, 4]
+        );
+        assert_eq!(life.len(), 1);
+        assert!(payment.is_empty());
+        let mut failure = pool.clone();
+        assert!(pay_cost_with_demand_and_choices(
+            &mut failure,
+            &cost,
+            None,
+            None,
+            None,
+            Some(&[ShardChoice::PayMana, ShardChoice::PayMana]),
+            life_colors,
+            &[]
+        )
+        .is_err());
+        assert_eq!(failure, pool);
+        assert_eq!(
+            failure.units().map(|u| u.pip_id).collect::<Vec<_>>(),
+            pool.units().map(|u| u.pip_id).collect::<Vec<_>>()
+        );
+    }
+
+    for (text, index) in [
+        ("{W/B}{Z}{C/U}{S}{W/B/P}", 4),
+        ("{W/B/P}{W/B}{Z}{C/U}{S}", 0),
+    ] {
+        let mut pool = ManaPool::from_units(vec![
+            hybrid_reserve_unit(ManaType::Green, 1, true, true),
+            hybrid_reserve_unit(ManaType::Colorless, 2, false, true),
+            hybrid_reserve_unit(ManaType::Blue, 3, false, false),
+            hybrid_reserve_unit(ManaType::White, 4, false, false),
+            hybrid_reserve_unit(ManaType::White, 5, false, false),
+            hybrid_reserve_unit(ManaType::Black, 6, false, false),
+            hybrid_reserve_unit(ManaType::Black, 7, false, false),
+        ]);
+        let cost = parse_mtgjson_mana_cost(text);
+        let preview = compute_phyrexian_shards(
+            &pool,
+            &cost,
+            None,
+            CostPermissionContext {
+                max_life: 1,
+                ..Default::default()
+            },
+        );
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].shard_index, index);
+        assert_eq!(preview[0].options, ShardOptions::ManaOrLife);
+        let (spent, life) = pay_cost_with_demand_and_choices(
+            &mut pool,
+            &cost,
+            None,
+            None,
+            None,
+            Some(&[ShardChoice::PayMana]),
+            LifePaymentColors::EMPTY,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            spent.iter().map(|u| u.pip_id.0).collect::<Vec<_>>(),
+            [4, 2, 3, 1, 5],
+            "the earlier W preference survives the Z proof although more B remains"
+        );
+        assert!(life.is_empty());
+        assert!(pool.units().all(|u| u.color == ManaType::Black));
+    }
+}
+
+#[test]
+fn snow_pool_z_hybrid_keeps_executable_baseline_and_pins() {
+    // H6: the tempting C/Z alternative strands strict C because the existing
+    // C/U dispatch greedily consumes the other C. An abstract matching using
+    // U for C/U is not an executable witness for this engine policy.
+    for phyrexian in [false, true] {
+        let cost = parse_mtgjson_mana_cost(if phyrexian {
+            "{Z}{C/U}{C}{S}{R/P}"
+        } else {
+            "{Z}{C/U}{C}{S}"
+        });
+        let mut pool = ManaPool::from_units(vec![
+            hybrid_reserve_unit(ManaType::Green, 1, true, true),
+            hybrid_reserve_unit(ManaType::Colorless, 2, false, true),
+            hybrid_reserve_unit(ManaType::Colorless, 3, false, false),
+            hybrid_reserve_unit(ManaType::Blue, 4, false, false),
+            hybrid_reserve_unit(ManaType::Red, 5, true, false),
+        ]);
+        let (spent, life) = pay_cost_with_demand_and_choices(
+            &mut pool,
+            &cost,
+            None,
+            None,
+            None,
+            None,
+            LifePaymentColors::EMPTY,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            spent.iter().map(|u| u.pip_id.0).collect::<Vec<_>>(),
+            [1, 3, 2, 5]
+        );
+        assert_eq!(life.len(), usize::from(phyrexian));
+        assert_eq!(pool.units().map(|u| u.pip_id.0).collect::<Vec<_>>(), [4]);
+    }
+    let cost = parse_mtgjson_mana_cost("{Z}{C/U}{S}");
+    for spare_snow in [false, true] {
+        let mut units = vec![
+            hybrid_reserve_unit(ManaType::Green, 1, true, true),
+            hybrid_reserve_unit(ManaType::Colorless, 2, false, true),
+            hybrid_reserve_unit(ManaType::Blue, 3, false, false),
+        ];
+        if spare_snow {
+            units.push(hybrid_reserve_unit(ManaType::Red, 4, true, false));
+        }
+        let original = ManaPool::from_units(units);
+        let mut pool = original.clone();
+        let result = pay_cost_with_demand_and_choices(
+            &mut pool,
+            &cost,
+            None,
+            None,
+            None,
+            None,
+            LifePaymentColors::EMPTY,
+            &[ManaPipId(1)],
+        );
+        if spare_snow {
+            let (spent, life) = result.unwrap();
+            assert_eq!(
+                spent.iter().map(|u| u.pip_id.0).collect::<Vec<_>>(),
+                [1, 2, 4]
+            );
+            assert!(life.is_empty());
+        } else {
+            assert!(
+                result.is_err(),
+                "pins remain binding even when an unpinned allocation succeeds"
+            );
+            assert_eq!(pool, original);
+        }
+    }
+}
+
+#[test]
+fn snow_pool_z_hybrid_ranks_life_after_failed_baseline_and_keeps_ties() {
+    // H4: baseline snow G cannot complete; the first alternative (R/Z)
+    // needs life, while the later C/Z leaves R for the Phyrexian payment.
+    let mut pool = ManaPool::from_units(vec![
+        hybrid_reserve_unit(ManaType::Green, 1, true, true),
+        hybrid_reserve_unit(ManaType::Red, 2, false, true),
+        hybrid_reserve_unit(ManaType::Colorless, 3, false, true),
+        hybrid_reserve_unit(ManaType::Blue, 4, false, false),
+        hybrid_reserve_unit(ManaType::Black, 5, false, false),
+        hybrid_reserve_unit(ManaType::Black, 6, false, false),
+    ]);
+    let cost = parse_mtgjson_mana_cost("{Z}{C/U}{B/R}{S}{R/P}");
+    assert!(can_pay_for_spell(
+        &pool,
+        &cost,
+        None,
+        CostPermissionContext::default()
+    ));
+    let (spent, life) = pay_cost_with_demand_and_choices(
+        &mut pool,
+        &cost,
+        None,
+        None,
+        None,
+        None,
+        LifePaymentColors::EMPTY,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        spent.iter().map(|u| u.pip_id.0).collect::<Vec<_>>(),
+        [3, 4, 6, 1, 2]
+    );
+    assert!(life.is_empty());
+    assert_eq!(pool.units().map(|u| u.pip_id.0).collect::<Vec<_>>(), [5]);
+
+    // A binding PayLife choice makes both complete routes cost one life
+    // payment. Preserve the full old baseline, including its second tier.
+    let mut pool = ManaPool::from_units(vec![
+        hybrid_reserve_unit(ManaType::Green, 1, true, true),
+        hybrid_reserve_unit(ManaType::Colorless, 2, false, true),
+        hybrid_reserve_unit(ManaType::Blue, 3, false, false),
+        hybrid_reserve_unit(ManaType::Red, 4, true, false),
+    ]);
+    let (spent, life) = pay_cost_with_demand_and_choices(
+        &mut pool,
+        &parse_mtgjson_mana_cost("{Z}{C/U}{S}{R/P}"),
+        None,
+        None,
+        None,
+        Some(&[ShardChoice::PayLife]),
+        LifePaymentColors::EMPTY,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        spent.iter().map(|u| u.pip_id.0).collect::<Vec<_>>(),
+        [1, 2, 4]
+    );
+    assert_eq!(life.len(), 1);
+    assert_eq!(pool.units().next().unwrap().pip_id, ManaPipId(3));
+}
+
+#[test]
+fn snow_pool_z_hybrid_context_generic_and_quality_controls() {
+    // H7: CR 106.6. Restrict each distinct role in turn; neither quality
+    // counts nor the suffix proof may treat an ineligible decoy as mana.
+    let meta = SpellMeta {
+        types: vec!["Creature".to_owned()],
+        ..Default::default()
+    };
+    let contexts = [
+        PaymentContext::Spell(&meta),
+        PaymentContext::Activation {
+            source_types: &[],
+            source_subtypes: &[],
+            ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
+        },
+    ];
+    for restricted in [None, Some(0), Some(1), Some(2)] {
+        let mut units = vec![
+            hybrid_reserve_unit(ManaType::Green, 1, true, true),
+            hybrid_reserve_unit(ManaType::Colorless, 2, false, true),
+            hybrid_reserve_unit(ManaType::Blue, 3, false, false),
+        ];
+        if let Some(index) = restricted {
+            units[index]
+                .restrictions
+                .push(ManaRestriction::OnlyForActivation);
+        }
+        let original = ManaPool::from_units(units);
+        for (index, context) in contexts.iter().enumerate() {
+            let mut pool = original.clone();
+            let result = pay_cost_with_demand_and_choices(
+                &mut pool,
+                &parse_mtgjson_mana_cost("{Z}{C/U}{S}"),
+                None,
+                Some(context),
+                None,
+                None,
+                LifePaymentColors::EMPTY,
+                &[],
+            );
+            if restricted.is_none() || index == 1 {
+                let (spent, life) = result.unwrap();
+                assert_eq!(
+                    spent.iter().map(|u| u.pip_id.0).collect::<Vec<_>>(),
+                    [2, 3, 1]
+                );
+                assert!(life.is_empty());
+                assert!(pool.is_empty());
+            } else {
+                assert!(result.is_err());
+                assert_eq!(pool, original);
+                assert_eq!(
+                    pool.units().map(|u| u.pip_id).collect::<Vec<_>>(),
+                    original.units().map(|u| u.pip_id).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+    // Generic and restricted-X payment remain after the exact suffix. No
+    // already-paid prefix shard may reappear as a residual requirement.
+    for restricted_x in [false, true] {
+        for extra in [None, Some(ManaType::White), Some(ManaType::Red)] {
+            let mut units = vec![
+                hybrid_reserve_unit(ManaType::Green, 1, true, true),
+                hybrid_reserve_unit(ManaType::Colorless, 2, false, true),
+                hybrid_reserve_unit(ManaType::Blue, 3, false, false),
+            ];
+            if let Some(color) = extra {
+                units.push(hybrid_reserve_unit(color, 4, false, false));
+            }
+            let original = ManaPool::from_units(units);
+            let meta = SpellMeta {
+                spend_only_on_x_colors: restricted_x.then_some(vec![ManaColor::White]),
+                spend_only_on_x_generic_count: u32::from(restricted_x),
+                ..Default::default()
+            };
+            let mut pool = original.clone();
+            let result = pay_cost_with_demand_and_choices(
+                &mut pool,
+                &parse_mtgjson_mana_cost("{1}{Z}{C/U}{S}"),
+                None,
+                Some(&PaymentContext::Spell(&meta)),
+                None,
+                None,
+                LifePaymentColors::EMPTY,
+                &[],
+            );
+            if extra.is_some() && (!restricted_x || extra == Some(ManaType::White)) {
+                let (spent, life) = result.unwrap();
+                assert_eq!(
+                    spent.iter().map(|u| u.pip_id.0).collect::<Vec<_>>(),
+                    [2, 3, 1, 4]
+                );
+                assert!(life.is_empty());
+                assert!(pool.is_empty());
+            } else {
+                assert!(result.is_err());
+                assert_eq!(pool, original);
+            }
+        }
+    }
+    // CR 107.4c: AnyColor still cannot substitute blue for strict C.
+    for permission in [
+        ManaSpendPermission::AnyColor,
+        ManaSpendPermission::AnyTypeOrColor,
+    ] {
+        let original = ManaPool::from_units(vec![
+            hybrid_reserve_unit(ManaType::Green, 1, true, true),
+            hybrid_reserve_unit(ManaType::Colorless, 2, false, true),
+            hybrid_reserve_unit(ManaType::Blue, 3, false, false),
+            hybrid_reserve_unit(ManaType::Blue, 4, false, false),
+        ]);
+        let mut pool = original.clone();
+        let result = pay_cost_with_demand_and_choices(
+            &mut pool,
+            &parse_mtgjson_mana_cost("{Z}{C/U}{C}{S}"),
+            None,
+            None,
+            Some(permission),
+            None,
+            LifePaymentColors::EMPTY,
+            &[],
+        );
+        if permission == ManaSpendPermission::AnyTypeOrColor {
+            let (spent, life) = result.unwrap();
+            assert_eq!(spent[0].pip_id, ManaPipId(2));
+            assert!(life.is_empty());
+            assert!(pool.is_empty());
+        } else {
+            assert!(result.is_err());
+            assert_eq!(pool, original);
+        }
+    }
+    for ordinary_alternative in [false, true] {
+        let mut units = vec![
+            hybrid_reserve_unit(ManaType::Green, 1, true, true),
+            hybrid_reserve_unit(ManaType::Colorless, 2, false, true),
+            hybrid_reserve_unit(ManaType::Blue, 3, true, false),
+            hybrid_reserve_unit(ManaType::Red, 4, false, false),
+        ];
+        if ordinary_alternative {
+            units.push(hybrid_reserve_unit(ManaType::Blue, 5, false, false));
+        }
+        let original = ManaPool::from_units(units);
+        let mut pool = original.clone();
+        let result = pay_cost_with_demand_and_choices(
+            &mut pool,
+            &parse_mtgjson_mana_cost("{Z}{C/U}{S}{S}"),
+            None,
+            None,
+            None,
+            None,
+            LifePaymentColors::EMPTY,
+            &[],
+        );
+        if ordinary_alternative {
+            let (spent, life) = result.unwrap();
+            assert_eq!(
+                spent.iter().map(|u| u.pip_id.0).collect::<Vec<_>>(),
+                [2, 5, 1, 3]
+            );
+            assert!(life.is_empty());
+            assert_eq!(pool.units().next().unwrap().pip_id, ManaPipId(4));
+        } else {
+            assert!(result.is_err());
+            assert_eq!(pool, original);
         }
     }
 }
