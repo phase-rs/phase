@@ -330,15 +330,21 @@ fn keyword_grant_collapses(keyword: &Keyword) -> bool {
 /// True when `activation`'s source is a creature or an activated ability of it
 /// is on the stack, `ability`'s chain only resets characteristics
 /// ([`repeat_only_resets_characteristics`]), activating it adds only the
-/// repeat to the stack, and [`settles_alike`] holds for the board with the
-/// repeat resolved first and that board with the repeat's continuous effects
-/// removed, each [`settle`]d.
+/// repeat to the stack, resolving it changes the board only by its continuous
+/// effects and the bookkeeping [`left_only_its_effects`] lists, and
+/// [`settles_alike`] holds for the board with the repeat resolved first and
+/// that board with the repeat's continuous effects removed, each [`settle`]d.
 pub(crate) fn repeat_gains_nothing(
     state: &GameState,
     activation: &GameAction,
     ability: &AbilityDefinition,
 ) -> bool {
-    let &GameAction::ActivateAbility { source_id, .. } = activation else {
+    let &GameAction::ActivateAbility {
+        source_id,
+        ability_index,
+        ..
+    } = activation
+    else {
         return false;
     };
     let pending: Vec<ObjectId> = state
@@ -379,6 +385,8 @@ pub(crate) fn repeat_gains_nothing(
         return false;
     }
     let repeat_entry = with.stack.back().map(|entry| entry.id);
+    let mut activated = with.clone();
+    activated.stack.pop_back();
     let Some(with) = settle(with, repeat_entry.as_slice()) else {
         return false;
     };
@@ -397,10 +405,54 @@ pub(crate) fn repeat_gains_nothing(
         .retain(|effect| !repeat.contains(&effect.id));
     without.layers_dirty.mark_full();
     flush_layers(&mut without);
+    // `without` is copied from the board the repeat resolved on, so anything
+    // else resolving it did would be in both lines.
+    if !left_only_its_effects(activated, &without, (source_id, ability_index)) {
+        return false;
+    }
     match (settle(without, &pending), settle(with, &pending)) {
         (Some(without), Some(with)) => settles_alike(without, with, &repeat),
         _ => false,
     }
+}
+
+/// True when `without`, the board with the repeat resolved and its continuous
+/// effects removed, has the [`rules_projection`] of `activated`, the board
+/// right after the repeat was activated, with its stack entry taken off, once
+/// `activated` takes `without`'s values for the fields below.
+fn left_only_its_effects(
+    mut activated: GameState,
+    without: &GameState,
+    repeat_key: (ObjectId, usize),
+) -> bool {
+    // The counters the repeat's own effects draw their ids and timestamps
+    // from.
+    activated.next_timestamp = without.next_timestamp;
+    activated.next_continuous_effect_id = without.next_continuous_effect_id;
+    // Cleared when a player passes priority.
+    activated.pending_activations = without.pending_activations.clone();
+    // CR 117.3b: the active player receives priority after the repeat
+    // resolves.
+    activated.priority_player = without.priority_player;
+    activated.waiting_for = without.waiting_for.clone();
+    // The repeat's own resolution is counted.
+    if let Some(&count) = without.ability_resolutions_this_turn.get(&repeat_key) {
+        activated
+            .ability_resolutions_this_turn
+            .insert(repeat_key, count);
+    }
+    // Reset before every top-level resolution, so on `activated` they may
+    // still hold an earlier resolution's values.
+    activated.player_actions_this_way = without.player_actions_this_way.clone();
+    activated.last_effect_amount = without.last_effect_amount;
+    activated.last_zone_changed_ids = without.last_zone_changed_ids.clone();
+    // `GameState::normalize_for_loop` resets the journal: it is provenance,
+    // not position.
+    activated.resolved_rules_journal = without.resolved_rules_journal.clone();
+    matches!(
+        (rules_projection(&activated), rules_projection(without)),
+        (Ok(activated), Ok(without)) if activated == without
+    )
 }
 
 /// How many passes [`settle`] makes before it gives up.

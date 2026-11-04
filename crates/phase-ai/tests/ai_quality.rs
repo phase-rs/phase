@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
 use engine::game::deck_loading::DeckEntry;
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, QuantityRef, TargetFilter,
@@ -2983,4 +2983,525 @@ fn production_scorer_rejects_only_an_identical_pending_animation() {
             "{difficulty:?}: a different body stays eligible, got {scored:?}"
         );
     }
+}
+
+const MUTAVAULT: &str = "{T}: Add {C}.\n{1}: This land becomes a 2/2 creature with all creature types until end of turn. It's still a land.";
+const BLINKMOTH_NEXUS: &str = "{T}: Add {C}.\n{1}: This land becomes a 1/1 Blinkmoth artifact creature with flying until end of turn. It's still a land.\n{1}, {T}: Target Blinkmoth creature gets +1/+1 until end of turn.";
+const TATYOVA_STEWARD_OF_TIDES: &str = "Land creatures you control have flying.\nWhenever a land you control enters, if you control seven or more lands, up to one target land you control becomes a 3/3 Elemental creature with haste. It's still a land.";
+const ZULAPORT_CUTTHROAT: &str = "Whenever this creature or another creature you control dies, each opponent loses 1 life and you gain 1 life.";
+const HYENA_UMBRA: &str = "Enchant creature\nEnchanted creature gets +1/+1 and has first strike.\nUmbra armor (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)";
+const DISENCHANT: &str = "Destroy target artifact or enchantment.";
+const REGENERATE: &str = "Regenerate target creature. (The next time that creature would be destroyed this turn, instead tap it, remove it from combat, and heal all damage on it.)";
+const VITALIZE: &str = "Untap all creatures you control.";
+const LIGHTNING_BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
+const ENDANGERED_ARMODON: &str =
+    "When you control a creature with toughness 2 or less, sacrifice this creature.";
+const RETURN_OF_THE_WILDSPEAKER: &str = "Choose one \u{2014}\n\u{2022} Draw cards equal to the greatest power among non-Human creatures you control.\n\u{2022} Non-Human creatures you control get +3/+3 until end of turn.";
+
+fn rearm_p0_priority(runner: &mut GameRunner) {
+    let state = runner.state_mut();
+    state.turn_number = 3;
+    state.active_player = P0;
+    state.phase = Phase::PreCombatMain;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+}
+
+fn cost(shards: Vec<engine::types::mana::ManaCostShard>, generic: u32) -> ManaCost {
+    ManaCost::Cost { shards, generic }
+}
+
+/// The engine-issued activation of `source`'s ability whose effect is a
+/// `GenericEffect` (Blinkmoth Nexus's animation).
+fn issued_animation(runner: &GameRunner, source: ObjectId) -> GameAction {
+    engine::ai_support::legal_actions(runner.state())
+        .into_iter()
+        .find(|action| {
+            matches!(action, GameAction::ActivateAbility { source_id, ability_index, .. }
+            if *source_id == source
+                && matches!(
+                    *runner.state().objects[&source].abilities[*ability_index].effect,
+                    Effect::GenericEffect { .. }
+                ))
+        })
+        .expect("reach guard: the engine issues the animation")
+}
+
+/// Blinkmoth Nexus with `damage` marked, made a 3/3 by Tatyova, Steward of
+/// Tides's trigger after a land drop, on a board `setup` completes. Returns
+/// the board, the Nexus, the engine-issued animation and what `setup`
+/// returned.
+fn tatyova_nexus<T>(
+    damage: u32,
+    setup: impl FnOnce(&mut GameScenario) -> T,
+) -> (GameRunner, ObjectId, GameAction, T) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let nexus = scenario
+        .add_land_from_oracle(P0, "Blinkmoth Nexus", BLINKMOTH_NEXUS)
+        .with_damage_marked(damage)
+        .id();
+    scenario
+        .add_creature_from_oracle(
+            P0,
+            "Tatyova, Steward of Tides",
+            3,
+            3,
+            TATYOVA_STEWARD_OF_TIDES,
+        )
+        .as_legendary();
+    for _ in 0..6 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
+    let forest = scenario.add_land_to_hand(P0, "Forest").id();
+    let extra = setup(&mut scenario);
+    let mut runner = scenario.build();
+    rearm_p0_priority(&mut runner);
+    let play = engine::ai_support::legal_actions(runner.state())
+        .into_iter()
+        .find(|action| matches!(action, GameAction::PlayLand { object_id, .. } if *object_id == forest))
+        .expect("reach guard: the engine issues the land drop");
+    runner.act(play).expect("the engine accepts its own action");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(nexus)),
+        })
+        .expect("Tatyova's trigger targets the Nexus");
+    runner.advance_until_stack_empty();
+    rearm_p0_priority(&mut runner);
+    let animation = issued_animation(&runner, nexus);
+    (runner, nexus, animation, extra)
+}
+
+/// P0 announces `animation` and passes, `respond` casts P1's spell, and P1
+/// passes.
+fn answer_the_animation(
+    runner: &mut GameRunner,
+    animation: &GameAction,
+    respond: impl FnOnce(&mut GameRunner),
+) {
+    runner
+        .act(animation.clone())
+        .expect("the engine accepts its own action");
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    respond(runner);
+    runner.act(GameAction::PassPriority).expect("P1 passes");
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .map(|entry| entry.controller)
+            .collect::<Vec<_>>(),
+        vec![P0, P1],
+        "reach guard: P1's spell sits above the pending animation"
+    );
+    assert!(
+        engine::ai_support::legal_actions(runner.state()).contains(animation),
+        "reach guard: the engine issues the repeat"
+    );
+}
+
+/// `runner`'s board once `action` has been taken and every player has
+/// passed until the stack is empty.
+fn played_out_after(
+    runner: &GameRunner,
+    action: &GameAction,
+) -> engine::types::game_state::GameState {
+    let mut line = runner.state().clone();
+    engine::game::engine::apply_as_current_for_simulation(&mut line, action.clone())
+        .expect("the engine accepts its own action");
+    for _ in 0..16 {
+        if line.stack.is_empty() {
+            return line;
+        }
+        engine::game::engine::apply_as_current_for_simulation(&mut line, GameAction::PassPriority)
+            .expect("the player with priority passes");
+    }
+    panic!("the stack did not empty: {:?}", line.waiting_for);
+}
+
+fn animation_scores(
+    runner: &GameRunner,
+    animation: &GameAction,
+) -> Vec<(AiDifficulty, Option<f64>)> {
+    [
+        AiDifficulty::Easy,
+        AiDifficulty::Medium,
+        AiDifficulty::VeryHard,
+    ]
+    .into_iter()
+    .map(|difficulty| {
+        let config = create_config(difficulty, Platform::Native);
+        let score = score_candidates(runner.state(), P0, &config)
+            .into_iter()
+            .find(|(action, _)| action == animation)
+            .map(|(_, score)| score);
+        (difficulty, score)
+    })
+    .collect()
+}
+
+fn assert_scored(runner: &GameRunner, animation: &GameAction) {
+    for (difficulty, score) in animation_scores(runner, animation) {
+        assert!(
+            score.is_some_and(f64::is_finite),
+            "{difficulty:?}: got {score:?}"
+        );
+    }
+}
+
+fn assert_vetoed(runner: &GameRunner, animation: &GameAction) {
+    for (difficulty, score) in animation_scores(runner, animation) {
+        assert_eq!(score, Some(f64::NEG_INFINITY), "{difficulty:?}");
+    }
+}
+
+fn add_cutthroat(scenario: &mut GameScenario) {
+    scenario.add_creature_from_oracle(P0, "Zulaport Cutthroat", 1, 1, ZULAPORT_CUTTHROAT);
+}
+
+/// CR 704.5g: the repeat's 1/1 makes the Nexus's marked damage lethal.
+#[test]
+fn production_scorer_scores_a_repeat_that_kills_the_land_beside_a_death_payoff() {
+    let (runner, nexus, animation, ()) = tatyova_nexus(1, add_cutthroat);
+    let land = &runner.state().objects[&nexus];
+    assert_eq!(
+        (land.power, land.toughness, land.damage_marked),
+        (Some(3), Some(3), 1),
+        "reach guard: Tatyova made the Nexus a damaged 3/3"
+    );
+    let with = played_out_after(&runner, &animation);
+    assert_eq!(
+        (with.objects[&nexus].zone, with.players[1].life),
+        (engine::types::zones::Zone::Graveyard, 19),
+        "reach guard: the repeat kills the Nexus and the Cutthroat drains"
+    );
+    assert_scored(&runner, &animation);
+}
+
+#[test]
+fn production_scorer_scores_a_repeat_that_kills_the_land_without_a_payoff() {
+    let (runner, nexus, animation, ()) = tatyova_nexus(1, |_| ());
+    let with = played_out_after(&runner, &animation);
+    assert_eq!(
+        with.objects[&nexus].zone,
+        engine::types::zones::Zone::Graveyard,
+        "reach guard: the repeat kills the Nexus"
+    );
+    assert_scored(&runner, &animation);
+}
+
+#[test]
+fn production_scorer_rejects_a_redundant_repeat_beside_a_death_payoff() {
+    let (mut runner, nexus, animation, ()) = tatyova_nexus(0, add_cutthroat);
+    runner
+        .act(animation.clone())
+        .expect("the engine accepts its own action");
+    runner.advance_until_stack_empty();
+    rearm_p0_priority(&mut runner);
+    let with = played_out_after(&runner, &animation);
+    assert_eq!(
+        (with.objects[&nexus].zone, with.players[1].life),
+        (engine::types::zones::Zone::Battlefield, 20),
+        "reach guard: the Nexus survives the repeat and nothing drains"
+    );
+    assert_vetoed(&runner, &animation);
+}
+
+/// Tatyova's Nexus with `damage` marked, wearing Hyena Umbra cast by P0,
+/// with its animation pending under P1's Disenchant aimed at the Umbra.
+fn umbra_nexus_under_disenchant(damage: u32) -> (GameRunner, ObjectId, GameAction, ObjectId) {
+    let (mut runner, nexus, animation, (umbra, disenchant)) = tatyova_nexus(damage, |scenario| {
+        scenario.add_basic_land(P0, ManaColor::White);
+        let umbra = scenario
+            .add_spell_to_hand(P0, "Hyena Umbra", false)
+            .as_enchantment()
+            .with_subtypes(vec!["Aura"])
+            .from_oracle_text_with_keywords(&["Enchant", "Umbra armor"], HYENA_UMBRA)
+            .with_mana_cost(cost(vec![engine::types::mana::ManaCostShard::White], 0))
+            .id();
+        let disenchant = scenario
+            .add_spell_to_hand_from_oracle(P1, "Disenchant", true, DISENCHANT)
+            .with_mana_cost(cost(vec![engine::types::mana::ManaCostShard::White], 1))
+            .id();
+        scenario.add_basic_land(P1, ManaColor::White);
+        scenario.add_basic_land(P1, ManaColor::White);
+        (umbra, disenchant)
+    });
+    runner.cast(umbra).target_object(nexus).resolve();
+    rearm_p0_priority(&mut runner);
+    let land = &runner.state().objects[&nexus];
+    assert_eq!(
+        (land.zone, land.attachments.as_slice(), land.toughness),
+        (
+            engine::types::zones::Zone::Battlefield,
+            [umbra].as_slice(),
+            Some(4)
+        ),
+        "reach guard: the Umbra enchants the Nexus"
+    );
+    answer_the_animation(&mut runner, &animation, |runner| {
+        runner.cast(disenchant).target_object(umbra).commit();
+    });
+    (runner, nexus, animation, umbra)
+}
+
+/// CR 704.5g + CR 702.89a: resolved first, the repeat makes two marked damage
+/// lethal, so the Umbra is destroyed instead of the Nexus; without the
+/// repeat, Disenchant takes the Umbra and the pending animation's 1/1 dies.
+#[test]
+fn production_scorer_scores_a_repeat_that_spends_an_umbra_to_save_the_land() {
+    let (runner, nexus, animation, umbra) = umbra_nexus_under_disenchant(2);
+    let without = played_out_after(&runner, &GameAction::PassPriority);
+    let with = played_out_after(&runner, &animation);
+    assert_eq!(
+        (
+            without.objects[&nexus].zone,
+            with.objects[&nexus].zone,
+            with.objects[&umbra].zone
+        ),
+        (
+            engine::types::zones::Zone::Graveyard,
+            engine::types::zones::Zone::Battlefield,
+            engine::types::zones::Zone::Graveyard
+        ),
+        "reach guard: only the repeat keeps the Nexus"
+    );
+    assert_scored(&runner, &animation);
+}
+
+#[test]
+fn production_scorer_rejects_a_redundant_repeat_under_an_umbra() {
+    let (runner, nexus, animation, _) = umbra_nexus_under_disenchant(0);
+    let without = played_out_after(&runner, &GameAction::PassPriority);
+    let with = played_out_after(&runner, &animation);
+    assert_eq!(
+        (without.objects[&nexus].zone, with.objects[&nexus].zone),
+        (
+            engine::types::zones::Zone::Battlefield,
+            engine::types::zones::Zone::Battlefield
+        ),
+        "reach guard: the Nexus survives either way"
+    );
+    assert_vetoed(&runner, &animation);
+}
+
+/// Tatyova's Nexus with `damage` marked and a regeneration shield from P0's
+/// Regenerate, with its animation pending under P0's Vitalize and P1's
+/// Lightning Bolt aimed at P0.
+fn shielded_nexus_under_vitalize(damage: u32) -> (GameRunner, ObjectId, GameAction) {
+    let (mut runner, nexus, animation, (regenerate, vitalize, bolt)) =
+        tatyova_nexus(damage, |scenario| {
+            let regenerate = scenario
+                .add_spell_to_hand_from_oracle(P0, "Regenerate", true, REGENERATE)
+                .with_mana_cost(cost(vec![engine::types::mana::ManaCostShard::Green], 1))
+                .id();
+            let vitalize = scenario
+                .add_spell_to_hand_from_oracle(P0, "Vitalize", true, VITALIZE)
+                .with_mana_cost(cost(vec![engine::types::mana::ManaCostShard::Green], 0))
+                .id();
+            let bolt = scenario
+                .add_spell_to_hand_from_oracle(P1, "Lightning Bolt", true, LIGHTNING_BOLT)
+                .with_mana_cost(cost(vec![engine::types::mana::ManaCostShard::Red], 0))
+                .id();
+            scenario.add_basic_land(P1, ManaColor::Red);
+            (regenerate, vitalize, bolt)
+        });
+    runner.cast(regenerate).target_object(nexus).resolve();
+    rearm_p0_priority(&mut runner);
+    runner
+        .act(animation.clone())
+        .expect("the engine accepts its own action");
+    runner.cast(vitalize).commit();
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    runner.cast(bolt).target_player(P0).commit();
+    runner.act(GameAction::PassPriority).expect("P1 passes");
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .map(|entry| entry.controller)
+            .collect::<Vec<_>>(),
+        vec![P0, P0, P1],
+        "reach guard: the bolt sits above Vitalize and the pending animation"
+    );
+    assert!(
+        engine::ai_support::legal_actions(runner.state()).contains(&animation),
+        "reach guard: the engine issues the repeat"
+    );
+    (runner, nexus, animation)
+}
+
+/// CR 704.5g + CR 701.19a: the repeat's 1/1 makes the marked damage lethal,
+/// so regeneration taps the Nexus before Vitalize untaps it; without the
+/// repeat, the pending animation's 1/1 is regenerated after Vitalize.
+#[test]
+fn production_scorer_scores_a_repeat_that_spends_a_regeneration_shield() {
+    let (runner, nexus, animation) = shielded_nexus_under_vitalize(1);
+    let without = played_out_after(&runner, &GameAction::PassPriority);
+    let with = played_out_after(&runner, &animation);
+    let land = |board: &engine::types::game_state::GameState| {
+        (board.objects[&nexus].zone, board.objects[&nexus].tapped)
+    };
+    assert_eq!(
+        (land(&without), land(&with)),
+        (
+            (engine::types::zones::Zone::Battlefield, true),
+            (engine::types::zones::Zone::Battlefield, false)
+        ),
+        "reach guard: only the repeat leaves the Nexus untapped"
+    );
+    assert_scored(&runner, &animation);
+}
+
+#[test]
+fn production_scorer_rejects_a_redundant_repeat_under_a_regeneration_shield() {
+    let (runner, nexus, animation) = shielded_nexus_under_vitalize(0);
+    let without = played_out_after(&runner, &GameAction::PassPriority);
+    let with = played_out_after(&runner, &animation);
+    let land = |board: &engine::types::game_state::GameState| {
+        (board.objects[&nexus].zone, board.objects[&nexus].tapped)
+    };
+    assert_eq!(
+        (land(&without), land(&with)),
+        (
+            (engine::types::zones::Zone::Battlefield, false),
+            (engine::types::zones::Zone::Battlefield, false)
+        ),
+        "reach guard: the Nexus ends untapped either way"
+    );
+    assert_vetoed(&runner, &animation);
+}
+
+/// Blinkmoth Nexus's animation pending under P0's Return of the Wildspeaker
+/// (draw mode) and P1's Lightning Bolt, with Hill Giant and, if `armodon`,
+/// Endangered Armodon. Hill Giant outweighs the Nexus, so the land's own
+/// power does not change what the spell draws.
+fn wildspeaker_over_a_pending_nexus(armodon: bool) -> (GameRunner, GameAction) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let nexus = scenario
+        .add_land_from_oracle(P0, "Blinkmoth Nexus", BLINKMOTH_NEXUS)
+        .id();
+    scenario.add_creature(P0, "Hill Giant", 3, 3);
+    if armodon {
+        scenario.add_creature_from_oracle(P0, "Endangered Armodon", 4, 5, ENDANGERED_ARMODON);
+    }
+    for _ in 0..14 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
+    let wildspeaker = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Return of the Wildspeaker",
+            true,
+            RETURN_OF_THE_WILDSPEAKER,
+        )
+        .id();
+    for _ in 0..6 {
+        scenario.add_card_to_library_top(P0, "Forest");
+    }
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(P1, "Lightning Bolt", true, LIGHTNING_BOLT)
+        .id();
+    scenario.add_basic_land(P1, ManaColor::Red);
+    let mut runner = scenario.build();
+    rearm_p0_priority(&mut runner);
+    let animation = issued_animation(&runner, nexus);
+    runner
+        .act(animation.clone())
+        .expect("the engine accepts its own action");
+    runner.cast(wildspeaker).modes(&[0]).commit();
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    runner.cast(bolt).target_player(P0).commit();
+    runner.act(GameAction::PassPriority).expect("P1 passes");
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .map(|entry| entry.controller)
+            .collect::<Vec<_>>(),
+        vec![P0, P0, P1],
+        "reach guard: the bolt sits above the spell and the pending animation"
+    );
+    assert!(
+        engine::ai_support::legal_actions(runner.state()).contains(&animation),
+        "reach guard: the engine issues the repeat"
+    );
+    (runner, animation)
+}
+
+/// CR 603.8 + CR 603.3: the repeat's 1/1 sets off Endangered Armodon's
+/// trigger, which sacrifices the Armodon before the spell resolves, so the
+/// spell draws for Hill Giant instead.
+#[test]
+fn production_scorer_scores_a_repeat_whose_resolution_triggers_under_an_opponents_spell() {
+    let (runner, animation) = wildspeaker_over_a_pending_nexus(true);
+    let hand = |state: &engine::types::game_state::GameState| state.players[0].hand.len();
+    let without = played_out_after(&runner, &GameAction::PassPriority);
+    let with = played_out_after(&runner, &animation);
+    assert_eq!(
+        (hand(&without), hand(&with)),
+        (4, 3),
+        "reach guard: the repeat costs a card"
+    );
+    assert_scored(&runner, &animation);
+}
+
+#[test]
+fn production_scorer_rejects_a_redundant_repeat_under_a_spell_and_an_opponents_spell() {
+    let (runner, animation) = wildspeaker_over_a_pending_nexus(false);
+    let hand = |state: &engine::types::game_state::GameState| state.players[0].hand.len();
+    let without = played_out_after(&runner, &GameAction::PassPriority);
+    let with = played_out_after(&runner, &animation);
+    assert_eq!(
+        (hand(&without), hand(&with)),
+        (3, 3),
+        "reach guard: the spell draws for Hill Giant either way"
+    );
+    assert_vetoed(&runner, &animation);
+}
+
+/// CR 117.3b: resolving the repeat gives priority to the opponent, who is the
+/// active player.
+#[test]
+fn production_scorer_rejects_a_repeat_on_an_animated_man_land_on_the_opponents_turn() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let vault = scenario
+        .add_land_from_oracle(P0, "Mutavault", MUTAVAULT)
+        .id();
+    for _ in 0..5 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
+    scenario.add_basic_land(P1, ManaColor::Blue);
+    let mut runner = scenario.build();
+    rearm_p0_priority(&mut runner);
+    let animation = issued_animation(&runner, vault);
+    runner
+        .act(animation.clone())
+        .expect("the engine accepts its own action");
+    runner.advance_until_stack_empty();
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.phase = Phase::BeginCombat;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+    assert!(
+        runner.state().objects[&vault]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature),
+        "reach guard: the Mutavault is already a creature"
+    );
+    assert!(
+        engine::ai_support::legal_actions(runner.state()).contains(&animation),
+        "reach guard: the engine issues the repeat"
+    );
+    assert_vetoed(&runner, &animation);
 }
