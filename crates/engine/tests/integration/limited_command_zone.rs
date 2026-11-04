@@ -1369,6 +1369,27 @@ fn game_end_reveal_keeps_secret_agenda_names_private_to_the_controller() {
         "reach guard: the agenda is hidden from its opponent before the game ends"
     );
 
+    // The secrecy must hold in the running game too, not only in the game-end
+    // projection: the opponent's face-down view and wire carry neither the names
+    // nor the count. The controller's wire carries both, so these assertions
+    // discriminate the redaction from a field the wire never serializes.
+    let in_game_opponent_view = filter_state_for_viewer(&state, P0);
+    assert!(in_game_opponent_view.objects[&bond_id]
+        .secret_chosen_names
+        .is_empty());
+    assert_eq!(in_game_opponent_view.objects[&bond_id].agenda_name_count, 0);
+    let in_game_opponent_wire = serde_json::to_string(&ClientGameStateRef::wrap(&state, Some(P0)))
+        .expect("wire state serializes");
+    assert!(!in_game_opponent_wire.contains("Runeclaw Bear"));
+    assert!(!in_game_opponent_wire.contains("Grizzly Bears"));
+    assert!(!in_game_opponent_wire.contains("secret_chosen_names"));
+    assert!(!in_game_opponent_wire.contains("agenda_name_count"));
+    let in_game_controller_wire =
+        serde_json::to_string(&ClientGameStateRef::wrap(&state, Some(P1)))
+            .expect("wire state serializes");
+    assert!(in_game_controller_wire.contains("Runeclaw Bear"));
+    assert!(in_game_controller_wire.contains("agenda_name_count"));
+
     apply(&mut state, P0, GameAction::Concede { player_id: P0 }).expect("P0 concedes");
 
     assert!(matches!(
