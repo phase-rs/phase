@@ -21,10 +21,10 @@ use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermi
 use crate::types::ability::{
     AbilityUseTally, ActivationRestriction, AttachSelection, AttachmentKind, AttachmentReferent,
     CardSelectionMode, CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
-    CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, ExcessRecipient,
-    ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource,
-    PossessionAxis, RepeatContinuation, RuntimeHandler, SeatDirection, TurnJournalKind, VoteTally,
-    VoteVisibility, VoterScope,
+    CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, DigSource,
+    ExcessRecipient, ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice,
+    PerpetualModification, PileSource, PossessionAxis, RepeatContinuation, RuntimeHandler,
+    SeatDirection, TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
 };
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -76103,6 +76103,137 @@ fn peel_library_placement_cardinality_recognizes_untargeted_any_number() {
             LibraryPlacementCardinality::AnyNumber | LibraryPlacementCardinality::TargetSet(_)
         ),
         "an untargeted \"up to two\" is neither an any-number choice nor a target set, got {got:?}"
+    );
+}
+
+/// CR 608.2c + CR 701.20e: whole-set admission for the private-look bottom
+/// placement. "Put those cards …" places everything the look showed; "put one
+/// of those cards …" places a chosen subset and states its own cardinality, so
+/// it must never be admitted to the whole-ledger rewrite.
+#[test]
+fn library_placement_whole_set_admission_requires_whole_set_grammar() {
+    for whole in [
+        "you may put those cards on the bottom of your library in any order",
+        "put those cards on the bottom of your library in a random order.",
+        "if you don't, put those cards on the bottom of your library",
+    ] {
+        assert!(
+            library_placement_puts_whole_noun_phrase_set(whole),
+            "whole-set grammar must be admitted: {whole}"
+        );
+    }
+    for subset in [
+        "put one of those cards on the bottom of your library",
+        "put two of those cards on the bottom of your library",
+        "put x of those cards on the bottom of your library",
+        "put any number of those cards on the bottom of your library",
+        "put up to two of those cards on the bottom of your library",
+        "put those cards on top of your library",
+    ] {
+        assert!(
+            !library_placement_puts_whole_noun_phrase_set(subset),
+            "an explicit subset must keep its declarative cardinality: {subset}"
+        );
+    }
+}
+
+/// Preferred Selection's decline instruction selects ONE of the two looked-at
+/// cards. CR 115.1 + CR 608.2c: the printed cardinality is part of the
+/// instruction, and the whole-set private-look rewrite must not erase it; only
+/// whole-set grammar (Petals of Insight's "put those cards …") may be rebound.
+/// The conditional one-card placement therefore survives in declarative form
+/// until its real selection semantics are implemented.
+#[test]
+fn preferred_selection_keeps_its_conditional_one_card_bottom_placement() {
+    const ORACLE: &str = "At the beginning of your upkeep, look at the top two cards of your library. You may sacrifice this enchantment and pay {2}{G}{G}. If you do, put one of those cards into your hand. If you don't, put one of those cards on the bottom of your library.";
+    let parsed = parse_oracle_text(
+        ORACLE,
+        "Preferred Selection",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let execute = parsed
+        .triggers
+        .first()
+        .and_then(|trigger| trigger.execute.as_deref())
+        .expect("Preferred Selection's upkeep trigger must produce an executable chain");
+
+    fn collect<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a AbilityDefinition>) {
+        out.push(def);
+        if let Some(sub) = def.sub_ability.as_deref() {
+            collect(sub, out);
+        }
+        if let Some(other) = def.else_ability.as_deref() {
+            collect(other, out);
+        }
+    }
+    let mut nodes = Vec::new();
+    collect(execute, &mut nodes);
+
+    // REACH GUARD: the full text reached the private-look restructure — the
+    // "put one of those cards into your hand" accept branch is a PriorLook Dig.
+    assert!(
+        nodes.iter().any(|def| matches!(
+            &*def.effect,
+            Effect::Dig {
+                source: DigSource::PriorLook,
+                keep_count: Some(1),
+                ..
+            }
+        )),
+        "reach guard: the accept branch must be a one-card PriorLook Dig, got {:?}",
+        nodes.iter().map(|def| &*def.effect).collect::<Vec<_>>()
+    );
+
+    let placements: Vec<&AbilityDefinition> = nodes
+        .iter()
+        .copied()
+        .filter(|def| {
+            matches!(
+                &*def.effect,
+                Effect::PutAtLibraryPosition {
+                    position: LibraryPosition::Bottom,
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(
+        placements.len(),
+        1,
+        "the decline instruction must keep its declarative one-card placement, got {:?}",
+        nodes.iter().map(|def| &*def.effect).collect::<Vec<_>>()
+    );
+    let placement = placements[0];
+    let Effect::PutAtLibraryPosition {
+        target,
+        count,
+        position,
+        ..
+    } = &*placement.effect
+    else {
+        unreachable!("filtered to PutAtLibraryPosition")
+    };
+    assert_eq!(*position, LibraryPosition::Bottom);
+    assert_eq!(
+        *count,
+        QuantityExpr::Fixed { value: 1 },
+        "\"one of those cards\" states its own cardinality — the whole-set rewrite \
+         must not replace it with a zero-keep PriorLook Dig"
+    );
+    assert!(
+        matches!(target, TargetFilter::TrackedSet { .. }),
+        "the placement still reads the looked-at set, got {target:?}"
+    );
+    assert!(
+        matches!(
+            &placement.condition,
+            Some(AbilityCondition::Not { condition })
+                if **condition == AbilityCondition::effect_performed()
+        ),
+        "the placement is the \"If you don't\" branch, got {:?}",
+        placement.condition
     );
 }
 

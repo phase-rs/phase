@@ -20873,6 +20873,52 @@ fn peel_library_placement_cardinality(input: &str) -> (LibraryPlacementCardinali
     (LibraryPlacementCardinality::Unstated, input)
 }
 
+/// CR 608.2c: the noun phrase a positional bottom-of-library placement puts,
+/// read from the instruction around it. The verb may follow a conditional or
+/// optional prefix ("If you don't, put …", "You may put …"), so it is located
+/// structurally rather than required at byte 0. The cardinality itself is NOT
+/// re-derived here — the caller hands this phrase to the shared
+/// `peel_library_placement_cardinality` authority.
+fn bottom_library_placement_noun_phrase(text_lower: &str) -> Option<&str> {
+    let (at_verb, _) = take_until::<_, _, OracleError<'_>>("put ")
+        .parse(text_lower)
+        .ok()?;
+    let after_verb = at_verb.strip_prefix("put ")?;
+    // `take_until` yields `(remaining_at_the_terminator, taken_prefix)`.
+    let (_, noun_phrase) = take_until::<_, _, OracleError<'_>>(" on the bottom of")
+        .parse(after_verb)
+        .ok()?;
+    Some(noun_phrase)
+}
+
+/// CR 608.2c + CR 701.20e: does this instruction put the WHOLE set its noun
+/// phrase names ("put those cards on the bottom of your library"), rather than
+/// an explicit one/N/any-number SUBSET of it ("put one of those cards …")?
+///
+/// The placement's effect cannot answer this: `LibraryPlacementCardinality::
+/// Unstated` and an explicit `Exact(1)` both lower to `count: Fixed(1)`. The
+/// distinction exists only in the grammar, so it is read back through the same
+/// cardinality authority the lowering used. The noun phrase must additionally
+/// BE the whole-set anaphor, which keeps the answer narrower than "no numeral
+/// in front": a quantified phrase the peel does not recognize ("up to two of
+/// those cards") is a subset and is refused here too.
+pub(super) fn library_placement_puts_whole_noun_phrase_set(text_lower: &str) -> bool {
+    let Some(noun_phrase) = bottom_library_placement_noun_phrase(text_lower) else {
+        return false;
+    };
+    let (LibraryPlacementCardinality::Unstated, rest) =
+        peel_library_placement_cardinality(noun_phrase)
+    else {
+        return false;
+    };
+    all_consuming(terminated(
+        alt((tag::<_, _, OracleError<'_>>("those cards"), tag("them"))),
+        multispace0,
+    ))
+    .parse(rest)
+    .is_ok()
+}
+
 /// CR 115.1 + CR 601.2c: does a positional placement's noun phrase name its
 /// objects as TARGETS — a target cardinality ("two target …", "up to N
 /// target …", "any number of target …") or a bare declared-target prefix

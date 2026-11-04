@@ -2164,6 +2164,14 @@ fn mark_independent_mana_spent_gates(defs: &mut [AbilityDefinition]) {
 /// `PutAtLibraryPosition` over a `TrackedSet`; rebind it to a `DigSource::PriorLook`
 /// Dig that routes the looked-at set to the bottom via the shared ledger.
 ///
+/// ADMISSION: only a WHOLE-SET instruction is rebound. The rewrite routes the
+/// entire private-look ledger to the rest destination, so it is faithful only
+/// when the noun phrase names the whole looked-at set ("put those cards …").
+/// An explicit subset — "put one of those cards …" (Preferred Selection) —
+/// states its own cardinality, and erasing it would silently place every
+/// looked-at card; such placements keep their declarative shape until their
+/// selection semantics are implemented (CR 115.1 + CR 608.2c).
+///
 /// This is the SOURCE-ORDER binding authority: `defs` holds only the clauses
 /// assembled before this one, so the selected producer cannot be a later
 /// instruction. Every clause emitted between the producer and this consumer must
@@ -2191,6 +2199,11 @@ fn bind_those_cards_bottom_to_prior_look(
     else {
         return false;
     };
+    // CR 608.2c + CR 701.20e: the rewrite places the WHOLE looked-at set, so it
+    // is admitted only for whole-set grammar. See the ADMISSION note above.
+    if !super::library_placement_puts_whole_noun_phrase_set(clause_text_lower) {
+        return false;
+    }
     // CR 401.4: "in any order" is the player's arrangement instruction, not the
     // looked-at order; "in a random order" is a distinct randomization.
     let rest_order = if scan_contains_phrase(clause_text_lower, "in a random order") {
