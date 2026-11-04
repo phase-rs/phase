@@ -636,9 +636,11 @@ pub(crate) enum IdentityProjection {
     /// [`redact_face_down_identity_from_observer`]: a face-down permanent or spell the
     /// viewer neither controls nor may look under (CR 708.5).
     FaceDownRedacted,
-    /// [`reveal_face_down_identity_to_controller`]: the other side of the same
-    /// two-sided pair — a face-down permanent or spell the viewer may look under, whose
-    /// back face's name is written onto the projected object.
+    /// [`reveal_face_down_printed_identity`]: the other side of the same two-sided
+    /// pair — a face-down permanent or spell the viewer may look under, whose back
+    /// face's printed card is written onto the projected object. A conspiracy's
+    /// private agenda choices are a SEPARATE disclosure and stay redacted unless the
+    /// view is the controller's own.
     FaceDownRevealed,
 }
 
@@ -1776,7 +1778,15 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             }
             IdentityProjection::FaceDownRevealed => {
                 if let Some(obj) = filtered.objects.get_mut(&obj_id) {
-                    reveal_face_down_identity_to_controller(obj);
+                    reveal_face_down_printed_identity(obj);
+                    // CR 702.106c + CR 702.106e: a reveal publishes the printed
+                    // card, never the agenda's secretly chosen names. This leaf is
+                    // also the CR 708.9 game-end projection, which reaches every
+                    // seated viewer, so the choices survive only where the card's
+                    // private access does — the controller's own look.
+                    if !can_view_private_for_player(obj.controller) {
+                        redact_secret_agenda_choices(obj);
+                    }
                 }
             }
         }
@@ -4865,9 +4875,17 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.static_definitions.clear();
         obj.printed_ref = None;
         obj.foretold = false;
-        obj.secret_chosen_names.clear();
-        obj.agenda_name_count = 0;
+        redact_secret_agenda_choices(obj);
     }
+}
+
+/// CR 702.106c + CR 702.106f: a face-down agenda's secretly chosen names — and how
+/// many names the agenda takes — belong to the controller who chose them. Only the
+/// turn-face-up special action publishes them (`conspiracy::turn_hidden_agenda_face_up`);
+/// every projection that discloses less than that keeps these fields off the wire.
+fn redact_secret_agenda_choices(obj: &mut crate::game::game_object::GameObject) {
+    obj.secret_chosen_names.clear();
+    obj.agenda_name_count = 0;
 }
 
 fn record_hidden_replacement_candidate_source(
@@ -4880,7 +4898,13 @@ fn record_hidden_replacement_candidate_source(
     }
 }
 
-fn reveal_face_down_identity_to_controller(obj: &mut crate::game::game_object::GameObject) {
+/// CR 708.5 + CR 702.106e: Write the hidden card's printed face onto a projection
+/// for a viewer entitled to look under it — the controller, a look-permission
+/// static's beneficiary, or every player at the CR 708.9 game-end reveal. This is
+/// an identity disclosure only: it never publishes a face-down conspiracy's secret
+/// agenda choices, which [`redact_secret_agenda_choices`] keeps off every other
+/// viewer's wire.
+fn reveal_face_down_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     if let Some(back_face) = &obj.back_face {
         obj.name = back_face.name.clone();
         obj.base_name = back_face.name.clone();
@@ -4919,8 +4943,7 @@ fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::G
         obj.static_definitions = Default::default();
         obj.replacement_definitions = Default::default();
         obj.chosen_attributes.clear();
-        obj.secret_chosen_names.clear();
-        obj.agenda_name_count = 0;
+        redact_secret_agenda_choices(obj);
         obj.card_types = Default::default();
         obj.mana_cost = crate::types::mana::ManaCost::NoCost;
         obj.keywords.clear();

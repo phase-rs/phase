@@ -1028,6 +1028,100 @@ fn game_end_reveals_every_remaining_face_down_conspiracy_once() {
     );
 }
 
+/// CR 702.106c + CR 702.106e: the game-end reveal publishes the printed card to
+/// every player, but the secretly chosen names stay the controller's. An opponent's
+/// game-end `ClientGameStateRef` must carry the printed double agenda and neither of
+/// its chosen names — nor how many names it takes.
+#[test]
+fn game_end_reveal_keeps_secret_agenda_names_private_to_the_controller() {
+    let mut state = priority_state();
+    load_limited_decks(&mut state, vec![], vec![summoners_bond_face()]);
+    let bond_id = owned_command_zone_ids(&state, P1)[0];
+    record_secret_agenda_choices(
+        &mut state,
+        bond_id,
+        P1,
+        vec!["Grizzly Bears".to_string(), "Runeclaw Bear".to_string()],
+    )
+    .expect("valid double-agenda names");
+    assert!(
+        state.objects[&bond_id].face_down,
+        "the double agenda is still face down when the game ends"
+    );
+    assert_eq!(
+        filter_state_for_viewer(&state, P0).objects[&bond_id].name,
+        HIDDEN_CARD_NAME,
+        "reach guard: the agenda is hidden from its opponent before the game ends"
+    );
+
+    apply(&mut state, P0, GameAction::Concede { player_id: P0 }).expect("P0 concedes");
+
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::GameOver { winner: Some(P1) }
+    ));
+    assert!(
+        state.objects[&bond_id].face_down,
+        "the game-end reveal does not turn the conspiracy face up"
+    );
+    assert_eq!(
+        state.objects[&bond_id].secret_chosen_names,
+        vec!["Grizzly Bears".to_string(), "Runeclaw Bear".to_string()],
+        "the authoritative state keeps the controller's choices"
+    );
+
+    // Reach guard: the controller receives both the printed card and the choices,
+    // so the opponent assertions below discriminate only the agenda privacy.
+    let controller_view = filter_state_for_viewer(&state, P1);
+    assert_eq!(controller_view.objects[&bond_id].name, "Summoner's Bond");
+    assert_eq!(
+        controller_view.objects[&bond_id].secret_chosen_names,
+        vec!["Grizzly Bears".to_string(), "Runeclaw Bear".to_string()]
+    );
+    assert_eq!(controller_view.objects[&bond_id].agenda_name_count, 2);
+
+    let opponent_view = filter_state_for_viewer(&state, P0);
+    assert_eq!(
+        opponent_view.objects[&bond_id].name, "Summoner's Bond",
+        "CR 702.106e: the printed card is public at game end"
+    );
+    assert!(
+        opponent_view.objects[&bond_id]
+            .card_types
+            .core_types
+            .contains(&CoreType::Conspiracy),
+        "the printed card type is revealed with the card"
+    );
+    assert!(
+        opponent_view.objects[&bond_id].is_conspiracy,
+        "the display classification stays"
+    );
+    assert!(opponent_view.objects[&bond_id]
+        .secret_chosen_names
+        .is_empty());
+    assert_eq!(opponent_view.objects[&bond_id].agenda_name_count, 0);
+
+    // The wire payload is the actual leak vector.
+    let opponent_wire = serde_json::to_string(&ClientGameStateRef::wrap(&state, Some(P0)))
+        .expect("wire state serializes");
+    assert!(
+        opponent_wire.contains("Summoner's Bond"),
+        "the printed card identity is public at game end"
+    );
+    assert!(
+        !opponent_wire.contains("Runeclaw Bear"),
+        "the opponent's wire carries no secret agenda name"
+    );
+    assert!(!opponent_wire.contains("Grizzly Bears"));
+    assert!(!opponent_wire.contains("secret_chosen_names"));
+    assert!(!opponent_wire.contains("agenda_name_count"));
+
+    let controller_wire = serde_json::to_string(&ClientGameStateRef::wrap(&state, Some(P1)))
+        .expect("wire state serializes");
+    assert!(controller_wire.contains("Runeclaw Bear"));
+    assert!(controller_wire.contains("agenda_name_count"));
+}
+
 /// The command-zone objects `owner` owns, in command-zone order.
 fn owned_command_zone_ids(state: &GameState, owner: PlayerId) -> Vec<ObjectId> {
     state
