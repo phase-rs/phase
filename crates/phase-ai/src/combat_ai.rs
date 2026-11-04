@@ -1775,14 +1775,27 @@ fn retarget_prevented_player_attacks(
     assignments
         .into_iter()
         .filter_map(|(id, target)| {
-            if mandatory.contains(&id) || target_takes_damage_from(state, target, id) {
+            if mandatory.contains(&id) {
                 return Some((id, target));
             }
-            attacker_legal_targets(targeting, attackable, id)
+            let legal = attacker_legal_targets(targeting, attackable, id);
+            if legal.contains(&target) && target_takes_damage_from(state, target, id) {
+                return Some((id, target));
+            }
+            legal
                 .iter()
                 .copied()
                 .find(|&other| target_takes_damage_from(state, other, id))
-                .or_else(|| has_self_attack_trigger(state, id).then_some(target))
+                .or_else(|| {
+                    if has_self_attack_trigger(state, id) {
+                        legal
+                            .contains(&target)
+                            .then_some(target)
+                            .or_else(|| legal.first().copied())
+                    } else {
+                        None
+                    }
+                })
                 .map(|chosen| (id, chosen))
         })
         .collect()
@@ -3780,12 +3793,16 @@ mod tests {
     use crate::planner::quick_state_hash;
     use crate::projection::ProjectionKey;
     use engine::game::game_object::ObjectIncarnationRefExt;
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::game::scenario_db::GameScenarioDbExt;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        Effect, EffectScope, PreventionAmount, PreventionScope, ResolvedAbility, TargetFilter,
+        ContinuousModification, Duration, Effect, EffectScope, PreventionAmount, PreventionScope,
+        ResolvedAbility, TargetFilter,
     };
     use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::CardId;
+    use engine::types::keywords::ProtectionTarget;
     use rand::{rngs::SmallRng, SeedableRng};
     use std::time::Instant;
 
@@ -9697,8 +9714,6 @@ mod tests {
     /// Grant `player` protection from everything until end of turn — the shape
     /// The One Ring's cast trigger and Teferi's Protection install (CR 702.16j).
     fn grant_protection_from_everything(state: &mut GameState, player: PlayerId) {
-        use engine::types::ability::{ContinuousModification, Duration};
-        use engine::types::keywords::ProtectionTarget;
         let source = create_object(
             state,
             CardId(state.next_object_id),
@@ -9768,8 +9783,6 @@ mod tests {
     /// A two-player state with `card` (from the real card data) on P0's
     /// battlefield, able to attack this turn.
     fn state_with_real_attacker(card: &str) -> (GameState, ObjectId) {
-        use engine::game::scenario::{GameScenario, P0};
-        use engine::game::scenario_db::GameScenarioDbExt;
         let mut scenario = GameScenario::new();
         let id = scenario.add_real_card(
             P0,
@@ -9849,6 +9862,65 @@ mod tests {
                 vec![(attacker, AttackTarget::Player(PlayerId(1)))],
                 "{card} must still attack for its trigger"
             );
+        }
+    }
+
+    #[test]
+    fn voluntary_self_trigger_retarget_stays_in_the_per_attacker_legal_set() {
+        for protect_old_target in [false, true] {
+            let mut scenario = GameScenario::new_with_format(
+                engine::types::format::FormatConfig::free_for_all(),
+                3,
+                42,
+            );
+            scenario.at_phase(engine::types::phase::Phase::DeclareAttackers);
+            let attacker = scenario.add_real_card(
+                P0,
+                "Aclazotz, Deepest Betrayal",
+                Zone::Battlefield,
+                crate::test_support::shared_integration_card_db(),
+            );
+            let mut state = scenario.build().state().clone();
+            let object = state.objects.get_mut(&attacker).unwrap();
+            object.summoning_sick = false;
+            object.entered_battlefield_turn = Some(1);
+            assert!(has_self_attack_trigger(&state, attacker));
+
+            let old_target = AttackTarget::Player(PlayerId(1));
+            let legal_target = AttackTarget::Player(PlayerId(2));
+            grant_protection_from_everything(&mut state, PlayerId(2));
+            if protect_old_target {
+                grant_protection_from_everything(&mut state, PlayerId(1));
+            }
+            assert_eq!(
+                target_takes_damage_from(&state, old_target, attacker),
+                !protect_old_target,
+            );
+            assert!(!target_takes_damage_from(&state, legal_target, attacker));
+
+            // Scoped helper fixture: the issued per-attacker map, not damageability or the
+            // aggregate pool, is authoritative. This is not a new printed attack restriction.
+            let attackable = [old_target, legal_target];
+            let targets_by_attacker = HashMap::from([(attacker, vec![legal_target])]);
+            let targeting = AttackTargetingContext {
+                valid_attacker_ids: Some(std::slice::from_ref(&attacker)),
+                valid_attack_targets: Some(&attackable),
+                valid_attack_targets_by_attacker: Some(&targets_by_attacker),
+                comparison_deadline: Some(Deadline::none()),
+            };
+            for target in [old_target, legal_target] {
+                assert_eq!(
+                    retarget_prevented_player_attacks(
+                        &state,
+                        &targeting,
+                        &attackable,
+                        &[],
+                        vec![(attacker, target)],
+                    ),
+                    vec![(attacker, legal_target)],
+                    "protect_old_target={protect_old_target}, target={target:?}",
+                );
+            }
         }
     }
 
