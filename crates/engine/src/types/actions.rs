@@ -1200,7 +1200,10 @@ pub enum DebugCardCreationKind {
 /// Direct game-state manipulation actions for debugging, testing, and remediation.
 /// Bypasses `WaitingFor` validation — fires from any game state without disrupting
 /// the current prompt, except the player-resource variants that
-/// [`DebugAction::requires_settled_priority`] gates to a Priority window.
+/// [`DebugAction::requires_settled_priority`] gates to a Priority window, and the
+/// payload-dependent checks (`CreateCard { zone: Battlefield, run_etb: true }`,
+/// `MoveToZone { simulate: true }`) that `preflight_debug_action` gates the same
+/// way.
 /// Gated on `GameState::debug_mode`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -1554,8 +1557,9 @@ impl DebugAction {
 
     /// Whether this debug action is a real player-resource event whose
     /// replacements can park a CR 616.1 ordering choice, so it is admitted only
-    /// at a settled Priority boundary. `CreateCard`'s battlefield-ETB entry has
-    /// its own payload-dependent check in `preflight_debug_action`.
+    /// at a settled Priority boundary. Both payload-dependent checks
+    /// (`CreateCard`'s battlefield-ETB entry and `MoveToZone`'s simulated
+    /// processing) live in `preflight_debug_action`.
     pub fn requires_settled_priority(&self) -> bool {
         match self {
             Self::GainLife { .. }

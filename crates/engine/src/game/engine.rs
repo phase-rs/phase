@@ -18022,6 +18022,25 @@ pub fn preflight_debug_action(
         }
     }
 
+    // CR 616.1 + CR 603.3b: a simulated move runs the full destination
+    // pipeline whatever the destination, and two tails of it can park a private
+    // prompt: entry replacements and "as enters" choices (CR 614.12), and the
+    // state-based-action and trigger dispatch that publishes an `OrderTriggers`
+    // ordering choice, a commander-zone choice, a replacement-order choice, or
+    // a legend choice. Only a settled Priority boundary can own either frame; a
+    // second prompt opened under an open one never resumes the preempted one.
+    // The raw move (`simulate: false`) keeps its prior behavior: the debug zone
+    // pipeline never consults replacements or drains triggers, so it installs
+    // only the debug arm's characteristic counters (CR 306.5b / CR 310.4b) and
+    // opens no prompt.
+    if let DebugAction::MoveToZone { simulate: true, .. } = action {
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return Err(EngineError::InvalidAction(
+                "Debug::MoveToZone with simulated processing requires a Priority window".into(),
+            ));
+        }
+    }
+
     Ok(())
 }
 
