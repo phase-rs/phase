@@ -16850,13 +16850,20 @@ fn effect_shuffle_their_library() {
 #[test]
 fn compound_shuffle_it_into_library() {
     let def = parse_effect_chain("Shuffle it into its owner's library", AbilityKind::Spell);
-    assert!(matches!(
-        &*def.effect,
-        Effect::ChangeZone {
-            destination: Zone::Library,
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::ChangeZoneAll {
+                origin: None,
+                destination: Zone::Library,
+                target: TargetFilter::ParentTarget,
+                library_shuffle: crate::types::ability::MassLibraryShuffleMode::TerminalShuffle,
+                ..
+            }
+        ),
+        "got {:?}",
+        def.effect
+    );
     // CR 701.24a: Compound shuffle must chain a Shuffle sub_ability.
     let sub = def
         .sub_ability
@@ -50275,19 +50282,38 @@ fn parse_owner_of_target_shuffles_into_library() {
         AbilityKind::Spell,
     );
     assert!(
+        matches!(*def.effect, Effect::TargetOnly { .. }),
+        "Expected the target declaration, got {:?}",
+        def.effect
+    );
+    let movement = def.sub_ability.as_ref().expect("bound owner move");
+    assert!(
         matches!(
-            *def.effect,
-            Effect::ChangeZone {
+            &*movement.effect,
+            Effect::ChangeZoneAll {
+                origin: None,
                 destination: Zone::Library,
-                owner_library: true,
+                target: TargetFilter::ParentTarget,
+                library_shuffle: crate::types::ability::MassLibraryShuffleMode::TerminalShuffle,
                 ..
             }
         ),
-        "Expected ChangeZone to Library with owner_library, got {:?}",
-        def.effect
+        "Expected the bound owner-population move, got {:?}",
+        movement.effect
     );
-    // Should have a Shuffle sub_ability
-    assert!(def.sub_ability.is_some(), "Expected Shuffle sub_ability");
+    assert!(
+        matches!(
+            &*movement
+                .sub_ability
+                .as_ref()
+                .expect("terminal shuffle")
+                .effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        ),
+        "Expected the owner-scoped terminal shuffle"
+    );
 }
 
 #[test]
@@ -50298,16 +50324,24 @@ fn parse_owner_of_target_nonland_shuffles_into_library() {
         AbilityKind::Spell,
     );
     assert!(
+        matches!(*def.effect, Effect::TargetOnly { .. }),
+        "Expected the target declaration, got {:?}",
+        def.effect
+    );
+    let movement = def.sub_ability.as_ref().expect("bound owner move");
+    assert!(
         matches!(
-            *def.effect,
-            Effect::ChangeZone {
+            &*movement.effect,
+            Effect::ChangeZoneAll {
+                origin: None,
                 destination: Zone::Library,
-                owner_library: true,
+                target: TargetFilter::ParentTarget,
+                library_shuffle: crate::types::ability::MassLibraryShuffleMode::TerminalShuffle,
                 ..
             }
         ),
-        "Expected ChangeZone to Library with owner_library, got {:?}",
-        def.effect
+        "Expected the bound owner-population move, got {:?}",
+        movement.effect
     );
 }
 
@@ -50388,16 +50422,24 @@ fn parse_possessive_owner_shuffles_into_library() {
         AbilityKind::Spell,
     );
     assert!(
+        matches!(*def.effect, Effect::TargetOnly { .. }),
+        "Expected the target declaration, got {:?}",
+        def.effect
+    );
+    let movement = def.sub_ability.as_ref().expect("bound owner move");
+    assert!(
         matches!(
-            *def.effect,
-            Effect::ChangeZone {
+            &*movement.effect,
+            Effect::ChangeZoneAll {
+                origin: None,
                 destination: Zone::Library,
-                owner_library: true,
+                target: TargetFilter::ParentTarget,
+                library_shuffle: crate::types::ability::MassLibraryShuffleMode::TerminalShuffle,
                 ..
             }
         ),
-        "Expected ChangeZone to Library with owner_library, got {:?}",
-        def.effect
+        "Expected the bound owner-population move, got {:?}",
+        movement.effect
     );
 }
 
@@ -95431,22 +95473,30 @@ fn compound_shuffle_self_and_graveyard_moves_whole_zone() {
         }
     ));
     let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
-    assert!(matches!(
-        &*zone_move.effect,
-        Effect::ChangeZoneAll {
-            origin: Some(Zone::Graveyard),
-            destination: Zone::Library,
-            target: TargetFilter::ScopedPlayer,
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            &*zone_move.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Library,
+                target: TargetFilter::ParentTargetOwner,
+                ..
+            }
+        ),
+        "got {:?}",
+        zone_move.effect
+    );
     let shuffle = zone_move.sub_ability.as_ref().expect("terminal shuffle");
-    assert!(matches!(
-        &*shuffle.effect,
-        Effect::Shuffle {
-            target: TargetFilter::ScopedPlayer
-        }
-    ));
+    assert!(
+        matches!(
+            &*shuffle.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        ),
+        "got {:?}",
+        shuffle.effect
+    );
     assert!(matches!(
         shuffle.player_scope,
         Some(PlayerFilter::TrackedSetPossessor {
@@ -95476,22 +95526,30 @@ fn compound_shuffle_this_artifact_and_graveyard_moves_whole_zone() {
         }
     ));
     let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
-    assert!(matches!(
-        &*zone_move.effect,
-        Effect::ChangeZoneAll {
-            origin: Some(Zone::Graveyard),
-            destination: Zone::Library,
-            target: TargetFilter::ScopedPlayer,
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            &*zone_move.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Library,
+                target: TargetFilter::ParentTargetOwner,
+                ..
+            }
+        ),
+        "got {:?}",
+        zone_move.effect
+    );
     let shuffle = zone_move.sub_ability.as_ref().expect("terminal shuffle");
-    assert!(matches!(
-        &*shuffle.effect,
-        Effect::Shuffle {
-            target: TargetFilter::ScopedPlayer
-        }
-    ));
+    assert!(
+        matches!(
+            &*shuffle.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        ),
+        "got {:?}",
+        shuffle.effect
+    );
 }
 
 /// CR 701.24c + CR 400.3: "Shuffle ~ and its owner's graveyard into their owner's

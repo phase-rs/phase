@@ -3250,6 +3250,16 @@ fn try_parse_reflexive_this_way_trigger(tp: TextPair) -> Option<ParsedEffectClau
         return None;
     }
 
+    // CR 603.7c: "when an exiled card enters [under …] this way" is the
+    // tracked-set delayed trigger owned by `try_parse_inline_delayed_trigger`;
+    // the generic reflexive path must not claim it.
+    if tag::<_, _, OracleError<'_>>("when an exiled card enters ")
+        .parse(before.lower)
+        .is_ok()
+    {
+        return None;
+    }
+
     // CR 603.12: zone-change "this way" reflexives ("when you discard/sacrifice/
     // put onto the battlefield … this way") are owned by the chunk-loop's
     // `strip_if_you_do_conditional` → `ZoneChangedThisWay` sub-ability path
@@ -16081,14 +16091,22 @@ fn try_parse_owner_of_target_shuffle(
     ))
     .parse(&tp.lower[predicate_start..])
     .ok()?;
+    let subject_text = tp.original[..predicate_start].trim();
     let mut trial = ctx.clone_throwaway();
-    let application =
-        subject::parse_subject_application(tp.original[..predicate_start].trim(), &mut trial)?;
-    if application.multi_target.is_some() {
-        return None;
-    }
-
-    let target = extract_owner_of_target(tp, ctx)?;
+    let application = subject::parse_subject_application(subject_text, &mut trial);
+    // allow-noncombinator: possessive anaphor classification for the owner-shuffle shortcut.
+    let possessive_anaphor = subject_text.contains("'s owner ") // allow-noncombinator: possessive subject scan.
+        && !subject_text.to_ascii_lowercase().contains("target "); // allow-noncombinator: declared-target guard.
+    let target = match application {
+        Some(application) => {
+            if application.multi_target.is_some() {
+                return None;
+            }
+            extract_owner_of_target(tp, ctx)?
+        }
+        None if possessive_anaphor => extract_owner_of_target(tp, ctx)?,
+        None => return None,
+    };
 
     let movement = imperative::lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
         target: TargetFilter::ParentTarget,
@@ -16152,6 +16170,20 @@ fn parse_into_library_nth_from_top_or_bottom(i: &str) -> OracleResult<'_, Librar
 ///
 /// Returns `Some(target_filter)` if the pattern matches, `None` otherwise.
 fn extract_owner_of_target(tp: TextPair, ctx: &mut ParseContext) -> Option<TargetFilter> {
+    // CR 400.3: a possessive anaphor subject ("that creature's owner", "its
+    // owner") announces no new target; restore the pre-declaration binding.
+    // allow-noncombinator: possessive boundary scan; target parsing stays in parse_target_with_ctx.
+    if let Some(idx) = tp.find("'s owner ") {
+        let subject = &tp.original[..idx];
+        // allow-noncombinator: declared-target guard on the possessive anaphor subject.
+        if !subject.to_ascii_lowercase().contains("target ") {
+            let (filter, remainder) =
+                ctx.with_player_antecedents(|scoped| parse_target_with_ctx(subject, scoped));
+            if remainder.trim().is_empty() {
+                return Some(filter);
+            }
+        }
+    }
     let predicate_start = subject::find_predicate_start(tp.original)?;
     let mut trial = ctx.clone();
     let application =
@@ -30867,6 +30899,18 @@ fn extract_player_anchor_in_chain(
     );
     let mut sub = clause.sub_ability.as_deref();
     while let Some(def) = sub {
+        // CR 701.24a + CR 115.1a: the bound owner-population move carries a
+        // `Shuffle(ScopedPlayer)` terminal with the owner library scope; that
+        // is the chain-level player anchor for a following chooser.
+        if matches!(
+            def.effect.as_ref(),
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        ) && def.player_scope.as_ref() == Some(&imperative::owner_library_shuffle_scope())
+        {
+            return Some(TargetFilter::ParentTargetOwner);
+        }
         if parent_target_is_player
             && matches!(
                 def.effect.as_ref(),
