@@ -95483,13 +95483,12 @@ fn compound_shuffle_self_and_graveyard_moves_whole_zone() {
             Effect::ChangeZoneAll {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Library,
-                // CR 109.5: "your graveyard" is the ACTIVATOR's population —
-                // the explicit `Controller` possessor the mass-move lowering
-                // emits, normalized to the controller-relative `ScopedPlayer`
-                // (which falls back to the ability controller). It is never
-                // the source owner's (`ParentTargetOwner`) unless another
-                // player activated the ability.
-                target: TargetFilter::ScopedPlayer,
+                // CR 109.5: "your graveyard" is the ACTIVATOR's population and
+                // stays the explicit `Controller` possessor the mass-move
+                // lowering emits. CR 108.3 (`ParentTargetOwner`) would move the
+                // source owner's graveyard instead whenever another player
+                // activated the ability.
+                target: TargetFilter::Controller,
                 ..
             }
         ),
@@ -95542,13 +95541,12 @@ fn compound_shuffle_this_artifact_and_graveyard_moves_whole_zone() {
             Effect::ChangeZoneAll {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Library,
-                // CR 109.5: "your graveyard" is the ACTIVATOR's population —
-                // the explicit `Controller` possessor the mass-move lowering
-                // emits, normalized to the controller-relative `ScopedPlayer`
-                // (which falls back to the ability controller). It is never
-                // the source owner's (`ParentTargetOwner`) unless another
-                // player activated the ability.
-                target: TargetFilter::ScopedPlayer,
+                // CR 109.5: "your graveyard" is the ACTIVATOR's population and
+                // stays the explicit `Controller` possessor the mass-move
+                // lowering emits. CR 108.3 (`ParentTargetOwner`) would move the
+                // source owner's graveyard instead whenever another player
+                // activated the ability.
+                target: TargetFilter::Controller,
                 ..
             }
         ),
@@ -95771,9 +95769,10 @@ fn elixir_shuffle_keeps_the_activator_graveyard_population() {
             if let Effect::ChangeZoneAll { origin, target, .. } = &*def.effect {
                 if *origin == Some(Zone::Graveyard) {
                     found_population = true;
-                    assert!(
-                        matches!(target, TargetFilter::ScopedPlayer | TargetFilter::Controller),
-                        "the graveyard population must stay the activator-relative one, got {target:?}"
+                    assert_eq!(
+                        *target,
+                        TargetFilter::Controller,
+                        "the graveyard population must stay the explicit activator possessor"
                     );
                 }
             }
