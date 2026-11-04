@@ -14250,6 +14250,13 @@ mod tests {
     /// for untargeted "put X cards from your hand onto the battlefield"
     /// patterns must also resume after a per-permanent replacement choice
     /// pauses the loop.
+    ///
+    /// R4c C6b/C6c: with the producing ability's continuation parked (as a
+    /// real prompt always has one), the selection publishes the tracked set
+    /// before the pause without writing the moved-object ledger, and the
+    /// paused `ChoiceSelected` completion counts arrivals (2 of 3 chosen; the
+    /// third is redirected to exile) and stamps that arrival count onto the
+    /// chained consumer.
     #[test]
     fn effect_zone_choice_multi_card_with_replacement_choice_processes_all_chosen() {
         use crate::game::engine::apply_as_current;
@@ -14341,6 +14348,39 @@ mod tests {
             .card_types
             .core_types
             .push(CoreType::Land);
+        // C6c discriminator: the third chosen card is chosen but never arrives.
+        // A mandatory `Moved` replacement redirects its battlefield entry to
+        // exile, so `ChoiceSelected` must count the two arrivals and NOT
+        // `chosen.len()` (3).
+        state
+            .objects
+            .get_mut(&graveyard_land)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .mode(ReplacementMode::Mandatory)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::SelfRef,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    )),
+            );
         state.active_player = PlayerId(0);
         state.priority_player = PlayerId(0);
 
@@ -14375,6 +14415,32 @@ mod tests {
             duration: None,
         };
 
+        // A real `EffectZoneChoice` prompt is raised while the producing
+        // ability's continuation is parked, and the selection publishes the
+        // tracked set only for an active continuation
+        // (`engine_resolution_choices.rs:9274`). Park the directly constructed
+        // tracked-set consumer from the plan's C6b row so the publication path
+        // runs and the completed choice can stamp its arrival count onto it.
+        state.push_ability_continuation(crate::types::resolution::AbilityContinuationFrame {
+            pending: crate::types::game_state::PendingContinuation::new(
+                Box::new(ResolvedAbility::new(
+                    Effect::CompletePlayerAction {
+                        parent_kind: EffectKind::PutCounter,
+                        action: crate::types::events::PlayerActionKind::AcceptedOptionalEffect,
+                        required_result: crate::types::ability::EffectResolutionResult {
+                            cause: ThisWayCause::Returned,
+                            count: 2,
+                        },
+                    },
+                    Vec::new(),
+                    ObjectId(100),
+                    PlayerId(0),
+                )),
+                &state,
+            ),
+            choose_zone_trigger_context: None,
+        });
+
         let _ = apply_as_current(
             &mut state,
             GameAction::SelectCards {
@@ -14383,6 +14449,25 @@ mod tests {
         )
         .expect("select all three cards");
 
+        // C6b: the pre-pause tracked set is published at selection and the
+        // moved-object ledger is NOT written from the selected ids.
+        let tracked = state
+            .chain_tracked_set_id
+            .expect("selection publishes the tracked set before the pause");
+        let published = state
+            .tracked_object_sets
+            .get(&tracked)
+            .expect("the published set is retained");
+        for chosen in [shock_a, shock_b, graveyard_land] {
+            assert!(
+                published.contains(&chosen),
+                "the pre-pause tracked set holds every chosen card"
+            );
+            assert!(
+                !state.last_zone_changed_ids.contains(&chosen),
+                "the moved ledger is not written from the selection"
+            );
+        }
         // First shock prompts; decline it (index 1 → tap).
         assert!(
             matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
@@ -14399,13 +14484,135 @@ mod tests {
             "second shock must prompt via resume, got {:?}",
             state.waiting_for
         );
-        let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+        let resumed = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
             .expect("decline second hand shock");
 
         assert_eq!(state.objects[&shock_a].zone, Zone::Battlefield);
         assert_eq!(state.objects[&shock_b].zone, Zone::Battlefield);
-        assert_eq!(state.objects[&graveyard_land].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&graveyard_land].zone,
+            Zone::Exile,
+            "the redirecting replacement keeps the chosen land out of the destination"
+        );
         assert!(state.active_change_zone_frame().is_none());
+        // C6c: the paused `ChoiceSelected` completion counts arrivals among the
+        // chosen cards, so the redirected land is excluded: 2, not
+        // `chosen.len()` (3).
+        assert_eq!(
+            state.last_effect_count,
+            Some(2),
+            "the paused ChoiceSelected policy counts arrivals among the chosen"
+        );
+        // The completion's this-way stamp uses that same arrival count: the
+        // chained consumer requires `{Returned, 2}`, so it publishes exactly
+        // once. A `chosen.len()` stamp (3) would satisfy nothing and drop it.
+        assert_eq!(
+            resumed
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    crate::types::events::GameEvent::PlayerPerformedAction {
+                        action: crate::types::events::PlayerActionKind::AcceptedOptionalEffect,
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "the chained consumer fires once from the arrival-count stamp"
+        );
+        assert_eq!(
+            resumed
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    crate::types::events::GameEvent::EffectResolved {
+                        kind: EffectKind::ChangeZone,
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "the staged choice family emits one ChangeZone resolution"
+        );
+    }
+
+    /// C10 (this-way stamp): the staged `ChangeZonePopulationSettled` completion
+    /// stamps the arrival count onto an active `CompletePlayerAction`
+    /// continuation. This is a bounded structural unit: the Vengeful
+    /// Regrowth/Rise fixtures carry no such continuation, so
+    /// `stamp_active_player_action_completion` is a production no-op there.
+    #[test]
+    fn staged_change_zone_completion_stamps_the_complete_player_action_arrival_count() {
+        use crate::types::ability::{EffectResolutionResult, ThisWayCause};
+        use crate::types::game_state::{
+            BatchCompletion, ChangeZoneBatchTail, ChangeZoneCountPolicy, ChangeZoneSettled,
+            PendingContinuation,
+        };
+        use crate::types::resolution::AbilityContinuationFrame;
+
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(9_900);
+        let required = EffectResolutionResult {
+            cause: ThisWayCause::Returned,
+            count: 3,
+        };
+        let chain = ResolvedAbility::new(
+            Effect::CompletePlayerAction {
+                parent_kind: EffectKind::ChangeZone,
+                action: crate::types::events::PlayerActionKind::AcceptedOptionalEffect,
+                required_result: required,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        state.push_ability_continuation(AbilityContinuationFrame {
+            pending: PendingContinuation::new(Box::new(chain), &state),
+            choose_zone_trigger_context: None,
+        });
+
+        let completion = BatchCompletion::ChangeZonePopulationSettled {
+            tail: Box::new(ChangeZoneBatchTail {
+                group_id: crate::types::identifiers::LogicalZoneChangeGroupId(1),
+                effect_kind: EffectKind::ChangeZone,
+                source_id: source,
+                controller: PlayerId(0),
+                destination: Zone::Battlefield,
+                count: ChangeZoneCountPolicy::MassAllMembers,
+                pending_return_result_producer: None,
+                stamp_this_way: true,
+            }),
+            settled: Some(ChangeZoneSettled {
+                policy_count: 3,
+                arrival_count: 3,
+                records: vec![],
+            }),
+        };
+        let mut events = Vec::new();
+        let _ = crate::game::engine_resolution_choices::run_batch_completion(
+            &mut state,
+            completion,
+            &mut events,
+        );
+
+        assert_eq!(
+            state
+                .active_ability_continuation()
+                .expect("the completion leaves the continuation active")
+                .chain
+                .context
+                .prior_effect_result,
+            Some(required),
+            "the settled arrival count is stamped onto the CompletePlayerAction node"
+        );
+        assert!(
+            crate::game::effects::complete_player_action::succeeded(
+                &state.active_ability_continuation().unwrap().chain
+            ),
+            "the stamped result satisfies the continuation's requirement"
+        );
     }
 
     /// CR 110.2a: Only `ControllerRef::You` is supported at runtime today.

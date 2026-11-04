@@ -6830,6 +6830,43 @@ impl PendingBatchDeliveries {
         if destroy_family && staged.change_zone.is_some() {
             return Err("a destroy staged batch carries ChangeZone metadata".to_string());
         }
+        // CR 101.4 + CR 608.2c: the ChangeZone family metadata and its typed
+        // completion are one payload. A crafted state may not carry either
+        // without the other, and the mass-only producer flags must agree with
+        // the completion's count policy.
+        let change_zone_completion = match &self.completion {
+            Some(BatchCompletion::ChangeZonePopulationSettled { tail, .. }) => Some(&**tail),
+            Some(_) | None => None,
+        };
+        match (&staged.change_zone, change_zone_completion) {
+            (Some(meta), Some(tail)) => {
+                let mass = matches!(
+                    tail.count,
+                    crate::types::game_state::ChangeZoneCountPolicy::MassAllMembers
+                );
+                if meta.count_hand_exile && !mass {
+                    return Err(
+                        "ChangeZone metadata counts hand exile on a non-mass tail".to_string()
+                    );
+                }
+                if meta.exiled_by_source && !meta.count_hand_exile {
+                    return Err(
+                        "ChangeZone metadata links ExiledBySource without the mass producer"
+                            .to_string(),
+                    );
+                }
+                if tail.group_id != self.logical_zone_change_group.logical_group_id {
+                    return Err("ChangeZone tail names another logical group".to_string());
+                }
+            }
+            (Some(_), None) => {
+                return Err("ChangeZone metadata on a non-ChangeZone staged batch".to_string())
+            }
+            (None, Some(_)) => {
+                return Err("ChangeZone completion without family metadata".to_string())
+            }
+            (None, None) => {}
+        }
 
         // `requests`/`remaining` are exactly the not-yet-consulted members in
         // announcement order. A member abandoned because its owner left the
@@ -6881,6 +6918,22 @@ impl PendingBatchDeliveries {
         let is_destroy = matches!(member.operation, StagedMemberOperation::Destroy(_));
         if member.outer_destroy_approved && !is_destroy {
             return Err("a zone-move staged member carries the destroy approval flag".to_string());
+        }
+        // CR 701.8a: the outer approval exists only after that outer consult
+        // returned Execute(Destroy); a crafted state cannot settle a member as
+        // destroyed before the consult ever happened.
+        if member.outer_destroy_approved
+            && !matches!(
+                member.state,
+                StagedBatchMemberState::InnerConsulting
+                    | StagedBatchMemberState::Approved
+                    | StagedBatchMemberState::PreventedWithChild
+                    | StagedBatchMemberState::Terminal
+            )
+        {
+            return Err(
+                "a staged member carries the destroy approval before its outer consult".to_string(),
+            );
         }
         match member.state {
             StagedBatchMemberState::Unconsulted => {
@@ -7382,6 +7435,12 @@ pub enum StagedBatchMemberState {
 /// CR 614.5: one consultation's exact result, retained while a post-replacement
 /// child remains live so the child's later settlement cannot re-run the
 /// replacement choice.
+///
+/// `Approved` carries the exact approved `ProposedEvent` inline: the value
+/// lives on the staged owner for one paused consultation and is matched by
+/// value in the approval handback, so boxing it would allocate per member
+/// without saving retained state.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StagedMemberOutcome {
     Approved(ProposedEvent),
@@ -7700,6 +7759,7 @@ pub(crate) fn change_zone_settled_facts(
     policy: &ChangeZoneCountPolicy,
     destination: Zone,
 ) -> ChangeZoneSettled {
+    use crate::types::game_state::LogicalZoneChangeTerminalOutcome;
     let mut records = Vec::new();
     let mut policy_count = 0i32;
     let mut arrival_count = 0usize;
@@ -7707,26 +7767,59 @@ pub(crate) fn change_zone_settled_facts(
         if member.state == StagedBatchMemberState::Abandoned {
             continue;
         }
-        let mut final_zone = None;
+        // CR 614.1 + CR 616.1: the group's own terminal outcomes are the
+        // authoritative per-member settlement facts. `Moved` names the exact
+        // action-local occurrence ordinal, which covers every origin zone —
+        // unlike the battlefield-departure projection, an occurrence from the
+        // graveyard/hand/exile/library is retained here.
+        let group_index = group
+            .prospective_battlefield_members
+            .iter()
+            .position(|prospective| prospective.identity == member.identity);
+        let outcome = group_index.and_then(|index| group.terminal_outcomes.get(index));
         let mut moved_record = None;
-        for occurrence in &group.all_origin_occurrences {
-            let GameEvent::ZoneChanged { record, .. } = &occurrence.event else {
-                continue;
-            };
-            if record
-                .trigger_source_context()
-                .is_some_and(|context| context.identity.reference == member.identity)
-            {
-                final_zone = Some(record.to_zone);
-                moved_record = Some((**record).clone());
+        let mut final_zone = None;
+        let mut moved = false;
+        match outcome {
+            Some(LogicalZoneChangeTerminalOutcome::Moved { occurrence_ordinal }) => {
+                if let Some(occurrence) = group.all_origin_occurrences.get(*occurrence_ordinal) {
+                    let GameEvent::ZoneChanged { record, .. } = &occurrence.event else {
+                        panic!("moved member names a non-zone-change occurrence");
+                    };
+                    final_zone = Some(record.to_zone);
+                    moved_record = Some((**record).clone());
+                    moved = true;
+                }
+            }
+            Some(
+                LogicalZoneChangeTerminalOutcome::Prevented
+                | LogicalZoneChangeTerminalOutcome::Remained
+                | LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft,
+            )
+            | None => {}
+            Some(LogicalZoneChangeTerminalOutcome::Pending) => {
+                panic!("settled ChangeZone population retains a pending member")
             }
         }
-        let arrived =
-            member.terminal == Some(ZoneMoveCompletion::Moved) && final_zone == Some(destination);
+        if !moved && member.terminal == Some(ZoneMoveCompletion::Moved) {
+            // Fallback for a member the logical group did not enrol (family
+            // entries enrol every announced member, so this is defensive): use
+            // its own occurrence by object identity.
+            for occurrence in &group.all_origin_occurrences {
+                if let GameEvent::ZoneChanged { record, .. } = &occurrence.event {
+                    if record.object_id == member.identity.object_id {
+                        final_zone = Some(record.to_zone);
+                        moved_record = Some((**record).clone());
+                        moved = true;
+                    }
+                }
+            }
+        }
+        let arrived = moved && final_zone == Some(destination);
         if arrived {
             arrival_count += 1;
         }
-        if member.terminal == Some(ZoneMoveCompletion::Moved) {
+        if moved {
             if let Some(record) = moved_record {
                 records.push(record);
             }
@@ -27305,13 +27398,13 @@ pub(crate) mod replacement_library_placement_wire_tests {
         let pending = state
             .pending_replacement
             .as_ref()
-            .or_else(|| match state.pending_deferred_life_cost_resume.as_ref() {
+            .or(match state.pending_deferred_life_cost_resume.as_ref() {
                 Some(DeferredLifeCostResume::PayAmount { pending_entry, .. }) => {
                     pending_entry.as_deref()
                 }
                 _ => None,
             })
-            .or_else(|| match state.pending_cost_move_resume.as_ref() {
+            .or(match state.pending_cost_move_resume.as_ref() {
                 Some(PendingCostMoveResume::ReplacementMayCost {
                     outer_replacement, ..
                 }) => outer_replacement.as_deref(),

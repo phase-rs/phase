@@ -4259,6 +4259,27 @@ impl ResolutionStack {
                                 .to_string(),
                         });
                     }
+                    // CR 101.4: exactly one marker may await one batch, or
+                    // retirement would leave a frame that fails the next
+                    // validation.
+                    if self
+                        .frames
+                        .iter()
+                        .filter(|frame| {
+                            matches!(
+                                frame,
+                                ResolutionFrame::ChangeZone(other)
+                                    if other.awaiting_batch == Some(marker)
+                            )
+                        })
+                        .count()
+                        != 1
+                    {
+                        return Err(ResolutionStackError::InvalidPayload {
+                            frame: FrameKind::ChangeZone,
+                            message: "duplicate batch-awaiting ChangeZone markers".to_string(),
+                        });
+                    }
                     // R4c addendum (a): the marker need not be the batch's
                     // IMMEDIATE parent. A resolving continuation or a
                     // post-replacement drain may be spliced between them by the

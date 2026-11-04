@@ -2592,6 +2592,13 @@ pub(crate) fn deliver_staged_destroy_batch(
 }
 
 /// CR 608.2c + CR 603.10a: the ChangeZone family's synchronous delivery result.
+///
+/// `Settled` carries the delivered group and its member terminals inline. The
+/// synchronous path consumes this value immediately at its single call site
+/// and never retains a population, so boxing the two vectors would add a heap
+/// indirection (and an allocation per settled move) while saving no retained
+/// state.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum StagedChangeZoneOutcome {
     Settled {
         group: LogicalZoneChangeGroup,
@@ -2950,6 +2957,12 @@ pub(crate) fn finalize_staged_pending_outcome(
 
 /// CR 401.4 + CR 401.2: validate and store one batch-owned arrangement
 /// permutation, then open the next prompt or deliver synchronously.
+///
+/// The eight parameters are all distinct semantic axes of one submission
+/// (owner, member set, prefix count, split scope, arrangement, event sink).
+/// Grouping any pair would fabricate a transient struct used only here and
+/// hide a real axis at the call site.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn submit_staged_batch_arrangement(
     state: &mut GameState,
     group_id: LogicalZoneChangeGroupId,
@@ -12729,5 +12742,253 @@ mod staged_batch_tests {
         let mut events = Vec::new();
         settle_batch_owner(&mut state, pending, Vec::new(), &mut events);
         assert!(state.active_batch_delivery().is_none(), "the owner retires");
+    }
+
+    /// D10: the staged Destroy terminal mapping. `CreatureDestroyed` is emitted
+    /// exactly once for an outer-approved member with a non-abandoned terminal
+    /// (Moved, Remained, inner Prevented) and never for an outer redirect,
+    /// outer prevention, pre-proposal guard or abandoned member; settlement
+    /// publishes the same set as `settled_destroyed`.
+    #[test]
+    fn d10_staged_destroy_terminal_mapping_and_creature_destroyed() {
+        use crate::types::ability::{Effect, ResolvedAbility};
+        use crate::types::game_state::{
+            BatchCompletion, StagedBatchMemberState, StagedDestroyOperation, StagedMemberOperation,
+            ZoneMoveCompletion,
+        };
+        use crate::types::keywords::Keyword;
+
+        fn battlefield_object(state: &mut GameState, card: u64, name: &str) -> ObjectId {
+            create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            )
+        }
+
+        fn destroyed_count(events: &[GameEvent], id: ObjectId) -> usize {
+            events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        GameEvent::CreatureDestroyed { object_id, .. } if *object_id == id
+                    )
+                })
+                .count()
+        }
+
+        let mut state = GameState::new_two_player(42);
+        let source = effect_source(&mut state);
+        let outer_redirect = battlefield_object(&mut state, 701, "Outer redirect");
+        let outer_prevented = battlefield_object(&mut state, 702, "Outer prevented");
+        let inner_prevented = battlefield_object(&mut state, 703, "Inner prevented");
+        let moved = battlefield_object(&mut state, 704, "Moved");
+        let remained = battlefield_object(&mut state, 705, "Remained");
+        let guarded = battlefield_object(&mut state, 706, "Guarded");
+        let abandoned = battlefield_object(&mut state, 707, "Abandoned");
+        let announced = [
+            outer_redirect,
+            outer_prevented,
+            inner_prevented,
+            moved,
+            remained,
+            guarded,
+            abandoned,
+        ];
+        let requests: Vec<ZoneMoveRequest> = announced
+            .iter()
+            .map(|id| ZoneMoveRequest::effect(*id, Zone::Graveyard, source))
+            .collect();
+        let group =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &announced);
+        let mut staged = new_staged_batch(&state, &requests);
+        for member in &mut staged.members {
+            member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
+                source,
+                cant_regenerate: false,
+            });
+        }
+        let mut owner = new_staged_owner(&state, &requests, group, staged);
+        let mut events = Vec::new();
+
+        // CR 614.6: the outer Destroy replacement redirected straight to a
+        // zone change. It is the final event and never sets the approval flag.
+        record_staged_member_approval(
+            &mut owner,
+            0,
+            ProposedEvent::zone_change(
+                outer_redirect,
+                Zone::Battlefield,
+                Zone::Exile,
+                Some(source),
+            ),
+        );
+        mark_staged_member_terminal(
+            &mut state,
+            &mut owner,
+            0,
+            ZoneMoveCompletion::Moved,
+            &mut events,
+        );
+
+        // Outer Prevented (regeneration / shield counter / Umbra): terminal
+        // Prevented, no approval, no `CreatureDestroyed`.
+        mark_staged_member_terminal(
+            &mut state,
+            &mut owner,
+            1,
+            ZoneMoveCompletion::Prevented,
+            &mut events,
+        );
+
+        // Inner Prevented: the outer Destroy was approved, so the singleton
+        // rule still emits one `CreatureDestroyed` (F16 preserved).
+        owner.staged.as_mut().unwrap().members[2].outer_destroy_approved = true;
+        mark_staged_member_terminal(
+            &mut state,
+            &mut owner,
+            2,
+            ZoneMoveCompletion::Prevented,
+            &mut events,
+        );
+
+        // Inner Execute redirected back to the battlefield: terminal Remained,
+        // but the outer approval still emits one `CreatureDestroyed`.
+        owner.staged.as_mut().unwrap().members[3].outer_destroy_approved = true;
+        mark_staged_member_terminal(
+            &mut state,
+            &mut owner,
+            3,
+            ZoneMoveCompletion::Moved,
+            &mut events,
+        );
+        owner.staged.as_mut().unwrap().members[4].outer_destroy_approved = true;
+        mark_staged_member_terminal(
+            &mut state,
+            &mut owner,
+            4,
+            ZoneMoveCompletion::Remained,
+            &mut events,
+        );
+
+        // Guard Remained: no proposal was ever made, so no event.
+        mark_staged_member_terminal(
+            &mut state,
+            &mut owner,
+            5,
+            ZoneMoveCompletion::Remained,
+            &mut events,
+        );
+
+        // An abandoned member is excluded even when the outer was approved.
+        {
+            let member = &mut owner.staged.as_mut().unwrap().members[6];
+            member.outer_destroy_approved = true;
+            member.terminal = Some(ZoneMoveCompletion::Moved);
+            member.state = StagedBatchMemberState::Abandoned;
+        }
+
+        for id in [outer_redirect, outer_prevented, guarded, abandoned] {
+            assert_eq!(
+                destroyed_count(&events, id),
+                0,
+                "no CreatureDestroyed for a non-approved or abandoned terminal"
+            );
+        }
+        for id in [inner_prevented, moved, remained] {
+            assert_eq!(
+                destroyed_count(&events, id),
+                1,
+                "exactly one CreatureDestroyed for an outer-approved non-abandoned terminal"
+            );
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::CreatureDestroyed { .. }))
+                .count(),
+            3
+        );
+
+        let members = owner.staged.as_ref().unwrap().members.clone();
+        let mut completion = BatchCompletion::DestroyPopulationSettled {
+            ability: Box::new(ResolvedAbility::new(
+                Effect::DestroyAll {
+                    target: TargetFilter::None,
+                    cant_regenerate: false,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )),
+            settled_destroyed: None,
+        };
+        crate::types::game_state::settle_batch_delivery_outcome(
+            &mut completion,
+            &state,
+            &owner.logical_zone_change_group,
+            &members,
+        );
+        let BatchCompletion::DestroyPopulationSettled {
+            settled_destroyed, ..
+        } = completion
+        else {
+            panic!("destroy completion retains its variant");
+        };
+        assert_eq!(
+            settled_destroyed.expect("settlement fills the payload"),
+            vec![inner_prevented, moved, remained],
+            "settled_destroyed is the same outer-approved, non-abandoned set"
+        );
+
+        // The pre-proposal guard: an indestructible member is `Remained` before
+        // the outer `Destroy` is ever proposed.
+        let mut guard_state = GameState::new_two_player(42);
+        let guard_source = effect_source(&mut guard_state);
+        let titan = battlefield_object(&mut guard_state, 708, "Adamant Titan");
+        guard_state
+            .objects
+            .get_mut(&titan)
+            .unwrap()
+            .keywords
+            .push(Keyword::Indestructible);
+        let guard_requests = vec![ZoneMoveRequest::effect(
+            titan,
+            Zone::Graveyard,
+            guard_source,
+        )];
+        let guard_group =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut guard_state, &[titan]);
+        let mut guard_staged = new_staged_batch(&guard_state, &guard_requests);
+        let operation = StagedDestroyOperation {
+            source: guard_source,
+            cant_regenerate: false,
+        };
+        guard_staged.members[0].operation = StagedMemberOperation::Destroy(operation);
+        let mut guard_owner =
+            new_staged_owner(&guard_state, &guard_requests, guard_group, guard_staged);
+        let guard_member = guard_owner.staged.as_ref().unwrap().members[0].clone();
+        let mut guard_events = Vec::new();
+        assert_eq!(
+            consult_staged_destroy_outer(
+                &mut guard_state,
+                &mut guard_owner,
+                &mut guard_events,
+                guard_member,
+                operation,
+            ),
+            StagedConsult::Continue
+        );
+        let guard_member = &guard_owner.staged.as_ref().unwrap().members[0];
+        assert_eq!(
+            guard_member.terminal,
+            Some(ZoneMoveCompletion::Remained),
+            "the guard is a Remained terminal, not a destruction"
+        );
+        assert!(!guard_member.outer_destroy_approved);
+        assert!(guard_events.is_empty());
     }
 }
