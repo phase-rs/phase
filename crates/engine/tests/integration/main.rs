@@ -283,6 +283,7 @@ mod loop_shortcut_ranking;
 mod loop_shortcut_seat_pin_census;
 mod loop_shortcut_shortening;
 mod love_on_the_battlefield_combat_counters;
+mod lwaxana_troi_tapped_trigger_doubling;
 mod mandatory_loop_draws;
 mod omnath_unspent_green_mana_2887;
 mod swords_target_legality_recheck;

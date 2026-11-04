@@ -12537,21 +12537,26 @@ fn trigger_source_matches_doubler_filter(
 pub(crate) fn active_trigger_doublers(
     state: &GameState,
 ) -> Vec<crate::types::events::LatchedTriggerDoubler> {
+    // CR 603.2d: each doubling effect counts on its own, so a permanent with
+    // two doubling statics (its own plus one a resolved ability gave it —
+    // Lwaxana Troi, Charming Guest) contributes one doubler per static.
     state
         .battlefield
         .iter()
-        .filter_map(|&obj_id| {
-            let obj = state.objects.get(&obj_id)?;
-            let doubler = super::functioning_abilities::active_static_definitions(state, obj)
-                .find(|sd| matches!(sd.mode, StaticMode::DoubleTriggers { .. }))?;
-            let StaticMode::DoubleTriggers { cause } = &doubler.mode else {
-                unreachable!("filter above guarantees DoubleTriggers");
-            };
-            Some(crate::types::events::LatchedTriggerDoubler {
-                source: trigger_source_context_for_latch(state, obj),
-                cause: cause.clone(),
-                affected: doubler.affected.clone(),
-            })
+        .filter_map(|obj_id| state.objects.get(obj_id))
+        .flat_map(|obj| {
+            super::functioning_abilities::active_static_definitions(state, obj).filter_map(
+                move |doubler| {
+                    let StaticMode::DoubleTriggers { cause } = &doubler.mode else {
+                        return None;
+                    };
+                    Some(crate::types::events::LatchedTriggerDoubler {
+                        source: trigger_source_context_for_latch(state, obj),
+                        cause: cause.clone(),
+                        affected: doubler.affected.clone(),
+                    })
+                },
+            )
         })
         .collect()
 }
