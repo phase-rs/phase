@@ -8,7 +8,6 @@ If you discover a security vulnerability in phase.rs, please report it responsib
 
 - **GitHub Security Advisories**: [Report a vulnerability](https://github.com/phase-rs/phase/security/advisories/new) (preferred)
 - **Email**: [security@phase-rs.dev](mailto:security@phase-rs.dev)
-- **Email**: [matt@phase-rs.dev](mailto:matt@phase-rs.dev)
 
 ### What to include
 
