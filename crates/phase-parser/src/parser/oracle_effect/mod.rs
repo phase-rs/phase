@@ -53966,17 +53966,17 @@ fn owner_anchor_preserves_legacy_scalar_and_rejects_unrelated_scope() {
             .as_deref_mut()
             .unwrap();
         assert!(matches!(*shuffle.effect, Effect::Shuffle { .. }));
-        shuffle.effect = Box::new(Effect::Shuffle { target });
+        *shuffle.effect = Effect::Shuffle { target };
         shuffle.player_scope = scope;
         let reveal = shuffle
             .sub_ability
             .as_deref_mut()
             .expect("positive reveal reach guard");
         assert!(matches!(*reveal.effect, Effect::RevealTop { .. }));
-        reveal.effect = Box::new(Effect::RevealTop {
+        *reveal.effect = Effect::RevealTop {
             player: TargetFilter::Controller,
             count: 1,
-        });
+        };
         apply_owner_library_reveal_anchor_from_text(&mut def, text);
         let reveal = def
             .sub_ability
