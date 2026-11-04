@@ -1453,6 +1453,65 @@ fn game_end_reveal_keeps_secret_agenda_names_private_to_the_controller() {
     assert!(!spectator_wire.contains("agenda_name_count"));
 }
 
+/// CR 702.106e + CR 702.106f: a game that ends before the agenda prompt is
+/// answered still reveals only the printed card. The stamped name count is the
+/// whole remaining secret — no name was ever recorded — and a double-agenda
+/// count would disclose that more than one name exists.
+#[test]
+fn game_end_reveal_hides_an_unanswered_double_agenda_count() {
+    let mut state = priority_state();
+    load_limited_decks(&mut state, vec![], vec![summoners_bond_face()]);
+    let bond_id = owned_command_zone_ids(&state, P1)[0];
+    assert_eq!(
+        state.objects[&bond_id].agenda_name_count, 2,
+        "the double agenda is stamped at creation"
+    );
+    assert!(
+        state.objects[&bond_id].secret_chosen_names.is_empty(),
+        "reach guard: this game ends before the names are chosen"
+    );
+    assert!(
+        state.objects[&bond_id].face_down,
+        "the double agenda is still face down when the game ends"
+    );
+
+    apply(&mut state, P0, GameAction::Concede { player_id: P0 }).expect("P0 concedes");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::GameOver { winner: Some(P1) }
+    ));
+
+    let opponent_view = filter_state_for_viewer(&state, P0);
+    assert_eq!(
+        opponent_view.objects[&bond_id].name, "Summoner's Bond",
+        "CR 702.106e: the printed card is public at game end"
+    );
+    assert_eq!(
+        opponent_view.objects[&bond_id].agenda_name_count, 0,
+        "CR 702.106f: an unanswered double agenda does not disclose its count"
+    );
+
+    let opponent_wire = serde_json::to_string(&ClientGameStateRef::wrap(&state, Some(P0)))
+        .expect("wire state serializes");
+    assert!(
+        opponent_wire.contains("Summoner's Bond"),
+        "the printed card identity is public at game end"
+    );
+    assert!(
+        !opponent_wire.contains("agenda_name_count"),
+        "the count is the only remaining carrier when no name was chosen"
+    );
+
+    // Reach guard: the same marker does serialize for the controller, so its
+    // absence above is the redaction and not a field the wire never carries.
+    let controller_wire = serde_json::to_string(&ClientGameStateRef::wrap(&state, Some(P1)))
+        .expect("wire state serializes");
+    assert!(
+        controller_wire.contains("\"agenda_name_count\":2"),
+        "the controller keeps the count of their own unanswered agenda"
+    );
+}
+
 /// The command-zone objects `owner` owns, in command-zone order.
 fn owned_command_zone_ids(state: &GameState, owner: PlayerId) -> Vec<ObjectId> {
     state
