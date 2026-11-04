@@ -11740,10 +11740,12 @@ pub(crate) fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleRes
 
 #[cfg(test)]
 mod tests {
+    use super::CombatRelationSubjectWord::{Demonstrative, Pronoun, SelfName};
     use super::*;
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::AttackerBlockStatus;
+    use crate::types::ability::BlockPairDirection::{CandidateIsBlocker, Either, SubjectIsBlocker};
     use crate::types::ability::{PtStat, PtValueScope};
     use crate::types::counter::CounterType;
     use crate::types::keywords::Keyword;
@@ -12738,8 +12740,6 @@ mod tests {
     /// and a missing subject all decline.
     #[test]
     fn block_history_clause_accepts_forms_partners_and_windows() {
-        use BlockPairDirection::{CandidateIsBlocker, Either, SubjectIsBlocker};
-        use CombatRelationSubjectWord::{Demonstrative, Pronoun, SelfName};
         let windows = [
             ("this combat", CombatHistoryScope::ThisCombat),
             ("this turn", CombatHistoryScope::ThisTurn),
