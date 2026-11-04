@@ -4221,7 +4221,8 @@ impl ResolutionStack {
             .filter(|frame| {
                 matches!(
                     frame,
-                    ResolutionFrame::BatchDelivery(batch) if batch.staged.is_some()
+                    ResolutionFrame::BatchDelivery(batch)
+                        if batch.staged.is_some() && batch.component_delivery_parent.is_none()
                 )
             })
             .count();
