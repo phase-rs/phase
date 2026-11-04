@@ -2170,7 +2170,7 @@ fn mark_independent_mana_spent_gates(defs: &mut [AbilityDefinition]) {
 /// An explicit subset — "put one of those cards …" (Preferred Selection) —
 /// states its own cardinality, and erasing it would silently place every
 /// looked-at card; such placements keep their declarative shape until their
-/// selection semantics are implemented (CR 115.1 + CR 608.2c).
+/// selection semantics are implemented (CR 608.2c + CR 608.2d).
 ///
 /// This is the SOURCE-ORDER binding authority: `defs` holds only the clauses
 /// assembled before this one, so the selected producer cannot be a later

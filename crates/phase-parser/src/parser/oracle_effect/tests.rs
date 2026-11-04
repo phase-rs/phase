@@ -76138,7 +76138,7 @@ fn library_placement_whole_set_admission_requires_whole_set_grammar() {
 }
 
 /// Preferred Selection's decline instruction selects ONE of the two looked-at
-/// cards. CR 115.1 + CR 608.2c: the printed cardinality is part of the
+/// cards. CR 608.2c + CR 608.2d: the printed cardinality is part of the
 /// instruction, and the whole-set private-look rewrite must not erase it; only
 /// whole-set grammar (Petals of Insight's "put those cards …") may be rebound.
 /// The conditional one-card placement therefore survives in declarative form
