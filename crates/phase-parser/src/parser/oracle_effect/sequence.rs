@@ -2703,7 +2703,9 @@ pub(super) fn starts_clause_text_or_conjugated(text: &str) -> bool {
         return true;
     }
     let lower = text.to_ascii_lowercase();
-    let first_word = lower.split_whitespace().next().unwrap_or("");
+    let first_raw = lower.split_whitespace().next().unwrap_or("");
+    // allow-noncombinator: punctuation trim on an already-tokenized word; not phrase dispatch.
+    let first_word = first_raw.trim_end_matches(['.', ',', ';', ':', '!', '?']);
     // Only attempt deconjugation on words ending in 's' that aren't already
     // recognized — avoids false positives on noun phrases.
     if !first_word.ends_with('s') || first_word.ends_with("ss") {
@@ -2722,7 +2724,7 @@ pub(super) fn starts_clause_text_or_conjugated(text: &str) -> bool {
         return false; // normalize_verb_token didn't change it — not a conjugated verb
     }
     // Reconstruct with the base form and check again.
-    let rest = &lower[first_word.len()..];
+    let rest = &lower[first_raw.len()..];
     let deconjugated = format!("{base}{rest}");
     starts_clause_text_lower(&deconjugated)
 }
