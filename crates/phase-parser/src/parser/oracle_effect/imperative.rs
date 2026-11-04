@@ -31,6 +31,7 @@ use super::{
     resolve_it_pronoun, ParseContext, PriorZoneChoicePartition,
 };
 use crate::parser::oracle_ir::ast::*;
+use crate::parser::oracle_ir::context::ChoiceQuantifierState;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::ChosenReturnSpec;
 use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
@@ -4945,6 +4946,16 @@ pub(super) fn is_standalone_object_choice_clause(fragment: &str) -> bool {
     parse_battlefield_object_choice_core(rest, rest_lower, &mut throwaway).is_some()
 }
 
+fn is_you_controlled_target(target: &TargetFilter) -> bool {
+    matches!(
+        target,
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            ..
+        })
+    )
+}
+
 pub(super) fn parse_choose_ast(
     text: &str,
     lower: &str,
@@ -5102,8 +5113,26 @@ pub(super) fn parse_choose_ast(
             // unclassified fragments into new card-coverage diagnostics.
             // The former parse_target wrapper discarded those diagnostics.
             let diagnostic_count = ctx.diagnostics.len();
-            let (target, _) = parse_target_with_ctx(rest, ctx);
+            let (target, remainder) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
+            // CR 115.10a + CR 608.2d: only a fully parsed, untargeted singular
+            // "a/an <object> you control" choice establishes resolution timing.
+            // Exact counts must not enter the count-1 chooser; a third-party
+            // choice may have had its targeted subject stripped.
+            // Random selections must not become controller-choice prompts.
+            if remainder.trim().is_empty()
+                && alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
+                    .parse(rest_lower.trim_start())
+                    .is_ok()
+                && matches!(ctx.choice_quantifier, ChoiceQuantifierState::NotStripped)
+                && ctx.target_selection_mode == TargetSelectionMode::Chosen
+                && !nom_primitives::scan_contains(rest_lower, "target ")
+                && is_you_controlled_target(&target)
+                && !target.is_context_ref()
+                && !target.denotes_player_target()
+            {
+                ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Resolution);
+            }
             return Some(ChooseImperativeAst::TargetOnly { target });
         }
     }

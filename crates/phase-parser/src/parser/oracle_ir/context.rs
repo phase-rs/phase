@@ -13,6 +13,14 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
 
+/// Whether the chunk loop removed a choice quantifier before parsing its body.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ChoiceQuantifierState {
+    #[default]
+    NotStripped,
+    Stripped,
+}
+
 /// The players an anaphoric controller phrase can bind to, read from the parse
 /// context (`ParseContext::player_antecedents`) or supplied by a named seed.
 /// `None` means no antecedent is in scope.
@@ -608,9 +616,19 @@ pub struct ParseContext {
     /// outranks the scan. `None` (the default) leaves the ladder in charge, so
     /// every incumbent clause is unaffected.
     ///
+    /// The legacy bare-choose producer declares `Resolution` only for a singular
+    /// "a/an <object> you control" phrase fully consumed by the target parser,
+    /// with chosen selection and no stripped quantifier, printed target, context
+    /// reference, or player target. Partial phrases and exact/stripped counts
+    /// leave this unset; `TargetOnly` then defaults to `Stack`, without a
+    /// filter-shape inference.
+    ///
     /// Set and consumed within a single chunk parse; never serialized. A
     /// speculative sub-parse that discards its cloned context discards this too.
     pub declared_target_choice_timing: Option<TargetChoiceTiming>,
+    /// CR 608.2d: stripped choice cardinality cannot use the single-object
+    /// resolution chooser. Defaults to `NotStripped` in each rebuilt chunk context.
+    pub(crate) choice_quantifier: ChoiceQuantifierState,
     /// CR 603.4: Transient relative-clause filter parsed from a
     /// trigger subject ("an opponent **who controls F** draws a card"). Set by
     /// `parse_single_subject` when it consumes a "who controls <filter>"
