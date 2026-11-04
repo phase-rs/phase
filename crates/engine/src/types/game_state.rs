@@ -8,6 +8,7 @@ use std::sync::Arc;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 use crate::database::card_db::CardDbHandle;
 use crate::game::game_object::ObjectIncarnationRefExt;
@@ -26726,8 +26727,6 @@ pub(crate) mod replacement_library_placement_wire_tests {
 fn migrate_legacy_replacement_library_placement(
     value: &mut serde_json::Value,
 ) -> Result<(), String> {
-    use serde_json::Value;
-
     fn child_path(path: &str, key: &str) -> String {
         format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"))
     }

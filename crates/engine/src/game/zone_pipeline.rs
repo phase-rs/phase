@@ -18,10 +18,11 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     BatchCompletion, EnteringAuraAuthority, ExileLinkKind, GameState, LiminalEntryKind,
-    LogicalZoneChangeGroup, MergedCardComponentRoute, PendingBatchDeliveries,
-    PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest, PendingComponentDeliveryParent,
-    PendingCounterPostAction, PendingLiminalEntryResume, PendingZoneChangeDelivery,
-    PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking, ZoneMoveCompletion,
+    LogicalZoneChangeGroup, LogicalZoneChangeTerminalOutcome, MergedCardComponentRoute,
+    PendingBatchDeliveries, PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest,
+    PendingComponentDeliveryParent, PendingCounterPostAction, PendingLiminalEntryResume,
+    PendingZoneChangeDelivery, PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
+    ZoneMoveCompletion,
 };
 use std::collections::HashSet;
 
@@ -1797,7 +1798,6 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                         .iter()
                         .position(|member| member.identity == link.member)
                         .expect("component group retains original incarnation");
-                    use crate::types::game_state::LogicalZoneChangeTerminalOutcome;
                     let terminal = match logical_zone_change_group.terminal_outcomes[index] {
                         LogicalZoneChangeTerminalOutcome::Moved { .. } => ZoneMoveCompletion::Moved,
                         LogicalZoneChangeTerminalOutcome::Prevented => {
@@ -5304,14 +5304,20 @@ mod announced_spell_residency_tests {
 #[cfg(test)]
 mod w3_library_placement_tests {
     use super::*;
+    use crate::game::engine::apply_as_current;
+    use crate::game::scenario::{GameScenario, P0};
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, QuantityExpr, ReplacementDefinition, ReplacementMode,
-        SearchSelectionConstraint, TargetFilter,
+        SearchSelectionConstraint, TargetFilter, TypeFilter, TypedFilter,
     };
+    use crate::types::actions::{AlternativeCastDecision, GameAction};
+    use crate::types::game_state::{CastingVariant, PersistedGameState};
     use crate::types::identifiers::CardId;
+    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::phase::Phase;
     use crate::types::replacements::ReplacementEvent;
-    use crate::types::resolution::ResolutionFrame;
+    use crate::types::resolution::{ResolutionFrame, ResolutionStateWire};
 
     fn event_placement(event: &ProposedEvent) -> Option<LibraryPosition> {
         let ProposedEvent::ZoneChange {
@@ -5444,8 +5450,6 @@ mod w3_library_placement_tests {
 
     #[test]
     fn canonical_placement_is_seeded_by_both_producers_before_consultation() {
-        use crate::game::engine::apply_as_current;
-        use crate::types::actions::GameAction;
         for position in [
             LibraryPosition::Top,
             LibraryPosition::Bottom,
@@ -5621,8 +5625,6 @@ mod w3_library_placement_tests {
 
     #[test]
     fn paused_producer_restoration_distinguishes_absent_null_and_current_position() {
-        use crate::game::engine::apply_as_current;
-        use crate::types::actions::GameAction;
         let (mut state, card, sentinels) = library_fixture(3);
         let source = install_optional_library_redirect(&mut state);
         move_object(
@@ -5698,8 +5700,6 @@ mod w3_library_placement_tests {
     /// before consultation; no board mutation occurs between answers.
     #[test]
     fn canonical_placement_survives_public_repeated_choices() {
-        use crate::game::engine::apply_as_current;
-        use crate::types::actions::GameAction;
         let (mut state, card, sentinels) = library_fixture(3);
         let first = install_optional_library_redirect(&mut state);
         let second = create_object(
@@ -5780,11 +5780,6 @@ mod w3_library_placement_tests {
         ObjectId,
         Vec<ObjectId>,
     ) {
-        use crate::game::scenario::{GameScenario, P0};
-        use crate::types::actions::{AlternativeCastDecision, GameAction};
-        use crate::types::game_state::CastingVariant;
-        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
-        use crate::types::phase::Phase;
         // Verbatim AtomicCards Oracle, including the complete mutate reminder.
         const OCTOPUS: &str = "Mutate {1}{U} (If you cast this spell for its mutate cost, put it over or under target non-Human creature you own. They mutate into the creature on top plus all abilities from under it.)\nFlash\nWhenever this creature deals combat damage to a player, draw a card.";
         let mut scenario = GameScenario::new();
@@ -5951,8 +5946,6 @@ mod w3_library_placement_tests {
 
     #[test]
     fn positioned_mutate_component_pause_preserves_applied_identity_and_split_provenance() {
-        use crate::types::ability::{TypeFilter, TypedFilter};
-        use crate::types::actions::GameAction;
         let (mut runner, bears, octopus, lost, sentinels) = totally_lost_mutate_fixture();
         let inherited_source = install_optional_library_redirect(runner.state_mut());
         let component_source = create_object(
@@ -6047,7 +6040,6 @@ mod w3_library_placement_tests {
 
     #[test]
     fn positioned_commander_component_redirect_keeps_ordinary_sibling_position() {
-        use crate::types::actions::GameAction;
         // Infrastructure sibling: commander designation is fixture metadata,
         // not a claim that Sea-Dasher Octopus is a legal printed commander.
         let (mut runner, bears, octopus, lost, sentinels) = totally_lost_mutate_fixture();
@@ -7071,11 +7063,6 @@ mod w3_library_placement_tests {
     /// choices must still place both members exactly once.
     #[test]
     fn legacy_positioned_batch_migration_normalizes_every_exact_owner_copy() {
-        use crate::game::engine::apply_as_current;
-        use crate::types::actions::GameAction;
-        use crate::types::game_state::PersistedGameState;
-        use crate::types::resolution::ResolutionStateWire;
-
         fn strip_event_placement(event: &mut serde_json::Value) {
             if let Some(zone) = event
                 .get_mut("ZoneChange")

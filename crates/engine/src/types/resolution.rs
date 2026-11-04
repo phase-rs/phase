@@ -1894,6 +1894,12 @@ impl ResolutionStack {
     }
 
     /// Mutably accesses a BatchDelivery owner while its exact active
+    /// component-delivery child remains linked to it. The identified parent is
+    /// retained for the complete elimination object sweep so a later
+    /// same-leaver parent-tail member can still retire from the original
+    /// owner's remaining/requests. `retire_unanswered_component_delivery_parent`
+    /// clears the handoff once the transaction finishes; this visitor never
+    /// searches for a buried parent.
     pub(crate) fn visit_active_component_delivery_pair_mut(
         &mut self,
         mut visit: impl FnMut(&mut PendingBatchDeliveries),
@@ -1902,23 +1908,91 @@ impl ResolutionStack {
             .active_batch_delivery()
             .and_then(|child| child.component_delivery_parent.clone());
         if let Some(link) = linked {
-            let parent = self.batch_delivery_owner_mut(link.parent_group_id)?;
-            visit(parent);
-            let canceled = parent
-                .paused_current
-                .as_ref()
-                .is_none_or(|paused| !paused.captures(link.member, &link.expected_event));
-            let child = self
-                .active_batch_delivery_mut()
-                .expect("checked active child");
-            if canceled {
-                child.component_delivery_parent = None;
+            // The parent may already have completed or been pruned during an
+            // earlier member's visit. The child still needs its own visit; the
+            // dangling relation is retired by the final sweep instead of being
+            // dropped here, which would orphan a later parent-tail member.
+            if let Some(parent) = self.retained_component_parent_owner_mut(link.parent_group_id) {
+                visit(parent);
             }
-            visit(child);
+            if let Some(child) = self.active_batch_delivery_mut() {
+                visit(child);
+            }
         } else if let Some(active) = self.active_batch_delivery_mut() {
             visit(active);
         }
         Ok(())
+    }
+
+    /// Access the immediate parent owner of a retained component handoff without
+    /// requiring its original pause to still capture the delegated member. The
+    /// elimination sweep retains the identified relation for the whole
+    /// transaction and retires it afterwards. This reads only the active top and
+    /// the frame immediately beneath it; it never scans for a buried parent.
+    fn retained_component_parent_owner_mut(
+        &mut self,
+        group: crate::types::identifiers::LogicalZoneChangeGroupId,
+    ) -> Option<&mut PendingBatchDeliveries> {
+        let top = self.frames.top()?;
+        let ResolutionFrame::BatchDelivery(_) = self.frames.get(top)? else {
+            return None;
+        };
+        let below = self.frames.below(top)?;
+        let ResolutionFrame::BatchDelivery(parent) = self.frames.get(below)? else {
+            return None;
+        };
+        if parent.logical_zone_change_group.logical_group_id != group {
+            return None;
+        }
+        match self.frames.get_mut(below)? {
+            ResolutionFrame::BatchDelivery(parent) => Some(parent.as_mut()),
+            _ => None,
+        }
+    }
+
+    /// CR 616.1 + CR 800.4a: After the complete elimination object sweep and
+    /// context retirement, clear every component-delivery handoff whose original
+    /// parent pause no longer captures the delegated member (or whose parent
+    /// frame has already retired). A handoff that a surviving parent still owns
+    /// stays live for its replacement choice. A parent tail owned by the same
+    /// leaver keeps its relation until this pass, so the sweep cannot orphan it.
+    pub(crate) fn retire_unanswered_component_delivery_parent(&mut self) {
+        let mut present_groups = HashSet::new();
+        let mut captured_pauses = Vec::new();
+        for frame in self.frames.iter() {
+            let ResolutionFrame::BatchDelivery(batch) = frame else {
+                continue;
+            };
+            present_groups.insert(batch.logical_zone_change_group.logical_group_id);
+            if let Some(paused) = batch
+                .paused_current
+                .as_ref()
+                .filter(|paused| paused.terminal_completion.is_none())
+            {
+                captured_pauses.push((
+                    batch.logical_zone_change_group.logical_group_id,
+                    paused.member,
+                    paused.expected_event.clone(),
+                ));
+            }
+        }
+        for frame in self.frames.iter_mut() {
+            let ResolutionFrame::BatchDelivery(child) = frame else {
+                continue;
+            };
+            let Some(link) = child.component_delivery_parent.as_ref() else {
+                continue;
+            };
+            let retained = present_groups.contains(&link.parent_group_id)
+                && captured_pauses.iter().any(|(group, member, event)| {
+                    *group == link.parent_group_id
+                        && *member == link.member
+                        && *event == link.expected_event
+                });
+            if !retained {
+                child.component_delivery_parent = None;
+            }
+        }
     }
 
     /// Mutably accesses a BatchDelivery owner while its exact active
@@ -6691,16 +6765,18 @@ mod tests {
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
         CastingVariant, CopyChosenStage, DrainStatus, DrawSequenceOrigin, ExiledStopInput,
-        GameState, PendingBatchDeliveries, PendingChooseOneOf, PendingCopyTokenResolution,
-        PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
-        PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingPerCategoryZoneChoice,
-        PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil,
-        PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
-        RepeatUntilStopWitness, ResidentDrainPolicy, StackEntry, StackEntryKind,
-        ZoneDeliveryExileTracking,
+        GameState, PendingBatchDeliveries, PendingChooseOneOf, PendingComponentDeliveryParent,
+        PendingCopyTokenResolution, PendingCounterAdditionQueue, PendingCounterMoveQueue,
+        PendingCounterRemovalQueue, PendingEachPlayerCopyChosen, PendingLifeTotalAssignment,
+        PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
+        PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
+        PendingZoneChangeDelivery, PostReplacementDrain, RepeatUntilStopWitness,
+        ResidentDrainPolicy, StackEntry, StackEntryKind, ZoneDeliveryExileTracking,
     };
 
-    use crate::types::identifiers::{CardId, LogicalZoneChangeGroupId, ObjectId};
+    use crate::types::identifiers::{
+        CardId, LogicalZoneChangeGroupId, ObjectId, ObjectIncarnationRef,
+    };
     use crate::types::player::PlayerId;
     use crate::types::proposed_event::{ProposedEvent, ReplacementId};
     use crate::types::replacements::ReplacementEvent;
@@ -6950,9 +7026,6 @@ mod tests {
         crate::types::identifiers::ObjectIncarnationRef,
         ProposedEvent,
     ) {
-        use crate::types::game_state::{PendingComponentDeliveryParent, PendingZoneChangeDelivery};
-        use crate::types::identifiers::ObjectIncarnationRef;
-
         let mut state = GameState::new_two_player(seed);
         let object = crate::game::zones::create_object(
             &mut state,
@@ -7012,7 +7085,6 @@ mod tests {
 
     #[test]
     fn component_delivery_relation_requires_exact_parent_and_member() {
-        use crate::types::game_state::PendingZoneChangeDelivery;
         let waiting = WaitingFor::Priority {
             player: PlayerId(0),
         };

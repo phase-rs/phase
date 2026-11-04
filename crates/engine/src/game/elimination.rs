@@ -783,6 +783,15 @@ pub(crate) fn eliminate_players(
     // CR 800.4a: the departure's events belong to the departure, not to a
     // surviving player's paused announcement.
     super::announcement_triggers::disown_events_through(state, events.len());
+
+    // CR 616.1 + CR 800.4a: the elimination transaction is complete. Retire a
+    // component-delivery handoff only now so a later same-leaver parent-tail
+    // member still reached its original owner during the object sweep and
+    // context retirement above. A handoff whose parent pause still captures the
+    // delegated member remains live for its replacement choice.
+    state
+        .resolution_stack
+        .retire_unanswered_component_delivery_parent();
 }
 
 /// CR 103.5 + CR 800.4a: Prune eliminated players from the in-flight
@@ -2168,9 +2177,9 @@ mod tests {
     use crate::types::game_state::{
         ActivePlayerControl, CastingVariant, ExtraTurn, NamedChoiceSource,
         NamedChoiceSourceBinding, OpponentGuessOwner, OpponentGuessSource, PendingCast,
-        PendingConniveReentry, PendingContinuation, PendingReplacement, PendingSpellResolution,
-        PendingZoneChangeDelivery, PromptSourceBinding, ResolutionSourceRelatch,
-        ScheduledTurnControl, StackEntry, StackEntryKind,
+        PendingComponentDeliveryParent, PendingConniveReentry, PendingContinuation,
+        PendingReplacement, PendingSpellResolution, PendingZoneChangeDelivery, PromptSourceBinding,
+        ResolutionSourceRelatch, ScheduledTurnControl, StackEntry, StackEntryKind,
     };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
@@ -2375,6 +2384,31 @@ mod tests {
             ObjectIncarnationRef::from_object(object),
             ProposedEvent::zone_change(object_id, object.zone, Zone::Graveyard, Some(source_id)),
         )
+    }
+
+    fn pending_batch_request(
+        object_id: ObjectId,
+    ) -> crate::types::game_state::PendingBatchZoneMoveRequest {
+        crate::types::game_state::PendingBatchZoneMoveRequest {
+            object_id,
+            destination: Zone::Graveyard,
+            cause: crate::types::game_state::PendingBatchZoneChangeCause::StateBasedAction,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_transformed: false,
+            controller_override: None,
+            enter_with_counters: Vec::new(),
+            face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
+            attach_to: None,
+            performed_by: None,
+            library_placement: None,
+            exile_duration: None,
+            exile_controller: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+            replacement_applied: HashSet::new(),
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+        }
     }
 
     fn pending_change_zone_iteration(
@@ -2644,12 +2678,12 @@ mod tests {
 
     /// CR 800.4a + CR 616.1: an eliminated original member cancels only its
     /// exact paused obligation in a linked component pair. Both logical groups
-    /// retire that identity, the child loses the now-unanswerable handoff, and
-    /// each surviving tail continues independently.
+    /// retire that identity, and the relation is retained for the whole sweep so
+    /// a second leaver-owned parent-tail member still retires from the original
+    /// owner's remaining/requests. The child loses the now-unanswerable handoff
+    /// only when the transaction retires it, and the surviving tail continues.
     #[test]
     fn leaving_original_member_retires_linked_component_pair_obligation() {
-        use crate::types::game_state::PendingComponentDeliveryParent;
-
         let mut state = setup_three_player();
         let leaving = create_object(
             &mut state,
@@ -2658,14 +2692,25 @@ mod tests {
             "Leaving original member".to_string(),
             Zone::Battlefield,
         );
-        let surviving = create_object(
+        // A second leaver-owned parent-tail member. The first visit cancels the
+        // original pause; the relation must survive so this later member still
+        // retires from the original owner's remaining/requests.
+        let leaving_tail = create_object(
             &mut state,
             CardId(717),
+            PlayerId(1),
+            "Second leaving original tail".to_string(),
+            Zone::Battlefield,
+        );
+        let surviving = create_object(
+            &mut state,
+            CardId(718),
             PlayerId(0),
             "Surviving original tail".to_string(),
             Zone::Battlefield,
         );
-        let mut parent_group = state.allocate_logical_zone_change_group(&[leaving, surviving]);
+        let mut parent_group =
+            state.allocate_logical_zone_change_group(&[leaving, leaving_tail, surviving]);
         parent_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parent group latches");
@@ -2688,7 +2733,7 @@ mod tests {
             component_delivery_parent: None,
             logical_zone_change_group: parent_group,
             paused_current: Some(paused.clone()),
-            remaining: vec![surviving],
+            remaining: vec![leaving_tail, surviving],
             destination: Zone::Graveyard,
             source_id: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -2696,8 +2741,11 @@ mod tests {
             library_placement: None,
             completion: None,
             replacement_applied: HashSet::new(),
-            requests: Vec::new(),
-            attempted: vec![leaving, surviving],
+            requests: vec![
+                pending_batch_request(leaving_tail),
+                pending_batch_request(surviving),
+            ],
+            attempted: vec![leaving, leaving_tail, surviving],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
         });
@@ -2736,7 +2784,7 @@ mod tests {
             .expect("the child remains the active owner");
         assert!(
             child.component_delivery_parent.is_none(),
-            "canceling the original pause removes the unanswerable handoff"
+            "the completed transaction retires the unanswerable handoff"
         );
         assert!(child.remaining.is_empty());
         assert_eq!(
@@ -2760,6 +2808,18 @@ mod tests {
             frames[0]["data"]["remaining"],
             serde_json::to_value(vec![surviving]).expect("surviving id serializes")
         );
+        let requests = frames[0]["data"]["requests"]
+            .as_array()
+            .expect("the original tail retains its requests");
+        assert_eq!(
+            requests.len(),
+            1,
+            "both leaver-owned tail requests retire from the original owner"
+        );
+        assert_eq!(
+            requests[0]["object_id"],
+            serde_json::to_value(surviving).expect("surviving id serializes")
+        );
         let abandoned = serde_json::to_value(
             crate::types::game_state::LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft,
         )
@@ -2770,8 +2830,8 @@ mod tests {
         .expect("pending outcome serializes");
         assert_eq!(
             frames[0]["data"]["logical_zone_change_group"]["terminal_outcomes"],
-            serde_json::json!([abandoned.clone(), pending]),
-            "the original group retires the leaving member and keeps its surviving tail"
+            serde_json::json!([abandoned.clone(), abandoned.clone(), pending]),
+            "the original group retires both leaving members and keeps its surviving tail"
         );
         assert_eq!(
             frames[1]["data"]["logical_zone_change_group"]["terminal_outcomes"],
@@ -2787,6 +2847,7 @@ mod tests {
         crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut state, &mut events);
         assert!(state.active_batch_delivery().is_none());
         assert_eq!(state.objects[&leaving].zone, Zone::Exile);
+        assert_eq!(state.objects[&leaving_tail].zone, Zone::Exile);
         assert_eq!(state.objects[&surviving].zone, Zone::Graveyard);
     }
 
