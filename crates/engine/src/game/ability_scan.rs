@@ -5974,6 +5974,8 @@ fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes {
 /// Improvise (CR 702.126a), Conspire (CR 702.78a), Crew (CR 702.122a), Saddle
 /// (CR 702.171a), Station (CR 702.184a), Teamwork (CR 702.194a), Waterbend
 /// (CR 701.67), Harmonize (CR 702.180a, taps a creature and reduces by its power);
+/// Beam me up (returns a creature you control as an additional cost, CR 118.8;
+/// rule number needs manual verification);
 /// Delve (CR 702.66a, exile graveyard cards); Craft (CR 702.167a, exile
 /// battlefield/graveyard materials); the sacrifice-for-reduction keywords — Emerge
 /// (CR 702.119a) and Offering (CR 702.48a, reduce by the sacrificed permanent's
@@ -6001,6 +6003,7 @@ pub(crate) fn keyword_cost_reads_growing_class(kw: &Keyword) -> bool {
         | Keyword::Teamwork(_)
         | Keyword::Waterbend
         | Keyword::Harmonize(_)
+        | Keyword::BeamMeUp(_)
         | Keyword::Delve
         | Keyword::Craft { .. }
         | Keyword::Emerge(_)
@@ -6406,6 +6409,7 @@ fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes {
         | Keyword::Warp(_)
         | Keyword::Sneak(_)
         | Keyword::WebSlinging(_)
+        | Keyword::BeamMeUp(_)
         | Keyword::Discover(_)
         | Keyword::Spree
         | Keyword::Tiered
@@ -8872,6 +8876,19 @@ mod tests {
             *keywords = vec![Keyword::Convoke];
         }
         assert!(scan_effect(&tok, ScanMode::LoopFirewall).sibling);
+    }
+
+    /// Beam me up (TRK; rule number needs manual verification) returns a
+    /// creature you control as an additional cost (CR 118.8), so its cost reads a
+    /// growing board class — classified fail-closed beside Harmonize.
+    #[test]
+    fn beam_me_up_cost_reads_a_growing_board_class() {
+        assert!(keyword_cost_reads_growing_class(&Keyword::BeamMeUp(
+            ManaCost::generic(2)
+        )));
+        assert!(keyword_cost_reads_growing_class(&Keyword::Harmonize(
+            ManaCost::generic(2)
+        )));
     }
 
     /// `AddCounterOnEnter` with a dynamic count reads sibling — it looks

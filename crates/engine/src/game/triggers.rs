@@ -49558,6 +49558,7 @@ pub mod tests {
             | Keyword::Warp(_)
             | Keyword::Sneak(_)
             | Keyword::WebSlinging(_)
+            | Keyword::BeamMeUp(_)
             | Keyword::Mobilize(_)
             | Keyword::Gift(_)
             | Keyword::Discover(_)

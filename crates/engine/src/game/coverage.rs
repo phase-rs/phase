@@ -5790,38 +5790,71 @@ fn keyword_label(kw: &Keyword) -> String {
 
 /// CR 702.16i: a PRINTED (face) color-set protection keyword is never expanded
 /// (only a continuous grant is, by the layer applier), so it protects from
-/// nothing. The single authority for `keyword_supported`, `keyword_gap_label` and
-/// the structural tag `extract_card_features` emits for the same face keyword;
+/// nothing. The single predicate `keyword_gap` and the structural tag
+/// `extract_card_features` emits for the same face keyword read;
 /// deliberately separate from `keyword_is_inert_protection_grant`, which must stay
 /// false for an `EachColor` inside a static's modifications.
 fn printed_color_set_protection_is_unexpanded(kw: &Keyword) -> bool {
     matches!(kw, Keyword::Protection(ProtectionTarget::EachColor(_)))
 }
 
-fn keyword_supported(kw: &Keyword) -> bool {
-    match kw {
-        Keyword::Unknown(_) => false,
-        Keyword::CumulativeUpkeep(cost) => cost.supports_cumulative_upkeep_payment(),
-        Keyword::Morph(cost) => cost.is_supported(),
-        kw if printed_color_set_protection_is_unexpanded(kw) => false,
-        _ => true,
+/// One keyword the engine can't run. `keyword_gap` is the single keyword
+/// authority every coverage support consumer reads: the gap walk
+/// (`check_keywords` -> `card_face_gaps`), the parse tree's `supported` flag
+/// (`keyword_supported`), precon playability (`card_face_has_unimplemented_parts`)
+/// and the in-game warning (`unimplemented_mechanics`). The keyword analogue
+/// of `AbilityNodeGap`; each consumer renders it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeywordGap<'a> {
+    /// The parser didn't recognize the keyword (`Keyword::Unknown`).
+    Unrecognized(&'a str),
+    /// CR 702.24a: the cumulative upkeep cost has no per-age-counter payment path.
+    CumulativeUpkeepUnsupportedCost,
+    /// CR 702.37a: the morph cost isn't payable.
+    MorphUnsupportedCost,
+    /// CR 702.16i: "protection from each [set]" is one protection per member; the engine never expands a face (or copied) keyword's set, so it protects from nothing.
+    ProtectionColorSetUnexpanded,
+    /// CR 601.3 + CR 118.9: beam me up's graveyard cast route is not
+    /// implemented (TRK; the keyword's rule number needs manual
+    /// verification). Strict-failure hold; removed when the route lands.
+    BeamMeUpCastRouteUnimplemented,
+}
+
+impl<'a> KeywordGap<'a> {
+    /// The gap's name, rendered by each consumer in its own form.
+    fn name(self) -> &'a str {
+        match self {
+            KeywordGap::Unrecognized(name) => name,
+            KeywordGap::CumulativeUpkeepUnsupportedCost => "CumulativeUpkeepUnsupportedCost",
+            KeywordGap::MorphUnsupportedCost => "MorphUnsupportedCost",
+            KeywordGap::ProtectionColorSetUnexpanded => "ProtectionColorSetUnexpanded",
+            KeywordGap::BeamMeUpCastRouteUnimplemented => "BeamMeUpCastRouteUnimplemented",
+        }
     }
 }
 
-fn keyword_gap_label(kw: &Keyword) -> Option<String> {
+/// The single keyword-support authority (see `KeywordGap`).
+fn keyword_gap(kw: &Keyword) -> Option<KeywordGap<'_>> {
     match kw {
-        Keyword::Unknown(s) => Some(format!("Keyword:{s}")),
+        Keyword::Unknown(s) => Some(KeywordGap::Unrecognized(s)),
         Keyword::CumulativeUpkeep(cost) if !cost.supports_cumulative_upkeep_payment() => {
-            Some("Keyword:CumulativeUpkeepUnsupportedCost".to_string())
+            Some(KeywordGap::CumulativeUpkeepUnsupportedCost)
         }
-        Keyword::Morph(cost) if !cost.is_supported() => {
-            Some("Keyword:MorphUnsupportedCost".to_string())
-        }
+        Keyword::Morph(cost) if !cost.is_supported() => Some(KeywordGap::MorphUnsupportedCost),
         kw if printed_color_set_protection_is_unexpanded(kw) => {
-            Some("Keyword:ProtectionColorSetUnexpanded".to_string())
+            Some(KeywordGap::ProtectionColorSetUnexpanded)
         }
+        Keyword::BeamMeUp(_) => Some(KeywordGap::BeamMeUpCastRouteUnimplemented),
         _ => None,
     }
+}
+
+fn keyword_supported(kw: &Keyword) -> bool {
+    keyword_gap(kw).is_none()
+}
+
+fn keyword_gap_label(kw: &Keyword) -> Option<String> {
+    keyword_gap(kw).map(|gap| format!("Keyword:{}", gap.name()))
 }
 
 /// Build a hierarchical parse tree from a `CardFace`, checking each item against
@@ -6790,16 +6823,23 @@ pub const STATIC_CARRIER_WARNING: &str = "Static: unimplemented part in a grante
 
 /// Check whether a game object has any mechanics the engine cannot handle.
 ///
-/// Checks keywords (Unknown variant = unrecognized), abilities (api_type
+/// Checks keywords (every `keyword_gap` class), abilities (api_type
 /// not in effect registry), triggers (mode not in trigger registry), and
 /// static abilities (mode not in static registry).
 pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
     let mut missing = Vec::new();
 
-    // 1. Any Unknown keyword means the parser didn't recognize it
+    // 1. Every keyword gap (`keyword_gap`, the shared keyword authority), over the
+    // object's live keywords.
     for kw in &obj.keywords {
-        if let Keyword::Unknown(s) = kw {
-            missing.push(format!("Keyword: {s}"));
+        let Some(gap) = keyword_gap(kw) else { continue };
+        // Every class is judged on the live keywords: a granted color set is
+        // expanded before it reaches `obj.keywords`
+        // (`keywords::resolve_granted_protection`), so any `EachColor` there
+        // (printed, or copied by a CR 707.2 Layer-1 copy) is unexpanded.
+        let label = format!("Keyword: {}", gap.name());
+        if !missing.contains(&label) {
+            missing.push(label);
         }
     }
 
@@ -7642,7 +7682,10 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
 }
 
 pub fn card_face_has_unimplemented_parts(face: &CardFace) -> bool {
-    ability_definitions_have_unimplemented_parts(&face.abilities)
+    // A face's keywords are its printed keywords, so every keyword gap class
+    // applies here, exactly as `check_keywords` judges them for `card_face_gaps`.
+    face.keywords.iter().any(|kw| keyword_gap(kw).is_some())
+        || ability_definitions_have_unimplemented_parts(&face.abilities)
         || face
             .additional_cost
             .as_ref()
@@ -7787,7 +7830,8 @@ fn fan_out_control_boundary_is_unobservable(def: &AbilityDefinition) -> bool {
 /// tree's `supported` flag, precon playability
 /// (`card_face_has_unimplemented_parts`) and the in-game warning
 /// (`unimplemented_mechanics`). A new strict-failure class added here reaches
-/// all of them.
+/// all of them. `keyword_gap` is the keyword-level counterpart those same
+/// consumers read.
 #[derive(Debug, Clone, Copy)]
 enum AbilityNodeGap<'a> {
     /// The parser couldn't express the node's effect.
@@ -14131,6 +14175,7 @@ fn is_keyword_line(lower: &str) -> bool {
         "grandeur\u{2014}",
         "grandeur ",
         "more than meets the eye ",
+        "beam me up ",
         "more than meets the eye\u{2014}",
         "soulshift ",
         "level up ",
@@ -15530,6 +15575,9 @@ mod tests {
                 .all(|item| item.supported),
             "every Plate parse item is supported"
         );
+        // Precon playability agrees: the printed set is held, the Plate is not.
+        assert!(super::card_face_has_unimplemented_parts(&printed));
+        assert!(!super::card_face_has_unimplemented_parts(&plate));
     }
 
     const TRANSCENDENT_DRAGON_ORACLE: &str = "Flash\nFlying\nWhen this creature enters, if you cast it, counter target spell. If that spell is countered this way, exile it instead of putting it into its owner's graveyard, then you may cast it without paying its mana cost.";
@@ -24434,6 +24482,8 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             .find(|item| item.category == ParseCategory::Keyword)
             .expect("keyword parse item");
         assert!(!keyword.supported);
+        // Precon playability reads the same keyword authority.
+        assert!(card_face_has_unimplemented_parts(&face));
     }
 
     #[test]
@@ -24454,6 +24504,13 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             .find(|item| item.category == ParseCategory::Keyword)
             .expect("keyword parse item");
         assert!(keyword.supported);
+        assert!(!card_face_has_unimplemented_parts(&face));
+        let (playable, warnings) = playability_and_object_warnings(&face);
+        assert!(
+            playable,
+            "a supported cumulative upkeep cost stays playable"
+        );
+        assert!(warnings.is_empty(), "no warning: {warnings:?}");
     }
 
     #[test]
@@ -24472,6 +24529,263 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             .find(|item| item.category == ParseCategory::Keyword)
             .expect("keyword parse item");
         assert!(keyword.supported);
+        assert!(!card_face_has_unimplemented_parts(&face));
+        let (playable, warnings) = playability_and_object_warnings(&face);
+        assert!(
+            playable,
+            "a supported cumulative upkeep cost stays playable"
+        );
+        assert!(warnings.is_empty(), "no warning: {warnings:?}");
+    }
+
+    /// An `AtomicCard` for a printed card with its real MTGJSON keyword array,
+    /// so a face is built through the production MTGJSON→face path.
+    fn printed_atomic_card(
+        name: &str,
+        oracle: &str,
+        mana_cost: &str,
+        color: &str,
+        types: &[&str],
+        subtypes: &[&str],
+        keywords: &[&str],
+    ) -> AtomicCard {
+        let to_strings = |items: &[&str]| items.iter().map(|s| (*s).to_string()).collect();
+        AtomicCard {
+            name: name.to_string(),
+            mana_cost: Some(mana_cost.to_string()),
+            colors: vec![color.to_string()],
+            color_identity: vec![color.to_string()],
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            text: Some(oracle.to_string()),
+            layout: "normal".to_string(),
+            type_line: Some(types.join(" ")),
+            types: to_strings(types),
+            subtypes: to_strings(subtypes),
+            supertypes: vec![],
+            keywords: if keywords.is_empty() {
+                None
+            } else {
+                Some(to_strings(keywords))
+            },
+            side: None,
+            face_name: None,
+            mana_value: 2.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some(format!("{}-oracle", name.to_lowercase())),
+                scryfall_id: Some(format!("{}-face", name.to_lowercase())),
+            },
+            foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
+        }
+    }
+
+    /// The ten printed TRK "Beam me up" sorceries (verbatim Oracle text,
+    /// reminder included) with their mana cost and color. MTGJSON's keyword
+    /// array is `[]` for each.
+    const BEAM_ME_UP_CARDS: [(&str, &str, &str, &str); 10] = [
+        ("Energize", "Return target creature an opponent controls to its owner's hand.\nBeam me up {3}{U} (You may cast this card from your graveyard for {3}{U} if you also return a creature you control to its owner's hand. Then exile this spell.)", "{1}{U}", "U"),
+        ("Pure Energy", "Distribute two +1/+1 counters among one or two target creatures.\nBeam me up {2}{W} (You may cast this card from your graveyard for {2}{W} if you also return a creature you control to its owner's hand. Then exile this spell.)", "{1}{W}", "W"),
+        ("Final Frontier", "Search your library for a basic land card or Planet card, put it onto the battlefield tapped, then shuffle.\nBeam me up {1}{G} (You may cast this card from your graveyard for {1}{G} if you also return a creature you control to its owner's hand. Then exile this spell.)", "{2}{G}", "G"),
+        ("Open Communications", "Draw a card.\nBeam me up {2}{U} (You may cast this card from your graveyard for {2}{U} if you also return a creature you control to its owner's hand. Then exile this spell.)", "{U}", "U"),
+        ("Adversary by Algorithm", "Create a 3/3 colorless Illusion artifact creature token.\nBeam me up {3}{G} (You may cast this card from your graveyard for {3}{G} if you also return a creature you control to its owner's hand. Then exile this spell.)", "{2}{G}", "G"),
+        ("There's Coffee in that Nebula", "Look at the top five cards of your library. You may reveal a Plains card or nonland permanent card with mana value 3 or less from among them and put it into your hand. Put the rest on the bottom in a random order.\nBeam me up {2}{W} (You may cast this card from your graveyard for {2}{W} if you also return a creature you control to its owner's hand. Then exile this spell.)", "{1}{W}", "W"),
+        ("Boarding Action", "Create a 2/1 red Klingon Warrior creature token with haste.\nBeam me up {2}{R} (You may cast this card from your graveyard for {2}{R} if you also return a creature you control to its owner's hand. Then exile this spell.)", "{1}{R}", "R"),
+        ("Federation Resupply", "Search your library for an Aura, Equipment, or Spacecraft card, reveal it, put it into your hand, then shuffle.\nBeam me up {3}{W} (You may cast this card from your graveyard for {3}{W} if you also return a creature you control to its owner's hand. Then exile this spell.)", "{1}{W}", "W"),
+        ("Pattern Buffer Preservation", "Look at the top two cards of your library. Put one of them into your hand and the other into your graveyard.\nBeam me up {1}{B} (You may cast this card from your graveyard for {1}{B} if you also return a creature you control to its owner's hand. Then exile this spell.)", "{1}{B}", "B"),
+        ("Transporter Malfunction", "Transporter Malfunction deals 3 damage to any target.\nBeam me up {3}{R}{R}{R} (You may cast this card from your graveyard for {3}{R}{R}{R} if you also return a creature you control to its owner's hand. Then exile this spell.)", "{1}{R}", "R"),
+    ];
+
+    const WILD_RIDE: &str = "Target creature gets +3/+0 and gains haste until end of turn.\nHarmonize {4}{R} (You may cast this card from your graveyard for its harmonize cost. You may tap a creature you control to reduce that cost by {X}, where X is its power. Then exile this spell.)";
+
+    const SHELTERING_ANCIENT: &str = "Trample\nCumulative upkeep\u{2014}Put a +1/+1 counter on a creature an opponent controls. (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)";
+
+    fn beam_me_up_face(name: &str, oracle: &str, mana_cost: &str, color: &str) -> CardFace {
+        build_oracle_face(
+            &printed_atomic_card(name, oracle, mana_cost, color, &["Sorcery"], &[], &[]),
+            None,
+        )
+    }
+
+    /// D2.3 hold: until beam me up's graveyard cast route lands (CR 601.3 +
+    /// CR 118.9; the keyword's rule number needs manual verification), every
+    /// coverage consumer reports each printed carrier unsupported, and the hold
+    /// is the card's only gap.
+    #[test]
+    fn beam_me_up_cards_are_held_unsupported_in_every_coverage_consumer() {
+        for (name, oracle, mana_cost, color) in BEAM_ME_UP_CARDS {
+            let face = beam_me_up_face(name, oracle, mana_cost, color);
+            // Reach guard: the printed line really is the typed keyword.
+            assert!(
+                face.keywords
+                    .iter()
+                    .any(|kw| matches!(kw, Keyword::BeamMeUp(_))),
+                "[{name}] face keywords: {:?}",
+                face.keywords
+            );
+
+            let card = coverage_result_for_face(face.clone());
+            assert!(!card.supported, "[{name}] must stay unsupported");
+            let mut handlers: Vec<&str> = card
+                .gap_details
+                .iter()
+                .map(|gap| gap.handler.as_str())
+                .collect();
+            handlers.sort_unstable();
+            assert_eq!(
+                handlers,
+                vec!["Keyword:BeamMeUp", "Keyword:BeamMeUpCastRouteUnimplemented"],
+                "[{name}] the hold is the only gap: {:?}",
+                card.gap_details
+            );
+            assert_eq!(card.gap_count, 2, "[{name}] gap count");
+            let keyword_item = card
+                .parse_details
+                .iter()
+                .find(|item| item.category == ParseCategory::Keyword)
+                .expect("keyword parse item");
+            assert_eq!(keyword_item.label, "BeamMeUp", "[{name}] keyword label");
+            assert!(!keyword_item.supported, "[{name}] keyword item held");
+
+            assert!(
+                card_face_has_unimplemented_parts(&face),
+                "[{name}] precon playability reads the hold"
+            );
+            let (playable, warnings) = playability_and_object_warnings(&face);
+            assert!(!playable, "[{name}] must not be precon-playable");
+            assert_eq!(
+                warnings,
+                vec!["Keyword: BeamMeUpCastRouteUnimplemented".to_string()],
+                "[{name}] in-game warning"
+            );
+        }
+
+        // Paired positive: a supported graveyard-cast keyword card through the
+        // same three consumers.
+        let wild_ride = build_oracle_face(
+            &printed_atomic_card(
+                "Wild Ride",
+                WILD_RIDE,
+                "{R}",
+                "R",
+                &["Sorcery"],
+                &[],
+                &["Harmonize"],
+            ),
+            None,
+        );
+        assert!(
+            wild_ride
+                .keywords
+                .iter()
+                .any(|kw| matches!(kw, Keyword::Harmonize(_))),
+            "reach guard: Wild Ride carries Harmonize: {:?}",
+            wild_ride.keywords
+        );
+        let card = coverage_result_for_face(wild_ride.clone());
+        assert!(card.supported, "Wild Ride gaps: {:?}", card.gap_details);
+        assert!(card.gap_details.is_empty());
+        assert!(!card_face_has_unimplemented_parts(&wild_ride));
+        let (playable, warnings) = playability_and_object_warnings(&wild_ride);
+        assert!(playable, "Wild Ride stays precon-playable");
+        assert!(warnings.is_empty(), "Wild Ride warnings: {warnings:?}");
+    }
+
+    /// The beam me up keyword line is a recognized keyword line for the
+    /// semantic audit, not a silent drop.
+    #[test]
+    fn beam_me_up_line_is_not_a_semantic_audit_silent_drop() {
+        let (name, oracle, mana_cost, color) = BEAM_ME_UP_CARDS[0];
+        let face = beam_me_up_face(name, oracle, mana_cost, color);
+        let findings = audit_card_lines(oracle, &face);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "got {findings:?}"
+        );
+
+        // Reach guard: the audit does scan this text — with the spell ability
+        // removed, its first line is reported.
+        let mut stripped = face.clone();
+        stripped.abilities.clear();
+        assert!(
+            audit_card_lines(oracle, &stripped)
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "the audit must scan Energize's lines"
+        );
+    }
+
+    /// CR 702.24a: a held keyword (here Sheltering Ancient's cumulative upkeep
+    /// cost, which has no per-age-counter payment path) makes the card
+    /// precon-unplayable and warned, as its coverage status already says.
+    #[test]
+    fn held_keyword_cards_are_unplayable_and_warned() {
+        let face = build_oracle_face(
+            &printed_atomic_card(
+                "Sheltering Ancient",
+                SHELTERING_ANCIENT,
+                "{1}{G}",
+                "G",
+                &["Creature"],
+                &["Treefolk"],
+                &["Trample", "Cumulative upkeep"],
+            ),
+            None,
+        );
+        assert!(
+            face.keywords.iter().any(|kw| matches!(
+                kw,
+                Keyword::CumulativeUpkeep(AbilityCost::EffectCost { .. })
+            )),
+            "reach guard: the typed effect cost: {:?}",
+            face.keywords
+        );
+        assert!(
+            card_face_gaps(&face)
+                .iter()
+                .any(|gap| gap == "Keyword:CumulativeUpkeepUnsupportedCost"),
+            "reach guard: coverage already holds it"
+        );
+        assert!(card_face_has_unimplemented_parts(&face));
+        let (playable, warnings) = playability_and_object_warnings(&face);
+        assert!(!playable, "Sheltering Ancient must not be precon-playable");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w == "Keyword: CumulativeUpkeepUnsupportedCost"),
+            "warnings: {warnings:?}"
+        );
+    }
+
+    /// CR 702.16i + CR 707.2: the warning judges every keyword gap class on the
+    /// live keywords, so a color-set protection present there without a printed
+    /// instance (the Layer-1 copy shape) warns.
+    #[test]
+    fn keyword_warning_reads_color_set_protection_on_live_keywords() {
+        use crate::types::keywords::{ProtectionColorSet, ProtectionTarget};
+
+        let mut obj = make_obj();
+        obj.keywords
+            .push(Keyword::Protection(ProtectionTarget::EachColor(
+                ProtectionColorSet::OutsideCommanderColorIdentity,
+            )));
+        assert!(obj.base_keywords.is_empty());
+        let warnings = unimplemented_mechanics(&obj);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w == "Keyword: ProtectionColorSetUnexpanded"),
+            "warnings: {warnings:?}"
+        );
     }
 
     #[test]

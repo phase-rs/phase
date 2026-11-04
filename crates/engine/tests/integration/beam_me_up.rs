@@ -1,18 +1,24 @@
 //! Beam me up (TRK): Marooned's "can't be beamed up" prohibition (CR 101.2 +
 //! CR 604.1 + CR 611.3a; the beam me up rule number needs manual
-//! verification). Phase 1 rows; the cast-route rows land with the graveyard
-//! cast route. Oracle text verbatim from MTGJSON / Scryfall.
+//! verification) and the beam me up keyword's inertness row. Phase 1 and 2
+//! rows; the cast-route rows land with the graveyard cast route. Oracle text
+//! verbatim from MTGJSON / Scryfall.
 
+use engine::ai_support::legal_actions;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::AttachTarget;
 use engine::game::keywords::can_be_beamed_up;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{FilterProp, TargetFilter, TypedFilter};
+use engine::types::actions::GameAction;
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
+use engine::types::zones::Zone;
 
 const MAROONED: &str = "Enchant artifact or creature\nWhen this Aura enters, you may pay {3}. If you do, tap enchanted permanent.\nEnchanted permanent doesn't untap during its controller's untap step and can't be beamed up.";
 const MALFUNCTION: &str = "Enchant artifact or creature\nWhen this Aura enters, tap enchanted permanent.\nEnchanted permanent doesn't untap during its controller's untap step.";
@@ -215,4 +221,121 @@ fn own_marooned_still_blocks_its_host() {
     assert!(!can_be_beamed_up(runner.state(), a));
     assert!(!probe_admits(&runner, a, a));
     assert!(can_be_beamed_up(runner.state(), b));
+}
+
+const OPEN_COMMUNICATIONS: &str = "Draw a card.\nBeam me up {2}{U} (You may cast this card from your graveyard for {2}{U} if you also return a creature you control to its owner's hand. Then exile this spell.)";
+const WILD_RIDE: &str = "Target creature gets +3/+0 and gains haste until end of turn.\nHarmonize {4}{R} (You may cast this card from your graveyard for its harmonize cost. You may tap a creature you control to reduce that cost by {X}, where X is its power. Then exile this spell.)";
+
+fn offers_cast_of(runner: &GameRunner, object: ObjectId) -> bool {
+    legal_actions(runner.state()).iter().any(
+        |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == object),
+    )
+}
+
+/// Phase 2 inertness row: until the graveyard cast route lands, a card's
+/// printed `Keyword::BeamMeUp` offers no cast from the graveyard, and the card
+/// still casts from hand as printed (CR 601.3: only a permission makes a
+/// graveyard cast legal; a hand cast is an ordinary sorcery that goes to its
+/// owner's graveyard on resolution). The phase 3 cast route replaces this row.
+#[test]
+fn beam_me_up_is_inert_until_the_graveyard_cast_route_lands() {
+    let open_communications_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 0,
+    };
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    sc.add_creature(P0, "Grizzly Bears", 2, 2);
+    let in_graveyard = sc
+        .add_spell_to_graveyard(P0, "Open Communications", false)
+        .with_mana_cost(open_communications_cost.clone())
+        .from_oracle_text(OPEN_COMMUNICATIONS)
+        .id();
+    let in_hand = sc
+        .add_spell_to_hand_from_oracle(P0, "Open Communications", false, OPEN_COMMUNICATIONS)
+        .with_mana_cost(open_communications_cost)
+        .id();
+    let wild_ride = sc
+        .add_spell_to_graveyard(P0, "Wild Ride", false)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .from_oracle_text(WILD_RIDE)
+        .id();
+    sc.add_card_to_library_top(P0, "Library Card");
+    let mut pool = vec![ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]); 3];
+    pool.extend(vec![
+        ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]);
+        5
+    ]);
+    sc.with_mana_pool(P0, pool);
+    let mut runner = sc.build();
+
+    // (i) Reach guard: the real graveyard object carries the printed keyword.
+    let printed = Keyword::BeamMeUp(ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 2,
+    });
+    assert!(
+        runner.state().objects[&in_graveyard].has_keyword(&printed),
+        "REACH: the graveyard Open Communications must carry Beam me up {{2}}{{U}}"
+    );
+
+    // Paired positives: the graveyard-cast offer path is reachable at this
+    // priority with this pool (Wild Ride's harmonize), and the hand copy is
+    // castable.
+    assert!(
+        offers_cast_of(&runner, wild_ride),
+        "Wild Ride's harmonize cast must be offered from the graveyard"
+    );
+    assert!(
+        offers_cast_of(&runner, in_hand),
+        "the hand copy is castable"
+    );
+    // (ii) No beam me up cast is offered.
+    assert!(
+        !offers_cast_of(&runner, in_graveyard),
+        "beam me up must offer no graveyard cast before its route lands"
+    );
+
+    // (iii) The hand copy casts and resolves as printed.
+    let outcome = runner.cast(in_hand).resolve();
+    assert_eq!(
+        outcome.hand_drawn(P0),
+        1,
+        "Open Communications draws a card"
+    );
+    assert_eq!(
+        outcome.zone_of(in_hand),
+        Zone::Graveyard,
+        "a hand cast goes to its owner's graveyard, not exile"
+    );
+
+    // (iv) Still nothing offered for a graveyard object carrying the keyword.
+    let offered_beam = runner
+        .state()
+        .objects
+        .values()
+        .filter(|obj| {
+            obj.zone == Zone::Graveyard
+                && obj.owner == P0
+                && obj
+                    .keywords
+                    .iter()
+                    .any(|kw| matches!(kw, Keyword::BeamMeUp(_)))
+        })
+        .map(|obj| obj.id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        offered_beam.len(),
+        2,
+        "both copies now sit in the graveyard"
+    );
+    for id in offered_beam {
+        assert!(
+            !offers_cast_of(&runner, id),
+            "no beam me up cast after resolution"
+        );
+    }
 }

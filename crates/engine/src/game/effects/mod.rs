@@ -10695,6 +10695,7 @@ fn keyword_reads_filter_population(
         | Keyword::Warp(..)
         | Keyword::Sneak(..)
         | Keyword::WebSlinging(..)
+        | Keyword::BeamMeUp(..)
         | Keyword::Gift(..)
         | Keyword::Discover(..)
         | Keyword::Spree
