@@ -8443,10 +8443,44 @@ pub fn spell_object_matches_filter_from_state_for(
     all_creature_types: &[String],
     fused: bool,
 ) -> bool {
+    spell_object_matches_filter_with_announced_x(
+        state,
+        spell_obj,
+        origin_zone,
+        caster,
+        filter,
+        source_id,
+        all_creature_types,
+        fused,
+        None,
+    )
+}
+
+/// Announced-X sibling of [`spell_object_matches_filter_from_state_for`].
+/// `announced_x: Some(x)` evaluates the filter against the spell as it stands
+/// once its caster has announced X (CR 601.2b): per CR 601.2a the spell being
+/// cast is on the stack, so CR 202.3e counts the announced X in its mana value
+/// (`GameObject::spell_mana_value_with_announced_x`). `None` reads the object as
+/// it currently presents itself, byte-identical to the `_for` entry.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spell_object_matches_filter_with_announced_x(
+    state: &GameState,
+    spell_obj: &GameObject,
+    origin_zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    all_creature_types: &[String],
+    fused: bool,
+    announced_x: Option<u32>,
+) -> bool {
     let Some(source_obj) = state.objects.get(&source_id) else {
         return false;
     };
-    let record = spell_cast_record_from_object_for(spell_obj, fused);
+    let mut record = spell_cast_record_from_object_for(spell_obj, fused);
+    if let Some(x) = announced_x {
+        record.mana_value = spell_obj.spell_mana_value_with_announced_x(fused, x);
+    }
     spell_object_matches_filter_inner(
         &record,
         origin_zone,

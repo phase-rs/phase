@@ -1356,7 +1356,7 @@ pub(super) fn apply_action_boundary_with_stack_limit(
 struct RawActionApplication {
     result: ActionResult,
     journal_start: usize,
-    records_cast_cost: bool,
+    cast_undo_action: Option<super::engine_casting::CastUndoAction>,
     independent_cast_action: Option<(PlayerId, PlayerId, GameAction)>,
     is_actor_scoped_preference: bool,
     suppress_auto_pass_once: bool,
@@ -1518,9 +1518,10 @@ fn apply_action_boundary_core(
     let mut journal_start = state.resolved_rules_journal.entries().len();
     let independent_cast_action = matches!(&action, GameAction::Concede { .. })
         .then(|| (authenticated_actor, semantic_owner, action.clone()));
-    let records_cast_cost = independent_cast_action.is_none()
+    let cast_undo_action = (independent_cast_action.is_none()
         && !matches!(&action, GameAction::Debug(_))
-        && !action.is_submitter_scoped();
+        && !action.is_submitter_scoped())
+    .then(|| super::engine_casting::CastUndoAction::of(&action));
     let is_actor_scoped_preference = action.is_actor_scoped_preference();
     let suppress_auto_pass_once = recovered_stale_priority_pass
         || matches!(
@@ -1562,7 +1563,7 @@ fn apply_action_boundary_core(
         return Ok(RawActionApplication {
             result: ActionResult::applied(vec![], state.waiting_for.clone()),
             journal_start,
-            records_cast_cost,
+            cast_undo_action,
             independent_cast_action,
             is_actor_scoped_preference,
             suppress_auto_pass_once,
@@ -1607,12 +1608,13 @@ fn apply_action_boundary_core(
             ActionResult::reversed(WaitingFor::Priority { player })
         }
         Err(EngineError::SpellCastReversed { player, pending }) => {
-            if records_cast_cost {
+            if let Some(role) = cast_undo_action {
                 if let Err(error) = super::engine_casting::record_spell_cast_undo(
                     state,
                     &boundary_snapshot,
                     journal_start,
                     None,
+                    role,
                 ) {
                     let failure = boundary_life_change_failure(state);
                     lifecycle.discard();
@@ -1691,7 +1693,7 @@ fn apply_action_boundary_core(
         return Ok(RawActionApplication {
             result,
             journal_start,
-            records_cast_cost,
+            cast_undo_action,
             independent_cast_action,
             is_actor_scoped_preference,
             suppress_auto_pass_once,
@@ -1791,7 +1793,7 @@ fn apply_action_boundary_core(
     Ok(RawActionApplication {
         result,
         journal_start,
-        records_cast_cost,
+        cast_undo_action,
         independent_cast_action,
         is_actor_scoped_preference,
         suppress_auto_pass_once,
@@ -2313,7 +2315,7 @@ fn finish_action_boundary_with_lifecycle(
     let RawActionApplication {
         mut result,
         journal_start,
-        records_cast_cost,
+        cast_undo_action,
         independent_cast_action,
         is_actor_scoped_preference,
         suppress_auto_pass_once,
@@ -2452,7 +2454,7 @@ fn finish_action_boundary_with_lifecycle(
                 owner,
                 action,
             )?;
-        } else if records_cast_cost && !reversed {
+        } else if let Some(role) = cast_undo_action.filter(|_| !reversed) {
             let cast_start = cast_start_snapshot.as_ref().filter(|boundary| {
                 state
                     .spell_cast_reversal
@@ -2464,6 +2466,7 @@ fn finish_action_boundary_with_lifecycle(
                 &boundary_snapshot,
                 boundary_snapshot.resolved_rules_journal.entries().len(),
                 cast_start,
+                role,
             )?;
         }
         Ok::<_, EngineError>(())
@@ -15133,6 +15136,26 @@ fn apply_non_priority_pass_action(
                 {
                     return Err(EngineError::InvalidAction(format!(
                         "X={value} cannot pay the activation cost"
+                    )));
+                }
+                // CR 601.6 + CR 601.2b + CR 202.3e: X is announced as part of
+                // the spell's proposal, and the announced spell must still be
+                // one its caster may cast. The proposal check let the cast
+                // begin because some X could evade a quality prohibition
+                // (CR 601.3a — Void Winnower and an even mana value); an X that
+                // gives the spell the prohibited quality is not a legal
+                // announcement.
+                if trial.activation_ability_index.is_none()
+                    && casting::announced_spell_is_prohibited(
+                        state,
+                        player,
+                        trial.object_id,
+                        value,
+                        trial.casting_variant == CastingVariant::Fuse,
+                    )
+                {
+                    return Err(EngineError::InvalidAction(format!(
+                        "X={value} gives this spell a quality a static ability prevents you from casting"
                     )));
                 }
                 if pending.deferred_target_selection {
