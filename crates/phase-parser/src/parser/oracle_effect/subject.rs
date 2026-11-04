@@ -9396,11 +9396,11 @@ mod tests {
         }
     }
     use crate::types::ability::AttackerBlockStatus;
+    use crate::types::ability::ThisWayCause;
     use crate::types::ability::{
         AbilityKind, BasicLandType, ChoiceType, Comparator, ContinuousModification, ControllerRef,
         Effect, PtStat, PtValueScope, QuantityRef, TypeFilter,
     };
-    use crate::types::ability::ThisWayCause;
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::identifiers::TrackedSetId;
     use crate::types::statics::BlockExceptionKind;
