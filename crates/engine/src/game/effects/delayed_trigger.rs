@@ -1980,32 +1980,10 @@ fn filter_refs_parent_object_anaphor_in(filter: &TargetFilter, relation: HostRel
             // `Typed { controller: ParentTargetController }` selects objects BY
             // the parent's controller; the referent being filtered is not the
             // parent's object, so it is NOT a parent object anaphor.
-            typed.properties.iter().any(|prop| match prop {
-                crate::types::ability::FilterProp::DistinctFrom { reference } => {
-                    filter_refs_parent_object_anaphor_in(reference, relation)
-                }
-                // CR 701.3a: a mass object set defined by attachment to the
-                // parent object ("Auras attached to that creature") names the
-                // parent inside the host filter. `ability_pins_object_anaphor`
-                // reads this function to decide whether the creation snapshot
-                // records `target_incarnations`, so missing this arm loses the
-                // incarnation pin the delayed payload needs at resolution.
-                crate::types::ability::FilterProp::AttachedTo {
-                    to: crate::types::ability::AttachmentReferent::Host { filter },
-                } => {
-                    relation == HostRelation::Dependency
-                        && filter_refs_parent_object_anaphor_in(filter, relation)
-                }
-                // CR 603.7c + CR 400.7: a history relation to the parent object is a
-                // DEPENDENCY of the payload, like the attachment host above. Without
-                // the pin, a target that changed zones would read as its new object,
-                // which blocked nothing (CR 608.2i, Gaze of the Gorgon's ruling).
-                crate::types::ability::FilterProp::CombatRelation {
-                    subject: crate::types::ability::CombatRelationSubject::AnaphoricTarget,
-                    ..
-                } => relation == HostRelation::Dependency,
-                _ => false,
-            })
+            typed
+                .properties
+                .iter()
+                .any(|prop| prop_refs_parent_object_anaphor_in(prop, relation))
         }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
             .iter()
@@ -2014,6 +1992,47 @@ fn filter_refs_parent_object_anaphor_in(filter: &TargetFilter, relation: HostRel
         TargetFilter::TrackedSetFiltered { filter, .. } => {
             filter_refs_parent_object_anaphor_in(filter, relation)
         }
+        _ => false,
+    }
+}
+
+/// The property arm of [`filter_refs_parent_object_anaphor_in`]. Recurses into
+/// `Not` / `AnyOf`, matching `filter_refs_parent_target`, so the incarnation pin
+/// follows every shape the target freeze does.
+fn prop_refs_parent_object_anaphor_in(
+    prop: &crate::types::ability::FilterProp,
+    relation: HostRelation,
+) -> bool {
+    match prop {
+        crate::types::ability::FilterProp::DistinctFrom { reference } => {
+            filter_refs_parent_object_anaphor_in(reference, relation)
+        }
+        // CR 701.3a: a mass object set defined by attachment to the
+        // parent object ("Auras attached to that creature") names the
+        // parent inside the host filter. `ability_pins_object_anaphor`
+        // reads this function to decide whether the creation snapshot
+        // records `target_incarnations`, so missing this arm loses the
+        // incarnation pin the delayed payload needs at resolution.
+        crate::types::ability::FilterProp::AttachedTo {
+            to: crate::types::ability::AttachmentReferent::Host { filter },
+        } => {
+            relation == HostRelation::Dependency
+                && filter_refs_parent_object_anaphor_in(filter, relation)
+        }
+        // CR 603.7c + CR 400.7: a history relation to the parent object is a
+        // DEPENDENCY of the payload, like the attachment host above. Without
+        // the pin, a target that changed zones would read as its new object,
+        // which blocked nothing (CR 608.2i, Gaze of the Gorgon's ruling).
+        crate::types::ability::FilterProp::CombatRelation {
+            subject: crate::types::ability::CombatRelationSubject::AnaphoricTarget,
+            ..
+        } => relation == HostRelation::Dependency,
+        crate::types::ability::FilterProp::Not { prop } => {
+            prop_refs_parent_object_anaphor_in(prop, relation)
+        }
+        crate::types::ability::FilterProp::AnyOf { props } => props
+            .iter()
+            .any(|prop| prop_refs_parent_object_anaphor_in(prop, relation)),
         _ => false,
     }
 }
@@ -6175,6 +6194,39 @@ mod tests {
         assert!(
             !filter_names_parent_object_subject(&anaphoric),
             "a history dependency is not the condition's moving subject"
+        );
+        // The pin follows the target freeze into `Not` / `AnyOf` properties.
+        let relation = crate::types::ability::FilterProp::CombatRelation {
+            relation: crate::types::ability::CombatRelation::BlockPairing {
+                direction: crate::types::ability::BlockPairDirection::Either,
+                scope: Some(crate::types::ability::CombatHistoryScope::ThisTurn),
+            },
+            subject: crate::types::ability::CombatRelationSubject::AnaphoricTarget,
+        };
+        let wrapped = |prop| {
+            TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature().properties(vec![prop]),
+            )
+        };
+        assert!(
+            filter_refs_parent_object_anaphor(&wrapped(crate::types::ability::FilterProp::Not {
+                prop: Box::new(relation.clone()),
+            })),
+            "a negated history dependency is still pinned"
+        );
+        assert!(
+            filter_refs_parent_object_anaphor(&wrapped(crate::types::ability::FilterProp::AnyOf {
+                props: vec![crate::types::ability::FilterProp::Token, relation],
+            })),
+            "a history dependency inside AnyOf is still pinned"
+        );
+        assert!(
+            !filter_refs_parent_object_anaphor(&wrapped(
+                crate::types::ability::FilterProp::AnyOf {
+                    props: vec![crate::types::ability::FilterProp::Token],
+                }
+            )),
+            "AnyOf without the relation pins nothing"
         );
         let source = history_with(crate::types::ability::CombatRelationSubject::Source);
         assert!(

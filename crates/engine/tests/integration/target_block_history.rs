@@ -1653,7 +1653,7 @@ fn judge_unworthy_with_an_empty_library_deals_no_damage() {
 /// CR 608.2c: a later instruction that chose its own target is not the root, so it
 /// does not lend its target to the instruction after it. Hand-built: no printed
 /// card has a targeted instruction between a reveal and its read (nearest: Pact
-/// Weapon, whose parse gives its pump an `Any` target). The derived loss is 3, the
+/// Weapon, whose parse gives its pump an `Any` target). The correct loss is 3, the
 /// revealed card's mana value; this asserts only that the target's mana value, 5,
 /// is not read, since the reveal's referent reads 0 here (the gap V35's Judge
 /// Unworthy row names).
