@@ -20880,11 +20880,12 @@ fn peel_library_placement_cardinality(input: &str) -> (LibraryPlacementCardinali
 /// re-derived here — the caller hands this phrase to the shared
 /// `peel_library_placement_cardinality` authority.
 fn bottom_library_placement_noun_phrase(text_lower: &str) -> Option<&str> {
-    let (at_verb, _) = take_until::<_, _, OracleError<'_>>("put ")
+    // `take_until` yields `(remaining_at_the_terminator, taken_prefix)`, so the
+    // verb is consumed by pairing the scan with its own `tag` rather than by a
+    // post-hoc prefix strip.
+    let (after_verb, _) = preceded(take_until::<_, _, OracleError<'_>>("put "), tag("put "))
         .parse(text_lower)
         .ok()?;
-    let after_verb = at_verb.strip_prefix("put ")?;
-    // `take_until` yields `(remaining_at_the_terminator, taken_prefix)`.
     let (_, noun_phrase) = take_until::<_, _, OracleError<'_>>(" on the bottom of")
         .parse(after_verb)
         .ok()?;
