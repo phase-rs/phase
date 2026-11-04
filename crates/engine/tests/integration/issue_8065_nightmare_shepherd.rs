@@ -17,12 +17,11 @@
 //! fail-soft skip, leaving `[AddSubtype(Nightmare)]` as the only exception).
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::game::triggers::process_triggers;
-use engine::game::zones::move_to_zone;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{parse_mtgjson_mana_cost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -48,11 +47,13 @@ fn answer_optionals_and_drain(runner: &mut GameRunner, accept: bool) -> u32 {
         if runner.state().stack.is_empty()
             && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
         {
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(runner.state().resolving_stack_entry.is_none());
             return prompts;
         }
-        if runner.act(GameAction::PassPriority).is_err() {
-            return prompts;
-        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority must advance the removal and dies trigger");
     }
     panic!(
         "resolution did not settle; waiting_for = {:?}",
@@ -60,13 +61,32 @@ fn answer_optionals_and_drain(runner: &mut GameRunner, accept: bool) -> u32 {
     );
 }
 
-/// CR 700.4 + CR 603.6: the creature dies through the real zone-change seam, so
-/// Nightmare Shepherd's "dies" trigger is collected from the `ZoneChanged`
-/// event. Returns the number of optional prompts its resolution presented.
-fn kill(runner: &mut GameRunner, victim: ObjectId, accept_exile: bool) -> u32 {
-    let mut events = Vec::new();
-    move_to_zone(runner.state_mut(), victim, Zone::Graveyard, &mut events);
-    process_triggers(runner.state_mut(), &events);
+/// CR 700.4 + CR 603.6: Murder's public cast produces the death and the dies trigger.
+/// Returns the number of optional prompts its resolution presented.
+fn kill(runner: &mut GameRunner, victim: ObjectId, murder: ObjectId, accept_exile: bool) -> u32 {
+    runner
+        .act(GameAction::CastSpell {
+            object_id: murder,
+            card_id: runner.state().objects[&murder].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Murder with its printed mana cost");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ));
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![engine::types::ability::TargetRef::Object(victim)],
+        })
+        .expect("Murder targets the donor");
+    assert!(runner
+        .state()
+        .stack
+        .iter()
+        .any(|entry| entry.source_id == murder));
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
     answer_optionals_and_drain(runner, accept_exile)
 }
 
@@ -81,24 +101,35 @@ fn copy_tokens(state: &GameState, name: &str) -> Vec<ObjectId> {
         .collect()
 }
 
-fn shepherd_board() -> (GameRunner, ObjectId) {
+fn shepherd_board() -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_creature_from_oracle(P0, "Nightmare Shepherd", 4, 4, NIGHTMARE_SHEPHERD);
     // A 3/3 donor, so a token that keeps the donor's P/T is visibly wrong.
-    let victim = scenario.add_creature(P0, "Centaur Courser", 3, 3).id();
-    (scenario.build(), victim)
+    let victim = scenario
+        .add_creature(P0, "Centaur Courser", 3, 3)
+        .with_subtypes(vec!["Centaur", "Warrior"])
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{B}{B}"))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]); 3],
+    );
+    (scenario.build(), victim, murder)
 }
 
 /// CR 707.9b + CR 707.9d: the copy is a 1/1 that is a Nightmare in addition to
 /// the donor's own types.
 #[test]
 fn copy_token_is_1_1_nightmare() {
-    let (mut runner, victim) = shepherd_board();
+    let (mut runner, victim, murder) = shepherd_board();
     assert_eq!(
-        kill(&mut runner, victim, true),
+        kill(&mut runner, victim, murder, true),
         1,
-        "CR 603.4: the dies trigger must present exactly one optional exile decision"
+        "CR 603.5: the dies trigger must present exactly one optional exile decision"
     );
 
     // Reach guard: the accepted optional exiled the dying creature, so the copy
@@ -137,6 +168,8 @@ fn copy_token_is_1_1_nightmare() {
         "the copy must still be a creature, got {:?}",
         token.card_types.core_types
     );
+    assert!(token.card_types.subtypes.iter().any(|s| s == "Centaur"));
+    assert!(token.card_types.subtypes.iter().any(|s| s == "Warrior"));
 }
 
 /// Paired control: declining "you may exile it" creates no token and leaves the
@@ -144,14 +177,14 @@ fn copy_token_is_1_1_nightmare() {
 /// than an unconditional copy.
 #[test]
 fn declining_the_exile_creates_no_token() {
-    let (mut runner, victim) = shepherd_board();
+    let (mut runner, victim, murder) = shepherd_board();
     // Reach guard: the trigger fired and presented the optional decision, so a
     // missing token below is the decline's effect rather than a trigger that
     // never resolved.
     assert_eq!(
-        kill(&mut runner, victim, false),
+        kill(&mut runner, victim, murder, false),
         1,
-        "CR 603.4: the dies trigger must present the optional exile decision"
+        "CR 603.5: the dies trigger must present the optional exile decision"
     );
 
     assert_eq!(
