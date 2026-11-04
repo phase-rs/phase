@@ -730,6 +730,22 @@ fn snow_pool_z_fallback_preserves_snow_before_phyrexian_life() {
             assert_eq!(preview.len(), 1);
             assert_eq!(preview[0].shard_index, phyrexian_index);
             assert_eq!(preview[0].options, ShardOptions::LifeOnly);
+            let mut mana_only_pool = pool.clone();
+            assert!(pay_cost_with_demand_and_choices(
+                &mut mana_only_pool,
+                &cost,
+                None,
+                context.as_ref(),
+                None,
+                Some(&[ShardChoice::PayMana]),
+                LifePaymentColors::EMPTY,
+                &[],
+            )
+            .is_err());
+            assert_eq!(
+                mana_only_pool, pool,
+                "forced mana cannot consume a partial payment"
+            );
             for choices in [None, Some([ShardChoice::PayLife])] {
                 let mut payment_pool = pool.clone();
                 let (spent, life) = pay_cost_with_demand_and_choices(
@@ -794,83 +810,128 @@ fn snow_pool_z_partial_payment_leaves_snow_for_auto_tap() {
     // Five's Z with Wowzer's S. Highland Forest supplies a real Snow/Z unit.
     // CR 601.2g + CR 107.4h: reserve that floating unit for Z and auto-tap
     // Snow-Covered Forest for S. An ordinary Forest cannot supply the deficit.
-    for with_snow_forest in [true, false] {
-        let mut s = board();
-        let highland = s
-            .add_land_from_oracle(
-                P0,
-                "Highland Forest",
-                "({T}: Add {R} or {G}.)\nThis land enters tapped.",
-            )
-            .as_snow()
-            .with_subtypes(vec!["Mountain", "Forest"])
-            .id();
-        let forest = with_snow_forest.then(|| snow_forest(&mut s));
-        let ordinary_forest = s.add_basic_land(P0, ManaColor::Green);
-        let creature = s
-            .add_creature_to_hand_from_oracle(P0, "Supplemental Z/S payment", 1, 1, "")
-            .with_mana_cost(parse_mtgjson_mana_cost("{Z}{S}"))
-            .id();
-        let mut r = s.build();
-        if let Some(forest) = forest {
-            finish_snow_forest(&mut r, forest);
-        }
-        // Start on a later turn, after Highland Forest has untapped.
-        r.state_mut().objects.get_mut(&highland).unwrap().tapped = false;
-        evaluate_layers(r.state_mut());
-        let (_, _, grouped) = legal_actions_full(r.state());
-        let action = grouped[&highland]
-            .iter()
-            .find(|action| {
-                matches!(action, GameAction::TapLandForMana { selection }
+    // Supplemental strict-U variants combine those axes with colored costs
+    // (CR 107.4a): Tropical Island's blue must remain available for each U.
+    // No printed card is claimed to combine these Z/U/S requirements.
+    for (cost, blue_sources) in [
+        ("{Z}{S}", 0),
+        ("{Z}{U}{S}", 1),
+        ("{Z}{U}{U}{S}", 2),
+        ("{S}{U}{Z}", 1),
+    ] {
+        for with_snow_forest in [true, false] {
+            let mut s = board();
+            let highland = s
+                .add_land_from_oracle(
+                    P0,
+                    "Highland Forest",
+                    "({T}: Add {R} or {G}.)\nThis land enters tapped.",
+                )
+                .as_snow()
+                .with_subtypes(vec!["Mountain", "Forest"])
+                .id();
+            let forest = with_snow_forest.then(|| snow_forest(&mut s));
+            let ordinary_forest = s.add_basic_land(P0, ManaColor::Green);
+            let tropicals: Vec<_> = (0..blue_sources)
+                .map(|_| {
+                    s.add_land_from_oracle(P0, "Tropical Island", "({T}: Add {G} or {U}.)")
+                        .with_subtypes(vec!["Forest", "Island"])
+                        .id()
+                })
+                .collect();
+            let creature = s
+                .add_creature_to_hand_from_oracle(P0, "Supplemental Z/colored/S payment", 1, 1, "")
+                .with_mana_cost(parse_mtgjson_mana_cost(cost))
+                .id();
+            let mut r = s.build();
+            if let Some(forest) = forest {
+                finish_snow_forest(&mut r, forest);
+            }
+            // Start on a later turn, after Highland Forest has untapped.
+            r.state_mut().objects.get_mut(&highland).unwrap().tapped = false;
+            evaluate_layers(r.state_mut());
+            let (_, _, grouped) = legal_actions_full(r.state());
+            let action = grouped[&highland]
+                .iter()
+                .find(|action| {
+                    matches!(action, GameAction::TapLandForMana { selection }
                     if selection.mana_type == ManaType::Green)
-            })
-            .expect("Highland Forest exposes its green mana action")
-            .clone();
-        r.act(action).unwrap();
-        assert_complete(&r, 1);
-        assert!(r.state().objects[&highland].tapped);
-        let floating = r.state().players[0].mana_pool.units().next().unwrap();
-        assert_eq!(floating.source_id, highland);
-        assert_eq!(floating.supertype, Some(ManaSupertype::Snow));
-        assert!(floating.source_could_produce_two_or_more_colors);
-
-        let card_id = r.state().objects[&creature].card_id;
-        let result = r.act(GameAction::CastSpell {
-            object_id: creature,
-            card_id,
-            targets: vec![],
-            payment_mode: CastPaymentMode::Auto,
-        });
-        assert!(
-            !r.state().objects[&ordinary_forest].tapped,
-            "ordinary green cannot fill the Snow or Z deficit"
-        );
-        if let Some(forest) = forest {
-            result.expect("floating Z plus auto-tapped Snow pays the full cost");
-            assert!(r.state().objects[&forest].tapped);
-            assert_eq!(r.state().stack.len(), 1);
-            assert!(r.state().players[0].mana_pool.is_empty());
-            r.advance_until_stack_empty();
-            assert_eq!(r.state().objects[&creature].zone, Zone::Battlefield);
-            assert_complete(&r, 0);
-        } else {
-            assert!(
-                result.is_err(),
-                "ordinary Forest cannot replace the Snow source"
-            );
-            assert_eq!(r.state().objects[&creature].zone, Zone::Hand);
-            assert_eq!(
-                r.state().players[0]
-                    .mana_pool
-                    .units()
-                    .next()
-                    .unwrap()
-                    .pip_id,
-                floating.pip_id,
-                "failed payment preserves the pre-floated unit"
-            );
+                })
+                .expect("Highland Forest exposes its green mana action")
+                .clone();
+            r.act(action).unwrap();
             assert_complete(&r, 1);
+            assert!(r.state().objects[&highland].tapped);
+            let floating = r.state().players[0].mana_pool.units().next().unwrap();
+            assert_eq!(floating.source_id, highland);
+            assert_eq!(floating.supertype, Some(ManaSupertype::Snow));
+            assert!(floating.source_could_produce_two_or_more_colors);
+            // Append ordinary blue after the snow green, using actual mana actions.
+            // Each source can produce two colors, so either pip could pay Z.
+            for tropical in &tropicals {
+                let (_, _, grouped) = legal_actions_full(r.state());
+                let action = grouped[tropical]
+                    .iter()
+                    .find(|action| {
+                        matches!(action, GameAction::TapLandForMana { selection }
+                        if selection.mana_type == ManaType::Blue)
+                    })
+                    .expect("Tropical Island exposes its blue mana action")
+                    .clone();
+                r.act(action).unwrap();
+                assert!(r.state().objects[tropical].tapped);
+            }
+            let floated: Vec<_> = r.state().players[0].mana_pool.units().collect();
+            assert_eq!(floated.len(), 1 + blue_sources);
+            assert_eq!(floated[0].source_id, highland);
+            for (unit, tropical) in floated[1..].iter().zip(&tropicals) {
+                assert_eq!(unit.source_id, *tropical);
+                assert_eq!(unit.color, ManaType::Blue);
+                assert_eq!(unit.supertype, None);
+                assert!(unit.source_could_produce_two_or_more_colors);
+            }
+
+            let card_id = r.state().objects[&creature].card_id;
+            let result = r.act(GameAction::CastSpell {
+                object_id: creature,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            });
+            assert!(
+                !r.state().objects[&ordinary_forest].tapped,
+                "ordinary green cannot fill the Snow or Z deficit"
+            );
+            if let Some(forest) = forest {
+                result.expect("floating Z plus auto-tapped Snow pays the full cost");
+                assert!(r.state().objects[&forest].tapped);
+                assert_eq!(r.state().stack.len(), 1);
+                assert!(r.state().players[0].mana_pool.is_empty());
+                r.advance_until_stack_empty();
+                assert_eq!(r.state().objects[&creature].zone, Zone::Battlefield);
+                assert_complete(&r, 0);
+            } else {
+                assert!(
+                    result.is_err(),
+                    "ordinary Forest cannot replace the Snow source"
+                );
+                assert_eq!(r.state().objects[&creature].zone, Zone::Hand);
+                assert_eq!(
+                    r.state().players[0]
+                        .mana_pool
+                        .units()
+                        .next()
+                        .unwrap()
+                        .pip_id,
+                    floated[0].pip_id,
+                    "failed payment preserves the pre-floated unit"
+                );
+                assert_eq!(
+                    r.state().players[0].mana_pool.units().collect::<Vec<_>>(),
+                    floated
+                );
+                assert_complete(&r, 1 + blue_sources);
+            }
         }
     }
 }

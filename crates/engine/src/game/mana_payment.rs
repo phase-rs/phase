@@ -1056,16 +1056,25 @@ fn payment_shard_order(
     order
 }
 
-// CR 107.4f + CR 601.2h: reserve the mana option of the remaining shards,
-// except those explicitly announced as life. Read the actual payment order;
+struct RemainingPaymentColorDemand {
+    preferred: ColorDemand,
+    required: ColorDemand,
+}
+
+// CR 107.4a + CR 107.4f: distinguish colored requirements from Phyrexian
+// mana preferences that may instead use life. Explicit PayMana choices and
+// the planner's mana-only view remain required. Read the actual payment order;
 // choice indices follow only its Phyrexian-shaped symbols.
 fn remaining_payment_color_demand(
     shards: &[ManaCostShard],
     remaining_order: &[usize],
     life_colors: Option<crate::types::mana::LifePaymentColors>,
     phyrexian_choices: Option<&[ShardChoice]>,
-) -> ColorDemand {
-    let mut demand = [0; 5];
+) -> RemainingPaymentColorDemand {
+    let mut demand = RemainingPaymentColorDemand {
+        preferred: [0; 5],
+        required: [0; 5],
+    };
     let mut choice_cursor = 0;
     for &index in remaining_order {
         let is_phyrexian = life_colors.is_some_and(|colors| {
@@ -1074,14 +1083,20 @@ fn remaining_payment_color_demand(
                 colors,
             ))
         });
-        if is_phyrexian {
+        let choice = if is_phyrexian {
             let choice = phyrexian_choices.and_then(|choices| choices.get(choice_cursor));
             choice_cursor += 1;
             if choice == Some(&ShardChoice::PayLife) {
                 continue;
             }
+            choice
+        } else {
+            None
+        };
+        accumulate_shard_demand(&mut demand.preferred, shards[index]);
+        if !is_phyrexian || choice == Some(&ShardChoice::PayMana) {
+            accumulate_shard_demand(&mut demand.required, shards[index]);
         }
-        accumulate_shard_demand(&mut demand, shards[index]);
     }
     demand
 }
@@ -1276,7 +1291,7 @@ pub(crate) fn reduce_cost_by_pool(
                 quality_demand.snow -= 1;
                 let future_demand =
                     remaining_payment_color_demand(shards, &order[position + 1..], None, None);
-                spend_snow_unit(&mut scratch, spell, &[], Some(&future_demand)).is_some()
+                spend_snow_unit(&mut scratch, spell, &[], Some(&future_demand.preferred)).is_some()
             }
             ShardRequirement::TwoOrMoreColorSource => {
                 quality_demand.multicolor -= 1;
@@ -1673,8 +1688,9 @@ fn pay_cost_with_demand_and_choices_once(
                             Some(life_colors),
                             phyrexian_choices.map(|choices| &choices[choice_cursor..]),
                         );
-                        let unit = spend_snow_unit(pool, spell, pins, Some(&future_demand))
-                            .ok_or(PaymentError::InsufficientMana)?;
+                        let unit =
+                            spend_snow_unit(pool, spell, pins, Some(&future_demand.preferred))
+                                .ok_or(PaymentError::InsufficientMana)?;
                         spent.push(unit);
                     }
                     ShardRequirement::TwoOrMoreColorSource => {
@@ -2082,7 +2098,7 @@ pub fn compute_phyrexian_shards(
                     Some(life_colors),
                     None,
                 );
-                let _ = spend_snow_unit(&mut sim, spell, &[], Some(&future_demand));
+                let _ = spend_snow_unit(&mut sim, spell, &[], Some(&future_demand.preferred));
             }
             ShardRequirement::TwoOrMoreColorSource => {
                 quality_demand.multicolor -= 1;
@@ -3219,7 +3235,7 @@ fn spend_two_or_more_color_source_eligible(
     spell: Option<&PaymentContext<'_>>,
     pins: &[ManaPipId],
     quality_demand: SourceQualityDemand,
-    demand: &ColorDemand,
+    demand: &RemainingPaymentColorDemand,
 ) -> Option<ManaUnit> {
     // CR 118.3a: prefer a pinned {Z}-eligible unit before the first match.
     spend_selected(pool, |pool| {
@@ -3235,21 +3251,22 @@ fn spend_two_or_more_color_source_eligible(
                         unit.source_could_produce_two_or_more_colors
                             && !unit.is_snow()
                             && spell_permits_unit(spell, unit)
-                            && color_is_unreserved(pool, unit.color, spell, demand)
+                            && color_is_unreserved(pool, unit.color, spell, &demand.preferred)
                     })
                 })
                 .flatten()
         })
         .or_else(|| {
-            // Prefer a complete quality allocation even if a later color may
-            // need life payment. An incomplete pool must still reduce Z below:
-            // auto-tap can supply the remaining Snow from another source.
+            // Optional Phyrexian demand may use life, but strict colored
+            // demand must keep its mana. An incomplete pool must still reduce
+            // Z below: auto-tap can supply the remaining Snow from another source.
             (quality_demand.snow > 0)
                 .then(|| {
                     pool.first_where(|unit| {
                         unit.source_could_produce_two_or_more_colors
                             && spell_permits_unit(spell, unit)
                             && quality_demand.preserves_after(pool, unit, spell)
+                            && color_is_unreserved(pool, unit.color, spell, &demand.required)
                     })
                 })
                 .flatten()
