@@ -357,6 +357,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::CollectEvidence { .. }
         | Effect::CombineHost { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::CopySpell { .. }
         | Effect::CopyTokenBlockingAttacker { .. }

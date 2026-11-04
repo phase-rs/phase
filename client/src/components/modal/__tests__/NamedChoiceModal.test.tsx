@@ -39,6 +39,34 @@ describe("NamedChoiceModal", () => {
     });
   });
 
+  // CR 201.4: a closed card-name domain (Garth One-Eye) publishes its legal
+  // names, so the modal offers exactly those instead of the open name search.
+  it("renders a closed card-name domain as its published options", () => {
+    const data: NamedChoiceData = {
+      player: 0,
+      choice_type: {
+        CardName: {
+          options: ["Disenchant", "Terror", "Black Lotus"],
+          distinctness: "DistinctFromSourceHistory",
+        },
+      },
+      options: ["Disenchant", "Black Lotus"],
+    };
+
+    render(<NamedChoiceModal data={data} />);
+
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Terror" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Black Lotus" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "ChooseOption",
+      data: { choice: "Black Lotus" },
+    });
+  });
+
   it("does not fade in every option in a searchable long list", () => {
     const data: NamedChoiceData = {
       player: 0,

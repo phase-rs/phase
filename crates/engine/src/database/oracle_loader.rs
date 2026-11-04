@@ -8,8 +8,10 @@ use crate::database::card_db::{
 };
 use crate::database::legality::normalize_legalities;
 use crate::database::mtgjson::load_atomic_cards;
+use crate::database::name_copy_gate::gate_unmaterializable_name_copies;
 use crate::database::synthesis::{
-    build_oracle_face, build_oracle_face_multi, layout_faces, map_layout, LayoutKind,
+    build_oracle_face, build_oracle_face_multi, layout_faces, layout_faces_mut, map_layout,
+    LayoutKind,
 };
 use crate::types::card::{CardFace, CardLayout, CardRules};
 
@@ -130,6 +132,24 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
             if !card_legalities.is_empty() {
                 legalities.insert(key, card_legalities);
             }
+        }
+    }
+
+    // CR 707.13 + CR 709.3c: a copy defined by a name the database can only hold
+    // as part of a multi-face card (or not at all) is an honest gap, not a silent
+    // no-op. Both stores of each face are gated so they cannot disagree.
+    let single_faced: std::collections::HashSet<String> = cards
+        .iter()
+        .filter(|(_, rules)| matches!(rules.layout, CardLayout::Single(_)))
+        .map(|(key, _)| key.clone())
+        .collect();
+    let is_single_faced_card = |name: &str| single_faced.contains(&name.to_lowercase());
+    for face in face_index.values_mut() {
+        gate_unmaterializable_name_copies(face, &is_single_faced_card);
+    }
+    for rules in cards.values_mut() {
+        for face in layout_faces_mut(&mut rules.layout) {
+            gate_unmaterializable_name_copies(face, &is_single_faced_card);
         }
     }
 

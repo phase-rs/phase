@@ -1318,7 +1318,7 @@ fn emperor_of_bones_resumes_riders_after_anointed_peacekeepers_as_enters_choices
             runner.waiting_for_kind()
         );
     };
-    assert!(matches!(choice_type, ChoiceType::CardName));
+    assert!(matches!(choice_type, ChoiceType::CardName { .. }));
     runner
         .act(GameAction::ChooseOption {
             choice: NAMED_CARD.to_string(),

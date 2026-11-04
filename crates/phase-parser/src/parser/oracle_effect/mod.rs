@@ -149,6 +149,10 @@ use crate::types::ability::{
     UntilCondition, VoteSubject, WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser,
     ZoneChoiceGatherRole, ZoneOwner,
 };
+// Imported on its own line rather than folded into the block above: that block
+// is the busiest merge point in this file, and a one-name addition inside it
+// conflicts with every sibling branch that adds one too.
+use crate::types::ability::NameDistinctness;
 // `DoubleTarget` has no production use in this module since the counter-doubling
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
 // `tests` module still names it through `use super::*`.
@@ -12754,6 +12758,15 @@ fn parse_effect_clause_inner_with_damage_context(
         return parsed_clause(effect);
     }
 
+    // CR 707.13 + CR 201.4: "create a copy of the card with the chosen name".
+    // Tried here, beside the conjures it shares a materialization path with, and
+    // before the imperative dispatcher: "create" is a dispatched verb, and its
+    // token/creation argument grammar rejects this clause (the recorded gap was
+    // `unparsed_verb_arguments`).
+    if let Some(effect) = try_parse_create_card_copy_by_name(tp) {
+        return parsed_clause(effect);
+    }
+
     let ast = parse_clause_ast(text, ctx);
     lower_clause_ast_with_damage_context(ast, ctx, tp.original, damage_context)
 }
@@ -14585,6 +14598,37 @@ fn try_parse_conjure(tp: TextPair) -> Option<Effect> {
         tapped,
         library_position,
         library_players,
+    })
+}
+
+/// CR 707.13 + CR 201.4: "Create a copy of the card with the chosen name."
+///
+/// The copy source is a NAME, not an object: the named card need not be in any
+/// zone, so none of the object-copy verbs (`CopySpell`, `CopyTokenOf`,
+/// `CastCopyOfCard`) can express it — they all read copiable values off
+/// something that exists. `Effect::CreateCardCopyByName` takes the copy's
+/// characteristics from the Oracle card reference instead (CR 707.13).
+///
+/// Deliberately narrow: only the chosen-name referent, which is the one
+/// `TargetFilter::HasChosenName` already names elsewhere in the parser. A literal
+/// "create a copy of a card named X" would fill in the effect's `name` field; no
+/// printed card asks for it yet, and inventing the grammar without one is how a
+/// wrong shape gets locked in.
+fn try_parse_create_card_copy_by_name(tp: TextPair) -> Option<Effect> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("create a copy of ")
+        .parse(tp.lower)
+        .ok()?;
+    let rest = rest.trim_end().trim_end_matches('.').trim_end();
+    // The copy object is the chosen-name referent and nothing else; `all_consuming`
+    // is what makes that exact rather than a prefix match.
+    all_consuming(tag::<_, _, OracleError<'_>>(
+        "the card with the chosen name",
+    ))
+    .parse(rest)
+    .ok()?;
+    Some(Effect::CreateCardCopyByName {
+        name: None,
+        count: QuantityExpr::Fixed { value: 1 },
     })
 }
 
@@ -37367,6 +37411,105 @@ fn parse_creature_type_enumeration(rest: &str) -> Option<Vec<String>> {
     }
 }
 
+/// CR 201.4 + CR 608.2d: "a card name [that hasn't been chosen] from among A, B,
+/// …, and F" (Garth One-Eye) — a CLOSED, Oracle-listed card-name domain, as
+/// `parse_creature_type_enumeration` above is for creature types.
+///
+/// The names are proper nouns, so they have to come out of the ORIGINAL text and
+/// not the lowercased copy the rest of this phrase table runs on: the engine
+/// enumerates this domain into `WaitingFor::NamedChoice.options`, and "black
+/// lotus" in a prompt is a defect even though the registry lookup that follows is
+/// case-insensitive. `original` is the same byte span as `rest` (`TextPair`'s
+/// invariant). Without one the enumeration DECLINES and the caller falls through
+/// to the open "a card name" form — today's behavior, never a mis-cased name.
+///
+/// BOUNDARY: the separator is the comma. " and " alone is not usable as one — it
+/// is a legal substring of a card name (Sword of Fire and Ice) — so a two-name
+/// "from among A and B" declines rather than risk splitting a name in half. No
+/// printed card uses that form today; one that did would keep the open prompt,
+/// which is what it gets now.
+fn parse_card_name_enumeration(
+    rest: &str,
+    original: Option<&str>,
+) -> Option<(Vec<String>, NameDistinctness)> {
+    type E<'a> = OracleError<'a>;
+
+    /// One printed name: everything up to the comma that separates it from the
+    /// next. `is_not` rather than a hand-rolled scan so the separator stays the
+    /// only structure this grammar knows about.
+    fn name_item(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        nom::bytes::complete::is_not(",").parse(input)
+    }
+
+    let original = original?;
+    if original.len() != rest.len() {
+        return None;
+    }
+
+    let (tail, _) = tag::<_, _, E>("a card name ").parse(rest).ok()?;
+    // CR 608.2d: a name chosen before is no longer a legal option. Both
+    // apostrophes: the corpus is not normalized on this character
+    // (see the straight/typographic pairs in `oracle.rs`'s "can't" handling).
+    let (tail, distinctness) = opt(alt((
+        value(
+            NameDistinctness::DistinctFromSourceHistory,
+            tag::<_, _, E>("that hasn't been chosen "),
+        ),
+        value(
+            NameDistinctness::DistinctFromSourceHistory,
+            tag("that hasn\u{2019}t been chosen "),
+        ),
+    )))
+    .parse(tail)
+    .ok()
+    .map(|(tail, d)| (tail, d.unwrap_or(NameDistinctness::Repeatable)))?;
+    // "from among" (Garth One-Eye, Ersta) and the bare "among" (Interrogation
+    // Robot: "a card name that hasn't been chosen among Who, What, …"). Same
+    // construct, one word apart; accepting only the longer form would leave the
+    // shorter one on the open prompt while its sibling clause parsed.
+    let (list, _) = alt((tag::<_, _, E>("from among "), tag("among ")))
+        .parse(tail)
+        .ok()?;
+
+    // The names are proper nouns, so they come off the ORIGINAL at the same byte
+    // offset (equal lengths, checked above) — the grammar above is what the
+    // lowercased copy is for.
+    let list_original = &original[original.len() - list.len()..];
+    let list_original = list_original.trim_end().trim_end_matches('.').trim_end();
+
+    let (_, items) = all_consuming(separated_list1(tag::<_, _, E>(", "), name_item))
+        .parse(list_original)
+        .ok()?;
+    // Two or more, and the comma is the only separator this accepts: " and " is a
+    // legal substring of a card name (Sword of Fire and Ice), so a two-name
+    // "from among A and B" declines here rather than risk splitting a name.
+    if items.len() < 2 {
+        return None;
+    }
+
+    let mut names = Vec::with_capacity(items.len());
+    let last = items.len() - 1;
+    for (index, piece) in items.into_iter().enumerate() {
+        let piece = piece.trim();
+        // Only the final item carries the coordinating conjunction ("…, and Black
+        // Lotus"), so stripping it there keeps a name that merely begins with
+        // "And" intact.
+        let name = if index == last {
+            opt(alt((tag::<_, _, E>("and "), tag("or "))))
+                .parse(piece)
+                .map(|(rest, _)| rest)
+                .unwrap_or(piece)
+        } else {
+            piece
+        };
+        if name.is_empty() {
+            return None;
+        }
+        names.push(name.to_string());
+    }
+    Some((names, distinctness))
+}
+
 /// CR 107.1 + CR 107.1a: a printed enumeration of whole numbers ("choose 2, 3,
 /// or 4" — Haktos the Unscarred) states an explicit candidate set of integers.
 /// Returns the enumeration's `(min, max)` when `rest` is a 2+-element ascending
@@ -37622,13 +37765,31 @@ pub(crate) fn try_parse_named_choice_with_provenance(
     lower: &str,
     has_number_choice: bool,
 ) -> Option<ChoiceType> {
+    try_parse_named_choice_with_text(lower, None, has_number_choice)
+}
+
+/// [`try_parse_named_choice_with_provenance`] with the ORIGINAL, un-lowercased
+/// clause alongside. Only one phrase needs it — the closed card-name domain
+/// (`parse_card_name_enumeration`), whose options are proper nouns — and passing
+/// `None` is exactly the behavior of every caller that has only the lowercase
+/// text: the enumeration declines and the open "a card name" form takes over.
+pub(crate) fn try_parse_named_choice_with_text(
+    lower: &str,
+    original: Option<&str>,
+    has_number_choice: bool,
+) -> Option<ChoiceType> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("choose "),
         nom::sequence::preceded(tag("secretly "), tag("choose ")),
     ))
     .parse(lower)
     .ok()?;
-    parse_named_choice_object_with_provenance(rest, has_number_choice)
+    // Same byte offset in the original, which `TextPair` guarantees is the same
+    // length; a caller whose pair does not line up passes `None` below.
+    let rest_original = original.and_then(|original| {
+        (original.len() == lower.len()).then(|| &original[original.len() - rest.len()..])
+    });
+    parse_named_choice_object_with_text(rest, rest_original, has_number_choice)
 }
 
 /// The object phrase of a named choice, with any leading "choose "/"secretly
@@ -37643,6 +37804,14 @@ pub(crate) fn parse_named_choice_object(rest: &str) -> Option<ChoiceType> {
 
 pub(crate) fn parse_named_choice_object_with_provenance(
     rest: &str,
+    has_number_choice: bool,
+) -> Option<ChoiceType> {
+    parse_named_choice_object_with_text(rest, None, has_number_choice)
+}
+
+pub(crate) fn parse_named_choice_object_with_text(
+    rest: &str,
+    original: Option<&str>,
     has_number_choice: bool,
 ) -> Option<ChoiceType> {
     type E<'a> = OracleError<'a>;
@@ -37674,6 +37843,10 @@ pub(crate) fn parse_named_choice_object_with_provenance(
         parse_card_type_other_than(rest).map(ChoiceType::card_type_from)
     } else if tag::<_, _, E>("a card type").parse(rest).is_ok() {
         Some(ChoiceType::card_type())
+    } else if let Some((options, distinctness)) = parse_card_name_enumeration(rest, original) {
+        // CR 201.4: the CLOSED domain must be tried before the open
+        // "a card name" tag below, which matches it as a prefix and drops the list.
+        Some(ChoiceType::card_name_from(options, distinctness))
     } else if alt((
         tag::<_, _, E>("a card name"),
         tag("any card name"),
@@ -37684,7 +37857,7 @@ pub(crate) fn parse_named_choice_object_with_provenance(
     .parse(rest)
     .is_ok()
     {
-        Some(ChoiceType::CardName)
+        Some(ChoiceType::card_name())
     } else if let Some((min, max)) = parse_number_enumeration(rest) {
         // CR 107.1: "choose 2, 3, or 4" (Haktos the Unscarred) — an explicit
         // printed integer candidate set. Grouped with the other `NumberRange`
@@ -41124,6 +41297,7 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::Meld { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::TurnFaceUp { .. }

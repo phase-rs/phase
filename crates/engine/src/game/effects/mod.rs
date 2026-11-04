@@ -111,6 +111,7 @@ pub mod copy_token_blocking;
 pub mod counter;
 pub mod counters;
 pub mod create_boon;
+pub mod create_card_copy_by_name;
 pub mod create_damage_replacement;
 pub mod create_draw_replacement;
 pub mod create_emblem;
@@ -5234,6 +5235,8 @@ fn effect_enters_battlefield(effect: &Effect) -> bool {
         Effect::Encore => false,
         // not a co-entry ContinuationStep: it selects cards and moves nothing itself.
         Effect::ChooseFromZone { .. } => false,
+        // CR 707.13: the copy is created to be cast, never onto the battlefield.
+        Effect::CreateCardCopyByName { .. } => false,
         // not a co-entry ContinuationStep: abandoning turns a scheme face
         // down (or returns it to the scheme deck), never onto the battlefield.
         Effect::AbandonScheme => false,
@@ -8115,6 +8118,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -8971,6 +8975,8 @@ fn effect_fields_read_filter_population(
             };
             recipient_reads || attacker_restriction.as_ref().is_some_and(has_filter)
         }
+        // CR 707.13: a name, not a filter.
+        Effect::CreateCardCopyByName { .. } => false,
         Effect::Conjure {
             cards,
             library_players,
@@ -9504,7 +9510,7 @@ fn choice_type_reads_filter_population(
         | ChoiceType::OddOrEven
         | ChoiceType::BasicLandType
         | ChoiceType::CardType { .. }
-        | ChoiceType::CardName
+        | ChoiceType::CardName { .. }
         | ChoiceType::NumberRange { .. }
         | ChoiceType::Labeled { .. }
         | ChoiceType::LandType
@@ -13292,6 +13298,9 @@ fn resolve_legacy_effect(
         }
         Effect::ProcessRadCounters => rad_counters::resolve(state, ability, events),
         Effect::Conjure { .. } => conjure::resolve(state, ability, events),
+        Effect::CreateCardCopyByName { .. } => {
+            create_card_copy_by_name::resolve(state, ability, events)
+        }
         Effect::Intensify { .. } => intensify::resolve(state, ability, events),
         Effect::ApplyPerpetual { .. } => perpetual::resolve(state, ability, events),
         Effect::DraftFromSpellbook { .. } => spellbook::resolve(state, ability, events),

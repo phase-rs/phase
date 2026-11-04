@@ -53,7 +53,10 @@ const MAX_RESULTS = 10;
 
 export function NamedChoiceModal({ data }: { data: OptionChoice["data"] }) {
   const typeKey = getChoiceTypeKey(data.choice_type);
-  if (typeKey === "CardName") {
+  // CR 201.4: the open card-name prompt publishes no options (any card name may
+  // be typed). A closed card-name domain (Garth One-Eye) publishes exactly its
+  // legal names, so it renders them like any other enumerated choice.
+  if (typeKey === "CardName" && data.options.length === 0) {
     return <CardNameSearch />;
   }
   // CR 107.1a/b: the engine publishes a free-entry contract when the answer is

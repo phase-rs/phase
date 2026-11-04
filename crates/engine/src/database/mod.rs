@@ -11,6 +11,7 @@ pub mod hideaway;
 pub mod legality;
 pub mod meld;
 pub mod mtgjson;
+pub mod name_copy_gate;
 pub mod oracle_loader;
 pub mod removed_cards;
 pub mod search;

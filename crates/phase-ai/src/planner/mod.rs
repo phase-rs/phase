@@ -4278,7 +4278,7 @@ pub(crate) mod tests {
         // CR 201.4 + CR 107.1a/b: card names and free-entry numbers are
         // validated by rule; a creature-type word is neither.
         for (label, by_rule) in [
-            ("melody/card-name", ChoiceType::CardName),
+            ("melody/card-name", ChoiceType::card_name()),
             (
                 "melody/free-entry",
                 ChoiceType::NumberRange {

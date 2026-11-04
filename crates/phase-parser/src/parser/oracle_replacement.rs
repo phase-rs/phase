@@ -20644,7 +20644,7 @@ mod tests {
             matches!(
                 *sub.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::CardName,
+                    choice_type: ChoiceType::CardName { .. },
                     persist: true,
                     ..
                 }
@@ -20675,7 +20675,7 @@ mod tests {
             matches!(
                 &*execute.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::CardName,
+                    choice_type: ChoiceType::CardName { .. },
                     persist: true,
                     ..
                 }
@@ -20758,7 +20758,7 @@ mod tests {
             matches!(
                 *choose.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::CardName,
+                    choice_type: ChoiceType::CardName { .. },
                     persist: true,
                     ..
                 }

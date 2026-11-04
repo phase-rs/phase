@@ -159,7 +159,7 @@ fn card_name_choice_marks_layers_dirty_for_chosen_name_static() {
     runner.state_mut().waiting_for = WaitingFor::NamedChoice {
         free_entry: None,
         player: P0,
-        choice_type: ChoiceType::CardName,
+        choice_type: ChoiceType::card_name(),
         options: Vec::new(),
         source: Some(choice_source),
         persist_player: None,

@@ -8000,16 +8000,36 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::ChooseOption { choice },
         ) => {
-            if matches!(choice_type, ChoiceType::CardName) {
-                let lower = choice.to_lowercase();
-                if !state
-                    .all_card_names
-                    .iter()
-                    .any(|name| name.to_lowercase() == lower)
-                {
+            // CR 201.4: the OPEN card-name prompt has no option list, so every name
+            // in the Oracle card reference is its domain and `all_card_names` is the
+            // only membership test there is. A CLOSED, Oracle-listed domain (Garth
+            // One-Eye) is the opposite: the legal answers are the ones the prompt
+            // published, and CR 608.2d has already removed from that list every name this source
+            // committed before ("a card name that hasn't been chosen"). Validating
+            // a closed domain against the global card list would accept both a
+            // seventh name and a name already used — the option list is the
+            // authority here, and this is the seam that enforces it (the client's
+            // `allow_arbitrary` projection is a hint, not a check).
+            if let ChoiceType::CardName {
+                options: domain, ..
+            } = &choice_type
+            {
+                if domain.is_empty() {
+                    let lower = choice.to_lowercase();
+                    if !state
+                        .all_card_names
+                        .iter()
+                        .any(|name| name.to_lowercase() == lower)
+                    {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Invalid card name '{}'",
+                            choice
+                        )));
+                    }
+                } else if !options.contains(&choice) {
                     return Err(EngineError::InvalidAction(format!(
-                        "Invalid card name '{}'",
-                        choice
+                        "Invalid card name '{}', must be one of: {:?}",
+                        choice, options
                     )));
                 }
             } else if let Some(accepted) = choice_type.accepts_free_entry_answer(&choice) {
@@ -8042,7 +8062,7 @@ pub(super) fn handle_resolution_choice(
             // CR 608.2d: a chosen card name is public information; surface it for
             // every naming (resolving instruction or as-enters choice) so the log
             // shows what was named.
-            if matches!(choice_type, ChoiceType::CardName) {
+            if matches!(choice_type, ChoiceType::CardName { .. }) {
                 events.push(GameEvent::CardNamed {
                     player_id: player,
                     source_id: source
@@ -8089,7 +8109,7 @@ pub(super) fn handle_resolution_choice(
             effects::choose::record_player_chosen_number(state, player, &choice_type, &choice);
             if let Some(context) = updated_context {
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    if matches!(choice_type, ChoiceType::CardName) {
+                    if matches!(choice_type, ChoiceType::CardName { .. }) {
                         frame
                             .pending
                             .chain

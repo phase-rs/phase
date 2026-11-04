@@ -5116,8 +5116,10 @@ pub(super) fn parse_choose_ast(
         ctx.pending_choice_type,
         Some(crate::types::ability::ChoiceType::NumberRange { .. })
     );
+    // CR 201.4: `text` is the un-lowercased clause. It is what lets the closed
+    // card-name domain (Garth One-Eye's six names) come out in printed case.
     if let Some(choice_type) =
-        super::try_parse_named_choice_with_provenance(lower, has_number_choice)
+        super::try_parse_named_choice_with_text(lower, Some(text), has_number_choice)
     {
         // CR 608.2d (override) + CR 701.9b (analogous): "choose a player at
         // random" (Strax) — the game selects the referent, not the controller.
@@ -7005,7 +7007,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             // number within that resolution (CR 608.2c; The Toymaker's Trap).
             persist: matches!(
                 choice_type,
-                ChoiceType::CardName
+                ChoiceType::CardName { .. }
                     | ChoiceType::CreatureType { .. }
                     | ChoiceType::CardType { .. }
                     | ChoiceType::Labeled { .. }

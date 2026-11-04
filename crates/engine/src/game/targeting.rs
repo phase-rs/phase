@@ -3254,6 +3254,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::TokenCreated { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::ObjectConjured { .. }
+        | GameEvent::CardCopyCreated { .. }
         | GameEvent::CreatureDestroyed { .. }
         | GameEvent::PermanentSacrificed { .. }
         | GameEvent::ControllerChanged { .. }

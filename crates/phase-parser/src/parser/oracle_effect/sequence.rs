@@ -8389,6 +8389,9 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
+        // CR 707.13: creates a copy from the Oracle card reference, never a `Dig`
+        // antecedent.
+        | Effect::CreateCardCopyByName { .. }
         | Effect::CombineHost { .. }
         | Effect::ChooseAugmentAndCombineWithHost { .. }
         | Effect::Intensify { .. }

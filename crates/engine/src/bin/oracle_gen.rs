@@ -644,6 +644,24 @@ fn insert_face_with_priority(
     }
 }
 
+/// CR 707.13 + CR 709.3c: gap every copy-by-name clause whose names the export
+/// cannot materialize as whole single-faced cards (see
+/// `database::name_copy_gate`). A single-faced export entry carries no `layout`.
+fn gate_unmaterializable_name_copies_in_export(face_index: &mut BTreeMap<String, CardExportEntry>) {
+    let single_faced: HashSet<String> = face_index
+        .iter()
+        .filter(|(_, entry)| entry.layout.is_none())
+        .map(|(key, _)| key.clone())
+        .collect();
+    let is_single_faced_card = |name: &str| single_faced.contains(&name.to_lowercase());
+    for entry in face_index.values_mut() {
+        engine::database::name_copy_gate::gate_unmaterializable_name_copies(
+            &mut entry.face,
+            &is_single_faced_card,
+        );
+    }
+}
+
 fn build_export_layout(
     faces: &[AtomicCard],
     oracle_id: Option<String>,
@@ -1592,6 +1610,8 @@ fn main() {
             gated_count
         );
     }
+
+    gate_unmaterializable_name_copies_in_export(&mut face_index);
 
     let json = serde_json::to_string(&face_index).expect("Failed to serialize card data");
     if let (Some(trace), Some(manifest)) = (&trace_args, trace_manifest) {

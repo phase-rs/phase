@@ -207,7 +207,7 @@ pub(crate) fn resolve_random_in_chain(
         source.as_mut(),
         persist_player,
     ) {
-        if matches!(choice_type, ChoiceType::CardName) {
+        if matches!(choice_type, ChoiceType::CardName { .. }) {
             ability.update_trigger_source_context_through_chain(context);
         } else {
             ability.update_trigger_source_context_in_resolution_segment(context);
@@ -304,7 +304,7 @@ pub(crate) fn bind_named_choice(
             // announced while applying THIS effect", so a fresh naming replaces
             // the snapshot's earlier answers (a recast spell's prior casts).
             // The source object's own history is untouched (CR 607.2d readers).
-            if matches!(choice_type, ChoiceType::CardName) {
+            if matches!(choice_type, ChoiceType::CardName { .. }) {
                 context
                     .lki
                     .chosen_attributes
@@ -379,7 +379,7 @@ pub(crate) fn bind_named_choice(
                 // may have run before the choice was made — re-run.
                 if matches!(
                     choice_type,
-                    ChoiceType::CardName
+                    ChoiceType::CardName { .. }
                         | ChoiceType::CreatureType { .. }
                         | ChoiceType::CardType { .. }
                         | ChoiceType::BasicLandType
@@ -831,9 +831,57 @@ fn compute_options(
             .into_iter()
             .map(|card_type| card_type.to_string())
             .collect(),
-        // CardName options are provided by the frontend from its local card database.
-        // The engine sends an empty list to avoid serializing 30k+ names every state update.
-        ChoiceType::CardName => Vec::new(),
+        // CR 201.4: the OPEN prompt's options are provided by the frontend from its
+        // local card database. The engine sends an empty list to avoid serializing
+        // 30k+ names every state update.
+        //
+        // A CLOSED, Oracle-listed domain is the opposite case: it is small, it is
+        // printed on the card, and the engine is the only place that knows it, so
+        // the engine enumerates it here in printed order.
+        //
+        // CR 608.2d + "...that hasn't been chosen": each successive COMMIT excludes
+        // names already committed on this source across prior resolutions. Chosen
+        // names persist as `ChosenAttribute::CardName` (bind_named_choice when
+        // persist), so the legal domain is the printed list minus that history.
+        // Exhausting it leaves an empty list → `choose::resolve` sets
+        // `cost_payment_failed_flag` and no-ops, which is exactly Garth One-Eye
+        // after all six names have been used (CR 609.3: the impossible choice does
+        // as much as possible, which is nothing).
+        //
+        // BOUNDARY: source-global subtraction, mirroring the `NumberRange` arm
+        // below. Safe for the current pool — a card with a
+        // `DistinctFromSourceHistory` name choice AND a separate persisting name
+        // choice on the same source would need a per-choice tag.
+        ChoiceType::CardName {
+            options,
+            distinctness,
+        } => match distinctness {
+            crate::types::ability::NameDistinctness::Repeatable => options.clone(),
+            crate::types::ability::NameDistinctness::DistinctFromSourceHistory => {
+                let used: Vec<String> = state
+                    .objects
+                    .get(&source_id)
+                    .map(|o| {
+                        o.chosen_attributes
+                            .iter()
+                            .filter_map(|a| match a {
+                                ChosenAttribute::CardName(name) => Some(name.clone()),
+                                _ => None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                options
+                    .iter()
+                    .filter(|name| {
+                        !used
+                            .iter()
+                            .any(|chosen| chosen.eq_ignore_ascii_case(name.as_str()))
+                    })
+                    .cloned()
+                    .collect()
+            }
+        },
         ChoiceType::NumberRange {
             min,
             max,
@@ -1114,7 +1162,7 @@ mod tests {
 
         // POSITIVE: `CardName` is a LAST-match (`.rev()`) read, so its history
         // must survive.
-        let name_choice = ChoiceType::CardName;
+        let name_choice = ChoiceType::card_name();
         let mut names = Vec::new();
         apply_choice_attributes(&mut names, &name_choice, "Shock");
         apply_choice_attributes(&mut names, &name_choice, "Bolt");
@@ -1563,7 +1611,7 @@ mod tests {
     #[test]
     fn choose_card_name_sends_empty_options() {
         let mut state = GameState::new_two_player(42);
-        let ability = make_choose_ability(ChoiceType::CardName);
+        let ability = make_choose_ability(ChoiceType::card_name());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -1574,7 +1622,7 @@ mod tests {
                 options,
                 ..
             } => {
-                assert_eq!(*choice_type, ChoiceType::CardName);
+                assert_eq!(*choice_type, ChoiceType::card_name());
                 assert!(options.is_empty());
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
@@ -2027,7 +2075,7 @@ mod tests {
         // impossible. The no-op short-circuit must NOT fire here — the prompt
         // still goes up so the player can name a card.
         let mut state = GameState::new_two_player(42);
-        let ability = make_choose_ability(ChoiceType::CardName);
+        let ability = make_choose_ability(ChoiceType::card_name());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
         assert!(
