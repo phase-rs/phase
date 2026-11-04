@@ -131,7 +131,7 @@ fn has_static(runner: &GameRunner, id: ObjectId, mode: &StaticMode) -> bool {
         .any(|def| def.mode == *mode)
 }
 
-/// R5: on a real Marooned board the reader excludes Marooned's host and admits
+/// P1-R5: on a real Marooned board the reader excludes Marooned's host and admits
 /// another creature. An opponent's (P1's) Marooned on P0's creature is the
 /// realistic case. Reach control: before `attach`, the same board admits A, so
 /// the exclusion comes from the host binding (`EnchantedBy`), not from
@@ -168,7 +168,7 @@ fn marooned_host_cannot_be_beamed_up_but_another_creature_can() {
     assert!(probe_admits(&runner, a, b));
 }
 
-/// R6: the prohibition is keyed on the `CantBeBeamedUp` static, not on the
+/// P1-R6: the prohibition is keyed on the `CantBeBeamedUp` static, not on the
 /// Aura's other static or its attachment. Malfunction carries the identical
 /// `CantUntap` on the enchanted permanent but prints no beam me up clause.
 #[test]
@@ -192,7 +192,7 @@ fn malfunction_host_can_still_be_beamed_up() {
     assert!(can_be_beamed_up(runner.state(), b));
 }
 
-/// R7a (CR 611.3a): the binding is live and source-relative. Moving Marooned
+/// P1-R7a (CR 611.3a): the binding is live and source-relative. Moving Marooned
 /// from A to B moves the prohibition with it; no latched id survives.
 #[test]
 fn moving_marooned_moves_the_prohibition() {
@@ -221,7 +221,7 @@ fn moving_marooned_moves_the_prohibition() {
     assert!(!probe_admits(&runner, a, b));
 }
 
-/// R7b: Marooned's text has no controller clause, so a Marooned controlled by
+/// P1-R7b: Marooned's text has no controller clause, so a Marooned controlled by
 /// the host's own controller (P0) still blocks its host.
 #[test]
 fn own_marooned_still_blocks_its_host() {
