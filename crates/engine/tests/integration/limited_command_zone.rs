@@ -29,7 +29,8 @@ use engine::game::interaction::{
 };
 use engine::game::scenario::{GameRunner, P0, P1};
 use engine::game::visibility::{
-    filter_events_for_viewer, filter_state_for_viewer, HIDDEN_CARD_NAME,
+    filter_events_for_viewer, filter_state_for_unseated_viewer, filter_state_for_viewer,
+    HIDDEN_CARD_NAME,
 };
 use engine::types::ability::{
     ChosenAttribute, ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
@@ -1120,6 +1121,22 @@ fn game_end_reveal_keeps_secret_agenda_names_private_to_the_controller() {
         .expect("wire state serializes");
     assert!(controller_wire.contains("Runeclaw Bear"));
     assert!(controller_wire.contains("agenda_name_count"));
+
+    let spectator_view = filter_state_for_unseated_viewer(&state);
+    assert!(spectator_view.objects[&bond_id]
+        .secret_chosen_names
+        .is_empty());
+    assert_eq!(spectator_view.objects[&bond_id].agenda_name_count, 0);
+
+    let spectator_wire = serde_json::to_string(&ClientGameStateRef::wrap(&state, None))
+        .expect("spectator wire state serializes");
+    assert!(
+        !spectator_wire.contains("Runeclaw Bear"),
+        "the spectator's wire carries no secret agenda name"
+    );
+    assert!(!spectator_wire.contains("Grizzly Bears"));
+    assert!(!spectator_wire.contains("secret_chosen_names"));
+    assert!(!spectator_wire.contains("agenda_name_count"));
 }
 
 /// The command-zone objects `owner` owns, in command-zone order.
