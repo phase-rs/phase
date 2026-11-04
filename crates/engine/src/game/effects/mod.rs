@@ -1736,6 +1736,25 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             {
                 drain_pending_continuation(state, events);
             }
+            // CR 615.5 + CR 608.2c: the retired dispatch can expose its frame's
+            // outer paused dispatch with nothing above it. Its own instruction
+            // finished while the nested continuation was still active (Swans of
+            // Bryn Argoll's draw, both of whose cards Abundance replaced), so
+            // `draw::resume_draw_sequence_outcome` left it resident, and no later
+            // continuation will retire it. Retire it now, and run the work queued
+            // behind it, through the frame's own resume arm.
+            if !waits_for_resolution_choice(&state.waiting_for)
+                && matches!(
+                    state.resolution_stack.last(),
+                    Some(ResolutionFrame::PostReplacement(drains))
+                        if matches!(
+                            drains.resident().map(|drain| &drain.status),
+                            Some(crate::types::game_state::DrainStatus::Paused)
+                        )
+                )
+            {
+                resume_resolution_frames(state, events);
+            }
         }
     }
     // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose

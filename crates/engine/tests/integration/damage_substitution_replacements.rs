@@ -62,6 +62,8 @@ const PHYTOHYDRA: &str =
     "If damage would be dealt to this creature, put that many +1/+1 counters on it instead.";
 const LICHENTHROPE: &str = "If damage would be dealt to this creature, put that many -1/-1 counters on it instead.\nAt the beginning of your upkeep, remove a -1/-1 counter from this creature.";
 const PHYREXIAN_HYDRA: &str = "Infect (This creature deals damage to creatures in the form of -1/-1 counters and to players in the form of poison counters.)\nIf damage would be dealt to this creature, prevent that damage. Put a -1/-1 counter on this creature for each 1 damage prevented this way.";
+const SWANS_OF_BRYN_ARGOLL: &str = "Flying\nIf a source would deal damage to this creature, prevent that damage. The source's controller draws cards equal to the damage prevented this way.";
+const ABUNDANCE: &str = "If you would draw a card, you may instead choose land or nonland and reveal cards from the top of your library until you reveal a card of the chosen kind. Put that card into your hand and put all other cards revealed this way on the bottom of your library in any order.";
 const FORCE_BUBBLE: &str = "If damage would be dealt to you, put that many depletion counters on this enchantment instead.\nWhen there are four or more depletion counters on this enchantment, sacrifice it.\nAt the beginning of each end step, remove all depletion counters from this enchantment.";
 const DELAYING_SHIELD: &str = "If damage would be dealt to you, put that many delay counters on this enchantment instead.\nAt the beginning of your upkeep, remove all delay counters from this enchantment. For each delay counter removed this way, you lose 1 life unless you pay {1}{W}.";
 const CRUMBLING_SANCTUARY: &str = "If damage would be dealt to a player, that player exiles that many cards from the top of their library instead.";
@@ -1779,6 +1781,85 @@ fn work_queued_behind_a_paused_rider_runs_in_the_order_it_was_queued() {
     assert_eq!(plus_counters(&runner, a), 8);
     assert_eq!(zone(&runner, id), Zone::Battlefield);
     assert_at_rest(&runner);
+}
+
+/// Pyroclasm at P1's Swans of Bryn Argoll: "The source's controller draws cards equal to the
+/// damage prevented this way." P0 draws 2, and P0's Abundance replaces each draw: "you may
+/// instead choose land or nonland and reveal cards from the top of your library until you
+/// reveal a card of the chosen kind. Put that card into your hand …". P0 takes both and chooses
+/// nonland twice; the Swans' draw is over with its second card (CR 121.2, CR 614.6, CR 615.5).
+///
+/// Behind the Swans' draw wait Phytohydra's 2 +1/+1 counters and Lichenthrope's 2 -1/-1
+/// counters, and both run before Pyroclasm finishes (CR 608.2c, CR 615.5). With a 0/9 in their
+/// place nothing waits, and Pyroclasm still finishes.
+#[test]
+fn a_rider_draw_replaced_card_by_card_finishes_and_runs_the_work_behind_it() {
+    for queued in [false, true] {
+        let mut scenario = self::scenario();
+        for index in 0..4 {
+            scenario.add_spell_to_library_top(P0, &format!("Library Filler {index}"), true);
+        }
+        let abundance = scenario
+            .add_enchantment_from_oracle(P0, "Abundance", ABUNDANCE)
+            .id();
+        let swans = scenario
+            .add_creature_from_oracle(P1, "Swans of Bryn Argoll", 4, 3, SWANS_OF_BRYN_ARGOLL)
+            .from_oracle_text_with_keywords(&["Flying"], SWANS_OF_BRYN_ARGOLL)
+            .id();
+        let substitutes = queued.then(|| {
+            let hydra = phytohydra(&mut scenario, P1);
+            let lichenthrope = scenario
+                .add_creature_from_oracle(P1, "Lichenthrope", 5, 5, LICHENTHROPE)
+                .id();
+            (hydra, lichenthrope)
+        });
+        let wall = (!queued).then(|| scenario.add_creature(P1, "Wall", 0, 9).id());
+        let spell = sorcery(&mut scenario, "Pyroclasm", PYROCLASM);
+        let mut runner = scenario.build();
+        let hand_before = player(&runner, P0).hand.len();
+        let library_before = player(&runner, P0).library.len();
+        let mut events = cast(&mut runner, spell, vec![]);
+
+        let (mut accepted, mut chosen) = (0, 0);
+        loop {
+            match &runner.state().waiting_for {
+                WaitingFor::ReplacementChoice { .. } => {
+                    accepted += 1;
+                    choose(&mut runner, &mut events, |candidate| {
+                        candidate.source_id == abundance && candidate.description == "Accept"
+                    });
+                }
+                WaitingFor::NamedChoice { .. } => {
+                    chosen += 1;
+                    let choice = "Nonland".to_string();
+                    answer(
+                        &mut runner,
+                        GameAction::ChooseOption { choice },
+                        &mut events,
+                    );
+                }
+                _ => break,
+            }
+        }
+
+        assert_eq!((accepted, chosen), (2, 2));
+        assert_eq!(player(&runner, P0).hand.len(), hand_before - 1 + 2);
+        assert_eq!(player(&runner, P0).library.len(), library_before - 2);
+        assert_eq!(damage(&runner, swans), 0);
+        if let Some(wall) = wall {
+            assert_eq!(damage(&runner, wall), 2);
+        }
+        if let Some((hydra, lichenthrope)) = substitutes {
+            assert_eq!(plus_counters(&runner, hydra), 2);
+            assert_eq!(
+                counters(&runner, lichenthrope, &CounterType::Minus1Minus1),
+                2
+            );
+            assert_eq!(damage(&runner, hydra), 0);
+            assert_eq!(damage(&runner, lichenthrope), 0);
+        }
+        assert_at_rest(&runner);
+    }
 }
 
 /// Temper with its printed {X}{1}{W}, and the mana to pay for it.
