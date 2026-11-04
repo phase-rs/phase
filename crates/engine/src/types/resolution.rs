@@ -4211,6 +4211,26 @@ impl ResolutionStack {
             });
         }
         let has_multi_draw = multi_draw_count == 1;
+        // CR 101.4 + CR 608.2c: at most one staged BatchDelivery owns an
+        // action. The elimination/reconcile seam selects that owner by a
+        // bounded stack walk; enforcing uniqueness here makes the selection
+        // exact instead of incidental.
+        let staged_owner_count = self
+            .frames
+            .iter()
+            .filter(|frame| {
+                matches!(
+                    frame,
+                    ResolutionFrame::BatchDelivery(batch) if batch.staged.is_some()
+                )
+            })
+            .count();
+        if staged_owner_count > 1 {
+            return Err(ResolutionStackError::InvalidPayload {
+                frame: FrameKind::BatchDelivery,
+                message: "multiple staged batch owners in one action".to_string(),
+            });
+        }
         let mut discard_ids = HashSet::new();
         let mut post_replacement_ids = HashSet::new();
         let mut direct_choice_count = 0;
