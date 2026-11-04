@@ -2616,7 +2616,9 @@ fn reconcile_loop_shortcut(state: &mut GameState, result: &mut ActionResult) {
         match state.loop_detection {
             LoopDetectionMode::Interactive => {
                 for span in mandatory.into_iter().rev() {
-                    if mandatory_outcome(state, result, span) {
+                    if !super::play_trace::offer_latched(state, span)
+                        && mandatory_outcome(state, result, span)
+                    {
                         return;
                     }
                 }
@@ -3038,6 +3040,7 @@ fn mandatory_outcome(
             counted_take,
             residual,
         } => {
+            super::play_trace::note_offered(state, span);
             offer_draw_without_end(state, result, residual, counted_take);
             true
         }
@@ -8565,8 +8568,12 @@ fn try_offer_object_growth_shortcut(
     let WaitingFor::Priority { player: caster } = state.waiting_for else {
         return None;
     };
-    // The retry: each span in the order the trace named it, until one confirms.
+    // The retry: each span in the order the trace named it, until one confirms; CR 732.2a: a
+    // period this window already offered is not offered again.
     let (span, confirmation) = spans.iter().find_map(|&span| {
+        if super::play_trace::offer_latched(state, span) {
+            return None;
+        }
         #[cfg(feature = "test-support")]
         crate::game::perf_counters::record_play_trace(|counters| counters.confirm_asks += 1);
         let confirmation = super::period_confirm::confirm(state, span).ok()?;
@@ -9219,17 +9226,13 @@ struct LoopShortcutOffer<'a> {
 
 /// CR 732.2a: reject a
 /// shortcut declaration and hand priority back to the next living seat — the manual-play
-/// handback every reject path in `handle_declare_shortcut` lands on. The rejected offer is
-/// declined: the proposer's plays leave the trace, as at a decline. Single
+/// handback every reject path in `handle_declare_shortcut` lands on. The proposer's plays stay
+/// in the trace; the window's offer latch (`play_trace::offer_latched`) keeps it from offering
+/// the period again. Single
 /// authority: a reject path added later cannot forget to sync `result.waiting_for`.
 /// Cited by CR number, not by `MagicCompRules.txt` line: that file is gitignored and
 /// re-fetched, so its line coordinates rot on every rules release.
-fn reject_shortcut_declaration(
-    state: &mut GameState,
-    proposer: PlayerId,
-    result: &mut ActionResult,
-) {
-    super::play_trace::discard_seat(state, proposer);
+fn reject_shortcut_declaration(state: &mut GameState, result: &mut ActionResult) {
     priority::reset_priority(state);
     state.waiting_for = WaitingFor::Priority {
         player: living_priority_seat(state),
@@ -9337,7 +9340,7 @@ fn handle_declare_shortcut(
         crate::analysis::decision_template::IterationCount::Fixed(n)
             if *n > MAX_SHORTCUT_CYCLES =>
         {
-            reject_shortcut_declaration(state, offer.proposer, &mut result);
+            reject_shortcut_declaration(state, &mut result);
             return Ok(result);
         }
         // CR 732.2a: the per-offer ceiling, enforced at the same single authority as the
@@ -9349,7 +9352,7 @@ fn handle_declare_shortcut(
         crate::analysis::decision_template::IterationCount::Fixed(n)
             if *n > offer.schema.deliverable_capacity =>
         {
-            reject_shortcut_declaration(state, offer.proposer, &mut result);
+            reject_shortcut_declaration(state, &mut result);
             return Ok(result);
         }
         // CR 732.2a: `UntilLethal` names no count at all, so it can only be legal when the
@@ -9359,7 +9362,7 @@ fn handle_declare_shortcut(
         crate::analysis::decision_template::IterationCount::UntilLethal
             if offer.schema.is_bounded() =>
         {
-            reject_shortcut_declaration(state, offer.proposer, &mut result);
+            reject_shortcut_declaration(state, &mut result);
             return Ok(result);
         }
         // CR 732.2a: a proposal without end is legal only on an offer that published one.
@@ -9367,7 +9370,7 @@ fn handle_declare_shortcut(
             if offer.schema.iteration_count
                 != crate::analysis::decision_template::IterationCount::WithoutEnd =>
         {
-            reject_shortcut_declaration(state, offer.proposer, &mut result);
+            reject_shortcut_declaration(state, &mut result);
             return Ok(result);
         }
         // Under-cap `Fixed` and `UntilLethal` (period-bounded by `shortcut_drive_period`)
@@ -9429,7 +9432,7 @@ fn handle_declare_shortcut(
     // `WaitingFor::RespondToShortcut` never runs this handler) lives on
     // `apply_confirmed_shortcut`'s consumption guard.
     if template.as_ref().is_some_and(|t| t.owner != offer.proposer) {
-        reject_shortcut_declaration(state, offer.proposer, &mut result);
+        reject_shortcut_declaration(state, &mut result);
         return Ok(result);
     }
     // CR 732.2a: a declaration cannot pin choices the offer published none of. Every
@@ -9469,7 +9472,7 @@ fn handle_declare_shortcut(
             template.as_ref(),
             &count,
         ) {
-            reject_shortcut_declaration(state, offer.proposer, &mut result);
+            reject_shortcut_declaration(state, &mut result);
             return Ok(result);
         }
     } else {
@@ -9498,7 +9501,7 @@ fn handle_declare_shortcut(
                     offer.period.recorded_answers(),
                     state,
                 ) {
-                    reject_shortcut_declaration(state, offer.proposer, &mut result);
+                    reject_shortcut_declaration(state, &mut result);
                     return Ok(result);
                 }
             }
@@ -9507,7 +9510,7 @@ fn handle_declare_shortcut(
             // replays; without one a pin-consuming drive would run with no pins, so it fails closed
             // into the manual-play handback.
             None if !offer.schema.points.is_empty() && offer.period.is_empty() => {
-                reject_shortcut_declaration(state, offer.proposer, &mut result);
+                reject_shortcut_declaration(state, &mut result);
                 return Ok(result);
             }
             None => {}

@@ -3420,6 +3420,33 @@ fn a_declined_offer_without_end_leaves_the_out_and_is_offered_again() {
     );
 }
 
+/// CR 732.2a: a counted declaration past the offer's capacity is refused; P0 gets priority and
+/// the window does not offer the period again, while a loop left alone is offered again.
+#[test]
+fn a_refused_declaration_without_end_is_not_offered_again_at_its_window() {
+    let Some(mut runner) = at_a_without_end_offer() else {
+        return;
+    };
+    let WaitingFor::LoopShortcut { schema, .. } = &runner.state().waiting_for else {
+        unreachable!("at an offer");
+    };
+    assert_eq!(schema.iteration_count, IterationCount::WithoutEnd);
+    let past = IterationCount::Fixed(schema.deliverable_capacity + 1);
+    runner
+        .act(declare(past))
+        .expect("a refused declaration hands priority back");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        matches!(pass_on(&mut runner, 60), WaitingFor::LoopShortcut { .. }),
+        "{:?}",
+        runner.state().waiting_for
+    );
+}
+
 /// CR 732.2a + CR 732.2b: the interaction publishes the proposal's count, answers its
 /// acceptance with the declaration, and offers the responder every place to shorten it.
 #[test]

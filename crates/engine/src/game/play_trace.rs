@@ -488,8 +488,8 @@ pub(crate) struct PlayTrace {
     named: im::Vector<NamedSpan>,
     /// The first named span no window has read.
     unread: usize,
-    /// The span the latest offer was made for.
-    offered: Option<NamedSpan>,
+    /// The span the latest offer was made for, with the window's entry count when it was made.
+    offered: Option<(NamedSpan, usize)>,
     undo: im::Vector<UndoPoint>,
     /// CR 733.1: the mana abilities the engine reversed inside the action in progress.
     reversed: Vec<(ObjectId, usize)>,
@@ -2155,8 +2155,20 @@ pub(crate) fn note_offered(state: &mut GameState, span: NamedSpan) {
         .as_deref_mut()
         .filter(|trace| trace.window == window)
     {
-        trace.offered = Some(span);
+        trace.offered = Some((span, trace.entries.len()));
     }
+}
+
+/// CR 732.2a: whether `span` names a period this window already offered: a window span ending
+/// within the trace as it stood at the offer, or the offered carried span itself. A refused
+/// declaration leaves the plays standing, so this is what keeps the window from offering it again.
+pub(crate) fn offer_latched(state: &GameState, span: NamedSpan) -> bool {
+    current(state)
+        .and_then(|trace| trace.offered)
+        .is_some_and(|(offered, prefix)| match span.source {
+            SpanSource::Window => span.end <= prefix,
+            SpanSource::Carried(_) => span == offered,
+        })
 }
 
 /// The printed identity of the node a triggered stack entry resolves, as a replayed cycle reports
@@ -2329,7 +2341,7 @@ pub fn play_trace_view(state: &GameState) -> Option<PlayTraceView> {
         entries: trace.entries.iter().cloned().collect(),
         named: trace.named.iter().copied().collect(),
         node_count: trace.nodes.len(),
-        offered: trace.offered,
+        offered: trace.offered.map(|(span, _)| span),
         carried: trace
             .carried
             .iter()
