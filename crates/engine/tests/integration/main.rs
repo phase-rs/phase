@@ -149,7 +149,6 @@ mod issue_6678_captain_america_shield_tap_defender;
 mod issue_6858_draw_that_many_discard;
 mod issue_6877_departed_triggering_spell;
 mod issue_7386_ozolith_combat_counter_move;
-mod issue_7899_blaster_hulk_energy_cost;
 mod issue_8024_terminal_rest_captures;
 mod issue_836_hero_of_bladehold_battle_cry;
 mod issue_8485_maze_of_ith_defender;
