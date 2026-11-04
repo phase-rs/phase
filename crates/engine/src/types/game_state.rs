@@ -6929,6 +6929,7 @@ impl PendingBatchDeliveries {
                     | StagedBatchMemberState::Approved
                     | StagedBatchMemberState::PreventedWithChild
                     | StagedBatchMemberState::Terminal
+                    | StagedBatchMemberState::Abandoned
             )
         {
             return Err(
