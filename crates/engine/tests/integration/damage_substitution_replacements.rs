@@ -1744,6 +1744,183 @@ fn every_rider_queued_behind_a_paused_rider_runs() {
     assert_at_rest(&runner);
 }
 
+const MASTER_OF_THE_WILD_HUNT: &str = "At the beginning of your upkeep, create a 2/2 green Wolf creature token.\n{T}: Tap all untapped Wolf creatures you control. Each Wolf tapped this way deals damage equal to its power to target creature. That creature deals damage equal to its power divided as its controller chooses among any number of those Wolves.";
+
+/// Master of the Wild Hunt: "That creature deals damage equal to its power divided as its
+/// controller chooses among any number of those Wolves." The division is chosen while the
+/// ability resolves (CR 608.2d), and the chosen portions are one batch. Wolf A and Wolf B are
+/// each under their own Test of Faith, with Hardened Scales and Doubling Season: Wolf A's
+/// counters ask an order (CR 616.1) and leave the prompt standing while the division goes on to
+/// Wolf B and Wolf C; Wolf B's counters wait behind Wolf A's (CR 608.2c, CR 615.5). One
+/// prevented damage is one counter event either way, so each Wolf gets (1 + 1) × 2 = 4.
+#[test]
+fn a_resolution_time_division_keeps_its_later_riders_behind_a_paused_one() {
+    let mut scenario = self::scenario();
+    let master = scenario
+        .add_creature_from_oracle(P0, "Master of the Wild Hunt", 3, 3, MASTER_OF_THE_WILD_HUNT)
+        .with_subtypes(vec!["Human", "Shaman"])
+        .id();
+    let mut wolf = |name: &str| {
+        scenario
+            .add_creature(P0, name, 2, 2)
+            .with_subtypes(vec!["Wolf"])
+            .id()
+    };
+    let a = wolf("Wolf A");
+    let b = wolf("Wolf B");
+    let c = wolf("Wolf C");
+    let brute = scenario.add_creature(P1, "Target Brute", 3, 10).id();
+    let scales = scenario
+        .add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES)
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON);
+    let faith_a = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let faith_b = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let mut runner = scenario.build();
+    cast(&mut runner, faith_a, vec![object_target(a)]);
+    cast(&mut runner, faith_b, vec![object_target(b)]);
+
+    let mut events = runner
+        .act(GameAction::ActivateAbility {
+            source_id: master,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Master of the Wild Hunt")
+        .events;
+    settle(&mut runner, &mut vec![object_target(brute)], &mut events);
+    let WaitingFor::DistributeAmong { player, total, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected the division prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!((player, total), (P1, 3));
+    assert_eq!(damage(&runner, brute), 6, "each Wolf dealt the target 2");
+
+    events.extend(
+        runner
+            .act(GameAction::DistributeAmong {
+                distribution: vec![
+                    (object_target(a), 1),
+                    (object_target(b), 1),
+                    (object_target(c), 1),
+                ],
+            })
+            .expect("a legal division")
+            .events,
+    );
+    assert_prompt_is_replacement_choice(&runner);
+    assert_eq!(
+        damage(&runner, c),
+        1,
+        "the division went on past the prompt"
+    );
+    let mut orders = Vec::new();
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ) {
+        orders.push((plus_counters(&runner, a), plus_counters(&runner, b)));
+        choose_source(&mut runner, &mut events, scales);
+    }
+
+    assert_eq!(orders, vec![(0, 0), (4, 0)]);
+    assert_eq!(
+        (plus_counters(&runner, a), plus_counters(&runner, b)),
+        (4, 4)
+    );
+    assert_eq!((damage(&runner, a), damage(&runner, b)), (0, 0));
+    assert_eq!(plus_counters(&runner, c), 0);
+    assert_eq!(prevented(&events), 2);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 },
+        "CR 117.3b: the active player receives priority after resolution"
+    );
+    assert_at_rest(&runner);
+}
+
+/// Master of the Wild Hunt's division under Furnace of Rath, with Wolf A under Test of Faith.
+/// Wolf A's portion meets two replacements, so its controller orders them (CR 616.1) and the
+/// rest of the division waits for that answer (CR 608.2c). Test of Faith first prevents the 1
+/// damage, leaving Furnace of Rath nothing to double, and puts one counter on Wolf A. Then
+/// Furnace of Rath doubles Wolf B's and Wolf C's 1 to 2, which destroys each 2/2 (CR 704.5g).
+#[test]
+fn a_resolution_time_division_parks_its_other_portions_behind_an_order_choice() {
+    let mut scenario = self::scenario();
+    let master = scenario
+        .add_creature_from_oracle(P0, "Master of the Wild Hunt", 3, 3, MASTER_OF_THE_WILD_HUNT)
+        .with_subtypes(vec!["Human", "Shaman"])
+        .id();
+    let mut wolf = |name: &str| {
+        scenario
+            .add_creature(P0, name, 2, 2)
+            .with_subtypes(vec!["Wolf"])
+            .id()
+    };
+    let a = wolf("Wolf A");
+    let b = wolf("Wolf B");
+    let c = wolf("Wolf C");
+    let brute = scenario.add_creature(P1, "Target Brute", 3, 20).id();
+    furnace(&mut scenario);
+    let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let mut runner = scenario.build();
+    cast(&mut runner, faith, vec![object_target(a)]);
+
+    let mut events = runner
+        .act(GameAction::ActivateAbility {
+            source_id: master,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Master of the Wild Hunt")
+        .events;
+    settle(&mut runner, &mut vec![object_target(brute)], &mut events);
+    let WaitingFor::DistributeAmong { player, total, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected the division prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!((player, total), (P1, 3));
+    assert_eq!(damage(&runner, brute), 12, "each Wolf's 2, doubled");
+
+    events.extend(
+        runner
+            .act(GameAction::DistributeAmong {
+                distribution: vec![
+                    (object_target(a), 1),
+                    (object_target(b), 1),
+                    (object_target(c), 1),
+                ],
+            })
+            .expect("a legal division")
+            .events,
+    );
+    assert_prompt_is_replacement_choice(&runner);
+    assert_eq!(
+        (damage(&runner, b), damage(&runner, c)),
+        (0, 0),
+        "the other portions wait for the order"
+    );
+    choose_shield(&mut runner, &mut events);
+
+    assert_eq!(plus_counters(&runner, a), 1);
+    assert_eq!(damage(&runner, a), 0);
+    assert_eq!(zone(&runner, a), Zone::Battlefield);
+    assert_eq!(zone(&runner, b), Zone::Graveyard);
+    assert_eq!(zone(&runner, c), Zone::Graveyard);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 },
+        "CR 117.3b: the active player receives priority after resolution"
+    );
+    assert_at_rest(&runner);
+}
+
 /// Pyroclasm at Bear A, Bear B and Bear C, each under its own Test of Faith, and Dralnu, Lich
 /// Lord. The counters queued behind Bear A's paused counters run in the order they were queued
 /// (CR 608.2c, CR 615.5): Bear B's, then Bear C's. Dralnu sacrifices two lands, and every Bear

@@ -418,6 +418,13 @@ fn handle_replacement_choice_inner(
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
     let parked_zone_change_delivery = state.pending_zone_change_delivery_from_replacement();
+    // CR 701.9a + CR 614.6: the paused frameless single-card discard this
+    // replacement answer owns, if any (paused by a CR 616.1 choice or by a
+    // single optional replacement's apply-or-decline choice).
+    // Captured with the other `parked_*` reads; a carrier installed while this
+    // answer resolves (a nested connive) belongs to the next answer and is left
+    // in place.
+    let parked_single_discard = state.pending_single_discard.as_deref().copied();
     let parked_phase_begin = state
         .pending_replacement
         .as_ref()
@@ -525,8 +532,30 @@ fn handle_replacement_choice_inner(
                         // remaining tail as a `ContinueZoneDeliveryTail` record
                         // (carrying `CallerEpilogue`, so the NEXT resume's
                         // epilogue still owns the continuation drain). Surface
-                        // the parked prompt; the epilogue must not run yet.
+                        // the parked prompt; the epilogue must not run yet. A
+                        // paused frameless discard delivered by this move is
+                        // settled first.
                         crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
+                            // CR 701.9a + CR 614.6: the paused discard's move was
+                            // delivered in this action (its hand departure is in
+                            // `events`) before the delivery tail parked this
+                            // prompt; settle it now, while the shared stamp can
+                            // still see that departure. CR 603.2 + CR 603.3b: this
+                            // action ends on a prompt, so the post-action scan
+                            // never sees it; defer the observers of exactly the
+                            // stamped events.
+                            if parked_single_discard.is_some()
+                                && state.pending_single_discard.as_deref().copied()
+                                    == parked_single_discard
+                            {
+                                let settle_start = events.len();
+                                effects::settle_paused_single_discard(state, events);
+                                super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                                    state,
+                                    events,
+                                    settle_start,
+                                );
+                            }
                             if let (Some(provenance), Some(pending)) = (
                                 parked_sacrifice_provenance,
                                 state.pending_replacement.as_mut(),
@@ -1152,6 +1181,17 @@ fn handle_replacement_choice_inner(
             };
             state.waiting_for = waiting_for.clone();
 
+            // CR 701.9a + CR 614.6: the replaced discard still happened; record it
+            // now that its move has been delivered, before post-replacement and
+            // `waiting_for`-gated drains run. Gated on the carrier latched before
+            // `continue_replacement` so a carrier installed during this answer
+            // (a different discard's, owed to a later answer) is not consumed here.
+            if parked_single_discard.is_some()
+                && state.pending_single_discard.as_deref().copied() == parked_single_discard
+            {
+                effects::settle_paused_single_discard(state, events);
+            }
+
             let mut replacement_ctx = None;
             if zone_change_object_id.is_some_and(|object_id| {
                 state
@@ -1632,6 +1672,14 @@ fn handle_replacement_choice_inner(
             ))
         }
         super::replacement::ReplacementResult::Prevented => {
+            // CR 614.6: a prevented move never happened, so the paused discard
+            // owned by this answer is never recorded. A carrier installed by a
+            // substitute during this answer is a different value and survives.
+            if parked_single_discard.is_some()
+                && state.pending_single_discard.as_deref().copied() == parked_single_discard
+            {
+                state.pending_single_discard = None;
+            }
             if let Some(paused) = parked_zone_change_delivery.as_ref() {
                 state.capture_paused_zone_change_delivery(
                     paused.member,

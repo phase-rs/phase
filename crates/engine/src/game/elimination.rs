@@ -1634,6 +1634,9 @@ fn do_eliminate(
     }
     if state.pending_replacement.is_some() && leaving_is_latched_chooser {
         state.pending_replacement = None;
+        // CR 800.4a: a paused frameless single-card discard belongs to the
+        // abandoned choice of the leaving player; left behind it would go stale.
+        state.pending_single_discard = None;
         state.replacement_may_cost_paused = false;
         super::replacement::abandon_post_replacement_continuation(state);
         super::turns::abandon_phase_begin_choice(state);
