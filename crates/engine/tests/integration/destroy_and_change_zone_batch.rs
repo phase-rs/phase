@@ -41,9 +41,11 @@ use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
-const WRATH: &str = "Destroy all creatures.";
+const DAY_OF_JUDGMENT: &str = "Destroy all creatures.";
 const HEX: &str = "Destroy six target creatures.";
 const FINAL_JUDGMENT: &str = "Exile all creatures.";
+// Fixture: the return instruction only. The printed token continuation and
+// flashback are card-level coverage, not part of this population row.
 const VENGEFUL_REGROWTH: &str =
     "Return up to three target land cards from your graveyard to the battlefield tapped.";
 
@@ -99,7 +101,7 @@ fn d1_mass_destroy_settles_the_whole_population() {
         .indestructible()
         .id();
     let wrath = scenario
-        .add_spell_to_hand_from_oracle(P0, "Wrath of God", false, WRATH)
+        .add_spell_to_hand_from_oracle(P0, "Day of Judgment", false, DAY_OF_JUDGMENT)
         .with_mana_cost(ManaCost::zero())
         .id();
 
@@ -165,7 +167,7 @@ fn d3_first_member_pause_keeps_the_remaining_population() {
     scenario.with_counter(shielded, CounterType::Shield, 1);
     let second = scenario.add_creature(P0, "Other Bear", 2, 2).id();
     let day = scenario
-        .add_spell_to_hand_from_oracle(P0, "Day of Judgment", false, WRATH)
+        .add_spell_to_hand_from_oracle(P0, "Day of Judgment", false, DAY_OF_JUDGMENT)
         .with_mana_cost(ManaCost::zero())
         .id();
 
@@ -346,7 +348,7 @@ fn d2_prevention_controls_regen_shield_counter_and_cant_regenerate() {
     let shielded = scenario.add_creature(P0, "Boon Bear", 2, 2).id();
     scenario.with_counter(shielded, CounterType::Shield, 1);
     let plain = scenario.add_creature(P0, "Plain Bear", 2, 2).id();
-    let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH);
+    let wrath = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
 
     let mut runner = scenario.build();
     let outcome = runner.cast(wrath).replacement_choice(0).resolve();
@@ -469,8 +471,8 @@ fn d2_umbra_armor_prevents_destruction_even_with_cant_regenerate() {
             .count()
     }
 
-    // Wrath of God (no cant_regenerate): the Umbra replaces the destruction.
-    let (state, events, host, plain, umbra) = umbra_board(WRATH, "Wrath of God");
+    // Day of Judgment (no cant_regenerate): the Umbra replaces the destruction.
+    let (state, events, host, plain, umbra) = umbra_board(DAY_OF_JUDGMENT, "Day of Judgment");
     assert_eq!(
         state.objects[&host].zone,
         Zone::Battlefield,
@@ -543,7 +545,7 @@ fn d3b_redirected_back_member_is_remained_with_one_creature_destroyed() {
     };
     let first = scenario.add_creature(P0, "First Bear", 2, 2).id();
     let second = scenario.add_creature(P0, "Second Bear", 2, 2).id();
-    let day = zero_cost_spell(&mut scenario, "Day of Judgment", WRATH);
+    let day = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
 
     let mut runner = scenario.build();
     let outcome = runner.cast(day).replacement_choice(0).resolve();
@@ -591,7 +593,7 @@ fn d4_rest_in_peace_redirects_every_inner_move_and_keeps_one_resolution() {
     let b = scenario.add_creature(P0, "Bear B", 2, 2).id();
     let c = scenario.add_creature(P0, "Bear C", 2, 2).id();
     scenario.add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE);
-    let day = zero_cost_spell(&mut scenario, "Day of Judgment", WRATH);
+    let day = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
 
     let mut runner = scenario.build();
     let outcome = runner.cast(day).resolve();
@@ -965,7 +967,7 @@ fn d8_staged_destroy_pause_round_trips_and_resumes() {
     };
     scenario.with_counter(shielded, CounterType::Shield, 1);
     let plain = scenario.add_creature(P0, "Plain Bear", 2, 2).id();
-    let day = zero_cost_spell(&mut scenario, "Day of Judgment", WRATH);
+    let day = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
 
     let mut runner = scenario.build();
     let mut commit = runner.cast(day).commit();
