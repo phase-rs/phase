@@ -13215,7 +13215,6 @@ mod tests {
         ManaTargetRole, PreventionAmount, PreventionScope,
     };
     use crate::types::ability::{CombatRelation, CombatRelationSubject};
-    use crate::types::counter::CounterType;
     use crate::types::phase::Phase;
 
     #[test]
