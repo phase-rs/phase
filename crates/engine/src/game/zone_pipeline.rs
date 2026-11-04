@@ -1378,8 +1378,15 @@ pub(crate) fn move_component_batch_then(
     let logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &ids);
     let group_id = logical_zone_change_group.logical_group_id;
-    let staged_admitted =
-        component_delivery_parent.is_none() && staged_batch_admission(state, &reqs);
+    // CR 730.3a: merged components are a simultaneous positional population
+    // whose owner orders the new library objects, including as a linked child
+    // of the parent permanent's delivery. Admit that family with a parent;
+    // every other component batch stays legacy.
+    let component_family = reqs
+        .iter()
+        .all(|req| matches!(req.cause, ZoneChangeCause::MergedComponentRouting));
+    let staged_admitted = staged_batch_admission(state, &reqs)
+        && (component_delivery_parent.is_none() || component_family);
     match deliver_batch(
         state,
         reqs,
@@ -7994,17 +8001,33 @@ mod w3_library_placement_tests {
         let component = ObjectIncarnationRef::from_object(&runner.state().objects[&octopus]);
         let start = runner.state().zone_changes_this_turn.len();
         let outcome = runner.cast(lost).target_object(bears).resolve();
-        assert_component_top_set(outcome.state(), &[bears, octopus], &sentinels);
-        assert_split_provenance(
-            outcome.state(),
-            outcome.events(),
-            survivor,
-            component,
-            start,
-            Zone::Library,
+        let mut events = outcome.events().to_vec();
+        let mut order = Vec::new();
+        if let WaitingFor::DigRestSplitChoice { cards, .. } = &runner.state().waiting_for {
+            order = cards.clone();
+            order.reverse();
+            let result = runner
+                .act(crate::types::actions::GameAction::SelectCards {
+                    cards: order.clone(),
+                })
+                .expect("the owner submits a nonidentity component order");
+            events.extend(result.events);
+        }
+        assert!(
+            !order.is_empty(),
+            "merged components must offer the owner arrangement"
         );
+        let state = runner.state();
+        let library: Vec<_> = state.players[0].library.iter().copied().collect();
         assert_eq!(
-            crate::game::merge::co_split_components(outcome.state(), bears, &[bears]),
+            &library[..order.len()],
+            order.as_slice(),
+            "the submitted owner order is the final top order"
+        );
+        assert_component_top_set(state, &[bears, octopus], &sentinels);
+        assert_split_provenance(state, &events, survivor, component, start, Zone::Library);
+        assert_eq!(
+            crate::game::merge::co_split_components(state, bears, &[bears]),
             vec![octopus]
         );
     }
@@ -8094,6 +8117,16 @@ mod w3_library_placement_tests {
                 .unwrap()
                 .events,
         );
+        if let WaitingFor::DigRestSplitChoice { cards, .. } = &runner.state().waiting_for {
+            let mut order = cards.clone();
+            order.reverse();
+            events.extend(
+                runner
+                    .act(GameAction::SelectCards { cards: order })
+                    .expect("the owner submits a nonidentity component order")
+                    .events,
+            );
+        }
         assert_component_top_set(runner.state(), &[bears, octopus], &sentinels);
         assert_split_provenance(
             runner.state(),
