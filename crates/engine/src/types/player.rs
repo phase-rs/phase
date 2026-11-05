@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use super::card_printing::SharedPrinting;
+use super::display_only::DisplayOnly;
 use super::event_kinds::BendingType;
 use super::identifiers::ObjectId;
 use super::mana::{ManaColor, ManaPool};
@@ -64,6 +66,10 @@ pub struct CompanionInfo {
     pub card: DeckEntry,
     /// CR 702.139c: Whether the companion has been put into hand this game (once per game).
     pub used: bool,
+    /// CR 702.139a + CR 203.1 + CR 206.1: the owner's printing of the revealed companion,
+    /// captured at the reveal from the source it was revealed from (display-only).
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +108,12 @@ pub struct Player {
     pub life_gained_this_turn: u32,
     #[serde(default)]
     pub life_lost_this_turn: u32,
+    /// CR 107.14 + CR 122.1: Energy counters this player has paid or otherwise
+    /// lost this turn. Bumped on every energy decrement in
+    /// `GameState::apply_resolved_player_edit` and reset at turn start. Read by
+    /// `QuantityRef::EnergyPaidOrLostThisTurn` (Blaster Hulk).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub energy_paid_or_lost_this_turn: u32,
     /// CR 603.4: Amount of life lost during the previous turn, snapshotted at turn start.
     /// Used by "if an opponent lost life during their last turn" intervening-if conditions.
     #[serde(default)]
@@ -232,6 +244,7 @@ impl Default for Player {
             energy: 0,
             life_gained_this_turn: 0,
             life_lost_this_turn: 0,
+            energy_paid_or_lost_this_turn: 0,
             life_lost_last_turn: 0,
             descended_this_turn: false,
             cards_drawn_this_turn: 0,

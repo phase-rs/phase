@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Resolution-time damage division (CR 608.2d): WaitingFor::DistributeAmong gains a serde-defaulted scope whose ResolutionCandidates variant lets the chooser divide among any number of untargeted candidates (each chosen candidate receives at least one) and carries the paused node, and serialized abilities and tracked sets can carry ThisWayCause::Tapped. An older peer drops scope and demands at least one for every candidate (valid subset divisions become unconfirmable) and cannot parse the Tapped tag, so the exact-match handshake must refuse the pairing."
+}

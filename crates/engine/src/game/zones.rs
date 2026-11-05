@@ -1701,8 +1701,17 @@ pub(crate) fn move_to_zone_with_entry_flags(
     // either the leaving or destination zone through its recipient filter,
     // condition, or dynamic quantity. Query before the move and repeat below
     // after the object reaches its destination, before any trigger collection.
-    let static_dependency_before =
-        crate::game::layers::static_layer_dependency_for_zone_transition(state, from, to);
+    //
+    // CR 113.6b: the move can also change the MOVED OBJECT'S OWN zone of
+    // function — a card whose `static_definitions` name either side of the
+    // transition either starts or stops functioning. The board-wide terms of
+    // that policy cannot see it: they ask about OTHER objects' filters,
+    // conditions and quantities. Its per-object term covers it, so
+    // an opt-in-zone static already sitting in its functioning zone does not
+    // make every later move hot.
+    let static_dependency_before = crate::game::layers::static_layer_dependency_for_zone_transition(
+        state, object_id, from, to,
+    );
     let unattached_from = state.objects.get(&object_id).and_then(|obj| {
         obj.attached_to
             .map(super::effects::attach::target_ref_from_attach_target)
@@ -1895,8 +1904,9 @@ pub(crate) fn move_to_zone_with_entry_flags(
         });
     }
 
-    let static_dependency_after =
-        crate::game::layers::static_layer_dependency_for_zone_transition(state, from, to);
+    let static_dependency_after = crate::game::layers::static_layer_dependency_for_zone_transition(
+        state, object_id, from, to,
+    );
 
     // pod-lab loop-3 Q5: a plain Battlefield entry that doesn't originate
     // from Hand or Exile, and isn't itself the source of a live
@@ -2730,6 +2740,40 @@ pub fn move_to_library_at_index(
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before the departure
     // sever (CR 701.3d) clears it.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
+    // CR 113.6b + CR 400.7 + CR 611.3a: this path bypasses `move_to_zone`'s
+    // dirty-mark block (see `move_to_zone`), so both the moved object's own
+    // zone-of-function crossing and the board-wide zone-read scan must run here
+    // too (#10400): a card put from a functioning zone onto the library top or
+    // bottom stops (or keeps) its grant, and recipients must be re-derived.
+    //
+    // Runs the WHOLE policy rather than only the per-object term, because the
+    // board-wide terms were skipped here too: putting a card out of a zone some
+    // live static's filter/condition/quantity reads (a graveyard, after a
+    // Cairn Wanderer-style grant) changes that static's truth exactly as a
+    // `move_to_zone` departure would. One call, not the pair: for both the
+    // per-object term and the board-wide terms the pre-move answers decide the
+    // mark (a source that starts or stops functioning is named by `from` or
+    // `to`). A battlefield-origin placement CAN also land here (Griptide,
+    // Banishing Stroke, Unexpectedly Absent parse to a battlefield-targeted
+    // `PutAtLibraryPosition`, and `counters_cleared_on_move_to_library` calls
+    // the primitive directly): through the pipeline the delivery tail already
+    // marks `Full` unconditionally for `from == Zone::Battlefield`
+    // (`zone_pipeline.rs`'s delivery tail), and for the raw
+    // `move_to_library_position` / `move_to_library_at_index` callers this call
+    // is the only mark.
+    //
+    // KNOWN REMAINING DIFFERENCE (pre-existing, not introduced here):
+    // `move_to_zone` also marks `Full` unconditionally for `from == Zone::Hand`
+    // (the hand-size blind-spot carve-out). This primitive does not, and this
+    // plan does not add it (a separate policy decision).
+    if crate::game::layers::static_layer_dependency_for_zone_transition(
+        state,
+        object_id,
+        from,
+        Zone::Library,
+    ) {
+        crate::game::layers::mark_layers_full(state);
+    }
     zone_change_record.combat_status = capture_combat_status(state, object_id);
     // CR 509.1g + CR 506.4 + CR 608.2h: as in `move_to_zone_with_entry_flags`,
     // snapshot the current block pairings before exit cleanup prunes them.
@@ -4286,6 +4330,260 @@ mod tests {
         );
     }
 
+    // ---- CR 113.6 + CR 113.6b: the MOVED source's own zone of function ----
+
+    /// The Anger-shaped declaration the `zones.rs` incarnation rows build:
+    /// CR 113.6b `active_zones = [Graveyard]` with the compound
+    /// `SourceInZone(Graveyard)` + `IsPresent(Mountain you control)` gate. The
+    /// `IsPresent` filter omits the printed parse's
+    /// `FilterProp::InZone { zone: Zone::Battlefield }` — deliberately, so these
+    /// rows stay revert probes: the board-wide term reads that property, and
+    /// with it the pre-move scan would already mark `Full`. The `layers.rs`
+    /// incarnation rows build this same condition shape; its
+    /// `static_definition_zone_of_function_crosses_matches_declared_zones`
+    /// helper builds an `active_zones = [Graveyard]` declaration with no
+    /// `.condition` at all.
+    fn incarnation_graveyard_static() -> StaticDefinition {
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }])
+            .condition(StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::SourceInZone {
+                        zone: Zone::Graveyard,
+                    },
+                    StaticCondition::IsPresent {
+                        filter: Some(TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Subtype("Mountain".to_string())],
+                            controller: Some(ControllerRef::You),
+                            properties: vec![],
+                        })),
+                    },
+                ],
+            })
+            .active_zones(vec![Zone::Graveyard])
+    }
+
+    /// A graveyard-functioning source (Anger shape) in `zone`, one static.
+    fn incarnation_source(state: &mut GameState, zone: Zone) -> ObjectId {
+        let id = create_object(state, CardId(2), PlayerId(0), "Anger".to_string(), zone);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.static_definitions.push(incarnation_graveyard_static());
+        id
+    }
+
+    /// A Mountain on player 0's battlefield (the Anger gate's conjunct).
+    fn incarnation_mountain(state: &mut GameState) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(3),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push("Mountain".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        id
+    }
+
+    /// A plain 2/2 for player 0.
+    fn incarnation_bear(state: &mut GameState) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(4),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.base_power = Some(2);
+        obj.base_toughness = Some(2);
+        id
+    }
+
+    /// `(state, anger, bear)` with Anger in `anger_zone`, a Bear on the
+    /// battlefield and, when `with_mountain`, the enabling Mountain.
+    fn incarnation_board(anger_zone: Zone, with_mountain: bool) -> (GameState, ObjectId, ObjectId) {
+        let mut state = setup();
+        if with_mountain {
+            incarnation_mountain(&mut state);
+        }
+        let bear = incarnation_bear(&mut state);
+        let anger = incarnation_source(&mut state, anger_zone);
+        (state, anger, bear)
+    }
+
+    /// CR 113.6 + CR 113.6b: a source milled from the library into the zone its
+    /// own `active_zones` declares STARTS functioning, so the full pass must be
+    /// re-derived for pre-existing recipients. `Library → Graveyard` deliberately
+    /// matches neither the hand/battlefield arms nor the board-wide zone-read
+    /// scan (Anger's filter names creatures you control; its condition names the
+    /// battlefield), leaving the per-object term as the only thing that can
+    /// dirty the cache.
+    #[test]
+    fn milled_incarnation_marks_layers_and_grants_haste() {
+        let (mut state, anger, bear) = incarnation_board(Zone::Library, true);
+        assert_eq!(
+            state.objects[&anger].static_definitions.iter_all().count(),
+            1,
+            "fixture premise: the milled source carries exactly one static definition"
+        );
+
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            !state.layers_dirty.is_dirty(),
+            "precondition: the layer cache is clean before the mill"
+        );
+        assert!(
+            !state.objects[&bear].has_keyword(&Keyword::Haste),
+            "precondition: a graveyard-less board grants no Haste"
+        );
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, anger, Zone::Graveyard, &mut events);
+
+        assert!(
+            matches!(
+                state.layers_dirty,
+                crate::types::game_state::LayersDirty::Full
+            ),
+            "a source entering a zone its own declaration names must mark Full, got {:?}",
+            state.layers_dirty
+        );
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            state.objects[&bear].has_keyword(&Keyword::Haste),
+            "once Anger is in the graveyard with a Mountain controlled, the Bear gains Haste"
+        );
+    }
+
+    /// CR 604.1 + CR 113.6b: the same mill without the Mountain must still mark
+    /// layers (the zone-of-function crossing happened) and must still grant
+    /// nothing. The mark assertion is the reach guard: without it the negative
+    /// could pass vacuously.
+    #[test]
+    fn milled_incarnation_without_land_gate_marks_but_grants_nothing() {
+        let (mut state, anger, bear) = incarnation_board(Zone::Library, false);
+
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(!state.layers_dirty.is_dirty());
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, anger, Zone::Graveyard, &mut events);
+
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "the zone-of-function crossing must mark even when the gate stays false"
+        );
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            !state.objects[&bear].has_keyword(&Keyword::Haste),
+            "without a Mountain the compound condition fails and no Haste is granted"
+        );
+    }
+
+    /// CR 113.6b + CR 611.3a: the new term is bound to the MOVED object, not to
+    /// the board. With Anger already functioning from the graveyard, an
+    /// unrelated card's `Library → Graveyard` mill must NOT invalidate layers.
+    /// Paired positive on the same board: moving Anger itself `Graveyard → Exile`
+    /// does. A board-wide implementation of the term fails the first half.
+    #[test]
+    fn filler_mill_with_incarnation_in_graveyard_does_not_mark_layers() {
+        let (mut state, anger, _bear) = incarnation_board(Zone::Graveyard, true);
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+        assert!(!state.layers_dirty.is_dirty());
+
+        crate::game::perf_counters::reset();
+
+        let filler = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Filler".to_string(),
+            Zone::Library,
+        );
+        let mut events = Vec::new();
+        move_to_zone(&mut state, filler, Zone::Graveyard, &mut events);
+
+        assert!(
+            !state.layers_dirty.is_dirty(),
+            "another card's move must not re-evaluate a static that is already functioning"
+        );
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            counters.layers_full_eval, 0,
+            "a filler mill must not trigger a full layer evaluation"
+        );
+        assert_eq!(
+            counters.layers_incremental, 0,
+            "a filler mill must not trigger an incremental pass either"
+        );
+
+        // Paired positive: the same board, this time moving the static's own
+        // source out of its functioning zone.
+        crate::game::perf_counters::reset();
+        let mut events = Vec::new();
+        move_to_zone(&mut state, anger, Zone::Exile, &mut events);
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "moving the source out of its declared zone must invalidate layers"
+        );
+        crate::game::layers::flush_layers(&mut state);
+        let counters = crate::game::perf_counters::snapshot();
+        assert!(
+            counters.layers_full_eval >= 1,
+            "the invalidation must land in a full evaluation, got {}",
+            counters.layers_full_eval
+        );
+    }
+
+    /// CR 113.6b + CR 400.7 + CR 611.3a: leaving the declared zone STOPS the
+    /// static, and the already-applied grant must be withdrawn. Fails at base:
+    /// `Graveyard → Exile` matches no arm of the dirty-mark block.
+    #[test]
+    fn exiled_incarnation_drops_its_graveyard_grant() {
+        let (mut state, anger, bear) = incarnation_board(Zone::Graveyard, true);
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            state.objects[&bear].has_keyword(&Keyword::Haste),
+            "precondition: Anger in the graveyard grants Haste"
+        );
+        assert!(!state.layers_dirty.is_dirty());
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, anger, Zone::Exile, &mut events);
+
+        assert!(
+            matches!(
+                state.layers_dirty,
+                crate::types::game_state::LayersDirty::Full
+            ),
+            "exiling the source must mark Full, got {:?}",
+            state.layers_dirty
+        );
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            !state.objects[&bear].has_keyword(&Keyword::Haste),
+            "the Bear must lose the Haste its source no longer grants"
+        );
+    }
+
     #[test]
     fn create_object_adds_to_battlefield() {
         let mut state = setup();
@@ -5081,6 +5379,128 @@ mod tests {
         move_to_library_at_index(&mut state, id, Some(0), &mut events);
 
         assert!(state.objects[&id].counters.is_empty());
+    }
+
+    /// CR 113.6b + CR 400.7 + CR 611.3a: the SIBLING primitive
+    /// (`move_to_library_at_index`) must run the same policy `move_to_zone`
+    /// runs. Putting a graveyard-functioning source on top of the library stops
+    /// its static, so recipients must be re-derived. Fails at base: this path
+    /// performs only the self-gated top-of-library check, so the mark is `Clean`.
+    #[test]
+    fn graveyard_incarnation_put_on_top_of_library_marks_full_and_drops_grant() {
+        let (mut state, anger, bear) = incarnation_board(Zone::Graveyard, true);
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            state.objects[&bear].has_keyword(&Keyword::Haste),
+            "precondition: Anger in the graveyard grants Haste"
+        );
+        assert!(!state.layers_dirty.is_dirty());
+
+        let mut events = Vec::new();
+        move_to_library_at_index(&mut state, anger, Some(0), &mut events);
+
+        assert!(
+            matches!(
+                state.layers_dirty,
+                crate::types::game_state::LayersDirty::Full
+            ),
+            "putting a functioning source into the library must mark Full, got {:?}",
+            state.layers_dirty
+        );
+        // Reach guards: the placement actually happened, so the negative below
+        // is not vacuous.
+        assert_eq!(state.objects[&anger].zone, Zone::Library);
+        assert_eq!(state.players[0].library.front(), Some(&anger));
+
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            !state.objects[&bear].has_keyword(&Keyword::Haste),
+            "out of the graveyard, Anger no longer grants Haste"
+        );
+    }
+
+    /// CR 611.3a + CR 613.1: the board-wide half of the policy must also run on
+    /// the sibling primitive. A static gated on a graveyard census loses its
+    /// grant when the graveyard card is put onto the library. Fails at base:
+    /// with no top-of-library static live, `move_to_library_at_index` marks
+    /// nothing.
+    #[test]
+    fn board_wide_zone_read_also_runs_on_library_placement() {
+        let mut state = setup();
+        let cairn_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }])
+            .condition(StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Creature).properties(vec![
+                        FilterProp::WithKeyword {
+                            value: Keyword::Flying,
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                    ]),
+                )),
+            });
+        let cairn = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Cairn Wanderer".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&cairn).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+            o.static_definitions.push(cairn_static.clone());
+            o.base_static_definitions = Arc::new(vec![cairn_static]);
+        }
+        let flyer = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Storm Crow".to_string(),
+            Zone::Library,
+        );
+        {
+            let o = state.objects.get_mut(&flyer).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+            o.base_keywords.push(Keyword::Flying);
+            o.keywords.push(Keyword::Flying);
+        }
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, flyer, Zone::Graveyard, &mut events);
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            state.objects[&cairn].has_keyword(&Keyword::Flying),
+            "precondition: a flyer in the graveyard grants Cairn Flying"
+        );
+        assert!(!state.layers_dirty.is_dirty());
+
+        let mut events = Vec::new();
+        move_to_library_at_index(&mut state, flyer, Some(0), &mut events);
+
+        assert!(
+            matches!(
+                state.layers_dirty,
+                crate::types::game_state::LayersDirty::Full
+            ),
+            "the board-wide graveyard read must invalidate on a library placement, got {:?}",
+            state.layers_dirty
+        );
+        assert_eq!(state.players[0].library.front(), Some(&flyer));
+
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            !state.objects[&cairn].has_keyword(&Keyword::Flying),
+            "with the graveyard emptied, Cairn's graveyard-gated grant must lapse"
+        );
     }
 
     #[test]
