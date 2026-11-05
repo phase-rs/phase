@@ -26,6 +26,7 @@ use engine::types::ability::{
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -41,6 +42,7 @@ const VENGEFUL_ARCHON: &str = "Flying\n{X}: Prevent the next X damage that would
 const TEMPER: &str = "Prevent the next X damage that would be dealt to target creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.";
 const BATTLEFIELD_MEDIC: &str =
     "{T}: Prevent the next X damage that would be dealt to target creature this turn, where X is the number of Clerics on the battlefield.";
+const SERRAS_HYMN: &str = "At the beginning of your upkeep, you may put a verse counter on this enchantment.\nSacrifice this enchantment: Prevent the next X damage that would be dealt this turn to any number of targets, divided as you choose, where X is the number of verse counters on this enchantment.";
 
 fn mana(kind: ManaType, count: usize) -> Vec<ManaUnit> {
     (0..count)
@@ -635,4 +637,82 @@ fn panacea_reannounces_x_independently_per_activation() {
         .iter()
         .any(|e| matches!(e, GameEvent::DamagePrevented { .. })));
     assert_eq!(runner.life(P1), 18, "the X=0 activation prevents nothing");
+}
+
+/// R10: Serra's Hymn sacrifices itself as a cost, so at resolution the source
+/// is in the graveyard with no counters. The where-X count of verse counters
+/// must come from last-known information (CR 608.2h), not the graveyard object.
+#[test]
+fn serras_hymn_sacrificed_source_counts_its_verse_counters_by_lki() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let hymn = scenario
+        .add_enchantment_from_oracle(P0, "Serra's Hymn", SERRAS_HYMN)
+        .id();
+    scenario.with_counter(hymn, CounterType::Generic("verse".to_string()), 3);
+    let target = scenario.add_creature(P0, "Shielded", 2, 2).id();
+
+    let mut runner = scenario.build();
+    // Reach guards: the Hymn starts on the battlefield holding 3 verse counters.
+    assert_eq!(runner.state().objects[&hymn].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&hymn]
+            .counters
+            .get(&CounterType::Generic("verse".to_string()))
+            .copied()
+            .unwrap_or(0),
+        3,
+        "the Hymn must carry 3 verse counters before it is sacrificed"
+    );
+
+    let outcome = runner
+        .activate(hymn, 0)
+        .pay_with(&[hymn])
+        .target_objects(&[target])
+        .resolve();
+    assert_priority(&outcome);
+    // Reach guard: the sacrifice cost really moved the source out of play, so
+    // resolution could only read its counters through last-known information.
+    assert_eq!(runner.state().objects[&hymn].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&hymn]
+            .counters
+            .get(&CounterType::Generic("verse".to_string()))
+            .copied()
+            .unwrap_or(0),
+        0,
+        "the graveyard object carries no counters"
+    );
+
+    let mut installed = prevention_shields(&runner);
+    installed.extend(hosted_prevention_shields(&runner));
+    assert_eq!(
+        installed,
+        vec![PreventionAmount::Next(3)],
+        "X is the 3 verse counters the Hymn had when it was sacrificed"
+    );
+
+    let mut events = Vec::new();
+    deal_damage::resolve(
+        runner.state_mut(),
+        &damage_ability(hymn, TargetRef::Object(target), 5),
+        &mut events,
+    )
+    .expect("damage event resolves");
+    let prevented: u32 = events
+        .iter()
+        .filter_map(|e| match e {
+            GameEvent::DamagePrevented { amount, .. } => Some(*amount),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(
+        prevented, 3,
+        "all three shield points prevent, got {events:?}"
+    );
+    assert_eq!(
+        runner.state().objects[&target].damage_marked,
+        2,
+        "the remaining two of five damage is dealt"
+    );
 }
