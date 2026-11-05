@@ -219,6 +219,15 @@ fn resolved_effect_value(
             target: TargetFilter::SelfRef,
             ..
         } => 1.0,
+        // CR 107.14: energy is a spendable player resource. Use the same
+        // per-counter weight as the board evaluation's energy offset.
+        Effect::GainEnergy { amount } => quantity_weight(
+            Some(state),
+            Some(node.controller),
+            Some(node.source_id),
+            amount,
+            0.1,
+        ),
         // CR 701.17a: milling yourself fills your own graveyard, which is as
         // often fuel as loss, so it names no direction.
         Effect::Mill { .. } if side == BoonTargetSide::Holder => 0.0,
@@ -6362,6 +6371,18 @@ mod controller_value_tests {
             ),
         ] {
             assert_eq!(reading(value_at(json, 20)), expected, "{json}");
+        }
+    }
+
+    /// CR 107.14: Aethergeode Miner's two energy are a controller resource;
+    /// a known zero gain supplies no value.
+    #[test]
+    fn energy_gain_value_tracks_the_resolved_quantity() {
+        for (amount, expected) in [(0, 0.0), (2, 0.2), (4, 0.4)] {
+            let json = format!(
+                r#"{{ "kind": "Spell", "effect": {{ "type": "GainEnergy", "amount": {{ "type": "Fixed", "value": {amount} }} }} }}"#
+            );
+            assert_eq!(value_at(&json, 20), expected, "energy amount {amount}");
         }
     }
 

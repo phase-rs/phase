@@ -10951,6 +10951,49 @@ mod tests {
         assert!(choose_from_engine_prompt(&mut state).is_empty());
     }
 
+    /// CR 107.14 + CR 508.3a + CR 702.16j: Aethergeode Miner's attack gives
+    /// its controller two energy even when protection prevents combat damage.
+    #[test]
+    fn energy_attack_payoff_attacks_a_protected_player_and_resolves() {
+        let mut scenario = GameScenario::new();
+        let miner = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Aethergeode Miner",
+                3,
+                1,
+                "Whenever this creature attacks, you get {E}{E} (two energy counters).\nPay {E}{E}: Exile this creature, then return it to the battlefield under its owner's control.",
+            )
+            .id();
+        let mut state = ready_two_player_state(scenario, &[miner]);
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert_eq!(state.players[0].energy, 0);
+
+        for comparison_deadline in [Some(Deadline::none()), None] {
+            let mut state = state.clone();
+            let attacks = choose_from_engine_prompt_with(&mut state, comparison_deadline);
+            let WaitingFor::DeclareAttackers {
+                valid_attacker_ids,
+                valid_attack_targets_by_attacker: Some(targets),
+                ..
+            } = &state.waiting_for
+            else {
+                panic!("the engine must issue the attacker's legal targets")
+            };
+            assert!(valid_attacker_ids.contains(&miner));
+            assert!(targets[&miner].contains(&AttackTarget::Player(PlayerId(1))));
+            assert_eq!(attacks, vec![(miner, AttackTarget::Player(PlayerId(1)))]);
+
+            let after = declare_and_resolve_unblocked(state, &attacks);
+            assert_eq!(after.players[0].energy, 2);
+            assert_eq!(after.players[1].energy, 0);
+            assert_eq!(after.players[1].life, 20);
+            assert!(after.stack.is_empty());
+            assert!(after.resolution_stack.is_empty());
+            assert!(matches!(after.waiting_for, WaitingFor::Priority { .. }));
+        }
+    }
+
     /// CR 508.3a + CR 603.2 + CR 702.16j: a friendly permanent's "whenever a
     /// creature you control attacks" pays off even when the defender prevents
     /// the damage. A vanilla Grizzly Bears attacks a protected player for
