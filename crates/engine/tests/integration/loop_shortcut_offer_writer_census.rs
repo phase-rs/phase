@@ -343,7 +343,9 @@ fn census(needle: &str) -> Vec<Hit> {
 /// seventh benign read, the restore validator's `visit_waiting_for_chains` in
 /// `types/game_state.rs`, names the variant only in its exhaustive no-op arm: a
 /// loop-shortcut offer holds no suspended ability chain to check, and the walk
-/// mints no offer and reads none of its fields.
+/// mints no offer and reads none of its fields. An eighth benign read, the Time Sieve
+/// row in `analysis/corpus_tests.rs` (test code the census scans as production),
+/// reads the schema of an offer the runner already minted and mints none.
 ///
 /// R8 CONJUNCT 2, same test — pin VALUE-legality has exactly ONE production
 /// consumer (`analysis::decision_template::declaration_conforms`), that consumer
@@ -376,7 +378,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
 
     assert_eq!(
         (production.len(), in_test.len()),
-        (29, 29),
+        (30, 31),
         "CR 732.2a OFFER-WRITER SURFACE CHANGED (not re-measured — this number is an \
          INVARIANCE pin over the whole 5d U-series).\n\
          The four CERTIFICATION-PATH writers are `reconcile_terminal_result` (object-growth \
@@ -406,6 +408,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
         vec![
             ("engine/src/ai_support/candidates.rs".to_string(), 1),
             ("engine/src/analysis/corpus.rs".to_string(), 1),
+            ("engine/src/analysis/corpus_tests.rs".to_string(), 1),
             ("engine/src/game/derived_views.rs".to_string(), 1),
             ("engine/src/game/engine.rs".to_string(), 6),
             ("engine/src/game/interaction.rs".to_string(), 5),
