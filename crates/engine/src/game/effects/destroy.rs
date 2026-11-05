@@ -241,13 +241,16 @@ pub fn resolve(
     // (Decimate). Each target passes the same guards as a single destruction,
     // then the whole set departs as one simultaneous event, so a choice for
     // one target parks the others instead of abandoning them.
+    // CR 115.3: one object may fill several of the instruction's target slots,
+    // but it is destroyed once, so it joins the batch once (first slot wins).
+    let mut seen = HashSet::new();
     let members: Vec<_> = destroyed_targets(state, ability)
         .into_iter()
         .filter_map(|target| match target {
             TargetRef::Object(object_id) => Some(object_id),
             TargetRef::Player(_) => None,
         })
-        .filter(|&object_id| is_destroyable(state, object_id))
+        .filter(|&object_id| seen.insert(object_id) && is_destroyable(state, object_id))
         .map(|object_id| SimultaneousDepartureMember {
             object_id,
             departure: SimultaneousDeparture::Destroy,
@@ -1049,6 +1052,50 @@ mod tests {
 
         assert!(!state.battlefield.contains(&obj_id));
         assert!(state.players[0].graveyard.contains(&obj_id));
+    }
+
+    /// CR 115.3: an object chosen for two target slots (Decimate's artifact and
+    /// creature slots on one artifact creature) is destroyed once.
+    #[test]
+    fn destroy_departs_an_object_named_by_two_slots_once() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Golem".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(obj_id), TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.players[0].graveyard.contains(&obj_id));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == obj_id))
+                .count(),
+            1,
+            "destroyed exactly once"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::ZoneChanged { object_id, .. } if *object_id == obj_id))
+                .count(),
+            1,
+            "moved exactly once"
+        );
     }
 
     /// Spawn a battlefield creature for the "destroy all other creatures" tests.

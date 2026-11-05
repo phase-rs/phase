@@ -786,3 +786,92 @@ fn decimate_destroys_every_target_after_an_ordering_choice() {
     assert!(state.stack.is_empty());
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
+
+/// CR 608.2c + CR 614.6: Fumigate's trailing "You gain 1 life for each creature
+/// destroyed this way" with a DELIVERY-time pause. Kalitas's Zombie for each
+/// opposing creature meets Jinnie Fay's optional token replacement (Jinnie kept
+/// alive by a shield counter, as Boon of Safety gives). The life gain waits for
+/// the whole departure: it happens only after the last token choice, and counts
+/// every creature destroyed this way.
+#[test]
+fn fumigate_life_gain_waits_for_the_last_delivery_time_token_choice() {
+    const FUMIGATE: &str =
+        "Destroy all creatures. You gain 1 life for each creature destroyed this way.";
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let kalitas = scenario.add_real_card(P0, "Kalitas, Traitor of Ghet", Zone::Battlefield, db);
+    let jinnie = scenario.add_real_card(P0, "Jinnie Fay, Jetmir's Second", Zone::Battlefield, db);
+    scenario.with_counter(jinnie, CounterType::Shield, 1);
+    let bears: Vec<ObjectId> = (0..2)
+        .map(|_| scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db))
+        .collect();
+    let fumigate = scenario
+        .add_spell_to_hand_from_oracle(P0, "Fumigate", false, FUMIGATE)
+        .id();
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[0].life;
+
+    let outcome = runner.cast(fumigate).commit().resolve();
+    let mut events = outcome.events().to_vec();
+    let mut offers = 0;
+    while let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = runner.state().waiting_for.clone()
+    {
+        assert_eq!(player, P0, "Jinnie's controller decides");
+        assert!(candidates.iter().any(|c| c.source_id == jinnie));
+        assert_eq!(
+            runner.state().players[0].life,
+            life_before,
+            "no life is gained while a token choice is open"
+        );
+        offers += 1;
+        assert!(offers <= bears.len(), "one offer per Zombie at most");
+        let decline = candidates
+            .iter()
+            .position(|c| c.description == "Decline")
+            .expect("an optional replacement offers Decline");
+        events.extend(
+            runner
+                .act(GameAction::ChooseReplacement { index: decline })
+                .expect("decline Jinnie's replacement")
+                .events,
+        );
+    }
+    assert_eq!(offers, bears.len(), "Jinnie is offered for every Zombie");
+    runner.advance_until_stack_empty();
+
+    let state = runner.state();
+    for bear in &bears {
+        assert_eq!(state.objects[bear].zone, Zone::Exile, "{bear:?}: exiled");
+    }
+    assert_eq!(state.objects[&kalitas].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&jinnie].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&fumigate].zone, Zone::Graveyard);
+    let destroyed: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, GameEvent::CreatureDestroyed { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(destroyed.len(), bears.len() + 1, "Kalitas and both Bears");
+    assert_eq!(
+        state.players[0].life,
+        life_before + destroyed.len() as i32,
+        "1 life for each creature destroyed this way"
+    );
+    let gain = events
+        .iter()
+        .position(|e| matches!(e, GameEvent::LifeChanged { player_id, amount, .. } if *player_id == P0 && *amount > 0))
+        .expect("the life gain happened");
+    let last_zombie = events
+        .iter()
+        .rposition(|e| matches!(e, GameEvent::TokenCreated { name, .. } if name.contains("Zombie")))
+        .expect("the Zombies were created");
+    assert!(last_zombie < gain, "the gain follows the last token choice");
+    assert!(destroyed.iter().all(|&i| i < gain), "and every destruction");
+    assert_eq!(zombies(&events), bears.len());
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
