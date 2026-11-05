@@ -182,3 +182,66 @@ fn land_creature_with_lethal_damage_survives_and_aura_is_sacrificed() {
     );
     assert!(state.objects[&land].has_keyword(&Keyword::Indestructible));
 }
+
+const AKROMAS_VENGEANCE: &str = "Destroy all artifacts, creatures, and enchantments.\nCycling {3} ({3}, Discard this card: Draw a card.)";
+
+/// CR 614.1a + CR 614.6 + CR 701.8a: Akroma's Vengeance destroys the Aura and
+/// the land it animates at once. The Aura is still on the battlefield when the
+/// land's destruction is consulted, so that destruction is replaced: the Aura
+/// is sacrificed and the land gains indestructible. By the time the Aura's
+/// own destruction is consulted or delivered, it is already in the graveyard
+/// (CR 400.7: a new object), so it is not moved a second time.
+#[test]
+fn akromas_vengeance_sacrifices_the_aura_once_and_spares_the_land() {
+    use engine::types::events::GameEvent;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let land = scenario.add_basic_land(P0, ManaColor::Red);
+    let aura = add_crackling_emergence(&mut scenario);
+    let vengeance = scenario
+        .add_spell_to_hand_from_oracle(P0, "Akroma's Vengeance", false, AKROMAS_VENGEANCE)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.cast(aura).target_object(land).resolve();
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&aura].zone, Zone::Battlefield);
+    assert!(
+        runner.state().objects[&land]
+            .card_types
+            .core_types
+            .contains(&engine::types::card_type::CoreType::Creature),
+        "reach guard: the Aura animates the land, so the spell destroys it too"
+    );
+
+    let outcome = runner.cast(vengeance).resolve();
+    let aura_moves = outcome
+        .events()
+        .iter()
+        .filter(|e| matches!(e, GameEvent::ZoneChanged { object_id, .. } if *object_id == aura))
+        .count();
+    let aura_destroyed = outcome
+        .events()
+        .iter()
+        .any(|e| matches!(e, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == aura));
+    runner.advance_until_stack_empty();
+
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&aura].zone,
+        Zone::Graveyard,
+        "Aura sacrificed"
+    );
+    assert_eq!(
+        aura_moves, 1,
+        "the Aura leaves the battlefield exactly once"
+    );
+    assert!(!aura_destroyed, "the Aura was sacrificed, not destroyed");
+    assert_eq!(
+        state.objects[&land].zone,
+        Zone::Battlefield,
+        "the land's destruction never happens"
+    );
+    assert!(state.objects[&land].has_keyword(&Keyword::Indestructible));
+}

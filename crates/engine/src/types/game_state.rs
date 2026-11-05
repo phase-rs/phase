@@ -28393,6 +28393,19 @@ impl PostReplacementDrainStack {
         }
     }
 
+    /// CR 614.6: detach the innermost drain if its continuation has not run
+    /// yet, so a caller that consults several sibling events before
+    /// delivering any of them can keep each event's rider beside its own
+    /// queued delivery instead of letting [`ResidentDrainPolicy::KeepResident`]
+    /// discard the later ones. A `Dispatching` or `Paused` resident is live
+    /// work and is never detached.
+    pub fn take_ready_resident(&mut self) -> Option<PostReplacementDrain> {
+        match self.drains.last()?.status {
+            DrainStatus::Ready(_) => self.drains.pop(),
+            DrainStatus::Dispatching | DrainStatus::Paused => None,
+        }
+    }
+
     /// Abandon every pending continuation. Two callers: player departure via
     /// `GameState::abandon_active_replacement_tails` (CR 800.4a), and the
     /// no-post-effect optional ACCEPT via
@@ -31189,6 +31202,19 @@ impl GameState {
             // for the remaining co-arrivers.
             self.clear_completed_active_devour_snapshot();
         }
+    }
+
+    /// CR 614.6: detach the active general drain's ready resident (see
+    /// [`PostReplacementDrainStack::take_ready_resident`]) and retire its frame
+    /// if that left it empty. Reinstall the drain with
+    /// [`Self::install_post_replacement_drain`] just before the event it
+    /// belongs to is delivered.
+    pub fn detach_ready_post_replacement_drain(&mut self) -> Option<PostReplacementDrain> {
+        let drain = self
+            .active_post_replacement_drains_mut()?
+            .take_ready_resident()?;
+        self.remove_empty_active_post_replacement_frame();
+        Some(drain)
     }
 
     /// Removes an exhausted general-drain frame only when it is the active top.
