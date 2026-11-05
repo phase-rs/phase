@@ -168,7 +168,8 @@ impl ContinuousModification {
             // resolution. Consumed by the BecomeCopy / CopyTokenOf resolvers
             // before any continuous-effect machinery is reached. Reaching this
             // arm via `apply_continuous_effect` indicates a wiring bug.
-            ContinuousModification::AddCounterOnEnter { .. } => unreachable!(
+            ContinuousModification::AddCounterOnEnter { .. }
+            | ContinuousModification::AddCopiedCountersOnEnter => unreachable!(
                 "AddCounterOnEnter is consumed at resolution; never layered. \
                  Verify resolver dispatch in token_copy.rs / become_copy.rs."
             ),

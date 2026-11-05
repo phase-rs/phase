@@ -2170,6 +2170,7 @@ pub(crate) fn copy_token_modifications_are_liminal_immediate(
         !matches!(
             modification,
             ContinuousModification::AddCounterOnEnter { .. }
+                | ContinuousModification::AddCopiedCountersOnEnter
                 | ContinuousModification::SetPowerDynamic { .. }
                 | ContinuousModification::SetToughnessDynamic { .. }
         )

@@ -401,6 +401,7 @@ fn continuous_modification_quantity(
         | CM::AddDynamicToughness { value }
         | CM::AddDynamicKeyword { value, .. } => Some(value),
         CM::AddCounterOnEnter { .. }
+        | CM::AddCopiedCountersOnEnter
         | CM::SetStartingLoyalty { .. }
         | CM::CopyValues { .. }
         | CM::CopyChosen

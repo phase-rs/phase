@@ -19383,12 +19383,13 @@ fn deferred_reflexive_card_type_guard_reaches_specialized_parser() {
     assert!(matches!(*rider.effect, Effect::Draw { .. }));
 }
 
-/// Dominion Saboteur's verified Oracle text carries a clone rider whose
-/// counter-copying instruction is not represented yet. The recognized rider
-/// must therefore reject the partial CR 614.1c replacement and remain an
-/// explicit parser gap instead of silently dropping printed rules text.
+/// CR 707.2 + CR 707.9b + CR 614.1c: Dominion Saboteur's clone rider lowers to
+/// one optional enter-as-copy replacement whose copy exceptions remove
+/// legendary and mirror the copied permanent's counters. The accepted-branch
+/// "If you do" sentence is the copy exception's own gate, so no sub-ability
+/// remains and no printed text is dropped.
 #[test]
-fn dominion_saboteur_unsupported_clone_rider_fails_closed() {
+fn dominion_saboteur_clone_rider_mirrors_copied_counters() {
     let parsed = parse(
         "You may have this creature enter as a copy of any artifact or creature on the battlefield, except it isn't legendary. If you do, it enters with additional counters on it equal to the same number and kinds of counters the copied permanent has on it.",
         "Dominion Saboteur",
@@ -19397,25 +19398,36 @@ fn dominion_saboteur_unsupported_clone_rider_fails_closed() {
         &["Shapeshifter"],
     );
     assert!(
-        parsed.replacements.is_empty(),
-        "the unsupported counter-copying rider must reject the partial clone replacement"
-    );
-    assert!(
-        parsed
-            .abilities
-            .iter()
-            .any(|ability| matches!(
-                &*ability.effect,
-                Effect::Unimplemented { name, description }
-                    if name == "static_structure"
-                        && description.as_deref().is_some_and(|fragment| {
-                            fragment.contains(
-                                "additional counters on it equal to the same number and kinds of counters"
-                            )
-                        })
-            )),
-        "the rejected Dominion Saboteur text must retain the unsupported counter-copying rider as the explicit gap, got {:?}",
+        parsed.abilities.is_empty(),
+        "no unimplemented fallback may remain, got {:?}",
         parsed.abilities
+    );
+    assert_eq!(parsed.replacements.len(), 1);
+    let replacement = &parsed.replacements[0];
+    assert!(matches!(
+        replacement.mode,
+        ReplacementMode::Optional { decline: None }
+    ));
+    let execute = replacement
+        .execute
+        .as_deref()
+        .expect("the clone replacement executes a copy");
+    assert!(execute.sub_ability.is_none());
+    let Effect::BecomeCopy {
+        additional_modifications,
+        ..
+    } = &*execute.effect
+    else {
+        panic!("expected BecomeCopy, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        additional_modifications,
+        &vec![
+            ContinuousModification::RemoveSupertype {
+                supertype: crate::types::card_type::Supertype::Legendary,
+            },
+            ContinuousModification::AddCopiedCountersOnEnter,
+        ]
     );
 }
 

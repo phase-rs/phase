@@ -22,7 +22,7 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (recipient, duration, additional_modifications) = match &ability.effect {
+    let (recipient, duration, mut additional_modifications) = match &ability.effect {
         Effect::BecomeCopy {
             recipient,
             duration,
@@ -51,9 +51,12 @@ pub fn resolve(
     // The Flood of Mars) copies the ability's own source, with its last-known
     // copiable values once it has left; any other copy source is the declared
     // object target.
-    let source = if copies_own_source(&ability.effect) {
-        copy_source(state, ability, CopySourceReferent::OwnSource)
-            .ok_or(EffectError::ObjectNotFound(ability.source_id))?
+    let (source, copied_id) = if copies_own_source(&ability.effect) {
+        (
+            copy_source(state, ability, CopySourceReferent::OwnSource)
+                .ok_or(EffectError::ObjectNotFound(ability.source_id))?,
+            ability.source_id,
+        )
     } else {
         let target_id = ability
             .targets
@@ -71,9 +74,15 @@ pub fn resolve(
             // `fight::resolve_fight_fighters`.
             .nth(crate::game::ability_utils::become_copy_copy_source_target_index(&ability.effect))
             .ok_or_else(|| EffectError::MissingParam("BecomeCopy requires a target".to_string()))?;
-        copy_source(state, ability, CopySourceReferent::Object(target_id))
-            .ok_or(EffectError::ObjectNotFound(target_id))?
+        (
+            copy_source(state, ability, CopySourceReferent::Object(target_id))
+                .ok_or(EffectError::ObjectNotFound(target_id))?,
+            target_id,
+        )
     };
+    // CR 707.2 + CR 122.6: a copied-counters rider reads the copy source's
+    // counters once, as the copy source is fixed.
+    snapshot_copied_counter_exceptions(state, copied_id, &mut additional_modifications);
 
     // Display identity follows the copy: carry the source's image routing so the
     // copying object renders the copied source's art. Not a CR 707.2 copiable
@@ -355,6 +364,62 @@ pub(crate) fn partition_entry_counter_exceptions(
     })
 }
 
+/// CR 707.2 + CR 122.6 + CR 614.12a: realize every "enters with additional
+/// counters equal to the same number and kinds of counters the copied
+/// permanent has" rider (`AddCopiedCountersOnEnter`) as concrete
+/// `AddCounterOnEnter` exceptions, one per counter kind on `copied_id`.
+///
+/// Counters are not copiable values (CR 707.2), so the rider must read the
+/// copied permanent itself. The snapshot is taken when the copy source is
+/// fixed — the CR 614.12a choice made before the permanent enters — so later
+/// changes to the copied permanent's counters never propagate. A copy source
+/// that has already left uses its last-known counters (CR 608.2h). Kinds are
+/// emitted in `CounterType` order so placement is deterministic.
+pub(crate) fn snapshot_copied_counter_exceptions(
+    state: &GameState,
+    copied_id: ObjectId,
+    modifications: &mut Vec<ContinuousModification>,
+) {
+    if !modifications.iter().any(|modification| {
+        matches!(
+            modification,
+            ContinuousModification::AddCopiedCountersOnEnter
+        )
+    }) {
+        return;
+    }
+    let counters = state
+        .objects
+        .get(&copied_id)
+        .map(|object| &object.counters)
+        .or_else(|| state.lki_cache.get(&copied_id).map(|lki| &lki.counters));
+    let mut copied: Vec<(crate::types::counter::CounterType, u32)> = counters
+        .into_iter()
+        .flatten()
+        .filter(|(_, count)| **count > 0)
+        .map(|(counter_type, count)| (counter_type.clone(), *count))
+        .collect();
+    copied.sort();
+    *modifications = std::mem::take(modifications)
+        .into_iter()
+        .flat_map(|modification| match modification {
+            ContinuousModification::AddCopiedCountersOnEnter => copied
+                .iter()
+                .map(
+                    |(counter_type, count)| ContinuousModification::AddCounterOnEnter {
+                        counter_type: counter_type.clone(),
+                        count: crate::types::ability::QuantityExpr::Fixed {
+                            value: i32::try_from(*count).unwrap_or(i32::MAX),
+                        },
+                        if_type: None,
+                    },
+                )
+                .collect::<Vec<_>>(),
+            other => vec![other],
+        })
+        .collect();
+}
+
 /// CR 707.2 + CR 613.1a: whether `recipient` carries a layer-1 copy effect
 /// installed by [`apply_precomputed_copy_values`]. A `BecomeCopy` that errored
 /// (for example because its source is gone) installs none, so entry-time copy
@@ -422,6 +487,12 @@ enum CopyExceptionOperation<'a> {
         value: u32,
     },
     RemoveManaCost,
+    /// CR 707.2 + CR 122.6: resolution-time counter rider whose kinds and
+    /// counts come from the copied permanent. Copy resolvers replace it with
+    /// concrete `AddCounterOnEnter` exceptions via
+    /// [`snapshot_copied_counter_exceptions`] before classification matters;
+    /// an unexpanded occurrence places nothing and is never layered.
+    AddCopiedCountersOnEnter,
     Layered(&'a ContinuousModification),
 }
 
@@ -536,6 +607,7 @@ impl<'a> CopyExceptionOperation<'a> {
                 Self::SetStartingLoyalty { value: *value }
             }
             ContinuousModification::RemoveManaCost => Self::RemoveManaCost,
+            ContinuousModification::AddCopiedCountersOnEnter => Self::AddCopiedCountersOnEnter,
         }
     }
 
@@ -543,6 +615,7 @@ impl<'a> CopyExceptionOperation<'a> {
         match self {
             Self::Fold(_) | Self::Layered(_) => true,
             Self::AddCounterOnEnter { .. }
+            | Self::AddCopiedCountersOnEnter
             | Self::SetStartingLoyalty { .. }
             | Self::RemoveManaCost => false,
         }
@@ -553,6 +626,7 @@ impl<'a> CopyExceptionOperation<'a> {
             Self::Fold(operation) => Some(operation),
             Self::Layered(_)
             | Self::AddCounterOnEnter { .. }
+            | Self::AddCopiedCountersOnEnter
             | Self::SetStartingLoyalty { .. }
             | Self::RemoveManaCost => None,
         }
@@ -566,6 +640,7 @@ impl<'a> CopyExceptionOperation<'a> {
             Self::Fold(_) => Some(original),
             Self::Layered(modification) => Some(modification),
             Self::AddCounterOnEnter { .. }
+            | Self::AddCopiedCountersOnEnter
             | Self::SetStartingLoyalty { .. }
             | Self::RemoveManaCost => None,
         }

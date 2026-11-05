@@ -2910,6 +2910,13 @@ pub(super) fn handle_copy_target_choice(
             ..
         } = &mut ability.effect
         {
+            // CR 707.2 + CR 614.12a: snapshot a copied-counters rider against
+            // the chosen copy source before the exceptions are held.
+            effects::become_copy::snapshot_copied_counter_exceptions(
+                state,
+                target_id,
+                additional_modifications,
+            );
             let (held, remaining) = effects::become_copy::partition_entry_counter_exceptions(
                 std::mem::take(additional_modifications),
             );
@@ -3075,6 +3082,13 @@ pub(super) fn handle_copy_target_choice(
         ..
     } = &mut ability.effect
     {
+        // CR 707.2 + CR 614.12a: the copy source was just chosen; snapshot a
+        // copied-counters rider against it before the exceptions are held.
+        effects::become_copy::snapshot_copied_counter_exceptions(
+            state,
+            target_id,
+            additional_modifications,
+        );
         let (held, remaining) = effects::become_copy::partition_entry_counter_exceptions(
             std::mem::take(additional_modifications),
         );

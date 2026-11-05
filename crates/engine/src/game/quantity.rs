@@ -2500,6 +2500,7 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         | ContinuousModification::AddDynamicKeyword { value, .. } => Some(value),
         // Resolution-time-consumed; never an active continuous effect.
         ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::AddCopiedCountersOnEnter
         | ContinuousModification::SetStartingLoyalty { .. } => None,
         // Non-dynamic modifications carry plain i32 / enum payloads, no dynamic
         // magnitude. Enumerated explicitly (no wildcard) so a future

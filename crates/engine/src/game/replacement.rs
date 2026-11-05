@@ -5327,11 +5327,19 @@ fn create_entry_copy_spec_for_replacement(
             },
         )
     };
+    // CR 707.2 + CR 122.6: a copied-counters rider reads the copy source's
+    // counters (or its last-known counters) as the copy payload is fixed.
+    let mut additional_modifications = additional_modifications.clone();
+    crate::game::effects::become_copy::snapshot_copied_counter_exceptions(
+        state,
+        *copy_source,
+        &mut additional_modifications,
+    );
     Some(CopyTokenSpec {
         values: Box::new(values),
         display,
         extra_keywords: Vec::new(),
-        additional_modifications: additional_modifications.clone(),
+        additional_modifications,
         tapped: false,
         enters_attacking: false,
         attack_request: TokenAttackRequest::Unspecified,

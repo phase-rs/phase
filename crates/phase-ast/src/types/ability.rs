@@ -26981,6 +26981,7 @@ fn immediate_modification_target_slot_filter(
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::AddCopiedCountersOnEnter
         | ContinuousModification::SetStartingLoyalty { .. }
         | ContinuousModification::RemoveManaCost
         | ContinuousModification::SubstituteTextWord { .. } => None,
@@ -42818,6 +42819,17 @@ pub enum ContinuousModification {
         /// characteristics").
         if_type: Option<CoreType>,
     },
+    /// CR 707.2 + CR 122.6 + CR 614.1c: "it enters with additional counters on
+    /// it equal to the same number and kinds of counters the copied permanent
+    /// has on it" (Dominion Saboteur). Counters are never copiable values
+    /// (CR 707.2), so this rider reproduces them explicitly: every kind on the
+    /// copied permanent, with its count, read when the copy choice is made.
+    ///
+    /// Like `AddCounterOnEnter`, this is NOT a continuous effect. The copy
+    /// resolver snapshots the copied object's counters into concrete
+    /// `AddCounterOnEnter` exceptions before any entry-counter placement, so it
+    /// never reaches the layer system or the counter-placement authority.
+    AddCopiedCountersOnEnter,
     /// CR 707.9b + CR 306.5b/c: Override the starting loyalty declared by a
     /// copy exception ("its starting loyalty is N"). Like `AddCounterOnEnter`,
     /// this is consumed at copy resolution: token-copy uses the value before

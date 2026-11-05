@@ -6643,6 +6643,9 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::SetStartingLoyalty { .. }
+        // CR 707.2: the copied permanent's counters are snapshotted once at copy
+        // time into fixed entry counters — no growing aggregate is read.
+        | ContinuousModification::AddCopiedCountersOnEnter
         | ContinuousModification::RemoveManaCost => Axes::NONE,
     }
 }

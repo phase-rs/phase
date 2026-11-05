@@ -13148,6 +13148,7 @@ fn apply_where_x_continuous_modification(
         // Resolution-time-consumed; where-X counter quantities are applied by
         // the counter/enter-with parser paths before this continuous grant pass.
         ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::AddCopiedCountersOnEnter
         | ContinuousModification::SetStartingLoyalty { .. } => {}
         ContinuousModification::GrantTrigger { trigger } => {
             if let Some(execute) = trigger.execute.as_mut() {
@@ -13260,6 +13261,7 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
             rebind_cost_paid_object_pt_to_target(value);
         }
         ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::AddCopiedCountersOnEnter
         | ContinuousModification::SetStartingLoyalty { .. } => {}
         ContinuousModification::CopyValues { .. }
         // CR 707.2c (Metamorphic Alteration): inert copy marker — no where-X carrier.

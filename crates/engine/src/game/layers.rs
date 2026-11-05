@@ -6513,6 +6513,7 @@ fn modification_characteristic_writes_at(
         // never reached through the layer pipeline (its apply site asserts);
         // counters are not characteristics in any case.
         | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::AddCopiedCountersOnEnter
         // CR 306.5b: loyalty is read from the copiable values, not written as a
         // layer effect; the apply site asserts unreachable.
         | ContinuousModification::SetStartingLoyalty { .. } => CharacteristicKinds::EMPTY,
@@ -12361,7 +12362,8 @@ fn apply_continuous_effect_filtered(
             // CR 122.1 + CR 614.1c: One-shot counter placement is consumed at
             // copy resolution by token_copy::resolve / become_copy::resolve.
             // Reaching this arm means a wiring bug.
-            ContinuousModification::AddCounterOnEnter { .. } => {
+            ContinuousModification::AddCounterOnEnter { .. }
+            | ContinuousModification::AddCopiedCountersOnEnter => {
                 debug_assert!(
                     false,
                     "AddCounterOnEnter must be consumed at resolution time, \
@@ -12916,6 +12918,7 @@ pub(crate) fn apply_type_or_color_modification(
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::AddCopiedCountersOnEnter
         | ContinuousModification::SetStartingLoyalty { .. }
         | ContinuousModification::RemoveManaCost => return TypeColorModification::OtherLayer,
     }

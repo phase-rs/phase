@@ -3482,8 +3482,20 @@ fn parse_clone_replacement(
     // The suffix may also carry a trailing post-replacement rider past the
     // sentence boundary — literal `When` remains a reflexive trigger, while an
     // accepted-branch `If` remains an inline continuation.
-    let (mana_value_limit, duration, additional_modifications, post_period) =
+    let (mana_value_limit, duration, mut additional_modifications, post_period) =
         parse_clone_suffix(suffix.trim(), card_name);
+    // CR 707.2 + CR 122.6: "If you do, it enters with additional counters on
+    // it equal to the same number and kinds of counters the copied permanent
+    // has on it" (Dominion Saboteur). The accepted-branch gate is exactly the
+    // copy exception's own gate — exceptions apply only when the copy does —
+    // so the rider lowers to a copy exception rather than a sub-ability.
+    let post_period = match parse_copied_counters_rider(post_period) {
+        Some((rest, modification)) => {
+            additional_modifications.push(modification);
+            rest
+        }
+        None => post_period,
+    };
 
     // CR 707.9a: The copy effect uses the chosen object's copiable values.
     // This is NOT targeting (hexproof/shroud don't apply).
@@ -3687,6 +3699,23 @@ fn attach_zone_to_filter(filter: TargetFilter, zone: Zone) -> TargetFilter {
         }
         other => other,
     }
+}
+
+/// CR 707.2 + CR 122.6 + CR 608.2c: Parse the accepted-branch
+/// `"if you do, it enters with additional counters … the copied permanent has
+/// on it."` sentence trailing a clone replacement. Returns the remainder after
+/// the sentence and the copied-counters copy exception, or `None` when the
+/// suffix carries no such rider.
+fn parse_copied_counters_rider(post_period: &str) -> Option<(&str, ContinuousModification)> {
+    let trimmed = post_period.trim_start_matches(['.', ' ']);
+    let (rest, modification) = preceded(
+        tag::<_, _, OracleError<'_>>("if you do, "),
+        super::oracle_effect::become_copy_except::parse_enters_with_copied_counters,
+    )
+    .parse(trimmed)
+    .ok()?;
+    let (rest, _) = opt(char::<_, OracleError<'_>>('.')).parse(rest).ok()?;
+    Some((rest, modification))
 }
 
 /// Parse a trailing "When you do, ..." / "If you do, ..." post-replacement rider.
