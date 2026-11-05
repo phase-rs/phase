@@ -323,7 +323,7 @@ fn effect_adds_mana_to_triggering_player(effect_lower: &str) -> bool {
 /// the player instructed to act. Read this before the trigger shell peels it.
 fn optional_player_from_effect_body(effect_text: &str) -> Option<TargetFilter> {
     let lower = effect_text.to_lowercase();
-    alt((
+    let player = alt((
         value(
             TargetFilter::TriggeringPlayer,
             tag::<_, _, OracleError<'_>>("they may "),
@@ -332,7 +332,8 @@ fn optional_player_from_effect_body(effect_text: &str) -> Option<TargetFilter> {
     ))
     .parse(lower.trim_start())
     .ok()
-    .map(|(_, player)| player)
+    .map(|(_, player)| player);
+    player
 }
 
 /// CR 113.6 + CR 113.6b: Collect every zone the trigger's
