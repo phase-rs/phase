@@ -42613,3 +42613,45 @@ fn q_stacking_the_deck_trigger_reads_self_etb_and_grants_to_the_found_card() {
         Some(TargetFilter::ParentTarget)
     );
 }
+
+/// Q, Stacking the Deck: the granted ability's body ("Create a copy of this
+/// card. You may cast the copy.") still parses as `Effect::Unimplemented`.
+/// This pins that gap so coverage keeps the card unsupported until the body is
+/// actually implemented; when it is, update this test with the real effect.
+#[test]
+fn q_stacking_the_deck_granted_ability_body_stays_unimplemented() {
+    let text = "When Q enters, shuffle your library, then exile cards from the top of your library until you exile a nonland card. That nonland card gains \"Exile a card from your hand: Create a copy of this card. You may cast the copy. Activate only during your turn and only if this card is exiled.\"";
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let parsed = parse_oracle_text(
+        text,
+        "Q, Stacking the Deck",
+        &[],
+        &owned(&["Legendary", "Creature"]),
+        &owned(&["Q"]),
+    );
+    let execute = parsed.triggers[0].execute.as_deref().expect("trigger body");
+    let grant = execute
+        .sub_ability
+        .as_deref()
+        .and_then(|exile_until| exile_until.sub_ability.as_deref())
+        .expect("grant link");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*grant.effect
+    else {
+        panic!("expected the grant, got {:?}", grant.effect);
+    };
+    let granted = static_abilities
+        .iter()
+        .flat_map(|def| def.modifications.iter())
+        .find_map(|modification| match modification {
+            ContinuousModification::GrantAbility { definition } => Some(definition),
+            _ => None,
+        })
+        .expect("granted activated ability");
+    assert!(
+        matches!(*granted.effect, Effect::Unimplemented { .. }),
+        "the granted body must stay Unimplemented so Q remains unsupported, got {:?}",
+        granted.effect
+    );
+}
