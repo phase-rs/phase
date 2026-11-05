@@ -3238,12 +3238,13 @@ fn compound_target_player_continuations_share_one_target() {
 
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AggregateFunction, BasicLandType, Comparator,
-    ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect, EffectScope,
-    FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec,
-    ObjectProperty, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount,
-    PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, RoundingMode,
-    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, ShieldKind,
-    StaticCondition, TapStateChange, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+    ContinuousModification, ControllerRef, DelayedTriggerCondition, DevotionColors, Duration,
+    Effect, EffectScope, FilterProp, ManaProduction, ManaSpendRestriction,
+    ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ObjectScope, ParsedCondition,
+    PlayerFilter, PlayerScope, PreventionAmount, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, ReplacementCondition, RoundingMode, SacrificeCost, SacrificeRequirement,
+    SharedQuality, SharedQualityRelation, ShieldKind, StaticCondition, TapStateChange,
+    TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind, WardCost};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, StepEndManaAction};
@@ -25690,9 +25691,6 @@ fn collect_prevention_nodes(
 
 #[test]
 fn x_prevention_class_parses_announced_x_as_dynamic_amount() {
-    use crate::types::ability::{ControllerRef, DevotionColors, ObjectScope};
-    use crate::types::mana::ManaColor;
-
     const ALABASTER_POTION: &str = "Choose one —\n• Target player gains X life.\n• Prevent the next X damage that would be dealt to any target this turn.";
     const ATALYA: &str = "{X}, {T}: Choose one —\n• Prevent the next X damage that would be dealt to target creature this turn. Spend only white mana on X.\n• You gain X life. Spend only white mana on X.";
     const PANACEA: &str =
@@ -25964,6 +25962,120 @@ fn x_prevention_class_parses_announced_x_as_dynamic_amount() {
             }
         }
     }
+}
+
+/// CR 615.7 + CR 107.3a + CR 120.2a: a counted prevention publishes an announced-X
+/// shield only when the shared count grammar consumed the whole quantity, i.e. its
+/// remainder opens on the prevention damage noun. "the next X plus X damage" leaves
+/// "plus X damage" unconsumed; the parser must report an explicit
+/// `prevent_damage_unconsumed_quantity` gap, never an X-sized shield that dropped the
+/// second operand, and the held gap must keep a weaker priority from re-reading the
+/// line as a blanket prevention replacement with X as 0.
+///
+/// No printed card has this shape (the corpus has no "prevent the next X plus ..."
+/// head). The synthetic texts replace "the next X damage" with "the next X plus X
+/// damage" in the verbatim templates of the nearest printed cards: Festival of the
+/// Guildpact (non-modal instant with a following spell line), Panacea (activated
+/// artifact ability) and Alabaster Potion (modal instant). Each printed card is the
+/// paired positive reach guard: it must still publish exactly one `PreventDamage`
+/// carrying the announced X, so the negatives cannot pass by the line having failed
+/// to parse at all.
+#[test]
+fn x_prevention_unconsumed_quantity_connective_fails_closed() {
+    const KEY: &str = "prevent_damage_unconsumed_quantity";
+    let announced_x = Some(QuantityExpr::Ref {
+        qty: QuantityRef::Variable {
+            name: "X".to_string(),
+        },
+    });
+
+    // (name, printed text, synthetic text, core types)
+    let cases: &[(&str, &str, &str, &[&str])] = &[
+        (
+            "Festival of the Guildpact",
+            "Prevent the next X damage that would be dealt to you this turn.\nDraw a card.",
+            "Prevent the next X plus X damage that would be dealt to you this turn.\nDraw a card.",
+            &["Instant"],
+        ),
+        (
+            "Panacea",
+            "{X}{X}, {T}: Prevent the next X damage that would be dealt to any target this turn.",
+            "{X}{X}, {T}: Prevent the next X plus X damage that would be dealt to any target this turn.",
+            &["Artifact"],
+        ),
+        (
+            "Alabaster Potion",
+            "Choose one \u{2014}\n\u{2022} Target player gains X life.\n\u{2022} Prevent the next X damage that would be dealt to any target this turn.",
+            "Choose one \u{2014}\n\u{2022} Target player gains X life.\n\u{2022} Prevent the next X plus X damage that would be dealt to any target this turn.",
+            &["Instant"],
+        ),
+    ];
+
+    for (name, printed, synthetic, core_types) in cases {
+        // Positive reach guard: the printed text publishes the announced-X shield.
+        let printed_parsed = parse(printed, name, &[], core_types, &[]);
+        let mut printed_nodes = Vec::new();
+        for ability in &printed_parsed.abilities {
+            collect_prevention_nodes(ability, &mut printed_nodes);
+        }
+        assert_eq!(
+            printed_nodes.len(),
+            1,
+            "{name}: the printed clause must publish exactly one shield, got {printed_nodes:?}"
+        );
+        assert_eq!(
+            printed_nodes[0].1, announced_x,
+            "{name}: the printed clause must carry the announced X"
+        );
+        assert!(
+            !unimplemented_keys(&printed_parsed)
+                .iter()
+                .any(|key| key == KEY),
+            "{name}: the printed clause must not reach the gap"
+        );
+
+        // The unconsumed connective fails closed.
+        let parsed = parse(synthetic, name, &[], core_types, &[]);
+        assert!(
+            unimplemented_keys(&parsed).iter().any(|key| key == KEY),
+            "{name}: the unconsumed quantity must be an explicit gap, keys={:?}",
+            unimplemented_keys(&parsed)
+        );
+        let mut nodes = Vec::new();
+        for ability in &parsed.abilities {
+            collect_prevention_nodes(ability, &mut nodes);
+        }
+        assert!(
+            nodes.is_empty(),
+            "{name}: no one-operand shield may be published, got {nodes:?}"
+        );
+        assert!(
+            parsed.replacements.is_empty(),
+            "{name}: the gap must not be re-read as a prevention replacement, got {:?}",
+            parsed.replacements
+        );
+    }
+
+    // The sibling spell line of a gapped prevention survives untouched: the only
+    // `Unimplemented` on the card is the receipt itself.
+    let festival = parse(
+        "Prevent the next X plus X damage that would be dealt to you this turn.\nDraw a card.",
+        "Festival of the Guildpact",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert!(
+        collect_all_effects(&festival)
+            .iter()
+            .any(|effect| matches!(effect, Effect::Draw { .. })),
+        "the Draw spell line must still be represented"
+    );
+    assert_eq!(
+        unimplemented_keys(&festival),
+        vec![KEY.to_string()],
+        "only the prevention receipt may be unimplemented"
+    );
 }
 
 #[test]

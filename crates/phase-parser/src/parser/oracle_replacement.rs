@@ -9125,11 +9125,7 @@ fn parse_oneshot_prevent_damage_tail(
     all_consuming(delimited(
         multispace0,
         pair(
-            map_opt(parse_damage_noun_with_scope, |scope| match scope {
-                Some(CombatDamageScope::CombatOnly) => Some(PreventionScope::CombatDamage),
-                None => Some(PreventionScope::AllDamage),
-                Some(CombatDamageScope::NoncombatOnly) => None,
-            }),
+            parse_prevention_damage_noun,
             opt(preceded(char(' '), parse_damage_target_phrase)),
         ),
         multispace0,
@@ -13688,6 +13684,19 @@ fn parse_damage_noun_with_scope(input: &str) -> OracleResult<'_, Option<CombatDa
         value(Some(CombatDamageScope::CombatOnly), tag("combat damage")),
         value(None, tag("damage")),
     ))
+    .parse(input)
+}
+
+/// CR 615.1a + CR 120.2a: the damage noun of a prevention clause through the shared
+/// [`parse_damage_noun_with_scope`] authority, narrowed to the scopes a prevention
+/// shield carries: "combat damage" -> `CombatDamage`, bare "damage" -> `AllDamage`;
+/// "noncombat damage" has no `PreventionScope` and is an `Err`.
+pub(crate) fn parse_prevention_damage_noun(input: &str) -> OracleResult<'_, PreventionScope> {
+    map_opt(parse_damage_noun_with_scope, |scope| match scope {
+        Some(CombatDamageScope::CombatOnly) => Some(PreventionScope::CombatDamage),
+        None => Some(PreventionScope::AllDamage),
+        Some(CombatDamageScope::NoncombatOnly) => None,
+    })
     .parse(input)
 }
 
