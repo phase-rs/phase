@@ -12,14 +12,16 @@
 use std::collections::BTreeSet;
 
 use engine::ai_support::legal_actions;
-use engine::game::casting::current_casting_variant_choice_options;
+use engine::game::casting::{can_cast_modal_face_now, current_casting_variant_choice_options};
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::{AttachTarget, ObjectIncarnationRefExt};
 use engine::game::keywords::{
     beam_me_up_granted_by, beam_me_up_instances, can_be_beamed_up, effective_beam_me_up_cost,
+    object_has_effective_keyword_kind, BeamMeUpInstance,
 };
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     DigRestOrder, Effect, FilterProp, TargetFilter, TargetRef, TypedFilter,
 };
@@ -31,12 +33,16 @@ use engine::types::game_state::{
     WaitingFor,
 };
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
-use engine::types::keywords::Keyword;
+use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::{BeamMeUpProhibitionScope, StaticMode};
 use engine::types::zones::Zone;
+
+use engine::database::CardDatabase;
+
+use crate::support::shared_card_db;
 
 const MAROONED: &str = "Enchant artifact or creature\nWhen this Aura enters, you may pay {3}. If you do, tap enchanted permanent.\nEnchanted permanent doesn't untap during its controller's untap step and can't be beamed up.";
 /// Marooned's blanket prohibition (every beam me up cast).
@@ -386,6 +392,12 @@ fn cast_with(runner: &mut GameRunner, card: ObjectId, intent: CastIntent<'_>) ->
             payment_mode: CastPaymentMode::Auto,
         })
         .unwrap_or_else(|err| panic!("cast {card:?}: {err:?}"));
+    drive_cast(runner, card, intent)
+}
+
+/// Answer every cast-time prompt of the cast of `card` already begun, through
+/// `apply()`, until the spell is on the stack (CR 601.2b-i).
+fn drive_cast(runner: &mut GameRunner, card: ObjectId, intent: CastIntent<'_>) -> CastRecord {
     let mut record = CastRecord::default();
     let mut remaining_targets: Vec<TargetRef> = intent.targets.to_vec();
     let mut targeted = false;
@@ -2143,5 +2155,240 @@ fn printed_and_scotty_beam_me_up_costs_are_both_offered() {
     pass_until_prompt(&mut runner);
     assert_settled(&runner);
     assert_eq!(runner.life(P1), life - 3);
+    assert_eq!(zone(&runner, card), Zone::Exile);
+}
+
+const ANCESTRAL_VISION: &str = "Suspend 4—{U} (Rather than cast this card from your hand, pay {U} and exile it with four time counters on it. At the beginning of your upkeep, remove a time counter. When the last is removed, you may cast it without paying its mana cost.)\nTarget player draws three cards.";
+const PACT_OF_THE_TITAN: &str = "Create a 4/4 red Giant creature token.\nAt the beginning of your next upkeep, pay {4}{R}. If you don't, you lose the game.";
+
+/// P0 controls Scotty (full Oracle text) and Grizzly Bears, has `pool` in its
+/// mana pool, and it is P0's precombat main phase. `graveyard` stages P0's
+/// graveyard; a `db` rehydrates real cards (CR 712.8a back faces) before layers
+/// are evaluated.
+fn scotty_board_with(
+    pool: Vec<ManaUnit>,
+    db: Option<&CardDatabase>,
+    graveyard: impl FnOnce(&mut GameScenario) -> Vec<ObjectId>,
+) -> (GameRunner, ObjectId, ObjectId, Vec<ObjectId>) {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let scotty = sc
+        .add_creature_from_oracle(P0, "Scotty, Miracle Worker", 2, 3, SCOTTY)
+        .as_legendary()
+        .with_mana_cost(cost(1, &[ManaCostShard::Blue, ManaCostShard::Blue]))
+        .id();
+    let bears = sc.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let cards = graveyard(&mut sc);
+    sc.add_card_to_library_top(P0, "Library Card A");
+    sc.add_card_to_library_top(P0, "Library Card B");
+    sc.with_mana_pool(P0, pool);
+    let mut runner = sc.build();
+    if let Some(db) = db {
+        engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    }
+    runner.state_mut().layers_dirty.mark_full();
+    evaluate_layers(runner.state_mut());
+    (runner, scotty, bears, cards)
+}
+
+/// S6 (CR 712.8a + CR 712.11b + CR 712.11c): Jadzi, Oracle of Arcavios is a
+/// creature card in the graveyard, but its modal back face, Journey to the
+/// Oracle, is a sorcery. Scotty's beam me up casts only instant and sorcery
+/// spells and "the beam me up cost is equal to that spell's mana cost", so the
+/// card is offered, only the Journey face may be chosen, and it is cast for
+/// Journey's own {2}{G}{G} — not the front face's {6}{U}{U} — returning
+/// another creature, then exiled after it resolves.
+#[test]
+fn scotty_casts_a_modal_dfc_sorcery_back_face_for_that_faces_mana_cost() {
+    let Some(db) = shared_card_db() else { return };
+    // Eight mana that could pay {6}{U}{U}: the creature face is refused for its
+    // type, not its cost.
+    let mut pool = mana(ManaType::Blue, 2);
+    pool.extend(mana(ManaType::Green, 6));
+    let (mut runner, scotty, bears, cards) = scotty_board_with(pool, Some(db), |sc| {
+        vec![sc.add_real_card(P0, "Jadzi, Oracle of Arcavios", Zone::Graveyard, db)]
+    });
+    let jadzi = cards[0];
+
+    // REACH: in the graveyard the card has only its creature front face, and
+    // Scotty's grant reads that face's {6}{U}{U}.
+    let front = &runner.state().objects[&jadzi];
+    assert_eq!(front.name, "Jadzi, Oracle of Arcavios");
+    assert!(front.card_types.core_types.contains(&CoreType::Creature));
+    assert_eq!(
+        front.back_face.as_ref().map(|back| back.name.as_str()),
+        Some("Journey to the Oracle"),
+        "the modal back face is hydrated"
+    );
+    assert_eq!(
+        effective_beam_me_up_cost(runner.state(), jadzi),
+        Some(cost(6, &[ManaCostShard::Blue, ManaCostShard::Blue]))
+    );
+
+    assert!(
+        offers_cast_of(&runner, jadzi),
+        "Journey to the Oracle is offered"
+    );
+    assert!(
+        can_cast_modal_face_now(runner.state(), P0, jadzi, true),
+        "the sorcery back face can be cast with beam me up"
+    );
+    assert!(
+        !can_cast_modal_face_now(runner.state(), P0, jadzi, false),
+        "the creature front face can't be cast with beam me up"
+    );
+
+    let card_id = runner.state().objects[&jadzi].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: jadzi,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Jadzi // Journey");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ModalFaceChoice { .. }
+        ),
+        "the caster chooses the face: {:?}",
+        runner.state().waiting_for
+    );
+    let actions = legal_actions(runner.state());
+    assert!(actions.contains(&GameAction::ChooseModalFace { back_face: true }));
+    assert!(
+        !actions.contains(&GameAction::ChooseModalFace { back_face: false }),
+        "the creature face is not a legal choice: {actions:?}"
+    );
+    runner
+        .act(GameAction::ChooseModalFace { back_face: true })
+        .expect("choose Journey to the Oracle");
+
+    let record = drive_cast(&mut runner, jadzi, CastIntent::returning(bears));
+    assert_eq!(
+        record.return_choices,
+        Some(vec![bears]),
+        "Scotty can't be beamed up to cast a spell this way"
+    );
+    assert_eq!(zone(&runner, bears), Zone::Hand, "Bears returned");
+    assert_eq!(zone(&runner, scotty), Zone::Battlefield, "Scotty stays");
+    assert_eq!(
+        pool_total(&runner, P0),
+        4,
+        "exactly Journey's {{2}}{{G}}{{G}} paid out of eight"
+    );
+
+    // Journey to the Oracle resolves: "You may put any number of land cards
+    // from your hand onto the battlefield." — declined, with no land in hand.
+    pass_until_prompt(&mut runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ),
+        "Journey to the Oracle's optional land drop: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("decline the land drop");
+    pass_until_prompt(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(zone(&runner, jadzi), Zone::Exile, "then exile that spell");
+}
+
+/// S7 (CR 118.6 + CR 202.1b): Scotty's grant on Ancestral Vision, which has no
+/// mana cost, is based on the mana cost of an object with no mana cost, so it
+/// is unpayable and Ancestral Vision is not cast for free. A {0} mana cost is
+/// payable: Pact of the Titan is cast for {0}.
+#[test]
+fn scotty_grant_on_a_card_with_no_mana_cost_is_unpayable() {
+    let (mut runner, _scotty, bears, cards) =
+        scotty_board_with(mana(ManaType::Blue, 3), None, |sc| {
+            let vision = sc
+                .add_spell_to_graveyard(P0, "Ancestral Vision", false)
+                .with_mana_cost(ManaCost::NoCost)
+                .from_oracle_text(ANCESTRAL_VISION)
+                .id();
+            let pact = sc
+                .add_spell_to_graveyard(P0, "Pact of the Titan", true)
+                .with_mana_cost(cost(0, &[]))
+                .from_oracle_text(PACT_OF_THE_TITAN)
+                .id();
+            vec![vision, pact]
+        });
+    let (vision, pact) = (cards[0], cards[1]);
+
+    assert!(
+        object_has_effective_keyword_kind(runner.state(), vision, KeywordKind::BeamMeUp),
+        "REACH: Scotty grants Ancestral Vision beam me up"
+    );
+    assert!(
+        beam_me_up_instances(runner.state(), vision).is_empty(),
+        "its only instance costs an unpayable mana cost"
+    );
+    assert_eq!(effective_beam_me_up_cost(runner.state(), vision), None);
+    assert!(
+        !offers_cast_of(&runner, vision),
+        "Ancestral Vision is not cast for free"
+    );
+
+    assert_eq!(
+        effective_beam_me_up_cost(runner.state(), pact),
+        Some(cost(0, &[])),
+        "a {{0}} mana cost is a payable beam me up cost"
+    );
+    assert!(
+        offers_cast_of(&runner, pact),
+        "Pact of the Titan is offered"
+    );
+    let record = cast_with(&mut runner, pact, CastIntent::returning(bears));
+    assert_eq!(record.return_choices, Some(vec![bears]));
+    assert_eq!(pool_total(&runner, P0), 3, "nothing paid for {{0}}");
+    pass_until_prompt(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(zone(&runner, pact), Zone::Exile, "then exile that spell");
+    assert!(
+        runner
+            .state()
+            .battlefield
+            .iter()
+            .any(|id| runner.state().objects[id].name == "Giant"),
+        "Pact of the Titan resolved"
+    );
+}
+
+/// S8 (CR 118.6 + CR 113.2c): dropping Scotty's unpayable instance leaves an
+/// independent printed beam me up on the same card. SYNTHETIC: no printed card
+/// has both no mana cost and beam me up; this is Open Communications' verbatim
+/// text on a card with no mana cost.
+#[test]
+fn unpayable_scotty_grant_leaves_a_printed_beam_me_up() {
+    let (mut runner, _scotty, bears, cards) =
+        scotty_board_with(mana(ManaType::Blue, 3), None, |sc| {
+            vec![sc
+                .add_spell_to_graveyard(P0, "Open Communications", false)
+                .with_mana_cost(ManaCost::NoCost)
+                .from_oracle_text(OPEN_COMMUNICATIONS)
+                .id()]
+        });
+    let card = cards[0];
+
+    assert_eq!(
+        beam_me_up_instances(runner.state(), card),
+        vec![BeamMeUpInstance {
+            cost: cost(2, &[ManaCostShard::Blue]),
+            granted_by: None,
+        }],
+        "only the printed instance remains"
+    );
+    assert!(offers_cast_of(&runner, card), "the printed cost is offered");
+    let record = cast_with(&mut runner, card, CastIntent::returning(bears));
+    assert_eq!(record.variant_options, None, "one beam me up option");
+    assert_eq!(pool_total(&runner, P0), 0, "{{2}}{{U}} paid");
+    pass_until_prompt(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(hand(&runner, P0).len(), 2, "Bears plus the drawn card");
     assert_eq!(zone(&runner, card), Zone::Exile);
 }

@@ -370,8 +370,14 @@ pub struct BeamMeUpInstance {
 /// order of its keyword contributions. The single authority for both the beam
 /// me up cost and the granter: each instance functions independently, so two
 /// Scottys give a graveyard card two instances, each scoping its own "can't be
-/// beamed up to cast a spell this way" prohibition. Beam me up rule number:
-/// needs manual verification.
+/// beamed up to cast a spell this way" prohibition.
+///
+/// CR 118.6: an instance whose cost is based on the mana cost of a card with no
+/// mana cost (Scotty, Miracle Worker's grant on Ancestral Vision) is unpayable,
+/// so it is not listed: it would otherwise concretize to `ManaCost::NoCost` and
+/// read as free. A payable instance on the same card (a printed beam me up, or
+/// a {0} mana cost) is unaffected. Beam me up rule number: needs manual
+/// verification.
 pub fn beam_me_up_instances(state: &GameState, object_id: ObjectId) -> Vec<BeamMeUpInstance> {
     let mut instances: Vec<BeamMeUpInstance> = Vec::new();
     let contributions =
@@ -383,6 +389,9 @@ pub fn beam_me_up_instances(state: &GameState, object_id: ObjectId) -> Vec<BeamM
             let Keyword::BeamMeUp(cost) = &entry.keyword else {
                 return None;
             };
+            if self_mana_cost_is_unpayable(state, object_id, cost) {
+                return None;
+            }
             let granted_by = match entry.origin {
                 Some(TriggerProducerOrigin::Static { source, .. }) => Some(source),
                 // A transient grant's source is a resolved spell or ability,

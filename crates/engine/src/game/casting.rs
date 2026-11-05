@@ -1798,19 +1798,21 @@ fn graveyard_spell_objects_available_to_cast(
         // CR 702.34 / CR 702.81 / CR 702.127 / CR 702.138 / CR 702.180:
         // Cards in graveyard with graveyard-cast keywords. Escape, Retrace,
         // Jump-start and beam me up must have enough eligible non-mana
-        // additional-cost material available.
-        if has_effective_graveyard_cast_keyword(state, player, obj_id, obj)
+        // additional-cost material available. Beam me up restricts the SPELL,
+        // not the card, so it is judged per face the player may cast
+        // (`beam_me_up_offered_from_graveyard`).
+        if (has_effective_graveyard_cast_keyword(state, player, obj_id, obj)
             && (has_harmonize_keyword(state, obj_id)
                 || has_flashback_keyword(state, obj_id)
                 || has_aftermath_keyword(state, obj_id)
                 || has_disturb_keyword(state, obj_id)
                 || retrace_has_discardable_land(state, player, obj_id)
                 || jumpstart_has_discardable_card(state, player, obj_id)
-                || beam_me_up_has_returnable_creature(state, player, obj_id)
                 || can_pay_escape_additional_cost(state, player, obj_id)
                 // CR 702.187b: Mayhem is eligible only while the card was
                 // discarded this turn.
-                || mayhem_castable_from_graveyard(state, player, obj_id))
+                || mayhem_castable_from_graveyard(state, player, obj_id)))
+            || beam_me_up_offered_from_graveyard(state, player, obj_id)
         {
             keyword_objects.push(obj_id);
         }
@@ -1965,8 +1967,11 @@ fn jumpstart_has_discardable_card(
 /// 207.2a, summarizes the beam me up rule rather than adding one — reads "Only
 /// instant and sorcery spells can be cast this way." Every printed beam me up
 /// card is a sorcery, so the gate only binds a granted beam me up (Scotty grants
-/// it to every card in your graveyard). The keyword's rule number needs manual
-/// verification.
+/// it to every card in your graveyard). The gate reads the face being cast
+/// (CR 712.11c): a chosen modal DFC back face is swapped in before
+/// preparation, and discovery tries each face the player may choose
+/// (`beam_me_up_offered_from_graveyard`). The keyword's rule number needs
+/// manual verification.
 fn beam_me_up_castable_from_graveyard(state: &GameState, object_id: ObjectId) -> bool {
     state.objects.get(&object_id).is_some_and(|obj| {
         obj.zone == Zone::Graveyard
@@ -1979,6 +1984,54 @@ fn beam_me_up_castable_from_graveyard(state: &GameState, object_id: ObjectId) ->
             })
             && super::keywords::effective_beam_me_up_cost(state, object_id).is_some()
     })
+}
+
+/// CR 712.11b + CR 712.11c: beam me up casts only instant and sorcery SPELLS,
+/// and the caster of a spell//spell split card or modal DFC chooses the face
+/// cast, so the graveyard route is offered when SOME face the player may cast
+/// is beam-me-up castable — Journey to the Oracle, the sorcery back face of
+/// Jadzi, Oracle of Arcavios, though the card in the graveyard is a creature
+/// (CR 712.8a). Discovery only: once the face is chosen, preparation and the
+/// beam me up cost read the chosen face's own characteristics and mana cost
+/// (`beam_me_up_castable_from_graveyard`, `keywords::beam_me_up_instances`).
+fn beam_me_up_offered_from_graveyard(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    some_prospective_spell_face(state, object_id, |state| {
+        beam_me_up_has_returnable_creature(state, player, object_id)
+    })
+}
+
+/// CR 709.3 + CR 712.11b + CR 712.11c: whether `admits` holds for some spell
+/// face `object_id` may be cast as from its current zone — the face it shows
+/// now, and, for a spell//spell split card or modal DFC whose face choice is
+/// offered there (`cast_spell_face_choice_offered_from_zone`), the other face
+/// simulated as chosen on a clone (`simulate_chosen_split_spell_back_face`, the
+/// swap the `ModalFaceChoice` handler performs). Each face is evaluated alone,
+/// as only the face put on the stack is evaluated to determine if it can be
+/// cast.
+fn some_prospective_spell_face(
+    state: &GameState,
+    object_id: ObjectId,
+    admits: impl Fn(&GameState) -> bool,
+) -> bool {
+    if admits(state) {
+        return true;
+    }
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if !cast_spell_face_choice_offered_from_zone(state, obj) {
+        return false;
+    }
+    let mut chosen_back = state.clone();
+    let Some(back) = chosen_back.objects.get_mut(&object_id) else {
+        return false;
+    };
+    simulate_chosen_split_spell_back_face(back);
+    admits(&chosen_back)
 }
 
 /// CR 118.3 + CR 601.2h: a beam me up cast also returns a creature you control
