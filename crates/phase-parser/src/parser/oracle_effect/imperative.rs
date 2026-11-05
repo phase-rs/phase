@@ -5150,8 +5150,7 @@ pub(super) fn parse_choose_ast(
             if (tail.split_whitespace().count() == 1
                 && !tail.chars().all(|c| c.is_ascii_punctuation())
                 && !super::sequence::starts_clause_text_or_conjugated(tail))
-                || matches!(&target, TargetFilter::Typed(filter)
-                    if filter.type_filters.is_empty() && filter.controller.is_none())
+                || crate::parser::oracle_quantity::is_empty_typed_filter(&target)
             {
                 return None;
             }
@@ -10187,7 +10186,10 @@ pub(super) fn shuffle_rest_clause(lower: &str) -> Option<ShuffleRestClause> {
 /// to the selected-population `ChangeZoneAll`, which requires announced targets
 /// to move anything (Alabaster Dragon, Dread, Serra Avatar).
 fn shuffle_it_names_the_source(object: &str, ctx: &ParseContext) -> bool {
-    if object.trim() != "it" {
+    if all_consuming(tag::<_, _, OracleError<'_>>("it"))
+        .parse(object.trim())
+        .is_err()
+    {
         return false;
     }
     if ctx.object_pronoun_ref.is_some() {

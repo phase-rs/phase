@@ -11541,8 +11541,7 @@ fn parse_effect_clause_inner_with_damage_context(
             // the noun authority (`parse_target`) each own their axis.
             let (target, remainder) = parse_target_with_ctx(target_input, ctx);
             if remainder.trim().is_empty()
-                && !matches!(&target, TargetFilter::Typed(filter)
-                    if filter.type_filters.is_empty() && filter.controller.is_none())
+                && !crate::parser::oracle_quantity::is_empty_typed_filter(&target)
             {
                 let mut clause = parsed_clause(Effect::TargetOnly { target });
                 clause.multi_target = Some(multi);
@@ -16155,13 +16154,6 @@ fn try_parse_owner_of_target_shuffle(
     // CR 608.2c: this shortcut owns only the shuffle instruction, never an
     // earlier action followed by a shuffle elsewhere in the clause.
     let predicate_start = subject::find_predicate_start(tp.original)?;
-    all_consuming((
-        alt((tag::<_, _, OracleError<'_>>("shuffle "), tag("shuffles "))),
-        tag("it into "),
-        alt((tag("their library"), tag("its owner's library"))),
-    ))
-    .parse(&tp.lower[predicate_start..])
-    .ok()?;
     let subject_text = tp.original[..predicate_start].trim();
     // CR 108.3 + CR 400.7e + CR 115.10a: the SOURCE's owner as the possessive
     // subject ("This creature's owner shuffles it into their library" —
@@ -16177,28 +16169,19 @@ fn try_parse_owner_of_target_shuffle(
         .parse(subject_owner_lower.as_str())
         .is_ok()
     {
-        return Some(imperative::lower_shuffle_ast(
-            ShuffleImperativeAst::ChangeZoneToLibrary {
-                target: TargetFilter::SelfRef,
-                owner_library: true,
-            },
-        ));
+        return try_parse_source_owner_shuffle(tp.slice(predicate_start, tp.len()));
     }
-    let mut trial = ctx.clone_throwaway();
-    let application = subject::parse_subject_application(subject_text, &mut trial);
-    // allow-noncombinator: possessive anaphor classification for the owner-shuffle shortcut.
-    let possessive_anaphor = subject_text.contains("'s owner ") // allow-noncombinator: possessive subject scan.
-        && !subject_text.to_ascii_lowercase().contains("target "); // allow-noncombinator: declared-target guard.
-    let target = match application {
-        Some(application) => {
-            if application.multi_target.is_some() {
-                return None;
-            }
-            extract_owner_of_target(tp, ctx)?
-        }
-        None if possessive_anaphor => extract_owner_of_target(tp, ctx)?,
-        None => return None,
-    };
+    all_consuming((
+        alt((tag::<_, _, OracleError<'_>>("shuffle "), tag("shuffles "))),
+        tag("it into "),
+        alt((tag("their library"), tag("its owner's library"))),
+    ))
+    .parse(&tp.lower[predicate_start..])
+    .ok()?;
+    // `extract_owner_of_target` is the single authority for the target
+    // possessor: it restores a possessive anaphor's pre-declaration binding and
+    // rejects multi-target ("up to N") subjects.
+    let target = extract_owner_of_target(tp, ctx)?;
 
     // CR 108.3 + CR 400.7e + CR 115.10a: an ATTACHED-HOST possessor names a
     // contextual object ("Enchanted creature's owner" — Watery Grasp), not a
@@ -16227,6 +16210,48 @@ fn try_parse_owner_of_target_shuffle(
     let mut declaration = parsed_clause(Effect::TargetOnly { target });
     declaration.sub_ability = Some(Box::new(bound_move));
     Some(declaration)
+}
+
+/// CR 201.5 + CR 108.3 + CR 400.3: the predicate of a `~'s owner` subject
+/// ("Etrata's owner shuffles Etrata into their library", "Fblthp's owner
+/// shuffles him into their library") names the source by its normalized name,
+/// a gendered source pronoun, or the bare pronoun "it". Text that refers to the
+/// object it is on by name means just that object (CR 201.5), and it goes to
+/// its owner's library (CR 400.3), so the movement authority is the
+/// single-object `ChangeZone` (`SelfRef`) followed by the terminal shuffle
+/// (CR 701.24a).
+///
+/// A trailing " and <clause>" (Gandalf: "... and draws three cards") is not
+/// lowered here: it is kept as an explicit `Effect::unimplemented` tail on the
+/// shuffle so the card's coverage stays honest instead of silently dropping the
+/// instruction (CR 608.2c: the controller follows every instruction in order).
+fn try_parse_source_owner_shuffle(predicate: TextPair) -> Option<ParsedEffectClause> {
+    let (_, (_, _, _, _, continuation)) = all_consuming((
+        alt((tag::<_, _, OracleError<'_>>("shuffle "), tag("shuffles "))),
+        alt((
+            value((), tag("~")),
+            value((), tag("it")),
+            crate::parser::oracle_target::parse_source_anaphoric_pronoun,
+        )),
+        tag(" into "),
+        alt((tag("their library"), tag("its owner's library"))),
+        opt(preceded(tag(" and "), rest)),
+    ))
+    .parse(predicate.lower)
+    .ok()?;
+    let mut clause = imperative::lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
+        target: TargetFilter::SelfRef,
+        owner_library: true,
+    });
+    if let Some(continuation_lower) = continuation {
+        let continuation_original = predicate.original_remainder(continuation_lower)?;
+        let terminal_shuffle = clause.sub_ability.as_mut()?;
+        terminal_shuffle.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented("source_owner_shuffle_continuation", continuation_original),
+        )));
+    }
+    Some(clause)
 }
 
 /// CR 400.3 + CR 401.7: Parse "the owner of target [filter] puts it into their
@@ -16285,8 +16310,7 @@ fn extract_owner_of_target(tp: TextPair, ctx: &mut ParseContext) -> Option<Targe
     // allow-noncombinator: possessive boundary scan; target parsing stays in parse_target_with_ctx.
     if let Some(idx) = tp.find("'s owner ") {
         let subject = &tp.original[..idx];
-        // allow-noncombinator: declared-target guard on the possessive anaphor subject.
-        if !subject.to_ascii_lowercase().contains("target ") {
+        if !nom_primitives::scan_contains(&subject.to_ascii_lowercase(), "target ") {
             let (filter, remainder) =
                 ctx.with_player_antecedents(|scoped| parse_target_with_ctx(subject, scoped));
             if remainder.trim().is_empty() {

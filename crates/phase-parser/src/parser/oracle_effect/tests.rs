@@ -96117,22 +96117,27 @@ fn compound_shuffle_this_artifact_and_graveyard_moves_whole_zone() {
 /// Serra Avatar).
 #[test]
 fn source_departure_shuffle_moves_the_source_not_a_population() {
-    let cards = [
+    // Verbatim MTGJSON Oracle text and keyword names per card.
+    let cards: [(&str, &[&str], &str); 3] = [
         (
             "Alabaster Dragon",
+            &["Flying"],
             "Flying\nWhen this creature dies, shuffle it into its owner's library.",
         ),
         (
             "Dread",
-            "Whenever a creature deals damage to you, put a nightmare counter on this creature.\nWhen Dread is put into a graveyard from anywhere, shuffle it into its owner's library.",
+            &["Fear"],
+            "Fear (This creature can't be blocked except by artifact creatures and/or black creatures.)\nWhenever a creature deals damage to you, destroy it.\nWhen Dread is put into a graveyard from anywhere, shuffle it into its owner's library.",
         ),
         (
             "Serra Avatar",
+            &[],
             "Serra Avatar's power and toughness are each equal to your life total.\nWhen Serra Avatar is put into a graveyard from anywhere, shuffle it into its owner's library.",
         ),
     ];
-    for (name, text) in cards {
-        let parsed = parse_oracle_text(text, name, &[], &["Creature".to_string()], &[]);
+    for (name, keywords, text) in cards {
+        let keywords: Vec<String> = keywords.iter().map(|k| (*k).to_string()).collect();
+        let parsed = parse_oracle_text(text, name, &keywords, &["Creature".to_string()], &[]);
         let mut found: Option<&AbilityDefinition> = None;
         for trigger in &parsed.triggers {
             let mut current = trigger.execute.as_deref();
@@ -96254,6 +96259,11 @@ fn source_owner_possessive_shuffle_moves_the_source() {
 /// itself. The possessor declares no target slot, so the movement stays the
 /// single-object `ChangeZone` rather than the selected-population
 /// `ChangeZoneAll`.
+///
+/// This is a deliberate ability EXCERPT, not the full card: the Aura's
+/// `Enchant creature` line and the untap-restriction static are omitted so the
+/// row isolates the Waterbend ability's own clause. The full verbatim card
+/// runs through the engine in `riftsweeper_owner_binding`.
 #[test]
 fn enchanted_host_owner_shuffle_moves_the_host_without_a_target_declaration() {
     let parsed = parse_oracle_text(
@@ -96288,6 +96298,121 @@ fn enchanted_host_owner_shuffle_moves_the_host_without_a_target_declaration() {
         matches!(&*movement.effect, Effect::Shuffle { .. }),
         "expected the terminal shuffle, got {:?}",
         movement.effect
+    );
+}
+
+/// The effects of the first trigger or ability chain that holds the source's own
+/// owner-library move (`ChangeZone { SelfRef, Library, owner_library }`),
+/// starting at that move, in `sub_ability` order.
+fn source_owner_shuffle_tail(parsed: &crate::parser::oracle::ParsedAbilities) -> Vec<Effect> {
+    let roots = parsed
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .chain(parsed.abilities.iter());
+    for root in roots {
+        let chain = chain_effects(root);
+        if let Some(start) = chain.iter().position(|effect| {
+            matches!(
+                effect,
+                Effect::ChangeZone {
+                    destination: Zone::Library,
+                    target: TargetFilter::SelfRef,
+                    owner_library: true,
+                    ..
+                }
+            )
+        }) {
+            return chain[start..].to_vec();
+        }
+    }
+    panic!("no source owner-library move: {parsed:?}");
+}
+
+/// CR 201.5 + CR 108.3 + CR 400.3 + CR 701.24a: "<Name>'s owner shuffles
+/// <name/him> into their library" (Etrata, the Silencer; Fblthp, Impossibly
+/// Lost) means the SOURCE goes to its owner's library and that library is
+/// shuffled. Full verbatim Oracle text. The row asserts the move and the
+/// terminal shuffle's presence, not the shuffle's target.
+#[test]
+fn source_owner_name_and_pronoun_spellings_move_the_source() {
+    let etrata = parse_oracle_text(
+        "Etrata can't be blocked.\nWhenever Etrata deals combat damage to a player, exile target creature that player controls and put a hit counter on that card. That player loses the game if they own three or more exiled cards with hit counters on them. Etrata's owner shuffles Etrata into their library.",
+        "Etrata, the Silencer",
+        &[],
+        &["Creature".to_string()],
+        &["Vampire".to_string(), "Assassin".to_string()],
+    );
+    let tail = source_owner_shuffle_tail(&etrata);
+    assert_eq!(tail.len(), 2, "Etrata: move then shuffle: {tail:?}");
+    assert!(
+        matches!(&tail[1], Effect::Shuffle { .. }),
+        "Etrata: CR 701.24c needs the terminal shuffle: {tail:?}"
+    );
+
+    let fblthp = parse_oracle_text(
+        "When one or more of your opponents are dealt combat damage during your turn, draw two cards. If your library has no cards in it, you win the game. Fblthp's owner shuffles him into their library. (If you draw from an empty library this way, you still win the game.)",
+        "Fblthp, Impossibly Lost",
+        &[],
+        &["Creature".to_string()],
+        &["Homunculus".to_string()],
+    );
+    let tail = source_owner_shuffle_tail(&fblthp);
+    assert_eq!(tail.len(), 2, "Fblthp: move then shuffle: {tail:?}");
+    assert!(
+        matches!(&tail[1], Effect::Shuffle { .. }),
+        "Fblthp: CR 701.24c needs the terminal shuffle: {tail:?}"
+    );
+    assert!(
+        !tail
+            .iter()
+            .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+        "Fblthp: the shuffle clause must not be a gap: {tail:?}"
+    );
+}
+
+/// CR 201.5 + CR 608.2c: Gandalf's "{6}: Gandalf's owner shuffles him into
+/// their library and draws three cards." The shuffle half restores the source's
+/// own library move; the " and draws three cards" instruction stays an explicit
+/// strict-failure tail, so coverage remains red instead of silently dropping the
+/// draw. Never `TargetOnly(SelfRef)`.
+#[test]
+fn source_owner_shuffle_conjunct_tail_stays_unimplemented() {
+    let gandalf = parse_oracle_text(
+        "Ward {3} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {3}.)\n{6}: Gandalf's owner shuffles him into their library and draws three cards.",
+        "Gandalf, Wandering Wizard",
+        &["Ward".to_string()],
+        &["Creature".to_string()],
+        &["Avatar".to_string(), "Wizard".to_string()],
+    );
+    let tail = source_owner_shuffle_tail(&gandalf);
+    assert_eq!(tail.len(), 3, "Gandalf: move, shuffle, gap tail: {tail:?}");
+    assert!(
+        matches!(&tail[1], Effect::Shuffle { .. }),
+        "Gandalf: {tail:?}"
+    );
+    assert!(
+        matches!(
+            &tail[2],
+            Effect::Unimplemented { name, description }
+                if name == "source_owner_shuffle_continuation"
+                    && description.as_deref() == Some("draws three cards")
+        ),
+        "Gandalf: {tail:?}"
+    );
+    let activated = gandalf
+        .abilities
+        .iter()
+        .find(|ability| ability.kind == AbilityKind::Activated)
+        .expect("Gandalf activated ability");
+    assert!(
+        !chain_effects(activated).iter().any(|effect| matches!(
+            effect,
+            Effect::TargetOnly {
+                target: TargetFilter::SelfRef
+            }
+        )),
+        "Gandalf: the source is not a declared target (CR 115.10a)"
     );
 }
 
@@ -96361,35 +96486,47 @@ fn plural_player_target_nouns_share_the_target_grammar() {
         );
     }
 
-    // Full-Oracle controls: the plural noun is the clause's whole payload.
+    // Full-Oracle controls: the plural noun is the clause's whole payload. Both
+    // cards print a cost-modification sentence first, so the target declaration
+    // is located by effect rather than by position.
     let officious = parse_oracle_text(
-        "Choose any number of target players. Investigate X times, where X is the total number of creatures those players control.",
+        "This spell costs {W}{U} more to cast for each target beyond the first.\nChoose any number of target players. Investigate X times, where X is the total number of creatures those players control.",
         "Officious Interrogation",
-        &[],
+        &["Investigate".to_string()],
         &["Instant".to_string()],
         &[],
     );
+    let officious_declaration = officious
+        .abilities
+        .iter()
+        .find(|ability| matches!(&*ability.effect, Effect::TargetOnly { .. }))
+        .unwrap_or_else(|| panic!("Officious Interrogation: no TargetOnly: {officious:?}"));
     assert!(
         matches!(
-            &*officious.abilities[0].effect,
+            &*officious_declaration.effect,
             Effect::TargetOnly {
                 target: TargetFilter::Player
             }
         ),
         "Officious Interrogation: got {:?}",
-        officious.abilities[0].effect
+        officious_declaration.effect
     );
 
     let coppercoats = parse_oracle_text(
-        "Strive — This spell costs {1}{W} more to cast for each target beyond the first.\nChoose any number of target opponents. Create X 1/1 white Human Soldier creature tokens, where X is the number of those opponents.",
+        "Strive \u{2014} This spell costs {1}{W} more to cast for each target beyond the first.\nChoose any number of target opponents. Create X 1/1 white Human Soldier creature tokens, where X is the number of creatures those opponents control.",
         "Call the Coppercoats",
-        &[],
+        &["Strive".to_string()],
         &["Instant".to_string()],
         &[],
     );
+    let coppercoats_declaration = coppercoats
+        .abilities
+        .iter()
+        .find(|ability| matches!(&*ability.effect, Effect::TargetOnly { .. }))
+        .unwrap_or_else(|| panic!("Call the Coppercoats: no TargetOnly: {coppercoats:?}"));
     assert!(
         matches!(
-            &*coppercoats.abilities[0].effect,
+            &*coppercoats_declaration.effect,
             Effect::TargetOnly { target }
                 if matches!(
                     target,
@@ -96399,7 +96536,7 @@ fn plural_player_target_nouns_share_the_target_grammar() {
                 )
         ),
         "Call the Coppercoats: got {:?}",
-        coppercoats.abilities[0].effect
+        coppercoats_declaration.effect
     );
 }
 

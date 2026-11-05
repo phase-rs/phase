@@ -3288,8 +3288,11 @@ fn parse_subject_application_for(
     }) {
         let (object_text, multi_target) = super::strip_optional_target_prefix(object_text);
         let object_lower = object_text.to_lowercase();
-        tag::<_, _, OracleError<'_>>("target ")
-            .parse(object_lower.as_str())
+        // CR 115.1 + CR 115.10a: only a printed declaration word makes the object
+        // a target; the shared prefix family also reads "other target" /
+        // "another target" so a slot such as "up to one other target nonland
+        // permanent" (Plan for All Outcomes) is not dropped.
+        crate::parser::oracle_nom::target::parse_declared_target_prefix(object_lower.as_str())
             .ok()?;
         let mut trial = ctx.clone();
         let (filter, remainder) = parse_target_with_ctx(object_text, &mut trial);
@@ -9401,6 +9404,43 @@ mod tests {
             &mut ParseContext::default()
         )
         .is_none());
+
+        // CR 115.1 + CR 115.10a: the declared-target prefix family ("other
+        // target", "another target") announces the same single pinned slot as
+        // the bare "target" sibling. Plan for All Outcomes prints "the owner of
+        // up to one other target nonland permanent" (census of that phrase = 1).
+        let app = parse_subject_application(
+            "the owner of up to one other target nonland permanent",
+            &mut ParseContext::default(),
+        )
+        .expect("Plan for All Outcomes owner subject");
+        assert_eq!(app.affected, TargetFilter::ParentTargetOwner);
+        assert_eq!(app.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+        let Some(TargetFilter::Typed(typed)) = &app.target else {
+            panic!("expected a typed declared target, got {:?}", app.target);
+        };
+        assert!(
+            typed.properties.contains(&FilterProp::Another),
+            "the 'other' qualifier excludes the source: {typed:?}"
+        );
+        assert!(typed
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+        assert!(typed.type_filters.contains(&TypeFilter::Permanent));
+
+        // Labelled grammar control: "another target" is the sibling spelling of
+        // the same prefix family. No printed card uses it after "the owner of"
+        // (census 0); the row pins the grammar, not a card.
+        let control = parse_subject_application(
+            "the owner of another target creature",
+            &mut ParseContext::default(),
+        )
+        .expect("another-target grammar control");
+        assert_eq!(control.affected, TargetFilter::ParentTargetOwner);
+        let Some(TargetFilter::Typed(typed)) = &control.target else {
+            panic!("expected a typed declared target, got {:?}", control.target);
+        };
+        assert!(typed.properties.contains(&FilterProp::Another));
     }
 
     #[test]

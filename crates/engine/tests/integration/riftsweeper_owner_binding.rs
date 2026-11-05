@@ -1,8 +1,13 @@
-//! Ordinary full-Oracle witnesses for R2, independent of Beam casting.
+//! Ordinary full-Oracle witnesses for R2 (declared-target owner shuffles), the
+//! declaration, owner-continuation and source-owner shuffle spellings
+//! (Etrata, Alabaster Dragon, Watery Grasp) and the empty-filter choose guard
+//! (Forge of Heroes), independent of Beam casting.
 
+use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -11,7 +16,15 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
+const P2: PlayerId = PlayerId(2);
+
 const RIFTSWEEPER: &str = "When this creature enters, choose target face-up exiled card. Its owner shuffles it into their library.";
+const ETRATA_THE_SILENCER: &str = "Etrata can't be blocked.\nWhenever Etrata deals combat damage to a player, exile target creature that player controls and put a hit counter on that card. That player loses the game if they own three or more exiled cards with hit counters on them. Etrata's owner shuffles Etrata into their library.";
+const ALABASTER_DRAGON: &str =
+    "Flying\nWhen this creature dies, shuffle it into its owner's library.";
+const MURDER: &str = "Destroy target creature.";
+const WATERY_GRASP: &str = "Enchant creature\nEnchanted creature doesn't untap during its controller's untap step.\nWaterbend {5}: Enchanted creature's owner shuffles it into their library. (While paying a waterbend cost, you can tap your artifacts and creatures to help. Each one pays for {1}.)";
+const FORGE_OF_HEROES: &str = "{T}: Add {C}.\n{T}: Choose target commander that entered this turn. Put a +1/+1 counter on it if it's a creature and a loyalty counter on it if it's a planeswalker.";
 const TURN_THE_EARTH: &str = "Choose up to three target cards in graveyards. The owners of those cards shuffle them into their libraries. You gain 2 life.\nFlashback {1}{G} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
 
 fn finished(runner: &GameRunner) {
@@ -35,6 +48,18 @@ fn shuffles(events: &[GameEvent]) -> Vec<PlayerId> {
             _ => None,
         })
         .collect()
+}
+
+/// The players whose library was shuffled, each listed once, in first-shuffle
+/// order. A single-object move into a library followed by the printed
+/// "shuffle" step emits one `ShuffledLibrary` event per step (the zone move's
+/// auto-shuffle convention, then the explicit `Effect::Shuffle`); this reads
+/// WHOSE library, which is what the owner-binding rows discriminate, and
+/// is deliberately blind to that pre-existing double event.
+fn distinct_shuffles(events: &[GameEvent]) -> Vec<PlayerId> {
+    let mut players = shuffles(events);
+    players.dedup();
+    players
 }
 
 // CR 406.3 + CR 608.2b: only face-up exile is a target, and a new incarnation
@@ -457,4 +482,339 @@ fn worldsouls_rage_keeps_damage_target_and_resolution_land_choice_separate() {
         assert_eq!(runner.state().objects[&opponent].zone, Zone::Graveyard);
         assert_eq!(runner.state().objects[&nonland].zone, Zone::Graveyard);
     }
+}
+
+/// The legal targets of the slot the runner is currently asking about
+/// (`WaitingFor::TargetSelection` / `TriggerTargetSelection`).
+fn current_slot_legal_targets(runner: &GameRunner) -> Vec<TargetRef> {
+    match &runner.state().waiting_for {
+        WaitingFor::TriggerTargetSelection {
+            target_slots,
+            selection,
+            ..
+        }
+        | WaitingFor::TargetSelection {
+            target_slots,
+            selection,
+            ..
+        } => target_slots
+            .get(selection.current_slot)
+            .map(|slot| slot.legal_targets.clone())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Drive an attack by `attacker` at `defender` through combat damage and every
+/// resulting trigger to a quiet `Priority` window. A target prompt is answered
+/// with `pick` (and the prompt's legal set is recorded in `offered`).
+fn attack_and_settle(
+    runner: &mut GameRunner,
+    attacker: ObjectId,
+    defender: PlayerId,
+    pick: ObjectId,
+    offered: &mut Vec<TargetRef>,
+) -> Vec<GameEvent> {
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(defender))])
+        .expect("the attacker is legal");
+    let mut events = runner.combat_damage().events().to_vec();
+    for _ in 0..40 {
+        let result = match &runner.state().waiting_for {
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                *offered = current_slot_legal_targets(runner);
+                runner.act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(pick)),
+                })
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+                continue;
+            }
+            WaitingFor::DeclareBlockers { .. } => runner.act(GameAction::DeclareBlockers {
+                assignments: vec![],
+            }),
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
+            other => panic!("unexpected prompt while settling combat: {other:?}"),
+        };
+        events.extend(result.expect("prompt answer accepted").events);
+    }
+    events
+}
+
+// CR 201.5 + CR 400.3 + CR 701.24a: "Etrata's owner shuffles Etrata into their
+// library" moves Etrata herself, not the earlier declared exile target, to HER
+// owner's library, and that library is shuffled. Etrata is owned by P2 and
+// controlled by P0; she attacks P1; the declared exile target is a creature
+// owned by P2 and controlled by P1 (CR 603.3a: the trigger's controller, P0,
+// announces it).
+//
+// The earlier exile target is owned by Etrata's owner on purpose. F-7:
+// pre-existing, the shuffling-player binding when the earlier exile target's
+// owner differs from Etrata's owner is filed separately; this row does not
+// discriminate the target's owner from the source's owner (equal by
+// construction) and makes no claim across that defect.
+//
+// Not asserted: P1's game state. The "loses the game if ..." sentence printed
+// before the shuffle is still read as an unconditional loss (a separate,
+// pre-existing misparse), so P1 may have left the game (CR 800.4a); the row does
+// not depend on it. The P0 and P1 negatives are paired with the positive P2
+// shuffle, which is the reach guard when P1 has left.
+#[test]
+fn etrata_source_owner_shuffle_moves_etrata_to_its_owners_library() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let etrata = scenario
+        .add_creature(P2, "Etrata, the Silencer", 2, 3)
+        .with_subtypes(vec!["Vampire", "Assassin"])
+        .controlled_by(P0)
+        .from_oracle_text(ETRATA_THE_SILENCER)
+        .id();
+    let victim = scenario
+        .add_creature(P2, "Grizzly Bears", 2, 2)
+        .controlled_by(P1)
+        .id();
+    scenario.with_library_top(P0, &["P0 Card"]);
+    scenario.with_library_top(P1, &["P1 Card"]);
+    scenario.with_library_top(P2, &["P2 Card"]);
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().objects[&etrata].owner, P2);
+    assert_eq!(runner.state().objects[&etrata].controller, P0);
+    assert_eq!(runner.state().objects[&victim].owner, P2);
+    assert_eq!(runner.state().objects[&victim].controller, P1);
+
+    let mut offered = vec![];
+    let events = attack_and_settle(&mut runner, etrata, P1, victim, &mut offered);
+
+    // Reach guard: the declared-target exile and the hit counter resolved.
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Exile);
+    assert_eq!(
+        runner.state().objects[&victim]
+            .counters
+            .get(&CounterType::Generic("hit".to_string()))
+            .copied(),
+        Some(1),
+        "the exiled card carries one hit counter"
+    );
+    // CR 201.5 + CR 400.3: Etrata herself is in her OWNER's library.
+    assert_eq!(runner.state().objects[&etrata].zone, Zone::Library);
+    assert!(runner.state().players[2].library.contains(&etrata));
+    assert!(!runner.state().players[0].library.contains(&etrata));
+    // CR 701.24a: P2's library is shuffled; neither the controller's (P0) nor
+    // the damaged player's (P1) is.
+    assert_eq!(distinct_shuffles(&events), vec![P2]);
+    finished(&runner);
+}
+
+// CR 400.7e + CR 400.3 + CR 701.24a: "When this creature dies, shuffle it into
+// its owner's library." The Dragon is owned by P1 and controlled by P0, so the
+// death trigger is P0's, but the card goes to P1's library and P1's library is
+// shuffled. The trigger declares no target (CR 115.10a).
+#[test]
+fn alabaster_dragon_death_shuffles_it_into_its_owners_library() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dragon = scenario
+        .add_creature(P1, "Alabaster Dragon", 4, 4)
+        .controlled_by(P0)
+        .with_subtypes(vec!["Dragon"])
+        .from_oracle_text_with_keywords(&["Flying"], ALABASTER_DRAGON)
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{B}{B}"))
+        .id();
+    scenario.with_library_top(P0, &["P0 Card"]);
+    scenario.with_library_top(P1, &["P1 Card"]);
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().objects[&dragon].owner, P1);
+    assert_eq!(runner.state().objects[&dragon].controller, P0);
+
+    let outcome = runner.cast(murder).target_object(dragon).resolve();
+
+    // Reach guard: the Dragon died (battlefield to graveyard) before the
+    // trigger moved it on.
+    assert!(outcome.events().iter().any(|event| matches!(event,
+        GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Graveyard, .. }
+        if *object_id == dragon)));
+    outcome.assert_zone(&[dragon], Zone::Library);
+    assert!(outcome.state().players[1].library.contains(&dragon));
+    assert!(!outcome.state().players[0].library.contains(&dragon));
+    assert_eq!(distinct_shuffles(outcome.events()), vec![P1]);
+    finished(&runner);
+}
+
+// CR 115.10a + CR 108.3 + CR 400.3 + CR 701.24a: "Enchanted creature's owner
+// shuffles it into their library" affects the enchanted creature without
+// targeting it, so no target prompt arises and the decoy (another P1 creature)
+// is untouched. The host goes to its owner's (P1's) library and P1 shuffles.
+// CR 704.5m: the Aura then has nothing to enchant and goes to the graveyard.
+#[test]
+fn watery_grasp_waterbend_shuffles_the_enchanted_creature_without_a_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let decoy = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let grasp = scenario
+        .add_spell_to_hand(P0, "Watery Grasp", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{U}"))
+        .with_color(vec![ManaColor::Blue])
+        .from_oracle_text_with_keywords(&["Enchant", "Waterbend"], WATERY_GRASP)
+        .id();
+    scenario.with_library_top(P1, &["P1 Card"]);
+    scenario.with_mana_pool(
+        P0,
+        (0..6)
+            .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+
+    runner.cast(grasp).target_object(host).resolve();
+    // Reach guard: the Aura resolved onto the host.
+    assert_eq!(runner.state().objects[&grasp].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&grasp].attached_to.is_some(), true);
+
+    let mut events = runner
+        .act(GameAction::ActivateAbility {
+            source_id: grasp,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the Waterbend activation is announced")
+        .events;
+    // CR 701.67a + CR 601.2h: the Waterbend cost opens its payment window; with
+    // no creatures or artifacts tapped, the pool pays the whole {5}.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaPayment {
+                convoke_mode: Some(_),
+                ..
+            }
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    events.extend(
+        runner
+            .act(GameAction::PassPriority)
+            .expect("the pool pays Waterbend {5}")
+            .events,
+    );
+    // CR 115.10a: the host is affected, not targeted, so the activation opens
+    // no target prompt and the ability is on the stack.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().stack.len(), 1);
+    for _ in 0..4 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+
+    assert_eq!(runner.state().objects[&host].zone, Zone::Library);
+    assert!(runner.state().players[1].library.contains(&host));
+    assert_eq!(runner.state().objects[&decoy].zone, Zone::Battlefield);
+    assert_eq!(distinct_shuffles(&events), vec![P1]);
+    assert_eq!(runner.state().objects[&grasp].zone, Zone::Graveyard);
+    finished(&runner);
+}
+
+// CR 115.1 + CR 115.10a: "Choose target commander that entered this turn" is a
+// declared target whose filter has no card type and no controller, only the
+// commander and entered-this-turn properties. The choose guard must not read
+// that as an empty filter: the legal set is exactly the commanders that entered
+// this turn (both players', CR 903.3), not the non-commander that entered this
+// turn and not the commander that entered earlier.
+//
+// Honesty guard: the "+1/+1 counter ... loyalty counter" tail is still an
+// unsupported clause, so the row asserts no counter placement.
+#[test]
+fn forge_of_heroes_choose_target_commander_offers_exactly_the_entered_commanders() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let forge = scenario
+        .add_land_from_oracle(P0, "Forge of Heroes", FORGE_OF_HEROES)
+        .id();
+    let mine = scenario
+        .add_creature(P0, "Entered Commander A", 2, 2)
+        .commander()
+        .with_summoning_sickness()
+        .id();
+    let theirs = scenario
+        .add_creature(P1, "Entered Commander B", 2, 2)
+        .commander()
+        .with_summoning_sickness()
+        .id();
+    let non_commander = scenario
+        .add_creature(P0, "Entered Non-Commander", 2, 2)
+        .with_summoning_sickness()
+        .id();
+    let veteran = scenario
+        .add_creature(P1, "Earlier Commander", 2, 2)
+        .commander()
+        .id();
+    let mut runner = scenario.build();
+    let earlier_turn = runner.state().turn_number - 1;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&veteran)
+        .unwrap()
+        .entered_battlefield_turn = Some(earlier_turn);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: forge,
+            ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Forge's second ability is activatable");
+
+    // Reach guard: the activation opened a target prompt for the declared slot.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    let mut legal = current_slot_legal_targets(&runner);
+    legal.sort_by_key(|target| match target {
+        TargetRef::Object(id) => id.0,
+        TargetRef::Player(player) => u64::from(player.0) + u64::from(u32::MAX),
+    });
+    let mut expected = vec![TargetRef::Object(mine), TargetRef::Object(theirs)];
+    expected.sort_by_key(|target| match target {
+        TargetRef::Object(id) => id.0,
+        TargetRef::Player(player) => u64::from(player.0) + u64::from(u32::MAX),
+    });
+    assert_eq!(legal, expected);
+    for excluded in [non_commander, veteran] {
+        assert!(!legal.contains(&TargetRef::Object(excluded)));
+    }
+
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(mine)),
+        })
+        .expect("an entered commander is a legal choice");
+    runner.advance_until_stack_empty();
+    finished(&runner);
 }
