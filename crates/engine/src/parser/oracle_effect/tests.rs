@@ -70129,9 +70129,8 @@ fn target_opponent_may_have_you_draw_is_not_the_announcer_slot() {
 }
 
 /// CR 601.2c: `TargetFilter::Player` is an ANNOUNCED TARGET chosen by the
-/// controller at cast time, not a clause anaphor, so it is never stamped. 76
-/// corpus nodes carry a bare `Player` slot under `optional: true` — the largest
-/// refusal class after `Typed`.
+/// controller at cast time, not a clause anaphor. In a causative, the
+/// controller announces the choice while the targeted player carries it out.
 #[test]
 fn announced_target_player_is_never_the_announcer() {
     let parsed = parse_oracle_text(
@@ -70153,8 +70152,9 @@ fn announced_target_player_is_never_the_announcer() {
         node.effect
     );
     assert_eq!(
-        node.optional_player, None,
-        "CR 601.2c: an announced target is not an anaphor the stamp may name"
+        node.optional_player,
+        Some(TargetFilter::OriginalController),
+        "CR 601.2c + CR 608.2d: the controller chooses; the announced target mills"
     );
 }
 
