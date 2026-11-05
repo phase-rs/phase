@@ -3234,7 +3234,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // a rider's presence is not a provenance signal any sane predicate could key on —
         // it says what happens NEXT, not who announced. Only the clause's own grammar,
         // which exists solely here, records who was named.
-        if clause_ir.parsed.optional
+        // The chunk shell can peel the optional prefix before the atomic parser
+        // sees it. Its `is_optional` channel still retains the printed source,
+        // which is needed to recognize a controller-held causative. Only the
+        // parsed-optional channel admits subject-anaphor inference below.
+        if (clause_ir.parsed.optional || clause_ir.is_optional)
             && !matches!(
                 &clause_ir.parsed.effect,
                 Effect::GrantCastingPermission { .. }
@@ -3282,8 +3286,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     .is_some();
                 def.optional_player = if controller_causative {
                     Some(TargetFilter::OriginalController)
-                } else {
+                } else if clause_ir.parsed.optional {
                     subject_anchored_optional_actor(&def, ActorBindingWindow::ThisResolution)
+                } else {
+                    None
                 };
             }
         }
