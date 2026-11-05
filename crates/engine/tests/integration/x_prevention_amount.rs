@@ -94,6 +94,23 @@ fn prevention_shields(runner: &GameRunner) -> Vec<PreventionAmount> {
         .collect()
 }
 
+/// Prevention shields hosted on battlefield objects. A creature-targeted
+/// shield is installed in the target's `replacement_definitions`
+/// (`prevent_damage::host_on_targets`), not in `pending_damage_replacements`,
+/// so `prevention_shields` alone cannot see it.
+fn hosted_prevention_shields(runner: &GameRunner) -> Vec<PreventionAmount> {
+    runner
+        .state()
+        .objects
+        .values()
+        .flat_map(|object| object.replacement_definitions.iter_all())
+        .filter_map(|replacement| match replacement.shield_kind {
+            ShieldKind::Prevention { amount } => Some(amount),
+            _ => None,
+        })
+        .collect()
+}
+
 fn assert_priority(outcome: &engine::game::scenario::Outcome) {
     assert!(
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
@@ -294,6 +311,13 @@ fn atalya_modal_activated_x2_prevents_two_on_creature() {
         .target_objects(&[target])
         .resolve();
     assert_priority(&outcome);
+    // Reach guard for the life-mode sibling's hosted-shield absence assertion:
+    // the prevention mode's shield is hosted on the chosen creature.
+    assert_eq!(
+        hosted_prevention_shields(&runner),
+        vec![PreventionAmount::Next(2)],
+        "the prevention mode hosts its X=2 shield on the chosen creature"
+    );
 
     let mut events = Vec::new();
     deal_damage::resolve(
@@ -328,7 +352,11 @@ fn atalya_life_mode_installs_no_shield() {
     assert_eq!(outcome.life_delta(P0), 2, "the life mode gains X life");
     assert!(
         prevention_shields(&runner).is_empty(),
-        "the life mode must install no prevention shield"
+        "the life mode must install no player-scoped prevention shield"
+    );
+    assert!(
+        hosted_prevention_shields(&runner).is_empty(),
+        "the life mode must install no prevention shield on any object"
     );
 }
 

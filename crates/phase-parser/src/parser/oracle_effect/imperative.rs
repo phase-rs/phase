@@ -8237,9 +8237,11 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
 ///
 /// The two callers keep different static placeholders for a dynamic quantity —
 /// `Next(1)` here, `All` in the distribute path (whose shield is natively
-/// expressed as "all damage, split among the targets") — because neither
-/// placeholder is read once `amount_dynamic` is `Some`: `prevent_damage::resolve`
-/// resolves the dynamic quantity and overwrites `amount` with it.
+/// expressed as "all damage, split among the targets") — because
+/// `prevent_damage::resolve` never reads the placeholder once `amount_dynamic`
+/// is `Some` — it resolves the dynamic quantity and overwrites `amount` with it.
+/// (`apply_where_x_effect_expression` does read it at parse time: an `All`
+/// placeholder opts the distribute path out of a trailing where-X binder.)
 pub(super) fn parse_counted_prevention_quantity(rest: &str) -> Option<(QuantityExpr, &str)> {
     let after_quantifier = opt(alt((
         tag::<_, _, OracleError<'_>>("the next "),
@@ -29110,8 +29112,9 @@ mod tests {
     /// X damage" (Festival of the Guildpact: "Prevent the next X damage that
     /// would be dealt to you this turn.") or "X of that damage" (Errant Minion /
     /// Power Leak: "Prevent X of that damage, where X is the amount of mana that
-    /// player paid this way."). The combat-noun, offset, connective and
-    /// noncombat rows are synthetic boundary probes; the nearest printed combat
+    /// player paid this way."). The determiner-less "next" rows, the combat-noun,
+    /// offset, connective and noncombat rows are synthetic boundary probes (no
+    /// printed card prints "prevent next …"); the nearest printed combat
     /// form is Decorated Griffin ("{1}{W}: Prevent the next 1 combat damage that
     /// would be dealt to you this turn.").
     #[test]
@@ -29226,7 +29229,13 @@ mod tests {
     ///
     /// No printed card prints a counted (X) prevention dealt by a target source;
     /// the nearest is Benalish Missionary ("{1}{W}, {T}: Prevent all combat
-    /// damage that would be dealt by target blocked creature this turn.").
+    /// damage that would be dealt by target blocked creature this turn."). No
+    /// printed card has the "X plus X" connective either (the corpus has no
+    /// "prevent the next X plus …" head); the nearest printed cards are Festival
+    /// of the Guildpact ("Prevent the next X damage that would be dealt to you
+    /// this turn.") for the "to you" row and Maze of Ith ("Prevent all combat
+    /// damage that would be dealt to and dealt by that creature this turn.") for
+    /// the bidirectional row.
     #[test]
     fn unconsumed_prevention_quantity_is_a_receipt_ahead_of_every_emitter() {
         let announced_x = Some(QuantityExpr::Ref {
