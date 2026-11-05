@@ -1945,13 +1945,14 @@ fn drive_finite_stack_keeps_ring_empty() {
     assert!(resolutions >= 3, "the drive must have processed real beats");
 }
 
-/// CR 500.7 + CR 732.2a: the Time Sieve row's extra-turn span is carried into each extra turn, but
-/// Thopter Assembly re-mints its Thopters there, so the confirmer refuses it wherever it is named
-/// and nothing is offered.
+/// CR 500.7 + CR 514.1 + CR 732.2a: the Time Sieve row's carried extra-turn span is first offered
+/// at the first extra turn's precombat main, which holds two Islands and Thopter Assembly; each
+/// repetition casts the Assembly and draws one card from the 23-card library, so the seventh would
+/// reach cleanup holding eight and discard from cards now hidden there (CR 401.2): 6.
 #[test]
-fn the_time_sieve_rows_carried_span_is_refused_wherever_it_is_named() {
-    use crate::game::period_confirm::confirm_for_tests;
-    use crate::game::play_trace::SpanSource;
+fn the_time_sieve_rows_carried_span_is_offered_to_its_first_cleanup_discard() {
+    use crate::analysis::decision_template::IterationCount;
+    use crate::game::play_trace::{play_trace_view, SpanSource};
     use crate::game::scenario_db::GameScenarioDbExt;
     use crate::types::zones::Zone;
     let db = card_db();
@@ -1979,24 +1980,11 @@ fn the_time_sieve_rows_carried_span_is_refused_wherever_it_is_named() {
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
     let start = runner.state().turn_number;
-    let mut verdicts = Vec::new();
-    while runner.state().turn_number <= start + 6 {
-        assert!(
-            corpus::offered_certificate(&runner).is_none(),
-            "offered at turn {}",
-            runner.state().turn_number
-        );
+    while corpus::offered_certificate(&runner).is_none() && runner.state().turn_number <= start + 6
+    {
         let state = runner.state();
         let priority = matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
             && state.stack.is_empty();
-        if priority {
-            verdicts.extend(
-                confirm_for_tests(state)
-                    .into_iter()
-                    .filter(|(span, _)| matches!(span.source, SpanSource::Carried(_)))
-                    .map(|(_, verdict)| verdict),
-            );
-        }
         let main = priority && state.active_player == P0 && state.phase == Phase::PreCombatMain;
         let untapped_islands = state
             .battlefield
@@ -2050,10 +2038,18 @@ fn the_time_sieve_rows_carried_span_is_refused_wherever_it_is_named() {
         };
         runner.act(action).expect("the Sieve drive's action");
     }
-    assert!(
-        runner.state().turn_number > start + 3 && runner.state().active_player == P0,
-        "reach: the Sieve took extra turns"
+    let state = runner.state();
+    let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for else {
+        panic!("no offer by turn {}", state.turn_number);
+    };
+    assert_eq!(
+        (state.turn_number, state.phase, &schema.iteration_count),
+        (start + 3, Phase::PreCombatMain, &IterationCount::Fixed(6))
     );
-    assert!(!verdicts.is_empty(), "reach: the Sieve's span is carried");
-    assert!(verdicts.iter().all(Result::is_err), "{verdicts:?}");
+    assert!(
+        play_trace_view(state)
+            .and_then(|view| view.offered)
+            .is_some_and(|span| matches!(span.source, SpanSource::Carried(_))),
+        "the offered span is the carried one"
+    );
 }

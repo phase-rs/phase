@@ -819,14 +819,12 @@ fn unbounded_counter_row_dies_with_its_bearer_but_the_store_does_not() {
     );
 }
 
-/// The charge-growth loop recurs only on its counter growth, which the ring drain does not
-/// delimit, so no count above zero is taken from its offer, and the AI is offered only the
-/// declaration without end and the decline.
+/// CR 732.2a: beside P1's Lightning Bolt the charge-growth loop is offered, and P0's accepted
+/// `Fixed(3)` performs three repetitions, each resolving the engine's trigger once ("put a charge
+/// counter on this creature. You gain 1 life."), so the take adds exactly three charge counters
+/// and 3 life.
 #[test]
-fn a_charge_growth_offer_beside_an_out_refuses_every_counted_take() {
-    use engine::analysis::decision_template::IterationCount;
-    use engine::analysis::loop_check::{CountedTake, UnperformableCause};
-
+fn a_counted_take_of_a_charge_growth_loop_beside_an_out_performs_its_count() {
     let (mut runner, kickoff, rider) =
         setup_2p_optional_charge_growth(LoopDetectionMode::Interactive);
     let _ = runner.cast(kickoff).resolve();
@@ -837,19 +835,13 @@ fn a_charge_growth_offer_beside_an_out_refuses_every_counted_take() {
         runner.state().waiting_for
     );
     assert!(charge_of(&runner, rider) >= 1, "reach: the charge grew");
-    crate::mandatory_loop_draws::assert_no_counted_take(
-        runner.state(),
-        CountedTake::Unperformable(UnperformableCause::UndelimitedCover),
-        "charge growth",
-    );
+    let (taken, _) = crate::mandatory_loop_draws::accepted_take(runner.state(), 3, "charge growth");
+    let taken = GameRunner::from_state(taken);
     assert_eq!(
-        engine::ai_support::legal_actions(runner.state()),
-        vec![
-            GameAction::DeclareShortcut {
-                count: IterationCount::WithoutEnd,
-                template: None,
-            },
-            GameAction::DeclineShortcut,
-        ]
+        (charge_of(&taken, rider), taken.state().players[0].life),
+        (
+            charge_of(&runner, rider) + 3,
+            runner.state().players[0].life + 3
+        )
     );
 }

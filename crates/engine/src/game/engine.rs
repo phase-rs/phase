@@ -2992,7 +2992,7 @@ enum MandatoryDecision {
     /// CR 104.2a: the loop is won by this player; a win ends the game, so nothing is kept.
     Won {
         winner: PlayerId,
-        delta: crate::analysis::resource::ResourceVector,
+        delta: Box<crate::analysis::resource::ResourceVector>,
     },
     Keep(super::play_trace::Witnessed),
 }
@@ -3090,7 +3090,7 @@ fn decide_mandatory_span(
         return match reading.winner {
             Some(winner) if profile.is_forced() => MandatoryDecision::Won {
                 winner,
-                delta: reading.delta,
+                delta: Box::new(reading.delta),
             },
             Some(_) | None => MandatoryDecision::Keep(Witnessed::Refused),
         };
@@ -26823,101 +26823,110 @@ mod kilo_interruptibility_tests {
         }
     }
 
-    /// Drive ONE full live cycle via the public boundary, recording the pinned period.
-    fn drive_one_live_cycle(state: &mut GameState) {
-        apply(
-            state,
+    /// Drive ONE full live cycle via the public boundary, recording the pinned period; the state,
+    /// actor and action of the beat whose `apply` made an offer, if one did.
+    fn drive_one_live_cycle(state: &mut GameState) -> Option<(GameState, PlayerId, GameAction)> {
+        let mut beat = (
             P0,
             GameAction::ActivateAbility {
                 source_id: RELIC,
                 ability_index: RELIC_TAP_MANA,
                 payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
-        )
-        .expect("activate Relic mana ability");
+        );
         let mut freed_activated = false;
         for _ in 0..200 {
+            let before = state.clone();
+            apply(state, beat.0, beat.1.clone())
+                .unwrap_or_else(|error| panic!("{:?}: {error:?}", beat.1));
+            if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
+                return Some((before, beat.0, beat.1));
+            }
             let actor = beat_actor(state);
-            match state.waiting_for.clone() {
-                WaitingFor::LoopShortcut { .. } => return,
+            beat = match state.waiting_for.clone() {
                 WaitingFor::PayCost {
                     kind: PayCostKind::TapCreatures { .. },
                     ..
-                } => {
-                    apply(state, actor, GameAction::SelectCards { cards: vec![KILO] })
-                        .expect("tap Kilo");
+                } => (actor, GameAction::SelectCards { cards: vec![KILO] }),
+                WaitingFor::ChooseManaColor { .. } => (
+                    actor,
+                    GameAction::ChooseManaColor {
+                        choice: ManaChoice::SingleColor(ManaType::Blue),
+                        count: 1,
+                    },
+                ),
+                WaitingFor::ProliferateChoice { .. } => (
+                    actor,
+                    GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(PENTAD)],
+                    },
+                ),
+                WaitingFor::Priority { .. } if !state.stack.is_empty() => {
+                    (actor, GameAction::PassPriority)
                 }
-                WaitingFor::ChooseManaColor { .. } => {
-                    apply(
-                        state,
-                        actor,
-                        GameAction::ChooseManaColor {
-                            choice: ManaChoice::SingleColor(ManaType::Blue),
-                            count: 1,
-                        },
-                    )
-                    .expect("choose Blue");
-                }
-                WaitingFor::ProliferateChoice { .. } => {
-                    apply(
-                        state,
-                        actor,
-                        GameAction::SelectTargets {
-                            targets: vec![TargetRef::Object(PENTAD)],
-                        },
-                    )
-                    .expect("proliferate Pentad");
-                }
+                WaitingFor::Priority { .. } if freed_activated => return None,
                 WaitingFor::Priority { .. } => {
-                    if state.stack.is_empty() {
-                        if freed_activated {
-                            return;
-                        }
-                        freed_activated = true;
-                        apply(
-                            state,
-                            P0,
-                            GameAction::ActivateAbility {
-                                source_id: FREED,
-                                ability_index: FREED_UNTAP,
-                                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
-                            },
-                        )
-                        .expect("activate Freed untap");
-                    } else {
-                        apply(state, actor, GameAction::PassPriority).expect("pass priority");
-                    }
+                    freed_activated = true;
+                    (
+                        P0,
+                        GameAction::ActivateAbility {
+                            source_id: FREED,
+                            ability_index: FREED_UNTAP,
+                            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                        },
+                    )
                 }
                 other => panic!("unexpected beat: {other:?}"),
-            }
+            };
         }
         panic!("drive did not settle");
     }
 
-    /// Matched pair: with the loop intact the offer re-derives (`Some`); removing Freed (Kilo can
-    /// no longer untap, the cycle is no longer mana-neutral) means the confirmer cannot replay the
-    /// recorded Freed activation ⇒ `None`. Pass-vs-defuse FLIPS the outcome.
+    /// CR 732.2a: the first cycle's offer, re-probed at its own window, is latched; declining it
+    /// discards P0's plays, so a second live cycle is a fresh detection. Returns the second cycle's
+    /// offering beat.
+    fn redriven_offer_beat() -> (GameState, PlayerId, GameAction) {
+        use crate::game::play_trace::{offer_latched, play_trace_view, WindowKey};
+        let mut driven = load_migrated_dump();
+        drive_one_live_cycle(&mut driven).expect("the first cycle is offered");
+        let reprobe = at_priority_window(driven.clone());
+        let offered = play_trace_view(&reprobe)
+            .and_then(|view| view.offered)
+            .expect("the offered span");
+        assert_eq!(WindowKey::of(&reprobe), WindowKey::of(&driven));
+        assert!(offer_latched(&reprobe, offered));
+        assert!(offer_at(&reprobe).is_none(), "the same window is latched");
+        apply(&mut driven, P0, GameAction::DeclineShortcut).expect("decline the offer");
+        drive_one_live_cycle(&mut driven).expect("the second cycle is offered")
+    }
+
+    /// The beat's outcome: whether applying `action` to `before` offers the loop.
+    fn offers_after(mut before: GameState, actor: PlayerId, action: GameAction) -> bool {
+        apply(&mut before, actor, action).expect("the offering beat applies");
+        matches!(before.waiting_for, WaitingFor::LoopShortcut { .. })
+    }
+
+    /// Matched pair at the second cycle's offering beat, Kilo untapped in both as the Freed untap
+    /// resolving there leaves it: intact, the loop is offered; with Freed removed, the confirmer
+    /// cannot replay the recorded Freed activation, so nothing is offered.
     #[test]
     fn freed_removed_defuses_the_offer() {
-        let mut driven = load_migrated_dump();
-        drive_one_live_cycle(&mut driven);
-
-        // Re-derive the empty-stack priority window the offer fires from (the board is a valid
-        // loop state — Kilo untapped, mana-neutral).
-        let mut intact = driven.clone();
-        intact.waiting_for = WaitingFor::Priority { player: P0 };
-        assert!(intact.stack.is_empty(), "settled to an empty stack");
+        let (mut before, actor, beat) = redriven_offer_beat();
+        before.objects.get_mut(&KILO).expect("Kilo").tapped = false;
         assert!(
-            offer_at(&intact).is_some(),
+            offers_after(before.clone(), actor, beat.clone()),
             "undefused: the intact loop re-derives the CR 732.2a offer"
         );
-
-        // Defuse: remove Freed AFTER recording. The re-drive can no longer re-find/re-activate it.
-        let mut defused = intact.clone();
+        let mut defused = before;
         defused.objects.remove(&FREED);
         defused.battlefield.retain(|id| *id != FREED);
+        apply(&mut defused, actor, beat).expect("the offering beat applies");
         assert!(
-            offer_at(&defused).is_none(),
+            !defused.objects[&KILO].tapped,
+            "reach: the defused board is at its loop state"
+        );
+        assert!(
+            !matches!(defused.waiting_for, WaitingFor::LoopShortcut { .. }),
             "defused (Freed removed): the re-drive aborts ⇒ NO offer — the outcome flips"
         );
     }
@@ -26952,19 +26961,21 @@ mod kilo_interruptibility_tests {
     fn declined_infinity_mark_does_not_suppress_reoffer() {
         use crate::analysis::resource::ResourceAxis;
 
-        let mut driven = load_migrated_dump();
-        drive_one_live_cycle(&mut driven);
-        let base = at_priority_window(driven);
+        let (before, actor, beat) = redriven_offer_beat();
+        assert!(
+            !before.unbounded_resources.contains_key(&P0),
+            "reach-guard: the unmarked beat carries no ∞ mark"
+        );
         // Positive control: without any ∞ mark the intact loop re-derives the offer.
         assert!(
-            offer_at(&base).is_some(),
+            offers_after(before.clone(), actor, beat.clone()),
             "positive control: the intact loop offers when no ∞ mark is present"
         );
 
         // Inject a pre-existing DECLINED ∞ axis for P0 (as if an earlier boundary declined the life
         // axis and left it ∞-marked for manual play). The offer hook never reads
         // `unbounded_resources`, so the mark must NOT suppress the re-offer.
-        let mut marked = base.clone();
+        let mut marked = before;
         marked.mark_unbounded_loop(P0, &[ResourceAxis::Life(P0)], &[ResourceAxis::Life(P0)]);
         assert!(
             marked
@@ -26974,7 +26985,7 @@ mod kilo_interruptibility_tests {
             "reach-guard: the declined ∞ Life mark is present on the probed state"
         );
         assert!(
-            offer_at(&marked).is_some(),
+            offers_after(marked, actor, beat),
             "the empty-stack offer hook is NOT ∞-gated: a persisted declined ∞ axis does not \
              suppress a genuine re-detection re-offering the loop (CR 732.2a / CR 732.2b)"
         );

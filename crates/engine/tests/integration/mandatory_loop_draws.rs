@@ -3269,7 +3269,7 @@ fn repetitions(events: &[GameEvent]) -> u32 {
 
 /// P0's `Fixed(n)` declaration at `offered`, accepted by P1: the board after the take and its
 /// events, after asserting the take performed `n` repetitions and gave P0 priority (CR 732.2a).
-fn accepted_take(offered: &GameState, n: u32, leg: &str) -> (GameState, Vec<GameEvent>) {
+pub(crate) fn accepted_take(offered: &GameState, n: u32, leg: &str) -> (GameState, Vec<GameEvent>) {
     assert_eq!(counted_take(offered), CountedTake::Performs, "{leg}");
     let (proposed, _) = admitted(offered, P0, declare(IterationCount::Fixed(n)), leg);
     let (taken, events) = admitted(
