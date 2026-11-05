@@ -34,7 +34,7 @@ pub(super) use lower::{
     extract_exact_target_multi_target, extract_optional_target_multi_target,
     parse_dynamic_counter_suffix_body, parse_multi_target_count_expr,
     parse_where_x_quantity_expression, strip_exact_target_prefix, strip_optional_target_prefix,
-    try_parse_pump,
+    try_parse_pump, WhereXBinding,
 };
 // Test-only re-exports from lower module.
 #[cfg(test)]
@@ -16834,7 +16834,12 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
         let (_, filter_text) = parse_reveal_until_active_filter_text(after_count_lower).ok()?;
         let filter = build_reveal_until_filter(filter_text);
         // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-        let count = apply_where_x_quantity_expression(raw_count, where_x_expression.as_deref())?;
+        // `try_parse_reveal_until` takes no `ParseContext`, so there is no
+        // antecedent to supply here; the count keeps the legacy seeds.
+        let count = apply_where_x_quantity_expression(
+            raw_count,
+            WhereXBinding::bare(where_x_expression.as_deref()),
+        )?;
         return Some(parsed_clause(Effect::RevealUntil {
             player,
             filter,
@@ -46530,6 +46535,12 @@ fn parse_effect_chain_ir_body(
                 prev_clause.map(|c| AbilityDefinition::new(kind, c.parsed.effect.clone()));
             let inherited_where_x_expression =
                 prev_clause.and_then(|c| c.where_x_expression.clone());
+            // CR 608.2c: inherited from the SAME clause as the expression above.
+            // Reading these off the current chunk's context instead would bind the
+            // inherited count's anaphor to a player the inherited clause never named.
+            let inherited_where_x_antecedents = prev_clause
+                .map(|c| c.where_x_player_antecedents.clone())
+                .unwrap_or_default();
             if let Some(alt_ir) =
                 try_parse_dig_instead_alternative(normalized_text, prev_temp.as_ref(), kind, ctx)
             {
@@ -46549,6 +46560,7 @@ fn parse_effect_chain_ir_body(
                             },
                         )
                         .where_x_expression(inherited_where_x_expression)
+                        .where_x_player_antecedents(inherited_where_x_antecedents)
                         .push();
                     continue;
                 }
@@ -48464,7 +48476,13 @@ fn parse_effect_chain_ir_body(
             if let Some(up) = unless_pay.take() {
                 inner_def.unless_pay = Some(up);
             }
-            apply_where_x_ability_expression(&mut inner_def, where_x_expression.as_deref());
+            // Through `ctx`, the live `&mut chunk_ctx` in this region, rather
+            // than `chunk_ctx` directly: `player_antecedents` only needs `&self`.
+            let inner_where_x_antecedents = ctx.player_antecedents();
+            apply_where_x_ability_expression(
+                &mut inner_def,
+                WhereXBinding::new(where_x_expression.as_deref(), &inner_where_x_antecedents),
+            );
             let uses_tracked_set = ability_definition_uses_tracked_set(&inner_def);
             let delayed_effect = Effect::CreateDelayedTrigger {
                 condition: prefix_condition.clone(),
@@ -48516,6 +48534,7 @@ fn parse_effect_chain_ir_body(
                 .starting_with(starting_with.clone())
                 .prefix_delayed_condition(Some(prefix_condition))
                 .where_x_expression(where_x_expression.clone())
+                .where_x_player_antecedents(chunk_ctx.player_antecedents())
                 .target_selection_mode(chunk_ctx.target_selection_mode)
                 .target_chooser(chunk_ctx.target_chooser.clone())
                 .declared_target_choice_timing(chunk_ctx.declared_target_choice_timing.take())
@@ -48551,6 +48570,7 @@ fn parse_effect_chain_ir_body(
                 .player_scope(player_scope)
                 .starting_with(starting_with.clone())
                 .where_x_expression(where_x_expression.clone())
+                .where_x_player_antecedents(chunk_ctx.player_antecedents())
                 .push();
             continue;
         }
@@ -49618,6 +49638,7 @@ fn parse_effect_chain_ir_body(
                 .starting_with(starting_with.clone())
                 .multi_target(multi_target)
                 .where_x_expression(where_x_expression)
+                .where_x_player_antecedents(chunk_ctx.player_antecedents())
                 // CR 105.4: `clause` came from the REAL chunk parse, so this
                 // early-return arm must carry the same declared provenance the
                 // three main `.push()` sites do. Dropping it is compile-silent
@@ -49690,6 +49711,7 @@ fn parse_effect_chain_ir_body(
                     .starting_with(starting_with.clone())
                     .multi_target(multi_target)
                     .where_x_expression(where_x_expression)
+                    .where_x_player_antecedents(chunk_ctx.player_antecedents())
                     // CR 105.4: same as the `KeywordOverride` arm above — this
                     // clause is a real chunk parse, so its declared provenance
                     // must be threaded rather than defaulted to `None`.
@@ -50319,6 +50341,7 @@ fn parse_effect_chain_ir_body(
                         .starting_with(starting_with.clone())
                         .multi_target(multi_target)
                         .where_x_expression(where_x_expression)
+                        .where_x_player_antecedents(chunk_ctx.player_antecedents())
                         .target_selection_mode(chunk_ctx.target_selection_mode)
                         .target_chooser(chunk_ctx.target_chooser.clone())
                         .declared_target_choice_timing(
@@ -50457,6 +50480,7 @@ fn parse_effect_chain_ir_body(
                 .delayed_condition(delayed_condition)
                 .multi_target(multi_target)
                 .where_x_expression(where_x_expression)
+                .where_x_player_antecedents(chunk_ctx.player_antecedents())
                 .unless_pay(unless_pay)
                 .target_selection_mode(chunk_ctx.target_selection_mode)
                 .target_chooser(chunk_ctx.target_chooser.clone())
@@ -51041,7 +51065,11 @@ fn try_parse_put_zone_change_parts(
             // `parse_where_x_quantity_expression` building block.
             let where_x_expression = strip_trailing_where_x(after_put_tp).1;
             // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-            let target = apply_where_x_to_filter(target, where_x_expression.as_deref())?;
+            let where_x_antecedents = ctx.player_antecedents();
+            let target = apply_where_x_to_filter(
+                target,
+                WhereXBinding::new(where_x_expression.as_deref(), &where_x_antecedents),
+            )?;
             // CR 608.2c: Restrict the target to objects affected by the
             // preceding effect when a "this way" result phrase appears in the
             // target text. The relevant resolvers publish `state.tracked_object_sets`

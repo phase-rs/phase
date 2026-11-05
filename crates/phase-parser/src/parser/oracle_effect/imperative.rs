@@ -22,7 +22,7 @@ use super::counter::{
 use super::lower::{
     parse_multi_target_count_expr, parse_where_x_quantity_expression,
     parse_where_x_quantity_expression_with_owner, rebind_cost_paid_object_pt_to_target,
-    strip_leading_quantifier, strip_terminal_where_x, strip_trailing_where_x,
+    strip_leading_quantifier, strip_terminal_where_x, strip_trailing_where_x, WhereXBinding,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
 use super::token::try_parse_token;
@@ -12484,7 +12484,10 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     // the spell phrase to the stack through the shared target parser. Keep this
     // path on that building block and only apply the trailing X definition.
     // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-    let target = super::apply_where_x_to_filter(target, where_x_expression.as_deref())?;
+    // `parse_counter_ast` takes no `ParseContext`, so there is no antecedent to
+    // supply here; the filter bound keeps the legacy seeds.
+    let target =
+        super::apply_where_x_to_filter(target, WhereXBinding::bare(where_x_expression.as_deref()))?;
     // CR 118.12: Parse "unless its controller pays {X}" for conditional counters
     let unless_pay = parse_counter_unless_pay(rest)?;
     Some(ZoneCounterImperativeAst::Counter {

@@ -1034,7 +1034,7 @@ pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Opt
             } else {
                 super::oracle_effect::lower::apply_where_x_quantity_expression(
                     count,
-                    Some(quantity),
+                    super::oracle_effect::lower::WhereXBinding::bare(Some(quantity)),
                 )?
             };
             (count, Some(x))

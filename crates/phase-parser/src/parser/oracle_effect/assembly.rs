@@ -2233,7 +2233,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 if let Some(continuation) = clause_ir.disposition.followup() {
                     apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
                     env.observe(&defs, None, NodeRole::ContinuationProduct);
-                    apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
+                    apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_binding());
                 }
                 true
             } else if let ClauseDisposition::Absorb { rider, kind } = &clause_ir.disposition {
@@ -2613,7 +2613,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             let mut new_def = *alt_def.clone();
                             apply_where_x_ability_expression(
                                 &mut new_def,
-                                clause_ir.where_x_expression.as_deref(),
+                                clause_ir.where_x_binding(),
                             );
                             new_def.else_ability = Some(Box::new(last_def));
                             defs.push(new_def);
@@ -2964,7 +2964,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         if let Some(continuation) = clause_ir.disposition.followup() {
             apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
             env.observe(&defs, None, NodeRole::ContinuationProduct);
-            apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
+            apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_binding());
         }
 
         // ── Build AbilityDefinition from ClauseIr ──
@@ -3633,7 +3633,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             current_defs.push(*sub.clone());
         }
         for current in &mut current_defs {
-            apply_where_x_ability_expression(current, clause_ir.where_x_expression.as_deref());
+            apply_where_x_ability_expression(current, clause_ir.where_x_binding());
         }
 
         // CR 615.5 + CR 609.7: In a "damage is prevented this way" rider, the
@@ -4091,7 +4091,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         if let Some(continuation) = clause_ir.disposition.intrinsic() {
             apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
             env.observe(&defs, None, NodeRole::ContinuationProduct);
-            apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
+            apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_binding());
         }
 
         // CR 603.7: a continuation of an open delayed payload resolves when the

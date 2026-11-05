@@ -31,10 +31,54 @@ Jovial Evil is the clearest witness: the damage `target` lowers to
 `controller: You`, in one effect. The spell counts the caster's white creatures
 and damages the opponent.
 
-**Two antecedent classes, one seam.** This is why a single hard-coded scope cannot
-be right: the discriminator is *not* the pronoun — both classes say both "they"
-and "that player" — it is whether the player was introduced by a per-player
-trigger iteration or by a declared target.
+**Three antecedent classes, not two.** The table's "Antecedent" column was the
+starting hypothesis; measurement split the declared-target half in two. The
+discriminator is *not* the pronoun — every class prints both "they" and "that
+player" — so no hard-coded scope is right for the set:
+
+| Class | Antecedent introduced by | Witness | Status |
+|---|---|---|---|
+| A | a per-player trigger iteration | Citadel of Pain | **FIXED**, runtime test + revert proof |
+| B1 | a declared target in a PRIOR clause | Curious Herd | deferred (see below) |
+| B2 | a target the clause's OWN subject declares | Jovial Evil; Pact of the Serpent's chained sibling | deferred (see below) |
+
+## Why B1/B2 are deferred — the ctx-free combinator layer
+
+Threading antecedents into `oracle_util::parse_count_slot` (the count-slot leaf)
+*does* fix Curious Herd — measured, final AST `controller: DeclaredPlayer`. It was
+reverted anyway, because it makes two paths disagree on one card where they must
+agree, and the repo already pins that agreement:
+
+- `oracle_effect::tests::shared_where_x_binds_draws_and_loses_life_siblings`
+  (issue #1587) requires both siblings of "target player draws X cards and loses X
+  life, where X is …" to share one binding. Threading the count slot fixes the
+  draw and cannot fix the sibling, so the test goes red. Before the change both
+  siblings read `You` — wrong, but consistently wrong, which is what it pinned.
+
+The sibling's phrase, "the number of creatures they control **of the chosen
+type**", is DECLINED by the antecedent-aware CDA parser and falls through to
+`oracle_nom::quantity`, which is **ctx-free by signature**
+(`fn(input: &str) -> OracleResult<'_, QuantityRef>`; 21 context-free
+`parse_type_phrase_folding(` call sites). Measured call paths, from an instrument
+on the legacy-seed fallback itself (158 firings):
+
+- `parse_the_number_of` → `parse_number_of_inner` → `parse_qualified_controlled_type`
+  → `parse_type_phrase_folding` (no ctx) → seed → `You`
+- the same shape via `parse_sacrificed_this_turn_filter` and
+  `parse_for_each_clause_ref_with_they_controller`
+
+**The anaphor is destroyed in transit:** by the time that layer returns a
+`QuantityRef`, the phrase has already become `ControllerRef::You`, so nothing
+downstream can rebind it. Covering B1/B2 therefore requires either antecedents
+threaded through a deliberately pure combinator layer, or that layer taught to
+return an *unbound* anaphor for a later binding pass — a design task whose blast
+radius includes the sacrifice and for-each quantity families, not a leaf fix.
+
+A dead end worth recording so it is not retried: `ParseContext::clause_declared_group`
+looks like the missing B2 rung and is not. It has only two writers (a damage
+continuation chain, a `TargetOnly` exile root), so it is `None` for the Pact class,
+and at the capture site the clause IR's antecedents were already correct
+(`declared_they: Some(DeclaredPlayer { .. })`) — the capture was never the defect.
 
 ## Root cause
 
@@ -88,13 +132,15 @@ All of the machinery already exists on main. The fix is reuse, so neither the
   already derives those rungs from `declared_player_scope`,
   `prior_player_declaration` and `relative_player_scope`.
 
-Both classes then fall out of the existing rungs with no new logic:
+Class A falls out of the existing rungs with no new logic, and is what shipped:
 
 - Citadel of Pain — the trigger sets `relative_player_scope = ScopedPlayer`
   → `third_person` → "they control" → `ScopedPlayer`.
-- Curious Herd / Jovial Evil / Pact of the Serpent — the chain sets
-  `declared_player_scope = TargetPlayer` → `declared_that_player` / `declared_they`
-  → `TargetPlayer`.
+
+B1/B2 reach the rungs correctly too — the measured clause-IR antecedents are
+right (`declared_they: Some(DeclaredPlayer { .. })`). They are blocked downstream
+of the rungs, in the ctx-free combinator layer described above, not by missing
+antecedents.
 
 A thread-local is **not** an option here: the codebase deliberately removed the
 thread-locals this would reintroduce (`relative_player_scope` "replaces
@@ -115,37 +161,74 @@ proliferate" move, and it keeps every pass-through call site unchanged:
 ```rust
 pub(crate) struct WhereXBinding<'a> {
     expression: Option<&'a str>,
-    antecedents: &'a PlayerAntecedents,
+    /// `None` = no antecedent was in scope at this lowering site, which is how
+    /// every site behaved before this binding existed.
+    antecedents: Option<&'a PlayerAntecedents>,
 }
 ```
 
-The antecedents are captured where the live context exists — the effect-chain
-chunk loop that already sets `where_x_expression` on the clause IR
-(`oracle_effect/mod.rs:48518, 48553, 49620, 49692, 50321, 50459`) — carried on
-`ClauseIr` beside `where_x_expression`
-(`oracle_ir/effect_chain.rs:950`), and handed to the rewriter by
-`assembly.rs:3636`. `ClauseIr` is `pub(crate)` parser IR and is not serialized,
-so there is no wire or fixture surface.
+The antecedents are optional, not mandatory, so a site with no `ParseContext` in
+reach (`try_parse_reveal_until`, `parse_counter_ast`) says so in the type instead
+of fabricating an empty set that reads like a real measurement.
+
+One method, `WhereXBinding::resolve_quantity`, is the single door from where-X
+text to a quantity, so the expression and the antecedents it is read under cannot
+drift apart at a call site. Every leaf goes through it.
+
+The antecedents are captured where the live context exists — every
+`ClauseIrBuilder` site in the effect-chain chunk loop that already sets
+`where_x_expression` — carried on `ClauseIr` beside it, and handed to the
+rewriter by one accessor, `ClauseIr::where_x_binding`, so a call site cannot
+supply the expression and forget the antecedents.
+
+Two sites are NOT a plain capture, and both are load-bearing:
+
+- The DigAlt seam inherits its where-X text from the *previous* clause
+  (`prev_clause.and_then(|c| c.where_x_expression.clone())`), so it inherits the
+  antecedents from that same clause. Reading the current chunk's context there
+  would bind an inherited count's anaphor to a player the inherited clause never
+  named.
+- `mana.rs::apply_where_x_count_expression` reaches the same bare leaf and its
+  enclosing `try_parse_add_mana_effect_with_context` already has a live context,
+  so the where-X *mana* count (Carpet of Flowers and its class) is threaded too.
+  This is beyond the five cards in the table above and is the reason the fix is a
+  class fix rather than a card fix.
+
+`ClauseIr` is `pub(crate)` parser IR, but it **does** derive `Serialize` (it
+appears in parser traces), and `PlayerAntecedents` does not. The new field is
+`#[serde(skip)]`, so the trace schema is unchanged and no fixture moves.
 
 ## Verification that discriminates
 
-Per-class, because a single fixture cannot distinguish the two antecedents — the
-exact failure that made the previous PR's test inadequate:
+The tests live in `crates/engine/tests/integration/controller_anaphor_binds_through_context.rs`,
+which already exists for this family ("an anaphoric controller phrase keeps
+binding to the player its ability introduced") and already pins the
+**direct-amount** form of both antecedent classes. The where-X form was the hole;
+the shipped change fills the per-player half of it:
+
+| | per-player antecedent | declared-target antecedent |
+|---|---|---|
+| direct amount | Acidic Soil, Price of Progress (pre-existing) | Anathemancer (pre-existing) |
+| `, where X is …` | **Citadel of Pain** (shipped) | B1/B2 — deferred, see above |
+
+Rows actually shipped:
 
 1. **Citadel of Pain** (CR 109.4 + CR 115.1) — runtime, two players with unequal
    untapped land counts; on the opponent's end step the damage must equal *that
    player's* count, not the controller's. Reverting the production change must
    flip it.
-2. **Curious Herd** (CR 608.2c) — runtime, P0/P1 with unequal artifact counts;
-   the token count must read the *declared target's* artifacts. This is the case
-   the previous approach got wrong, and it must fail under a hard-coded
-   `ScopedPlayer` as well as under today's `You`.
-3. **Negative/reach guard** — a where-X count with a *direct* "you control"
-   phrase must stay `ControllerRef::You`, proving the threading did not make every
-   count target-relative.
-4. **Coverage honesty** — Psychic Allergy must remain an honest
-   `where_x_binding` gap; the fix must not flip an unrepresentable count to
-   falsely-supported.
+   Verified: disabling the fix at its single choke point
+   (`WhereXBinding::antecedents_or_empty`) makes this row FAIL.
+2. **Coverage honesty** — Psychic Allergy remains an honest `where_x_binding`
+   gap; the fix must not flip an unrepresentable count (its chosen-colour filter)
+   to falsely-supported. Asserted over the whole parse, because both of that
+   card's triggers are `Phase::Upkeep` and selecting one by phase is ambiguous.
+
+Deferred with the classes they cover — written and measured, then removed with the
+production change they depend on: a Curious Herd runtime row (P0/P1 unequal
+artifact counts; the token count must read the declared target's) and its paired
+`you control` reach-guard proving the threading does not make every count
+target-relative.
 
 The parse-diff receipt is the blast-radius check: any card outside this class
 whose where-X count changes controller is unintended, and the additive argument
