@@ -7682,6 +7682,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
 pub fn card_face_has_unimplemented_parts(face: &CardFace) -> bool {
     // A face's keywords are its printed keywords, so every keyword gap class
     // applies here, exactly as `check_keywords` judges them for `card_face_gaps`.
+    // allow-raw-authority: coverage audits a printed CardFace, not a live game object
     face.keywords.iter().any(|kw| keyword_gap(kw).is_some())
         || ability_definitions_have_unimplemented_parts(&face.abilities)
         || face
@@ -24736,6 +24737,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             None,
         );
         assert!(
+            // allow-raw-authority: test inspects the parsed printed CardFace
             face.keywords.iter().any(|kw| matches!(
                 kw,
                 Keyword::CumulativeUpkeep(AbilityCost::EffectCost { .. })
