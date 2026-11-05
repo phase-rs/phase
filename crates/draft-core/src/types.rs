@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::validation::{LimitedDeckError, STANDARD_BASIC_LANDS};
 use engine::types::card::DraftEffect;
+use engine::types::card_printing::DeckPrinting;
 use engine::types::match_config::{MatchConfig, MatchType};
 use engine::types::player::PlayerId;
 
@@ -1285,6 +1286,24 @@ pub enum DraftStatus {
     Abandoned,
 }
 
+impl DraftStatus {
+    /// Every status, in declaration order. The [`DraftKind::ALL`] idiom: the
+    /// serde round-trip folds this instead of a hand-written array, and
+    /// `draft_status_all_lists_every_variant` guards the list.
+    pub const ALL: [DraftStatus; 10] = [
+        DraftStatus::Lobby,
+        DraftStatus::Drafting,
+        DraftStatus::Review,
+        DraftStatus::Paused,
+        DraftStatus::Deckbuilding,
+        DraftStatus::Pairing,
+        DraftStatus::MatchInProgress,
+        DraftStatus::RoundComplete,
+        DraftStatus::Complete,
+        DraftStatus::Abandoned,
+    ];
+}
+
 /// A single card instance in a draft pack or pool.
 /// Lightweight collation type — NOT engine CardFace.
 /// Enriched with colors/cmc/type_line for bot AI color preference (Medium+),
@@ -1679,6 +1698,14 @@ pub enum DraftAction {
         /// [`MAX_COMMANDER_DESIGNATIONS`](crate::types::MAX_COMMANDER_DESIGNATIONS).
         #[serde(default)]
         commanders: Vec<String>,
+        /// Optional owner choices; native ingress bounds them before dispatch.
+        /// Name-only and server-generated submissions carry no annotations.
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "engine::types::card_printing::deserialize_deck_printings"
+        )]
+        printings: Vec<DeckPrinting>,
     },
     /// Generate the next round's pairings. Carries no round: the reducer is the
     /// single authority for which round that is (`DraftSession::next_pairing_round`).
@@ -1993,6 +2020,14 @@ pub struct DraftDeckSubmission {
     /// `validate_limited_deck`.
     #[serde(default)]
     pub commanders: Vec<String>,
+    /// Snapshotted with the accepted names. Every accepted resubmission replaces
+    /// this vector, including an empty vector clearing previous owner choices.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "engine::types::card_printing::deserialize_deck_printings"
+    )]
+    pub printings: Vec<DeckPrinting>,
 }
 
 /// Win/loss record for a player in the draft event.
@@ -2392,6 +2427,49 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn submitted_printings_wire_compatibility() {
+        use super::{DraftAction, DraftDeckSubmission};
+        let old_data = r#"{"seat":0,"main_deck":["Plains"],"commanders":[]}"#;
+        let annotated_data = r#"{"seat":0,"main_deck":["Plains"],"commanders":[],"printings":[{"section":"main_deck","name":"Plains","count":1,"printing":{"set_code":"lea","collector_number":"001"}}]}"#;
+        for data in [old_data, annotated_data] {
+            let stored: DraftDeckSubmission = serde_json::from_str(data).unwrap();
+            assert_eq!(
+                serde_json::to_string(&stored).unwrap(),
+                data,
+                "stored wire bytes"
+            );
+            let expected = format!(r#"{{"type":"SubmitDeck","data":{data}}}"#);
+            for frame in [
+                expected.clone(),
+                format!(r#"{{"data":{data},"type":"SubmitDeck"}}"#),
+            ] {
+                let action: DraftAction = serde_json::from_str(&frame).unwrap();
+                assert_eq!(
+                    serde_json::to_string(&action).unwrap(),
+                    expected,
+                    "action wire bytes"
+                );
+            }
+        }
+        let explicit_empty = r#"{"seat":0,"main_deck":["Plains"],"commanders":[],"printings":[]}"#;
+        let stored: DraftDeckSubmission = serde_json::from_str(explicit_empty).unwrap();
+        assert_eq!(
+            serde_json::to_string(&stored).unwrap(),
+            old_data,
+            "empty sidecar preserves old stored bytes"
+        );
+        let action: DraftAction = serde_json::from_str(&format!(
+            r#"{{"type":"SubmitDeck","data":{explicit_empty}}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_string(&action).unwrap(),
+            format!(r#"{{"type":"SubmitDeck","data":{old_data}}}"#),
+            "empty sidecar preserves old action bytes"
+        );
+    }
+
     /// THE PUBLISHED CAPABILITY AND THE REFUSAL ARE ONE ANSWER.
     ///
     /// `allowed_set_layouts` is what the setup page renders; `validate_source`
@@ -3093,24 +3171,52 @@ mod tests {
         }
     }
 
+    /// `DraftStatus::ALL` must list every status once, in the form of
+    /// `draft_kind_all_lists_every_variant`. The `match` has no wildcard, so a
+    /// new status is a compile error here; the array type fixes the length;
+    /// and the sorted indices, derived from `DraftStatus::ALL.len()`, catch a
+    /// duplicate, or a status left out while a later one is listed.
+    #[test]
+    fn draft_status_all_lists_every_variant() {
+        fn index_of(status: DraftStatus) -> usize {
+            match status {
+                DraftStatus::Lobby => 0,
+                DraftStatus::Drafting => 1,
+                DraftStatus::Review => 2,
+                DraftStatus::Paused => 3,
+                DraftStatus::Deckbuilding => 4,
+                DraftStatus::Pairing => 5,
+                DraftStatus::MatchInProgress => 6,
+                DraftStatus::RoundComplete => 7,
+                DraftStatus::Complete => 8,
+                DraftStatus::Abandoned => 9,
+            }
+        }
+        let mut indices: Vec<usize> = DraftStatus::ALL.into_iter().map(index_of).collect();
+        // Reach: the fold saw the array. An empty array would pass the
+        // equality below without covering anything.
+        assert!(!indices.is_empty());
+        indices.sort_unstable();
+        assert_eq!(
+            indices,
+            (0..DraftStatus::ALL.len()).collect::<Vec<_>>(),
+            "DraftStatus::ALL must list every variant exactly once"
+        );
+    }
+
     #[test]
     fn serde_roundtrip_draft_status() {
-        let statuses = [
-            DraftStatus::Lobby,
-            DraftStatus::Drafting,
-            DraftStatus::Paused,
-            DraftStatus::Deckbuilding,
-            DraftStatus::Pairing,
-            DraftStatus::MatchInProgress,
-            DraftStatus::RoundComplete,
-            DraftStatus::Complete,
-            DraftStatus::Abandoned,
-        ];
-        for status in statuses {
+        for status in DraftStatus::ALL {
             let json = serde_json::to_string(&status).unwrap();
             let back: DraftStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(status, back);
         }
+        // Reach: the fold covers Review, and Review keeps its wire name.
+        assert!(DraftStatus::ALL.contains(&DraftStatus::Review));
+        assert_eq!(
+            serde_json::to_string(&DraftStatus::Review).unwrap(),
+            "\"Review\""
+        );
     }
 
     #[test]

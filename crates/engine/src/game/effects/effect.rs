@@ -1022,6 +1022,7 @@ fn binds_as_player(filter: &TargetFilter) -> bool {
         | TargetFilter::AffectedObjectOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
@@ -1561,6 +1562,9 @@ fn defended_scope_uses_source_controller_anchor(
         | AttackTargetFilter::PlayerOrPermanents => true,
         AttackTargetFilter::Owner
         | AttackTargetFilter::OwnerOrPlaneswalker
+        // CR 508.6: source-OBJECT relative like `Owner` — the history belongs to
+        // the permanent carrying the restriction, not to its controller.
+        | AttackTargetFilter::PlayerAttackedBySourceThisTurn
         | AttackTargetFilter::Monarch => false,
     }
 }

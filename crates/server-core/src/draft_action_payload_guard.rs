@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use draft_core::types::{
     DraftAction, MAX_CARDS_PER_PICK, MAX_COMMANDER_DESIGNATIONS, MAX_SHARED_STACK_PILES,
 };
+use engine::types::card_printing::validate_deck_printings_bounds;
 use lobby_broker::inbound_guard::{validate_deck_list, MAX_MAIN_DECK_ENTRIES};
 use lobby_broker::validation::{
     validate_required_label, validate_token, MAX_DISPLAY_NAME_LEN, MAX_TOKEN_LEN,
@@ -113,6 +114,7 @@ pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
         DraftAction::SubmitDeck {
             main_deck,
             commanders,
+            printings,
             ..
         } => {
             validate_deck_list("SubmitDeck.main_deck", main_deck, MAX_MAIN_DECK_ENTRIES)?;
@@ -131,6 +133,7 @@ pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
                 commanders,
                 MAX_COMMANDER_DESIGNATIONS,
             )?;
+            validate_deck_printings_bounds("SubmitDeck.printings", printings)?;
         }
         DraftAction::ReportMatchResult { match_id, .. } => {
             validate_token("ReportMatchResult.match_id", match_id, MAX_TOKEN_LEN)?;
@@ -166,6 +169,176 @@ pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn submitted_printings_typed_bound_rechecks_vector_size() {
+        use engine::types::card_printing::{DeckPrinting, MAX_DECK_PRINTING_ENTRIES};
+        let row: DeckPrinting = serde_json::from_value(valid_printing()).unwrap();
+        for (count, accepted) in [
+            (MAX_DECK_PRINTING_ENTRIES, true),
+            (MAX_DECK_PRINTING_ENTRIES + 1, false),
+        ] {
+            let message = crate::protocol::ClientMessage::DraftAction {
+                draft_code: "ABCD12".into(),
+                action: DraftAction::SubmitDeck {
+                    seat: 0,
+                    main_deck: vec!["Plains".into()],
+                    commanders: vec![],
+                    printings: vec![row.clone(); count],
+                },
+            };
+            assert_eq!(
+                crate::client_message_wire_guard::guard_client_message_before_dispatch(
+                    &message,
+                    crate::protocol::ServerMode::Full
+                )
+                .is_ok(),
+                accepted,
+                "typed sidecar count is checked before dispatch"
+            );
+        }
+    }
+
+    fn printing_frame(sidecar: &serde_json::Value, data_first: bool) -> String {
+        let data =
+            format!(r#"{{"seat":0,"main_deck":["Plains"],"commanders":[],"printings":{sidecar}}}"#);
+        if data_first {
+            format!(
+                r#"{{"data":{{"action":{{"data":{data},"type":"SubmitDeck"}},"draft_code":"ABCD12"}},"type":"DraftAction"}}"#
+            )
+        } else {
+            format!(
+                r#"{{"type":"DraftAction","data":{{"draft_code":"ABCD12","action":{{"type":"SubmitDeck","data":{data}}}}}}}"#
+            )
+        }
+    }
+
+    fn valid_printing() -> serde_json::Value {
+        serde_json::json!({
+            "section": "main_deck", "name": "Plains", "count": 1,
+            "printing": { "set_code": "lea", "collector_number": "001" }
+        })
+    }
+
+    fn guarded_printings(
+        sidecar: &serde_json::Value,
+        data_first: bool,
+    ) -> Result<serde_json::Value, String> {
+        let message: crate::protocol::ClientMessage =
+            serde_json::from_str(&printing_frame(sidecar, data_first))
+                .map_err(|error| error.to_string())?;
+        crate::client_message_wire_guard::guard_client_message_before_dispatch(
+            &message,
+            crate::protocol::ServerMode::Full,
+        )?;
+        Ok(serde_json::to_value(message).unwrap()["data"]["action"]["data"].clone())
+    }
+
+    #[test]
+    fn submitted_printings_readable_malformed_rows_do_not_reject_names() {
+        let valid = valid_printing();
+        let mut unknown = valid.clone();
+        unknown["section"] = serde_json::json!("future_section");
+        let mut overflow = valid.clone();
+        overflow["count"] = serde_json::json!(u64::from(u32::MAX) + 1);
+        let mut negative = valid.clone();
+        negative["count"] = serde_json::json!(-1);
+        for data_first in [false, true] {
+            let rows = serde_json::json!([
+                null, 42, false, {}, {"name":"Plains"}, overflow, negative,
+                valid, unknown
+            ]);
+            let data = guarded_printings(&rows, data_first).unwrap();
+            assert_eq!(data["main_deck"], serde_json::json!(["Plains"]));
+            assert_eq!(data["commanders"], serde_json::json!([]));
+            unknown["section"] = serde_json::json!("unknown");
+            assert_eq!(data["printings"], serde_json::json!([valid, unknown]));
+            for non_array in [
+                serde_json::Value::Null,
+                serde_json::json!({}),
+                serde_json::json!(false),
+                serde_json::json!("bad"),
+                serde_json::json!(42),
+            ] {
+                let data = guarded_printings(&non_array, data_first).unwrap();
+                assert_eq!(data["main_deck"], serde_json::json!(["Plains"]));
+                assert!(data.get("printings").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn submitted_printings_raw_element_bound_counts_dropped_rows() {
+        use engine::types::card_printing::MAX_DECK_PRINTING_ENTRIES;
+        for data_first in [false, true] {
+            let mut rows = vec![serde_json::Value::Null; MAX_DECK_PRINTING_ENTRIES];
+            rows[MAX_DECK_PRINTING_ENTRIES - 1] = valid_printing();
+            assert_eq!(
+                guarded_printings(&serde_json::json!(rows), data_first).unwrap()["printings"],
+                serde_json::json!([valid_printing()])
+            );
+            rows.push(serde_json::Value::Null);
+            let frame = printing_frame(&serde_json::json!(rows), data_first);
+            assert!(frame.len() < 64 * 1024);
+            assert!(
+                serde_json::from_str::<crate::protocol::ClientMessage>(&frame).is_err(),
+                "raw sidecar overflow must fail before dispatch"
+            );
+        }
+    }
+
+    #[test]
+    fn submitted_printings_byte_bounds_are_utf8_not_characters() {
+        use engine::types::card_printing::{
+            MAX_DECK_CARD_NAME_LEN, MAX_PRINTING_COLLECTOR_NUMBER_LEN, MAX_PRINTING_SET_CODE_LEN,
+        };
+        for (pointer, bound) in [
+            ("/name", MAX_DECK_CARD_NAME_LEN),
+            ("/printing/set_code", MAX_PRINTING_SET_CODE_LEN),
+            (
+                "/printing/collector_number",
+                MAX_PRINTING_COLLECTOR_NUMBER_LEN,
+            ),
+        ] {
+            for data_first in [false, true] {
+                let mut row = valid_printing();
+                *row.pointer_mut(pointer).unwrap() = serde_json::json!("é".repeat(bound / 2));
+                let data = guarded_printings(&serde_json::json!([row]), data_first).unwrap();
+                assert_eq!(data["printings"], serde_json::json!([row]));
+                *row.pointer_mut(pointer).unwrap() =
+                    serde_json::json!(format!("{}x", "é".repeat(bound / 2)));
+                assert!(
+                    guarded_printings(&serde_json::json!([row]), data_first).is_err(),
+                    "decoded printing byte overflow must fail ingress: {pointer}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn submitted_printings_validity_is_not_an_ingress_rejection() {
+        let mut rows = vec![];
+        for (name, set, number, count) in [
+            ("", "lea", "001", 1),
+            ("Plains", "", "001", 1),
+            ("Plains", "lea", "", 1),
+            ("Plains\n", "lea", "001", 1),
+            ("Plains", "lea\n", "001", 1),
+            ("Plains", "lea", "00\n1", 1),
+            ("Plains", "lea", "001", 0),
+            ("Absent", "lea", "001", u32::MAX),
+        ] {
+            rows.push(serde_json::json!({
+                "section":"main_deck", "name":name, "count":count,
+                "printing":{"set_code":set,"collector_number":number}
+            }));
+        }
+        rows.push(valid_printing());
+        assert_eq!(
+            guarded_printings(&serde_json::json!(rows), false).unwrap()["printings"],
+            serde_json::json!(rows)
+        );
+    }
+
     use super::*;
     use lobby_broker::inbound_guard::MAX_MAIN_DECK_ENTRIES;
 
@@ -525,6 +698,7 @@ mod tests {
             seat: 0,
             main_deck: vec!["Forest".to_string(); MAX_MAIN_DECK_ENTRIES + 1],
             commanders: Vec::new(),
+            printings: Vec::new(),
         };
         let err = guard_draft_action_payload(&action).unwrap_err();
         assert!(err.contains("main_deck"));
@@ -536,6 +710,7 @@ mod tests {
             seat: 0,
             main_deck: vec!["Forest\nIsland".to_string()],
             commanders: Vec::new(),
+            printings: Vec::new(),
         };
         let err = guard_draft_action_payload(&action).unwrap_err();
         assert!(err.contains("control characters"));
@@ -560,6 +735,7 @@ mod tests {
             seat: 0,
             main_deck: vec!["Forest".to_string()],
             commanders: vec!["Forest".to_string(); MAX_COMMANDER_DESIGNATIONS + 1],
+            printings: Vec::new(),
         };
         let err = guard_draft_action_payload(&action).unwrap_err();
         assert!(
@@ -577,6 +753,7 @@ mod tests {
             seat: 0,
             main_deck: vec!["Forest".to_string()],
             commanders: vec!["Forest".to_string(); MAX_COMMANDER_DESIGNATIONS],
+            printings: Vec::new(),
         };
         assert!(guard_draft_action_payload(&action).is_ok());
     }

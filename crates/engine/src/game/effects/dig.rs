@@ -359,6 +359,20 @@ fn resolve_from_prior_look(
     // cards to rest_dest without any interactive prompt.
     if raw_keep_count == 0 {
         if let Some(dest) = rest_dest {
+            // CR 701.20e + CR 608.2c: If the rest cards are being placed on the
+            // bottom of the library in any order (PlayerChoice) and there are 2
+            // or more cards, pause for the controller to announce their
+            // permutation. This handles cards like Petals of Insight where the
+            // player chooses "put on bottom in any order" as one of the options.
+            if dest == Zone::Library && rest_order == DigRestOrder::PlayerChoice && cards.len() >= 2
+            {
+                state.waiting_for = WaitingFor::DigBottomOrder {
+                    player: ability.controller,
+                    source_id: ability.source_id,
+                    cards: cards.clone(),
+                };
+                return Ok(());
+            }
             match crate::game::engine_resolution_choices::route_rest_partition(
                 state,
                 &cards,

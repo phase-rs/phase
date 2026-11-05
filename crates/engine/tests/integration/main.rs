@@ -4,6 +4,7 @@
 // `--test`), so one implementation serves both without shipping guard code in a release build.
 // MEASURED, not assumed — the alternative already in this tree is `test_support.rs` / `support.rs`,
 // twin files kept equal by a comment asking a human to remember.
+#![recursion_limit = "512"]
 #[path = "../../src/source_census.rs"]
 mod source_census;
 
@@ -11,7 +12,9 @@ mod abdel_adrian_animate_dead_altar_board;
 mod abigale_integration;
 mod active_damage_trigger_recipient_anaphor;
 mod adapter_contract_fixtures;
+mod additional_cost_declaration_tail;
 mod agent_frank_horrigan_attacked_this_turn_indestructible;
+mod all_good_things_shared_card_type;
 mod ancient_brass_dragon_roll_d20;
 mod ancient_bronze_dragon_roll_d20;
 mod ancient_copper_dragon_roll_d20;
@@ -25,10 +28,12 @@ mod banding_combat;
 mod batched_trigger_subject_count;
 mod battlefield_entry_authority_census;
 mod bbfu7_attacks_if_able_not_goad;
+mod beckett_mariner_promotion_counters;
 mod betor_lifelink_counters_repro;
 mod bishop_of_binding_where_x_exiled_card_power;
 mod blitz_em_dash_graveyard_cast;
 mod blizzard_brawl_snow_indestructible;
+mod board_wipe_co_departure_scaling;
 mod bring_to_light_free_cast_2880;
 mod cartographers_hawk_relative_damage_recipient;
 mod case_solve_condition;
@@ -59,6 +64,7 @@ mod dandan_shared_pile_storage;
 mod dandan_simultaneous_draw;
 mod dandan_wheel_split;
 mod dandan_zone_change_identity;
+mod debug_move_to_zone_simulated_priority;
 mod deferred_card_type_reflexive_guard;
 mod delayed_event_subject_anaphor_snapshot;
 mod delayed_that_many_resolution_scope;
@@ -149,6 +155,7 @@ mod issue_6858_draw_that_many_discard;
 mod issue_6877_departed_triggering_spell;
 mod issue_7386_ozolith_combat_counter_move;
 mod issue_8024_terminal_rest_captures;
+mod issue_8065_nightmare_shepherd;
 mod issue_836_hero_of_bladehold_battle_cry;
 mod issue_8485_maze_of_ith_defender;
 mod issue_879_obsessive_pursuit;
@@ -162,8 +169,10 @@ mod layer_boundary_census;
 mod lost_monarch_combat_damage_by_type_intervening_if;
 mod mana_ability_mana_payment_window;
 mod mana_burn;
+mod master_of_the_wild_hunt;
 mod maze_of_ith_untap_bidirectional_prevent;
 mod mbaku_attacked_monarch_intervening_if;
+mod miles_obrien_returned_to_hand;
 mod min_blocker_floor_block_candidates_7183;
 mod mindblade_render_warrior_intervening_if_2867;
 mod mjolnir_hammer_double_damage;
@@ -193,6 +202,7 @@ mod pass_priority_structural_legality;
 mod period_confirm_rows;
 mod perpetual_gains;
 mod perrie_the_pulverizer_attack_trigger_6219;
+mod petals_of_insight;
 mod play_trace;
 mod power_fist_combat_damage_regression;
 mod preacher_of_the_schism_life_gates;
@@ -218,11 +228,13 @@ mod std_dynqty_a_damage_mod_runtime;
 mod std_longtail_b_delayed_effects;
 mod std_s07_damage_doublers;
 mod stensian_sanguinist_prepare;
+mod stored_may_decline_trigger_uses_stack;
 mod strategic_betrayal_6505;
 pub mod support;
 mod swallow_optional_you_may;
 mod target_instance_identity_9280;
 mod terra_herald_optional_prompt;
+mod tezzeret_cruel_captain_emblem;
 mod thoughtweft_trample_regression;
 mod total_war_attacking_player_scope;
 mod types_ability;
@@ -232,6 +244,7 @@ mod unstoppable_slasher_half_life;
 mod ureni_attack_trigger;
 mod vengeful_ancestor_goaded_attack_trigger;
 mod viewer_projection_ingest_gate;
+mod void_winnower_announced_x;
 mod vrestin_menoptra_leader_5949;
 mod wba_fodder_multiset;
 mod wba_loop_firewall_interposition;
@@ -287,6 +300,9 @@ mod controller_anaphor_binds_through_context;
 
 mod resolution_progress_contract;
 
+mod ignite_memories_random_reveal;
+mod niambi_granted_trigger_once_each_turn;
+mod q_stacking_the_deck;
 mod risky_move_gain_control_trigger;
 mod token_attack_destination;
 mod venat_heros_sundering_transform_8071;
