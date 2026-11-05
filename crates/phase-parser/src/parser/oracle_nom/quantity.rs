@@ -5810,19 +5810,63 @@ fn parse_card_with_relative_clause(input: &str) -> OracleResult<'_, TargetFilter
     ))
 }
 
-/// CR 608.2c: whether `text` names a controller through a player anaphor
-/// ("they control", "that player controls", "its controller controls") rather
-/// than a direct player ("you control"). Lets a reader whose population grammar
-/// cannot bind an anaphor to its antecedent decline the phrase instead of
-/// accepting the grammar's context-free default.
-fn names_anaphoric_controller(text: &str) -> bool {
-    scan_at_word_boundaries(text, |i| {
-        verify(parse_controller_phrase, |phrase| {
-            matches!(phrase.subject, ControllerSubject::Anaphoric(_))
-        })
-        .parse(i)
-    })
-    .is_some()
+/// CR 608.2c: whether `text` names a player through an anaphor ("they",
+/// "that player", "its controller", "its owner") in any position the shared
+/// population grammar binds to a fixed player regardless of the supplied
+/// antecedents. Lets a reader whose population grammar cannot bind an anaphor
+/// to its antecedent decline the phrase instead of accepting a context-free
+/// default. Direct players ("you control", "you own", "your graveyard") do not
+/// count.
+fn names_player_anaphor(text: &str) -> bool {
+    scan_at_word_boundaries(text, parse_population_player_anaphor).is_some()
+}
+
+/// CR 608.2c: one anaphoric player reference inside a population phrase.
+///
+/// * control — "they control", "that player controls", "its controller
+///   controls": the anaphoric subjects of the shared `parse_controller_phrase`;
+/// * CR 108.3 ownership — "they own", "that player owns", "owned by that
+///   player";
+/// * CR 404.1 zone owner — "their graveyard", "that player's graveyard", "its
+///   owner's graveyard", "its controller's graveyard".
+fn parse_population_player_anaphor(input: &str) -> OracleResult<'_, ()> {
+    let anaphoric_subject = || {
+        alt((
+            tag("that player"),
+            tag("they"),
+            preceded(alt((tag("its "), tag("their "))), tag("controller")),
+        ))
+    };
+    alt((
+        value(
+            (),
+            verify(parse_controller_phrase, |phrase| {
+                matches!(phrase.subject, ControllerSubject::Anaphoric(_))
+            }),
+        ),
+        value(
+            (),
+            (
+                anaphoric_subject(),
+                tag(" "),
+                alt((tag("owns"), tag("own"))),
+                not(satisfy(char::is_alphanumeric)),
+            ),
+        ),
+        value((), (tag("owned by "), anaphoric_subject())),
+        value(
+            (),
+            alt((
+                tag("their "),
+                tag("that player's "),
+                preceded(
+                    alt((tag("its "), tag("their "))),
+                    alt((tag("owner's "), tag("controller's "))),
+                ),
+            )),
+        ),
+    ))
+    .parse(input)
 }
 
 fn parse_for_each_clause_ref_with_they_controller<'a>(
@@ -5882,11 +5926,12 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
                 // retain their existing number-of quantity-reader support.
                 //
                 // CR 608.2c + CR 109.5: the shared population grammar reads its
-                // controller without this reader's player antecedents, so an
-                // anaphoric "they control" / "that player controls" would bind
-                // to `You` instead of the iterating or scoped player. No printed
-                // card uses that framing here (Sarek names "you control"), so
-                // the arm declines it rather than bind the wrong player.
+                // controller, owner and zone owner without this reader's player
+                // antecedents, so an anaphoric "they control" / "they own" /
+                // "their graveyard" would bind to a fixed player instead of the
+                // iterating or scoped one. No printed card uses that framing
+                // here (Sarek names "you control"), so the arm declines it
+                // rather than bind the wrong player.
                 map(
                     verify(
                         consumed(parse_distinct_category_subtypes_among),
@@ -5897,7 +5942,7 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
                                     restrict: Some(SubtypeSet::Creature),
                                     ..
                                 }
-                            ) && !names_anaphoric_controller(population)
+                            ) && !names_player_anaphor(population)
                         },
                     ),
                     |(_, qty)| qty,
@@ -13674,9 +13719,10 @@ mod tests {
     }
 
     /// CR 608.2c + CR 109.5: the creature-type for-each arm keeps a literal
-    /// "you control" population as `You` under a supplied player antecedent,
-    /// and declines the anaphoric "they control" / "that player controls"
-    /// framing its population grammar cannot bind to that antecedent.
+    /// "you control" / "you own" / "your graveyard" population under a supplied
+    /// player antecedent, and declines the anaphoric control, ownership and
+    /// zone-owner framings its population grammar cannot bind to that
+    /// antecedent.
     #[test]
     fn for_each_creature_types_among_discriminates_controller_from_antecedent() {
         let ctx = ParseContext {
@@ -13702,9 +13748,32 @@ mod tests {
                 ..
             }
         ));
+        for direct in [
+            "creature types among creatures you own",
+            "creature types among creature cards in your graveyard",
+        ] {
+            let parsed = parse_for_each_clause_ref_with_context(direct, &ctx);
+            assert!(
+                matches!(
+                    parsed,
+                    Ok((
+                        "",
+                        QuantityRef::DistinctSubtypes {
+                            restrict: Some(SubtypeSet::Creature),
+                            ..
+                        }
+                    ))
+                ),
+                "{direct}: a direct player stays accepted, got {parsed:?}"
+            );
+        }
         for anaphoric in [
             "creature types among non-borg creatures they control",
             "creature types among creatures that player controls",
+            "creature types among creatures they own",
+            "creature types among creatures owned by that player",
+            "creature types among creature cards in their graveyard",
+            "creature types among creature cards in that player's graveyard",
         ] {
             let parsed = parse_for_each_clause_ref_with_context(anaphoric, &ctx);
             assert!(
