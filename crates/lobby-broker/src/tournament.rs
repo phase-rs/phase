@@ -2153,6 +2153,45 @@ pub enum TournamentExpiryEvent {
     Abandoned(String),
 }
 
+/// Aggregate budget for the card-name bytes of every persisted deck this manager
+/// holds, across all tournaments, enforced at [`TournamentManager::submit_deck`]
+/// admission. The lobby Durable Object serializes the ENTIRE broker — the lobby
+/// registry plus every tournament and its retained decks — as one JSON value
+/// under a single SQLite key, and Cloudflare caps a key+value at 2 MB. The
+/// per-deck wire bounds ([`crate::inbound_guard::validate_deck_payload`])
+/// individually accept decks whose names sum far past that cap in aggregate (six
+/// maxed decks are ~2.46 MB of names alone), so a per-deck bound alone cannot
+/// bound the snapshot. This caps the summed name bytes well under 2 MB, leaving
+/// headroom for each deck's separately-bounded printings sidecar, JSON structural
+/// overhead, and the rest of the broker snapshot. A refused submission leaves
+/// every retained deck and its readiness unchanged (the check precedes the single
+/// mutation).
+pub const MAX_AGGREGATE_DECK_NAME_BYTES: usize = 512 * 1024;
+
+/// Total bytes of the card-name strings in `deck` — the attacker-controlled,
+/// persistence-dominating cost [`MAX_AGGREGATE_DECK_NAME_BYTES`] bounds. The
+/// structured `printings` sidecar is bounded separately (per-deck) by
+/// [`crate::inbound_guard::validate_deck_payload`], and the conservative aggregate
+/// budget absorbs its proportional contribution.
+fn deck_name_bytes(deck: &DeckData) -> usize {
+    [
+        &deck.main_deck,
+        &deck.sideboard,
+        &deck.commander,
+        &deck.companion,
+        &deck.attraction_deck,
+        &deck.planar_deck,
+        &deck.scheme_deck,
+        &deck.contraption_deck,
+        &deck.sticker_sheets,
+        &deck.signature_spell,
+    ]
+    .into_iter()
+    .flat_map(|list| list.iter())
+    .map(String::len)
+    .sum()
+}
+
 /// The pure registry of tournaments, mirroring
 /// [`crate::lobby::LobbyManager`]'s manager-owns-state shape.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2697,6 +2736,26 @@ impl TournamentManager {
         env: &impl BrokerEnv,
     ) -> Result<(), String> {
         let now = env.now_ms() / 1000;
+        let incoming_bytes = deck_name_bytes(&deck);
+        // Sum the card-name bytes of every OTHER persisted deck — all
+        // tournaments, minus the (code, player_key) slot this submission
+        // overwrites — while the shared registry is still borrowed immutably, so
+        // the aggregate budget below can be checked before any mutation. A
+        // resubmission replaces its own deck, so its old bytes are excluded here
+        // rather than double-counted.
+        let retained_other_bytes: usize = self
+            .tournaments
+            .iter()
+            .flat_map(|(t_code, meta)| {
+                meta.players.iter().filter_map(move |p| {
+                    let is_overwritten_slot = t_code == code && p.player_key == player_key;
+                    p.deck
+                        .as_ref()
+                        .filter(|_| !is_overwritten_slot)
+                        .map(deck_name_bytes)
+                })
+            })
+            .sum();
         let meta = self.meta_mut(code)?;
         if meta.status.is_terminal() {
             return Err(format!(
@@ -2717,6 +2776,17 @@ impl TournamentManager {
             .iter_mut()
             .find(|p| p.player_key == player_key)
             .ok_or_else(|| format!("Player {player_key} is not registered in {code}"))?;
+        // Aggregate persistence budget: the whole broker serializes under one
+        // 2 MB Durable Object key, so admit the deck only if the summed name
+        // bytes of all retained decks stay under the budget. Checked last, right
+        // before the single mutation, so a refusal leaves every retained deck and
+        // its readiness unchanged.
+        if retained_other_bytes + incoming_bytes > MAX_AGGREGATE_DECK_NAME_BYTES {
+            return Err(format!(
+                "Deck rejected: it would exceed the server's aggregate tournament deck \
+                 budget ({MAX_AGGREGATE_DECK_NAME_BYTES} bytes of card names across all events)"
+            ));
+        }
         player.deck = Some(deck);
         meta.last_activity_at = now;
         Ok(())
@@ -4165,6 +4235,38 @@ mod tests {
             main_deck: vec![name.to_string(); 40],
             ..Default::default()
         }
+    }
+
+    /// `submit_deck` refuses a deck whose card-name bytes would push the summed
+    /// persisted deck state across all tournaments past
+    /// [`MAX_AGGREGATE_DECK_NAME_BYTES`] — the whole broker serializes under one
+    /// 2 MB Durable Object key — and the refusal leaves the slot unchanged, so a
+    /// later within-budget deck is still admitted. REVERT-FAIL: drop the aggregate
+    /// check in `submit_deck` and the over-budget submission stores instead of
+    /// erroring.
+    #[test]
+    fn submit_deck_enforces_the_aggregate_name_budget_and_refuses_cleanly() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        // A single deck whose card names alone exceed the aggregate budget.
+        let over_budget = DeckData {
+            main_deck: vec!["x".repeat(256); MAX_AGGREGATE_DECK_NAME_BYTES / 256 + 1],
+            ..Default::default()
+        };
+        assert!(mgr.submit_deck("T", &key(0), over_budget, &env).is_err());
+        // The refusal left the entrant's slot empty — state unchanged.
+        let stored = mgr
+            .get("T")
+            .expect("t")
+            .players
+            .iter()
+            .find(|p| p.player_key == key(0))
+            .and_then(|p| p.deck.clone());
+        assert_eq!(stored, None);
+        // A within-budget deck is still admitted afterwards.
+        mgr.submit_deck("T", &key(0), deck_of("Island"), &env)
+            .expect("a modest deck stays within budget");
     }
 
     /// `submit_deck` stores a per-entrant deck and `pairing_decks_submitted`

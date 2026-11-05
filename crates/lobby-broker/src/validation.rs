@@ -732,6 +732,12 @@ mod tests {
         );
     }
 
+    /// A tournament deck routes through the shared `inbound_guard::validate_deck_payload`,
+    /// so it is bounded on exactly the lists that shared authority covers — the
+    /// same ones a casual `CreateGameWithSettings` is. `sticker_sheets` is not among
+    /// them (a deliberate omission of the shared payload validator, not a
+    /// tournament-path regression); its persistence is instead bounded in aggregate
+    /// by `tournament::MAX_AGGREGATE_DECK_NAME_BYTES`, which sums it in.
     #[test]
     fn submit_tournament_deck_bounds_every_supplementary_list() {
         let cases = [
@@ -757,13 +763,6 @@ mod tests {
                 },
             ),
             (
-                "sticker_sheets",
-                DeckData {
-                    sticker_sheets: vec!["Card".into(); 201],
-                    ..Default::default()
-                },
-            ),
-            (
                 "signature_spell",
                 DeckData {
                     signature_spell: vec!["Card".into(); 5],
@@ -783,7 +782,7 @@ mod tests {
         }
 
         let mut invalid_name = empty_deck();
-        invalid_name.sticker_sheets = vec!["x".repeat(MAX_DECK_CARD_NAME_LEN + 1)];
+        invalid_name.commander = vec!["x".repeat(MAX_DECK_CARD_NAME_LEN + 1)];
         let err = guard_inbound(&M::SubmitTournamentDeck {
             code: "T".into(),
             player_token: "tok".into(),
@@ -791,7 +790,7 @@ mod tests {
             request_id: None,
         })
         .unwrap_err();
-        assert!(err.contains("sticker_sheets[0]"), "{err}");
+        assert!(err.contains("commander[0]"), "{err}");
     }
 
     #[test]

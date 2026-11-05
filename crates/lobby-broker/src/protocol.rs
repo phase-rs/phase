@@ -2407,6 +2407,20 @@ pub enum ParsedFrame {
     /// bounds in [`crate::validation`]. Carries a human-readable reason for the
     /// `Error` reply.
     Malformed(String),
+    /// A fully-deserialized, correlated tournament action whose field values
+    /// failed validation. Unlike [`Self::Malformed`] — a bare `Error` the
+    /// correlated client authority ignores — this carries the request id so the
+    /// shell answers with a correlated `TournamentActionRejected`, settling the
+    /// client's pending submission instead of leaving it to time out. Only a
+    /// frame that adopts the optional correlation contract AND is routinely
+    /// trippable by a non-hostile client (today: `SubmitTournamentDeck`, whose
+    /// `DeckData` can legitimately approach the per-list caps) takes this path; an
+    /// uncorrelated (`None`) one keeps [`Self::Malformed`]. This mirrors the
+    /// native boundary's split in `server_core::wire_rejection_message`.
+    RejectedTournamentAction {
+        request_id: TournamentRequestId,
+        reason: String,
+    },
     /// The frame's `type` is not a known lobby tag. The shell routes this to
     /// the same reject path as a mode-disabled message.
     UnknownTag(String),
@@ -2473,9 +2487,29 @@ pub fn parse_lobby_client_message(text: &str) -> ParsedFrame {
     match serde_json::from_str::<LobbyClientMessage>(&reconstructed) {
         Ok(msg) => match crate::validation::validate_lobby_message(&msg) {
             Ok(()) => ParsedFrame::Message(Box::new(msg)),
-            Err(reason) => ParsedFrame::Malformed(reason),
+            Err(reason) => correlated_tournament_rejection(&msg, reason),
         },
         Err(e) => ParsedFrame::Malformed(e.to_string()),
+    }
+}
+
+/// Route a validation refusal on a fully-deserialized frame to a correlated
+/// [`ParsedFrame::RejectedTournamentAction`] when the frame is a routinely-
+/// trippable tournament action that adopted the correlation contract, and to a
+/// bare [`ParsedFrame::Malformed`] otherwise. The native boundary makes the same
+/// split in `server_core::wire_rejection_message`; keeping both in step is what
+/// lets a correlated `SubmitTournamentDeck` settle identically on either
+/// transport.
+fn correlated_tournament_rejection(msg: &LobbyClientMessage, reason: String) -> ParsedFrame {
+    match msg {
+        LobbyClientMessage::SubmitTournamentDeck {
+            request_id: Some(request_id),
+            ..
+        } => ParsedFrame::RejectedTournamentAction {
+            request_id: *request_id,
+            reason,
+        },
+        _ => ParsedFrame::Malformed(reason),
     }
 }
 
@@ -2595,6 +2629,47 @@ mod tests {
         let frame = r#"{"type":"Ping","data":{"timestamp":"not a number"}}"#;
         assert!(matches!(
             parse_lobby_client_message(frame),
+            ParsedFrame::Malformed(_)
+        ));
+    }
+
+    /// The Worker transport boundary: a fully-deserialized `SubmitTournamentDeck`
+    /// whose deck fails its bounds carries its `request_id` through the refusal as
+    /// a correlated [`ParsedFrame::RejectedTournamentAction`] (so the broker-wasm
+    /// shell answers with a correlated `TournamentActionRejected`), while the
+    /// uncorrelated (`None`) frame keeps the bare [`ParsedFrame::Malformed`].
+    /// REVERT-FAIL: route the `Some` case back to `Malformed` and the exact-id
+    /// assertion fails.
+    #[test]
+    fn oversized_tournament_deck_preserves_request_id_through_refusal() {
+        let over_bounds = || engine::starter_decks::DeckData {
+            main_deck: vec!["Forest".to_string(); crate::inbound_guard::MAX_MAIN_DECK_ENTRIES + 1],
+            ..Default::default()
+        };
+        let request_id = TournamentRequestId(7);
+        let correlated = LobbyClientMessage::SubmitTournamentDeck {
+            code: "TOUR01".to_string(),
+            player_token: "tok".to_string(),
+            deck: over_bounds(),
+            request_id: Some(request_id),
+        };
+        let frame = serde_json::to_string(&correlated).expect("serialize");
+        match parse_lobby_client_message(&frame) {
+            ParsedFrame::RejectedTournamentAction {
+                request_id: got, ..
+            } => assert_eq!(got, request_id),
+            other => panic!("expected RejectedTournamentAction, got {other:?}"),
+        }
+
+        let uncorrelated = LobbyClientMessage::SubmitTournamentDeck {
+            code: "TOUR01".to_string(),
+            player_token: "tok".to_string(),
+            deck: over_bounds(),
+            request_id: None,
+        };
+        let frame = serde_json::to_string(&uncorrelated).expect("serialize");
+        assert!(matches!(
+            parse_lobby_client_message(&frame),
             ParsedFrame::Malformed(_)
         ));
     }
