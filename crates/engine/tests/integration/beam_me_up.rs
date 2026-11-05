@@ -2191,7 +2191,7 @@ fn scotty_board_with(
     (runner, scotty, bears, cards)
 }
 
-/// S6 (CR 712.8a + CR 712.11b + CR 712.11c): Jadzi, Oracle of Arcavios is a
+/// S11 (CR 712.8a + CR 712.11b + CR 712.11c): Jadzi, Oracle of Arcavios is a
 /// creature card in the graveyard, but its modal back face, Journey to the
 /// Oracle, is a sorcery. Scotty's beam me up casts only instant and sorcery
 /// spells and "the beam me up cost is equal to that spell's mana cost", so the
@@ -2298,7 +2298,59 @@ fn scotty_casts_a_modal_dfc_sorcery_back_face_for_that_faces_mana_cost() {
     assert_eq!(zone(&runner, jadzi), Zone::Exile, "then exile that spell");
 }
 
-/// S7 (CR 118.6 + CR 202.1b): Scotty's grant on Ancestral Vision, which has no
+/// S14 (CR 712.11c + CR 601.2a): choosing Jadzi's creature front face at the
+/// face prompt of a beam me up cast is refused by `apply()` itself, not only
+/// left out of the legal actions, and the refusal changes nothing: the card
+/// stays in the graveyard, no creature is returned and no mana is spent.
+#[test]
+fn scotty_refuses_the_modal_dfc_creature_face_through_apply() {
+    let Some(db) = shared_card_db() else { return };
+    let mut pool = mana(ManaType::Blue, 2);
+    pool.extend(mana(ManaType::Green, 6));
+    let (mut runner, _scotty, bears, cards) = scotty_board_with(pool, Some(db), |sc| {
+        vec![sc.add_real_card(P0, "Jadzi, Oracle of Arcavios", Zone::Graveyard, db)]
+    });
+    let jadzi = cards[0];
+
+    let card_id = runner.state().objects[&jadzi].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: jadzi,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Jadzi // Journey");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ModalFaceChoice { .. }
+        ),
+        "REACH: the face prompt is up: {:?}",
+        runner.state().waiting_for
+    );
+    let pool_before = pool_total(&runner, P0);
+
+    let refused = runner.act(GameAction::ChooseModalFace { back_face: false });
+    assert!(
+        refused.is_err(),
+        "the creature face can't be cast with beam me up: {refused:?}"
+    );
+    assert_eq!(zone(&runner, jadzi), Zone::Graveyard, "Jadzi stays put");
+    assert_eq!(zone(&runner, bears), Zone::Battlefield, "nothing returned");
+    assert_eq!(pool_total(&runner, P0), pool_before, "no mana spent");
+    assert!(runner.state().stack.is_empty(), "nothing was cast");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ModalFaceChoice { .. }
+        ),
+        "the face prompt is still up: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// S12 (CR 118.6 + CR 202.1b): Scotty's grant on Ancestral Vision, which has no
 /// mana cost, is based on the mana cost of an object with no mana cost, so it
 /// is unpayable and Ancestral Vision is not cast for free. A {0} mana cost is
 /// payable: Pact of the Titan is cast for {0}.
@@ -2359,7 +2411,7 @@ fn scotty_grant_on_a_card_with_no_mana_cost_is_unpayable() {
     );
 }
 
-/// S8 (CR 118.6 + CR 113.2c): dropping Scotty's unpayable instance leaves an
+/// S13 (CR 118.6 + CR 113.2c): dropping Scotty's unpayable instance leaves an
 /// independent printed beam me up on the same card. SYNTHETIC: no printed card
 /// has both no mana cost and beam me up; this is Open Communications' verbatim
 /// text on a card with no mana cost.
