@@ -11938,9 +11938,15 @@ fn detach_after_player_scope_local_chain(
     // seat's template and is skipped with its gate when the gate is false
     // (`starts_independent_instruction`). A child with its OWN `player_scope`
     // is the next multi-player action (CR 608.2e) and is judged as before.
+    // A step is a DIFFERENT action of the same sentence ("lose 2 life and you
+    // draw a card"); a continuation repeating the gated node's own effect kind
+    // ("gain 1 life" then "gain 3 life") is a later instruction that reads the
+    // same whether or not the gate held, so it stays the once-after-all-seats
+    // tail.
     let next_is_gated_instruction_step = membership == SeatGateMembership::PerSeatGated
         && !starts_independent_instruction(&next)
-        && next.player_scope.is_none();
+        && next.player_scope.is_none()
+        && std::mem::discriminant(&node.effect) != std::mem::discriminant(&next.effect);
     if next_is_performed_gated
         || next_is_zone_change_this_way_gated
         || next_is_co_scoped_anaphoric_consumer
