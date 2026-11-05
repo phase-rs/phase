@@ -8824,10 +8824,13 @@ fn try_parse_gain_quoted_ability(text: &str) -> Option<Effect> {
     if modifications.is_empty() {
         return None;
     }
-    // CR 113.3a: Granted abilities last as long as the granting effect. For
-    // sub_ability inline grants in pump-style spells the parent's UntilEndOfTurn
-    // is the typical default; preserve any explicitly stripped duration.
-    let duration = duration.or(Some(Duration::UntilEndOfTurn));
+    // CR 611.2a: an inline granted ability lasts as long as the
+    // granting effect, so its window is the parsed one VERBATIM. `None` must stay
+    // a true unset sentinel: an injected `UntilEndOfTurn` is byte-identical to a
+    // printed one, which strands an enclosing printed window (an "Until your next
+    // turn," prefix) instead of letting it distribute here. The single authority
+    // for the fallback is the resolver (`game/effects/effect.rs`), which already
+    // applies `.unwrap_or(Duration::UntilEndOfTurn)`.
     Some(Effect::GenericEffect {
         static_abilities: vec![StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
@@ -8865,7 +8868,8 @@ fn coalesce_pump_with_modifications(body_text: &str) -> Option<Effect> {
     if !(has_pt && has_non_pt) {
         return None;
     }
-    let duration = duration.or(Some(Duration::UntilEndOfTurn));
+    // CR 611.2a: emit the parsed window verbatim — see `try_parse_gain_quoted_ability`.
+    // The resolver (`game/effects/effect.rs`) supplies the end-of-turn fallback.
     Some(Effect::GenericEffect {
         static_abilities: vec![StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
@@ -27795,7 +27799,7 @@ mod tests {
     /// Attack: `+1/+0 and gain "When this creature dies, draw a card."` until
     /// end of turn.
     #[test]
-    fn gain_quoted_trigger_ability_until_end_of_turn() {
+    fn gain_quoted_trigger_ability_states_no_injected_window() {
         let effect =
             try_parse_gain_quoted_ability("gain \"When this creature dies, draw a card.\"")
                 .expect("expected gain-quoted-ability to parse");
@@ -27807,7 +27811,12 @@ mod tests {
         else {
             panic!("expected GenericEffect, got something else");
         };
-        assert_eq!(duration.as_ref(), Some(&Duration::UntilEndOfTurn));
+        assert_eq!(
+            duration.as_ref(),
+            None,
+            "CR 611.2a (#7962): a quoted grant whose text prints no window stays unset; the \
+             resolver owns the end-of-turn fallback"
+        );
         let static_def = static_abilities
             .first()
             .expect("static_abilities must contain the granted modification");
@@ -28357,12 +28366,17 @@ mod tests {
 
     /// No explicit duration on a pump+keyword body defaults to UntilEndOfTurn.
     #[test]
-    fn coalesce_pump_keyword_defaults_until_end_of_turn() {
+    fn coalesce_pump_keyword_leaves_the_window_to_the_resolver() {
         let effect = coalesce_pump_with_modifications("get +1/+0 and gain flying")
             .expect("pump+keyword body should coalesce");
         match effect {
             Effect::GenericEffect { duration, .. } => {
-                assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+                assert_eq!(
+                    duration, None,
+                    "CR 611.2a (#7962): a body that prints no window must not inject one — \
+                     the resolver (`game/effects/effect.rs`) owns the end-of-turn fallback, \
+                     and an injected value would be indistinguishable from a printed one"
+                );
             }
             other => panic!("expected GenericEffect, got {other:?}"),
         }
