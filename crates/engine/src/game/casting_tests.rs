@@ -63912,9 +63912,12 @@ fn copy_cast_with_no_spell_ability_records_no_targets() {
 /// R10 (hostile) — CR 707.12 + CR 601.2c: an absent stack entry is a hard refusal,
 /// never an empty default. This arm is reachable only from a direct call, which is
 /// exactly why no production test can cover it: restating the derivation as
-/// `.find(..).and_then(StackEntry::ability).map(..).unwrap_or_default()` makes this
-/// call return `Ok(())`, publish `SpellCast` and record a cast with no facts, while
-/// every other test in the suite — including both delivered R10 legs — still passes.
+/// `.find(..).and_then(StackEntry::ability).map(..).unwrap_or_default()` publishes
+/// `SpellCast`, records a cast with no facts, and then fails at
+/// `validate_cast_occurrence_stack_spell_carrier` with a *different* `InvalidAction`
+/// ("cannot stamp cast occurrence on non-spell stack carrier …") — after the write,
+/// not before it, while every other test in the suite — including both delivered R10
+/// legs — still passes.
 #[test]
 fn copy_cast_without_a_stack_entry_is_refused_and_records_nothing() {
     let mut state = setup_game_at_main_phase();
