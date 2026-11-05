@@ -3728,15 +3728,20 @@ pub(super) fn parse_search_and_creation_ast(
         if let Some(player) = parse_dig_library_owner(rest_lower, ctx, DigOwnerPhrase::WithHeadNoun)
         {
             // CR 701.20e + CR 701.13a + CR 406.3: "look at the top card ... and
-            // exiles it face down" (Gonti, Night Minister) — fuse into ExileTop so
-            // the card leaves the library and the trailing play grant can bind to
-            // the tracked set.
-            if preceded(
-                take_until::<_, _, OracleError<'_>>("and exiles it face down"),
-                tag::<_, _, OracleError<'_>>("and exiles it face down"),
-            )
-            .parse(rest_lower)
-            .is_ok()
+            // exiles it face down" (Gonti, Night Minister) / "..., then exiles it
+            // face down" (Vulcan Mind-Meld) — the subject's own continuation —
+            // fuse into ExileTop so the card leaves the library and the trailing
+            // play grant can bind to the tracked set.
+            if nom_primitives::scan_at_word_boundaries(rest_lower, |i| {
+                (
+                    alt((tag::<_, _, OracleError<'_>>("and "), tag("then "))),
+                    tag("exiles "),
+                    alt((tag("it"), tag("them"))),
+                    tag(" face down"),
+                )
+                    .parse(i)
+            })
+            .is_some()
             {
                 return Some(SearchCreationImperativeAst::ExileTopLookedAt {
                     player,

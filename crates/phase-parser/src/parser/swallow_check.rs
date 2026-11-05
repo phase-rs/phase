@@ -3363,6 +3363,28 @@ fn detect_dynamic_qty(
     if per_opponent_choices_cover_all_for_each_markers(cleaned, &markers, scoped) {
         return;
     }
+    // CR 406.6 + CR 611.2a: "For each card exiled this way, the player who
+    // exiled it may play it" (Vulcan Mind-Meld) distributes one grant per
+    // exiled card; its carrier is the per-object `PermissionGrantee::ObjectExiler`
+    // binding, not a `QuantityExpr`.
+    if markers == ["for each "]
+        && cleaned
+            .match_indices("for each ") // allow-noncombinator: swallow detector marker scan on classified text
+            .all(|(idx, _)| {
+                crate::parser::oracle_effect::is_object_exiler_play_grant(&cleaned[idx..])
+            })
+        && evidence.any_effect(|e| {
+            matches!(
+                e,
+                Effect::GrantCastingPermission {
+                    grantee: crate::types::ability::PermissionGrantee::ObjectExiler,
+                    ..
+                }
+            )
+        })
+    {
+        return;
+    }
     // CR 608.2c: each printed "For each <population>," is represented by its own
     // distinct co-scoped player_scope + ParentTarget iteration (occurrence-counted
     // per population); an unmatched occurrence is a swallowed clause.
@@ -8989,6 +9011,46 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             "the bare 'for each player, choose' idiom must not be reported as a \
              swallowed dynamic quantity — its carrier is ChooseAndSacrificeRest, \
              not a QuantityExpr. Warnings: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// CR 406.6: Vulcan Mind-Meld's "For each card exiled this way, the player
+    /// who exiled it may play it" is carried by the per-object `ObjectExiler`
+    /// grant. Reach-guard: that grant must be present (not `Unimplemented`)
+    /// before the negative; revert-to-red: dropping the exiler suppression
+    /// reintroduces the warning while the guard holds.
+    #[test]
+    fn vulcan_mind_meld_exiler_grant_does_not_flag_dynamic_qty() {
+        let parsed = parse_named(
+            "Target opponent looks at the top card of your library, then exiles it face down. \
+             You look at the top two cards of their library, then exile them face down. For \
+             each card exiled this way, the player who exiled it may play it for as long as it \
+             remains exiled. Mana of any type can be spent to cast spells this way.",
+            "Vulcan Mind-Meld",
+            &["Sorcery"],
+        );
+        let mut effects = Vec::new();
+        let mut node = parsed.abilities.first();
+        while let Some(def) = node {
+            effects.push(def.effect.as_ref());
+            node = def.sub_ability.as_deref();
+        }
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::GrantCastingPermission {
+                    grantee: crate::types::ability::PermissionGrantee::ObjectExiler,
+                    ..
+                }
+            )) && !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Unimplemented { .. })),
+            "premise: the exiler grant parses: {effects:?}"
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "DynamicQty"),
+            "{:?}",
             parsed.parse_warnings
         );
     }

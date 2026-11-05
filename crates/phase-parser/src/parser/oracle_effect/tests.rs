@@ -95758,3 +95758,84 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
         );
     }
 }
+
+/// SHAPE (Vulcan Mind-Meld, verbatim): CR 608.2c + CR 115.1 — the targeted
+/// subject performs the exile from the caster's library; "their library" binds
+/// to that declared player; CR 406.6 — each exiled card's grant binds to its
+/// exiling player; CR 609.4b — the standalone "this way" concession folds onto
+/// that grant.
+#[test]
+fn vulcan_mind_meld_parses_subject_exiles_and_exiler_grant() {
+    let chain = parse_effect_chain(
+        "Target opponent looks at the top card of your library, then exiles it face down. You \
+         look at the top two cards of their library, then exile them face down. For each card \
+         exiled this way, the player who exiled it may play it for as long as it remains exiled. \
+         Mana of any type can be spent to cast spells this way.",
+        AbilityKind::Spell,
+    );
+    let effects = collect_chain_effects(&chain);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+        "{effects:?}"
+    );
+    assert_eq!(effects.len(), 3, "{effects:?}");
+    assert!(
+        matches!(
+            effects[0],
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Player { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        effects[0]
+    );
+    assert!(
+        effects[0]
+            .target_filter()
+            .is_some_and(|filter| !filter.is_context_ref()),
+        "the targeted subject is the declared player target: {:?}",
+        effects[0]
+    );
+    assert!(
+        matches!(
+            effects[1],
+            Effect::ExileTop {
+                player: TargetFilter::DeclaredPlayer { .. },
+                count: QuantityExpr::Fixed { value: 2 },
+                face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                ..
+            }
+        ),
+        "{:?}",
+        effects[1]
+    );
+    assert!(
+        matches!(
+            effects[2],
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    mode: Play,
+                    duration: Duration::Permanent,
+                    mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                    ..
+                },
+                target: TargetFilter::TrackedSet { .. },
+                grantee: PermissionGrantee::ObjectExiler,
+            }
+        ),
+        "{:?}",
+        effects[2]
+    );
+    assert!(chain.repeat_for.is_none());
+    assert!(chain
+        .sub_ability
+        .as_deref()
+        .and_then(|sub| sub.sub_ability.as_deref())
+        .is_some_and(|grant| grant.repeat_for.is_none()));
+}
