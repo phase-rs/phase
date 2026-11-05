@@ -23955,6 +23955,30 @@ pub(crate) enum PausedManaPayment {
     Unresumable,
 }
 
+/// CR 118.1 + CR 605.3a: Upper bound of the total mana the payer could produce
+/// for a resolution-time effect payment: the mana pool plus each battlefield
+/// permanent's [`super::mana_sources::effect_payment_mana_capacity`] (mana
+/// abilities, colour-dependent sources, and TapsForMana aura bonuses).
+///
+/// Effect payments are not spell casts, so no spell context, convoke/improvise
+/// or delve applies. The per-permanent sum can over-count (chain-sacrifice
+/// configurations, a single permanent's alternative abilities); that is
+/// acceptable for an upper bound because callers gate every candidate amount
+/// through [`can_pay_effect_mana_cost_after_auto_tap`].
+pub(super) fn effect_payment_mana_ceiling(state: &GameState, payer: PlayerId) -> u32 {
+    let pool = state
+        .players
+        .iter()
+        .find(|p| p.id == payer)
+        .map_or(0, |p| p.mana_pool.total() as u32);
+    let permanents: u32 = state
+        .battlefield
+        .iter()
+        .map(|&id| super::mana_sources::effect_payment_mana_capacity(state, id, payer))
+        .sum();
+    pool + permanents
+}
+
 /// Returns true if the player can pay a resolution-time mana cost after
 /// auto-tapping mana sources. This is distinct from spell-casting and
 /// activated-ability payments: CR 106.6 restrictions that name those categories

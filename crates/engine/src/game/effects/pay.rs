@@ -6,7 +6,7 @@ use crate::types::ability::{is_pay_any_amount, AbilityCost, Effect};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, ManaAmountComposition, PayableResource, WaitingFor};
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::{ManaCost, ManaCostShard};
+use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 
 use super::{EffectError, ResolvedAbility};
@@ -427,9 +427,10 @@ fn resolution_mana_x_max(
 ///
 /// Unlike `resolution_mana_x_max` this never fails: `per_unit.scaled(0)` is
 /// `{0}`, which CR 118.5 makes payable by acknowledgment alone, so the search
-/// floors at 0 rather than returning `None`. The upper bound is the spell-style
-/// X preview for a bare `{X}` (`casting_costs::max_x_value`, total mana
-/// available); the downward search then gates every candidate through the
+/// floors at 0 rather than returning `None`. The upper bound is the effect-payment
+/// mana ceiling (`casting::effect_payment_mana_ceiling`: pool plus each
+/// permanent's capacity, including colour-dependent sources and TapsForMana
+/// aura bonuses); the downward search then gates every candidate through the
 /// effect-context auto-tap check, so colors the unit demands, and sources whose
 /// mana may not be spent at resolution, are enforced exactly as on submit.
 /// Like the X path it clones the probe cost once per candidate.
@@ -443,16 +444,7 @@ fn resolution_mana_per_unit_max(
     source_id: ObjectId,
     per_unit: &ManaCost,
 ) -> u32 {
-    // Resolution-time payments are not spell casts — no spell object is passed.
-    let mut n = casting_costs::max_x_value(
-        state,
-        payer,
-        &ManaCost::Cost {
-            shards: vec![ManaCostShard::X],
-            generic: 0,
-        },
-        None,
-    );
+    let mut n = casting::effect_payment_mana_ceiling(state, payer);
     loop {
         if n == 0 {
             return 0;

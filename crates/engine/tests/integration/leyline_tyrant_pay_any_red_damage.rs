@@ -12,12 +12,13 @@
 //! `Effect::Unimplemented`, so no `PayAmountChoice` ever surfaced and no damage
 //! was dealt.
 
+use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{ManaAmountComposition, PayableResource, WaitingFor};
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::ObjectId;
@@ -33,6 +34,14 @@ const VENDETTA: &str = "Destroy target nonblack creature. It can't be regenerate
 /// the resolution-time payment). Vendetta is committed to the stack targeting
 /// the Tyrant.
 fn cast_vendetta_on_own_tyrant(pool: &[ManaType]) -> GameRunner {
+    let (scenario, tyrant, vendetta) = leyline_scenario(pool);
+    commit_vendetta(scenario, tyrant, vendetta)
+}
+
+/// Builds the Leyline Tyrant / Vendetta scenario without building or casting,
+/// so a test can add more permanents first. Returns `(scenario, tyrant,
+/// vendetta)`.
+fn leyline_scenario(pool: &[ManaType]) -> (GameScenario, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let tyrant = scenario
@@ -55,6 +64,11 @@ fn cast_vendetta_on_own_tyrant(pool: &[ManaType]) -> GameRunner {
             .map(|&color| ManaUnit::new(color, ObjectId(0), false, vec![]))
             .collect(),
     );
+    (scenario, tyrant, vendetta)
+}
+
+/// Builds the scenario and commits Vendetta to the stack targeting the Tyrant.
+fn commit_vendetta(scenario: GameScenario, tyrant: ObjectId, vendetta: ObjectId) -> GameRunner {
     let mut runner = scenario.build();
     runner.cast(vendetta).target_object(tyrant).commit();
     runner
@@ -229,9 +243,14 @@ fn leyline_tyrant_pays_zero_and_deals_no_damage() {
         .act(GameAction::SubmitPayAmount { amount: 0 })
         .expect("pay zero")
         .events;
-    // CR 118.5 / CR 603.12: whether a zero payment still prompts the rider's
-    // target is not asserted either way; answer it if it appears.
-    resolve_rider(&mut runner, TargetRef::Player(P1), &mut events);
+    // CR 603.12: the reflexive trigger is created by the resolving payment
+    // instruction and still prompts for its "any target" on a zero payment.
+    let offered = resolve_rider(&mut runner, TargetRef::Player(P1), &mut events)
+        .expect("CR 603.12: the reflexive trigger still prompts for a target on a zero payment");
+    assert!(
+        offered.contains(&TargetRef::Player(P1)),
+        "any target includes the opponent: {offered:?}"
+    );
 
     assert_eq!(
         pool_color(&runner, P0, ManaType::Red),
@@ -260,4 +279,161 @@ fn leyline_tyrant_decline_pays_nothing() {
     );
     assert_eq!(pool_color(&runner, P0, ManaType::Red), 2);
     assert_eq!(runner.life(P1), p1_life_before);
+}
+
+const NYX_LOTUS: &str = "Nyx Lotus enters tapped.\n{T}: Choose a color. Add an amount of mana of that color equal to your devotion to that color. (Your devotion to a color is the number of mana symbols of that color in the mana costs of permanents you control.)";
+const FERTILE_GROUND: &str = "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional one mana of any color.";
+
+/// Reach-guard shared by the empty-pool rows: Vendetta spent the only floating
+/// {B}, so P0's pool is empty and the per-unit `{R}` prompt is up. Returns the
+/// prompt's `max`.
+fn empty_pool_prompt_max(runner: &mut GameRunner) -> u32 {
+    let prompt = drive_to_pay_prompt(runner, true).expect("the per-unit {R} prompt");
+    let pool_total = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .map_or(0, |p| p.mana_pool.total());
+    assert_eq!(pool_total, 0, "the pool is empty at the prompt");
+    let WaitingFor::PayAmountChoice { player, max, .. } = prompt else {
+        unreachable!("drive_to_pay_prompt returns only PayAmountChoice")
+    };
+    assert_eq!(player, P0);
+    max
+}
+
+/// Adds Nyx Lotus (and, when `red_devotion` is true, a creature with {R}{R} in
+/// its mana cost) to the Leyline scenario with an otherwise empty pool.
+fn lotus_scenario(red_devotion: bool) -> (GameScenario, ObjectId, ObjectId, ObjectId) {
+    let (mut scenario, tyrant, vendetta) = leyline_scenario(&[ManaType::Black]);
+    let lotus = scenario
+        .add_artifact_from_oracle(P0, "Nyx Lotus", NYX_LOTUS)
+        .id();
+    if red_devotion {
+        scenario
+            .add_creature(P0, "Red Devotee", 1, 1)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+                generic: 0,
+            });
+    }
+    (scenario, tyrant, vendetta, lotus)
+}
+
+/// Builds the Mountain scenario, optionally enchanted with Fertile Ground,
+/// attached before Vendetta is cast. Returns `(runner, mountain)`.
+fn mountain_scenario(with_fertile_ground: bool) -> (GameRunner, ObjectId) {
+    let (mut scenario, tyrant, vendetta) = leyline_scenario(&[ManaType::Black]);
+    let mountain = scenario.add_basic_land(P0, ManaColor::Red);
+    let aura = with_fertile_ground.then(|| {
+        scenario
+            .add_enchantment_from_oracle(P0, "Fertile Ground", FERTILE_GROUND)
+            .id()
+    });
+    let mut runner = scenario.build();
+    if let Some(aura) = aura {
+        let state = runner.state_mut();
+        state.objects.get_mut(&aura).expect("the Aura").attached_to =
+            Some(AttachTarget::Object(mountain));
+        state
+            .objects
+            .get_mut(&mountain)
+            .expect("the Mountain")
+            .attachments
+            .push(aura);
+        state.layers_dirty.mark_full();
+    }
+    runner.cast(vendetta).target_object(tyrant).commit();
+    (runner, mountain)
+}
+
+/// CR 118.1 + CR 605.3a: Nyx Lotus is a mana ability source that makes red
+/// equal to the controller's devotion to red (Leyline Tyrant is in the
+/// graveyard, so only the Devotee's {R}{R} counts). With an empty pool the
+/// offered maximum is therefore 2, and paying 2 taps the Lotus for 2 damage.
+#[test]
+fn leyline_tyrant_offers_nyx_lotus_devotion_with_empty_pool() {
+    let (scenario, tyrant, vendetta, lotus) = lotus_scenario(true);
+    let mut runner = commit_vendetta(scenario, tyrant, vendetta);
+    let p1_life_before = runner.life(P1);
+
+    let max = empty_pool_prompt_max(&mut runner);
+    assert!(
+        !runner.state().objects[&lotus].tapped,
+        "reach-guard: the builder places Nyx Lotus untapped"
+    );
+    assert_eq!(max, 2, "devotion to red is 2, payable from Nyx Lotus alone");
+
+    let mut events = runner
+        .act(GameAction::SubmitPayAmount { amount: 2 })
+        .expect("pay {R}{R} from Nyx Lotus")
+        .events;
+    assert!(
+        runner.state().objects[&lotus].tapped,
+        "Nyx Lotus was tapped for the payment"
+    );
+    resolve_rider(&mut runner, TargetRef::Player(P1), &mut events);
+    assert_eq!(runner.life(P1), p1_life_before - 2, "that much (2) damage");
+}
+
+/// Sibling of the Nyx Lotus row: with zero devotion to red the Lotus makes no
+/// red, so the prompt still appears (CR 107.1c: zero is legal) with `max: 0`.
+/// Paired positive: `leyline_tyrant_offers_nyx_lotus_devotion_with_empty_pool`.
+#[test]
+fn leyline_tyrant_nyx_lotus_without_red_devotion_offers_zero() {
+    let (scenario, tyrant, vendetta, lotus) = lotus_scenario(false);
+    let mut runner = commit_vendetta(scenario, tyrant, vendetta);
+
+    let max = empty_pool_prompt_max(&mut runner);
+    assert!(
+        !runner.state().objects[&lotus].tapped,
+        "reach-guard: Nyx Lotus is untapped and available"
+    );
+    assert_eq!(max, 0, "zero devotion to red makes no red mana");
+}
+
+/// CR 118.1 + CR 605.1b + CR 106.12a: Fertile Ground adds one additional mana
+/// whenever the enchanted Mountain is tapped for mana, so the Mountain's {R}
+/// plus the bonus mana make an offered maximum of 2 from an empty pool. The
+/// bonus mana is of any color, so the exact affordability check admits 2 red.
+#[test]
+fn leyline_tyrant_offers_fertile_ground_bonus_with_empty_pool() {
+    let (mut runner, mountain) = mountain_scenario(true);
+    let p1_life_before = runner.life(P1);
+
+    let max = empty_pool_prompt_max(&mut runner);
+    assert!(
+        !runner.state().objects[&mountain].tapped,
+        "reach-guard: the Mountain is untapped at the prompt"
+    );
+    assert_eq!(max, 2, "Mountain {{R}} plus Fertile Ground's extra mana");
+
+    let mut events = runner
+        .act(GameAction::SubmitPayAmount { amount: 2 })
+        .expect("pay {R}{R} from the enchanted Mountain")
+        .events;
+    assert!(
+        runner.state().objects[&mountain].tapped,
+        "the Mountain was tapped for the payment"
+    );
+    resolve_rider(&mut runner, TargetRef::Player(P1), &mut events);
+    assert_eq!(runner.life(P1), p1_life_before - 2, "that much (2) damage");
+}
+
+/// Sibling of the Fertile Ground row: the same Mountain without the Aura offers
+/// exactly 1. Paired positive:
+/// `leyline_tyrant_offers_fertile_ground_bonus_with_empty_pool`. The base 1
+/// comes from the Mountain's explicit `{T}: Add {R}` ability (both
+/// `feasible_mana_capacity` and `max_mana_yield` report 1).
+#[test]
+fn leyline_tyrant_mountain_alone_offers_one() {
+    let (mut runner, mountain) = mountain_scenario(false);
+
+    let max = empty_pool_prompt_max(&mut runner);
+    assert!(
+        !runner.state().objects[&mountain].tapped,
+        "reach-guard: the Mountain is untapped at the prompt"
+    );
+    assert_eq!(max, 1, "a lone Mountain makes one {{R}}");
 }
