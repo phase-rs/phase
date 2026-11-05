@@ -21,7 +21,7 @@ use crate::types::ability::{
     ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRecipient, Duration,
     EachDamageRecipient, Effect, EffectScope, FilterProp, MultiTargetSpec, ObjectScope,
     PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr, StaticCondition,
-    StaticDefinition, TargetFilter, ThisWayCause, TypedFilter,
+    StaticDefinition, TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::game_state_kinds::DayNight;
 use crate::types::identifiers::TrackedSetId;
@@ -4338,7 +4338,25 @@ fn parse_subject_application_for(
             );
             let binds_declared_target =
                 consumer == AnaphorConsumer::AffectedObject && names_declared_target;
-            if ctx.subject.is_some() && !binds_declared_target {
+            // CR 608.2c: an earlier "exile cards … until you exile a <type> card"
+            // loop of this chain introduces the card it found as the antecedent of
+            // a later "that <type> card" (Q, Stacking the Deck: "That nonland card
+            // gains …"), which the runtime hands to the next instruction as its
+            // targets. The anaphor names that card, never the trigger source, when
+            // every type it names is one the loop's stop filter requires.
+            let names_exile_until_hit = matches!(
+                (ctx.chain_prior_exile_until_match.as_ref(), &filter),
+                (Some(TargetFilter::Typed(found)), TargetFilter::Typed(anaphor))
+                    if anaphor
+                        .type_filters
+                        .iter()
+                        .any(|t| !matches!(t, TypeFilter::Card))
+                        && anaphor
+                            .type_filters
+                            .iter()
+                            .all(|t| matches!(t, TypeFilter::Card) || found.type_filters.contains(t))
+            );
+            if ctx.subject.is_some() && !binds_declared_target && !names_exile_until_hit {
                 return Some(SubjectApplication {
                     affected: filter,
                     target: Some(TargetFilter::TriggeringSource),
