@@ -53692,21 +53692,32 @@ fn clear_stack_to_priority(state: &mut GameState) {
     };
 }
 
-fn install_first_spell_cascade_grant(state: &mut GameState) {
+/// Install a first-qualified-spell keyword-grant static (`oracle_line`) on a
+/// battlefield permanent named `name`, owned by P0.
+///
+/// Parameterized by the card so the same fixture serves every member of the class:
+/// Maelstrom Nexus (no post-timing qualifier), Rain of Riches (payment-source
+/// qualifier) and TARDIS Bay (mana-value qualifier).
+fn install_first_spell_cascade_grant(
+    state: &mut GameState,
+    name: &str,
+    card_id: CardId,
+    oracle_line: &str,
+) {
     let source = create_object(
         state,
-        CardId(7_000),
+        card_id,
         PlayerId(0),
-        "Maelstrom Nexus".to_string(),
+        name.to_string(),
         Zone::Battlefield,
     );
-    let grant = parse_static_line("The first spell you cast each turn has cascade.")
-        .expect("Maelstrom Nexus static should parse");
+    let grant = parse_static_line(oracle_line)
+        .unwrap_or_else(|| panic!("{name}'s static should parse: {oracle_line}"));
     // Sanity: the parser must emit the gated form, not the legacy condition-null
     // static — otherwise this test silently stops exercising the gate.
     assert!(
         grant.condition.is_some(),
-        "first-spell grant must carry the SpellsCastThisTurn gate"
+        "{name}'s first-spell grant must carry the SpellsCastThisTurn gate"
     );
     state
         .objects
@@ -53716,10 +53727,157 @@ fn install_first_spell_cascade_grant(state: &mut GameState) {
         .push(grant);
 }
 
+/// A battlefield artifact with the `Treasure` subtype — the source Phase 1's
+/// `FilterProp::ManaSpentFromSource { Subtype("Treasure") }` selects. No mana
+/// ability is wired: the fixtures below add the pool units directly and stamp
+/// this object's id as their source, which is exactly what `pay_mana_cost`
+/// attributes a payment by (each unit's `source_id`, resolved through
+/// `state.objects` at CR 601.2h).
+fn treasure_permanent(state: &mut GameState, card_id: CardId) -> ObjectId {
+    let id = create_object(
+        state,
+        card_id,
+        PlayerId(0),
+        "Treasure".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Artifact);
+    obj.card_types.subtypes.push("Treasure".to_string());
+    id
+}
+
+/// A battlefield non-Treasure mana source — the control side of the provenance
+/// question. Only its identity matters: the pool units name it as their source.
+fn plain_mana_source(state: &mut GameState, card_id: CardId) -> ObjectId {
+    let id = create_object(
+        state,
+        card_id,
+        PlayerId(0),
+        "Mana Land".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&id)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    id
+}
+
+/// `add_mana`'s source-stamping twin: the same pool units, but each names
+/// `source_id` as the permanent that produced it. A unit whose `source_id` is
+/// `ObjectId(0)` (what `add_mana` produces) stamps no
+/// `ManaSpentSourceSnapshot`, so a payment-provenance fixture must use this.
+fn add_mana_from_source(
+    state: &mut GameState,
+    player: PlayerId,
+    color: ManaType,
+    count: usize,
+    source_id: ObjectId,
+) {
+    let player_data = state.players.iter_mut().find(|p| p.id == player).unwrap();
+    for _ in 0..count {
+        player_data.mana_pool.add(ManaUnit {
+            color,
+            source_id,
+            pip_id: crate::types::mana::ManaPipId(0),
+            supertype: None,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+        });
+    }
+}
+
+/// A sorcery with a real mana cost and a library-independent effect, in hand.
+/// A `ManaCost::zero()` fixture cannot stand in for the provenance tests: a zero
+/// cost makes no payment, so nothing is stamped and the positive reach guard
+/// could never fire.
+fn create_paid_sorcery(
+    state: &mut GameState,
+    card_id: CardId,
+    owner: PlayerId,
+    cost: ManaCost,
+) -> ObjectId {
+    let id = create_object(
+        state,
+        card_id,
+        owner,
+        format!("Paid Sorcery {card_id:?}"),
+        Zone::Hand,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Sorcery);
+    obj.mana_cost = cost;
+    Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+    ));
+    id
+}
+
+/// Assert a cast completed past payment and report its cast-time keyword
+/// snapshot (CR 601.2i).
+///
+/// The payment assertion is the fixture's reach guard: a spell whose cast never
+/// reached CR 601.2h would show an empty `cast_spell_keywords` for a reason that
+/// has nothing to do with the grant, making the negative legs vacuous.
+fn cast_keywords_after_payment(state: &GameState, spell: ObjectId) -> Vec<Keyword> {
+    let obj = &state.objects[&spell];
+    // `mana_spent_to_cast` itself is a trigger-collection transient
+    // (`clear_post_collection_transients` resets it once the cast's triggers are
+    // collected); the LATCHED evidence of payment is the amount and the source
+    // snapshots, so those are what the reach guard reads.
+    assert!(
+        obj.mana_spent_to_cast_amount > 0,
+        "the fixture must reach the payment step (CR 601.2h) before its keyword snapshot means anything"
+    );
+    obj.cast_spell_keywords.clone()
+}
+
+/// Assert the spell's payment was attributed to `source` — the fixture-integrity
+/// guard for a provenance-qualified filter. An unattributed unit (one whose
+/// `source_id` names no permanent) stamps no `ManaSpentSourceSnapshot`, so the
+/// filter would have nothing to match and the leg would prove nothing.
+fn assert_paid_from(state: &GameState, spell: ObjectId, source: ObjectId) {
+    let obj = &state.objects[&spell];
+    assert!(
+        !obj.mana_spent_source_snapshots.is_empty(),
+        "the fixture must pay with source-attributed mana"
+    );
+    assert_eq!(
+        obj.mana_spent_source_snapshots.len(),
+        obj.mana_spent_to_cast_amount as usize,
+        "every spent unit must name its source"
+    );
+    assert!(
+        obj.mana_spent_source_snapshots
+            .iter()
+            .all(|snapshot| snapshot.source_id == source),
+        "fixture integrity: the spell must be funded by the intended source, got {:?}",
+        obj.mana_spent_source_snapshots
+            .iter()
+            .map(|snapshot| snapshot.source_id)
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn snapshot_first_qualifying_spell_captures_grant_second_does_not() {
     let mut state = setup_game_at_main_phase();
-    install_first_spell_cascade_grant(&mut state);
+    install_first_spell_cascade_grant(
+        &mut state,
+        "Maelstrom Nexus",
+        CardId(7_000),
+        "The first spell you cast each turn has cascade.",
+    );
 
     let first = create_free_sorcery(&mut state, CardId(7_001), PlayerId(0));
     cast_free_sorcery_to_stack(&mut state, first, CardId(7_001));
@@ -53750,7 +53908,12 @@ fn snapshot_first_qualifying_spell_captures_grant_second_does_not() {
 #[test]
 fn first_qualifying_spell_enqueues_cascade_second_does_not() {
     let mut state = setup_game_at_main_phase();
-    install_first_spell_cascade_grant(&mut state);
+    install_first_spell_cascade_grant(
+        &mut state,
+        "Maelstrom Nexus",
+        CardId(7_000),
+        "The first spell you cast each turn has cascade.",
+    );
 
     let count_cascade = |state: &GameState| {
         state
@@ -53786,6 +53949,153 @@ fn first_qualifying_spell_enqueues_cascade_second_does_not() {
         count_cascade(&state),
         0,
         "the second same-turn spell must NOT enqueue a Cascade trigger"
+    );
+}
+
+/// CR 106.3 + CR 601.2h + CR 604.2 + CR 611.3b: Rain of Riches — "The first spell
+/// you cast each turn that mana from a Treasure was spent to cast has cascade."
+///
+/// Three casts in one game, each paid from a real source:
+///   leg A — a `{2}` sorcery paid by a plain land: the payment source does not
+///           match the qualifier, so the AFFECTED reader refuses it. (The gate is
+///           true here — no qualifying spell has been cast — so this leg can only
+///           fail on the filter.)
+///   leg B — a second `{2}` sorcery paid by a Treasure: the first *qualifying*
+///           spell of the turn, so the grant applies. This is also decision 8's
+///           "a prior nonqualifying spell does not consume the grant".
+///   leg C — a third `{2}` sorcery paid by a Treasure: its affected filter matches,
+///           so only the GATE (`SpellsCastThisTurn(qualified) == 0`) can refuse it.
+///
+/// Reverting the parser fix makes the grant unconditional: all three legs receive
+/// Cascade and legs A and C fail.
+#[test]
+fn rain_of_riches_grants_cascade_only_to_a_treasure_funded_first_spell() {
+    let mut state = setup_game_at_main_phase();
+    install_first_spell_cascade_grant(
+        &mut state,
+        "Rain of Riches",
+        CardId(7_100),
+        "The first spell you cast each turn that mana from a Treasure was spent to cast has cascade.",
+    );
+    let land = plain_mana_source(&mut state, CardId(7_101));
+    let treasure = treasure_permanent(&mut state, CardId(7_102));
+
+    let leg_a = create_paid_sorcery(&mut state, CardId(7_103), PlayerId(0), ManaCost::generic(2));
+    let leg_b = create_paid_sorcery(&mut state, CardId(7_104), PlayerId(0), ManaCost::generic(2));
+    let leg_c = create_paid_sorcery(&mut state, CardId(7_105), PlayerId(0), ManaCost::generic(2));
+
+    let mut runner = crate::game::scenario::GameRunner::from_state(state);
+
+    // Leg A: funded by a land.
+    add_mana_from_source(
+        runner.state_mut(),
+        PlayerId(0),
+        ManaType::Colorless,
+        2,
+        land,
+    );
+    runner.cast(leg_a).commit();
+    let keywords = cast_keywords_after_payment(runner.state(), leg_a);
+    assert_paid_from(runner.state(), leg_a, land);
+    assert!(
+        !keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
+        "a first spell not funded by a Treasure must not receive the grant; got {keywords:?}"
+    );
+    clear_stack_to_priority(runner.state_mut());
+
+    // Leg B: the first Treasure-funded spell of the turn.
+    add_mana_from_source(
+        runner.state_mut(),
+        PlayerId(0),
+        ManaType::Colorless,
+        2,
+        treasure,
+    );
+    runner.cast(leg_b).commit();
+    let keywords = cast_keywords_after_payment(runner.state(), leg_b);
+    assert_paid_from(runner.state(), leg_b, treasure);
+    assert!(
+        keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
+        "the first Treasure-funded spell of the turn must receive Cascade; got {keywords:?}"
+    );
+    clear_stack_to_priority(runner.state_mut());
+
+    // Leg C: a second Treasure-funded spell — only the gate can refuse it.
+    add_mana_from_source(
+        runner.state_mut(),
+        PlayerId(0),
+        ManaType::Colorless,
+        2,
+        treasure,
+    );
+    runner.cast(leg_c).commit();
+    let keywords = cast_keywords_after_payment(runner.state(), leg_c);
+    assert_paid_from(runner.state(), leg_c, treasure);
+    assert!(
+        !keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
+        "a second Treasure-funded spell of the same turn must not receive Cascade; got {keywords:?}"
+    );
+}
+
+/// CR 202.3 + CR 604.2 + CR 611.3b: TARDIS Bay — "The first spell you cast during
+/// each of your turns with mana value 2 or greater has cascade."
+///
+/// Same three-leg shape as Rain of Riches, with the honest difference that the
+/// qualifier is a live characteristic (mana value) rather than a payment
+/// provenance, so the payment source is irrelevant:
+///   leg A — mana value 1: the affected reader refuses it (the gate is true).
+///   leg B — mana value 2 as the turn's second spell: the first *qualifying* one,
+///           so the grant applies — a prior nonqualifying spell does not consume it.
+///   leg C — a second mana value 2 spell: its affected filter matches, so only the
+///           gate can refuse it.
+#[test]
+fn tardis_bay_grants_cascade_only_to_a_first_spell_with_mana_value_two_or_greater() {
+    let mut state = setup_game_at_main_phase();
+    install_first_spell_cascade_grant(
+        &mut state,
+        "TARDIS Bay",
+        CardId(7_500),
+        "The first spell you cast during each of your turns with mana value 2 or greater has cascade.",
+    );
+
+    let leg_a = create_paid_sorcery(&mut state, CardId(7_501), PlayerId(0), ManaCost::generic(1));
+    let leg_b = create_paid_sorcery(&mut state, CardId(7_502), PlayerId(0), ManaCost::generic(2));
+    let leg_c = create_paid_sorcery(&mut state, CardId(7_503), PlayerId(0), ManaCost::generic(2));
+
+    let mut runner = crate::game::scenario::GameRunner::from_state(state);
+
+    // Leg A: mana value 1.
+    add_mana(runner.state_mut(), PlayerId(0), ManaType::Colorless, 1);
+    runner.cast(leg_a).commit();
+    let keywords = cast_keywords_after_payment(runner.state(), leg_a);
+    assert_eq!(
+        runner.state().objects[&leg_a].mana_spent_to_cast_amount,
+        1,
+        "fixture integrity: leg A is a one-mana spell"
+    );
+    assert!(
+        !keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
+        "a first spell with mana value 1 must not receive the grant; got {keywords:?}"
+    );
+    clear_stack_to_priority(runner.state_mut());
+
+    // Leg B: mana value 2, the turn's second spell but its first qualifying one.
+    add_mana(runner.state_mut(), PlayerId(0), ManaType::Colorless, 2);
+    runner.cast(leg_b).commit();
+    let keywords = cast_keywords_after_payment(runner.state(), leg_b);
+    assert!(
+        keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
+        "the first mana-value-2-or-greater spell of the turn must receive Cascade; got {keywords:?}"
+    );
+    clear_stack_to_priority(runner.state_mut());
+
+    // Leg C: a second mana value 2 spell — only the gate can refuse it.
+    add_mana(runner.state_mut(), PlayerId(0), ManaType::Colorless, 2);
+    runner.cast(leg_c).commit();
+    let keywords = cast_keywords_after_payment(runner.state(), leg_c);
+    assert!(
+        !keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
+        "a second mana-value-2 spell of the same turn must not receive Cascade; got {keywords:?}"
     );
 }
 

@@ -984,10 +984,22 @@ pub(crate) fn try_parse_cost_modification(
     if is_self_spell {
         definition.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
     }
-    let branch_condition = if let Some((filter, timing, ordinal)) = nth_qualified_spell.as_ref() {
-        Some(nth_qualified_spell_condition(filter, timing, *ordinal))
-    } else {
-        during_your_turn_scope
+    // CR 601.2f + charter decision 8: the once-per-turn gate is built from THE
+    // SAME value the discount reads — `spell_filter`, which by now carries the
+    // shared parser's qualifier, the cost consumer's own target clause
+    // (appended once, by `merge_cost_modifier_target_filter`) and any cast-origin
+    // restriction. A gate assembled from the shared parser's narrower filter
+    // counts the wrong spells: a prior non-qualifying spell would spend a
+    // discount the card prints for its first qualifying spell only.
+    let branch_condition = match (&nth_qualified_spell, &spell_filter) {
+        (Some((_, timing, ordinal)), Some(filter)) => {
+            Some(nth_qualified_spell_condition(filter, timing, *ordinal))
+        }
+        // Unreachable while the nth arm installs a filter and no merge empties
+        // it. If that invariant ever breaks, decline rather than ship a
+        // conditionless reducer with a printed once-per-turn gate.
+        (Some(_), None) => return None,
+        (None, _) => during_your_turn_scope,
     };
     definition.condition = match (leading_condition, branch_condition) {
         (Some(leading), Some(branch)) => Some(StaticCondition::And {
