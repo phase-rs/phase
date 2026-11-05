@@ -47389,6 +47389,17 @@ fn parse_effect_chain_ir_body(
                     );
                 }
                 ctx.next_declared_player_group = chain_declared_groups;
+                // CR 608.2c + CR 122.1: the outer gate's counted counter kind is
+                // the antecedent of a counter anaphor in ANY of its body
+                // instructions (Treasure Map: "Then if there are three or more
+                // landmark counters on it, remove those counters, transform this
+                // artifact, and …"). The body chunks are parsed without that
+                // condition, so bind the kind on `ctx` across this recursion and
+                // restore it afterward so it never reaches a later instruction.
+                let enclosing_counter_anaphor_kind = ctx.counter_anaphor_kind.clone();
+                if let Some(counted) = conditions::source_counter_kind_counted_by(outer_condition) {
+                    ctx.counter_anaphor_kind = Some(counted);
+                }
                 let mut body_ir = parse_effect_chain_ir_with_damage_context(
                     &text,
                     kind,
@@ -47396,6 +47407,7 @@ fn parse_effect_chain_ir_body(
                     0,
                     Some(damage_context),
                 );
+                ctx.counter_anaphor_kind = enclosing_counter_anaphor_kind;
                 chain_declared_groups = ctx.next_declared_player_group;
                 // CR 608.2c + CR 614.6: an "instead" body is one replacement of the
                 // earlier instruction, not N independently gated instructions.
@@ -48311,6 +48323,16 @@ fn parse_effect_chain_ir_body(
             in_trigger: ctx.in_trigger,
             bare_card_aggregate_source,
             nearest_dig_rest_zone,
+            // CR 608.2c + CR 122.1: a bare counter anaphor in this chunk's body
+            // ("remove those counters") names the counter kind its own condition
+            // counted on the source. A chunk with no counting condition of its
+            // own falls back to the kind bound by an enclosing gate whose body
+            // this chunk belongs to (the multi-instruction conditional-body seam
+            // above binds it on `ctx` for the duration of that recursion only).
+            counter_anaphor_kind: condition
+                .as_ref()
+                .and_then(conditions::source_counter_kind_counted_by)
+                .or_else(|| ctx.counter_anaphor_kind.clone()),
             // CR 611.2a: this chunk's leading duration was peeled by
             // `sequence::expand_leading_duration_chunks` before the chunk text was
             // handed to the body parser, so the body can no longer see it. Publish
