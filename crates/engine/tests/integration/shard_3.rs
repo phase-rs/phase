@@ -626,4 +626,3 @@ mod issue_5254_declaration_in_stone_clue_owner;
 mod issue_5263_chaos_warp;
 mod issue_5268_invincible_iron_man;
 mod issue_5271_overencumbered_tokens;
-mod issue_8056_reveal_visibility;
