@@ -9059,7 +9059,7 @@ mod tests {
     use super::*;
     use crate::analysis::decision_template::ChoicePoint;
     use crate::game::game_object::GameObject;
-    use crate::types::ability::TriggerDefinitionRef;
+    use crate::types::ability::{AggregateFunction, TriggerDefinitionRef};
     use crate::types::actions::ReplacementAutoChoice;
     use crate::types::game_state::{
         ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
@@ -9068,6 +9068,8 @@ mod tests {
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ExtraPhaseId,
     };
+    use crate::types::mana::ManaCost;
+    use crate::types::statics::CostModifyMode;
     use crate::types::zones::Zone;
 
     fn pid(n: u8) -> PlayerId {
@@ -15086,16 +15088,19 @@ mod tests {
     }
 
     /// CR 601.2f + CR 732.2a: the period tie is NOT a "the source must cast itself" carve-out.
-    /// A BATTLEFIELD reducer that prices ANOTHER spell ("Instant and sorcery spells you cast
-    /// cost less …") is asked the same question: an unmoved journal certifies, a moved one
-    /// rejects. This is the half a self-spell-only exclusion would lose.
+    /// Rakdos, Lord of Riots — "Creature spells you cast cost {1} less to cast for each 1 life
+    /// your opponents have lost this turn." — is a PRINTED battlefield reducer that prices
+    /// ANOTHER spell off a projected per-turn journal (`LifeLostThisTurn { Opponent, Sum }`,
+    /// the same `projected` axis class as the Hulk's energy journal). It is asked the same
+    /// question: an unmoved journal certifies, a moved one rejects. This is the half a
+    /// self-spell-only exclusion would lose. The static below is Rakdos's printed shape —
+    /// `{1}` generic, creature spells you cast, summed opponent life lost — asserted through
+    /// the production parser by `life_changed_this_turn_quantity::rakdos_reduces_creature_spells_by_the_opponents_life_loss`.
     #[test]
     fn constant_depth_board_wide_projected_cost_modifier_is_period_tied() {
-        use crate::types::mana::ManaCost;
-        use crate::types::statics::CostModifyMode;
         let board = || {
             let mut state = GameState::new_two_player(7);
-            let sid = inert_token(&mut state, 600, 0, "Board Reducer");
+            let sid = inert_token(&mut state, 600, 0, "Rakdos, Lord of Riots");
             state
                 .objects
                 .get_mut(&sid)
@@ -15103,9 +15108,18 @@ mod tests {
                 .static_definitions
                 .push(StaticDefinition::new(StaticMode::ModifyCost {
                     mode: CostModifyMode::Reduce,
-                    amount: ManaCost::default(),
-                    spell_filter: None,
-                    dynamic_count: Some(QuantityRef::EnergyPaidOrLostThisTurn),
+                    amount: ManaCost::Cost {
+                        shards: Vec::new(),
+                        generic: 1,
+                    },
+                    spell_filter: Some(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    )),
+                    dynamic_count: Some(QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Sum,
+                        },
+                    }),
                     reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
                 }));
             state
@@ -15115,10 +15129,12 @@ mod tests {
             loop_states_equal_modulo_resources(&before, &before.clone()),
             "control: an unmoved journal prices both frames the same ⇒ EQUAL"
         );
-        let mut energy_paid = before.clone();
-        energy_paid.players[0].energy_paid_or_lost_this_turn = 2;
+        // One cycle in which an opponent loses 2 life ⇒ the printed reducer prices the next
+        // creature spell 2 less than the one it extrapolates.
+        let mut life_lost = before.clone();
+        life_lost.players[1].life_lost_this_turn = 2;
         assert!(
-            !loop_states_equal_modulo_resources(&before, &energy_paid),
+            !loop_states_equal_modulo_resources(&before, &life_lost),
             "CR 601.2f: a board-wide reducer pricing another spell still vetoes once the \
              journal it reads moves"
         );
