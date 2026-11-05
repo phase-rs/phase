@@ -42834,12 +42834,14 @@ pub enum ContinuousModification {
     /// (CR 707.2), so this rider reproduces them explicitly: every kind on the
     /// copied permanent, with its count, read when the copy choice is made.
     ///
-    /// Like `AddCounterOnEnter`, this is NOT a continuous effect. The copy
-    /// resolver snapshots the copied object's counters into concrete
-    /// `AddCounterOnEnter` exceptions before any entry-counter placement, so it
-    /// never reaches the layer system or the counter-placement authority. An
-    /// unexpanded occurrence fails closed everywhere: it places no counters and
-    /// never panics.
+    /// Like `AddCounterOnEnter`, this is NOT a continuous effect. The
+    /// enter-as-copy paths that carry it — `BecomeCopy` resolution, both
+    /// `CopyTargetChoice` answers, and the pre-entry copy spec — snapshot the
+    /// copied object's counters into concrete `AddCounterOnEnter` exceptions
+    /// before any entry-counter placement. A direct `CopyTokenOf` exception
+    /// does not expand it (no printed card puts this rider on a token copy):
+    /// an unexpanded occurrence fails closed everywhere — it places no
+    /// counters and never panics.
     AddCopiedCountersOnEnter,
     /// CR 707.9b + CR 306.5b/c: Override the starting loyalty declared by a
     /// copy exception ("its starting loyalty is N"). Like `AddCounterOnEnter`,

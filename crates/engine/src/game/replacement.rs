@@ -10007,6 +10007,86 @@ pub(super) fn current_self_enter_replacement_choice(
         .cloned()
 }
 
+/// CR 614.12 + CR 616.1f: the entering object's own optional self-replacements
+/// that apply to its battlefield entry, as it now exists — the optional sibling
+/// of [`current_self_enter_replacement_modifiers`] and
+/// [`current_self_enter_replacement_choice`], which consider only mandatory
+/// ones. Read after an enter-as-copy choice, when a copy may have given the
+/// object a "you may have this enter as a copy" replacement of its own.
+pub(super) fn self_enter_optional_replacements(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Vec<(ReplacementId, &ReplacementDefinition)> {
+    let registry = replacement_registry();
+    let event = ProposedEvent::zone_change(source_id, Zone::Battlefield, Zone::Battlefield, None);
+    find_applicable_replacements(state, &event, registry)
+        .into_iter()
+        .filter(|rid| rid.source == source_id)
+        .filter_map(|rid| replacement_definition_for_id(state, rid).map(|def| (rid, def)))
+        .filter(|(_, replacement)| replacement_mode_is_optional(&replacement.mode))
+        .collect()
+}
+
+/// CR 616.1c + CR 616.1f + CR 614.12a: park the optional copy replacement an
+/// entering object acquired by becoming a copy, and raise the ordinary
+/// accept/decline `ReplacementChoice` for it.
+///
+/// The object already entered (the interactive copy choice resolves
+/// post-move), so the parked proposal is the synthetic battlefield-to-battlefield
+/// copy-surface shape also used by [`surface_copied_entry_payment`]; it is never
+/// delivered. Its `enter_with_counters` holds the counters the current copy's
+/// exceptions realize, which survive only a decline (CR 707.9e). The affected
+/// object's controller makes the choice (CR 616.1).
+pub(super) fn park_acquired_copy_offer(
+    state: &mut GameState,
+    source_id: ObjectId,
+    rid: ReplacementId,
+    exception_counters: Vec<(CounterType, u32)>,
+) -> WaitingFor {
+    let chooser = state
+        .objects
+        .get(&source_id)
+        .map_or(state.active_player, |object| object.controller);
+    let mut proposed =
+        ProposedEvent::zone_change(source_id, Zone::Battlefield, Zone::Battlefield, None);
+    if let ProposedEvent::ZoneChange {
+        enter_with_counters,
+        ..
+    } = &mut proposed
+    {
+        *enter_with_counters = exception_counters;
+    }
+    state.pending_replacement = Some(PendingReplacement {
+        proposed,
+        sacrifice_provenance: None,
+        candidates: vec![rid],
+        search_found_candidates: Vec::new(),
+        depth: 0,
+        is_optional: true,
+        choice_player: Some(chooser),
+        library_placement: None,
+        exile_controller: None,
+        exile_duration: None,
+        exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+        excess_recipient: None,
+        lifelink_bonus: 0,
+        may_cost_paid: false,
+        may_cost_remaining: None,
+        delivery_boundary: None,
+        unrepresentable_life_change: state.ingress_life_policy(),
+    });
+    state.waiting_for = replacement_choice_waiting_for(chooser, state);
+    state.waiting_for.clone()
+}
+
+/// CR 616.1f: whether the parked replacement is an acquired-copy offer raised
+/// by [`park_acquired_copy_offer`] — an optional choice over a copy-surface
+/// (battlefield-to-battlefield) proposal. A genuine entry proposal always
+/// arrives from another zone, and the copy-surfaced payment park is mandatory.
+pub(crate) fn parked_replacement_is_acquired_copy_offer(pending: &PendingReplacement) -> bool {
+    pending.is_optional && parked_entry_payment_is_copy_surface(pending)
+}
+
 /// CR 614.12a + CR 707.2 + CR 614.1c: surface a copied as-enters life payment (Clone
 /// entering as Minion of the Wastes) after the copy resolves. The payment
 /// sibling of `current_self_enter_replacement_choice`: the interactive copy

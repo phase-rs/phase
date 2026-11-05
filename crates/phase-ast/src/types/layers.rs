@@ -173,8 +173,9 @@ impl ContinuousModification {
                  Verify resolver dispatch in token_copy.rs / become_copy.rs."
             ),
             // CR 707.2 + CR 122.6: the copied-counters rider is a copy
-            // exception that every copy resolver snapshots into concrete
-            // `AddCounterOnEnter` exceptions. An unexpanded rider that reaches
+            // exception that the enter-as-copy paths snapshot into concrete
+            // `AddCounterOnEnter` exceptions (a direct `CopyTokenOf` exception
+            // does not expand it). An unexpanded rider that reaches
             // the layer system anyway must fail closed rather than panic: it is
             // ordered with the copy effect it rides on (Layer 1, like
             // `CopyChosen`), and its `apply_continuous_effect` arm places no
