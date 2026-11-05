@@ -11,25 +11,34 @@
 //! Fixture provenance. Every card with rules text is a real printed card with its
 //! verbatim Oracle text, parsed through `*_from_oracle`: Proteus Staff (the
 //! activated reveal-until `BatchDelivery` producer), Archelos, Lagoon Mystic and
-//! Authority of the Consuls (the CR 616.1 entry tap-state ordering prompt),
+//! Imposing Sovereign (the CR 616.1 entry tap-state ordering prompt),
 //! Deanna Troi, Psychic Counsel, Hardened Scales and Branching Evolution (the
 //! CR 616.1 counter ordering prompt). The victim and the revealed entrant are
 //! textless filler creatures, which carry no Oracle text to paraphrase. No
 //! synthetic card or hand-built replacement definition is used.
 //!
 //! The ordering prompt that parks the batch (pause 1) needs no controller choice:
-//! Authority's "enter tapped" and Archelos's "enter untapped" are both applicable
-//! writers of the same entry tap state and do not commute, so the entrant's
-//! controller P0 gets a free CR 616.1e choice. This was probed through the public
-//! activation before being adopted (it replaced an earlier synthetic
-//! `enters_under` pair): the activation reaches pause 1 (Authority vs Archelos),
-//! then pause 2 (Hardened Scales vs Branching Evolution), then retires the batch.
+//! Imposing Sovereign's "enter tapped" and Archelos's "enter untapped" are both
+//! applicable writers of the same entry tap state and do not commute, so the
+//! entrant's controller P0 gets a free CR 616.1e choice. This was probed through
+//! the public activation before being adopted (it replaced an earlier synthetic
+//! `enters_under` pair): the activation reaches pause 1 (Imposing Sovereign vs
+//! Archelos), then pause 2 (Hardened Scales vs Branching Evolution), then retires
+//! the batch.
+//!
+//! Imposing Sovereign is used rather than Authority of the Consuls (the same
+//! "Creatures your opponents control enter tapped." clause plus a "Whenever a
+//! creature an opponent controls enters, you gain 1 life" trigger): Authority was
+//! dropped because its trigger leaves one object on the ordinary stack, so the
+//! public activation could not end in the empty-stack Priority state that row 1
+//! asserts literally. Imposing Sovereign parses to the same entry tap-state
+//! replacement and has no trigger.
 //!
 //! Rows:
 //!  1. `proteus_staff_activation_batch_settles_through_tap_then_counter_ordering` —
 //!     the production proof. `GameAction::ActivateAbility` -> stack ->
-//!     `reveal_until` -> two `ChooseReplacement` answers -> the batch retires with
-//!     no further priority pass.
+//!     `reveal_until` -> two `ChooseReplacement` answers -> Priority with the
+//!     ordinary and resolution stacks empty and the batch retired, no priority pass.
 //!  2. `resumed_batch_member_settles_after_tap_state_then_counter_ordering` — seam
 //!     row calling `reveal_until::resolve` directly on the same printed board.
 //!  3. `resumed_batch_member_without_tail_park_settles_synchronously` — seam
@@ -58,8 +67,7 @@ const PROTEUS_STAFF: &str = "{2}{U}, {T}: Put target creature on the bottom of i
      bottom of their library in any order. Activate only as a sorcery.";
 const ARCHELOS_LAGOON_MYSTIC: &str = "As long as Archelos is tapped, other permanents enter \
      tapped.\nAs long as Archelos is untapped, other permanents enter untapped.";
-const AUTHORITY_OF_THE_CONSULS: &str = "Creatures your opponents control enter tapped.\nWhenever \
-     a creature an opponent controls enters, you gain 1 life.";
+const IMPOSING_SOVEREIGN: &str = "Creatures your opponents control enter tapped.";
 const DEANNA_TROI: &str = "Other creatures you control enter with an additional +1/+1 counter on \
      them.";
 const HARDENED_SCALES: &str =
@@ -69,18 +77,16 @@ const BRANCHING_EVOLUTION: &str = "If one or more +1/+1 counters would be put on
      control, twice that many +1/+1 counters are put on that creature instead.";
 
 /// P0 controls Archelos and Deanna Troi (plus Hardened Scales, and Branching
-/// Evolution when `branching_evolution`); P1 controls Authority of the Consuls,
-/// which taps creatures P0 puts onto the battlefield. Returns Authority's id.
-fn add_printed_board(scenario: &mut GameScenario, branching_evolution: bool) -> ObjectId {
+/// Evolution when `branching_evolution`); P1 controls Imposing Sovereign, which
+/// taps creatures P0 puts onto the battlefield.
+fn add_printed_board(scenario: &mut GameScenario, branching_evolution: bool) {
     scenario.add_creature_from_oracle(P0, "Archelos, Lagoon Mystic", 2, 4, ARCHELOS_LAGOON_MYSTIC);
     scenario.add_creature_from_oracle(P0, "Deanna Troi, Psychic Counsel", 2, 2, DEANNA_TROI);
     scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES);
     if branching_evolution {
         scenario.add_enchantment_from_oracle(P0, "Branching Evolution", BRANCHING_EVOLUTION);
     }
-    scenario
-        .add_enchantment_from_oracle(P1, "Authority of the Consuls", AUTHORITY_OF_THE_CONSULS)
-        .id()
+    scenario.add_creature_from_oracle(P1, "Imposing Sovereign", 2, 1, IMPOSING_SOVEREIGN);
 }
 
 /// Put a textless filler creature card on top of P0's library, with two
@@ -185,13 +191,13 @@ fn two_way_ordering_index(state: &GameState, sources: [&str; 2], answer: &str) -
     }
 }
 
-/// CR 616.1e + CR 616.1f: answer the entry tap-state ordering with Authority first
+/// CR 616.1e + CR 616.1f: answer the entry tap-state ordering with Imposing Sovereign first
 /// so Archelos's "untapped" write is applied last and wins.
 fn answer_tap_state_ordering(runner: &mut GameRunner) {
     let index = two_way_ordering_index(
         runner.state(),
-        ["Authority of the Consuls", "Archelos, Lagoon Mystic"],
-        "Authority of the Consuls",
+        ["Imposing Sovereign", "Archelos, Lagoon Mystic"],
+        "Imposing Sovereign",
     );
     runner
         .act(GameAction::ChooseReplacement { index })
@@ -240,7 +246,7 @@ fn proteus_staff_activation_batch_settles_through_tap_then_counter_ordering() {
     let staff = scenario
         .add_artifact_from_oracle(P0, "Proteus Staff", PROTEUS_STAFF)
         .id();
-    let authority = add_printed_board(&mut scenario, true);
+    add_printed_board(&mut scenario, true);
     let victim = scenario.add_vanilla(P0, 2, 2);
     let kept = stage_library(&mut scenario);
     let mut runner = scenario.build();
@@ -254,8 +260,8 @@ fn proteus_staff_activation_batch_settles_through_tap_then_counter_ordering() {
     // a batch parked by the activation's own resolution.
     two_way_ordering_index(
         outcome.state(),
-        ["Authority of the Consuls", "Archelos, Lagoon Mystic"],
-        "Authority of the Consuls",
+        ["Imposing Sovereign", "Archelos, Lagoon Mystic"],
+        "Imposing Sovereign",
     );
     let state = runner.state();
     assert!(
@@ -279,7 +285,7 @@ fn proteus_staff_activation_batch_settles_through_tap_then_counter_ordering() {
         "nothing is classified before the resumed delivery runs"
     );
 
-    // CR 616.1e + CR 616.1f: Authority first, so Archelos's untap write wins.
+    // CR 616.1e + CR 616.1f: Imposing Sovereign first, so Archelos's untap write wins.
     answer_tap_state_ordering(&mut runner);
     // Pause 2: the counter ordering. The resumed segment is already classified
     // (this is the fix) even though its delivery parked again.
@@ -299,17 +305,11 @@ fn proteus_staff_activation_batch_settles_through_tap_then_counter_ordering() {
         "the batch settled exactly once and no resolution frame survives"
     );
     assert!(state.pending_replacement.is_none());
-    // CR 603.2 + CR 603.3b: the only stack object is Authority's "whenever a
-    // creature an opponent controls enters" trigger for the entrant, controlled by
-    // Authority's controller P1 and placed before P0 received priority.
-    assert_eq!(
-        state
-            .stack
-            .iter()
-            .map(|entry| (entry.source_id, entry.controller))
-            .collect::<Vec<_>>(),
-        vec![(authority, P1)],
-        "Authority's lifegain trigger is the only stack object"
+    // Nothing is left on the ordinary stack: the entrant carries no trigger.
+    assert!(
+        state.stack.is_empty(),
+        "the ordinary stack is empty, got {} entries",
+        state.stack.len()
     );
     let entrant = &state.objects[&kept];
     assert_eq!(entrant.zone, Zone::Battlefield, "the kept creature entered");
@@ -342,11 +342,11 @@ fn resumed_batch_member_settles_after_tap_state_then_counter_ordering() {
     let mut events = Vec::new();
     reveal_until::resolve(runner.state_mut(), &ability, &mut events).unwrap();
 
-    // Pause 1: Authority vs Archelos (CR 616.1e).
+    // Pause 1: Imposing Sovereign vs Archelos (CR 616.1e).
     two_way_ordering_index(
         runner.state(),
-        ["Authority of the Consuls", "Archelos, Lagoon Mystic"],
-        "Authority of the Consuls",
+        ["Imposing Sovereign", "Archelos, Lagoon Mystic"],
+        "Imposing Sovereign",
     );
     assert!(
         runner.state().active_batch_delivery().is_some(),
