@@ -3117,12 +3117,18 @@ fn detect_dynamic_qty(
     //              reduced by {N}", computed per recipient by `CostDerivation`.
     //   CR 702.20a  AssignDamageFromToughness / AssignDamageAsThoughUnblocked —
     //              Brontodon class; a typed modification, not a quantity expression.
+    //   CR 707.2 + CR 122.6  AddCopiedCountersOnEnter — "additional counters on it
+    //              equal to the same number and kinds of counters the copied
+    //              permanent has on it" (Dominion Saboteur): the count and kinds are
+    //              snapshotted from the chosen copy source at entry, so the variant
+    //              itself carries the dynamic amount.
     if evidence.any::<ContinuousModification>(|m| {
         matches!(
             m,
             ContinuousModification::AddKeywordWithDerivedCost { .. }
                 | ContinuousModification::AssignDamageFromToughness
                 | ContinuousModification::AssignDamageAsThoughUnblocked
+                | ContinuousModification::AddCopiedCountersOnEnter
         )
     }) {
         return;
@@ -16647,5 +16653,53 @@ mod distributed_x_cost_if_exemption_tests {
         let with_second_if = "Whenever you cast an instant or sorcery spell or activate an ability, if that spell's mana cost or that ability's activation cost contains {X}, copy that spell or ability. You may choose new targets for the copy if you control an artifact.";
         assert!(condition_if_fires(with_second_if, FOLDED));
         assert!(condition_if_fires(VAZI_LINE, FOLDED));
+    }
+
+    /// CR 707.2 + CR 122.6: a clone rider's copied-counters copy exception
+    /// (`AddCopiedCountersOnEnter`) is the typed carrier for its " equal to "
+    /// dynamic marker, so Dominion Saboteur raises no `DynamicQty` swallow.
+    #[test]
+    fn copied_counters_clone_rider_is_a_dynamic_qty_carrier() {
+        let text = "You may have this creature enter as a copy of any artifact or creature \
+                    on the battlefield, except it isn't legendary. If you do, it enters with \
+                    additional counters on it equal to the same number and kinds of counters \
+                    the copied permanent has on it.";
+        // Reach guard: the fixture raises the detector's " equal to " marker.
+        assert!(
+            // allow-noncombinator: test fixture assertion on classified text
+            text.contains(" equal to "),
+            "fixture must raise the detector's dynamic marker"
+        );
+        let parsed = parse_oracle_text(
+            text,
+            "Dominion Saboteur",
+            &[],
+            &["Creature".to_string()],
+            &["Shapeshifter".to_string()],
+        );
+        // Reach guard: the rider lowered to the typed copy exception.
+        let carries_rider = parsed.replacements.iter().any(|r| {
+            r.execute.as_deref().is_some_and(|exec| {
+                matches!(
+                    &*exec.effect,
+                    Effect::BecomeCopy { additional_modifications, .. }
+                        if additional_modifications
+                            .contains(&ContinuousModification::AddCopiedCountersOnEnter)
+                )
+            })
+        });
+        assert!(
+            carries_rider,
+            "the clone rider must carry AddCopiedCountersOnEnter: {:?}",
+            parsed.replacements
+        );
+        assert!(
+            !parsed.parse_warnings.iter().any(|w| matches!(
+                w,
+                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "DynamicQty"
+            )),
+            "the copied-counters exception carries the dynamic amount: {:?}",
+            parsed.parse_warnings
+        );
     }
 }
