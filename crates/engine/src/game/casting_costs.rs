@@ -13485,8 +13485,8 @@ enum AutoPaymentEntry {
     PayNow,
     /// A cast that already committed a sacrifice, return or hand-discard
     /// selection to its payment commit: the payment step decides, so an
-    /// unpayable or zero total leaves the mana window open rather than
-    /// unwinding the selection (CR 601.2g).
+    /// unpayable total leaves the mana window open rather than unwinding the
+    /// selection (CR 601.2g).
     ThroughPaymentStep,
 }
 
@@ -13525,7 +13525,8 @@ fn enter_locked_spell_payment(
     // per CR 601.2f (X chosen before mana is paid).
     let has_x = cost_has_x(&cost);
     let manual_payment = payment_mode == CastPaymentMode::Manual && cost.mana_value() > 0;
-    let auto_payment_needs_input = payment_mode == CastPaymentMode::Auto
+    let auto_payment_needs_input = auto == AutoPaymentEntry::PayNow
+        && payment_mode == CastPaymentMode::Auto
         && cost.mana_value() > 0
         && !super::casting::can_pay_cost_after_auto_tap(state, player, object_id, &cost)
         && super::casting::spell_payment_manual_route(state, player, object_id, &cost)

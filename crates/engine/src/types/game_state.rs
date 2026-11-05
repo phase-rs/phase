@@ -58070,7 +58070,7 @@ mod restored_exact_attack_authority_tests {
             cast_this_way_enters_mods: Default::default(),
         };
         let mut admitted = Vec::new();
-        for carrier in 0..26 {
+        for carrier in 0..27 {
             let mut state = state.clone();
             state.waiting_for = match carrier {
                 // The rider in the mana ability's own resume root.
@@ -58505,6 +58505,24 @@ mod restored_exact_attack_authority_tests {
                             },
                         },
                     );
+                    state.waiting_for.clone()
+                }
+                // A deferred-return commit's cost-move root whose pre-payment
+                // checks hand back a prompt holding the chain.
+                26 => {
+                    state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
+                        player: P0,
+                        pending: None,
+                        chosen: vec![],
+                        paused_at_index: 0,
+                        destination: Zone::Hand,
+                        completion: PendingCostMoveCompletion::ResumeDeferredSpellCommit {
+                            phyrexian_choices: None,
+                            pre_payment_checks: Box::new(pre_payment_checks()),
+                        },
+                        deferred_cost_events: vec![],
+                        departure_record_indices: vec![],
+                    });
                     state.waiting_for.clone()
                 }
                 _ => unreachable!(),

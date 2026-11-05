@@ -256,6 +256,7 @@ const LLANOWAR_ELVES: &str = "{T}: Add {G}.";
 const GOBLIN_ELECTROMANCER: &str = "Instant and sorcery spells you cast cost {1} less to cast.";
 const BIRDS_OF_PARADISE: &str = "Flying\n{T}: Add one mana of any color.";
 const INSPIRING_STATUARY: &str = "Nonartifact spells you cast have improvise. (Your artifacts can help cast those spells. Each artifact you tap after you're done activating mana abilities pays for {1}.)";
+const TREASURE: &str = "{T}, Sacrifice this artifact: Add one mana of any color.";
 const TINKER: &str = "As an additional cost to cast this spell, sacrifice an artifact.\nSearch your library for an artifact card, put that card onto the battlefield, then shuffle.";
 
 fn cost(generic: u32, shards: &[ManaCostShard]) -> ManaCost {
@@ -2055,4 +2056,113 @@ fn tinker_sacrificed_artifact_can_improvise_first() {
         Zone::Graveyard,
         "tapped for improvise, then sacrificed"
     );
+}
+
+/// Final Frontier in P0's graveyard with Grizzly Bears to return, a Forest, a
+/// Treasure, and (when `second_land`) an Island.
+fn final_frontier_with_treasure(second_land: bool) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let card = sorcery_in_graveyard(
+        &mut sc,
+        P0,
+        "Final Frontier",
+        cost(2, &[ManaCostShard::Green]),
+        FINAL_FRONTIER,
+    );
+    let bears = sc.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    sc.add_basic_land(P0, ManaColor::Green);
+    if second_land {
+        sc.add_basic_land(P0, ManaColor::Blue);
+    }
+    let treasure = sc.add_artifact_from_oracle(P0, "Treasure", TREASURE).id();
+    sc.add_card_to_library_top(P0, "Library Card");
+    (sc.build(), card, bears, treasure)
+}
+
+/// Cast `card` with beam me up under `AutoExceptSacrificialMana`, returning
+/// `returned`.
+fn cast_sparing_sacrificial_mana(runner: &mut GameRunner, card: ObjectId, returned: ObjectId) {
+    let card_id = runner.state().objects[&card].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: card,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::AutoExceptSacrificialMana,
+        })
+        .expect("cast Final Frontier with beam me up");
+    select(runner, vec![returned]);
+}
+
+/// R16 (CR 601.2g + CR 601.2h): a kept return keeps the caster's sacrificial
+/// mana preference. The Forest and the Island pay {1}{G}, the Treasure is not
+/// sacrificed, and the Bears return at the commit.
+#[test]
+fn beam_me_up_sparing_sacrificial_mana_taps_only_the_lands() {
+    let (mut runner, card, bears, treasure) = final_frontier_with_treasure(true);
+    cast_sparing_sacrificial_mana(&mut runner, card, bears);
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the lands pay without a prompt: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone(&runner, card), Zone::Stack);
+    let lands: Vec<ObjectId> = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            runner.state().objects[id]
+                .card_types
+                .core_types
+                .contains(&CoreType::Land)
+        })
+        .collect();
+    assert_eq!(lands.len(), 2, "REACH: the Forest and the Island");
+    assert!(
+        lands.iter().all(|id| runner.state().objects[id].tapped),
+        "both lands paid"
+    );
+    assert_eq!(
+        zone(&runner, treasure),
+        Zone::Battlefield,
+        "the Treasure is spared"
+    );
+    assert!(!runner.state().objects[&treasure].tapped);
+    assert_eq!(zone(&runner, bears), Zone::Hand, "returned at the commit");
+}
+
+/// R17 (CR 601.2g): when only the Treasure can cover the shortfall, the cast
+/// asks for the sacrificial source, and the creature kept for the return is
+/// still on the battlefield.
+#[test]
+fn beam_me_up_sparing_sacrificial_mana_offers_the_treasure_for_the_shortfall() {
+    let (mut runner, card, bears, treasure) = final_frontier_with_treasure(false);
+    cast_sparing_sacrificial_mana(&mut runner, card, bears);
+
+    let WaitingFor::ManaSourceSelection {
+        player, options, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected the sacrificial source prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0);
+    assert!(
+        options
+            .iter()
+            .any(|option| option.source.object_id == treasure),
+        "the Treasure is offered: {options:?}"
+    );
+    assert_eq!(
+        zone(&runner, bears),
+        Zone::Battlefield,
+        "the kept creature has not been returned yet"
+    );
+    assert_eq!(zone(&runner, treasure), Zone::Battlefield);
 }
