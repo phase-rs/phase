@@ -9,18 +9,19 @@ use crate::parser::oracle_ir::doc::PrintedTriggerIndex;
 use crate::parser::oracle_ir::effect_chain::PlayerScopeRewrite;
 use crate::parser::test_support::assert_no_unimplemented;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
-    AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource, CastingPermission,
-    ChooseOneOfKind, CoinFlipRun, CombatHistoryScope, Comparator, ContinuousModification,
-    ControllerRef, CopyChooseScope, CopyRetargetPermission, CountScope, CounterTransferMode,
-    DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageModification, DamageSource,
-    DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope, FilterProp,
-    ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice, ObjectProperty,
-    ObjectScope, PerPlayerScope, PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope,
-    PropertyAggregate, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RoundingMode,
-    SeatDirection, SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter,
-    TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, XModification,
-    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner, ZoneRef,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
+    AggregateFunction, AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource,
+    CastingPermission, ChooseOneOfKind, CoinFlipRun, CombatHistoryScope, Comparator,
+    ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission, CountScope,
+    CounterTransferMode, DamageAmountScope, DamageAmountThreshold, DamageChannel,
+    DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect,
+    EffectScope, FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice,
+    ObjectProperty, ObjectScope, PerPlayerScope, PerpetualGrantModification, PerpetualModification,
+    PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat, PtValue, PtValueScope,
+    QuantityExpr, QuantityRef, RoundingMode, SeatDirection, SharedQuality, SiblingCondition,
+    SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition,
+    TurnJournalKind, TypeFilter, TypedFilter, XModification, ZoneChoiceCandidateSource,
+    ZoneChoiceChooser, ZoneOwner, ZoneRef,
 };
 use crate::types::ability::{
     IllegalTargetsDisposition, NumberQuality, Parity, SpentColor, StaticCondition, StaticDefinition,
@@ -11658,6 +11659,62 @@ fn strip_constraint_does_not_affect_effect() {
     let result =
         strip_constraint_sentences("draw a card. this ability triggers only once each turn.");
     assert_eq!(result, "draw a card");
+}
+
+#[test]
+fn strip_constraint_leaves_a_quoted_granted_restriction_in_place() {
+    // CR 113.1a + CR 603.1: the quoted sentence belongs to the granted ability.
+    let text = "return it to the battlefield. it perpetually gains \"whenever this creature becomes the target of a spell or ability, draw a card. this ability triggers only once each turn.\"";
+    assert_eq!(strip_constraint_sentences(text), text);
+}
+
+/// At Knifepoint's trigger (verbatim Scryfall Oracle text): a quoted granted
+/// ability with its own restriction, followed by the trigger's own unquoted
+/// "This ability triggers only once each turn."
+#[test]
+fn at_knifepoint_unquoted_limit_is_the_triggers_and_the_quoted_one_is_the_tokens() {
+    let trigger = parse_trigger_line(
+        "Whenever you commit a crime, create a 1/1 red Mercenary creature token with \"{T}: Target creature you control gets +1/+0 until end of turn. Activate only as a sorcery.\" This ability triggers only once each turn.",
+        "At Knifepoint",
+    );
+    // CR 603.1: the unquoted sentence restricts this trigger.
+    assert_eq!(
+        trigger.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering,
+        })
+    );
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    assert!(
+        execute.sub_ability.is_none(),
+        "the constraint sentence must not become a sub-ability: {:?}",
+        execute.sub_ability
+    );
+    let Effect::Token {
+        static_abilities, ..
+    } = &*execute.effect
+    else {
+        panic!("expected the token, got {:?}", execute.effect);
+    };
+    let granted = static_abilities
+        .iter()
+        .flat_map(|def| def.modifications.iter())
+        .find_map(|modification| match modification {
+            ContinuousModification::GrantAbility { definition } => Some(definition),
+            _ => None,
+        })
+        .expect("the token's granted activated ability");
+    // CR 602.5d: the quoted "Activate only as a sorcery." stays with the
+    // token's granted ability.
+    assert_eq!(
+        granted.activation_restrictions,
+        vec![ActivationRestriction::AsSorcery]
+    );
+    assert!(
+        matches!(*granted.effect, Effect::Pump { .. }),
+        "{:?}",
+        granted.effect
+    );
 }
 
 #[test]
@@ -36496,8 +36553,10 @@ fn elder_brain_they_draw_binds_to_defending_player() {
     assert_eq!(def.mode, TriggerMode::Attacks);
     let execute = def.execute.as_ref().expect("should have execute");
     assert!(
-        matches!(&*execute.effect, Effect::ChangeZoneAll { .. }),
-        "head effect must remain the exile-hand ChangeZoneAll, got {:?}",
+        matches!(&*execute.effect, Effect::Unimplemented { .. }),
+        "CR 400.1: the exile names ONE player's hand, but the possessive binds no \
+         player, so it stays an honest gap rather than an every-hand ChangeZoneAll; \
+         got {:?}",
         execute.effect
     );
     let draw = execute
@@ -42612,4 +42671,278 @@ fn opponent_casts_bare_spell_keeps_valid_card_unset() {
     );
     assert_eq!(triggers[0].mode, TriggerMode::SpellCast);
     assert_eq!(triggers[0].valid_card, None);
+}
+
+/// Q, Stacking the Deck (verbatim Scryfall Oracle text). Three trigger-level
+/// readings the granted quoted ability must not disturb:
+/// - CR 201.5c: the one-letter short name "Q" is a self-reference, so the
+///   trigger is a self-ETB (`SelfRef`), not "whenever a Q creature enters";
+/// - CR 603.2 + CR 602.5c: the quoted "Activate only during your turn"
+///   restricts the GRANTED ability, never this trigger;
+/// - CR 608.2c: "That nonland card" names the card the exile-until loop found,
+///   so the grant does not bind the trigger source (`TriggeringSource`).
+#[test]
+fn q_stacking_the_deck_trigger_reads_self_etb_and_grants_to_the_found_card() {
+    let text = "When Q enters, shuffle your library, then exile cards from the top of your library until you exile a nonland card. That nonland card gains \"Exile a card from your hand: Create a copy of this card. You may cast the copy. Activate only during your turn and only if this card is exiled.\"";
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let parsed = parse_oracle_text(
+        text,
+        "Q, Stacking the Deck",
+        &[],
+        &owned(&["Legendary", "Creature"]),
+        &owned(&["Q"]),
+    );
+    assert_eq!(parsed.triggers.len(), 1, "{:?}", parsed.triggers);
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(trigger.constraint, None);
+
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    let exile_until = execute.sub_ability.as_deref().expect("exile-until link");
+    assert!(
+        matches!(*exile_until.effect, Effect::ExileFromTopUntil { .. }),
+        "{:?}",
+        exile_until.effect
+    );
+    let grant = exile_until.sub_ability.as_deref().expect("grant link");
+    let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = &*grant.effect
+    else {
+        panic!("expected the grant, got {:?}", grant.effect);
+    };
+    assert_eq!(*target, None, "the grant inherits the found card");
+    assert_eq!(
+        static_abilities[0].affected,
+        Some(TargetFilter::ParentTarget)
+    );
+}
+
+/// Q, Stacking the Deck: the granted ability's body ("Create a copy of this
+/// card. You may cast the copy.") still parses as `Effect::Unimplemented`.
+/// This pins that gap so coverage keeps the card unsupported until the body is
+/// actually implemented; when it is, update this test with the real effect.
+#[test]
+fn q_stacking_the_deck_granted_ability_body_stays_unimplemented() {
+    let text = "When Q enters, shuffle your library, then exile cards from the top of your library until you exile a nonland card. That nonland card gains \"Exile a card from your hand: Create a copy of this card. You may cast the copy. Activate only during your turn and only if this card is exiled.\"";
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let parsed = parse_oracle_text(
+        text,
+        "Q, Stacking the Deck",
+        &[],
+        &owned(&["Legendary", "Creature"]),
+        &owned(&["Q"]),
+    );
+    let execute = parsed.triggers[0].execute.as_deref().expect("trigger body");
+    let grant = execute
+        .sub_ability
+        .as_deref()
+        .and_then(|exile_until| exile_until.sub_ability.as_deref())
+        .expect("grant link");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*grant.effect
+    else {
+        panic!("expected the grant, got {:?}", grant.effect);
+    };
+    let granted = static_abilities
+        .iter()
+        .flat_map(|def| def.modifications.iter())
+        .find_map(|modification| match modification {
+            ContinuousModification::GrantAbility { definition } => Some(definition),
+            _ => None,
+        })
+        .expect("granted activated ability");
+    assert!(
+        matches!(*granted.effect, Effect::Unimplemented { .. }),
+        "the granted body must stay Unimplemented so Q remains unsupported, got {:?}",
+        granted.effect
+    );
+}
+
+/// Niambi, Beloved Protector (verbatim Scryfall Oracle text). CR 113.1a +
+/// CR 603.1: the quoted "This ability triggers only once each turn." is part of
+/// the GRANTED trigger's own text. It must not restrict Niambi's ETB, and it must
+/// survive constraint-sentence stripping so the granted trigger carries it.
+#[test]
+fn niambi_quoted_once_each_turn_restricts_only_the_granted_trigger() {
+    let text = "Flash\nWhen Niambi, Beloved Protector enters, if you cast it, choose target nonlegendary creature card in your graveyard that was put there from the battlefield this turn. Return it to the battlefield. It perpetually gains \"Whenever this creature becomes the target of a spell or ability, draw a card. This ability triggers only once each turn.\"";
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let parsed = parse_oracle_text(
+        text,
+        "Niambi, Beloved Protector",
+        &owned(&["Flash"]),
+        &owned(&["Legendary", "Creature"]),
+        &owned(&["Human", "Cleric"]),
+    );
+    assert_eq!(parsed.triggers.len(), 1, "{:?}", parsed.triggers);
+    let etb = &parsed.triggers[0];
+    assert_eq!(etb.constraint, None, "the quoted limit is not the ETB's");
+
+    let mut node = etb.execute.as_deref();
+    let granted = std::iter::from_fn(|| {
+        let current = node?;
+        node = current.sub_ability.as_deref();
+        Some(current)
+    })
+    .find_map(|ability| match &*ability.effect {
+        Effect::ApplyPerpetual { modification, .. } => Some(modification),
+        _ => None,
+    })
+    .expect("perpetual grant in the ETB chain");
+    let granted_trigger = match granted {
+        PerpetualModification::GrantAbility { modifications } => modifications
+            .iter()
+            .find_map(|modification| match modification {
+                PerpetualGrantModification::GrantTrigger { trigger } => Some(trigger),
+                _ => None,
+            })
+            .expect("granted trigger"),
+        other => panic!("expected a granted ability, got {other:?}"),
+    };
+    assert_eq!(granted_trigger.mode, TriggerMode::BecomesTarget);
+    assert_eq!(
+        granted_trigger.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering,
+        })
+    );
+    assert!(
+        matches!(
+            granted_trigger.execute.as_deref().map(|e| &*e.effect),
+            Some(Effect::Draw { .. })
+        ),
+        "{:?}",
+        granted_trigger.execute
+    );
+    assert!(
+        granted_trigger
+            .execute
+            .as_deref()
+            .is_some_and(|e| e.sub_ability.is_none()),
+        "the restriction must not leak into the granted body"
+    );
+}
+
+/// CR 201.5 + CR 608.2c + CR 122.1: a counter-threshold continuation whose
+/// subject is a gendered self-reference ("on her") gates the rest of the
+/// instruction, and its "remove those counters" anaphor names the counted KIND
+/// (promotion / ribbon), not every counter on the source. Verbatim Oracle text.
+#[test]
+fn counter_threshold_continuation_binds_remove_those_counters_to_counted_kind() {
+    let cases = [
+        (
+            "First strike\nReckless Behavior \u{2014} Whenever Beckett Mariner becomes tapped, put a promotion counter on her. Then if there are three or more promotion counters on her, remove those counters and she deals 2 damage to each opponent.",
+            "Beckett Mariner, Impetuous Ensign",
+            "promotion",
+            3,
+        ),
+        (
+            "Whenever you gain life, put that many ribbon counters on this creature. Then if there are three or more ribbon counters on this creature, remove those counters and untap it.\n{T}: Add one mana of any color.",
+            "Prize Pig",
+            "ribbon",
+            3,
+        ),
+    ];
+    for (text, name, kind, threshold) in cases {
+        let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let parsed = parse_oracle_text(text, name, &[], &owned(&["Creature"]), &[]);
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{name}: {:?}",
+            parsed.parse_warnings
+        );
+        assert_eq!(parsed.triggers.len(), 1, "{name}");
+        let execute = parsed.triggers[0].execute.as_deref().expect("trigger body");
+        assert_no_unimplemented(execute);
+        let remove = execute.sub_ability.as_deref().expect("gated continuation");
+        let counter_type = crate::types::counter::parse_counter_type(kind);
+        assert_eq!(
+            remove.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(counter_type.clone()),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: threshold },
+            }),
+            "{name}"
+        );
+        assert_eq!(
+            *remove.effect,
+            Effect::RemoveCounter {
+                counter_type: Some(counter_type),
+                count: QuantityExpr::Fixed { value: -1 },
+                target: TargetFilter::SelfRef,
+            },
+            "{name}"
+        );
+    }
+}
+
+/// CR 608.2c + CR 122.1: when the counter-threshold gate scopes over SEVERAL
+/// instructions ("remove those counters, transform this artifact, and create
+/// three Treasure tokens"), the body is parsed through the recursive
+/// conditional-body seam, and the counted KIND must still reach "remove those
+/// counters" there — landmark / soul, not every counter on the permanent. The
+/// gate also covers the removal itself. Verbatim Oracle text (MTGJSON).
+#[test]
+fn multi_instruction_counter_gate_binds_remove_those_counters_to_counted_kind() {
+    let cases = [
+        (
+            "{1}, {T}: Scry 1. Put a landmark counter on this artifact. Then if there are three or more landmark counters on it, remove those counters, transform this artifact, and create three Treasure tokens. (They're artifacts with \"{T}, Sacrifice this token: Add one mana of any color.\")",
+            "Treasure Map",
+            "Artifact",
+            "landmark",
+        ),
+        (
+            "{T}: Add {C}.\n{1}, {T}, Sacrifice a creature: Put a soul counter on this land. Then if there are three or more soul counters on it, remove those counters, transform it, then untap it. Activate only as a sorcery.",
+            "Hostile Hostel",
+            "Land",
+            "soul",
+        ),
+    ];
+    for (text, name, core_type, kind) in cases {
+        let parsed = parse_oracle_text(text, name, &[], &[core_type.to_string()], &[]);
+        let counter_type = crate::types::counter::parse_counter_type(kind);
+        let removals: Vec<&AbilityDefinition> = parsed
+            .abilities
+            .iter()
+            .flat_map(|ability| {
+                std::iter::successors(Some(ability), |def| def.sub_ability.as_deref())
+            })
+            .filter(|def| matches!(*def.effect, Effect::RemoveCounter { .. }))
+            .collect();
+        assert_eq!(removals.len(), 1, "{name}: {:#?}", parsed.abilities);
+        let remove = removals[0];
+        assert_no_unimplemented(remove);
+        assert_eq!(
+            *remove.effect,
+            Effect::RemoveCounter {
+                counter_type: Some(counter_type.clone()),
+                count: QuantityExpr::Fixed { value: -1 },
+                target: TargetFilter::SelfRef,
+            },
+            "{name}"
+        );
+        assert_eq!(
+            remove.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(counter_type),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            }),
+            "{name}"
+        );
+    }
 }

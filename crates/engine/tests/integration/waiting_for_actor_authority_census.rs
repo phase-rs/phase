@@ -830,9 +830,15 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // 144 -> 145 is adjudicated: the conspiracy agenda prompt added
     // `SecretAgendaChoice`, `ActingAuthority::One(player)`. Not actorless: pregame
     // cannot advance without that player's `GameAction::ChooseSecretAgendaNames`.
-    if declared.len() != 145 {
+    // 145 -> 146 is adjudicated: Petals of Insight's "put those cards on the
+    // bottom of your library in any order" (CR 401.4 + CR 608.2c) added
+    // `DigBottomOrder`. It names one acting `player` — the controller
+    // announcing the bottom permutation — and is classified by
+    // `WaitingFor::acting_authority` as `ActingAuthority::One(player)`. Not
+    // actorless: it cannot advance without that player's `SelectCards`.
+    if declared.len() != 146 {
         failures.push(format!(
-            "PIN declared.len()={} != 145.\n\
+            "PIN declared.len()={} != 146.\n\
              \n\
              Adding a `WaitingFor` variant IS the counted event this gate exists to make loud. \
              Repair it by ADJUDICATING, not by bumping the number:\n\

@@ -4873,6 +4873,44 @@ mod tests {
         }
     }
 
+    /// CR 205.3m + CR 107.1a: the category-restricted distinct-subtype count
+    /// ("creature types among <population>") is a for-each clause, so it both
+    /// multiplies ungrouped and divides grouped (Sarek: "for every five creature
+    /// types among non-Borg creatures you control").
+    #[test]
+    fn for_each_creature_types_among_population_counts_and_groups() {
+        use crate::types::ability::SubtypeExclusion;
+        use crate::types::card_type::SubtypeSet;
+        let distinct = parse_for_each_clause("creature type among non-borg creatures you control")
+            .expect("ungrouped distinct creature-type count parses");
+        let QuantityRef::DistinctSubtypes {
+            source: CardTypeSetSource::Objects { filter },
+            exclude: SubtypeExclusion::None,
+            restrict: Some(SubtypeSet::Creature),
+        } = &distinct
+        else {
+            panic!("expected restricted DistinctSubtypes, got {distinct:?}");
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed population, got {filter:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                "Borg".to_string()
+            )))));
+        assert_eq!(
+            parse_for_each_clause_expr("five creature types among non-borg creatures you control"),
+            Some(QuantityExpr::DivideRounded {
+                inner: Box::new(QuantityExpr::Ref { qty: distinct }),
+                divisor: 5,
+                rounding: RoundingMode::Down,
+            })
+        );
+    }
+
     /// CR 107.1 + CR 608.2c: a leading group size N ≥ 2 divides the counted
     /// clause at the expression level and is declined at the reference level,
     /// which cannot express the grouping.

@@ -55,6 +55,23 @@ pub(crate) fn delayed_source_context(
     Some(source_context)
 }
 
+/// CR 608.2c + CR 603.7c: Does this delayed payload's HEAD name the tracked set
+/// the creating resolution published?
+///
+/// The plural anaphor is emitted as a `TrackedSet`/`TrackedSetFiltered` head
+/// target (Golden Argosy's "Return them"), so that population is the referent
+/// even when it is empty. Checking only the head is deliberate: a nested
+/// continuation leg can carry a tracked-set reference while the head still
+/// inherits its single referent — Fortune, Loyal Steed's "exile it …, then
+/// return those cards" — and such payloads keep the latest-nonempty preference
+/// in [`resolve`]. `ParentTarget` and `Any` heads are the inherited-referent
+/// shapes and keep it too.
+fn payload_names_tracked_set(effect: &Effect) -> bool {
+    effect
+        .target_filter()
+        .is_some_and(super::filter_references_tracked_set)
+}
+
 /// CR 603.7: Create a delayed triggered ability during resolution.
 pub fn resolve(
     state: &mut GameState,
@@ -127,6 +144,14 @@ pub fn resolve(
     // CR 603.7: Prefer the active nonempty resolution-chain set, then the latest
     // nonempty published set. An empty chain id (stale pre-choice publish) must
     // not shadow a later nonempty set (Storm Herald delayed exile).
+    // CR 608.2c + CR 603.7c: a payload that NAMES the published set (a plural
+    // anaphor such as Golden Argosy's "Return them", emitted by the parser as a
+    // `TrackedSet` reference) binds the creating resolution's OWN publication,
+    // empty included. An empty publication is a real referent — a population
+    // with no members — so falling back to an older nonempty set would move
+    // unrelated objects once the delayed trigger resolves. The nonempty
+    // preference above stays for payloads that merely inherit a referent
+    // (`ParentTarget`) instead of naming the set.
     let tracked_set_id = if uses_tracked_set {
         if matches!(
             &*effect_def.effect,
@@ -137,6 +162,14 @@ pub fn resolve(
         ) {
             // CR 400.7j: a payload naming the source finds only what this ability's own move moved, so it binds that publication as is, empty included.
             state.chain_tracked_set_id
+        } else if payload_names_tracked_set(&effect_def.effect) {
+            // CR 608.2c: the set is named, so a chain publication IS the
+            // referent — empty included. With no chain publication at all
+            // (a manually built ability, or a publisher that ran in an earlier
+            // resolution) keep the established latest-nonempty fallback.
+            state
+                .chain_tracked_set_id
+                .or_else(|| crate::game::targeting::latest_tracked_set_id(state))
         } else {
             state
                 .chain_tracked_set_id
@@ -432,6 +465,15 @@ pub fn resolve(
     // single-target contextual bind. This operates on the built `delayed_ability`
     // (not the condition), so it must stay after the ability chain is built.
     if let Some(real_id) = tracked_set_id {
+        // CR 608.2c + CR 603.7c: which referent a payload's `ParentTarget`
+        // names is decided by the PARSER, not inferred here. A plural anaphor
+        // to a published set is emitted as the `TrackedSet` sentinel (Golden
+        // Argosy's "Return them"); a singular creation-source reference stays
+        // `ParentTarget` (Fortune, Loyal Steed's "exile it") and must keep the
+        // parent/event-source binding below rather than absorb the whole set.
+        // Neither the absence of a declared target slot nor the fall back to
+        // `latest_tracked_set_id` proves a plural referent, so no rewrite is
+        // applied here.
         bind_tracked_set_to_ability_chain(&mut delayed_ability, real_id);
     }
 
@@ -6782,5 +6824,195 @@ mod attached_set_delayed_tests {
         );
         bind_event_subject_nodes(&mut ability, &state, attacker);
         assert!(ability.targets.is_empty());
+    }
+
+    /// CR 608.2c + CR 603.7c: a delayed payload's SINGULAR creation-source
+    /// anaphor ("exile it", Fortune, Loyal Steed) keeps its own referent even
+    /// when an unrelated tracked set is the most recently published one. The
+    /// source-filtered binding must not be widened to that whole set: only a
+    /// payload that NAMES the published set (a plural anaphor, which the parser
+    /// emits as `TrackedSet`) reads it.
+    ///
+    /// Revert probe: reinstate a creation-time "no declared referent ⇒ whole
+    /// set" rewrite here and the payload becomes a bare `TrackedSet`, so the
+    /// `TrackedSetFiltered { filter: ParentTarget }` assertion flips.
+    #[test]
+    fn singular_source_anaphor_does_not_absorb_an_unrelated_tracked_set() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "When Fortune enters, scry 2.\nWhenever Fortune attacks while saddled, at end of combat, exile it and up to one creature that saddled it this turn, then return those cards to the battlefield under their owner's control.\nSaddle 1",
+            "Fortune, Loyal Steed",
+            &[],
+            &["Creature".to_string()],
+            &["Horse".to_string(), "Mount".to_string()],
+        );
+        let execute = parsed.triggers[1]
+            .execute
+            .as_ref()
+            .expect("Fortune's attack trigger");
+        let Effect::CreateDelayedTrigger {
+            effect: payload, ..
+        } = &*execute.effect
+        else {
+            panic!(
+                "expected the end-of-combat delayed trigger, got {:?}",
+                execute.effect
+            );
+        };
+        assert!(
+            matches!(
+                &*payload.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "reach: the payload head is the singular source exile: {:?}",
+            payload.effect
+        );
+
+        let mut state = GameState::new_two_player(42);
+        let foreign = crate::game::zones::create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Unrelated card".to_string(),
+            Zone::Exile,
+        );
+        let foreign_set = TrackedSetId(1);
+        state.tracked_object_sets.insert(foreign_set, vec![foreign]);
+        state.next_tracked_set_id = 2;
+        // The creating resolution published nothing: the foreign set is only
+        // the globally latest one, never a publisher of this resolution.
+        state.chain_tracked_set_id = None;
+
+        let ability = ResolvedAbility::new(
+            (*execute.effect).clone(),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("the delayed trigger installs");
+
+        let delayed = state.delayed_triggers[0].ability.clone();
+        let Effect::ChangeZoneAll {
+            destination,
+            target,
+            ..
+        } = &delayed.effect
+        else {
+            panic!(
+                "expected the payload's zone-move head, got {:?}",
+                delayed.effect
+            );
+        };
+        assert_eq!(*destination, Zone::Exile);
+        assert!(
+            matches!(
+                target,
+                TargetFilter::TrackedSetFiltered { id, filter, .. }
+                    if *id == foreign_set
+                        && matches!(filter.as_ref(), TargetFilter::ParentTarget)
+            ),
+            "the singular source anaphor keeps its source filter; it must not \
+             become the whole unrelated set: {target:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 603.7c: a delayed payload that NAMES the published set
+    /// ("Return them", Golden Argosy) binds the creating resolution's OWN
+    /// publication even when that publication is EMPTY. An empty population is
+    /// still the referent the card text names; falling back to an older
+    /// nonempty set would return unrelated exiled cards at the end step.
+    ///
+    /// Revert probe: drop the `payload_names_tracked_set` branch in `resolve`
+    /// and the installed trigger binds `foreign_set` (the latest nonempty set)
+    /// instead of the fresh empty chain set.
+    #[test]
+    fn plural_tracked_set_payload_binds_a_fresh_empty_chain_set() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Whenever Golden Argosy attacks, exile each creature that crewed it this turn. Return them to the battlefield tapped under their owner's control at the beginning of the next end step.\nCrew 1",
+            "Golden Argosy",
+            &[],
+            &["Artifact".to_string()],
+            &["Vehicle".to_string()],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_ref()
+            .expect("Golden Argosy's attack trigger");
+        let delayed_def = execute
+            .sub_ability
+            .as_deref()
+            .expect("the end-step delayed return follows the exile");
+        let Effect::CreateDelayedTrigger {
+            uses_tracked_set, ..
+        } = &*delayed_def.effect
+        else {
+            panic!(
+                "expected the end-step delayed trigger, got {:?}",
+                delayed_def.effect
+            );
+        };
+        assert!(*uses_tracked_set, "the payload reads the published set");
+
+        let mut state = GameState::new_two_player(42);
+        let unrelated = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Unrelated card".to_string(),
+            Zone::Exile,
+        );
+        let foreign_set = TrackedSetId(1);
+        state
+            .tracked_object_sets
+            .insert(foreign_set, vec![unrelated]);
+        // The creating resolution exiled no crewing creatures this turn: a
+        // FRESH EMPTY set is its publication.
+        let empty_chain_set = TrackedSetId(2);
+        state
+            .tracked_object_sets
+            .insert(empty_chain_set, Vec::new());
+        state.next_tracked_set_id = 3;
+        state.chain_tracked_set_id = Some(empty_chain_set);
+        // Reach guard: the latest-nonempty fallback would pick this set, so the
+        // binding assertion below is not vacuous.
+        assert_eq!(
+            crate::game::targeting::latest_tracked_set_id(&state),
+            Some(foreign_set)
+        );
+
+        let ability = ResolvedAbility::new(
+            (*delayed_def.effect).clone(),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("the delayed trigger installs");
+
+        let delayed = state.delayed_triggers[0].ability.clone();
+        let Effect::ChangeZoneAll { target, .. } = &delayed.effect else {
+            panic!(
+                "expected the payload's mass return, got {:?}",
+                delayed.effect
+            );
+        };
+        assert!(
+            matches!(target, TargetFilter::TrackedSet { id } if *id == empty_chain_set),
+            "the plural anaphor must bind the creating resolution's empty set, \
+             not an unrelated earlier set: {target:?}"
+        );
+
+        let mut later_events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &delayed, &mut later_events, 0)
+            .expect("the delayed return resolves");
+        assert_eq!(
+            state.objects[&unrelated].zone,
+            Zone::Exile,
+            "an empty publication returns nothing, so the unrelated exiled card stays put"
+        );
     }
 }

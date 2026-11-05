@@ -29398,6 +29398,18 @@ impl TargetFilter {
         if self.chosen_player_index().is_some() {
             return true;
         }
+        // CR 603.2 + CR 701.23a: a contentless player-scoped filter controlled by the
+        // triggering player ("search that player's library") reads the player from the
+        // trigger event at resolution; it is never announced as a target.
+        if matches!(
+            self,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.is_empty()
+                    && tf.properties.is_empty()
+                    && matches!(tf.controller, Some(ControllerRef::TriggeringPlayer))
+        ) {
+            return true;
+        }
         matches!(
             self,
             TargetFilter::None

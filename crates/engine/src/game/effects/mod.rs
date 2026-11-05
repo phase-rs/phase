@@ -3196,7 +3196,7 @@ pub(crate) fn active_player_action_completion_requires(
     })
 }
 
-fn prepend_to_pending_continuation(state: &mut GameState, head: ResolvedAbility) {
+pub(crate) fn prepend_to_pending_continuation(state: &mut GameState, head: ResolvedAbility) {
     prepend_to_pending_continuation_with_producer(state, head, None, None);
 }
 
@@ -11935,7 +11935,7 @@ fn detach_after_player_scope_local_chain(
     }
 }
 
-pub(crate) fn split_player_scope_chain(
+pub fn split_player_scope_chain(
     ability: &ResolvedAbility,
     scope: &PlayerFilter,
 ) -> (ResolvedAbility, Option<Box<ResolvedAbility>>) {
