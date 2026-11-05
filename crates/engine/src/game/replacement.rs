@@ -10034,13 +10034,16 @@ pub(super) fn self_enter_optional_replacements(
 /// The object already entered (the interactive copy choice resolves
 /// post-move), so the parked proposal is the synthetic battlefield-to-battlefield
 /// copy-surface shape also used by [`surface_copied_entry_payment`]; it is never
-/// delivered. Its `enter_with_counters` holds the counters the current copy's
-/// exceptions realize, which survive only a decline (CR 707.9e). The affected
-/// object's controller makes the choice (CR 616.1).
+/// delivered. Its applied set carries the entry's enter-as-copy chain
+/// (CR 614.5, keyed by provenance, including the offered replacement's), and
+/// its `enter_with_counters` holds the counters the current copy's exceptions
+/// realize, which survive only a decline (CR 707.9e). The affected object's
+/// controller makes the choice (CR 616.1).
 pub(super) fn park_acquired_copy_offer(
     state: &mut GameState,
     source_id: ObjectId,
     rid: ReplacementId,
+    applied: HashSet<AppliedReplacementKey>,
     exception_counters: Vec<(CounterType, u32)>,
 ) -> WaitingFor {
     let chooser = state
@@ -10051,10 +10054,12 @@ pub(super) fn park_acquired_copy_offer(
         ProposedEvent::zone_change(source_id, Zone::Battlefield, Zone::Battlefield, None);
     if let ProposedEvent::ZoneChange {
         enter_with_counters,
+        applied: proposed_applied,
         ..
     } = &mut proposed
     {
         *enter_with_counters = exception_counters;
+        *proposed_applied = applied;
     }
     state.pending_replacement = Some(PendingReplacement {
         proposed,

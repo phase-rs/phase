@@ -2777,6 +2777,14 @@ pub(super) fn handle_copy_target_choice(
         state.waiting_for = WaitingFor::Priority {
             player: state.active_player,
         };
+        // CR 614.5 + CR 616.1f: the entry's applied enter-as-copy chain and the
+        // provenance of what this choice copies, read before the copy installs
+        // and before this choice's paused drain is retired.
+        let copy_chain = enter_as_copy_chain(state, source_id);
+        let copied = state
+            .objects
+            .get(&target_id)
+            .map(crate::types::identifiers::ObjectIncarnationRef::from_object);
         let mut ability = copy_effect_for_source(state, source_id)
             .map(|effect_def| {
                 build_resolved_from_def_with_targets(
@@ -3016,10 +3024,12 @@ pub(super) fn handle_copy_target_choice(
         // CR 616.1c + CR 616.1f: a copy of an uncopied enter-as-copy permanent
         // acquired that permanent's copy replacement; offer it before the token's
         // entry completes. Its answer finishes the entry and the batch.
-        if copy_applied {
+        if let (true, Some(copied)) = (copy_applied, copied) {
             if let Some(waiting_for) = offer_acquired_enter_as_copy_replacement(
                 state,
                 source_id,
+                copied,
+                &copy_chain,
                 &exception_counters,
                 &mut counter_pause_post_actions,
             ) {
@@ -3072,6 +3082,14 @@ pub(super) fn handle_copy_target_choice(
         });
     }
 
+    // CR 614.5 + CR 616.1f: the entry's applied enter-as-copy chain and the
+    // provenance of what this choice copies, read before the copy installs and
+    // before this choice's paused drain is retired.
+    let copy_chain = enter_as_copy_chain(state, source_id);
+    let copied = state
+        .objects
+        .get(&target_id)
+        .map(crate::types::identifiers::ObjectIncarnationRef::from_object);
     let mut ability = copy_effect_for_source(state, source_id)
         .map(|effect_def| {
             build_resolved_from_def_with_targets(
@@ -3155,10 +3173,12 @@ pub(super) fn handle_copy_target_choice(
     // CR 616.1c + CR 616.1f: a copy of an uncopied enter-as-copy permanent
     // acquired that permanent's copy replacement; offer it before the entry
     // completes. Accepting it re-enters this handler for the same entrant.
-    if copy_applied {
+    if let (true, Some(copied)) = (copy_applied, copied) {
         if let Some(waiting_for) = offer_acquired_enter_as_copy_replacement(
             state,
             source_id,
+            copied,
+            &copy_chain,
             &exception_counters,
             &mut Vec::new(),
         ) {
@@ -3174,6 +3194,21 @@ pub(super) fn handle_copy_target_choice(
         CopyEntryCounters::Merged { exception_counters },
     )? {
         return Ok(waiting_for);
+    }
+    // CR 616.1 + CR 614.12a: completing the entry can drain a parked token
+    // batch's continuation (an acquired-copy chain resumed here for a token),
+    // whose next token raises its own entry prompt. Only this answered copy
+    // prompt, or priority, is spent; keep any other live prompt.
+    let answered_prompt_is_spent = match &state.waiting_for {
+        WaitingFor::Priority { .. } => true,
+        WaitingFor::CopyTargetChoice {
+            source_id: prompt_source,
+            ..
+        } => *prompt_source == source_id,
+        _ => false,
+    };
+    if !answered_prompt_is_spent {
+        return Ok(state.waiting_for.clone());
     }
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
@@ -3230,9 +3265,79 @@ fn realized_copy_exception_counters(
     .collect()
 }
 
+/// CR 614.5 + CR 616.1f: the "enter as a copy" replacements already applied to
+/// an entry, keyed by provenance ([`AppliedReplacementKey::EnterAsCopyFrom`]).
+///
+/// A chain resumed by an accepted acquired offer rides that offer's paused
+/// post-replacement drain (see [`answer_acquired_copy_offer`]); read it before
+/// the drain is retired. Otherwise this is the entry's first copy choice, and
+/// the chain is seeded with the entrant's own enter-as-copy replacement, whose
+/// provenance is the entrant itself — or, for a token created as a copy, the
+/// object that token copies (its `CopyTokenSpec::donor`), since the token's
+/// replacement is that object's, acquired by copying it.
+fn enter_as_copy_chain(state: &GameState, entrant: ObjectId) -> HashSet<AppliedReplacementKey> {
+    let resumed: HashSet<AppliedReplacementKey> = state
+        .active_post_replacement_drains()
+        .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
+        .filter(|drain| drain.source == Some(entrant))
+        .map(|drain| {
+            drain
+                .applied
+                .iter()
+                .copied()
+                .filter(|key| is_enter_as_copy_key_of(key, entrant))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !resumed.is_empty() {
+        return resumed;
+    }
+    let (object, provenance) = match state.liminal_entries.get(&entrant) {
+        Some(entry) => {
+            let projected = entry.object.projected();
+            (
+                projected,
+                entry
+                    .copy_resume
+                    .as_ref()
+                    .and_then(|copy| copy.donor)
+                    .unwrap_or_else(|| {
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(projected)
+                    }),
+            )
+        }
+        None => match state.objects.get(&entrant) {
+            Some(object) => (
+                object,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(object),
+            ),
+            None => return HashSet::new(),
+        },
+    };
+    let index = object
+        .replacement_definitions
+        .iter_all()
+        .position(|replacement| {
+            super::replacement::EventModifiers::first_non_modifier_ability(
+                replacement.execute.as_deref(),
+            )
+            .is_some_and(|real_work| matches!(&*real_work.effect, Effect::BecomeCopy { .. }))
+        })
+        .unwrap_or_default();
+    HashSet::from([AppliedReplacementKey::EnterAsCopyFrom {
+        source: entrant,
+        index,
+        copied: provenance,
+    }])
+}
+
+fn is_enter_as_copy_key_of(key: &AppliedReplacementKey, entrant: ObjectId) -> bool {
+    matches!(key, AppliedReplacementKey::EnterAsCopyFrom { source, .. } if *source == entrant)
+}
+
 /// CR 614.12 + CR 616.1c + CR 616.1f + CR 707.9e: the optional "enter as a
-/// copy" replacement the entering permanent acquired by becoming a copy, when
-/// it is still owed its opportunity to apply to this entry.
+/// copy" replacement the entering permanent acquired by becoming a copy of
+/// `copied`, when it is still owed its opportunity to apply to this entry.
 ///
 /// CR 614.12 checks the entering permanent's characteristics *as modified by
 /// the replacement effects already applied* — so an object that entered as a
@@ -3240,10 +3345,13 @@ fn realized_copy_exception_counters(
 /// card's own "you may have this enter as a copy" replacement, and CR 616.1f
 /// repeats the selection with it. Returns the replacement only when:
 ///
-/// * the entry's latest copy copied a source this entry has not copied before
-///   ([`effects::become_copy::latest_copy_source_is_new`], CR 614.5). Callers
-///   ask only after a copy installed (`copy_applied`), so an entrant whose copy
-///   failed is never re-offered its own, already-applied replacement;
+/// * no replacement with `copied`'s provenance has applied to this entry yet
+///   (`chain`, CR 614.5) — so a token copy of an uncopied Saboteur that copies
+///   that same Saboteur, or a chain that returns to a source it already
+///   copied, is not re-offered an effect that already had its opportunity.
+///   That bound loses no reachable outcome: revisiting a source repeats a
+///   choice the chain already had. Callers ask only after a copy installed,
+///   so an entrant whose copy failed keeps its applied replacement unoffered;
 /// * the replacement is a self-scoped, optional `BecomeCopy` that applies to
 ///   the entry (the mandatory as-enters surfaces in
 ///   [`finish_copy_target_choice_entry_after_counters`] own the rest); and
@@ -3252,14 +3360,20 @@ fn realized_copy_exception_counters(
 fn acquired_enter_as_copy_replacement(
     state: &GameState,
     source_id: ObjectId,
+    copied: crate::types::identifiers::ObjectIncarnationRef,
+    chain: &HashSet<AppliedReplacementKey>,
 ) -> Option<crate::types::proposed_event::ReplacementId> {
-    let entrant = state.objects.get(&source_id)?;
-    if entrant.zone != Zone::Battlefield
-        || !effects::become_copy::latest_copy_source_is_new(
-            state,
-            crate::types::identifiers::ObjectIncarnationRef::from_object(entrant),
+    if chain.iter().any(|key| {
+        matches!(
+            key,
+            AppliedReplacementKey::EnterAsCopyFrom { source, copied: applied, .. }
+                if *source == source_id && *applied == copied
         )
-    {
+    }) {
+        return None;
+    }
+    let entrant = state.objects.get(&source_id)?;
+    if entrant.zone != Zone::Battlefield {
         return None;
     }
     let controller = entrant.controller;
@@ -3286,27 +3400,30 @@ fn acquired_enter_as_copy_replacement(
 }
 
 /// CR 616.1c + CR 616.1f: before an enter-as-copy entry completes, offer the
-/// copy replacement the realized copy acquired. `None` when there is none (the
-/// caller completes the entry as usual).
+/// copy replacement the realized copy of `copied` acquired. `None` when there is
+/// none (the caller completes the entry as usual).
 ///
 /// The offer is the ordinary optional `ReplacementChoice` over a parked
 /// battlefield-to-battlefield proposal — the copy-surface park shape
 /// [`super::replacement::surface_copied_entry_payment`] uses, since the object
-/// already entered. The proposal's `enter_with_counters` carries this copy's
-/// realized exception counters: a decline keeps the copy, and with it those
-/// counters; an accept applies a later copy effect, which retires them
+/// already entered. The proposal carries the entry's applied chain plus the
+/// offered replacement's provenance key, and in `enter_with_counters` this
+/// copy's realized exception counters: a decline keeps the copy, and with it
+/// those counters; an accept applies a later copy effect, which retires them
 /// (CR 707.9e). A liminal token caller's completion post-actions are stashed
 /// exactly as the copied payment and Aura-host pauses stash them, and are
 /// drained when the chain finally completes.
 fn offer_acquired_enter_as_copy_replacement(
     state: &mut GameState,
     source_id: ObjectId,
+    copied: crate::types::identifiers::ObjectIncarnationRef,
+    chain: &HashSet<AppliedReplacementKey>,
     exception_counters: &[(CounterType, u32)],
     counter_pause_post_actions: &mut Vec<PendingCounterPostAction>,
 ) -> Option<WaitingFor> {
     crate::game::layers::mark_layers_full(state);
     crate::game::layers::flush_layers(state);
-    let rid = acquired_enter_as_copy_replacement(state, source_id)?;
+    let rid = acquired_enter_as_copy_replacement(state, source_id, copied, chain)?;
     if !counter_pause_post_actions.is_empty() {
         effects::counters::stash_pending_counter_post_actions(
             state,
@@ -3315,25 +3432,68 @@ fn offer_acquired_enter_as_copy_replacement(
             std::mem::take(counter_pause_post_actions),
         );
     }
+    let mut applied = chain.clone();
+    applied.insert(AppliedReplacementKey::EnterAsCopyFrom {
+        source: source_id,
+        index: rid.index,
+        copied,
+    });
     Some(super::replacement::park_acquired_copy_offer(
         state,
         source_id,
         rid,
+        applied,
         exception_counters.to_vec(),
     ))
+}
+
+/// CR 614.12a + CR 707.2: the copy source a promptless enter-as-copy
+/// replacement uses — an indexed exiled card, fixed before entry. Mirrors the
+/// no-prompt arm of [`apply_post_replacement_effect`] (which binds every legal
+/// source as a target) and the source index [`effects::become_copy::resolve`]
+/// reads from them. `None` for a replacement that prompts for its source.
+fn predetermined_copy_source(
+    state: &GameState,
+    execute: &AbilityDefinition,
+    entrant: ObjectId,
+) -> Option<crate::types::identifiers::ObjectIncarnationRef> {
+    let real_work = super::replacement::EventModifiers::first_non_modifier_ability(Some(execute))?;
+    let Effect::BecomeCopy { target, .. } = &*real_work.effect else {
+        return None;
+    };
+    if !matches!(target, TargetFilter::ExiledCardByIndex { .. }) {
+        return None;
+    }
+    let object = state.objects.get(&entrant)?;
+    let copy_source = find_copy_targets(
+        state,
+        target,
+        entrant,
+        object.controller,
+        copy_target_mana_value_ceiling(object.mana_spent_to_cast_amount, real_work),
+    )
+    .into_iter()
+    .nth(crate::game::ability_utils::become_copy_copy_source_target_index(&real_work.effect))?;
+    state
+        .objects
+        .get(&copy_source)
+        .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
 }
 
 /// CR 616.1f + CR 707.9e: answer the offer raised by
 /// [`offer_acquired_enter_as_copy_replacement`].
 ///
 /// Accept (index 0) applies the acquired replacement through the ordinary
-/// post-replacement dispatch, which raises the next `CopyTargetChoice` exactly
-/// as the entry's first copy did; its answer re-enters
-/// [`handle_copy_target_choice`] for the same entrant, so the chain stays in the
-/// one enter-as-copy pipeline until no acquired replacement is left. The first
-/// copy's exception counters are dropped (CR 707.9e). Decline (index 1) — or an
-/// accept that finds nothing left to copy — completes the entry as the current
-/// copy, with its surviving exception counters.
+/// post-replacement dispatch, carrying the entry's applied chain. A prompted
+/// copy raises the next `CopyTargetChoice` exactly as the entry's first copy
+/// did, with the chain kept on its paused drain; its answer re-enters
+/// [`handle_copy_target_choice`] for the same entrant, so the chain stays in
+/// the one enter-as-copy pipeline until no acquired replacement is left. A
+/// promptless copy (an indexed exiled source) installs here, and the offer is
+/// re-checked for what it acquired. Either way a later copy installed, so the
+/// first copy's exception counters are dropped (CR 707.9e). Decline (index 1),
+/// or an accept that copies nothing, completes the entry as the current copy
+/// with its surviving exception counters.
 fn answer_acquired_copy_offer(
     state: &mut GameState,
     index: usize,
@@ -3345,59 +3505,95 @@ fn answer_acquired_copy_offer(
         .expect("an acquired copy offer owns the pending replacement");
     let ProposedEvent::ZoneChange {
         object_id: entrant,
-        enter_with_counters: exception_counters,
+        enter_with_counters,
         ..
     } = &pending.proposed
     else {
         unreachable!("acquired copy offers park ZoneChange proposals");
     };
     let entrant = *entrant;
-    let exception_counters = exception_counters.clone();
+    let mut exception_counters = enter_with_counters.clone();
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
-    if index == 0 {
-        let [rid] = pending.candidates.as_slice() else {
-            unreachable!("an acquired copy offer parks exactly one candidate");
-        };
-        let execute = state
+    let execute = (index == 0)
+        .then(|| match pending.candidates.as_slice() {
+            [rid] => state
+                .objects
+                .get(&rid.source)
+                .and_then(|object| object.replacement_definitions.get(rid.index))
+                .and_then(|replacement| replacement.execute.clone()),
+            _ => unreachable!("an acquired copy offer parks exactly one candidate"),
+        })
+        .flatten();
+    if let Some(execute) = execute {
+        let applied = pending.proposed.applied_set().clone();
+        let entrant_pin = state
             .objects
-            .get(&rid.source)
-            .and_then(|object| object.replacement_definitions.get(rid.index))
-            .and_then(|replacement| replacement.execute.clone());
-        if let Some(execute) = execute {
-            let mut applied = pending.proposed.applied_set().clone();
-            applied.insert(AppliedReplacementKey::object(rid.source, rid.index));
-            let chooser = pending.choice_player;
-            state.install_post_replacement_drain(
-                crate::types::game_state::PostReplacementDrain {
-                    status: crate::types::game_state::DrainStatus::Ready(
-                        PostReplacementContinuation::Template(execute),
-                    ),
-                    source: Some(entrant),
-                    applied,
-                    event_source: None,
-                    event_target: None,
-                    controller: chooser,
-                },
-                crate::types::game_state::ResidentDrainPolicy::Replace,
-            );
-            // CR 614.12a: this entry's battlefield event was deferred when its
-            // first copy choice paused, and is replayed once, after the final
-            // copy. The dispatch below re-captures from this action's events,
-            // which hold no entry event, so keep the entry's own capture.
-            let deferred_entry_events = std::mem::take(&mut state.deferred_entry_events);
-            let waiting_for = apply_pending_post_replacement_effect(
-                state,
-                Some(entrant),
-                None,
-                Some(ReplacementEvent::Moved),
-                events,
-            );
-            state.deferred_entry_events = deferred_entry_events;
-            if let Some(waiting_for) = waiting_for {
-                state.waiting_for = waiting_for.clone();
-                return Ok(waiting_for);
+            .get(&entrant)
+            .map(crate::types::identifiers::ObjectIncarnationRef::from_object);
+        let copies_before = entrant_pin.map_or(0, |pin| {
+            effects::become_copy::installed_copy_effect_count(state, pin)
+        });
+        let predetermined_source = predetermined_copy_source(state, &execute, entrant);
+        state.install_post_replacement_drain(
+            crate::types::game_state::PostReplacementDrain {
+                status: crate::types::game_state::DrainStatus::Ready(
+                    PostReplacementContinuation::Template(execute),
+                ),
+                source: Some(entrant),
+                applied: applied.clone(),
+                event_source: None,
+                event_target: None,
+                controller: pending.choice_player,
+            },
+            crate::types::game_state::ResidentDrainPolicy::Replace,
+        );
+        // CR 614.12a: this entry's battlefield event was deferred when its
+        // first copy choice paused, and is replayed once, after the final
+        // copy. The dispatch below re-captures from this action's events,
+        // which hold no entry event, so keep the entry's own capture.
+        let deferred_entry_events = std::mem::take(&mut state.deferred_entry_events);
+        let waiting_for = apply_pending_post_replacement_effect(
+            state,
+            Some(entrant),
+            None,
+            Some(ReplacementEvent::Moved),
+            events,
+        );
+        state.deferred_entry_events = deferred_entry_events;
+        if let Some(waiting_for) = waiting_for {
+            // CR 614.5: the dispatch consumed the drain's applied set; keep the
+            // entry's chain on the paused drain for the copy-source answer.
+            if let Some(drain) = state
+                .active_post_replacement_drains_mut()
+                .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+                .filter(|drain| drain.source == Some(entrant))
+            {
+                drain.applied = applied;
+            }
+            state.waiting_for = waiting_for.clone();
+            return Ok(waiting_for);
+        }
+        let copies_after = entrant_pin.map_or(0, |pin| {
+            effects::become_copy::installed_copy_effect_count(state, pin)
+        });
+        if copies_after > copies_before {
+            // CR 707.9e: a later copy effect applied, so the earlier copy's
+            // additional-effect counters do not happen; the later copy placed
+            // its own exception counters as it resolved.
+            exception_counters.clear();
+            if let Some(copied) = predetermined_source {
+                if let Some(waiting_for) = offer_acquired_enter_as_copy_replacement(
+                    state,
+                    entrant,
+                    copied,
+                    &applied,
+                    &exception_counters,
+                    &mut Vec::new(),
+                ) {
+                    return Ok(waiting_for);
+                }
             }
         }
     }
@@ -3411,9 +3607,12 @@ fn answer_acquired_copy_offer(
     )? {
         return Ok(waiting_for);
     }
-    state.waiting_for = WaitingFor::Priority {
-        player: state.active_player,
-    };
+    // CR 616.1 + CR 614.12a: completing the entry can drain a parked token
+    // batch's continuation, whose next token raises its own entry prompt.
+    // `waiting_for` was reset above, so anything else is that live prompt.
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return Ok(state.waiting_for.clone());
+    }
     super::engine::resume_pending_continuation_if_priority(state, events)?;
     Ok(state.waiting_for.clone())
 }

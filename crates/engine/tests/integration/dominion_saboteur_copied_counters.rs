@@ -19,6 +19,22 @@ use engine::types::zones::Zone;
 
 const DOMINION_SABOTEUR: &str = "You may have this creature enter as a copy of any artifact or creature on the battlefield, except it isn't legendary. If you do, it enters with additional counters on it equal to the same number and kinds of counters the copied permanent has on it.";
 
+/// Golden Egg {2} Artifact — Food — verbatim Oracle text.
+const GOLDEN_EGG: &str = "When this artifact enters, draw a card.\n{1}, {T}, Sacrifice this artifact: Add one mana of any color.\n{2}, {T}, Sacrifice this artifact: You gain 3 life.";
+/// Isamaru, Hound of Konda {W} Legendary Creature — Dog 2/2 — no rules text.
+const ISAMARU: &str = "Isamaru, Hound of Konda";
+
+/// Puts Golden Egg onto `owner`'s battlefield. A copy of it draws a card for
+/// P0 as it enters, so P0's library is stocked to keep that draw legal.
+fn add_golden_egg(scenario: &mut GameScenario, owner: engine::types::player::PlayerId) -> ObjectId {
+    let egg = scenario
+        .add_artifact_from_oracle(owner, "Golden Egg", GOLDEN_EGG)
+        .with_subtypes(vec!["Food"])
+        .id();
+    scenario.with_library_top(P0, &["Island", "Island"]);
+    egg
+}
+
 fn cast_to_copy_offer(runner: &mut GameRunner, saboteur: ObjectId) {
     let card_id = runner.state().objects[&saboteur].card_id;
     runner
@@ -76,7 +92,7 @@ fn copying_a_legendary_creature_drops_legendary_and_mirrors_its_counters() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let donor = scenario
-        .add_creature_from_oracle(P1, "Legendary Bear", 2, 2, "")
+        .add_creature_from_oracle(P1, ISAMARU, 2, 2, "")
         .as_legendary()
         .id();
     scenario.with_counter(donor, CounterType::Plus1Plus1, 2);
@@ -91,7 +107,7 @@ fn copying_a_legendary_creature_drops_legendary_and_mirrors_its_counters() {
 
     let entered = &runner.state().objects[&saboteur];
     assert_eq!(entered.zone, Zone::Battlefield);
-    assert_eq!(entered.name, "Legendary Bear");
+    assert_eq!(entered.name, ISAMARU);
     assert!(
         !entered
             .card_types
@@ -122,9 +138,7 @@ fn copying_a_legendary_creature_drops_legendary_and_mirrors_its_counters() {
 fn copying_an_artifact_mirrors_every_counter_kind() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let donor = scenario
-        .add_artifact_from_oracle(P0, "Charged Relic", "")
-        .id();
+    let donor = add_golden_egg(&mut scenario, P0);
     let charge = CounterType::Generic("charge".to_string());
     scenario.with_counter(donor, charge.clone(), 3);
     scenario.with_counter(donor, CounterType::Plus1Plus1, 1);
@@ -139,7 +153,7 @@ fn copying_an_artifact_mirrors_every_counter_kind() {
 
     let entered = &runner.state().objects[&saboteur];
     assert_eq!(entered.zone, Zone::Battlefield);
-    assert_eq!(entered.name, "Charged Relic");
+    assert_eq!(entered.name, "Golden Egg");
     assert_eq!(entered.counters.get(&charge).copied(), Some(3));
     assert_eq!(
         entered.counters.get(&CounterType::Plus1Plus1).copied(),
@@ -153,7 +167,7 @@ fn declining_the_copy_enters_a_plain_creature_without_counters() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let donor = scenario
-        .add_creature_from_oracle(P1, "Legendary Bear", 2, 2, "")
+        .add_creature_from_oracle(P1, ISAMARU, 2, 2, "")
         .as_legendary()
         .id();
     scenario.with_counter(donor, CounterType::Plus1Plus1, 2);
@@ -192,7 +206,7 @@ fn returned_from_the_graveyard_it_still_copies_the_counters() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let donor = scenario
-        .add_creature_from_oracle(P1, "Legendary Bear", 2, 2, "")
+        .add_creature_from_oracle(P1, ISAMARU, 2, 2, "")
         .as_legendary()
         .id();
     scenario.with_counter(donor, CounterType::Plus1Plus1, 2);
@@ -214,7 +228,7 @@ fn returned_from_the_graveyard_it_still_copies_the_counters() {
     assert_eq!(outcome.zone_of(saboteur), Zone::Battlefield);
 
     let entered = &runner.state().objects[&saboteur];
-    assert_eq!(entered.name, "Legendary Bear");
+    assert_eq!(entered.name, ISAMARU);
     assert!(!entered
         .card_types
         .supertypes
@@ -234,9 +248,7 @@ fn returned_from_the_graveyard_it_still_copies_the_counters() {
 fn a_token_copy_created_by_an_effect_copies_the_counters() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let donor = scenario
-        .add_artifact_from_oracle(P1, "Charged Relic", "")
-        .id();
+    let donor = add_golden_egg(&mut scenario, P1);
     let charge = CounterType::Generic("charge".to_string());
     scenario.with_counter(donor, charge.clone(), 3);
     let saboteur = scenario
@@ -263,7 +275,7 @@ fn a_token_copy_created_by_an_effect_copies_the_counters() {
         .collect();
     assert_eq!(tokens.len(), 1, "exactly one token copy enters");
     let token = tokens[0];
-    assert_eq!(token.name, "Charged Relic");
+    assert_eq!(token.name, "Golden Egg");
     assert_eq!(
         token.counters.get(&charge).copied(),
         Some(3),
@@ -325,14 +337,10 @@ struct AcquiredCopyBoard {
     runner: GameRunner,
     saboteur: ObjectId,
     steel: ObjectId,
-    relic: ObjectId,
+    egg: ObjectId,
 }
 
-/// A textless test artifact's only ability: an entry trigger, so a test can
-/// count how many times the realized copy's entry was observed.
-const RELIC_ENTRY_TRIGGER: &str = "When this artifact enters, you gain 2 life.";
-
-/// An uncopied Sculpting Steel with two +1/+1 counters, a Charged Relic (with
+/// An uncopied Sculpting Steel with two +1/+1 counters, a Golden Egg (with
 /// an entry trigger) with three charge counters, and Dominion Saboteur in hand.
 fn acquired_copy_board() -> AcquiredCopyBoard {
     let mut scenario = GameScenario::new();
@@ -341,10 +349,8 @@ fn acquired_copy_board() -> AcquiredCopyBoard {
         .add_artifact_from_oracle(P1, "Sculpting Steel", SCULPTING_STEEL)
         .id();
     scenario.with_counter(steel, CounterType::Plus1Plus1, 2);
-    let relic = scenario
-        .add_artifact_from_oracle(P1, "Charged Relic", RELIC_ENTRY_TRIGGER)
-        .id();
-    scenario.with_counter(relic, CounterType::Generic("charge".to_string()), 3);
+    let egg = add_golden_egg(&mut scenario, P1);
+    scenario.with_counter(egg, CounterType::Generic("charge".to_string()), 3);
     let saboteur = scenario
         .add_creature_to_hand_from_oracle(P0, "Dominion Saboteur", 3, 3, DOMINION_SABOTEUR)
         .id();
@@ -352,13 +358,13 @@ fn acquired_copy_board() -> AcquiredCopyBoard {
         runner: scenario.build(),
         saboteur,
         steel,
-        relic,
+        egg,
     }
 }
 
 /// CR 616.1c + CR 616.1f + CR 707.9e: Dominion Saboteur copies an uncopied
 /// Sculpting Steel, then applies the copy replacement it acquired from Steel to
-/// copy Charged Relic. The later copy retires the Saboteur exception's
+/// copy Golden Egg. The later copy retires the Saboteur exception's
 /// additional counters, and Steel's own replacement copies no counters.
 #[test]
 fn copying_an_uncopied_sculpting_steel_offers_its_copy_replacement_too() {
@@ -366,10 +372,10 @@ fn copying_an_uncopied_sculpting_steel_offers_its_copy_replacement_too() {
         mut runner,
         saboteur,
         steel,
-        relic,
+        egg,
         ..
     } = acquired_copy_board();
-    let life_before = runner.state().players[0].life;
+    let library_before = runner.state().players[0].library.len();
 
     cast_to_copy_offer(&mut runner, saboteur);
     accept_copy_of(&mut runner, steel);
@@ -377,20 +383,18 @@ fn copying_an_uncopied_sculpting_steel_offers_its_copy_replacement_too() {
     runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("apply the acquired copy replacement");
-    choose_copy_source(&mut runner, relic);
+    choose_copy_source(&mut runner, egg);
     assert_settled(&mut runner);
     assert_eq!(
-        runner.state().players[0].life,
-        life_before + 2,
-        "CR 614.12a + CR 603.6a: the entry is observed once, as the final copy"
+        runner.state().players[0].library.len(),
+        library_before - 1,
+        "CR 614.12a + CR 603.6a: the entry is observed once, as the final copy — \
+         Golden Egg's copied entry trigger draws exactly one card"
     );
 
     let entered = &runner.state().objects[&saboteur];
     assert_eq!(entered.zone, Zone::Battlefield);
-    assert_eq!(
-        entered.name, "Charged Relic",
-        "the winning copy is the Relic"
-    );
+    assert_eq!(entered.name, "Golden Egg", "the winning copy is Golden Egg");
     assert!(
         entered.counters.is_empty(),
         "CR 707.9e: the later copy retires Saboteur's copied counters, and \
@@ -399,7 +403,7 @@ fn copying_an_uncopied_sculpting_steel_offers_its_copy_replacement_too() {
     );
     assert!(
         entered.replacement_definitions.is_empty(),
-        "the Relic copy carries no enter-as-copy replacement"
+        "the Golden Egg copy carries no enter-as-copy replacement"
     );
 }
 
@@ -473,9 +477,7 @@ fn a_sculpting_steel_copying_an_uncopied_steel_may_copy_again() {
     let resident = scenario
         .add_artifact_from_oracle(P1, "Sculpting Steel", SCULPTING_STEEL)
         .id();
-    let relic = scenario
-        .add_artifact_from_oracle(P1, "Charged Relic", "")
-        .id();
+    let egg = add_golden_egg(&mut scenario, P1);
     let entering = scenario
         .add_artifact_to_hand_from_oracle(P0, "Sculpting Steel", SCULPTING_STEEL)
         .id();
@@ -487,17 +489,17 @@ fn a_sculpting_steel_copying_an_uncopied_steel_may_copy_again() {
     runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("apply the acquired copy replacement");
-    choose_copy_source(&mut runner, relic);
+    choose_copy_source(&mut runner, egg);
     assert_settled(&mut runner);
 
     let entered = &runner.state().objects[&entering];
     assert_eq!(entered.zone, Zone::Battlefield);
-    assert_eq!(entered.name, "Charged Relic");
+    assert_eq!(entered.name, "Golden Egg");
 }
 
 /// CR 614.12 + CR 616.1f on the token path: a token copy of an uncopied
 /// Dominion Saboteur copies an uncopied Sculpting Steel and then, through the
-/// replacement acquired from it, Charged Relic — with no counters (CR 707.9e).
+/// replacement acquired from it, Golden Egg — with no counters (CR 707.9e).
 #[test]
 fn a_token_copy_also_offers_the_acquired_copy_replacement() {
     let mut scenario = GameScenario::new();
@@ -506,10 +508,8 @@ fn a_token_copy_also_offers_the_acquired_copy_replacement() {
         .add_artifact_from_oracle(P1, "Sculpting Steel", SCULPTING_STEEL)
         .id();
     scenario.with_counter(steel, CounterType::Plus1Plus1, 2);
-    let relic = scenario
-        .add_artifact_from_oracle(P1, "Charged Relic", "")
-        .id();
-    scenario.with_counter(relic, CounterType::Generic("charge".to_string()), 3);
+    let egg = add_golden_egg(&mut scenario, P1);
+    scenario.with_counter(egg, CounterType::Generic("charge".to_string()), 3);
     let saboteur = scenario
         .add_creature_from_oracle(P0, "Dominion Saboteur", 3, 3, DOMINION_SABOTEUR)
         .id();
@@ -541,7 +541,7 @@ fn a_token_copy_also_offers_the_acquired_copy_replacement() {
     runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("apply the acquired copy replacement");
-    choose_copy_source(&mut runner, relic);
+    choose_copy_source(&mut runner, egg);
     assert_settled(&mut runner);
 
     let state = runner.state();
@@ -552,10 +552,269 @@ fn a_token_copy_also_offers_the_acquired_copy_replacement() {
         .collect();
     assert_eq!(tokens.len(), 1, "exactly one token copy enters");
     assert_eq!(tokens[0].id, token);
-    assert_eq!(tokens[0].name, "Charged Relic");
+    assert_eq!(tokens[0].name, "Golden Egg");
     assert!(
         tokens[0].counters.is_empty(),
         "CR 707.9e: no copied counters survive the later copy; got {:?}",
         tokens[0].counters
     );
+}
+
+/// Clone {3}{U} Creature — Shapeshifter 0/0 — verbatim Oracle text.
+const CLONE: &str =
+    "You may have this creature enter as a copy of any creature on the battlefield.";
+/// Rite of Replication {2}{U}{U} Sorcery — verbatim Oracle text.
+const RITE_OF_REPLICATION: &str = "Kicker {5} (You may pay an additional {5} as you cast this spell.)\nCreate a token that's a copy of target creature. If this spell was kicked, create five of those tokens instead.";
+
+/// CR 614.5 + CR 616.1f: a token copy of an uncopied Dominion Saboteur has
+/// Saboteur's replacement because it copies that Saboteur. Using it to copy
+/// that same Saboteur acquires no new replacement — the one it would acquire
+/// is the one that already applied — so the entry completes, with the copied
+/// Saboteur's counters, and is not offered Saboteur's replacement again.
+#[test]
+fn a_token_copying_the_saboteur_it_copies_is_not_offered_that_replacement_again() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let saboteur = scenario
+        .add_creature_from_oracle(P0, "Dominion Saboteur", 3, 3, DOMINION_SABOTEUR)
+        .id();
+    scenario.with_counter(saboteur, CounterType::Plus1Plus1, 1);
+    let counterpart = scenario
+        .add_spell_to_hand_from_oracle(P0, "Cackling Counterpart", true, CACKLING_COUNTERPART)
+        .id();
+    let mut runner = scenario.build();
+
+    let _ = runner.cast(counterpart).target_object(saboteur).commit();
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the token copy offers Saboteur's replacement, got {:?}",
+        runner.state().waiting_for
+    );
+    accept_copy_of(&mut runner, saboteur);
+    assert_settled(&mut runner);
+
+    let state = runner.state();
+    let tokens: Vec<_> = state
+        .objects
+        .values()
+        .filter(|object| object.is_token && object.zone == Zone::Battlefield)
+        .collect();
+    assert_eq!(tokens.len(), 1, "exactly one token copy enters");
+    assert_eq!(tokens[0].name, "Dominion Saboteur");
+    assert_eq!(
+        tokens[0].counters.get(&CounterType::Plus1Plus1).copied(),
+        Some(1),
+        "the copied Saboteur's counter is added by the one applied rider"
+    );
+    assert_eq!(tokens[0].counters.len(), 1);
+}
+
+/// CR 616.1f + CR 707.9e (second half): Clone copies an uncopied Dominion
+/// Saboteur and so acquires Saboteur's replacement; applying it to copy
+/// Grizzly Bears, that later copy's own exception adds the Bears' counters.
+#[test]
+fn clone_copying_an_uncopied_saboteur_then_copies_with_the_saboteur_rider() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let saboteur = scenario
+        .add_creature_from_oracle(P1, "Dominion Saboteur", 3, 3, DOMINION_SABOTEUR)
+        .id();
+    scenario.with_counter(saboteur, CounterType::Plus1Plus1, 1);
+    let bears = scenario
+        .add_creature_from_oracle(P1, "Grizzly Bears", 2, 2, "")
+        .id();
+    scenario.with_counter(bears, CounterType::Plus1Plus1, 2);
+    let clone = scenario
+        .add_creature_to_hand_from_oracle(P0, "Clone", 0, 0, CLONE)
+        .id();
+    let mut runner = scenario.build();
+
+    cast_to_copy_offer(&mut runner, clone);
+    accept_copy_of(&mut runner, saboteur);
+    assert_acquired_copy_offer(&runner, clone);
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("apply the replacement Clone acquired from Saboteur");
+    choose_copy_source(&mut runner, bears);
+    assert_settled(&mut runner);
+
+    let entered = &runner.state().objects[&clone];
+    assert_eq!(entered.zone, Zone::Battlefield);
+    assert_eq!(entered.name, "Grizzly Bears");
+    assert_eq!(
+        entered.counters.get(&CounterType::Plus1Plus1).copied(),
+        Some(2),
+        "the later copy's own exception adds the Bears' two counters, and \
+         Clone's copy of Saboteur placed none"
+    );
+    assert_eq!(entered.counters.len(), 1);
+    assert_eq!((entered.power, entered.toughness), (Some(4), Some(4)));
+}
+
+/// How a token in the Rite of Replication batch answers the offer of the
+/// replacement it acquired from Sculpting Steel.
+#[derive(Clone, Copy)]
+enum AcquiredAnswer {
+    Decline,
+    AcceptCopying(ObjectId),
+}
+
+/// Casts kicked Rite of Replication on Dominion Saboteur and drives every
+/// token through: accept Saboteur's own replacement, copy the uncopied
+/// Sculpting Steel, then answer the replacement acquired from Steel per
+/// `answer`. Returns how many own and acquired offers were made.
+fn drive_kicked_rite_batch(
+    runner: &mut GameRunner,
+    rite: ObjectId,
+    saboteur: ObjectId,
+    steel: ObjectId,
+    answer: AcquiredAnswer,
+) -> (usize, usize) {
+    let _ = runner
+        .cast(rite)
+        .target_object(saboteur)
+        .accept_optional()
+        .commit();
+    runner.advance_until_stack_empty();
+
+    let (mut own_offers, mut acquired_offers) = (0, 0);
+    for _ in 0..96 {
+        let waiting_for = runner.state().waiting_for.clone();
+        match waiting_for {
+            WaitingFor::ReplacementChoice { candidates, .. } => {
+                // A token still entering (liminal, shaped as Saboteur) is
+                // offered its own replacement; a token that entered as a Steel
+                // copy is offered the replacement it acquired from Steel.
+                let offerer = candidates[0].source_id;
+                let index = if runner.state().liminal_entries.contains_key(&offerer) {
+                    own_offers += 1;
+                    0
+                } else {
+                    let object = &runner.state().objects[&offerer];
+                    assert!(object.is_token, "only the tokens are offered a copy");
+                    assert_eq!(object.name, "Sculpting Steel");
+                    acquired_offers += 1;
+                    match answer {
+                        AcquiredAnswer::Decline => 1,
+                        AcquiredAnswer::AcceptCopying(_) => 0,
+                    }
+                };
+                runner
+                    .act(GameAction::ChooseReplacement { index })
+                    .expect("answer the enter-as-copy offer");
+            }
+            WaitingFor::CopyTargetChoice { source_id, .. } => {
+                let chooser_is_steel_copy = runner
+                    .state()
+                    .objects
+                    .get(&source_id)
+                    .is_some_and(|object| object.name == "Sculpting Steel");
+                let donor = match answer {
+                    AcquiredAnswer::AcceptCopying(donor) if chooser_is_steel_copy => donor,
+                    _ => steel,
+                };
+                choose_copy_source(runner, donor);
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => runner.advance_until_stack_empty(),
+            other => panic!("unexpected prompt in the token batch: {other:?}"),
+        }
+    }
+    assert_settled(runner);
+    (own_offers, acquired_offers)
+}
+
+/// An uncopied Sculpting Steel with two +1/+1 counters, Golden Egg, Dominion
+/// Saboteur, and kicked-castable Rite of Replication in hand.
+fn kicked_rite_board() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let steel = scenario
+        .add_artifact_from_oracle(P1, "Sculpting Steel", SCULPTING_STEEL)
+        .id();
+    scenario.with_counter(steel, CounterType::Plus1Plus1, 2);
+    let egg = add_golden_egg(&mut scenario, P1);
+    scenario.with_library_top(P0, &["Island"; 6]);
+    let saboteur = scenario
+        .add_creature_from_oracle(P0, "Dominion Saboteur", 3, 3, DOMINION_SABOTEUR)
+        .id();
+    let rite = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rite of Replication", false, RITE_OF_REPLICATION)
+        .id();
+    for _ in 0..5 {
+        scenario.add_basic_land(P0, engine::types::mana::ManaColor::Blue);
+    }
+    (scenario.build(), rite, saboteur, steel, egg)
+}
+
+fn battlefield_tokens(runner: &GameRunner) -> Vec<&engine::game::game_object::GameObject> {
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.is_token && object.zone == Zone::Battlefield)
+        .collect()
+}
+
+/// CR 616.1f + CR 707.9e across a token batch: kicked Rite of Replication makes
+/// five token copies of Dominion Saboteur. Each copies an uncopied Sculpting
+/// Steel and declines the replacement it acquired, so each keeps Saboteur's
+/// copied counters, and the batch continues past every parked offer.
+#[test]
+fn a_kicked_rite_of_replication_batch_completes_through_each_declined_offer() {
+    let (mut runner, rite, saboteur, steel, _) = kicked_rite_board();
+    let (own_offers, acquired_offers) =
+        drive_kicked_rite_batch(&mut runner, rite, saboteur, steel, AcquiredAnswer::Decline);
+    assert_eq!(
+        own_offers, 5,
+        "each of the five tokens is offered Saboteur's copy"
+    );
+    assert_eq!(acquired_offers, 5, "each token is offered what it acquired");
+
+    let tokens = battlefield_tokens(&runner);
+    assert_eq!(tokens.len(), 5, "kicked: five token copies enter");
+    for token in tokens {
+        assert_eq!(token.name, "Sculpting Steel");
+        assert_eq!(
+            token.counters.get(&CounterType::Plus1Plus1).copied(),
+            Some(2),
+            "a declined acquired offer keeps Saboteur's copied counters on {:?}",
+            token.id
+        );
+        assert_eq!(token.counters.len(), 1);
+    }
+}
+
+/// CR 616.1f + CR 707.9e across a token batch, accepting: each of the five
+/// tokens copies Steel, then Golden Egg through the replacement it acquired.
+/// The later copy retires Saboteur's counters, and the batch continues past
+/// every resumed copy chain.
+#[test]
+fn a_kicked_rite_of_replication_batch_completes_through_each_accepted_offer() {
+    let (mut runner, rite, saboteur, steel, egg) = kicked_rite_board();
+    let (own_offers, acquired_offers) = drive_kicked_rite_batch(
+        &mut runner,
+        rite,
+        saboteur,
+        steel,
+        AcquiredAnswer::AcceptCopying(egg),
+    );
+    assert_eq!(own_offers, 5);
+    assert_eq!(acquired_offers, 5);
+
+    let tokens = battlefield_tokens(&runner);
+    assert_eq!(tokens.len(), 5, "kicked: five token copies enter");
+    for token in &tokens {
+        assert_eq!(token.name, "Golden Egg");
+        assert!(
+            token.counters.is_empty(),
+            "CR 707.9e: no copied counters survive the later copy on {:?}: {:?}",
+            token.id,
+            token.counters
+        );
+    }
 }
