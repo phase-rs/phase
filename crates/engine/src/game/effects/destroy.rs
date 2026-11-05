@@ -10,7 +10,12 @@ use crate::types::ability::{
     TypedFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PostReplacementDrain, ResidentDrainPolicy, WaitingFor};
+pub(crate) use crate::types::game_state::SimultaneousDeparture;
+use crate::types::game_state::{
+    GameState, PendingSimultaneousDeparture, QueuedSimultaneousDeparture, ResidentDrainPolicy,
+    SimultaneousDepartureConsultStep as ConsultStep, SimultaneousDepartureMember,
+    SimultaneousDepartureOwner, SimultaneousDepartureStage, WaitingFor,
+};
 use crate::types::identifiers::{ObjectId, ObjectIdentityBinding};
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
@@ -401,134 +406,70 @@ pub fn resolve_all(
         .copied()
         .collect();
 
+    // CR 701.8a + CR 608.2c: every matching permanent is destroyed by one
+    // simultaneous event. Each member's destruction is consulted while the
+    // whole set is present and only then delivered, and a choice on the way
+    // parks the rest of the batch instead of abandoning it. The owner's
+    // completion stamps the co-departures and publishes `EffectResolved`.
     let members: Vec<_> = matching
         .iter()
-        .map(|&id| (id, SimultaneousDeparture::Destroy))
+        .map(|&object_id| SimultaneousDepartureMember {
+            object_id,
+            departure: SimultaneousDeparture::Destroy,
+        })
         .collect();
-    let batch = depart_simultaneously_consulting_together(
+    let _ = depart_simultaneously(
         state,
         &members,
+        SimultaneousDepartureOwner::DestroyAll {
+            source_id: ability.source_id,
+            kind: EffectKind::from(&ability.effect),
+        },
         Some(ability.source_id),
         cant_regenerate,
         events,
     );
-    let one_at_a_time: &[ObjectId] = match batch {
-        SimultaneousDepartureOutcome::Completed { .. } => &[],
-        SimultaneousDepartureOutcome::Paused => return Ok(()),
-        SimultaneousDepartureOutcome::NotTaken => &matching,
-    };
-    for &obj_id in one_at_a_time {
-        let proposed = ProposedEvent::Destroy {
-            object_id: obj_id,
-            source: Some(ability.source_id),
-            cant_regenerate,
-            applied: HashSet::new(),
-        };
-
-        match replacement::replace_event(state, proposed, events) {
-            ReplacementResult::Execute(event) => {
-                if !apply_destroy_after_replacement(state, event, events) {
-                    return Ok(());
-                }
-            }
-            // Regenerated, or replaced by an "instead" effect whose replacing
-            // instructions run now, before the next object is consulted.
-            ReplacementResult::Prevented => {
-                if let Some(waiting_for) = run_prevented_destruction_continuation(state, events) {
-                    state.waiting_for = waiting_for;
-                    return Ok(());
-                }
-            }
-            ReplacementResult::NeedsChoice(player) => {
-                state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
-                return Ok(());
-            }
-        }
-    }
-
-    // CR 603.10a + CR 704.3: every creature destroyed by this effect left the
-    // battlefield simultaneously, so co-departing leaves-the-battlefield/dies
-    // observers (Blood Artist, Zulaport Cutthroat) must observe each other.
-    // CR 701.19a/b: a regenerated member (and any other Prevented destruction)
-    // stays on the battlefield, so `departed_subset` excludes it from every
-    // survivor's co-departed group.
-    crate::game::zones::mark_simultaneous_departures(
-        events,
-        &crate::game::zones::departed_subset(state, &matching),
-    );
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
 
     Ok(())
 }
 
-/// How one member of a simultaneous batch leaves the battlefield.
+/// How [`depart_simultaneously`] ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SimultaneousDeparture {
-    /// CR 701.8a: destroyed. The destruction is consulted, then its graveyard
-    /// move.
-    Destroy,
-    /// CR 704.5f: put into its owner's graveyard without being destroyed, so
-    /// only the graveyard move is consulted.
-    PutIntoGraveyard,
-}
-
-/// How [`depart_simultaneously_consulting_together`] ended.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SimultaneousDepartureOutcome {
-    /// Every member was consulted and delivered. `delivered` lists the members
-    /// whose (possibly redirected) zone change was carried out.
-    Completed { delivered: Vec<ObjectId> },
-    /// A delivery surfaced a choice; `state.waiting_for` is set.
+    /// Every member was consulted and delivered, and the owner's completion
+    /// ran.
+    Completed,
+    /// A consult or a delivery surfaced a choice; `state.waiting_for` is set
+    /// and the rest of the batch is parked in a `SimultaneousDeparture` frame,
+    /// resumed once that choice's own work has settled.
     Paused,
-    /// Nothing changed; the caller moves the members one at a time instead.
-    NotTaken,
 }
 
-/// One member's consulted departure, held until every member is consulted.
-struct QueuedDeparture {
-    object_id: ObjectId,
-    /// CR 400.7: the battlefield object that was consulted. A replacing
-    /// instruction run for an earlier member (Crackling Emergence's "sacrifice
-    /// this Aura") may already have moved it, and a new object is not the one
-    /// this departure was consulted for.
-    binding: ObjectIdentityBinding,
-    /// The destroying source, carried onto the delivery and `CreatureDestroyed`.
-    source: Option<ObjectId>,
-    /// The approved zone change, or `None` when the graveyard move was
-    /// prevented.
-    zone_event: Option<ProposedEvent>,
-    /// Whether the departure is a destruction (emits `CreatureDestroyed`)
-    /// rather than an outer redirect or a CR 704.5f move.
-    destroyed: bool,
-    /// CR 614.6: the replacing instructions the consult stashed for this
-    /// member (Kalitas's "create a 2/2 black Zombie"), run as part of its own
-    /// delivery. Held here because the pipeline keeps one pending rider: a
-    /// second member's would be discarded while the first one waits.
-    rider: Option<PostReplacementDrain>,
+/// Whether consulting one member kept going or parked the batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsultFlow {
+    Continue,
+    Paused,
 }
 
 /// CR 614.1a + CR 614.6: does a member's departure have a replacement effect
-/// whose source is another member? Only then must every departure be consulted
-/// while all members are still present; otherwise the one-at-a-time path is
-/// equivalent, because each member's replacements are consulted while their
-/// sources are still on the battlefield.
-fn co_departing_replacement_applies(
+/// whose source is another member? Only then must every death of a
+/// state-based-action batch be consulted while all members are still present;
+/// otherwise each member's replacements are consulted while their sources are
+/// still on the battlefield whichever order the deaths are performed in.
+pub(crate) fn co_departing_replacement_applies(
     state: &GameState,
-    members: &[(ObjectId, SimultaneousDeparture)],
+    members: &[SimultaneousDepartureMember],
     source: Option<ObjectId>,
     cant_regenerate: bool,
 ) -> bool {
-    let member_ids: HashSet<ObjectId> = members.iter().map(|&(id, _)| id).collect();
+    let member_ids: HashSet<ObjectId> = members.iter().map(|member| member.object_id).collect();
     let registry = replacement::replacement_registry();
-    members.iter().any(|&(object_id, departure)| {
+    members.iter().any(|member| {
+        let object_id = member.object_id;
         let graveyard_move =
             ProposedEvent::zone_change(object_id, Zone::Battlefield, Zone::Graveyard, source);
-        let destruction = match departure {
+        let destruction = match member.departure {
             SimultaneousDeparture::Destroy => Some(ProposedEvent::Destroy {
                 object_id,
                 source,
@@ -548,186 +489,474 @@ fn co_departing_replacement_applies(
     })
 }
 
-/// CR 614.1a + CR 614.6 + CR 701.8a: several permanents leave the battlefield
-/// at once (a "destroy all" spell; CR 704.3 state-based actions), so a
-/// replacement effect whose source is itself one of them (Dr. McCoy protecting
-/// the other creatures Wrath of God destroys; Kalitas, Traitor of Ghet exiling
-/// the opposing creatures that die with it) still applies to the others.
-/// Consult every member's destruction and graveyard move while the whole set
-/// is present, then deliver the moves. The single authority for both the
-/// destroy-all and the state-based-action batch.
+/// CR 614.1a + CR 614.6 + CR 616.1 + CR 701.8a: several permanents leave the
+/// battlefield at once (a "destroy all" instruction; CR 704.3 state-based
+/// actions), so a replacement effect whose source is itself one of them (Dr.
+/// McCoy protecting the other creatures Wrath of God destroys; Kalitas,
+/// Traitor of Ghet exiling the opposing creatures that die with it) still
+/// applies to the others. Consult every member's destruction and graveyard
+/// move while the whole set is present, then deliver the moves. The single
+/// authority for both the destroy-all and the state-based-action batch.
 ///
 /// Each member's stashed replacing instructions are detached and held with its
 /// queued delivery, then reinstalled just before that delivery, whose tail runs
 /// them. A queued member that has meanwhile left the battlefield is skipped
 /// with its instructions (CR 400.7).
 ///
-/// Returns `NotTaken` with nothing changed when no member is the source of a
-/// replacement that applies to another member, or when a consult or a
-/// replacing instruction run during the consult needed a player's choice
-/// (CR 616.1): state and events are restored to the snapshot and the caller
-/// moves the members one at a time, which surfaces that prompt.
-///
-/// Known gap: a choice surfaced by a *delivery* (after the consult) returns
-/// `Paused` and the remaining queued deliveries are not resumed after it. No
-/// printed card is known to reach it: it needs a co-departing replacement
-/// source plus a graveyard-move delivery tail that prompts.
-pub(crate) fn depart_simultaneously_consulting_together(
+/// A choice is never a reason to abandon the batch. A consult that needs a
+/// CR 616.1 choice parks the batch with that member in flight; the answer is
+/// recorded into the queue rather than delivered on its own, so the members
+/// consulted after it still see every co-departing replacement source
+/// ([`resume_parked_departure_consult`]). A delivery whose move or replacing
+/// instructions need a choice (Kalitas's Zombie meeting Jinnie Fay's "you may
+/// instead create") parks the batch beneath that choice's own work; once it has
+/// settled, the batch delivers the rest ([`drain_pending_simultaneous_departure`]).
+pub(crate) fn depart_simultaneously(
     state: &mut GameState,
-    members: &[(ObjectId, SimultaneousDeparture)],
+    members: &[SimultaneousDepartureMember],
+    owner: SimultaneousDepartureOwner,
     source: Option<ObjectId>,
     cant_regenerate: bool,
     events: &mut Vec<GameEvent>,
 ) -> SimultaneousDepartureOutcome {
-    if members.len() < 2
-        || !co_departing_replacement_applies(state, members, source, cant_regenerate)
-    {
-        return SimultaneousDepartureOutcome::NotTaken;
-    }
-
-    let snapshot = state.clone();
-    let events_start = events.len();
-    let restore = |state: &mut GameState, events: &mut Vec<GameEvent>| {
-        *state = snapshot.clone();
-        events.truncate(events_start);
+    let pending = PendingSimultaneousDeparture {
+        owner,
+        source,
+        cant_regenerate,
+        announced: members.iter().map(|member| member.object_id).collect(),
+        unconsulted: members.to_vec(),
+        queued: Vec::new(),
+        stage: None,
+        delivered: Vec::new(),
+        outer_rider_pending: state.has_post_replacement_drain(),
+        deferred_events: Vec::new(),
     };
-    // A rider already pending before the batch belongs to an outer event; the
-    // batch must neither detach it nor run it out of turn. Its members' riders
-    // then collide with it exactly as on the one-at-a-time path.
-    let outer_rider_pending = state.has_post_replacement_drain();
+    let batch_start = events.len();
+    advance_simultaneous_departure(state, pending, batch_start, events)
+}
 
-    let mut queue: Vec<QueuedDeparture> = Vec::with_capacity(members.len());
-    for &(object_id, departure) in members {
+/// CR 614.6 + CR 616.1 + CR 608.2c: resume a parked simultaneous departure
+/// once the child that paused it (a delivery's prompt, a replacing
+/// instruction's prompt) has settled. The member whose delivery was in flight
+/// is recorded, the events held back while the batch was paused are restored
+/// ahead of this action's, and the remaining members are consulted and
+/// delivered.
+pub(crate) fn drain_pending_simultaneous_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
+    let Some(mut pending) = state
+        .take_active_simultaneous_departure()
+        .expect("simultaneous-departure resumer may consume only its active frame")
+    else {
+        return;
+    };
+    match pending.stage.take() {
+        None => {}
+        // CR 616.1: the consult's answer was carried out by the answer's own
+        // owner rather than recorded here (the batch was not the active frame
+        // when the answer arrived), so that member's departure already
+        // happened; the rest of the batch continues.
+        Some(SimultaneousDepartureStage::Consulting { .. }) => {}
+        Some(SimultaneousDepartureStage::Delivering {
+            object_id,
+            source,
+            destroyed,
+            moved,
+        }) => {
+            // CR 614.5 + CR 614.6: a token-choice substitute accepted during
+            // that member's delivery (Jinnie Fay's Cats) seeded its applied set
+            // so it cannot re-apply to its own tokens. Its work has settled;
+            // the next member's replacing instructions create a new event that
+            // the same replacement may modify again.
+            state.post_replacement_token_choice_applied = None;
+            state.post_replacement_token_substitution_count = None;
+            record_delivery(&mut pending, object_id, source, destroyed, moved, events);
+        }
+    }
+    // CR 603.10a: one departure is observable as one batch. The events held
+    // back while it was paused precede everything this resuming action
+    // produced.
+    let mut restored = std::mem::take(&mut pending.deferred_events);
+    restored.append(events);
+    *events = restored;
+    let _ = advance_simultaneous_departure(state, pending, 0, events);
+}
+
+/// A replacement choice is about to be answered while a simultaneous
+/// departure's consult is parked on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ParkedDepartureConsult {
+    outer_rider_pending: bool,
+}
+
+/// CR 616.1: is the replacement choice about to be answered the parked consult
+/// of a simultaneous departure? Read before the answer is applied: applying it
+/// can stash the chosen replacement's instructions above the batch's frame.
+pub(crate) fn parked_departure_consult(
+    state: &GameState,
+    answered_object: Option<ObjectId>,
+) -> Option<ParkedDepartureConsult> {
+    let pending = state.active_simultaneous_departure()?;
+    match &pending.stage {
+        Some(SimultaneousDepartureStage::Consulting { member, .. })
+            if Some(member.object_id) == answered_object =>
+        {
+            Some(ParkedDepartureConsult {
+                outer_rider_pending: pending.outer_rider_pending,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// CR 616.1 + CR 614.6 + CR 701.8a: record the answered consult of a parked
+/// simultaneous departure into its queue instead of carrying the departure out
+/// on its own, then leave the batch parked for the shared resumption boundary
+/// (or parked again on the member's next choice). Delivering the answered
+/// member here would take it off the battlefield while later members are
+/// still being consulted, stripping them of a replacement it is the source of
+/// (Kalitas exiling the other creatures Wrath of God destroys).
+///
+/// Returns the answer back when the batch's frame is no longer reachable, so
+/// the caller carries it out through its ordinary path.
+pub(crate) fn resume_parked_departure_consult(
+    state: &mut GameState,
+    parked: ParkedDepartureConsult,
+    result: ReplacementResult,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), ReplacementResult> {
+    // Applying the answer may have stashed the chosen replacement's
+    // instructions in a drain frame above the batch. They belong to this
+    // member; lift them off so the batch is reachable, then reinstall them for
+    // the consult to queue with the member.
+    let rider = if parked.outer_rider_pending {
+        None
+    } else {
+        state.detach_ready_post_replacement_drain()
+    };
+    let taken = state.take_active_simultaneous_departure();
+    if let Some(rider) = rider {
+        state.install_post_replacement_drain(rider, ResidentDrainPolicy::KeepResident);
+    }
+    let Ok(Some(mut pending)) = taken else {
+        return Err(result);
+    };
+    let Some(SimultaneousDepartureStage::Consulting {
+        member,
+        binding,
+        step,
+    }) = pending.stage.take()
+    else {
+        unreachable!("a parked departure consult owns a Consulting stage");
+    };
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    let consult_start = events.len();
+    let child_stack_start = state.resolution_stack.capture_child_boundary();
+    match settle_consult(state, &mut pending, member, binding, step, result, events) {
+        ConsultFlow::Paused => {
+            park_simultaneous_departure(state, pending, child_stack_start, consult_start, events);
+        }
+        ConsultFlow::Continue => {
+            // The answered member is queued; the shared resumption boundary
+            // consults the rest and delivers the batch.
+            pending
+                .deferred_events
+                .extend(events.drain(consult_start..));
+            state.resolution_stack.push_simultaneous_departure(pending);
+        }
+    }
+    Ok(())
+}
+
+/// Consult the remaining members, then deliver every queued one, parking the
+/// batch on the first choice. Runs the owner's completion once nothing is
+/// left. `stamp_from` is where this batch's events begin in `events`.
+fn advance_simultaneous_departure(
+    state: &mut GameState,
+    mut pending: PendingSimultaneousDeparture,
+    stamp_from: usize,
+    events: &mut Vec<GameEvent>,
+) -> SimultaneousDepartureOutcome {
+    while !pending.unconsulted.is_empty() {
+        let member = pending.unconsulted.remove(0);
         // CR 400.7: an earlier member's replacing instructions may have moved
         // this one already; it is no longer on the battlefield to depart.
         let Some(binding) = state
             .objects
-            .get(&object_id)
+            .get(&member.object_id)
             .filter(|obj| obj.zone == Zone::Battlefield && obj.is_phased_in())
             .map(ObjectIdentityBinding::from_object)
         else {
             continue;
         };
-
-        // (zone event, destruction source, whether it is the destruction itself).
-        let consulted: Option<(Option<ProposedEvent>, Option<ObjectId>, bool)> = match departure {
-            SimultaneousDeparture::Destroy => {
-                let proposed = ProposedEvent::Destroy {
-                    object_id,
-                    source,
-                    cant_regenerate,
+        let child_stack_start = state.resolution_stack.capture_child_boundary();
+        let (step, proposed) = match member.departure {
+            SimultaneousDeparture::Destroy => (
+                ConsultStep::Destruction,
+                ProposedEvent::Destroy {
+                    object_id: member.object_id,
+                    source: pending.source,
+                    cant_regenerate: pending.cant_regenerate,
                     applied: HashSet::new(),
-                };
-                match replacement::replace_event(state, proposed, events) {
-                    ReplacementResult::Execute(ProposedEvent::Destroy {
-                        object_id,
-                        source,
-                        ..
-                    }) => {
-                        let zone_proposed = ProposedEvent::zone_change(
-                            object_id,
-                            Zone::Battlefield,
-                            Zone::Graveyard,
-                            source,
-                        );
-                        match replacement::replace_event(state, zone_proposed, events) {
-                            ReplacementResult::Execute(zone_event) => {
-                                Some((Some(zone_event), source, true))
-                            }
-                            ReplacementResult::Prevented => Some((None, source, true)),
-                            ReplacementResult::NeedsChoice(_) => {
-                                restore(state, events);
-                                return SimultaneousDepartureOutcome::NotTaken;
-                            }
-                        }
-                    }
-                    // CR 614.6: an outer redirect of the destruction itself.
-                    ReplacementResult::Execute(redirect @ ProposedEvent::ZoneChange { .. }) => {
-                        Some((Some(redirect), None, false))
-                    }
-                    ReplacementResult::Execute(_) => None,
-                    // Regenerated, or replaced by an "instead" effect whose
-                    // replacing instructions run now.
-                    ReplacementResult::Prevented => {
-                        if run_prevented_destruction_continuation(state, events).is_some() {
-                            restore(state, events);
-                            return SimultaneousDepartureOutcome::NotTaken;
-                        }
-                        None
-                    }
-                    ReplacementResult::NeedsChoice(_) => {
-                        restore(state, events);
-                        return SimultaneousDepartureOutcome::NotTaken;
-                    }
-                }
-            }
-            SimultaneousDeparture::PutIntoGraveyard => {
-                let proposed =
-                    ProposedEvent::zone_change(object_id, Zone::Battlefield, Zone::Graveyard, None);
-                match replacement::replace_event(state, proposed, events) {
-                    ReplacementResult::Execute(zone_event) => Some((Some(zone_event), None, false)),
-                    ReplacementResult::Prevented => Some((None, None, false)),
-                    ReplacementResult::NeedsChoice(_) => {
-                        restore(state, events);
-                        return SimultaneousDepartureOutcome::NotTaken;
-                    }
-                }
-            }
+                },
+            ),
+            // CR 704.5f: a put-into-graveyard death has no destroying source.
+            SimultaneousDeparture::PutIntoGraveyard => (
+                ConsultStep::GraveyardMove {
+                    source: None,
+                    destroyed: false,
+                },
+                ProposedEvent::zone_change(
+                    member.object_id,
+                    Zone::Battlefield,
+                    Zone::Graveyard,
+                    None,
+                ),
+            ),
         };
-
-        if let Some((zone_event, source, destroyed)) = consulted {
-            let rider = if outer_rider_pending {
-                None
-            } else {
-                state.detach_ready_post_replacement_drain()
-            };
-            queue.push(QueuedDeparture {
-                object_id,
-                binding,
-                source,
-                zone_event,
-                destroyed,
-                rider,
-            });
+        let result = replacement::replace_event(state, proposed, events);
+        if settle_consult(state, &mut pending, member, binding, step, result, events)
+            == ConsultFlow::Paused
+        {
+            park_simultaneous_departure(state, pending, child_stack_start, stamp_from, events);
+            return SimultaneousDepartureOutcome::Paused;
         }
     }
 
-    let mut delivered = Vec::with_capacity(queue.len());
-    for queued in queue {
+    while !pending.queued.is_empty() {
+        let queued = pending.queued.remove(0);
         // CR 400.7: the consulted object already left (sacrificed by another
         // member's replacing instructions); neither its move nor its replacing
         // instructions happen.
         if !queued.binding.is_current(state) {
             continue;
         }
+        let child_stack_start = state.resolution_stack.capture_child_boundary();
         let has_rider = queued.rider.is_some();
         if let Some(rider) = queued.rider {
             state.install_post_replacement_drain(rider, ResidentDrainPolicy::KeepResident);
         }
-        match queued.zone_event {
+        let moved = queued.zone_event.is_some();
+        let paused = match queued.zone_event {
             // The delivery tail runs the reinstalled rider (CR 614.6).
             Some(zone_event) => {
-                if !deliver_destruction_zone_change(state, zone_event, queued.source, events) {
-                    return SimultaneousDepartureOutcome::Paused;
-                }
-                delivered.push(queued.object_id);
+                !deliver_destruction_zone_change(state, zone_event, queued.source, events)
             }
-            None if has_rider => {
-                if let Some(waiting_for) = run_prevented_destruction_continuation(state, events) {
+            None if has_rider => match run_prevented_destruction_continuation(state, events) {
+                Some(waiting_for) => {
                     state.waiting_for = waiting_for;
-                    return SimultaneousDepartureOutcome::Paused;
+                    true
                 }
-            }
-            None => {}
-        }
-        if queued.destroyed {
-            events.push(GameEvent::CreatureDestroyed {
+                None => false,
+            },
+            None => false,
+        };
+        if paused {
+            // CR 608.2c: the member's delivery finishes through the choice's
+            // own work; the batch records it once that work has settled.
+            pending.stage = Some(SimultaneousDepartureStage::Delivering {
                 object_id: queued.object_id,
-                source_id: queued.source,
+                source: queued.source,
+                destroyed: queued.destroyed,
+                moved,
             });
+            park_simultaneous_departure(state, pending, child_stack_start, stamp_from, events);
+            return SimultaneousDepartureOutcome::Paused;
+        }
+        record_delivery(
+            &mut pending,
+            queued.object_id,
+            queued.source,
+            queued.destroyed,
+            moved,
+            events,
+        );
+    }
+
+    complete_simultaneous_departure(state, &pending, stamp_from, events);
+    SimultaneousDepartureOutcome::Completed
+}
+
+/// CR 616.1 + CR 614.6: settle one consult step of `member` from its
+/// replacement result, queueing its approved move with its own replacing
+/// instructions. A destruction that executes goes on to consult its graveyard
+/// move. A choice records the step in flight so its answer resumes it.
+fn settle_consult(
+    state: &mut GameState,
+    pending: &mut PendingSimultaneousDeparture,
+    member: SimultaneousDepartureMember,
+    binding: ObjectIdentityBinding,
+    step: ConsultStep,
+    result: ReplacementResult,
+    events: &mut Vec<GameEvent>,
+) -> ConsultFlow {
+    match (step, result) {
+        (_, ReplacementResult::NeedsChoice(player)) => {
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+            pending.stage = Some(SimultaneousDepartureStage::Consulting {
+                member,
+                binding,
+                step,
+            });
+            ConsultFlow::Paused
+        }
+        // CR 701.8a: the destruction happens, so its graveyard move is
+        // consulted next.
+        (
+            ConsultStep::Destruction,
+            ReplacementResult::Execute(ProposedEvent::Destroy {
+                object_id, source, ..
+            }),
+        ) => {
+            let zone_proposed =
+                ProposedEvent::zone_change(object_id, Zone::Battlefield, Zone::Graveyard, source);
+            let result = replacement::replace_event(state, zone_proposed, events);
+            settle_consult(
+                state,
+                pending,
+                member,
+                binding,
+                ConsultStep::GraveyardMove {
+                    source,
+                    destroyed: true,
+                },
+                result,
+                events,
+            )
+        }
+        // CR 614.6: an outer redirect of the destruction itself.
+        (
+            ConsultStep::Destruction,
+            ReplacementResult::Execute(redirect @ ProposedEvent::ZoneChange { .. }),
+        ) => {
+            queue_departure(state, pending, member, binding, None, Some(redirect), false);
+            ConsultFlow::Continue
+        }
+        (ConsultStep::Destruction, ReplacementResult::Execute(_)) => ConsultFlow::Continue,
+        // Regenerated, or replaced by an "instead" effect whose replacing
+        // instructions run now, before the next member is consulted. Nothing of
+        // this member's departure remains, so a prompt they raise parks the
+        // batch with no member in flight.
+        (ConsultStep::Destruction, ReplacementResult::Prevented) => {
+            match run_prevented_destruction_continuation(state, events) {
+                Some(waiting_for) => {
+                    state.waiting_for = waiting_for;
+                    ConsultFlow::Paused
+                }
+                None => ConsultFlow::Continue,
+            }
+        }
+        (ConsultStep::GraveyardMove { source, destroyed }, ReplacementResult::Execute(event)) => {
+            queue_departure(
+                state,
+                pending,
+                member,
+                binding,
+                source,
+                Some(event),
+                destroyed,
+            );
+            ConsultFlow::Continue
+        }
+        (ConsultStep::GraveyardMove { source, destroyed }, ReplacementResult::Prevented) => {
+            queue_departure(state, pending, member, binding, source, None, destroyed);
+            ConsultFlow::Continue
         }
     }
-    SimultaneousDepartureOutcome::Completed { delivered }
+}
+
+/// Queue one consulted member, detaching the replacing instructions its consult
+/// stashed so a later member's cannot displace them.
+fn queue_departure(
+    state: &mut GameState,
+    pending: &mut PendingSimultaneousDeparture,
+    member: SimultaneousDepartureMember,
+    binding: ObjectIdentityBinding,
+    source: Option<ObjectId>,
+    zone_event: Option<ProposedEvent>,
+    destroyed: bool,
+) {
+    let rider = if pending.outer_rider_pending {
+        None
+    } else {
+        state.detach_ready_post_replacement_drain()
+    };
+    pending.queued.push(QueuedSimultaneousDeparture {
+        object_id: member.object_id,
+        binding,
+        source,
+        zone_event,
+        destroyed,
+        rider,
+    });
+}
+
+/// Record one member's finished delivery.
+fn record_delivery(
+    pending: &mut PendingSimultaneousDeparture,
+    object_id: ObjectId,
+    source: Option<ObjectId>,
+    destroyed: bool,
+    moved: bool,
+    events: &mut Vec<GameEvent>,
+) {
+    if moved {
+        pending.delivered.push(object_id);
+    }
+    if destroyed {
+        events.push(GameEvent::CreatureDestroyed {
+            object_id,
+            source_id: source,
+        });
+    }
+}
+
+/// Park the batch on the choice just surfaced, holding back the events it has
+/// produced so far (from `batch_start`) until it settles (CR 603.10a).
+fn park_simultaneous_departure(
+    state: &mut GameState,
+    mut pending: PendingSimultaneousDeparture,
+    child_stack_start: crate::types::resolution::ChildStackDepth,
+    batch_start: usize,
+    events: &mut Vec<GameEvent>,
+) {
+    pending.deferred_events.extend(events.drain(batch_start..));
+    state.park_simultaneous_departure(pending, child_stack_start);
+}
+
+/// The logical owner's completion, run once after every member has departed.
+fn complete_simultaneous_departure(
+    state: &mut GameState,
+    pending: &PendingSimultaneousDeparture,
+    stamp_from: usize,
+    events: &mut Vec<GameEvent>,
+) {
+    // CR 603.10a + CR 704.3: every member left the battlefield simultaneously,
+    // so co-departing leaves-the-battlefield/dies observers (Blood Artist,
+    // Zulaport Cutthroat) observe each other. CR 701.19a/b: a regenerated
+    // member (and any other prevented departure) stays on the battlefield, so
+    // `departed_subset` excludes it from every co-departed group.
+    let departed = crate::game::zones::departed_subset(state, &pending.announced);
+    match pending.owner {
+        SimultaneousDepartureOwner::DestroyAll { source_id, kind } => {
+            crate::game::zones::mark_simultaneous_departures(&mut events[stamp_from..], &departed);
+            events.push(GameEvent::EffectResolved {
+                kind,
+                source_id,
+                subject: None,
+            });
+        }
+        SimultaneousDepartureOwner::StateBasedDeaths => {
+            crate::game::sba::settle_redirected_state_based_deaths(state, &pending.delivered);
+            crate::game::zones::mark_simultaneous_departures(&mut events[stamp_from..], &departed);
+        }
+    }
 }
 
 #[cfg(test)]

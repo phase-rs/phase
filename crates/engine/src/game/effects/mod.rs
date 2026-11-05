@@ -2055,6 +2055,12 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         ResolutionFrame::DebugCardEntries(_) => {
             crate::game::engine_debug::drain_pending_debug_card_entries(state, events);
         }
+        // CR 614.6 + CR 616.1 + CR 704.3: a simultaneous departure resumes the
+        // members it has not yet consulted or delivered once the child that
+        // paused it has settled.
+        ResolutionFrame::SimultaneousDeparture(_) => {
+            resume_simultaneous_departure_and_exposed_continuation(state, events);
+        }
         ResolutionFrame::EachPlayerCopyChosen(_) => {
             each_player_copy_chosen::drain_pending(state, events);
         }
@@ -2178,9 +2184,35 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         }
     }
 
+    // CR 608.2c + CR 616.1: the child just settled may have been the work a
+    // simultaneous departure was parked under (a member's delivery prompt,
+    // its replacing instructions' prompt). The batch resumes in this same
+    // boundary, so its remaining members leave the battlefield before anything
+    // else can observe it.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.active_simultaneous_departure().is_some()
+    {
+        resume_simultaneous_departure_and_exposed_continuation(state, events);
+    }
+
     clear_post_replacement_token_choice_seed_if_resolution_drained(state);
     if waits_for_resolution_choice(&state.waiting_for) {
         state.resolution_stack.note_repeat_until_descendant_choice();
+    }
+}
+
+/// CR 608.2c: resume the active simultaneous departure, then the enclosing
+/// instruction's continuation its completion exposes ("Destroy all creatures.
+/// Then ..."), mirroring the batch-delivery arm.
+fn resume_simultaneous_departure_and_exposed_continuation(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    destroy::drain_pending_simultaneous_departure(state, events);
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.active_ability_continuation().is_some()
+    {
+        drain_pending_continuation(state, events);
     }
 }
 
@@ -5660,6 +5692,21 @@ fn frame_may_apply_with_entry(frame: &ResolutionFrame) -> bool {
                     None => false,
                 })
         }
+        // A queued member's replacing instructions are later instructions of
+        // the same departure, exactly like a resident post-replacement drain.
+        ResolutionFrame::SimultaneousDeparture(pending) => pending
+            .queued
+            .iter()
+            .filter_map(|queued| queued.rider.as_ref())
+            .any(|drain| match drain.ready_continuation() {
+                Some(PostReplacementContinuation::Template(definition)) => {
+                    definition_chain_may_apply_with_entry(definition)
+                }
+                Some(PostReplacementContinuation::Resolved(resolved)) => {
+                    resolved_chain_may_apply_with_entry(resolved)
+                }
+                None => false,
+            }),
         ResolutionFrame::ChangeZone(_)
         | ResolutionFrame::CounterMoves(_)
         | ResolutionFrame::CounterRemovals(_)

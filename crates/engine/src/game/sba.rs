@@ -987,6 +987,19 @@ fn check_lethal_damage(
     perform_creature_deaths(state, events, any_performed, &to_die);
 }
 
+/// CR 704.3 + CR 704.5g: a state-based death redirected back to the
+/// battlefield keeps no lethal damage (the degenerate self-redirect guard the
+/// one-at-a-time path applies too). Run by a simultaneous death batch's
+/// completion over the members whose moves it carried out.
+pub(crate) fn settle_redirected_state_based_deaths(state: &mut GameState, delivered: &[ObjectId]) {
+    for object_id in delivered {
+        if let Some(obj) = live_battlefield_object_mut(state, object_id) {
+            obj.damage_marked = 0;
+            obj.dealt_deathtouch_damage = false;
+        }
+    }
+}
+
 fn perform_creature_deaths(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -997,50 +1010,43 @@ fn perform_creature_deaths(
     // simultaneous. When a co-dying creature is the source of a replacement
     // that applies to another one's death (Etching of Kumano, Kalitas, Dr.
     // McCoy), consult every death while the whole set is present, then deliver
-    // them; the shared batch restores the snapshot and declines when a
-    // consult needs a choice, leaving the sequential path below to surface it.
+    // them. A choice on the way parks the rest of the batch with each member's
+    // consulted move and replacing instructions, so it resumes under the same
+    // replacement authority instead of re-deriving the deaths after a
+    // co-dying source has gone.
     use crate::game::effects::destroy::{
-        depart_simultaneously_consulting_together, SimultaneousDeparture,
-        SimultaneousDepartureOutcome,
+        co_departing_replacement_applies, depart_simultaneously, SimultaneousDeparture,
     };
+    use crate::types::game_state::{SimultaneousDepartureMember, SimultaneousDepartureOwner};
     let members: Vec<_> = to_die
         .iter()
-        .map(|&death| {
-            let departure = if death.is_destroy() {
+        .map(|&death| SimultaneousDepartureMember {
+            object_id: death.object_id(),
+            departure: if death.is_destroy() {
                 SimultaneousDeparture::Destroy
             } else {
                 SimultaneousDeparture::PutIntoGraveyard
-            };
-            (death.object_id(), departure)
+            },
         })
         .collect();
     // CR 704.5g / CR 704.5h: a state-based destruction has no destroying source.
-    match depart_simultaneously_consulting_together(state, &members, None, false, events) {
-        SimultaneousDepartureOutcome::Completed { delivered } => {
-            *any_performed = true;
-            // Degenerate-self-redirect guard, as on the sequential path below:
-            // a death redirected back to the battlefield keeps no lethal damage.
-            for object_id in delivered {
-                if let Some(obj) = live_battlefield_object_mut(state, &object_id) {
-                    obj.damage_marked = 0;
-                    obj.dealt_deathtouch_damage = false;
-                }
-            }
-            let ids: Vec<ObjectId> = members.iter().map(|&(id, _)| id).collect();
-            zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &ids));
-            return;
-        }
-        SimultaneousDepartureOutcome::Paused => {
-            *any_performed = true;
-            return;
-        }
-        SimultaneousDepartureOutcome::NotTaken => {}
+    if members.len() > 1 && co_departing_replacement_applies(state, &members, None, false) {
+        *any_performed = true;
+        let _ = depart_simultaneously(
+            state,
+            &members,
+            SimultaneousDepartureOwner::StateBasedDeaths,
+            None,
+            false,
+            events,
+        );
+        return;
     }
 
-    // CR 701.19b: Route a single death (or a rolled-back, choice-bearing batch)
-    // through the replacement pipeline so regeneration shields can intercept
-    // destruction. The synchronous multi-object path above keeps co-dying
-    // replacement sources alive through all consultations.
+    // CR 701.19b: Route a single death (or a batch with no co-dying replacement
+    // source) through the replacement pipeline so regeneration shields can
+    // intercept destruction. With no co-dying source, each death's
+    // replacements are consulted while their sources are still present.
     let mut performed_ids = Vec::new();
     for &death in to_die {
         let id = death.object_id();

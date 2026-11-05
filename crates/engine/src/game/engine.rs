@@ -35,7 +35,7 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::TokenAttackRequest;
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
-use crate::types::resolution::ResolutionStack;
+use crate::types::resolution::{ResolutionFrame, ResolutionStack};
 use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
     ResolvedOncePerTurnPermission, ResolvedRulesCommand,
@@ -9782,12 +9782,23 @@ pub(super) fn resume_pending_continuation_if_priority(
         resume_pending_continuation_pass(state, events)?;
         let after = SubtreePosition::at(&state.resolution_stack);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. })
-            || state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
+            || (state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
+                && !holds_parked_simultaneous_departure(&state.resolution_stack))
             || !after.is_strictly_inside(&before)
         {
             return Ok(());
         }
     }
+}
+
+/// CR 608.2c + CR 704.3: a simultaneous departure parked beneath a settling
+/// child is one event still in progress. Like a counter-cost root, it needs
+/// every pass that retires the child work above it, so its remaining members
+/// leave the battlefield before any player receives priority.
+fn holds_parked_simultaneous_departure(stack: &ResolutionStack) -> bool {
+    stack
+        .iter()
+        .any(|frame| matches!(frame, ResolutionFrame::SimultaneousDeparture(_)))
 }
 
 /// The loop's progress measure: stack depth, then the drain count of the active
