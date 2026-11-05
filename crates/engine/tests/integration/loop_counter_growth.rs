@@ -822,7 +822,12 @@ fn unbounded_counter_row_dies_with_its_bearer_but_the_store_does_not() {
 /// CR 732.2a: beside P1's Lightning Bolt the charge-growth loop is offered, and P0's accepted
 /// `Fixed(3)` performs three repetitions, each resolving the engine's trigger once ("put a charge
 /// counter on this creature. You gain 1 life."), so the take adds exactly three charge counters
-/// and 3 life.
+/// and 3 life. No printed card closes this counter-to-life trigger loop: Earth Kingdom General
+/// ("Whenever you put one or more +1/+1 counters on a creature, you may gain that much life. Do
+/// this only once each turn.") fires once a turn and Obelisk Spider ("Whenever you put one or more
+/// -1/-1 counters on a creature, each opponent loses 1 life and you gain 1 life.") needs -1/-1
+/// counters; the nearest is Excalibur II ("Whenever you gain life, put a charge counter on
+/// Excalibur II.").
 #[test]
 fn a_counted_take_of_a_charge_growth_loop_beside_an_out_performs_its_count() {
     let (mut runner, kickoff, rider) =
