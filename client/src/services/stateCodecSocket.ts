@@ -64,7 +64,7 @@ export class StateCodecAttachment {
   /** Bootstrap authority for the adopted socket; `null` before the first adoption. */
   private current: StateCodecBootstrapBinding | null = null;
   /** `null` while delivery is healthy; never holds `"ready"`. */
-  private recovery: StateCodecRecoveryState | null = null;
+  private recovery: "recovering" | null = null;
 
   /**
    * Fresh, still-pending authority for one attach. It is not current until

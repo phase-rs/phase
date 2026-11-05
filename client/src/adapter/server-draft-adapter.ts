@@ -727,8 +727,20 @@ export class ServerDraftAdapter implements EngineAdapter {
       && (attachment.owner.type === "join" || this.pendingInit === attachment.owner.init);
   }
 
-  /** Drops the pending command slot for a codec recovery and rejects it with `error`. */
+  /**
+   * Drops the pending command slot for a codec recovery of the current socket
+   * and rejects it with `error`. A stamped command that was claimed on a
+   * still-open retired socket is not this recovery's to drop: that socket's
+   * completion or close still settles it (see {@link settleRetiredCompletion}
+   * and {@link settleRetiredClose}). An unstamped (legacy) slot settles on the
+   * first completion frame of any socket, and a slot with no recorded socket
+   * has no retired owner, so both are dropped as before.
+   */
   private interruptPendingSubmission(error: AdapterError): void {
+    const claimedOnRetiredSocket = this.submission.stamped
+      && this.submissionSocket !== null
+      && this.submissionSocket !== this.ws;
+    if (claimedOnRetiredSocket) return;
     const dropped = this.submission.drop();
     if (dropped) {
       dropped.reject(error);

@@ -3455,6 +3455,74 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
     adapter.dispose();
   });
 
+  it("leaves a command claimed on the retired socket pending when the current socket's codec recovers", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+
+    const claimed = trackRejection(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
+    const claimedId = lastSubmissionCommandId(ws);
+    const { replacement, replacementSession } = await replaceSocket(adapter, provider, ws);
+    // Drop the retired socket's state events so the wait below observes the replacement's own GameStarted.
+    events.length = 0;
+    await enterCodecMatch(replacement, events);
+    events.length = 0;
+
+    // The replacement's codec stream rejects a frame: recovery of the CURRENT socket.
+    replacementSession.decode.mockImplementationOnce(async () => ({ kind: "resyncRequired" }));
+    replacement.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate",
+      data: { state: matchState("corrupt"), events: [], full_key: FULL_KEY },
+    }));
+    await vi.waitFor(() => expect(replacement.send).toHaveBeenCalledWith('{"type":"ResyncState"}'));
+    // Reach guard: the recovery gate is set, so the interruption ran.
+    await vi.waitFor(() => expect(() => (adapter as unknown as { stateCodec: { assertNotRecovering(): void } }).stateCodec.assertNotRecovering())
+      .toThrow());
+    // The command belongs to the still-open retired socket: not rejected, not released.
+    expect(await claimed()).toBe("never settled");
+    expect(events).not.toContainEqual({ type: "actionPendingChanged", pending: false });
+
+    // The retired socket's valid-key completion still settles it.
+    ws.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate", command_id: claimedId,
+      data: { state: matchState("retired-answer"), events: [{ marker: "retired-answer" }], full_key: FULL_KEY },
+    }));
+    await expect(claimed()).resolves.toMatchObject({
+      resolvedWith: { events: [{ marker: "retired-answer" }] },
+    });
+    expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
+    adapter.dispose();
+  });
+
+  it("still drops a command claimed on the current socket when that socket's codec recovers after a replacement", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    const { replacement, replacementSession } = await replaceSocket(adapter, provider, ws);
+    // Drop the retired socket's state events so the wait below observes the replacement's own GameStarted.
+    events.length = 0;
+    await enterCodecMatch(replacement, events);
+    events.length = 0;
+
+    const claimed = trackRejection(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
+    lastSubmissionCommandId(replacement);
+    replacementSession.decode.mockImplementationOnce(async () => ({ kind: "resyncRequired" }));
+    replacement.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate",
+      data: { state: matchState("corrupt"), events: [], full_key: FULL_KEY },
+    }));
+    await vi.waitFor(() => expect(replacement.send).toHaveBeenCalledWith('{"type":"ResyncState"}'));
+    await expect(claimed()).resolves.toMatchObject({
+      code: "WS_CLOSED", message: "State delivery interrupted during action", recoverable: true,
+    });
+    expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
+    adapter.dispose();
+  });
+
   // A pending preview is owned by the socket it was sent on: a retired socket's
   // close can no longer be answered for its own previews, and must not touch the
   // replacement's.

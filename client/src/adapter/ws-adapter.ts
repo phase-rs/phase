@@ -55,9 +55,9 @@ import {
   StateCodecPreparationAbortError,
   prepareStateCodecSession as prepareBoundedStateCodecSession,
   StateCodecAttachment,
+  type StateCodecName,
   type StateCodecSessionProvider,
 } from "../services/stateCodecSocket";
-import type { StateCodecName } from "../services/stateCodecSocket";
 import type { StateCodecSession } from "./state-codec-runtime";
 import { getSharedAdapter } from "./wasm-adapter";
 import type { WireFormat } from "../network/wireEnvelope";
