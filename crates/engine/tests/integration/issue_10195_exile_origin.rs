@@ -5,8 +5,10 @@
 //! 603.6c defines leaves-the-battlefield abilities); when
 //! the text names the source zone ("is exiled from the battlefield"), an exile
 //! from any other zone is not the trigger event. The parser arm used to drop
-//! the whole ` from <zone>` tail, so Soulherder, Market Gnome and Captain
-//! Marvel, Shooting Star fired on every exile.
+//! the whole ` from <zone>` tail, so Soulherder and Captain Marvel, Shooting
+//! Star fired on an exile from any zone; Market Gnome parsed the same
+//! `origin: null`, but its self-referential trigger then functioned only on
+//! the battlefield, so only its own battlefield exile reached it.
 //!
 //! The "while you're activating a craft ability" qualifier has no AST carrier
 //! yet (it needs a serialized `TriggerConstraint`, i.e. a protocol bump) and is

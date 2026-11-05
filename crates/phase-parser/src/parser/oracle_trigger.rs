@@ -16585,8 +16585,9 @@ fn try_parse_event(
     // CR 701.13a + CR 603.6c: "is exiled" / "are exiled" — exile trigger, with an
     // optional " from <zone>" source-zone tail. The tail used to be a bare
     // prefix test that silently dropped it, so "is exiled from the battlefield"
-    // fired on an exile from any zone (issue #10195: Soulherder, Market Gnome,
-    // Captain Marvel, Shooting Star).
+    // parsed with no origin (issue #10195: Soulherder, Market Gnome, Captain
+    // Marvel, Shooting Star); the battlefield observers then fired on an exile
+    // from any zone.
     if let Ok((after_verb, ())) = alt((
         value((), tag::<_, _, OracleError<'_>>("is exiled")),
         value((), tag("are exiled")),
@@ -16640,10 +16641,14 @@ fn try_parse_event(
             // exclusion; the positive zone list expresses the same set.
             OriginConstraint::NotEquals(zone) => def.origin_zones = origin_zones_except(&[zone]),
         }
-        // CR 113.6k + CR 603.10a: a self-referential "is exiled" trigger
-        // condition cannot trigger from the battlefield alone (it looks back at
-        // the source leaving it), so it functions in every zone it can trigger
-        // from, including graveyard and exile. Mirrors `try_parse_put_into_exile_from`.
+        // CR 113.6k: an unconstrained self-referential "When ~ is exiled" can
+        // trigger from outside the battlefield (e.g. a graveyard exile), so it
+        // must function there; `Exile` is listed because this mode is matched
+        // immediately after the move, with the source already in exile. A
+        // battlefield-origin form (Market Gnome) triggers from the battlefield
+        // and is collected by the CR 603.10a leaves-the-battlefield look-back
+        // scan; the extra zones are inert for it because `match_exiled` checks
+        // the origin. Mirrors `try_parse_put_into_exile_from`.
         if filter_references_self(subject) {
             def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
         }
