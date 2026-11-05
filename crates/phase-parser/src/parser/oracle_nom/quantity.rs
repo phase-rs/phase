@@ -5861,7 +5861,17 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
             alt((
                 parse_distinct_card_types_among,
                 parse_shared_card_types_with,
-                parse_distinct_category_subtypes_among,
+                // This for-each extension is creature-only; other categories
+                // retain their existing number-of quantity-reader support.
+                verify(parse_distinct_category_subtypes_among, |qty| {
+                    matches!(
+                        qty,
+                        QuantityRef::DistinctSubtypes {
+                            restrict: Some(SubtypeSet::Creature),
+                            ..
+                        }
+                    )
+                }),
             )),
             // CR 108.3: owned-card populations; nested to keep the outer `alt`
             // within nom's tuple arity (21 items).
@@ -11195,6 +11205,26 @@ mod tests {
                 .unwrap();
         assert_eq!(rest, "");
         assert!(matches!(q, QuantityRef::DistinctCounterKindsAmong { .. }));
+    }
+
+    #[test]
+    fn for_each_category_subtypes_accepts_creatures_without_extending_planeswalkers() {
+        // SHAPE: the for-each extension is limited to the creature-type class.
+        let (_, qty) = parse_for_each_clause_ref_complete(
+            "creature types among non-borg creatures you control",
+        )
+        .expect("the complete creature-type for-each clause parses");
+        assert!(matches!(
+            qty,
+            QuantityRef::DistinctSubtypes {
+                restrict: Some(SubtypeSet::Creature),
+                ..
+            }
+        ));
+        assert!(parse_for_each_clause_ref_complete(
+            "planeswalker types among planeswalkers you control"
+        )
+        .is_err());
     }
 
     #[test]

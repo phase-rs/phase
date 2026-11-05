@@ -18,22 +18,24 @@
 //! five" counts complete groups (rounded down). CR 707.12 + CR 707.12a: each
 //! card copy may be cast individually.
 //!
-//! Revert probes:
+//! Static discrimination expectations (not executed revert probes):
 //!  * Dropping the "for every" count binder (`oracle_util::parse_count_binder`)
 //!    or the creature-type arm of the for-each reader leaves Sarek's draw
-//!    `Unimplemented` — every Sarek draw count below flips to 0.
+//!    `Unimplemented` — the shared Draw reach guard fails, including the
+//!    zero-draw case; the positive draw outcomes also drop to 0.
 //!  * Restricting `parse_you_draw_this_way_condition` to "one or more" again
 //!    drops the "three or more" gate silently, so the 5-type case gains counters.
 //!  * Dropping the Case 1 multiplicity carry in `fold_cast_copy_of_card_defs`
 //!    makes Infinite Diversity / Mnemonic Deluge offer a single copy.
 
-use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::types::ability::TargetRef;
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, CopyChoiceMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
+use engine::types::mana::parse_mtgjson_mana_cost;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -113,6 +115,22 @@ fn run_sarek(creatures: &[&[&str]]) -> SarekRun {
     let hand_before = runner.state().players[0].hand.len();
 
     runner.advance_to_phase(Phase::BeginCombat);
+    // CR 603.2 + CR 603.3: entering combat must put Sarek's actual parsed
+    // Draw trigger on the stack, even when its count will resolve to zero.
+    let trigger = runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.source_id == sarek)
+        .expect("Sarek's beginning-of-combat trigger reached the stack");
+    let StackEntryKind::TriggeredAbility { ability, .. } = &trigger.kind else {
+        panic!("expected Sarek's triggered ability, got {:?}", trigger.kind);
+    };
+    assert!(
+        matches!(&ability.effect, Effect::Draw { .. }),
+        "Sarek's trigger must contain the parsed Draw, got {:?}",
+        ability.effect
+    );
     runner.advance_until_stack_empty();
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
@@ -182,9 +200,11 @@ fn sarek_with_fifteen_creature_types_draws_three_and_adds_counters() {
 
 /// A graveyard sorcery whose copies have a target-free, observable effect.
 fn add_gain_life_sorcery(scenario: &mut GameScenario) -> ObjectId {
-    let mut builder = scenario.add_spell_to_graveyard(P0, "Test Rite", false);
-    builder.from_oracle_text("You gain 3 life.");
-    builder.id()
+    scenario
+        .add_spell_to_graveyard(P0, "Sacred Nectar", false)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{W}"))
+        .from_oracle_text("You gain 4 life.")
+        .id()
 }
 
 fn p0_life(runner: &GameRunner) -> i32 {
@@ -259,8 +279,8 @@ fn answer_copy_choice(runner: &mut GameRunner, source: ObjectId, accept: bool) {
 
 /// X = 3 distinct non-Borg types (Human, Soldier, Android; Human shared; the
 /// Borg Drone's Wizard and the changeling excluded) → three copies, each
-/// offered individually. Casting two and declining one gains 6 life, not 3 or
-/// 9; the exiled card stays in exile and Infinite Diversity exiles itself.
+/// offered individually. Casting two Sacred Nectars and declining one gains
+/// 8 life; the exiled card stays in exile and Infinite Diversity exiles itself.
 #[test]
 fn infinite_diversity_offers_one_copy_per_non_borg_creature_type() {
     let mut scenario = GameScenario::new();
@@ -268,7 +288,7 @@ fn infinite_diversity_offers_one_copy_per_non_borg_creature_type() {
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Infinite Diversity", false, INFINITE_DIVERSITY)
         .id();
-    let rite = add_gain_life_sorcery(&mut scenario);
+    let nectar = add_gain_life_sorcery(&mut scenario);
     add_population(
         &mut scenario,
         &[&["Human", "Soldier"], &["Android", "Human"]],
@@ -277,10 +297,10 @@ fn infinite_diversity_offers_one_copy_per_non_borg_creature_type() {
     install_type_db(&mut runner);
     let life_before = p0_life(&runner);
 
-    cast_targeting(&mut runner, spell, rite);
-    answer_copy_choice(&mut runner, rite, true);
-    answer_copy_choice(&mut runner, rite, false);
-    answer_copy_choice(&mut runner, rite, true);
+    cast_targeting(&mut runner, spell, nectar);
+    answer_copy_choice(&mut runner, nectar, true);
+    answer_copy_choice(&mut runner, nectar, false);
+    answer_copy_choice(&mut runner, nectar, true);
 
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
@@ -290,10 +310,10 @@ fn infinite_diversity_offers_one_copy_per_non_borg_creature_type() {
     assert!(runner.state().stack.is_empty());
     assert_eq!(
         p0_life(&runner),
-        life_before + 6,
+        life_before + 8,
         "two of three copies cast"
     );
-    assert_eq!(runner.state().objects[&rite].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&nectar].zone, Zone::Exile);
     assert_eq!(runner.state().objects[&spell].zone, Zone::Exile);
 }
 
@@ -306,13 +326,13 @@ fn infinite_diversity_with_no_non_borg_types_makes_no_copies() {
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Infinite Diversity", false, INFINITE_DIVERSITY)
         .id();
-    let rite = add_gain_life_sorcery(&mut scenario);
+    let nectar = add_gain_life_sorcery(&mut scenario);
     add_population(&mut scenario, &[]);
     let mut runner = scenario.build();
     install_type_db(&mut runner);
     let life_before = p0_life(&runner);
 
-    cast_targeting(&mut runner, spell, rite);
+    cast_targeting(&mut runner, spell, nectar);
 
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
@@ -321,12 +341,12 @@ fn infinite_diversity_with_no_non_borg_types_makes_no_copies() {
     );
     assert!(runner.state().stack.is_empty());
     assert_eq!(p0_life(&runner), life_before);
-    assert_eq!(runner.state().objects[&rite].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&nectar].zone, Zone::Exile);
     assert_eq!(runner.state().objects[&spell].zone, Zone::Exile);
 }
 
 /// Fixed-count sibling: Mnemonic Deluge offers three copies; casting all three
-/// gains 9 life.
+/// gains 12 life from Sacred Nectar.
 #[test]
 fn mnemonic_deluge_offers_three_copies() {
     let mut scenario = GameScenario::new();
@@ -334,13 +354,13 @@ fn mnemonic_deluge_offers_three_copies() {
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Mnemonic Deluge", false, MNEMONIC_DELUGE)
         .id();
-    let rite = add_gain_life_sorcery(&mut scenario);
+    let nectar = add_gain_life_sorcery(&mut scenario);
     let mut runner = scenario.build();
     let life_before = p0_life(&runner);
 
-    cast_targeting(&mut runner, spell, rite);
+    cast_targeting(&mut runner, spell, nectar);
     for _ in 0..3 {
-        answer_copy_choice(&mut runner, rite, true);
+        answer_copy_choice(&mut runner, nectar, true);
     }
 
     assert!(
@@ -349,7 +369,71 @@ fn mnemonic_deluge_offers_three_copies() {
         runner.state().waiting_for
     );
     assert!(runner.state().stack.is_empty());
-    assert_eq!(p0_life(&runner), life_before + 9, "three copies cast");
-    assert_eq!(runner.state().objects[&rite].zone, Zone::Exile);
+    assert_eq!(p0_life(&runner), life_before + 12, "three copies cast");
+    assert_eq!(runner.state().objects[&nectar].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Exile);
+}
+
+/// CR 707.12 + CR 707.12a + CR 601.2c: each accepted Lightning Bolt copy
+/// announces its own target. The target-announcement pause must resume only
+/// that iteration, with one independent opportunity to decline the middle copy.
+#[test]
+fn mnemonic_deluge_targeted_copies_resume_with_independent_choices_and_targets() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mnemonic Deluge", false, MNEMONIC_DELUGE)
+        .id();
+    let bolt = scenario
+        .add_spell_to_graveyard(P0, "Lightning Bolt", true)
+        .with_mana_cost(parse_mtgjson_mana_cost("{R}"))
+        .from_oracle_text("Lightning Bolt deals 3 damage to any target.")
+        .id();
+    let mut runner = scenario.build();
+    let p0_before = runner.life(P0);
+    let p1_before = runner.life(P1);
+
+    cast_targeting(&mut runner, spell, bolt);
+    for target in [Some(P0), None, Some(P1)] {
+        answer_copy_choice(&mut runner, bolt, target.is_some());
+        if let Some(target) = target {
+            let WaitingFor::CopyRetarget {
+                player,
+                mode,
+                current_slot,
+                target_slots,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "accepted Bolt copy must announce a target, got {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(*mode, Some(CopyChoiceMode::Announce));
+            assert_eq!(*current_slot, 0);
+            assert_eq!(target_slots.len(), 1);
+            assert!(target_slots[0]
+                .legal_alternatives
+                .contains(&TargetRef::Player(target)));
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Player(target)),
+                })
+                .expect("announce this copy's distinct player target");
+            settle(&mut runner);
+        }
+    }
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "exactly three copy choices and two announcements, then priority; got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.life(P0), p0_before - 3, "first accepted Bolt");
+    assert_eq!(runner.life(P1), p1_before - 3, "third accepted Bolt");
+    assert_eq!(runner.state().objects[&bolt].zone, Zone::Exile);
     assert_eq!(runner.state().objects[&spell].zone, Zone::Exile);
 }

@@ -31010,6 +31010,33 @@ fn draw_a_card_for_every_n_counts_complete_groups() {
     );
 }
 
+/// SHAPE: extending creature-type quantities must leave Svega's unsupported
+/// planeswalker-type for-each activation honestly unparsed, independently of
+/// the other abilities on the card.
+#[test]
+fn svega_planeswalker_type_token_activation_keeps_unparsed_quantity() {
+    let parsed = parse_oracle_text(
+        "Landfall — Whenever a land enters under your control, put a loyalty counter on target planeswalker.\n−2: For each planeswalker type among planeswalkers you control, create a 1/1 Attendee creature token that's all colors.\n−X: Choose an Elspeth, Teferi, Liliana, Chandra, or Garruk planeswalker card name with mana value X. Create a copy of the card with the chosen name. You may cast the copy without paying its mana cost.\nSvega can be your commander.",
+        "Svega, the Unconventional",
+        &[],
+        &["Planeswalker".to_string()],
+        &["Svega".to_string()],
+    );
+    let activation = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(ability.cost, Some(AbilityCost::Loyalty { amount: -2 })))
+        .expect("Svega's printed −2 activation is retained");
+    assert!(
+        matches!(
+            activation.effect.as_ref(),
+            Effect::Unimplemented { name, .. } if name == "unparsed_quantity"
+        ),
+        "the specific −2 activation must fail honestly, got {:?}",
+        activation.effect
+    );
+}
+
 #[test]
 fn random_exile_then_copy_that_card_uses_tracked_set() {
     let def = parse_effect_chain(
