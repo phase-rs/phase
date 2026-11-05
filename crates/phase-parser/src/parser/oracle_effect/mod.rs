@@ -199,7 +199,8 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::BodyScope;
 pub(crate) use crate::parser::oracle_ir::context::{
     BareCardAggregateBinding, ChosenColorQualifierScope, DeclaredSlotEntry, DeclaredSlotRegistry,
-    ParseContext, PriorZoneChoicePartition, TokenPtFollowup, TriggerConditionScope,
+    HeadWindowProbe, ParseContext, PriorZoneChoicePartition, TokenPtFollowup,
+    TriggerConditionScope,
 };
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseId,
@@ -4637,11 +4638,26 @@ pub(crate) fn parse_cast_this_way_enters_with_counter(lower: &str) -> Option<(Co
     .parse(lower)
     .map(|(rest, _)| rest)
     .unwrap_or(lower);
-    // Anaphoric subject for the spell just granted casting permission.
+    // Anaphoric subject for the spell just granted casting permission: "that"
+    // + the permission's printed type noun phrase, which may stack several
+    // card types (CR 205.2b, "that artifact creature enters with …": Overflow
+    // Submatrix) or name the generic "permanent".
+    let anaphoric_type_noun = separated_list1(
+        tag::<_, _, OracleError<'_>>(" "),
+        alt((
+            value((), nom_primitives::parse_core_type),
+            value((), tag("permanent")),
+        )),
+    );
     let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("that creature enters with "),
-        tag("that permanent enters with "),
-        tag("that artifact enters with "),
+        value(
+            (),
+            (
+                tag::<_, _, OracleError<'_>>("that "),
+                anaphoric_type_noun,
+                tag(" enters with "),
+            ),
+        ),
         // Self-granting permission (Undead Sprinter) refers to itself as "this
         // creature" in the printed Oracle text. The main parse pipeline
         // normalizes that phrase to the `~` self-reference token upstream
@@ -4652,11 +4668,11 @@ pub(crate) fn parse_cast_this_way_enters_with_counter(lower: &str) -> Option<(Co
         // the normalized and literal CR 201.5 self-reference forms must be
         // accepted here — distinct from the anaphoric "that creature" a
         // separate-source grant uses.
-        tag("~ enters with "),
-        tag("it enters with "),
-        tag("this creature enters with "),
-        tag("this permanent enters with "),
-        tag("this artifact enters with "),
+        value((), tag("~ enters with ")),
+        value((), tag("it enters with ")),
+        value((), tag("this creature enters with ")),
+        value((), tag("this permanent enters with ")),
+        value((), tag("this artifact enters with ")),
     ))
     .parse(lower)
     .ok()?;
@@ -9063,10 +9079,14 @@ fn try_parse_have_base_pt_become(tp: TextPair<'_>) -> Option<ParsedEffectClause>
     };
 
     // CR 611.2 + CR 514.2: this set is a continuous effect from the resolution of
-    // a (triggered) ability. The card's "until end of turn" suffix is normally
-    // stripped onto the ability frame before this body parses; default to end of
-    // turn when no explicit suffix reaches here, an explicit suffix wins.
-    let duration = duration.or(Some(Duration::UntilEndOfTurn));
+    // a (triggered) ability, and its window is whatever the clause printed.
+    // Emitted VERBATIM: `None` is the only value that says "this recognizer saw no
+    // window", so an enclosing printed window (a leading "Until your next turn,")
+    // can distribute onto it through `with_clause_duration` /
+    // `with_clause_chain_duration`. An injected `UntilEndOfTurn` is byte-identical
+    // to a printed one and silently blocked that distribution (#7962). The
+    // end-of-turn fallback for a genuinely windowless set already exists in the
+    // resolver (`game/effects/animate.rs`'s `.unwrap_or`).
     let mut clause = parsed_clause(effect);
     clause.duration = duration;
     Some(clause)
@@ -9597,6 +9617,14 @@ fn parse_effect_clause_with_damage_context(
     ctx: &mut ParseContext,
     damage_context: DamageTargetContext,
 ) -> ParsedEffectClause {
+    // CR 611.2a: the recognizers below that own their duration return before the
+    // clause shell runs, so a window heading the unpeeled clause is recorded here;
+    // any other clause leaves the probe armed for the post-peel reading.
+    if ctx.head_window.is_armed() {
+        if let Some((window, _)) = strip_leading_duration(text.trim()) {
+            ctx.head_window.settle(Some(window));
+        }
+    }
     // CR 612.1: "Change the text of <target> by replacing all instances of ..." owns its
     // own duration, so it must run before the clause shell peels a trailing one.
     {
@@ -9706,6 +9734,10 @@ fn parse_effect_clause_with_damage_context(
     }
     let (peeled_text, peel_ctx) =
         super::clause_shell::peel_clause_with_anchor(text, ctx.chain_prior_targeted_player);
+    // CR 611.2a: the shell peels only head slots and a TRAILING window, so a window
+    // printed at the head of this clause now heads `peeled_text` — the exact text
+    // the leading-duration arm of `parse_effect_clause_inner` reads.
+    settle_head_window(ctx, &peeled_text);
     // CR 608.2c + CR 109.5: a peeled player subject ("target opponent may",
     // "that creature's controller may", "each opponent …") names who acts, and
     // this clause has no slot to carry it — the chunk loop is where those
@@ -11536,6 +11568,17 @@ mod swap_chosen_labels_parser_tests {
     #[test]
     fn rejects_non_swap_clause() {
         assert_eq!(parse_swap_chosen_labels("each player draws a card"), None);
+    }
+}
+
+/// CR 611.2a + CR 608.2c: settle an armed `ParseContext::head_window` probe with the
+/// window heading `body`, read with the same normalization and combinator the
+/// leading-duration arm of [`parse_effect_clause_inner`] applies to it.
+fn settle_head_window(ctx: &mut ParseContext, body: &str) {
+    if ctx.head_window.is_armed() {
+        let body = strip_leading_sequence_connector(body).trim();
+        ctx.head_window
+            .settle(strip_leading_duration(body).map(|(window, _)| window));
     }
 }
 
@@ -33794,6 +33837,17 @@ const UNREPRESENTABLE_CAST_CAP_GAP: &str = "unrepresentable_cast_cap";
 /// free cast of ANY card, so the clause is refused instead.
 const CAST_TARGET_UNTYPED_GAP: &str = "cast_target_untyped";
 
+/// CR 712.8a + CR 712.11c: The parser gap name for a "from among … exiled this
+/// way" cast clause that names a type on BOTH sides of the anchor ("cast
+/// enchantment spells from among the creature cards exiled this way"). The
+/// suffix gates the card pool, judged on the card where it is (CR 712.8a); the
+/// prefix gates the spell, judged on the face being cast (CR 712.11c). One cast
+/// filter cannot carry the two stages, so the clause is refused rather than
+/// lowered to a single gate that judges both against each face. No printed card
+/// has this shape; the nearest printed cards each carry one side (Wand of
+/// Wonder the prefix, Etali, Primal Conqueror the suffix).
+const FROM_AMONG_POOL_AND_SPELL_GATE_GAP: &str = "from_among_pool_and_spell_gate";
+
 /// CR 608.2c + CR 608.2g: The single construction seam for every `from among`
 /// batch-cast arm.
 ///
@@ -34331,20 +34385,41 @@ fn ensure_exile_zone_on_cast_target(filter: &mut TargetFilter) {
     }
 }
 
+/// CR 601.3: the spell-type gate printed BEFORE a "from among …" anchor
+/// (`before_anchor` is the text preceding "from among "): a type list ("instant
+/// and/or sorcery spells") or a single type ("creature spells"). `None` for the
+/// untyped heads ("any number of spells ", "up to two spells "). The one probe
+/// every "from among" batch arm uses to classify its prefix side.
+fn parse_from_among_prefix_type_gate(before_anchor: &str) -> Option<TargetFilter> {
+    parse_cast_type_list(before_anchor).or_else(|| parse_cast_type_gate(before_anchor))
+}
+
+/// What the `"from among (the|those) [TYPED] (card|cards) exiled this way"`
+/// anchor lowers to, when it is present.
+#[derive(Debug, Clone, PartialEq)]
+enum FromAmongExiledAnchor {
+    /// The cast target: the exile anaphor, with the one-sided type gate if any.
+    Target(TargetFilter),
+    /// A type on both sides of the anchor — a card-pool gate and a spell-face
+    /// gate no single cast filter can carry ([`FROM_AMONG_POOL_AND_SPELL_GATE_GAP`]).
+    PoolAndSpellGate,
+}
+
 /// CR 610.3 + CR 608.2c: Parse the `"from among (the|those) [TYPED]
 /// (card|cards) exiled this way"` anchor and lift its optional typed leg
 /// into a `TargetFilter`.
 ///
 /// Returns:
-/// * `Some(And { ExiledBySource, Typed(tf) })` — typed leg present
+/// * `Some(Target(And { ExiledBySource, Typed(tf) }))` — typed leg present
 ///   (Etali: "the nonland cards exiled this way" → AND with Non(Land)).
-/// * `Some(ExiledBySource)` — bare "the cards exiled this way".
+/// * `Some(Target(ExiledBySource))` — bare "the cards exiled this way".
+/// * `Some(PoolAndSpellGate)` — a type on both sides of the anchor; refused.
 /// * `None` — anchor or "exiled this way" suffix not present.
 ///
 /// Composition mirrors `has_from_among_cards_exiled_with_self` (anchor
 /// strip) and `parse_cast_type_list` / `parse_type_phrase_folding` (typed
 /// leg extraction).
-fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
+fn parse_from_among_exiled_this_way(rest: &str) -> Option<FromAmongExiledAnchor> {
     type E<'a> = OracleError<'a>;
     let (after_anchor, before_anchor) = take_until::<_, _, E>("from among ").parse(rest).ok()?;
     let (after_anchor, _) = tag::<_, _, E>("from among ").parse(after_anchor).ok()?;
@@ -34372,9 +34447,26 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
     //
     // Then the post-article probe ("instant or sorcery cards"), then
     // `parse_type_phrase_folding` ("nonland cards", "creature cards").
-    let mut typed_filter = parse_cast_type_list(before_anchor)
-        .or_else(|| parse_cast_type_list(after_article))
+    //
+    // CR 712.8a + CR 712.11c: when BOTH positions carry a type ("cast
+    // enchantment spells from among the creature cards exiled this way"), the
+    // suffix gates the card pool and the prefix gates the spell face, judged at
+    // different stages. A single cast filter evaluates both against each face,
+    // so the shape is refused (`PoolAndSpellGate`) rather than lowered.
+    //
+    // CR 601.3: a single pre-anchor type ("cast creature spells from among
+    // cards exiled this way") is the same restriction as a list; without it
+    // the gate was dropped and every exiled card was castable.
+    let prefix_gate = parse_from_among_prefix_type_gate(before_anchor);
+    let suffix_filter = parse_cast_type_list(after_article)
         .unwrap_or_else(|| super::oracle_target::parse_type_phrase_folding(after_article).0);
+    let mut typed_filter = match prefix_gate {
+        Some(_) if cast_filter_has_meaningful_typed_leaf(&suffix_filter) => {
+            return Some(FromAmongExiledAnchor::PoolAndSpellGate);
+        }
+        Some(prefix) => prefix,
+        None => suffix_filter,
+    };
 
     // "the cards exiled this way" lifts a bare `Typed(Card)` leaf with no
     // further constraint — that's the structural "cards" anchor, not a
@@ -34384,18 +34476,18 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
     // accessor that excludes Card/Any noise.
     let meaningful = cast_filter_has_meaningful_typed_leaf(&typed_filter);
 
-    Some(if !meaningful {
+    Some(FromAmongExiledAnchor::Target(if !meaningful {
         TargetFilter::ExiledBySource
     } else {
         ensure_exile_zone_on_cast_target(&mut typed_filter);
         if typed_filter.references_exiled_by_source() {
-            return Some(typed_filter.normalized());
+            return Some(FromAmongExiledAnchor::Target(typed_filter.normalized()));
         }
         TargetFilter::And {
             filters: vec![TargetFilter::ExiledBySource, typed_filter],
         }
         .normalized()
-    })
+    }))
 }
 
 /// CR 608.2g + CR 601.2 + CR 118.9: Parse the counted free-cast-window form
@@ -34430,7 +34522,15 @@ fn try_parse_counted_free_cast_from_exiled_this_way(rest: &str) -> Option<Effect
         .parse(after_count)
         .ok()?;
 
-    let mut filter = parse_from_among_exiled_this_way(after_noun)?;
+    let mut filter = match parse_from_among_exiled_this_way(after_noun)? {
+        FromAmongExiledAnchor::Target(filter) => filter,
+        FromAmongExiledAnchor::PoolAndSpellGate => {
+            return Some(Effect::unimplemented(
+                FROM_AMONG_POOL_AND_SPELL_GATE_GAP,
+                rest,
+            ));
+        }
+    };
     // CR 608.2c: "the OTHER cards exiled this way" — rewrite the
     // source-relative `Another` into the tracked-set complement of the prior
     // choose's picks (see doc comment).
@@ -35428,6 +35528,20 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // anywhere in `rest` (post-"cast " prefix) is structurally diagnostic of
     // the per-resolution exile-set anaphor.
     if scan_contains_phrase(rest, "from among those nonland cards") {
+        // CR 712.8a + CR 712.11c: the "nonland cards" suffix gates the card
+        // pool; a spell type printed before the anchor would gate the spell
+        // face at a different stage. Refuse that combined shape exactly as
+        // `parse_from_among_exiled_this_way` does, before lowering a grant
+        // that keeps only the pool gate.
+        let before_anchor = take_until::<_, _, OracleError<'_>>("from among ")
+            .parse(rest)
+            .map_or(rest, |(_, before)| before);
+        if parse_from_among_prefix_type_gate(before_anchor).is_some() {
+            return Some(Effect::unimplemented(
+                FROM_AMONG_POOL_AND_SPELL_GATE_GAP,
+                rest,
+            ));
+        }
         let mut nonland_card_filter = TargetFilter::Typed(
             TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
         );
@@ -35477,15 +35591,24 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // Unlocks the WotC-templated "exiled this way" family: Etali Primal
     // Conqueror, Etali Primal Storm, Crabomination, Gix Yawgmoth Praetor,
     // Hellcarver Demon, and similar.
-    if let Some(target) = parse_from_among_exiled_this_way(rest) {
-        return Some(from_among_batch_cast_effect(
-            from_among_batch_cast_driver(mode, without_paying, rest, ctx),
-            target,
-            mode,
-            without_paying,
-            constraint,
-            rest,
-        ));
+    match parse_from_among_exiled_this_way(rest) {
+        Some(FromAmongExiledAnchor::Target(target)) => {
+            return Some(from_among_batch_cast_effect(
+                from_among_batch_cast_driver(mode, without_paying, rest, ctx),
+                target,
+                mode,
+                without_paying,
+                constraint,
+                rest,
+            ));
+        }
+        Some(FromAmongExiledAnchor::PoolAndSpellGate) => {
+            return Some(Effect::unimplemented(
+                FROM_AMONG_POOL_AND_SPELL_GATE_GAP,
+                rest,
+            ));
+        }
+        None => {}
     }
     // CR 400.1/400.2 + CR 608.2c: The bare "them"/"those cards" anaphor is
     // ambiguous — it usually refers to an exile the chain produced
@@ -48792,6 +48915,11 @@ fn parse_effect_chain_ir_body(
             let prior = builder.clauses().last().map(|c| &c.parsed.effect);
             entry_counter_rider_clause(&text_no_qty, condition.as_ref(), prior)
         };
+        // CR 611.2a + CR 608.2c: arm the head-window probe for THIS clause's main
+        // parse only, after every leading guard above has been lifted, so the clause
+        // parser reports the window it actually lowers at the clause's head (see
+        // `ParseContext::head_window`). Lifted onto the clause's `ClauseIr` below.
+        ctx.head_window = HeadWindowProbe::Armed;
         let (clause, repeat_for) = if let Some(retained_type_clause) = retained_type_clause {
             let duration_binding = retained_type_duration_binding(builder.clauses());
             (retained_type_clause.lower(duration_binding), repeat_for)
@@ -48872,6 +49000,7 @@ fn parse_effect_chain_ir_body(
             &text_no_qty.to_ascii_lowercase(),
         );
         let (clause, repeat_for) = lower_copy_each_tracked_spell(&text_no_qty, clause, repeat_for);
+        let head_window = ctx.head_window.take_window();
 
         // CR 608.2c: a clause that STATED its subject ("target opponent loses
         // life equal to the difference" — Ancient Cellarspawn) has it peeled
@@ -49724,6 +49853,7 @@ fn parse_effect_chain_ir_body(
                 // too, but that predates this change and is left as-is rather
                 // than folded into an unrelated fix.)
                 .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
+                .head_window(head_window.clone())
                 .push();
             continue;
         }
@@ -49790,6 +49920,7 @@ fn parse_effect_chain_ir_body(
                     // clause is a real chunk parse, so its declared provenance
                     // must be threaded rather than defaulted to `None`.
                     .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
+                    .head_window(head_window.clone())
                     .push();
                 continue;
             }
@@ -50420,6 +50551,7 @@ fn parse_effect_chain_ir_body(
                             chunk_ctx.declared_target_choice_timing.take(),
                         )
                         .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
+                        .head_window(head_window.clone())
                         .push();
                 }
                 continue 'chunks;
@@ -50556,6 +50688,7 @@ fn parse_effect_chain_ir_body(
                 .target_chooser(chunk_ctx.target_chooser.clone())
                 .declared_target_choice_timing(chunk_ctx.declared_target_choice_timing.take())
                 .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
+                .head_window(head_window.clone())
                 .declared_player_group(clause_declared_group)
                 .push();
 

@@ -3314,6 +3314,48 @@ type MultiZonePlayerExileParse<'a> = (&'a str, (Vec<TypeFilter>, ControllerRef, 
 type DefenderBoundAttackParse<'a> =
     Result<(&'a str, (TargetFilter, Option<Duration>)), nom::Err<OracleError<'a>>>;
 
+/// CR 400.1 + CR 608.2c: true when a mass-exile operand names an anaphoric
+/// player's zone as its source ("… from that player's hand", "… from that
+/// opponent's graveyard") but the parsed `target` binds no player on any leg —
+/// so the lowered instruction would reach every player's zone. Structural on the
+/// filter (owner/controller axes), grammatical on the text: a nom scan for the
+/// `from <anaphoric possessive> <zone>` source at a word boundary.
+fn operand_dropped_player_possessive_source(rest_lower: &str, target: &TargetFilter) -> bool {
+    fn binds_a_player(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::Typed(tf) => {
+                tf.controller.is_some()
+                    || tf
+                        .properties
+                        .iter()
+                        .any(|prop| matches!(prop, FilterProp::Owned { .. }))
+            }
+            TargetFilter::And { filters } => filters.iter().any(binds_a_player),
+            TargetFilter::Or { filters } => filters.iter().all(binds_a_player),
+            // Any other shape is not a population sweep over typed zone cards.
+            _ => true,
+        }
+    }
+    let names_anaphoric_zone = nom_primitives::scan_at_word_boundaries(rest_lower, |input| {
+        value(
+            (),
+            (
+                tag::<_, _, OracleError<'_>>("from "),
+                alt((
+                    tag("that player's "),
+                    tag("that player\u{2019}s "),
+                    tag("that opponent's "),
+                    tag("that opponent\u{2019}s "),
+                )),
+                alt((tag("hand"), tag("graveyard"), tag("library"))),
+            ),
+        )
+        .parse(input)
+    })
+    .is_some();
+    names_anaphoric_zone && !binds_a_player(target)
+}
+
 /// CR 400.3 + CR 404.1 + CR 406.2 + CR 108.2 + CR 205.2a: "exile all `[<types>]`
 /// cards from `<possessive>` `<zone>` and `<zone>`" — mass exile of the cards a
 /// player owns across a *union* of zones. Two forms:
@@ -8824,10 +8866,13 @@ fn try_parse_gain_quoted_ability(text: &str) -> Option<Effect> {
     if modifications.is_empty() {
         return None;
     }
-    // CR 113.3a: Granted abilities last as long as the granting effect. For
-    // sub_ability inline grants in pump-style spells the parent's UntilEndOfTurn
-    // is the typical default; preserve any explicitly stripped duration.
-    let duration = duration.or(Some(Duration::UntilEndOfTurn));
+    // CR 611.2a: an inline granted ability lasts as long as the
+    // granting effect, so its window is the parsed one VERBATIM. `None` must stay
+    // a true unset sentinel: an injected `UntilEndOfTurn` is byte-identical to a
+    // printed one, which strands an enclosing printed window (an "Until your next
+    // turn," prefix) instead of letting it distribute here. The single authority
+    // for the fallback is the resolver (`game/effects/effect.rs`), which already
+    // applies `.unwrap_or(Duration::UntilEndOfTurn)`.
     Some(Effect::GenericEffect {
         static_abilities: vec![StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
@@ -8865,7 +8910,8 @@ fn coalesce_pump_with_modifications(body_text: &str) -> Option<Effect> {
     if !(has_pt && has_non_pt) {
         return None;
     }
-    let duration = duration.or(Some(Duration::UntilEndOfTurn));
+    // CR 611.2a: emit the parsed window verbatim — see `try_parse_gain_quoted_ability`.
+    // The resolver (`game/effects/effect.rs`) supplies the end-of-turn fallback.
     Some(Effect::GenericEffect {
         static_abilities: vec![StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
@@ -11869,6 +11915,13 @@ pub(super) fn parse_exile_ast(
             ctx,
             EffectScope::All,
         );
+        // CR 400.1 + CR 608.2c: "… from that player's hand" names ONE player's
+        // zone. A filter that bound no owner/controller would sweep every
+        // player's zone (Elder Brain: "exile all cards from that player's hand"),
+        // so refuse rather than lower the wider instruction.
+        if operand_dropped_player_possessive_source(rest_lower, &target) {
+            return None;
+        }
         return Some(ZoneCounterImperativeAst::Exile {
             origin,
             target,
@@ -27795,7 +27848,7 @@ mod tests {
     /// Attack: `+1/+0 and gain "When this creature dies, draw a card."` until
     /// end of turn.
     #[test]
-    fn gain_quoted_trigger_ability_until_end_of_turn() {
+    fn gain_quoted_trigger_ability_states_no_injected_window() {
         let effect =
             try_parse_gain_quoted_ability("gain \"When this creature dies, draw a card.\"")
                 .expect("expected gain-quoted-ability to parse");
@@ -27807,7 +27860,12 @@ mod tests {
         else {
             panic!("expected GenericEffect, got something else");
         };
-        assert_eq!(duration.as_ref(), Some(&Duration::UntilEndOfTurn));
+        assert_eq!(
+            duration.as_ref(),
+            None,
+            "CR 611.2a (#7962): a quoted grant whose text prints no window stays unset; the \
+             resolver owns the end-of-turn fallback"
+        );
         let static_def = static_abilities
             .first()
             .expect("static_abilities must contain the granted modification");
@@ -28357,12 +28415,17 @@ mod tests {
 
     /// No explicit duration on a pump+keyword body defaults to UntilEndOfTurn.
     #[test]
-    fn coalesce_pump_keyword_defaults_until_end_of_turn() {
+    fn coalesce_pump_keyword_leaves_the_window_to_the_resolver() {
         let effect = coalesce_pump_with_modifications("get +1/+0 and gain flying")
             .expect("pump+keyword body should coalesce");
         match effect {
             Effect::GenericEffect { duration, .. } => {
-                assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+                assert_eq!(
+                    duration, None,
+                    "CR 611.2a (#7962): a body that prints no window must not inject one — \
+                     the resolver (`game/effects/effect.rs`) owns the end-of-turn fallback, \
+                     and an injected value would be indistinguishable from a printed one"
+                );
             }
             other => panic!("expected GenericEffect, got {other:?}"),
         }
