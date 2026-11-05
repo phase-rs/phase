@@ -28582,6 +28582,12 @@ fn resolve_unless_payer(
             }
             resolved
         }
+        // CR 608.2c + CR 118.12a: "choose an opponent at random. …
+        // unless they …" — the payer is the player the earlier `Choose`
+        // selected, read from the resolution-scoped `chosen_players` list.
+        TargetFilter::Typed(_) if payer.chosen_player_index().is_some() => {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
+        }
         // CR 115.1 + CR 118.12a: a payer DECLARED as a target inside the unless
         // clause ("unless target opponent/target player pays") resolves to the
         // player chosen at stack placement, read from `ability.targets` (same as

@@ -8732,6 +8732,13 @@ fn parse_event_context_ref_with_ctx<'a>(
         (TargetFilter::TriggeringPlayer, Some(ControllerRef::ParentTargetController)) => {
             TargetFilter::ParentTargetController
         }
+        // CR 608.2c: "that player" after "choose an opponent (at random)"
+        // names the player the `Choose` selected, not the trigger event's
+        // player (Indoraptor, the Perfect Hybrid).
+        (TargetFilter::TriggeringPlayer, Some(scope @ ControllerRef::ChosenPlayer { .. })) => {
+            subject::chosen_player_anaphor_filter(Some(scope))
+                .unwrap_or(TargetFilter::TriggeringPlayer)
+        }
         // CR 608.2c + CR 109.4 + CR 115.1: "that player" after a targeted
         // `Choose` ("target opponent chooses self or others") or a
         // player-typed `TargetOnly` names the ANNOUNCED target — the most
@@ -9570,6 +9577,12 @@ fn parse_effect_clause_with_damage_context(
             );
             let (stripped, unless_pay) =
                 extract_resolution_unless_pay_modifier(&clause_text, player_scope.as_ref());
+            let mut unless_pay = unless_pay;
+            rebind_chosen_player_unless_payer(
+                unless_pay.as_mut(),
+                ctx.relative_player_scope.as_ref(),
+                &stripped,
+            );
             if unless_pay.is_some() {
                 unless_pay_deferred = unless_pay;
                 (None, stripped)
@@ -48121,6 +48134,11 @@ fn parse_effect_chain_ir_body(
 
         let (text, mut unless_pay) =
             extract_resolution_unless_pay_modifier(&text, player_scope.as_ref());
+        rebind_chosen_player_unless_payer(
+            unless_pay.as_mut(),
+            chain_chosen_player_scope.as_ref(),
+            &text,
+        );
 
         // CR 701.17a + CR 608.2k: Derive the actor performing this chunk's effect
         // from any actor prefix that was just stripped ("you (may) ", "an
@@ -52272,6 +52290,65 @@ fn parse_unless_have_you_draw_cost(after_unless: &str) -> Option<AbilityCost> {
             target: TargetFilter::OriginalController,
         }),
     })
+}
+
+/// CR 608.2c + CR 118.12a: after "choose an opponent at random." the anaphoric
+/// unless-payer "they" names the player that `Choose` selected, not a declared
+/// target slot (which resolves to nobody when none exists). Rebinds through the
+/// single chosen-player anaphor authority.
+///
+/// CR 608.2c: this is a FALLBACK, not an override. A clause that declares its
+/// own player subject ("Target player loses 3 life unless they discard a card")
+/// supplies the NEARER antecedent for the "they", which `TargetFilter::Player`
+/// already binds, so an earlier choice must never capture that payer.
+fn rebind_chosen_player_unless_payer(
+    modifier: Option<&mut UnlessPayModifier>,
+    scope: Option<&ControllerRef>,
+    clause_text: &str,
+) {
+    let Some(modifier) = modifier else {
+        return;
+    };
+    if modifier.payer != TargetFilter::Player {
+        return;
+    }
+    // Only a chain that actually chose a player can supply a competing
+    // antecedent, so the clause scan below runs only for that shape.
+    let Some(chosen) = subject::chosen_player_anaphor_filter(scope) else {
+        return;
+    };
+    if clause_declares_player_target(clause_text) {
+        return;
+    }
+    modifier.payer = chosen;
+}
+
+/// CR 115.1 + CR 608.2c: True when an effect clause declares its own player
+/// target ("target player", "target opponent") — as the subject ("Target player
+/// loses 3 life …") or as a recipient after a verb ("deals 3 damage to target
+/// player"). Either position is the nearer antecedent of a following "they"/
+/// "that player", so anaphor rebinding must not reach past it to a player an
+/// earlier instruction chose.
+///
+/// Scans at word boundaries because a declared recipient sits mid-clause. The
+/// probe requires the target KEYWORD, so a descriptor or anaphoric phrase
+/// ("a player", "that player") never blocks rebinding.
+fn clause_declares_player_target(clause_text: &str) -> bool {
+    let lower = clause_text.to_ascii_lowercase();
+    nom_primitives::scan_at_word_boundaries(&lower, parse_declared_player_target_probe).is_some()
+}
+
+/// CR 115.1: scan probe for [`clause_declares_player_target`]. Delegates the
+/// phrase grammar to the single target parser and the player-containing shape
+/// check to the existing explicit-player-target predicate.
+fn parse_declared_player_target_probe(input: &str) -> OracleResult<'_, ()> {
+    let (filter, rest, syntax) =
+        super::oracle_target::parse_target_with_syntax(input, &mut ParseContext::default());
+    if syntax == TargetSyntax::TargetKeyword && target_filter_is_explicit_player_target(&filter) {
+        Ok((rest, ()))
+    } else {
+        Err(oracle_err(input))
+    }
 }
 
 fn extract_resolution_unless_pay_modifier(
