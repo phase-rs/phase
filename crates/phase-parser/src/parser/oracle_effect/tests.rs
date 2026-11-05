@@ -95761,7 +95761,7 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
 
 /// SHAPE (Vulcan Mind-Meld, verbatim): CR 608.2c + CR 115.1 — the targeted
 /// subject performs the exile from the caster's library; "their library" binds
-/// to that declared player; CR 406.6 — each exiled card's grant binds to its
+/// to that declared player; CR 406.3a — each exiled card's grant binds to its
 /// exiling player; CR 609.4b — the standalone "this way" concession folds onto
 /// that grant.
 #[test]

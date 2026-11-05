@@ -5563,7 +5563,7 @@ pub enum PermissionGrantee {
     /// of Hospitality), read through `TargetFilter::TriggeringSourceController`
     /// with its last-known-information fallback (CR 608.2h).
     TriggeringSourceController,
-    /// CR 406.6 + CR 608.2c — each object's recorded exiling player (the
+    /// CR 406.3 + CR 608.2c — each object's recorded exiling player (the
     /// player who performed the exile that put it there, which need not be
     /// its owner or the ability's controller): "For each card exiled this way,
     /// the player who exiled it may play it" (Vulcan Mind-Meld). A card whose

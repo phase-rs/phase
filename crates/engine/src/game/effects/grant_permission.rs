@@ -47,7 +47,7 @@ pub(crate) fn resolve_grantee(
                 .get(&obj_id)
                 .map_or(ability.controller, |o| o.owner),
         ),
-        // CR 406.6 + CR 608.2c: the player who performed this object's exile.
+        // CR 406.3 + CR 608.2c: the player who performed this object's exile.
         // An unattributed exile grants nobody rather than a stand-in.
         PermissionGrantee::ObjectExiler => state.objects.get(&obj_id)?.exiled_by,
         // CR 603.2 + CR 109.4: the controller of the object that caused the

@@ -3363,7 +3363,7 @@ fn detect_dynamic_qty(
     if per_opponent_choices_cover_all_for_each_markers(cleaned, &markers, scoped) {
         return;
     }
-    // CR 406.6 + CR 611.2a: "For each card exiled this way, the player who
+    // CR 406.3a + CR 611.2a: "For each card exiled this way, the player who
     // exiled it may play it" (Vulcan Mind-Meld) distributes one grant per
     // exiled card; its carrier is the per-object `PermissionGrantee::ObjectExiler`
     // binding, not a `QuantityExpr`.
@@ -9015,7 +9015,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         );
     }
 
-    /// CR 406.6: Vulcan Mind-Meld's "For each card exiled this way, the player
+    /// CR 406.3a: Vulcan Mind-Meld's "For each card exiled this way, the player
     /// who exiled it may play it" is carried by the per-object `ObjectExiler`
     /// grant. Reach-guard: that grant must be present (not `Unimplemented`)
     /// before the negative; revert-to-red: dropping the exiler suppression

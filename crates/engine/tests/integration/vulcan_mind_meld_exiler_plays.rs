@@ -8,8 +8,8 @@
 //! Covers, through the production cast → resolution path:
 //!   * CR 608.2c + CR 115.1: a targeted subject acting on another player's
 //!     library performs the exile, and is recorded as the player who exiled
-//!     the card (CR 406.6).
-//!   * CR 406.6 + CR 611.2a: each exiled card's permission binds to the player
+//!     the card (CR 406.3).
+//!   * CR 406.3a + CR 611.2a: each exiled card's permission binds to the player
 //!     who exiled it — not its owner and not the spell's controller.
 //!   * CR 609.4b: "Mana of any type can be spent to cast spells this way" is
 //!     scoped to the cards exiled this way.
@@ -146,7 +146,7 @@ fn cast_mind_meld() -> Melded {
     }
 }
 
-/// CR 608.2c + CR 406.6 + CR 406.3: the target opponent exiles the top card of
+/// CR 608.2c + CR 406.3: the target opponent exiles the top card of
 /// the caster's library; the caster exiles the top two of the opponent's. All
 /// three are face down and attributed to the player who exiled them, and each
 /// is visible only to that player.
@@ -182,7 +182,7 @@ fn mind_meld_each_player_exiles_face_down_and_sees_only_their_own_exiles() {
     assert_eq!(seen_as(&runner, P1, p1_sorcery), "Hidden Card");
 }
 
-/// CR 406.6 + CR 609.4b + CR 305.1: the caster may play the two cards they
+/// CR 406.3a + CR 609.4b + CR 305.1: the caster may play the two cards they
 /// exiled — the red sorcery paid with blue mana, and the land as their land
 /// drop — but not their own card the opponent exiled.
 #[test]
@@ -229,7 +229,7 @@ fn mind_meld_caster_plays_the_cards_they_exiled_with_mana_of_any_type() {
     assert_eq!(runner.state().objects[&p1_land].controller, P0);
 }
 
-/// CR 406.6 + CR 611.2a: the opponent may play the card they exiled from the
+/// CR 406.3a + CR 611.2a: the opponent may play the card they exiled from the
 /// caster's library on their own turn, but never the cards the caster exiled
 /// from the opponent's own library.
 #[test]
