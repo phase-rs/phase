@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -319,6 +320,16 @@ impl CounterPlacement {
             CounterPlacement::Object { actor, .. }
             | CounterPlacement::Player { actor, .. }
             | CounterPlacement::Energy { actor, .. } => *actor,
+        }
+    }
+
+    /// CR 122.1: the kind of counter put on an object. Player counters carry a
+    /// `PlayerCounterKind` (and energy is its own placement), so they have no
+    /// object counter type.
+    pub fn counter_type(&self) -> Option<&CounterType> {
+        match self {
+            CounterPlacement::Object { counter_type, .. } => Some(counter_type),
+            CounterPlacement::Player { .. } | CounterPlacement::Energy { .. } => None,
         }
     }
 }
@@ -1399,6 +1410,61 @@ impl ProposedEvent {
         }
     }
 
+    /// CR 122.5 + CR 122.6: the counter placement this event proposes, if any.
+    /// An `AddCounter` event carries its placement directly. Moving a counter
+    /// means removing it and putting it onto a second object (CR 122.5), so a
+    /// counter move's add stage is a placement of the moved counters on the
+    /// destination, put there by the moving effect's controller (CR 608.2c).
+    /// A move's remove stage and every other event propose no placement.
+    pub fn counter_placement(&self) -> Option<Cow<'_, CounterPlacement>> {
+        match self {
+            ProposedEvent::AddCounter { placement, .. } => Some(Cow::Borrowed(placement)),
+            ProposedEvent::MoveCounter {
+                actor,
+                destination_id,
+                counter_type,
+                stage: CounterMoveStage::Add,
+                ..
+            } => Some(Cow::Owned(CounterPlacement::Object {
+                actor: *actor,
+                object_id: *destination_id,
+                counter_type: counter_type.clone(),
+            })),
+            ProposedEvent::MoveCounter {
+                stage: CounterMoveStage::Remove,
+                ..
+            }
+            | ProposedEvent::ZoneChange { .. }
+            | ProposedEvent::Damage { .. }
+            | ProposedEvent::Draw { .. }
+            | ProposedEvent::SearchFound { .. }
+            | ProposedEvent::Scry { .. }
+            | ProposedEvent::Mill { .. }
+            | ProposedEvent::CoinFlip { .. }
+            | ProposedEvent::RollDice { .. }
+            | ProposedEvent::Explore { .. }
+            | ProposedEvent::Connive { .. }
+            | ProposedEvent::Proliferate { .. }
+            | ProposedEvent::LifeGain { .. }
+            | ProposedEvent::LifeLoss { .. }
+            | ProposedEvent::RemoveCounter { .. }
+            | ProposedEvent::CreateToken { .. }
+            | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::Discard { .. }
+            | ProposedEvent::Tap { .. }
+            | ProposedEvent::Untap { .. }
+            | ProposedEvent::TurnFaceUp { .. }
+            | ProposedEvent::Destroy { .. }
+            | ProposedEvent::Sacrifice { .. }
+            | ProposedEvent::BeginTurn { .. }
+            | ProposedEvent::BeginPhase { .. }
+            | ProposedEvent::ProduceMana { .. }
+            | ProposedEvent::EmptyManaPool { .. }
+            | ProposedEvent::Planeswalk { .. }
+            | ProposedEvent::Attach { .. } => None,
+        }
+    }
+
     /// Returns the primary object affected by this event, if any.
     pub fn affected_object_id(&self) -> Option<ObjectId> {
         match self {
@@ -1600,6 +1666,51 @@ mod tests {
 
         assert_eq!(remove.affected_object_id(), Some(ObjectId(1)));
         assert_eq!(add.affected_object_id(), Some(ObjectId(2)));
+    }
+
+    /// CR 122.5 + CR 608.2c: a counter move's add stage proposes a placement of
+    /// the moved counters on the destination by the moving effect's controller;
+    /// its remove stage proposes none, and an `AddCounter` placement is returned
+    /// as carried.
+    #[test]
+    fn counter_placement_reads_the_move_add_stage_as_a_placement() {
+        let moved = |stage| ProposedEvent::MoveCounter {
+            actor: PlayerId(1),
+            source_id: ObjectId(1),
+            destination_id: ObjectId(2),
+            counter_type: CounterType::Plus1Plus1,
+            remove_count: 2,
+            add_count: 2,
+            stage,
+            applied: HashSet::new(),
+        };
+        assert_eq!(
+            moved(CounterMoveStage::Add).counter_placement().as_deref(),
+            Some(&CounterPlacement::Object {
+                actor: PlayerId(1),
+                object_id: ObjectId(2),
+                counter_type: CounterType::Plus1Plus1,
+            })
+        );
+        assert_eq!(moved(CounterMoveStage::Remove).counter_placement(), None);
+
+        let energy = CounterPlacement::Energy {
+            actor: PlayerId(0),
+            player_id: PlayerId(1),
+        };
+        let add = ProposedEvent::AddCounter {
+            placement: energy.clone(),
+            count: 2,
+            applied: HashSet::new(),
+        };
+        assert_eq!(add.counter_placement().as_deref(), Some(&energy));
+        let remove = ProposedEvent::RemoveCounter {
+            object_id: ObjectId(1),
+            counter_type: CounterType::Plus1Plus1,
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert_eq!(remove.counter_placement(), None);
     }
 
     /// SHAPE: `ProposedEvent::EmptyManaPool` survives a serde roundtrip with

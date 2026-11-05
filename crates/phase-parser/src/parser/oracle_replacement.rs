@@ -56,12 +56,12 @@ use super::oracle_util::{
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, ChooseOneOfKind,
     CoinFlipRun, CombatDamageScope, Comparator, ContinuousModification, ControllerRef,
-    CopyManaValueLimit, CountScope, CounterReplacementSubject, DamageModification,
-    DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, DieRollIgnoreRule,
-    DrawReplacementScope, Duration, Effect, EffectScope, FilterProp, LibraryInstructionActor,
-    LibraryPosition, ManaModification, ManaReplacementScope, ManaSpendPermission,
-    PermissionGrantee, PlayerFilter, PreventionAmount, PreventionFormula, PreventionScope,
-    QuantityExpr, QuantityModification, QuantityRef, RedirectionLifetime,
+    CopyManaValueLimit, CountScope, CounterRecipient, CounterReplacementSubject,
+    DamageModification, DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope,
+    DieRollIgnoreRule, DrawReplacementScope, Duration, Effect, EffectScope, FilterProp,
+    LibraryInstructionActor, LibraryPosition, ManaModification, ManaReplacementScope,
+    ManaSpendPermission, PermissionGrantee, PlayerFilter, PreventionAmount, PreventionFormula,
+    PreventionScope, QuantityExpr, QuantityModification, QuantityRef, RedirectionLifetime,
     ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     ReplacementPlayerScope, RoundingMode, SourceExclusion, StaticCondition, StaticDefinition,
     SubAbilityLink, TapStateChange, TargetFilter, TokenAttackDestination, TriggerConstraint,
@@ -704,11 +704,7 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- Token creation replacement: "if one or more tokens would be created..." ---
-    if nom_primitives::scan_contains(&lower, "tokens would be created")
-        || nom_primitives::scan_contains(&lower, "token would be created")
-        || nom_primitives::scan_contains(&lower, "would create one or more tokens")
-        || nom_primitives::scan_contains(&lower, "would create a token")
-    {
+    if is_token_creation_replacement_antecedent(&lower) {
         // CR 614.1a + CR 614.4: Moonlit Meditation's "the first time … each turn"
         // copy-of-host substitution must be tried first — its specific antecedent
         // tag cannot steal Jinnie ("if you would create…") or Doubling Season
@@ -790,11 +786,11 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
-    if nom_primitives::scan_contains(&lower, "counters would be put on")
-        || nom_primitives::scan_contains(&lower, "counter would be put on")
-        || nom_primitives::scan_contains(&lower, "would put one or more counters")
-        || nom_primitives::scan_contains(&lower, "would put a counter")
-    {
+    if let Some(def) = parse_player_get_counters_replacement(&lower, &text) {
+        return Some(def);
+    }
+
+    if is_counter_placement_replacement_antecedent(&lower) {
         if let Some(def) = parse_counter_replacement(&lower, &text) {
             return Some(def);
         }
@@ -13227,9 +13223,120 @@ fn parse_energy_get_replacement(lower: &str, original_text: &str) -> Option<Repl
         .quantity_modification(QuantityModification::Plus { value: 1 })
         .description(original_text.to_string());
     def.valid_player = Some(ReplacementPlayerScope::You);
+    // CR 107.14: {E} is an energy counter a player gets — never an object counter.
+    def.counter_recipient = CounterRecipient::Player;
     Some(def)
 }
-fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+/// CR 614.1a + CR 111.1: structural antecedent of a token-creation replacement
+/// ("… tokens would be created …", "… would create one or more tokens …").
+/// Shared by the printed-static dispatcher and the resolution-install effect
+/// parser so a line can only lower to a `CreateToken` replacement when it is
+/// actually about creating tokens.
+pub(crate) fn is_token_creation_replacement_antecedent(lower: &str) -> bool {
+    nom_primitives::scan_contains(lower, "tokens would be created")
+        || nom_primitives::scan_contains(lower, "token would be created")
+        || nom_primitives::scan_contains(lower, "would create one or more tokens")
+        || nom_primitives::scan_contains(lower, "would create a token")
+}
+
+/// CR 614.1a + CR 122.6: structural antecedent of a counter-placement
+/// replacement — the passive "[counters] would be put on …" or the active
+/// "[subject] would put one or more [<type>] counters on …". Shared by the
+/// printed-static dispatcher and the resolution-install effect parser.
+pub(crate) fn is_counter_placement_replacement_antecedent(lower: &str) -> bool {
+    nom_primitives::scan_contains(lower, "counters would be put on")
+        || nom_primitives::scan_contains(lower, "counter would be put on")
+        || nom_primitives::scan_at_word_boundaries(lower, parse_would_put_counters_on).is_some()
+}
+
+/// CR 122.6: the active counter-placement clause "<actor> would put one or more
+/// [<type>] counters on " / "<actor> would put a[n] [<type>] counter on ". The
+/// actor is one the replacement can scope by — a player ("you", "an opponent",
+/// "a player", read through `valid_player` + `CounterReplacementSubject`) or
+/// "an effect" (any source). A narrower actor ("a modular triggered ability" —
+/// Zabaz, the Glimmerwasp) has no typed scope, so the clause is not claimed
+/// rather than silently widened. The optional counter type ("+1/+1", "charge",
+/// …) is delegated to the shared `parse_counter_type_typed` building block; the
+/// untyped noun is tried first so the open-ended type arm never swallows the
+/// word "counters".
+fn parse_would_put_counters_on(input: &str) -> OracleResult<'_, ()> {
+    let counter_noun = || alt((tag("counters on "), tag("counter on ")));
+    value(
+        (),
+        (
+            alt((
+                tag("you "),
+                tag("an opponent "),
+                tag("a player "),
+                tag("an effect "),
+            )),
+            tag("would put "),
+            alt((tag("one or more "), tag("a "), tag("an "))),
+            alt((
+                counter_noun(),
+                preceded(
+                    terminated(nom_primitives::parse_counter_type_typed, char(' ')),
+                    counter_noun(),
+                ),
+            )),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 122.1 + CR 614.1a: "If you would get one or more counters, you get that
+/// many plus one of each of those kinds of counters instead." (Winding
+/// Constrictor's player clause). A player-recipient `AddCounter` replacement
+/// scoped to "you" as the recipient, covering every counter kind a player can
+/// get (poison, experience, energy, …). Only the counter-agnostic form is
+/// claimed: the runtime counter-type gate reads object placements only, so a
+/// typed player-counter clause would over-apply and stays unclaimed.
+fn parse_player_get_counters_replacement(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (_, modification) = all_consuming(delimited(
+        tag::<_, _, OracleError<'_>>("if you would get one or more counters, you get "),
+        parse_counter_count_modification,
+        (
+            opt(alt((
+                tag(" of each of those kinds of counters"),
+                tag(" of those counters"),
+                tag(" counters"),
+            ))),
+            tag(" instead"),
+            opt(char('.')),
+        ),
+    ))
+    .parse(lower.trim())
+    .ok()?;
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+        .quantity_modification(modification)
+        .description(original_text.to_string());
+    def.valid_player = Some(ReplacementPlayerScope::You);
+    def.counter_recipient = CounterRecipient::Player;
+    Some(def)
+}
+
+/// CR 614.1a: the count-modifying head of a counter replacement's consequent —
+/// "that many plus N", "that many minus N", "twice that many", "half that many".
+fn parse_counter_count_modification(input: &str) -> OracleResult<'_, QuantityModification> {
+    alt((
+        preceded(tag("that many plus "), nom_primitives::parse_number)
+            .map(|value| QuantityModification::Plus { value }),
+        preceded(tag("that many minus "), nom_primitives::parse_number)
+            .map(|value| QuantityModification::Minus { value }),
+        value(QuantityModification::DOUBLE, tag("twice that many")),
+        value(QuantityModification::Half, tag("half that many")),
+    ))
+    .parse(input)
+}
+
+pub(crate) fn parse_counter_replacement(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
     use crate::types::ability::QuantityModification;
 
     let modification = if nom_primitives::scan_contains(lower, "half that many") {
@@ -13315,15 +13422,16 @@ fn is_counter_replacement_object_scope(filter: &TargetFilter) -> bool {
 }
 
 fn parse_counter_replacement_scope_anchor(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        alt((
-            tag::<_, _, OracleError<'_>>("counters would be put on "),
-            tag("counter would be put on "),
-            tag("an effect would put one or more counters on "),
-            tag("an effect would put a counter on "),
-        )),
-    )
+    alt((
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("counters would be put on "),
+                tag("counter would be put on "),
+            )),
+        ),
+        parse_would_put_counters_on,
+    ))
     .parse(input)
 }
 
@@ -13336,6 +13444,7 @@ fn parse_counter_replacement_scope_tail(input: &str) -> OracleResult<'_, ()> {
                 tag::<_, _, OracleError<'_>>(", that many"),
                 tag(", twice that many"),
                 tag(", it puts"),
+                tag(", put "),
             )),
         ),
     )
@@ -31252,6 +31361,115 @@ mod tests {
             "\"an opponent would put\" scopes by the counter actor"
         );
         assert_eq!(def.quantity_modification, Some(QuantityModification::Half));
+    }
+
+    #[test]
+    fn typed_actor_counter_doubler_scopes_type_recipient_and_actor() {
+        // CR 614.1a + CR 122.6: the active "If you would put one or more <type>
+        // counters on <filter>, put twice that many …" form (Lt. Cmdr. Geordi La
+        // Forge) is a printed static AddCounter replacement — never a token
+        // doubler — scoped by actor (you), recipient filter, and counter type.
+        let def = parse_replacement_line(
+            "If you would put one or more charge counters on an artifact you control, put twice that many charge counters on that artifact instead.",
+            "Lt. Cmdr. Geordi La Forge",
+        )
+        .expect("Geordi's counter doubler must parse as a replacement");
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::DOUBLE)
+        );
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::You));
+        assert_eq!(
+            def.counter_replacement_subject,
+            CounterReplacementSubject::Actor
+        );
+        assert_eq!(
+            def.counter_match,
+            Some(CounterMatch::OfType(CounterType::Generic(
+                "charge".to_string()
+            )))
+        );
+        assert!(matches!(
+            def.valid_card,
+            Some(TargetFilter::Typed(ref tf))
+                if tf.type_filters == vec![TypeFilter::Artifact]
+                    && tf.controller == Some(ControllerRef::You)
+        ));
+        assert_eq!(
+            def.expiry, None,
+            "a printed static replacement has no window"
+        );
+    }
+
+    #[test]
+    fn typed_actor_counter_plus_one_scopes_creature_recipient() {
+        // CR 614.1a: the same active form with a "that many plus one" consequent
+        // (Prairie Dog's clause body).
+        let def = parse_replacement_line(
+            "If you would put one or more +1/+1 counters on a creature you control, put that many plus one +1/+1 counters on it instead.",
+            "Prairie Dog",
+        )
+        .expect("active +1/+1 plus-one clause must parse");
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Plus { value: 1 })
+        );
+        assert_eq!(
+            def.counter_match,
+            Some(CounterMatch::OfType(CounterType::Plus1Plus1))
+        );
+        assert_eq!(
+            def.counter_replacement_subject,
+            CounterReplacementSubject::Actor
+        );
+        assert!(matches!(
+            def.valid_card,
+            Some(TargetFilter::Typed(ref tf))
+                if tf.type_filters == vec![TypeFilter::Creature]
+                    && tf.controller == Some(ControllerRef::You)
+        ));
+    }
+
+    #[test]
+    fn source_restricted_counter_replacement_is_not_widened() {
+        // CR 614.1a: "a modular triggered ability would put …" (Zabaz, the
+        // Glimmerwasp) names a counter source with no typed scope; claiming it
+        // would apply the bonus to every +1/+1 counter, so it stays unclaimed.
+        // Reach guard: the same consequent with a "you" actor does parse.
+        assert!(parse_replacement_line(
+            "If a modular triggered ability would put one or more +1/+1 counters on a creature you control, that many plus one +1/+1 counters are put on it instead.",
+            "Zabaz, the Glimmerwasp",
+        )
+        .is_none());
+        assert!(parse_replacement_line(
+            "If you would put one or more +1/+1 counters on a creature you control, put that many plus one +1/+1 counters on it instead.",
+            "Prairie Dog",
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn player_get_counters_plus_one_is_recipient_scoped_to_you() {
+        // CR 122.1 + CR 614.1a: Winding Constrictor's player clause.
+        let def = parse_replacement_line(
+            "If you would get one or more counters, you get that many plus one of each of those kinds of counters instead.",
+            "Winding Constrictor",
+        )
+        .expect("player counter clause must parse");
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Plus { value: 1 })
+        );
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::You));
+        assert_eq!(
+            def.counter_replacement_subject,
+            CounterReplacementSubject::Recipient
+        );
+        assert_eq!(def.valid_card, None);
+        assert_eq!(def.counter_match, None);
+        assert_eq!(def.counter_recipient, CounterRecipient::Player);
     }
 
     /// CR 614.1a: Negative sibling — Doubling Season's "an effect would put …

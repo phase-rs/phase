@@ -5684,6 +5684,7 @@ fn floating_replacement_can_name_object(
         source_controller: _,
         origin: _,
         counter_replacement_subject: _,
+        counter_recipient: _,
         entry_payment_max,
     } = def;
     execute.is_some()
