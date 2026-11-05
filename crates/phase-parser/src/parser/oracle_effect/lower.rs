@@ -42,13 +42,13 @@ use crate::types::ability::{
     AttackSubject, CardTypeSetSource, CastCostModifier, CastFromZoneDriver,
     CastPermissionConstraint, CastingPermission, CoinFlipRun, CombatHistoryScope, Comparator,
     ConjureSource, ContinuousEffectOnset, ContinuousModification, ControllerRef, CountBinding,
-    DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
-    ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
-    NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter, PlayerRelation,
-    PreventionAmount, PreventionScope, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
-    RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement, StaticCondition,
-    StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
-    TypeFilter, TypedFilter,
+    CounterKindChooser, CounterKindDomain, DamageChannel, DamageSource, DelayedTriggerCondition,
+    Duration, Effect, EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
+    MultiTargetSpec, NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter,
+    PlayerRelation, PreventionAmount, PreventionScope, PropertyAggregate, PtValue, QuantityExpr,
+    QuantityRef, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
@@ -3738,6 +3738,42 @@ pub(super) fn resolve_those_tokens_anaphors(defs: &mut [AbilityDefinition]) {
     }
 }
 
+/// CR 608.2d + CR 122.1 + CR 122.6: "Choose a counter on target <permanent>.
+/// Put another counter of that kind on it." The first sentence parses to a bare
+/// `TargetOnly` (the declared target is owned by the target-designation path),
+/// so nothing ever selects the kind the second sentence reads. Insert the
+/// resolution-time `ChooseCounterKind` over the declared target between them
+/// (Dathon, His Heart Open; Ichormoon Gauntlet). A `PutChosenCounter` bound to
+/// `ParentTarget` right after a `TargetOnly` has no other possible source for
+/// its kind.
+pub(super) fn insert_counter_kind_choice_after_target_only(defs: &mut Vec<AbilityDefinition>) {
+    let mut i = 0;
+    while i + 1 < defs.len() {
+        let needs_choice = matches!(&*defs[i].effect, Effect::TargetOnly { .. })
+            && matches!(
+                &*defs[i + 1].effect,
+                Effect::PutChosenCounter {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            );
+        if needs_choice {
+            let mut choice = AbilityDefinition::new(
+                defs[i + 1].kind,
+                Effect::ChooseCounterKind {
+                    target: TargetFilter::ParentTarget,
+                    domain: CounterKindDomain::default(),
+                    chooser: CounterKindChooser::default(),
+                },
+            );
+            choice.sub_link = defs[i + 1].sub_link;
+            defs.insert(i + 1, choice);
+            i += 1;
+        }
+        i += 1;
+    }
+}
+
 /// CR 701.60a + CR 608.2c: Resolve the plural population anaphor in
 /// "[mass P/T modification to a population]. ... they're no longer suspected"
 /// (Eliminate the Impossible: "Creatures your opponents control get -2/-0 ...
@@ -3925,7 +3961,7 @@ pub(super) fn rewrite_counter_instead_target_from_antecedent(
 /// Match an `Unimplemented` effect whose description is
 /// "create <N> of those tokens" (optionally with a trailing modifier like
 /// "that are tapped and attacking" or "instead"). Returns the parsed count.
-fn match_create_of_those_tokens(effect: &Effect) -> Option<QuantityExpr> {
+pub(super) fn match_create_of_those_tokens(effect: &Effect) -> Option<QuantityExpr> {
     // The discriminator is the `tag("create ")` + count/anaphor parse below, read off the
     // recorded description; the gap's name is the parser's verdict on which sub-grammar
     // refused the clause and is not a stable key for this rewrite.

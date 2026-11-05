@@ -248,6 +248,7 @@ mod connecting_the_dots_return_exiled_with;
 mod connive_draw_pause_tail_completion;
 mod connive_trigger_msh_wave1;
 mod connive_zero_no_op_701_50e;
+mod conquest_mission_borg_tokens;
 mod conspire_granted_keyword;
 mod constellation_enters_with_choice;
 mod construct_cosmic_cube_second_draw_token;

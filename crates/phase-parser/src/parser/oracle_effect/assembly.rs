@@ -53,8 +53,9 @@ use super::lower::{
     fold_deal_damage_then_prevent_into_computed_amount, fold_enters_this_way_counter_rider,
     fold_exile_resolving_rider, fold_search_choose_type_conditional_destination,
     fold_token_it_has_grants_into_token_statics, gate_other_revealed_card_on_multiplayer_reveal,
-    gate_reflexive_rider_on_declined_optional_target, is_exile_until_cast_bottom_cleanup,
-    is_land_enters_tapped_rider, is_linked_exile_cast_bottom_cleanup, is_stable_branch_amount,
+    gate_reflexive_rider_on_declined_optional_target, insert_counter_kind_choice_after_target_only,
+    is_exile_until_cast_bottom_cleanup, is_land_enters_tapped_rider,
+    is_linked_exile_cast_bottom_cleanup, is_stable_branch_amount, match_create_of_those_tokens,
     nest_whenever_this_turn_token_cleanup_delayed_trigger,
     normalize_exile_until_cast_bottom_cleanup, normalize_linked_exile_cast_bottom_cleanup,
     parse_controlled_by_different_players_target_constraint,
@@ -2623,7 +2624,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             // instructions before it (Goblin Charbelcher's reveal) are
                             // performed regardless and supply the quantity it reads.
                             let mut instead = *instead_def.clone();
-                            let base_index = instead_damage_antecedent_index(
+                            let base_index = instead_antecedent_index(
                                 &env,
                                 &defs,
                                 instead_override_body_mut(&mut instead),
@@ -4204,6 +4205,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // noun "those tokens" refers back to the previous clause's token-creation
     // effect. Rewrite those subs by cloning the previous effect with an
     // updated count (Rite of Replication / Saproling Migration / Krothuss).
+    insert_counter_kind_choice_after_target_only(&mut defs);
     resolve_those_tokens_anaphors(&mut defs);
     resolve_populated_unsuspect_anaphors(&mut defs);
 
@@ -4885,7 +4887,7 @@ fn bind_instead_body_to_antecedent(body: &mut AbilityDefinition, antecedent: &Ab
 /// amount ("deals double that damage instead") — names the DAMAGE instruction
 /// it restates, so it binds to the nearest preceding `DamageDealer` instead.
 /// Falls back to the first def when no later damage instruction exists.
-fn instead_damage_antecedent_index(
+fn instead_antecedent_index(
     env: &AssemblyEnv,
     defs: &[AbilityDefinition],
     instead_def: &AbilityDefinition,
@@ -4900,6 +4902,20 @@ fn instead_damage_antecedent_index(
             QuantityExpr::Ref { qty: QuantityRef::EventContextAmount }
         )
     );
+    // CR 111.1 + CR 608.2c: "create N of those tokens instead" names the token
+    // creation it restates — the nearest preceding token-creating instruction —
+    // not the chain's first instruction (Conquest Mission puts a counter first).
+    if match_create_of_those_tokens(instead_def.effect.as_ref()).is_some() {
+        return defs
+            .iter()
+            .rposition(|def| {
+                matches!(
+                    def.effect.as_ref(),
+                    Effect::Token { .. } | Effect::CopyTokenOf { .. }
+                )
+            })
+            .unwrap_or(0);
+    }
     if !restates_damage {
         return 0;
     }
