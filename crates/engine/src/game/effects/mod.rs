@@ -11938,15 +11938,9 @@ fn detach_after_player_scope_local_chain(
     // seat's template and is skipped with its gate when the gate is false
     // (`starts_independent_instruction`). A child with its OWN `player_scope`
     // is the next multi-player action (CR 608.2e) and is judged as before.
-    // A step is a DIFFERENT action of the same sentence ("lose 2 life and you
-    // draw a card"); a continuation repeating the gated node's own effect kind
-    // ("gain 1 life" then "gain 3 life") is a later instruction that reads the
-    // same whether or not the gate held, so it stays the once-after-all-seats
-    // tail.
     let next_is_gated_instruction_step = membership == SeatGateMembership::PerSeatGated
         && !starts_independent_instruction(&next)
-        && next.player_scope.is_none()
-        && std::mem::discriminant(&node.effect) != std::mem::discriminant(&next.effect);
+        && next.player_scope.is_none();
     if next_is_performed_gated
         || next_is_zone_change_this_way_gated
         || next_is_co_scoped_anaphoric_consumer
@@ -57715,14 +57709,25 @@ mod tests {
     /// steps after the gated node, not just the first. No printed card has a
     /// run of two or more ungated steps after a per-seat gated node; the
     /// nearest printed card is Braids's Frightful Return chapter III, whose
-    /// draw gets a cloned continuation step here.
+    /// draw gets a "you gain 1 life" continuation step here. `GainLife` is not
+    /// an iteration-bound recipient kind (`effect_has_iteration_bound_recipient`),
+    /// so `is_player_scope_local_continuation` does not keep it: only the
+    /// gated-step rule keeps it in the seat template, where it is skipped with
+    /// the gate.
     #[test]
     fn player_scope_gated_instruction_keeps_a_run_of_steps() {
+        fn with_gain_step(resolved: &mut ResolvedAbility) {
+            let draw = braids_iii_draw_mut(resolved);
+            let mut gain = draw.clone();
+            gain.effect = Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::OriginalController,
+            };
+            gain.sub_link = SubAbilityLink::ContinuationStep;
+            draw.sub_ability = Some(Box::new(gain));
+        }
         let mut resolved = braids_iii_resolved();
-        let draw = braids_iii_draw_mut(&mut resolved);
-        let mut second = draw.clone();
-        second.sub_link = SubAbilityLink::ContinuationStep;
-        draw.sub_ability = Some(Box::new(second));
+        with_gain_step(&mut resolved);
         let (template, tail) = split_at_first_scope(&resolved);
         let steps = template_steps(&template);
         assert_eq!(steps.len(), 3, "template: {template:?}");
@@ -57731,8 +57736,75 @@ mod tests {
             "REACH: the gated life loss is retained"
         );
         assert!(matches!(steps[1].effect, Effect::Draw { .. }));
-        assert!(matches!(steps[2].effect, Effect::Draw { .. }));
+        assert!(matches!(steps[2].effect, Effect::GainLife { .. }));
         assert!(tail.is_none(), "nothing detaches: {tail:?}");
+
+        // CR 608.2c + CR 118.12: the opponent sacrifices (the gate "If they
+        // don't" is false), so the whole gated instruction, the gain included,
+        // is skipped; it declines, and every step runs.
+        for (sacrifices, opponent_loss, gained) in [(true, 0, 0), (false, 2, 1)] {
+            let mut state = GameState::new_two_player(7);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Braids's Frightful Return".into(),
+                Zone::Battlefield,
+            );
+            let victim = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(1),
+                "Victim".into(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&victim)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(0),
+                "Library card".into(),
+                Zone::Library,
+            );
+            let mut resolved = braids_iii_resolved();
+            with_gain_step(&mut resolved);
+            let mut cursor = Some(&mut resolved);
+            while let Some(node) = cursor {
+                node.source_id = source;
+                cursor = node.sub_ability.as_deref_mut();
+            }
+            resolved.targets = vec![TargetRef::Player(PlayerId(1))];
+            resolve_ability_chain(&mut state, &resolved, &mut Vec::new(), 0).unwrap();
+            assert!(
+                matches!(
+                    state.waiting_for,
+                    WaitingFor::OptionalEffectChoice {
+                        player: PlayerId(1),
+                        ..
+                    }
+                ),
+                "REACH: the opponent is offered the sacrifice: {:?}",
+                state.waiting_for
+            );
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::DecideOptionalEffect { accept: sacrifices },
+            )
+            .unwrap();
+            assert_eq!(
+                state.objects[&victim].zone == Zone::Battlefield,
+                !sacrifices,
+                "REACH: the sacrifice follows the answer"
+            );
+            assert_eq!(state.players[1].life, 20 - opponent_loss, "{sacrifices}");
+            assert_eq!(state.players[0].life, 20 + gained, "{sacrifices}");
+        }
     }
 
     /// U6 — CR 608.2c + CR 118.12: the positive-gate member of the class.
