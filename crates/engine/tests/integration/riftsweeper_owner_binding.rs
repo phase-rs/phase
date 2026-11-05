@@ -555,9 +555,11 @@ fn attack_and_settle(
 // owned by P2 and controlled by P1 (CR 603.3a: the trigger's controller, P0,
 // announces it).
 //
-// The earlier exile target is owned by Etrata's owner on purpose. F-7:
-// pre-existing, the shuffling-player binding when the earlier exile target's
-// owner differs from Etrata's owner is filed separately; this row does not
+// The earlier exile target is owned by Etrata's owner on purpose. Separate,
+// pre-existing card bug (it reproduces on main with Beacon of Destruction cast
+// at another player's creature, and is described in the PR body): when the
+// earlier declared target's owner differs from the source's owner, the
+// terminal shuffle resolves to the target's owner. This row does not
 // discriminate the target's owner from the source's owner (equal by
 // construction) and makes no claim across that defect.
 //
