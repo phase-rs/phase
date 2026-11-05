@@ -22,7 +22,7 @@ The text after the command picks the batch:
 - `unlabeled`: issues with no labels at all
 - `pending`: issues labeled `classifier:pending` (player card reports)
 - one or more issue numbers, such as `10507 10529`
-- anything else is passed to `gh issue list --search`, such as `label:area:engine Worldgorger`
+- anything else is used as the GitHub search query, such as `label:area:engine Worldgorger`
 - `cluster`: skip triage and only rerun clustering over everything already in `triage/qwen/proposals.jsonl`
 
 The default slice is the 30 newest issues labeled `status:needs-triage` that aren't in `triage/qwen/proposals.jsonl` yet.
@@ -44,17 +44,31 @@ Card text and parse data come from the published coverage file. It's about 70 MB
 
 ## Step 1: Fetch the batch
 
+This walks the search results newest first, a page of 100 at a time, skipping issues already in `proposals.jsonl`, until it has `N` new ones or runs out of results. Proposals don't change live labels, so earlier runs' issues still match the search; filtering before counting is what lets each run pick up where the last one stopped.
+
 ```bash
-gh issue list --repo phase-rs/phase --state open --search "label:status:needs-triage sort:created-desc" --limit 60 \
-  --json number,title,labels,author,createdAt,body \
-  | jq -c --slurpfile done triage/qwen/proposals.jsonl \
-      '[.[] | select(.number as $n | $done | map(.number) | index($n) | not)] | .[0:30][] | .body |= .[0:2000]' \
-  > triage/qwen/batch.jsonl
+N=30                            # batch size: set from the argument
+Q='label:status:needs-triage'   # unlabeled: 'no:label'; pending: 'label:classifier:pending'; a search argument: the argument itself
+: > triage/qwen/batch.jsonl
+page=1
+while [ "$(wc -l < triage/qwen/batch.jsonl)" -lt "$N" ] && [ "$page" -le 10 ]; do
+  gh api -X GET search/issues -f q="repo:phase-rs/phase is:issue is:open $Q" \
+    -f sort=created -f order=desc -f per_page=100 -f page="$page" > triage/qwen/page.json || break
+  jq -c --slurpfile done triage/qwen/proposals.jsonl '
+      ($done | map(.number)) as $seen
+      | .items[] | select(.number as $n | $seen | index($n) | not)
+      | {number, title, labels: [.labels[].name], author: .user.login, createdAt: .created_at, body: ((.body // "")[0:2000])}' \
+    triage/qwen/page.json >> triage/qwen/batch.jsonl
+  [ "$(jq '.items | length' triage/qwen/page.json)" -lt 100 ] && break
+  page=$((page + 1))
+done
+head -n "$N" triage/qwen/batch.jsonl > triage/qwen/batch.tmp && mv triage/qwen/batch.tmp triage/qwen/batch.jsonl
+wc -l < triage/qwen/batch.jsonl
 ```
 
-The `30` in `.[0:30]` is the batch size; change it to match the argument.
+If the count printed is below `N`, every matching issue has been triaged; say so in the run report. GitHub search stops at 1,000 results, which is why the loop stops at page 10. If a query matches more than that, narrow `Q` (for example by adding `created:<2026-06-01`) rather than raising the page limit.
 
-For `unlabeled`, use `--search "no:label sort:created-desc"`. For `pending`, use `--search "label:classifier:pending sort:created-desc"`. For explicit numbers, run `gh issue view <N> --repo phase-rs/phase --json number,title,labels,author,createdAt,body,comments` for each.
+For explicit numbers, run `gh issue view <N> --repo phase-rs/phase --json number,title,labels,author,createdAt,body,comments` for each.
 
 Bodies are trimmed to 2,000 characters to keep the batch small. If an issue looks cut off at a point that matters, fetch it in full with `gh issue view`, including comments, which often contain the reporter's follow-up or a maintainer's diagnosis.
 
@@ -87,13 +101,13 @@ jq -c --arg n "Card Name" 'first(.cards[] | select(.card_name == $n)) | {oracle_
 
 The name is case-sensitive. If nothing comes back, try without apostrophes, the front face of a double-faced card, or the obvious typo fix. If you still can't find it, say so in `notes`; a card missing from the data is worth knowing about in itself.
 
-Quote card text from card data, not from the issue or from memory. Reports regularly paraphrase or misremember the card, and an issue filed against the wrong text sends the fixer after the wrong behavior. If you have a locally generated `client/public/card-data.json` (developer setups do; it's gitignored and built by the card-data pipeline), quote from that, since it's the repo's authoritative copy:
+Quote card text from card data, not from the issue or from memory. Reports regularly paraphrase or misremember the card, and an issue filed against the wrong text sends the fixer after the wrong behavior. If you have a locally generated `client/public/card-data.json` (developer setups do; it's gitignored and built by the card-data pipeline), try it first, since it's the repo's authoritative copy:
 
 ```bash
-jq -r --arg n "card name in lowercase" '.[$n].oracle_text' client/public/card-data.json
+jq -er --arg n "card name in lowercase" '.[$n].oracle_text | strings | select(length > 0)' client/public/card-data.json
 ```
 
-Otherwise quote `oracle_text` from the coverage file. The two agree for almost every card; they differ only when one was built before an Oracle text update. Record which one you used in `oracle_source`.
+Use what this prints only if it exits 0. Any other exit means there's no usable text: 2 if the file isn't there, 4 if the card isn't in it or has empty text. In that case quote `oracle_text` from the coverage lookup above instead, and check that it's a non-empty string too. The two files agree for almost every card; they differ only when one was built before an Oracle text update. Record the file you actually quoted from in `oracle_source`. If neither has text for the card, set `oracle_source` to `null`, don't quote any card text, and say in `notes` which lookups failed.
 
 Then work out which clause the report is about. `parse_details` lists each ability with its `source_text`, a `supported` flag, a `label`, and `details` and `children` describing what the parser built. Pick the one clause the complaint matches and set the classifier verdict:
 
@@ -158,12 +172,30 @@ Write two files, replacing the previous versions:
 `triage/qwen/clusters.json`, an array of objects like this one (the issue numbers are made up):
 
 ```json
-{"title": "Cluster: copy effects drop cast-time choices (Nov 2026 triage)", "existing_tracker": null, "members": [101, 102, 103], "new_members": [101, 102, 103], "rationale": "All three copy a spell whose modes or X were chosen on cast, and the copy resolves with defaults. One fix in how copies inherit the original's choices covers them.", "order": "103 first; it has the simplest reproduction.", "confidence": "medium", "confirm_by": "Check whether copies read the original stack object's chosen modes."}
+{"title": "Cluster: copy effects drop cast-time choices (Nov 2026 triage)", "existing_tracker": null, "members": [101, 102, 103], "new_members": [101, 102], "conflicts": [{"number": 103, "current_parent": 4800, "why": "Attached to #4800 (combat participation), but its root cause is the copy's chosen modes, which this cluster predicts better."}], "rationale": "All three copy a spell whose modes or X were chosen on cast, and the copy resolves with defaults. One fix in how copies inherit the original's choices covers them.", "order": "103 first; it has the simplest reproduction.", "confidence": "medium", "confirm_by": "Check whether copies read the original stack object's chosen modes."}
 ```
 
-Set `existing_tracker` to the tracker's issue number when you're proposing to attach members to it, and `null` for a new cluster. `members` is every issue in the cluster. `new_members` is the ones that still need attaching: for an existing tracker, leave out anything already in its `attached` list; for a new cluster, it's the same as `members`.
+Set `existing_tracker` to the tracker's issue number when you're proposing to attach members to it, and `null` for a new cluster. `members` is every issue in the cluster.
 
-`triage/qwen/clusters.md`, the same clusters for a person to read: one `##` heading per cluster, the rationale, the member issues with their one-line summaries (mark the ones in `new_members`), and the existing tracker if there is one. End with a short `## Related pairs` list and a `## Unclustered` count.
+An issue can have only one parent, and a member may already sit under a tracker that isn't in `trackers.jsonl`: a closed one, one past the first 50, or a parent that isn't labeled `collector`. So once `members` is drafted, look up each member's current parent:
+
+```bash
+jq -r '[.[].members[]] | unique
+  | map("i\(.): issue(number: \(.)) { number parent { number } }")
+  | "{ repository(owner: \"phase-rs\", name: \"phase\") { \(join(" ")) } }"' triage/qwen/clusters.json > triage/qwen/parents.graphql
+gh api graphql -f query="$(cat triage/qwen/parents.graphql)" \
+  --jq '.data.repository[] | {number, parent: .parent.number}' > triage/qwen/parents.jsonl
+```
+
+Then sort each member by what came back:
+
+- `parent` is `null`: it goes in `new_members`.
+- `parent` is this cluster's `existing_tracker`: it's already attached; keep it in `members` and leave it out of `new_members`.
+- `parent` is any other issue: leave it out of `new_members` and add it to `conflicts` with `current_parent` and a one-line `why` explaining which parent fits better. Never propose moving it; a maintainer decides whether to reparent. If the current parent fits at least as well, drop the issue from this cluster instead.
+
+`conflicts` is an empty list when there are none.
+
+`triage/qwen/clusters.md`, the same clusters for a person to read: one `##` heading per cluster, the rationale, the member issues with their one-line summaries (mark the ones in `new_members`, and list each conflict with its current parent), and the existing tracker if there is one. End with a short `## Related pairs` list and a `## Unclustered` count.
 
 ## Step 4: Finish the run
 
@@ -171,7 +203,7 @@ Print a short report:
 
 - how many issues you triaged, with counts by status and by classifier verdict
 - the issues that need a maintainer's eye: likely duplicates, possible regressions, anything that looks like a crash or a stall, and anything you'd close
-- clusters that are new or that grew this run
+- clusters that are new or that grew this run, and any members listed under `conflicts`
 
 The files in `triage/qwen/` are the output: `proposals.jsonl`, `clusters.json` and `clusters.md`. Share them wherever the maintainers asked for feedback.
 
@@ -212,7 +244,7 @@ Leave `source:*`, `resolution:*`, `collector`, `pr:*`, `contributor:*` and the m
 
 ## Without tools
 
-If you're a chat model with no shell, the person will paste this file followed by one or more issues. Do Step 2 for each issue and reply with the proposal lines. Skip the coverage lookup and the duplicate search, set `classifier` to `null`, and say in `notes` that card text is unverified. When the person asks you to cluster, they'll paste a set of proposal lines; do Step 3 over those, without existing trackers unless they paste those too.
+If you're a chat model with no shell, the person will paste this file followed by one or more issues. Do Step 2 for each issue and reply with the proposal lines. Skip the coverage lookup and the duplicate search, set `classifier` to `null`, and say in `notes` that card text is unverified. When the person asks you to cluster, they'll paste a set of proposal lines; do Step 3 over those, without existing trackers unless they paste those too. You can't look up parents, so leave `conflicts` empty and say in each cluster's `confirm_by` that current parents weren't checked.
 
 ## For maintainers: applying proposals
 
@@ -232,4 +264,24 @@ jq -r '.[] | select(.existing_tracker != null) | .existing_tracker as $t | .new_
   | "gh api -X POST repos/phase-rs/phase/issues/\($t)/sub_issues -F sub_issue_id=\"$(gh api repos/phase-rs/phase/issues/\(.) --jq .id)\""' triage/qwen/clusters.json
 ```
 
-New clusters need their tracker issue created first (`gh issue create --label collector`), then the same command with the new tracker's number.
+A new cluster has `existing_tracker: null`, so the command above skips it until its tracker exists. Create the tracker, then write its number back into `clusters.json` so the command picks it up. Set `TITLE` to the cluster's `title`:
+
+```bash
+TITLE='Cluster: <theme> (<scope>)'
+T=$(jq -r --arg title "$TITLE" '.[] | select(.title == $title and .existing_tracker == null)
+      | "## Rationale\n\n\(.rationale)\n\n## Ordering\n\n\(.order)\n"' triage/qwen/clusters.json \
+    | gh issue create --repo phase-rs/phase --label collector --title "$TITLE" --body-file - \
+    | sed 's#.*/##')
+jq --argjson t "$T" --arg title "$TITLE" \
+   'map(if .title == $title and .existing_tracker == null then .existing_tracker = $t else . end)' \
+   triage/qwen/clusters.json > triage/qwen/clusters.tmp && mv triage/qwen/clusters.tmp triage/qwen/clusters.json
+```
+
+Then rerun the attach command; it now prints the new tracker's `new_members`.
+
+Members listed under `conflicts` are never in `new_members`, so these commands don't touch them. This prints them for review:
+
+```bash
+jq -r '.[] | (.existing_tracker // "new: \(.title)") as $t | .conflicts[]?
+  | "#\(.number) is under #\(.current_parent); proposed for \($t): \(.why)"' triage/qwen/clusters.json
+```
