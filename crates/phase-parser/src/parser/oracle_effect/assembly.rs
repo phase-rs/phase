@@ -55,7 +55,7 @@ use super::lower::{
     fold_token_it_has_grants_into_token_statics, gate_other_revealed_card_on_multiplayer_reveal,
     gate_reflexive_rider_on_declined_optional_target, is_exile_until_cast_bottom_cleanup,
     is_land_enters_tapped_rider, is_linked_exile_cast_bottom_cleanup, is_stable_branch_amount,
-    nest_whenever_this_turn_token_cleanup_delayed_trigger,
+    match_create_of_those_tokens, nest_whenever_this_turn_token_cleanup_delayed_trigger,
     normalize_exile_until_cast_bottom_cleanup, normalize_linked_exile_cast_bottom_cleanup,
     parse_controlled_by_different_players_target_constraint,
     parse_same_zone_owner_target_constraint, parse_total_mana_value_target_constraint,
@@ -2676,12 +2676,28 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             // instructions before it (Goblin Charbelcher's reveal) are
                             // performed regardless and supply the quantity it reads.
                             let mut instead = *instead_def.clone();
-                            let base_index = instead_antecedent_index(
+                            let bound_antecedent = instead_antecedent_index(
                                 &env,
                                 &defs,
                                 instead_override_body_mut(&mut instead),
                                 *declared_antecedent,
                             );
+                            // An anaphor no single clause answers fails closed:
+                            // the override stays the honest unsupported marker
+                            // and is never rewritten from some other instruction.
+                            if bound_antecedent.is_none() {
+                                let body = instead_override_body_mut(&mut instead);
+                                let fragment = body
+                                    .effect
+                                    .unimplemented_description()
+                                    .unwrap_or_default()
+                                    .to_string();
+                                *body.effect = Effect::unimplemented(
+                                    "those_tokens_instead_unbound_antecedent",
+                                    fragment,
+                                );
+                            }
+                            let base_index = bound_antecedent.unwrap_or(0);
                             // Identity: the base is MOVED out of `defs` and back in —
                             // it keeps its NodeId (U6-C2 ruling). Capture before the take.
                             // The TAIL defs (after the base) are nested into it below, so
@@ -2710,10 +2726,12 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                     .sub_ability
                                     .as_deref_mut()
                                     .expect("the optional-payment continuation was checked");
-                                bind_instead_body_to_antecedent(
-                                    instead_override_body_mut(&mut instead),
-                                    continuation,
-                                );
+                                if bound_antecedent.is_some() {
+                                    bind_instead_body_to_antecedent(
+                                        instead_override_body_mut(&mut instead),
+                                        continuation,
+                                    );
+                                }
                                 if has_explicit_player_target(continuation.effect.as_ref()) {
                                     rewrite_player_anaphor_targets_in_definition(&mut instead);
                                 }
@@ -2723,10 +2741,12 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                 // CR 111.1 + CR 707.10: Resolve "create N of those
                                 // tokens" anaphor against the root (the antecedent
                                 // for a multi-clause base is the first printed clause).
-                                bind_instead_body_to_antecedent(
-                                    instead_override_body_mut(&mut instead),
-                                    &root,
-                                );
+                                if bound_antecedent.is_some() {
+                                    bind_instead_body_to_antecedent(
+                                        instead_override_body_mut(&mut instead),
+                                        &root,
+                                    );
+                                }
                                 if has_explicit_player_target(root.effect.as_ref()) {
                                     rewrite_player_anaphor_targets_in_definition(&mut instead);
                                 }
@@ -4986,26 +5006,29 @@ fn bind_instead_body_to_antecedent(body: &mut AbilityDefinition, antecedent: &Ab
 /// amount ("deals double that damage instead") — names the DAMAGE instruction
 /// it restates, so it binds to the nearest preceding `DamageDealer` instead.
 /// An override whose anaphor names an earlier clause binds to the clause the
-/// parser declared for it. Falls back to the first def otherwise.
+/// parser declared for it, or to nothing (`None`) when no single clause was
+/// declared or it is gone. Other overrides fall back to the first def.
 fn instead_antecedent_index(
     env: &AssemblyEnv,
     defs: &[AbilityDefinition],
     instead_def: &AbilityDefinition,
     declared: Option<ClauseId>,
-) -> usize {
+) -> Option<usize> {
     // CR 111.1 + CR 608.2c: an override whose anaphor names an earlier clause
-    // ("create two of those tokens instead") binds to the clause the parser
-    // declared, not the chain's first instruction (Conquest Mission puts a
-    // quest counter first).
-    if let Some(clause) = declared {
-        return env
-            .resolve(
+    // ("create two of those tokens instead") binds only to the clause the
+    // parser declared — never to the chain's first instruction (Conquest
+    // Mission puts a quest counter first). No declaration (two token-creating
+    // clauses), or a declared clause no longer in the output, binds nothing.
+    let restates_tokens = match_create_of_those_tokens(instead_def.effect.as_ref()).is_some();
+    if restates_tokens || declared.is_some() {
+        return declared.and_then(|clause| {
+            env.resolve(
                 defs,
                 AntecedentSelector::Clause(clause),
                 None,
                 OnMiss::Ignore,
             )
-            .unwrap_or(0);
+        });
     }
     let restates_damage = matches!(
         instead_def.effect.as_ref(),
@@ -5018,15 +5041,17 @@ fn instead_antecedent_index(
         )
     );
     if !restates_damage {
-        return 0;
+        return Some(0);
     }
-    env.resolve(
-        defs,
-        AntecedentSelector::LastWithRole(AntecedentRole::DamageDealer),
-        None,
-        OnMiss::Ignore,
+    Some(
+        env.resolve(
+            defs,
+            AntecedentSelector::LastWithRole(AntecedentRole::DamageDealer),
+            None,
+            OnMiss::Ignore,
+        )
+        .unwrap_or(0),
     )
-    .unwrap_or(0)
 }
 
 /// CR 608.2c + CR 614.6: resolve the "that damage" anaphor of an "instead"
@@ -6557,14 +6582,12 @@ mod arena_tests {
 
     /// SYNTHETIC binding test — no printed card has this shape. With two
     /// token-creating clauses "those tokens" is ambiguous, so the parser
-    /// declares no antecedent rather than picking one by proximity.
+    /// declares no antecedent, and the assembled override fails closed as the
+    /// unsupported marker instead of restating either token creation.
     #[test]
     fn synthetic_ambiguous_those_tokens_declares_no_antecedent() {
-        let ir = parse_effect_chain_ir(
-            "Create a Treasure token. Create a 1/1 colorless Borg artifact creature token. If ~ has six or more quest counters on it, create two of those tokens instead.",
-            AbilityKind::Spell,
-            &mut ParseContext::default(),
-        );
+        let text = "Create a Treasure token. Create a 1/1 colorless Borg artifact creature token. If ~ has six or more quest counters on it, create two of those tokens instead.";
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
         let declared = ir
             .clauses
             .iter()
@@ -6575,5 +6598,24 @@ mod arena_tests {
                 _ => None,
             });
         assert_eq!(declared, Some(None));
+
+        let def = crate::parser::oracle_effect::parse_effect_chain(text, AbilityKind::Spell);
+        let (_, override_def) = instead_antecedent(&def);
+        let description = override_def
+            .effect
+            .unimplemented_description()
+            .expect("an unbound anaphor stays the unsupported marker")
+            .to_string();
+        assert_eq!(
+            override_def.effect.as_ref(),
+            &Effect::unimplemented("those_tokens_instead_unbound_antecedent", description),
+            "an unbound anaphor stays the unsupported marker"
+        );
+        assert!(
+            chain_nodes(&def)
+                .iter()
+                .all(|node| token_name(node) != Some("Treasure") || node.condition.is_none()),
+            "no override restates the Treasure"
+        );
     }
 }
