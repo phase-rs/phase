@@ -154,3 +154,106 @@ fn creature_with_counter_survives_lethal_combat_damage() {
         "the 6/4 Wurm took only 3"
     );
 }
+
+const WRATH_OF_GOD: &str = "Destroy all creatures. They can't be regenerated.";
+
+/// CR 614.1a + CR 614.6: one destroy-all effect, two replaced destructions.
+/// Each replaced destruction carries out its own replacing instructions, so
+/// both Bears survive, lose their counters, and are healed; McCoy, who only
+/// protects another creature, is destroyed.
+#[test]
+fn wrath_of_god_runs_each_replacement_for_two_protected_creatures() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mccoy = scenario
+        .add_creature_from_oracle(P0, "Dr. McCoy, Surly Surgeon", 2, 2, MCCOY)
+        .id();
+    let bear_a = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let bear_b = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    scenario.with_counter(bear_a, CounterType::Plus1Plus1, 2);
+    scenario.with_counter(bear_b, CounterType::Plus1Plus1, 1);
+    let wrath = scenario
+        .add_spell_to_hand_from_oracle(P0, "Wrath of God", false, WRATH_OF_GOD)
+        .id();
+    let mut runner = scenario.build();
+    for bear in [bear_a, bear_b] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&bear)
+            .expect("bear")
+            .damage_marked = 1;
+    }
+
+    runner.cast(wrath).resolve();
+    runner.advance_until_stack_empty();
+
+    for bear in [bear_a, bear_b] {
+        assert!(
+            runner.state().battlefield.contains(&bear),
+            "{bear:?}: destruction replaced"
+        );
+        assert_eq!(
+            counters(&runner, bear, CounterType::Plus1Plus1),
+            0,
+            "{bear:?}: counters removed"
+        );
+        assert_eq!(
+            runner.state().objects[&bear].damage_marked,
+            0,
+            "{bear:?}: damage healed"
+        );
+    }
+    assert!(
+        !runner.state().battlefield.contains(&mccoy),
+        "McCoy is not another creature"
+    );
+}
+
+/// CR 704.3 + CR 704.5g: McCoy and a protected Bear take lethal combat damage
+/// together, so both destructions are performed as one batch of state-based
+/// actions while McCoy is still on the battlefield. McCoy is destroyed; the
+/// Bear's destruction is replaced, and its replacing instructions run.
+#[test]
+fn mccoy_and_protected_creature_take_lethal_combat_damage_together() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mccoy = scenario
+        .add_creature_from_oracle(P0, "Dr. McCoy, Surly Surgeon", 2, 2, MCCOY)
+        .id();
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    scenario.with_counter(bear, CounterType::Plus1Plus1, 1);
+    let wurm_a = scenario.add_creature(P1, "Craw Wurm", 6, 4).id();
+    let wurm_b = scenario.add_creature(P1, "Craw Wurm", 6, 4).id();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[
+            (mccoy, AttackTarget::Player(P1)),
+            (bear, AttackTarget::Player(P1)),
+        ])
+        .expect("declare attackers");
+    for _ in 0..8 {
+        if runner.waiting_for_kind() == "DeclareBlockers" {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority into the declare-blockers step");
+    }
+    runner
+        .declare_blockers(&[(wurm_a, mccoy), (wurm_b, bear)])
+        .expect("declare blockers");
+    runner.combat_damage();
+
+    assert!(
+        !runner.state().battlefield.contains(&mccoy),
+        "McCoy dies to lethal damage"
+    );
+    assert!(
+        runner.state().battlefield.contains(&bear),
+        "the Bear's lethal-damage destruction is replaced"
+    );
+    assert_eq!(counters(&runner, bear, CounterType::Plus1Plus1), 0);
+    assert_eq!(runner.state().objects[&bear].damage_marked, 0, "healed");
+}

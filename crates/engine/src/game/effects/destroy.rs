@@ -9,7 +9,7 @@ use crate::types::ability::{
     TypedFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
@@ -106,6 +106,29 @@ fn deliver_destruction_zone_change(
     )
 }
 
+/// CR 614.1a + CR 614.6: a destruction replaced by "instead <effect>" (Dr.
+/// McCoy's "remove all +1/+1 counters from it and all damage already dealt to
+/// it is healed", Crackling Emergence's "sacrifice this Aura and that land gains
+/// indestructible") never happens; the replacing instructions are carried out
+/// in its place. The replacement pipeline stashes those instructions as a
+/// post-replacement continuation, and a stash that arrives while an earlier
+/// one is still waiting is discarded, so every caller that destroys more than
+/// one object (a destroy-all spell, several targets, a state-based-action
+/// batch) must run each prevented destruction's continuation before consulting
+/// the next object. Returns the prompt when the continuation needs a player's
+/// choice; the caller surfaces it and stops.
+pub(crate) fn run_prevented_destruction_continuation(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    if !state.has_post_replacement_drain() {
+        return None;
+    }
+    crate::game::engine_replacement::apply_pending_post_replacement_effect(
+        state, None, None, None, events,
+    )
+}
+
 /// Outcome of destroying a single object through the guarded path.
 ///
 /// Lets callers (the top-level `Effect::Destroy` loop and the counter-source
@@ -175,7 +198,15 @@ pub(crate) fn destroy_single_object(
                 DestroyOutcome::NeedsChoice
             }
         }
-        ReplacementResult::Prevented => DestroyOutcome::Completed,
+        ReplacementResult::Prevented => {
+            match run_prevented_destruction_continuation(state, events) {
+                Some(waiting_for) => {
+                    state.waiting_for = waiting_for;
+                    DestroyOutcome::NeedsChoice
+                }
+                None => DestroyOutcome::Completed,
+            }
+        }
         ReplacementResult::NeedsChoice(player) => {
             state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
             DestroyOutcome::NeedsChoice
@@ -369,7 +400,19 @@ pub fn resolve_all(
         .copied()
         .collect();
 
-    for &obj_id in &matching {
+    let batch = destroy_all_consulting_together(
+        state,
+        &matching,
+        ability.source_id,
+        cant_regenerate,
+        events,
+    );
+    let one_at_a_time: &[ObjectId] = match batch {
+        DestroyAllBatch::Completed => &[],
+        DestroyAllBatch::Paused => return Ok(()),
+        DestroyAllBatch::NotTaken => &matching,
+    };
+    for &obj_id in one_at_a_time {
         let proposed = ProposedEvent::Destroy {
             object_id: obj_id,
             source: Some(ability.source_id),
@@ -383,7 +426,14 @@ pub fn resolve_all(
                     return Ok(());
                 }
             }
-            ReplacementResult::Prevented => {} // Regenerated or other replacement
+            // Regenerated, or replaced by an "instead" effect whose replacing
+            // instructions run now, before the next object is consulted.
+            ReplacementResult::Prevented => {
+                if let Some(waiting_for) = run_prevented_destruction_continuation(state, events) {
+                    state.waiting_for = waiting_for;
+                    return Ok(());
+                }
+            }
             ReplacementResult::NeedsChoice(player) => {
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
                 return Ok(());
@@ -409,6 +459,119 @@ pub fn resolve_all(
     });
 
     Ok(())
+}
+
+/// How `destroy_all_consulting_together` ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DestroyAllBatch {
+    /// Every destruction was consulted and delivered.
+    Completed,
+    /// A delivery surfaced a choice; `state.waiting_for` is set.
+    Paused,
+    /// Nothing changed; destroy the objects one at a time instead.
+    NotTaken,
+}
+
+/// CR 614.1a + CR 614.6: "destroy all" destroys every matching permanent at
+/// once, so a replacement effect whose source is itself one of them (Dr. McCoy
+/// protecting the other creatures Wrath of God destroys) still applies to the
+/// others' destruction. Consult every destruction, and its graveyard move,
+/// while the whole set is still on the battlefield, then deliver the moves —
+/// the same order the state-based-action batch uses (`sba::perform_creature_deaths`).
+///
+/// Returns `NotTaken` with nothing changed when no destroyed object is a
+/// replacement source, or when a consult or a replacing continuation needed a
+/// player's choice: state and events are restored and the caller destroys the
+/// objects one at a time, which surfaces that prompt.
+fn destroy_all_consulting_together(
+    state: &mut GameState,
+    matching: &[ObjectId],
+    source_id: ObjectId,
+    cant_regenerate: bool,
+    events: &mut Vec<GameEvent>,
+) -> DestroyAllBatch {
+    let replacement_source_among_destroyed = matching.iter().any(|id| {
+        state
+            .objects
+            .get(id)
+            .is_some_and(|obj| !obj.replacement_definitions.is_empty())
+    });
+    if matching.len() < 2 || !replacement_source_among_destroyed {
+        return DestroyAllBatch::NotTaken;
+    }
+
+    let snapshot = state.clone();
+    let events_start = events.len();
+    let restore = |state: &mut GameState, events: &mut Vec<GameEvent>| {
+        *state = snapshot.clone();
+        events.truncate(events_start);
+    };
+
+    // (destroyed object, destruction source, consulted graveyard move, whether
+    // the move is the destruction itself rather than an outer redirect).
+    let mut deliveries: Vec<(ObjectId, Option<ObjectId>, Option<ProposedEvent>, bool)> =
+        Vec::with_capacity(matching.len());
+    for &object_id in matching {
+        let proposed = ProposedEvent::Destroy {
+            object_id,
+            source: Some(source_id),
+            cant_regenerate,
+            applied: HashSet::new(),
+        };
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(ProposedEvent::Destroy {
+                object_id, source, ..
+            }) => {
+                let zone_proposed = ProposedEvent::zone_change(
+                    object_id,
+                    Zone::Battlefield,
+                    Zone::Graveyard,
+                    source,
+                );
+                match replacement::replace_event(state, zone_proposed, events) {
+                    ReplacementResult::Execute(zone_event) => {
+                        deliveries.push((object_id, source, Some(zone_event), true));
+                    }
+                    ReplacementResult::Prevented => {
+                        deliveries.push((object_id, source, None, true))
+                    }
+                    ReplacementResult::NeedsChoice(_) => {
+                        restore(state, events);
+                        return DestroyAllBatch::NotTaken;
+                    }
+                }
+            }
+            ReplacementResult::Execute(redirect @ ProposedEvent::ZoneChange { .. }) => {
+                deliveries.push((object_id, None, Some(redirect), false));
+            }
+            ReplacementResult::Execute(_) => {}
+            ReplacementResult::Prevented => {
+                if run_prevented_destruction_continuation(state, events).is_some() {
+                    restore(state, events);
+                    return DestroyAllBatch::NotTaken;
+                }
+            }
+            ReplacementResult::NeedsChoice(_) => {
+                restore(state, events);
+                return DestroyAllBatch::NotTaken;
+            }
+        }
+    }
+
+    for (object_id, source, zone_event, destroyed) in deliveries {
+        if let Some(zone_event) = zone_event {
+            if !deliver_destruction_zone_change(state, zone_event, source, events) {
+                return DestroyAllBatch::Paused;
+            }
+        }
+        if destroyed {
+            events.push(GameEvent::CreatureDestroyed {
+                object_id,
+                source_id: source,
+            });
+        }
+    }
+    DestroyAllBatch::Completed
 }
 
 #[cfg(test)]
