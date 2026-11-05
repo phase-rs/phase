@@ -51825,24 +51825,43 @@ fn rebind_chosen_player_unless_payer(
     if modifier.payer != TargetFilter::Player {
         return;
     }
+    // Only a chain that actually chose a player can supply a competing
+    // antecedent, so the clause scan below runs only for that shape.
+    let Some(chosen) = subject::chosen_player_anaphor_filter(scope) else {
+        return;
+    };
     if clause_declares_player_target(clause_text) {
         return;
     }
-    if let Some(chosen) = subject::chosen_player_anaphor_filter(scope) {
-        modifier.payer = chosen;
-    }
+    modifier.payer = chosen;
 }
 
-/// CR 115.1 + CR 608.2c: True when a clause opens with a subject that declares
-/// its own player target ("target player", "target opponent"). That subject is
-/// the nearer antecedent of a following "they"/"that player", so anaphor
-/// rebinding must not reach past it to a player an earlier instruction chose.
+/// CR 115.1 + CR 608.2c: True when an effect clause declares its own player
+/// target ("target player", "target opponent") — as the subject ("Target player
+/// loses 3 life …") or as a recipient after a verb ("deals 3 damage to target
+/// player"). Either position is the nearer antecedent of a following "they"/
+/// "that player", so anaphor rebinding must not reach past it to a player an
+/// earlier instruction chose.
 ///
-/// Delegates to the target grammar: an anaphoric subject ("that player") parses
-/// as `TriggeringPlayer`, not as a declaration, so it never blocks rebinding.
+/// Scans at word boundaries because a declared recipient sits mid-clause. The
+/// probe requires the target KEYWORD, so a descriptor or anaphoric phrase
+/// ("a player", "that player") never blocks rebinding.
 fn clause_declares_player_target(clause_text: &str) -> bool {
-    let (target, _) = super::oracle_target::parse_target(clause_text);
-    declared_player_controller_ref(&target).is_some()
+    let lower = clause_text.to_ascii_lowercase();
+    nom_primitives::scan_at_word_boundaries(&lower, parse_declared_player_target_probe).is_some()
+}
+
+/// CR 115.1: scan probe for [`clause_declares_player_target`]. Delegates the
+/// phrase grammar to the single target parser and accepts only the declared
+/// player shapes the target keyword introduces, so the construction rule stays
+/// in `declared_player_controller_ref`.
+fn parse_declared_player_target_probe(input: &str) -> OracleResult<'_, ControllerRef> {
+    let (filter, rest, syntax) =
+        super::oracle_target::parse_target_with_syntax(input, &mut ParseContext::default());
+    match declared_player_controller_ref(&filter) {
+        Some(declared) if syntax == TargetSyntax::TargetKeyword => Ok((rest, declared)),
+        _ => Err(oracle_err(input)),
+    }
 }
 
 fn extract_resolution_unless_pay_modifier(

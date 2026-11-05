@@ -42095,6 +42095,34 @@ fn chosen_player_unless_payer_rebind_covers_the_grammar() {
     let lose_life = execute.sub_ability.as_ref().expect("lose-life clause");
     let unless_pay = lose_life.unless_pay.as_ref().expect("unless_pay");
     assert_eq!(unless_pay.payer, TargetFilter::Player);
+
+    // Nearer declared player RECIPIENT: "deals 3 damage to target player"
+    // declares its own player after the verb, so "they" is that target, not
+    // the opponent chosen earlier in the chain.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose an opponent at random. ~ deals 3 damage to target player unless they pay {2}.",
+        "Rebind Probe",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    let damage = execute.sub_ability.as_ref().expect("damage clause");
+    let Effect::DealDamage { target, .. } = damage.effect.as_ref() else {
+        panic!("expected DealDamage, got {:?}", damage.effect);
+    };
+    assert_eq!(*target, TargetFilter::Player);
+    let unless_pay = damage.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::Player);
+
+    // An explicitly named payer is never rebound: "unless its controller
+    // pays" keeps the damaged permanent's controller even after the chain
+    // chose an opponent at random.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose an opponent at random. ~ deals 3 damage to target creature unless its controller pays {2}.",
+        "Rebind Probe",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    let damage = execute.sub_ability.as_ref().expect("damage clause");
+    let unless_pay = damage.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
 }
 
 // CR 122.1 + CR 603.2: an active-voice "you remove a <kind> counter" trigger
