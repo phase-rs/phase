@@ -9247,6 +9247,26 @@ preset_id = "08086333-bd24-563d-97b8-f838c5a0c9bf"
 id = "080a9528-ded6-510d-9bfe-e4e494e4c459"
 category = "Creature"
 fidelity = "Full"
+source_card_names = [
+    "Academy Instructor",
+    "Captain Benjamin Sisko",
+    "Captain James T. Kirk",
+    "Captain Janeway, Endgame",
+    "Captain Jean-Luc Picard",
+    "Excalbian Gamemaster",
+    "Georgiou, Terran Emperor",
+    "Impossible Choice",
+    "Kobayashi Maru Scenario",
+    "M'Ress, Crew Coordinator",
+    "MACO Strike Team",
+    "Make It So",
+    "Officer",
+    "Photosynthetic Physician",
+    "Shuttlecraft Galileo",
+    "U.S.S. Cerritos, Following Up",
+    "U.S.S. Enterprise-A, Free Spirit",
+    "Worf, Son of Mogh",
+]
 set_code = "TRK"
 set_name = "Star Trek"
 collector_number = "14"
@@ -13454,6 +13474,26 @@ preset_id = "0d54973b-0600-5ea7-bb7c-28ee330c448b"
 id = "0d5787cb-c964-58a5-9c3c-998df55cf73b"
 category = "Creature"
 fidelity = "Full"
+source_card_names = [
+    "Academy Instructor",
+    "Captain Benjamin Sisko",
+    "Captain James T. Kirk",
+    "Captain Janeway, Endgame",
+    "Captain Jean-Luc Picard",
+    "Excalbian Gamemaster",
+    "Georgiou, Terran Emperor",
+    "Impossible Choice",
+    "Kobayashi Maru Scenario",
+    "M'Ress, Crew Coordinator",
+    "MACO Strike Team",
+    "Make It So",
+    "Officer",
+    "Photosynthetic Physician",
+    "Shuttlecraft Galileo",
+    "U.S.S. Cerritos, Following Up",
+    "U.S.S. Enterprise-A, Free Spirit",
+    "Worf, Son of Mogh",
+]
 set_code = "TRK"
 set_name = "Star Trek"
 collector_number = "8"
@@ -13789,6 +13829,26 @@ preset_id = "0d854bcb-6335-5040-a1e6-3f19a590a625"
 id = "0de3a88f-4c37-5180-a488-8e5624da8650"
 category = "Creature"
 fidelity = "Full"
+source_card_names = [
+    "Academy Instructor",
+    "Captain Benjamin Sisko",
+    "Captain James T. Kirk",
+    "Captain Janeway, Endgame",
+    "Captain Jean-Luc Picard",
+    "Excalbian Gamemaster",
+    "Georgiou, Terran Emperor",
+    "Impossible Choice",
+    "Kobayashi Maru Scenario",
+    "M'Ress, Crew Coordinator",
+    "MACO Strike Team",
+    "Make It So",
+    "Officer",
+    "Photosynthetic Physician",
+    "Shuttlecraft Galileo",
+    "U.S.S. Cerritos, Following Up",
+    "U.S.S. Enterprise-A, Free Spirit",
+    "Worf, Son of Mogh",
+]
 set_code = "TRK"
 set_name = "Star Trek"
 collector_number = "9"
@@ -16738,11 +16798,13 @@ fidelity = "PartialMissingAbilities"
 source_card_names = [
     "Artificial Anomaly",
     "David and Carol Marcus, Creators",
+    "Gaseous Anomaly",
     "Genesis Effect",
     "Saurian Explorer",
     "Spatial Anomaly",
     "Stable Wormhole",
     "Subspace Anomaly",
+    "Temporal Anomaly",
 ]
 set_code = "TRK"
 set_name = "Star Trek"
@@ -16780,9 +16842,19 @@ scryfall_oracle_id = "a4f31512-a91c-42e0-9929-5069386c3c71"
 scryfall_id = "2f683f37-4291-410d-b179-ed6139c06877"
 
 [[token.source_card_refs]]
+card_name = "Temporal Anomaly"
+scryfall_oracle_id = "cf0d1859-699e-47d4-bc91-7c5ff61fabe9"
+scryfall_id = "d2000219-0a57-48e6-ab0f-d5ad0fb7bcf6"
+
+[[token.source_card_refs]]
 card_name = "Genesis Effect"
 scryfall_oracle_id = "ec763f36-3504-4bfe-8481-1a7d0bff8d8e"
 scryfall_id = "f0996bab-c2e4-4483-a76e-1355c81f1577"
+
+[[token.source_card_refs]]
+card_name = "Gaseous Anomaly"
+scryfall_oracle_id = "1fb736bf-c9bd-45ab-86ce-7f138f1724b2"
+scryfall_id = "e6974579-7e88-4d7f-9b05-93d08167cb17"
 
 [[token.source_card_refs]]
 card_name = "Saurian Explorer"
@@ -36667,6 +36739,22 @@ preset_id = "28c7e87c-3eda-52f4-aa11-ebb0880e2bb1"
 id = "28e6e1d1-8b8f-5e53-a3ca-7d8127d41bdc"
 category = "Creature"
 fidelity = "Full"
+source_card_names = [
+    "Antagonist Incorporator",
+    "Assembly Specialist",
+    "Borg",
+    "Borg Incursion",
+    "Class-4 Tactical Cube",
+    "Collective Override",
+    "Conquest Mission",
+    "Deliver from Chaos",
+    "Join the Collective",
+    "Locutus of Borg",
+    "Maturation Chamber",
+    "Stratagem Emulator",
+    "Tenacious Drone",
+    "Type-03 Borg Vessel",
+]
 set_code = "TRK"
 set_name = "Star Trek"
 collector_number = "19"
@@ -62772,6 +62860,10 @@ preset_id = "4873fe20-675e-5db5-b9ba-8d996c2806ba"
 id = "4897bb1d-368e-5e91-b32b-539f13a1318a"
 category = "Creature"
 fidelity = "Full"
+source_card_names = [
+    "Spacecraft Illusion",
+    "U.S.S. Stargazer, Here and There",
+]
 set_code = "TRC"
 set_name = "Star Trek Commander"
 collector_number = "7"
@@ -63202,6 +63294,26 @@ preset_id = "48db8a3b-57f9-5eae-8344-4b46db06f111"
 id = "491735d2-4e81-51ed-90b0-e223095af46e"
 category = "Creature"
 fidelity = "Full"
+source_card_names = [
+    "Academy Instructor",
+    "Captain Benjamin Sisko",
+    "Captain James T. Kirk",
+    "Captain Janeway, Endgame",
+    "Captain Jean-Luc Picard",
+    "Excalbian Gamemaster",
+    "Georgiou, Terran Emperor",
+    "Impossible Choice",
+    "Kobayashi Maru Scenario",
+    "M'Ress, Crew Coordinator",
+    "MACO Strike Team",
+    "Make It So",
+    "Officer",
+    "Photosynthetic Physician",
+    "Shuttlecraft Galileo",
+    "U.S.S. Cerritos, Following Up",
+    "U.S.S. Enterprise-A, Free Spirit",
+    "Worf, Son of Mogh",
+]
 set_code = "TRK"
 set_name = "Star Trek"
 collector_number = "6"
@@ -63914,6 +64026,26 @@ preset_id = "4983cf20-03e7-5f8d-a817-2d69acc1db5a"
 id = "49ae795c-4443-5ead-9b64-a104084bc087"
 category = "Creature"
 fidelity = "Full"
+source_card_names = [
+    "Academy Instructor",
+    "Captain Benjamin Sisko",
+    "Captain James T. Kirk",
+    "Captain Janeway, Endgame",
+    "Captain Jean-Luc Picard",
+    "Excalbian Gamemaster",
+    "Georgiou, Terran Emperor",
+    "Impossible Choice",
+    "Kobayashi Maru Scenario",
+    "M'Ress, Crew Coordinator",
+    "MACO Strike Team",
+    "Make It So",
+    "Officer",
+    "Photosynthetic Physician",
+    "Shuttlecraft Galileo",
+    "U.S.S. Cerritos, Following Up",
+    "U.S.S. Enterprise-A, Free Spirit",
+    "Worf, Son of Mogh",
+]
 set_code = "TRK"
 set_name = "Star Trek"
 collector_number = "11"
@@ -85893,6 +86025,11 @@ scryfall_oracle_id = "b98ab107-3908-4425-89d3-634043bb4d4b"
 scryfall_id = "2bba1d93-0904-464b-9797-a0f0f4b05df8"
 
 [[token.source_card_refs]]
+card_name = "Savvy Profiteer"
+scryfall_oracle_id = "e96a9f9a-9326-4f0b-98ad-23210c97299f"
+scryfall_id = "8256376f-011f-4cc8-9be4-47f5121ca75e"
+
+[[token.source_card_refs]]
 card_name = "Quark, Humble Proprietor"
 scryfall_oracle_id = "61703e94-cb57-44d8-b37b-7b14b3cfd86d"
 scryfall_id = "96104754-57e2-46e9-948d-628aab2aa0ad"
@@ -92155,11 +92292,6 @@ scryfall_oracle_id = "22c53662-51b9-4a8c-8ec7-e8b456a268b7"
 scryfall_id = "0bb3c5ef-257f-4505-8781-c6db8e12d59a"
 
 [[token.source_card_refs]]
-card_name = "The Duras Sisters"
-scryfall_oracle_id = "03973bad-1b3c-4488-a23e-232b192c95cc"
-scryfall_id = "56c8d25b-9114-4412-af57-db7f8c2e20c4"
-
-[[token.source_card_refs]]
 card_name = "The Destruction of Praxis"
 scryfall_oracle_id = "028d6812-55db-40df-9288-89c2e478c76c"
 scryfall_id = "3d33ac2a-73a9-4804-bf9f-c8cf4eea1c76"
@@ -92193,11 +92325,6 @@ scryfall_id = "da030114-a4ee-46d7-a6fd-6c0d8e779bcf"
 card_name = "Rite of Ascension"
 scryfall_oracle_id = "08c6ca45-09ff-4fe4-bc9b-45876e94f430"
 scryfall_id = "03932c24-ffdc-4593-b223-342d68a1533c"
-
-[[token.source_card_refs]]
-card_name = "L'Rell, Fierce Visionary"
-scryfall_oracle_id = "ea684e78-483c-4b89-b184-b2aeede83cc7"
-scryfall_id = "4b59e50c-21e2-480d-b5b5-cc6c1eeed57a"
 
 [[token.source_card_refs]]
 card_name = "D-7 Battle Cruiser"
@@ -102523,6 +102650,7 @@ source_card_names = [
     "Locutus of Borg",
     "Maturation Chamber",
     "Stratagem Emulator",
+    "Tenacious Drone",
     "Type-03 Borg Vessel",
 ]
 set_code = "TRK"
@@ -102583,6 +102711,11 @@ scryfall_id = "a4e204fd-a137-4d7c-bc0e-5af4ceb1a383"
 card_name = "Deliver from Chaos"
 scryfall_oracle_id = "edea104c-b563-4fae-9e74-82164a8e090b"
 scryfall_id = "2f5b9460-53e8-4a1e-b635-8e6299fa4ae5"
+
+[[token.source_card_refs]]
+card_name = "Tenacious Drone"
+scryfall_oracle_id = "af6351a9-ac01-4fed-9ea9-a352d21a8312"
+scryfall_id = "206ae042-09af-4fc1-8441-69cecdd087de"
 
 [[token.source_card_refs]]
 card_name = "Type-03 Borg Vessel"
@@ -119303,6 +119436,7 @@ source_card_names = [
     "Make It So",
     "Photosynthetic Physician",
     "Shuttlecraft Galileo",
+    "U.S.S. Cerritos, Following Up",
     "U.S.S. Enterprise-A, Free Spirit",
     "Worf, Son of Mogh",
 ]
@@ -119376,6 +119510,11 @@ scryfall_id = "99429015-6e5d-4ecf-aaf7-eba181bcffc7"
 card_name = "Worf, Son of Mogh"
 scryfall_oracle_id = "a2249af3-2e3e-484b-a31a-26432edd13ae"
 scryfall_id = "d74900c9-aedc-4fcd-a074-43ff0ff61805"
+
+[[token.source_card_refs]]
+card_name = "U.S.S. Cerritos, Following Up"
+scryfall_oracle_id = "472eac8f-2b82-4fa9-a40c-af11ec40f19e"
+scryfall_id = "76bf7521-5024-4fdc-9ea1-5e10f2647efb"
 
 [[token.source_card_refs]]
 card_name = "Captain Jean-Luc Picard"
@@ -155157,6 +155296,26 @@ preset_id = "a8ae86dd-06bb-5c57-8e78-e86ede39d412"
 id = "a8bfcc5a-fcfc-59e5-a892-1ae9840db628"
 category = "Creature"
 fidelity = "Full"
+source_card_names = [
+    "Academy Instructor",
+    "Captain Benjamin Sisko",
+    "Captain James T. Kirk",
+    "Captain Janeway, Endgame",
+    "Captain Jean-Luc Picard",
+    "Excalbian Gamemaster",
+    "Georgiou, Terran Emperor",
+    "Impossible Choice",
+    "Kobayashi Maru Scenario",
+    "M'Ress, Crew Coordinator",
+    "MACO Strike Team",
+    "Make It So",
+    "Officer",
+    "Photosynthetic Physician",
+    "Shuttlecraft Galileo",
+    "U.S.S. Cerritos, Following Up",
+    "U.S.S. Enterprise-A, Free Spirit",
+    "Worf, Son of Mogh",
+]
 set_code = "TRK"
 set_name = "Star Trek"
 collector_number = "7"
@@ -157604,6 +157763,11 @@ scryfall_oracle_id = "cc3fcd26-c088-4335-9a35-0e11019e3d5b"
 scryfall_id = "22ddde38-79e0-48f2-9920-b66f6399b077"
 
 [[token.source_card_refs]]
+card_name = "Big Score"
+scryfall_oracle_id = "a5cbd257-c836-493e-bb1a-76242619dea2"
+scryfall_id = "843795d1-8f12-43af-bac6-319fbdaa0b18"
+
+[[token.source_card_refs]]
 card_name = "Smothering Tithe"
 scryfall_oracle_id = "153376c9-dffd-458c-8ce3-a4c8269bc4e9"
 scryfall_id = "7839cdc8-0cc9-4a17-9642-fb23f6e0be06"
@@ -159053,6 +159217,11 @@ scryfall_id = "fe5f0fe9-f063-4fb7-81c9-13f4e14d6ed1"
 card_name = "Spot, Felis catus"
 scryfall_oracle_id = "25fe4df1-abf7-4f17-9e0d-57e414697400"
 scryfall_id = "ccdc8c1a-68ba-4498-a336-13676d8de107"
+
+[[token.source_card_refs]]
+card_name = "Neelix, Moral Support"
+scryfall_oracle_id = "7fba522b-a292-4d1f-9999-f787ba2d5fd1"
+scryfall_id = "09c0daa9-9eca-4817-a427-868d1efcfa20"
 
 [[token.source_card_refs]]
 card_name = "Replicator"
@@ -177455,6 +177624,26 @@ preset_id = "c0dea9db-fb14-52e0-8304-5025d32f26f4"
 id = "c0e753a2-3538-55ce-bf93-33e0bbd74514"
 category = "Creature"
 fidelity = "Full"
+source_card_names = [
+    "Academy Instructor",
+    "Captain Benjamin Sisko",
+    "Captain James T. Kirk",
+    "Captain Janeway, Endgame",
+    "Captain Jean-Luc Picard",
+    "Excalbian Gamemaster",
+    "Georgiou, Terran Emperor",
+    "Impossible Choice",
+    "Kobayashi Maru Scenario",
+    "M'Ress, Crew Coordinator",
+    "MACO Strike Team",
+    "Make It So",
+    "Officer",
+    "Photosynthetic Physician",
+    "Shuttlecraft Galileo",
+    "U.S.S. Cerritos, Following Up",
+    "U.S.S. Enterprise-A, Free Spirit",
+    "Worf, Son of Mogh",
+]
 set_code = "TRK"
 set_name = "Star Trek"
 collector_number = "10"
@@ -199054,6 +199243,46 @@ scryfall_oracle_id = "695b14a0-920a-47bd-bd4a-7989862cdd0a"
 preset_id = "d7539d53-fc4b-5bd6-b816-8adc1558e38d"
 
 [[token]]
+id = "d75c3a31-ec6b-562a-a79a-5066424337e6"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Chandra, Acolyte of Flame",
+    "Mask of Immolation",
+    "Molten Birth",
+    "Molten Lavamancer",
+    "Scampering Scorcher",
+    "Seasoned Pyromancer",
+    "Tilonalli's Summoner",
+    "Young Pyromancer",
+]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "2906"
+released_at = "2019-12-02"
+type_line = "Token Creature — Elemental"
+
+[token.body]
+display_name = "Elemental"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Young Pyromancer"
+scryfall_oracle_id = "5fac139a-07d3-4e6c-98e3-d98b199f7a6f"
+scryfall_id = "bc846a79-9ff9-41ca-8c5b-07509e9b1047"
+
+[token.token_image_ref]
+scryfall_id = "40116092-622d-4dbb-9f32-6ccebbd9559b"
+scryfall_oracle_id = "1a6c2152-71ca-46be-ab83-c84633442257"
+preset_id = "d75c3a31-ec6b-562a-a79a-5066424337e6"
+
+[[token]]
 id = "d76af2c5-2e22-582a-bd84-97dc25d3601b"
 fidelity = "Full"
 source_card_names = [
@@ -200073,6 +200302,20 @@ preset_id = "d7e8ec2d-f7a8-5356-9a08-eb7d3ab43fa9"
 id = "d7e9b52a-d040-54b7-8831-c0b71635750b"
 category = "Creature"
 fidelity = "Full"
+source_card_names = [
+    "Boarding Action",
+    "Cha'DIch Investigator",
+    "D-7 Battle Cruiser",
+    "Glory to the Empire!",
+    "Klingon Warrior",
+    "L'Rell, Fierce Visionary",
+    "Right of Vengeance",
+    "Rite of Ascension",
+    "Sins of the Father",
+    "The Destruction of Praxis",
+    "The Duras Sisters",
+    "Worf, Defiant Commander",
+]
 set_code = "TRK"
 set_name = "Star Trek"
 collector_number = "4"
@@ -206756,6 +206999,20 @@ preset_id = "de8ef114-3765-577d-a6d9-a28ace0fa70d"
 id = "de9b69a5-ab82-5146-9e5c-d24ec4a2a83b"
 category = "Creature"
 fidelity = "Full"
+source_card_names = [
+    "Boarding Action",
+    "Cha'DIch Investigator",
+    "D-7 Battle Cruiser",
+    "Glory to the Empire!",
+    "Klingon Warrior",
+    "L'Rell, Fierce Visionary",
+    "Right of Vengeance",
+    "Rite of Ascension",
+    "Sins of the Father",
+    "The Destruction of Praxis",
+    "The Duras Sisters",
+    "Worf, Defiant Commander",
+]
 set_code = "TRK"
 set_name = "Star Trek"
 collector_number = "3"
@@ -207402,6 +207659,26 @@ preset_id = "df8502df-5d33-55e9-a756-f8fa94ef5b32"
 id = "df85d029-1713-5b9e-97bb-2b4cee58e960"
 category = "Creature"
 fidelity = "Full"
+source_card_names = [
+    "Academy Instructor",
+    "Captain Benjamin Sisko",
+    "Captain James T. Kirk",
+    "Captain Janeway, Endgame",
+    "Captain Jean-Luc Picard",
+    "Excalbian Gamemaster",
+    "Georgiou, Terran Emperor",
+    "Impossible Choice",
+    "Kobayashi Maru Scenario",
+    "M'Ress, Crew Coordinator",
+    "MACO Strike Team",
+    "Make It So",
+    "Officer",
+    "Photosynthetic Physician",
+    "Shuttlecraft Galileo",
+    "U.S.S. Cerritos, Following Up",
+    "U.S.S. Enterprise-A, Free Spirit",
+    "Worf, Son of Mogh",
+]
 set_code = "TRK"
 set_name = "Star Trek"
 collector_number = "13"
@@ -208426,6 +208703,11 @@ preset_id = "e111ef12-32a1-5790-8106-8fbfa4572824"
 id = "e1175472-e486-53d1-824d-92686cf23374"
 category = "Creature"
 fidelity = "PartialMissingAbilities"
+source_card_names = [
+    "Koloth, Tribble Hunter",
+    "Tribble",
+    "Tribble Cluster",
+]
 set_code = "TRC"
 set_name = "Star Trek Commander"
 collector_number = "2"
@@ -210889,6 +211171,11 @@ scryfall_id = "c0d0b4ee-72f6-45b6-8911-e3ef979e40a0"
 card_name = "Sam Kirk, Xenoanthropologist"
 scryfall_oracle_id = "eec55307-8525-4dae-a030-d210f3895138"
 scryfall_id = "d6cd4b1c-929f-4653-a2e0-d976d99deb16"
+
+[[token.source_card_refs]]
+card_name = "Starfleet Security"
+scryfall_oracle_id = "896077f9-b26e-4964-9279-03ee284a3e89"
+scryfall_id = "62acde0e-791d-4259-83bc-3690e498f3b0"
 
 [[token.source_card_refs]]
 card_name = "Jake Sisko, War Correspondent"
@@ -226970,6 +227257,26 @@ preset_id = "f632859f-fb8c-5d4b-a02e-14c7ce32d46c"
 id = "f637d813-4c14-5680-b08e-aaf6c844bb60"
 category = "Creature"
 fidelity = "Full"
+source_card_names = [
+    "Academy Instructor",
+    "Captain Benjamin Sisko",
+    "Captain James T. Kirk",
+    "Captain Janeway, Endgame",
+    "Captain Jean-Luc Picard",
+    "Excalbian Gamemaster",
+    "Georgiou, Terran Emperor",
+    "Impossible Choice",
+    "Kobayashi Maru Scenario",
+    "M'Ress, Crew Coordinator",
+    "MACO Strike Team",
+    "Make It So",
+    "Officer",
+    "Photosynthetic Physician",
+    "Shuttlecraft Galileo",
+    "U.S.S. Cerritos, Following Up",
+    "U.S.S. Enterprise-A, Free Spirit",
+    "Worf, Son of Mogh",
+]
 set_code = "TRK"
 set_name = "Star Trek"
 collector_number = "12"

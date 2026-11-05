@@ -959,6 +959,38 @@ pub fn create_commander_from_card_face(
     obj_id
 }
 
+/// Create a non-commander command zone GameObject from a CardFace (e.g. Conspiracy in limited formats per CR 905).
+/// Conspiracies with hidden agenda enter face down (CR 905.4a / CR 702.106); others enter face up (CR 905.4).
+///
+/// The printing is stamped before the conspiracy is set up, so a hidden-agenda
+/// conspiracy conceals it as it turns face down (`conceal_printing`).
+pub fn create_command_zone_card_from_card_face(
+    state: &mut GameState,
+    card_face: &CardFace,
+    printing: Option<&CardPrinting>,
+    owner: PlayerId,
+) -> crate::types::identifiers::ObjectId {
+    let mut face = card_face.clone();
+    crate::database::synthesis::synthesize_conspiracy(&mut face);
+
+    let card_id = CardId(state.next_object_id);
+    let obj_id = create_object(state, card_id, owner, face.name.clone(), Zone::Command);
+    stamp_created_card(state, obj_id, printing);
+
+    let obj = state.objects.get_mut(&obj_id).expect("just created");
+    apply_card_face_to_object(obj, &face);
+    obj.is_commander = false;
+    obj.controller = owner;
+
+    if crate::game::conspiracy::is_conspiracy(obj) {
+        let hidden_agenda = crate::game::conspiracy::card_has_hidden_agenda(&face);
+        obj.agenda_name_count = crate::game::conspiracy::agenda_name_count(&face);
+        crate::game::conspiracy::start_with_conspiracy(state, obj_id, hidden_agenda);
+    }
+
+    obj_id
+}
+
 /// CR 717.2: Create an Attraction in the supplementary deck (command zone).
 pub fn create_attraction_deck_card(
     state: &mut GameState,
@@ -1465,15 +1497,51 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
     // `commander` slot must neither place a command-zone object nor net the
     // slot out of the library, or a populated-but-inert `commander` slot would
     // add a 61st card to a constructed game.
-    if place_commanders {
+    #[derive(Copy, Clone)]
+    enum CommandZonePlacement {
+        Commander,
+        NonCommanderLimited,
+    }
+    let placement = if place_commanders {
+        Some(CommandZonePlacement::Commander)
+    } else if state
+        .format_config
+        .command_zone_holds_limited_conspiracies()
+    {
+        Some(CommandZonePlacement::NonCommanderLimited)
+    } else {
+        None
+    };
+    if let Some(placement) = placement {
         for (seat, deck) in std::iter::once(&payload.player)
             .chain(std::iter::once(&payload.opponent))
             .chain(&payload.ai_decks)
             .enumerate()
         {
+            let owner = PlayerId(seat as u8);
             for copy in entry_copies(deck, DeckSection::Commander, None) {
-                let id = create_commander_from_card_face(state, copy.face, PlayerId(seat as u8));
-                stamp_created_card(state, id, copy.printing);
+                match placement {
+                    CommandZonePlacement::Commander => {
+                        let id = create_commander_from_card_face(state, copy.face, owner);
+                        stamp_created_card(state, id, copy.printing);
+                    }
+                    CommandZonePlacement::NonCommanderLimited => {
+                        // CR 905: only Conspiracy cards start in a Limited command zone.
+                        if copy
+                            .face
+                            .card_type
+                            .core_types
+                            .contains(&crate::types::card_type::CoreType::Conspiracy)
+                        {
+                            create_command_zone_card_from_card_face(
+                                state,
+                                copy.face,
+                                copy.printing,
+                                owner,
+                            );
+                        }
+                    }
+                }
             }
         }
     }

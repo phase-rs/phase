@@ -654,6 +654,7 @@
     "kicked": "Du wurdest aus dem Pod geworfen",
     "hostLeft": "Der Host hat den Draft verlassen",
     "connection": "Verbindungsfehler",
+    "incompatible": "Dieser Draft ist mit deiner Protokollversion nicht kompatibel.",
     "retry": "Erneut verbinden"
   },
   "winston": {

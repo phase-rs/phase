@@ -1,4 +1,7 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { useEffect } from "react";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -27,6 +30,8 @@ const guest = vi.hoisted(() => ({
   ctor: vi.fn(),
   dispose: vi.fn(),
   instances: [] as Array<{ emit: (event: unknown) => void; dispose: ReturnType<typeof vi.fn> }>,
+  /** How the next guest's first contact settles: `null` accepts it. */
+  firstContact: null as null | ((emit: (event: unknown) => void) => Promise<void>),
 }));
 vi.mock("../../adapter/p2p-draft-guest", () => ({
   P2PDraftGuest: vi.fn().mockImplementation(function (...args: unknown[]) {
@@ -41,7 +46,10 @@ vi.mock("../../adapter/p2p-draft-guest", () => ({
           listener = null;
         };
       },
-      initialize: vi.fn(async () => {}),
+      initialize: vi.fn(async () => {
+        const firstContact = guest.firstContact;
+        if (firstContact) await firstContact((event) => listener?.(event));
+      }),
       leave: vi.fn(async () => {}),
       dispose,
       get isRecoveryRevoked() {
@@ -123,6 +131,41 @@ import { adHocLobbySource, useMultiplayerStore, type LobbySource } from "../../s
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 import { useConnectivityStore } from "../../stores/connectivityStore";
 import { DraftPodGuestAdapter } from "../../adapter/draftPodGuestAdapter";
+import { admitDraft27GuestView, Draft27IncompatibilityError } from "../../adapter/draft-compatibility";
+import { useDraftPodStore } from "../../stores/draftPodStore";
+
+/** The guest's refusal of the FIFO player view draft-core publishes, from the shared fixture. */
+function fifoViewRefusal(): Draft27IncompatibilityError {
+  const fixture = JSON.parse(readFileSync(resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "../../../../fixtures/draft-contract/fifo_legacy_admission.json",
+  ), "utf8")) as { queued_view: unknown };
+  const admission = admitDraft27GuestView(fixture.queued_view);
+  if (admission.ok) throw new Error("Expected the guest to refuse the fixture's FIFO view");
+  return new Draft27IncompatibilityError(admission.error);
+}
+
+/** First contact as the guest settles it when it refuses the host's view. */
+function refuseFirstContact(refusal: Draft27IncompatibilityError): void {
+  guest.firstContact = async (emit) => {
+    emit({ type: "reconnectFailed", failure: { kind: "incompatible", message: refusal.message, code: refusal.code } });
+    emit({ type: "error", message: refusal.message });
+    throw refusal;
+  };
+}
+
+/** A later view the guest refuses, as it reports it after the pod opened. */
+function refuseLaterView(refusal: Draft27IncompatibilityError): void {
+  act(() => {
+    guest.instances[0]!.emit({
+      type: "reconnectFailed",
+      failure: { kind: "incompatible", message: refusal.message, code: refusal.code },
+    });
+    guest.instances[0]!.emit({ type: "error", message: refusal.message });
+  });
+}
+
+const TRANSLATED_REFUSAL = "This draft is incompatible with your protocol version.";
 
 const ORIGIN = adHocLobbySource("wss://play.example.com/ws") as LobbySource;
 const p2pDraftRow: LobbyGame = {
@@ -215,6 +258,7 @@ describe("MultiplayerPage draft pod handoff", () => {
     harness.lobbyAction = null;
     net.plan = [];
     guest.instances = [];
+    guest.firstContact = null;
     net.joinRoom.mockImplementation((code: string, signal?: AbortSignal) => {
       const next = net.plan.shift();
       return next ? next(code, signal) : Promise.resolve(joinResult(code));
@@ -555,5 +599,127 @@ describe("MultiplayerPage draft pod handoff", () => {
 
     expect(await screen.findByTestId("lobby")).toBeTruthy();
     expect(screen.queryByText("Leave Draft")).toBeNull();
+  });
+
+  it("toasts the translated incompatibility message when a lobby join meets the guest's compatibility refusal", async () => {
+    const refusal = fifoViewRefusal();
+    refuseFirstContact(refusal);
+    joinFromLobbyRow();
+
+    await waitFor(() => expect(pageJoins).toHaveLength(1));
+    // Reach: the page's own join settled failed with the refusal's English as its error.
+    await act(async () => {
+      await expect(pageJoins[0]).resolves.toMatchObject({ status: "failed", error: refusal.message });
+    });
+    await waitFor(() => expect(toastMessages()).toHaveLength(1));
+    expect(screen.getByTestId("lobby")).toBeTruthy();
+    expect(toastMessages()).toEqual([TRANSLATED_REFUSAL]);
+    expect(toastMessages()).not.toContain(refusal.message);
+    await expect(pageJoins[0]).resolves.toStrictEqual({ status: "failed", error: refusal.message, code: refusal.code });
+    expect(useMultiplayerDraftStore.getState()).toMatchObject({ phase: "idle", guestRecoveryFailure: null });
+  });
+
+  it("toasts an uncoded incompatible failure's own message from a lobby join", async () => {
+    const reason = "Draft protocol mismatch. Refresh both windows.";
+    guest.firstContact = async (emit) => {
+      emit({ type: "reconnectFailed", failure: { kind: "incompatible", message: reason } });
+      throw new Error(reason);
+    };
+    joinFromLobbyRow();
+
+    await waitFor(() => expect(pageJoins).toHaveLength(1));
+    await act(async () => {
+      await expect(pageJoins[0]).resolves.toStrictEqual({ status: "failed", error: reason });
+    });
+    await waitFor(() => expect(toastMessages()).toEqual([reason]));
+  });
+
+  it("shows the translated incompatibility message when a guest's recovery meets the compatibility refusal", async () => {
+    const refusal = fifoViewRefusal();
+    refuseFirstContact(refusal);
+    renderApp("/draft-pod?entry=guest");
+
+    // Reach: the pod page's error view.
+    await screen.findByText("Return to Menu", undefined, { timeout: 2000 });
+    expect(pageJoins).toHaveLength(1);
+    expect(screen.getByText(TRANSLATED_REFUSAL)).toBeTruthy();
+    expect(screen.queryByText(refusal.message)).toBeNull();
+    expect(screen.queryByText("Try Reconnecting")).toBeNull();
+    expect(useMultiplayerDraftStore.getState()).toMatchObject({
+      guestRecoveryFailure: { kind: "incompatible", message: refusal.message, code: refusal.code },
+      error: refusal.message,
+    });
+  });
+
+  it("shows the translated incompatibility message when the pod page's own join meets the compatibility refusal", async () => {
+    persist.inspectActiveDraftGuest.mockReturnValue({ type: "absent" });
+    const refusal = fifoViewRefusal();
+    refuseFirstContact(refusal);
+    renderApp("/draft-pod");
+    await settle();
+    // Positive control: entering the pod page joins nothing by itself.
+    expect(pageJoins).toHaveLength(0);
+
+    await act(async () => {
+      useDraftPodStore.setState({ joinCode: "ABCDE", guestDisplayName: "Tester" });
+      await useDraftPodStore.getState().joinPod();
+    });
+
+    // Reach: the pod page's error view.
+    await screen.findByText("Return to Menu", undefined, { timeout: 2000 });
+    expect(pageJoins).toHaveLength(1);
+    expect(screen.getByText(TRANSLATED_REFUSAL)).toBeTruthy();
+    expect(screen.queryByText(refusal.message)).toBeNull();
+    expect(useMultiplayerDraftStore.getState().guestRecoveryFailure).toEqual({
+      kind: "incompatible",
+      message: refusal.message,
+      code: refusal.code,
+    });
+  });
+
+  it("replaces an opened pod's lobby with the translated incompatibility message when a later view is refused", async () => {
+    // No saved guest seat: a pod page entry resume that runs after the refusal
+    // then has nothing to reconnect over it.
+    persist.inspectActiveDraftGuest.mockReturnValue({ type: "absent" });
+    const refusal = fifoViewRefusal();
+    joinFromLobbyRow();
+    // Reach: the lobby join opened the pod's lobby.
+    await screen.findByText("Waiting for host to start the draft...", undefined, { timeout: 2000 });
+
+    refuseLaterView(refusal);
+
+    await screen.findByText("Return to Menu", undefined, { timeout: 2000 });
+    expect(screen.getByText(TRANSLATED_REFUSAL)).toBeTruthy();
+    expect(screen.queryByText(refusal.message)).toBeNull();
+    expect(screen.queryByText("Waiting for host to start the draft...")).toBeNull();
+    expect(useMultiplayerDraftStore.getState()).toMatchObject({ phase: "error", error: refusal.message });
+  });
+
+  it("keeps a refused guest pod on the translated incompatibility message when its match reaches the between-games step", async () => {
+    // No saved guest seat: a pod page entry resume that runs after the refusal
+    // then has nothing to reconnect over it.
+    persist.inspectActiveDraftGuest.mockReturnValue({ type: "absent" });
+    const refusal = fifoViewRefusal();
+    joinFromLobbyRow();
+    await screen.findByText("Waiting for host to start the draft...", undefined, { timeout: 2000 });
+    refuseLaterView(refusal);
+    // Reach: the translated error view is shown.
+    await screen.findByText(TRANSLATED_REFUSAL, undefined, { timeout: 2000 });
+
+    act(() => {
+      useMultiplayerDraftStore.getState().handleBetweenGamesPrompt({
+        matchId: "m1",
+        gameNumber: 2,
+        score: { p0_wins: 1, p1_wins: 0, draws: 0 },
+        loserSeat: 1,
+        timerMs: 0,
+      });
+    });
+    await settle();
+
+    expect(useMultiplayerDraftStore.getState()).toMatchObject({ phase: "error", sideboardPrompt: null });
+    expect(screen.getByText(TRANSLATED_REFUSAL)).toBeTruthy();
+    expect(screen.queryByText(refusal.message)).toBeNull();
+    expect(screen.queryByTestId("pod-error-banner")).toBeNull();
   });
 });

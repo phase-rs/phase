@@ -159,6 +159,20 @@ pub struct ExileReturnLatchCounters {
     pub trigger_origin_lookups: u64,
 }
 
+/// Test-only work counters for the CR 603.10a co-departure arm of trigger
+/// collection (`triggers::CoDepartureObserverIndex`). Kept out of
+/// [`PerfCounterSnapshot`] for the same reason as the counter sets above: that
+/// struct's serialized field set powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CoDepartureObserverCounters {
+    /// Per-pass index builds (one per pass that sees a co-departure group).
+    pub index_builds: u64,
+    /// (departure, co-departed observer) pairs whose observer source context
+    /// was resolved because the observer left with a trigger.
+    pub observer_resolutions: u64,
+}
+
 /// Test-only counters for the stack's bulk token executor
 /// (`stack::resolve_bulk_token_run`) and the post-action pipeline it elides.
 /// Kept out of [`PerfCounterSnapshot`] for the same reason as the counter sets
@@ -588,6 +602,13 @@ thread_local! {
     static EXILE_RETURN_LATCH_COUNTERS: Cell<ExileReturnLatchCounters> = const {
         Cell::new(ExileReturnLatchCounters {
             trigger_origin_lookups: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
+    static CO_DEPARTURE_OBSERVER_COUNTERS: Cell<CoDepartureObserverCounters> = const {
+        Cell::new(CoDepartureObserverCounters {
+            index_builds: 0,
+            observer_resolutions: 0,
         })
     };
     #[cfg(feature = "test-support")]
@@ -1133,6 +1154,31 @@ pub fn exile_return_latch_snapshot() -> ExileReturnLatchCounters {
     EXILE_RETURN_LATCH_COUNTERS.with(Cell::get)
 }
 
+/// CR 603.10a: one co-departure observer index build.
+#[cfg(feature = "test-support")]
+pub fn record_co_departure_index_build() {
+    CO_DEPARTURE_OBSERVER_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.index_builds += 1;
+        cell.set(counters);
+    });
+}
+
+/// CR 603.10a: one co-departed observer whose source context was resolved.
+#[cfg(feature = "test-support")]
+pub fn record_co_departure_observer_resolution() {
+    CO_DEPARTURE_OBSERVER_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.observer_resolutions += 1;
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn co_departure_observer_snapshot() -> CoDepartureObserverCounters {
+    CO_DEPARTURE_OBSERVER_COUNTERS.with(Cell::get)
+}
+
 #[cfg(feature = "test-support")]
 pub fn reset_prior_target_binding_counters() {
     PRIOR_TARGET_BINDING_COUNTERS
@@ -1286,6 +1332,9 @@ pub fn reset() {
     PLAY_TRACE_COUNTERS.with(|counters| counters.set(PlayTraceCounters::default()));
     #[cfg(feature = "test-support")]
     EXILE_RETURN_LATCH_COUNTERS.with(|counters| counters.set(ExileReturnLatchCounters::default()));
+    #[cfg(feature = "test-support")]
+    CO_DEPARTURE_OBSERVER_COUNTERS
+        .with(|counters| counters.set(CoDepartureObserverCounters::default()));
     #[cfg(feature = "test-support")]
     STACK_BULK_COUNTERS.with(|counters| counters.set(StackBulkCounters::default()));
     #[cfg(feature = "test-support")]
