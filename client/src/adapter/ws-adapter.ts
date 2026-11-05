@@ -54,7 +54,9 @@ import {
   StateCodecSocket,
   StateCodecPreparationAbortError,
   prepareStateCodecSession as prepareBoundedStateCodecSession,
+  STATE_CODEC_RECOVERY_INTERRUPTED_MESSAGE,
   type StateCodecBootstrap,
+  type StateCodecBootstrapBinding,
   type StateCodecRecoveryState,
   type StateCodecSessionProvider,
 } from "../services/stateCodecSocket";
@@ -1702,10 +1704,7 @@ export class WebSocketAdapter implements EngineAdapter {
    * attach and published when that attachment's socket is adopted: a surviving
    * snapshot, token or codec baseline never authorizes a new bootstrap.
    */
-  private attachmentBootstrap: {
-    socket: PhaseSocketTransport | null;
-    status: StateCodecBootstrap;
-  } | null = null;
+  private attachmentBootstrap: StateCodecBootstrapBinding | null = null;
   /** A rejected Full identity is terminal for this socket. */
   private sessionIdentityRejected = false;
   /** Set by AiDriverFault: the server permanently rejects every later submission for this game code. */
@@ -1905,10 +1904,7 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   /** Bootstrap status reported to the codec transport for one attachment. */
-  private bootstrapStatus(bootstrap: {
-    socket: PhaseSocketTransport | null;
-    status: StateCodecBootstrap;
-  }): StateCodecBootstrap {
+  private bootstrapStatus(bootstrap: StateCodecBootstrapBinding): StateCodecBootstrap {
     // Before the socket is adopted this attachment is the only authority; a
     // retired socket's binding never authorizes a replacement.
     if (this.attachmentBootstrap !== bootstrap || this.disposed) return "pending";
@@ -1930,10 +1926,7 @@ export class WebSocketAdapter implements EngineAdapter {
    * may submit, which must be refused while recovery is in progress.
    */
   private handleStateCodecRecovery(
-    bootstrap: {
-      socket: PhaseSocketTransport | null;
-      status: StateCodecBootstrap;
-    },
+    bootstrap: StateCodecBootstrapBinding,
     state: StateCodecRecoveryState,
   ): void {
     if (this.disposed) return;
@@ -1944,7 +1937,7 @@ export class WebSocketAdapter implements EngineAdapter {
       const dropped = this.submission.drop();
       if (dropped) {
         dropped.reject(
-          new AdapterError("WS_CLOSED", "State delivery interrupted during action", true),
+          new AdapterError("WS_CLOSED", STATE_CODEC_RECOVERY_INTERRUPTED_MESSAGE, true),
         );
         this.emit({ type: "actionPendingChanged", pending: false });
       }
@@ -2036,7 +2029,7 @@ export class WebSocketAdapter implements EngineAdapter {
     // the adapter's current binding only when its socket is adopted: until
     // then the previous socket (if still current) keeps its own binding, and
     // this attachment's supersession is tracked by `preparation` alone.
-    const bootstrap: { socket: PhaseSocketTransport | null; status: StateCodecBootstrap } = {
+    const bootstrap: StateCodecBootstrapBinding = {
       socket: null,
       status: "pending",
     };

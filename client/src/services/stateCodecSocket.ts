@@ -28,6 +28,19 @@ export type StateCodecBootstrap = "pending" | "accepted";
 /** Ordered notification from the wrapper to the owning adapter. */
 export type StateCodecRecoveryState = "recovering" | "ready";
 
+/**
+ * One attachment's bootstrap authority, shared by the owning adapters. `socket`
+ * is `null` until the attachment's socket is adopted; `status` becomes
+ * `accepted` only after a genuine GameStarted passes the adapter's guards.
+ */
+export interface StateCodecBootstrapBinding {
+  socket: PhaseSocketTransport | null;
+  status: StateCodecBootstrap;
+}
+
+/** Rejection message for a command dropped while codec recovery begins. */
+export const STATE_CODEC_RECOVERY_INTERRUPTED_MESSAGE = "State delivery interrupted during action";
+
 /** Bounded optional preparation budget (event-loop time, not network). */
 export const STATE_CODEC_PREPARATION_TIMEOUT_MS = 5_000;
 /** Confirmation and recovery window; the same value bounds both. */

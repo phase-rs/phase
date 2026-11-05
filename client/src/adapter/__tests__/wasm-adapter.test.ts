@@ -1904,6 +1904,50 @@ describe("WasmAdapter state-codec sessions", () => {
       .toBeInstanceOf(StateCodecLifecycleError);
   });
 
+  it("classifies a wasm trap as a lifecycle failure and a codec rejection as resync on the main-thread fallback", async () => {
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    const firstFree = vi.fn();
+    const thirdFree = vi.fn();
+    stateCodecDecodeJs
+      .mockReturnValueOnce({
+        json: () => '{"n":1}',
+        free: firstFree,
+        clone_handle: () => ({ json: () => "{}", free: vi.fn() }),
+      })
+      .mockImplementationOnce(() => {
+        throw new Error("base hash mismatch");
+      })
+      .mockReturnValueOnce({
+        json: () => '{"n":3}',
+        free: thirdFree,
+        clone_handle: () => ({ json: () => "{}", free: vi.fn() }),
+      })
+      .mockImplementationOnce(() => {
+        throw new WebAssembly.RuntimeError("unreachable");
+      });
+    await subject.initialize();
+    const session = await subject.openStateCodecSession();
+
+    // Reach guard: the same session decodes normally and reports an ordinary
+    // codec rejection as resyncRequired (dropping the baseline), so the trap
+    // rejection below cannot be a session that never decoded.
+    await expect(session!.decode(new Uint8Array([1]))).resolves.toEqual({
+      kind: "decoded",
+      json: '{"n":1}',
+    });
+    await expect(session!.decode(new Uint8Array([2]))).resolves.toEqual({ kind: "resyncRequired" });
+    expect(firstFree).toHaveBeenCalledOnce();
+    await expect(session!.decode(new Uint8Array([3]))).resolves.toEqual({
+      kind: "decoded",
+      json: '{"n":3}',
+    });
+
+    await expect(session!.decode(new Uint8Array([4]))).rejects
+      .toBeInstanceOf(StateCodecLifecycleError);
+    expect(thirdFree).toHaveBeenCalledOnce();
+    session!.close();
+  });
+
   it("applies the caller-visible decode deadline on the main-thread fallback", async () => {
     mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
     stateCodecDecodeJs.mockReturnValue({ json: () => "{}", free: vi.fn(), clone_handle: vi.fn() });

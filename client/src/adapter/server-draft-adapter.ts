@@ -46,7 +46,9 @@ import {
   STATE_CODEC_PREPARATION_TIMEOUT_MS,
   StateCodecPreparationAbortError,
   prepareStateCodecSession as prepareBoundedStateCodecSession,
+  STATE_CODEC_RECOVERY_INTERRUPTED_MESSAGE,
   type StateCodecBootstrap,
+  type StateCodecBootstrapBinding,
   type StateCodecRecoveryState,
   type StateCodecSessionProvider,
 } from "../services/stateCodecSocket";
@@ -249,10 +251,7 @@ export class ServerDraftAdapter implements EngineAdapter {
    * attachment's socket is adopted. A new draft match resets it to pending;
    * only an accepted GameStarted completes it.
    */
-  private attachmentBootstrap: {
-    socket: PhaseSocketTransport | null;
-    status: StateCodecBootstrap;
-  } | null = null;
+  private attachmentBootstrap: StateCodecBootstrapBinding | null = null;
   /** The socket the in-flight game command was sent on, if any. */
   private submissionSocket: PhaseSocketTransport | null = null;
 
@@ -740,10 +739,7 @@ export class ServerDraftAdapter implements EngineAdapter {
   }
 
   /** Bootstrap status reported to the codec transport for one attachment. */
-  private bootstrapStatus(bootstrap: {
-    socket: PhaseSocketTransport | null;
-    status: StateCodecBootstrap;
-  }): StateCodecBootstrap {
+  private bootstrapStatus(bootstrap: StateCodecBootstrapBinding): StateCodecBootstrap {
     if (this.disposed || this.attachmentBootstrap !== bootstrap) return "pending";
     if (bootstrap.socket !== null && this.ws !== bootstrap.socket) return "pending";
     return bootstrap.status;
@@ -768,10 +764,7 @@ export class ServerDraftAdapter implements EngineAdapter {
    * before emitting, because listeners run synchronously and may submit.
    */
   private handleStateCodecRecovery(
-    bootstrap: {
-      socket: PhaseSocketTransport | null;
-      status: StateCodecBootstrap;
-    },
+    bootstrap: StateCodecBootstrapBinding,
     state: StateCodecRecoveryState,
   ): void {
     if (this.disposed) return;
@@ -782,7 +775,7 @@ export class ServerDraftAdapter implements EngineAdapter {
       const dropped = this.submission.drop();
       if (dropped) {
         dropped.reject(
-          new AdapterError("WS_CLOSED", "State delivery interrupted during action", true),
+          new AdapterError("WS_CLOSED", STATE_CODEC_RECOVERY_INTERRUPTED_MESSAGE, true),
         );
         this.emit({ type: "actionPendingChanged", pending: false });
       }
@@ -854,7 +847,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     let socket: PhaseSocket | null = null;
     let prepared: StateCodecSession | null = null;
     const initOwner = attachment.owner.type === "init" ? attachment.owner.init : null;
-    const bootstrap: { socket: PhaseSocketTransport | null; status: StateCodecBootstrap } = {
+    const bootstrap: StateCodecBootstrapBinding = {
       socket: null,
       status: "pending",
     };

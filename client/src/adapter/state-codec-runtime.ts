@@ -81,11 +81,17 @@ export class StateCodecRuntime {
     let candidate: StateCodecHandle;
     try {
       candidate = this.engine.state_codec_decode(frame, transfer ?? undefined);
-    } catch {
+    } catch (error) {
+      this.dropBaseline(sessionId);
+      // A wasm trap (panic, `unreachable`) is not a codec verdict: the instance
+      // may be left inconsistent, so it is a lifecycle failure the socket
+      // terminates on instead of resyncing against the same instance.
+      if (error instanceof WebAssembly.RuntimeError) {
+        throw new StateCodecLifecycleError("State-codec decoder trapped");
+      }
       // Rust rejected the frame: malformed frame, missing baseline, base hash
       // mismatch, or result hash mismatch. Integrity is the codec crate's
       // verdict, so this is a resync request, not a lifecycle failure.
-      this.dropBaseline(sessionId);
       return { kind: "resyncRequired" };
     }
     let json: string;
