@@ -1899,6 +1899,14 @@ export class WebSocketAdapter implements EngineAdapter {
     }
   }
 
+  /**
+   * Whether a newer `attachSocket` has replaced `preparation`'s attachment. A
+   * disposed adapter is not superseded: its attachments only wind down.
+   */
+  private isSupersededAttachment(preparation: AbortController): boolean {
+    return !this.disposed && this.stateCodecPreparation !== preparation;
+  }
+
   /** Drops the pending command slot for a codec recovery and rejects it with `error`. */
   private interruptPendingSubmission(error: AdapterError): void {
     const dropped = this.submission.drop();
@@ -2029,6 +2037,9 @@ export class WebSocketAdapter implements EngineAdapter {
         onFrameSent: () => diagnostics?.didSend(),
       });
     } catch (err) {
+      // A newer attachment owns the opening latch, the pending initialization
+      // and the reconnect episode: this older handshake's failure is not theirs.
+      if (this.isSupersededAttachment(preparation)) return;
       this.socketOpening = false;
       if (this.disposed) return;
       const retryable = !(err instanceof HandshakeError)
@@ -2060,9 +2071,11 @@ export class WebSocketAdapter implements EngineAdapter {
       this.rejectInitialization(new AdapterError("WS_ERROR", String(err), true));
       return;
     }
-    this.socketOpening = false;
+    const superseded = this.isSupersededAttachment(preparation);
+    // The opening latch belongs to the newest attachment.
+    if (!superseded) this.socketOpening = false;
     // A handshake that settled before `dispose()` resumes here after it.
-    if (this.disposed || this.stateCodecPreparation !== preparation) {
+    if (this.disposed || superseded) {
       socket.close();
       return;
     }

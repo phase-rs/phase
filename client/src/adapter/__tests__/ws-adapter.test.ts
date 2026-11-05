@@ -4,6 +4,18 @@ import { loadDiagnosticHistory } from "../../services/diagnosticHistory";
 
 const lanGate = vi.hoisted(() => ({ supported: false, probe: vi.fn(), authorize: vi.fn() }));
 const terminalStore = vi.hoisted(() => ({ commit: vi.fn(async () => true) }));
+// The production default for the codec provider reads the tab's shared engine;
+// `open` stands a fake engine in only for the default-wiring test below.
+const sharedEngine = vi.hoisted(() => ({ open: null as null | (() => Promise<unknown>) }));
+vi.mock("../wasm-adapter", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../wasm-adapter")>();
+  return {
+    ...original,
+    getSharedAdapter: () => sharedEngine.open
+      ? { openStateCodecSession: sharedEngine.open } as unknown as ReturnType<typeof original.getSharedAdapter>
+      : original.getSharedAdapter(),
+  };
+});
 vi.mock("../../services/nativeEngineSocket", () => ({ NativeEngineSocket: class { constructor() { return new MockWebSocket("native-lan"); } } }));
 vi.mock("../../services/lan", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../services/lan")>(),
@@ -4970,5 +4982,190 @@ describe("WebSocketAdapter — negotiated StateCodecV1 identity and teardown", (
     expect(codec.close).toHaveBeenCalledOnce();
     expect(raw.close).toHaveBeenCalled();
     adapter.dispose();
+  });
+});
+
+// ── Superseded attachments ───────────────────────────────────────────────
+//
+// `initialize()` can start a newer attachment while an older reconnect
+// attachment is already inside its handshake. The opening latch, the pending
+// initialization and the reconnect episode belong to the newer attachment.
+
+describe("WebSocketAdapter — superseded attachment handshake", () => {
+  const reconnectSession = {
+    gameCode: "GAME01", playerToken: "codec-token", fullKey: REPLY_OWNERSHIP_FULL_KEY,
+    serverUrl: "wss://localhost:9374/ws", timestamp: Date.now(),
+  };
+  const GAME_STARTED = JSON.stringify({
+    type: "GameStarted", data: { state: createMockState(), your_player: 0 },
+  });
+  const internals = (adapter: WebSocketAdapter) => adapter as unknown as {
+    socketOpening: boolean;
+    reconnectTimer: unknown;
+  };
+
+  /** Reconnect attachment A is mid-handshake when `initialize()` starts attachment B. */
+  async function overlappingAttachments() {
+    MockWebSocket.last = null;
+    const adapter = new WebSocketAdapter(
+      "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      undefined, undefined, undefined,
+      { stateCodecSessionProvider: () => Promise.resolve(null) },
+    );
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    expect(adapter.tryReconnect(reconnectSession)).toBe(true);
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+    const socketA = latestSocket();
+    const init = trackRejection(adapter.initialize());
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(socketA));
+    const socketB = latestSocket();
+    // Reach guard: both handshakes are in flight and B owns the opening latch.
+    expect(internals(adapter).socketOpening).toBe(true);
+    return { adapter, events, socketA, socketB, init };
+  }
+
+  async function finishAttachmentB(socketB: MockWebSocket) {
+    socketB.dispatchSynthetic("message", SERVER_HELLO);
+    await vi.waitFor(() => expect(socketB.send).toHaveBeenCalledWith(
+      expect.stringContaining('"type":"JoinGameWithPassword"'),
+    ));
+    socketB.dispatchSynthetic("message", GAME_STARTED);
+  }
+
+  it("keeps the newer attachment's opening latch and init when the older handshake settles", async () => {
+    const { adapter, socketA, socketB, init } = await overlappingAttachments();
+    try {
+      socketA.dispatchSynthetic("message", SERVER_HELLO);
+      // Reach guard: the older handshake settled and its socket was abandoned.
+      await vi.waitFor(() => expect(socketA.close).toHaveBeenCalled());
+
+      expect(internals(adapter).socketOpening).toBe(true);
+      expect(adapter.tryReconnect(reconnectSession)).toBe(false);
+      expect(await init()).toBe("never settled");
+
+      await finishAttachmentB(socketB);
+      await expect(init()).resolves.toMatchObject({ resolvedWith: undefined });
+      // The newer attachment's own settlement releases the latch.
+      expect(internals(adapter).socketOpening).toBe(false);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("leaves the newer attachment's init and the reconnect schedule untouched when the older handshake fails", async () => {
+    const { adapter, events, socketA, socketB, init } = await overlappingAttachments();
+    try {
+      socketA.dispatchSynthetic("close");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(internals(adapter).socketOpening).toBe(true);
+      expect(internals(adapter).reconnectTimer).toBeNull();
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "reconnecting" }));
+      expect(await init()).toBe("never settled");
+
+      await finishAttachmentB(socketB);
+      await expect(init()).resolves.toMatchObject({ resolvedWith: undefined });
+      expect(internals(adapter).socketOpening).toBe(false);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("still retries when the failing reconnect handshake is the current attachment", async () => {
+    // Positive control for the test above: the same failure with no newer
+    // attachment releases the latch and schedules the retry.
+    MockWebSocket.last = null;
+    const adapter = new WebSocketAdapter(
+      "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      undefined, undefined, undefined,
+      { stateCodecSessionProvider: () => Promise.resolve(null) },
+    );
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    try {
+      expect(adapter.tryReconnect(reconnectSession)).toBe(true);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      latestSocket().dispatchSynthetic("close");
+      await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "reconnecting" })));
+      expect(internals(adapter).socketOpening).toBe(false);
+      expect(internals(adapter).reconnectTimer).not.toBeNull();
+    } finally {
+      adapter.dispose();
+    }
+  });
+});
+
+describe("WebSocketAdapter — production codec provider default", () => {
+  afterEach(() => { sharedEngine.open = null; });
+
+  it("advertises StateCodecV1 and decodes through the shared engine's session when no provider is injected", async () => {
+    const codec = scriptedCodec();
+    const open = vi.fn(() => Promise.resolve(codec.session));
+    sharedEngine.open = open;
+    MockWebSocket.last = null;
+    // Non-native options and no `stateCodecSessionProvider`: the default applies.
+    const adapter = new WebSocketAdapter(
+      "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+    );
+    try {
+      const init = adapter.initialize();
+      const raw = await codecHandshake("JoinGameWithPassword", null);
+      const hello = raw.send.mock.calls
+        .map(([text]) => JSON.parse(text as string) as { type?: string; data?: { state_codecs?: unknown } })
+        .find((frame) => frame.type === "ClientHello");
+      expect(hello?.data?.state_codecs).toEqual(["StateCodecV1"]);
+      expect(open).toHaveBeenCalledOnce();
+
+      deliverCodec(raw, "Full", codecGameStarted(1, 1));
+      await init;
+      // The Full frame reached the adapter only through the shared engine's session.
+      expect(codec.decode).toHaveBeenCalledOnce();
+      expect((await adapter.getSnapshot()).state.turn_number).toBe(1);
+    } finally {
+      adapter.dispose();
+    }
+  });
+});
+
+describe("WebSocketAdapter — negotiated StateCodecV1 spectate", () => {
+  it("bootstraps a spectator on GameStarted Full, then recovers a rejected Delta through one resync", async () => {
+    MockWebSocket.last = null;
+    const codec = scriptedCodec();
+    const adapter = new WebSocketAdapter(
+      "wss://localhost:9374/ws", "spectate", { main_deck: [], sideboard: [] }, "GAME01",
+      undefined, undefined, undefined,
+      { stateCodecSessionProvider: () => Promise.resolve(codec.session) },
+    );
+    const turn = () => (adapter as unknown as { snapshot: { state: GameState } }).snapshot.state.turn_number;
+    try {
+      const init = adapter.initialize();
+      const raw = await codecHandshake("SpectatorJoin", null);
+      // The spectator bootstrap: a non-seat viewer and no player token.
+      deliverCodec(raw, "Full", codecGameStarted(1, 1, { your_player: 255, player_token: undefined }));
+      await init;
+      expect(adapter.playerId).toBe(255);
+      expect(turn()).toBe(1);
+
+      deliverCodec(raw, "Full", codecStateUpdate(2, 2));
+      await vi.waitFor(() => expect(turn()).toBe(2));
+      codec.rejectNext(1);
+      deliverCodec(raw, "Delta", codecStateUpdate(3, 3));
+      await vi.waitFor(() => expect(resyncRequests(raw)).toBe(1));
+      // Reach guard: the rejected Delta was decoded and never applied.
+      expect(codec.decode).toHaveBeenCalledTimes(3);
+      expect(turn()).toBe(2);
+
+      deliverCodec(raw, "Full", codecStateUpdate(4, 4));
+      await vi.waitFor(() => expect(turn()).toBe(4));
+      deliverCodec(raw, "Delta", codecStateUpdate(5, 5));
+      await vi.waitFor(() => expect(turn()).toBe(5));
+      // One resync recovered the stream; the spectator socket stayed open.
+      expect(resyncRequests(raw)).toBe(1);
+      expect(raw.close).not.toHaveBeenCalled();
+      expect(codec.close).not.toHaveBeenCalled();
+    } finally {
+      adapter.dispose();
+    }
   });
 });

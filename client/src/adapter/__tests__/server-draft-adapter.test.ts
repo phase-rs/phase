@@ -19,9 +19,19 @@ import { usePreferencesStore } from "../../stores/preferencesStore";
 import type { PrintingEntry } from "../../services/scryfall";
 import type * as Scryfall from "../../services/scryfall";
 
-const artIO = vi.hoisted(() => ({ face: vi.fn(), catalog: vi.fn(), bounds: vi.fn() }));
+const artIO = vi.hoisted(() => ({
+  face: vi.fn(),
+  catalog: vi.fn(),
+  bounds: vi.fn(),
+  // Present on the fake shared engine only while the default-wiring test runs.
+  openCodec: null as null | (() => Promise<unknown>),
+}));
 vi.mock("../wasm-adapter", () => ({
-  getSharedAdapter: () => ({ getCardFaceData: artIO.face, checkDeckPrintingsBounds: artIO.bounds }),
+  getSharedAdapter: () => ({
+    getCardFaceData: artIO.face,
+    checkDeckPrintingsBounds: artIO.bounds,
+    ...(artIO.openCodec ? { openStateCodecSession: artIO.openCodec } : {}),
+  }),
 }));
 vi.mock("../../services/scryfall", async (original) => ({
   ...await original<typeof Scryfall>(), getCardPrintings: artIO.catalog,
@@ -3375,6 +3385,50 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
     },
   );
 
+  it.each([
+    ["omits the Full-session key", undefined],
+    ["carries another generation's key", { ...FULL_KEY, generation: FULL_KEY.generation + 1 }],
+  ] as const)(
+    "leaves a command claimed on the retired socket pending when its completion %s",
+    async (_label, fullKey) => {
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+
+      const claimed = trackRejection(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
+      const claimedId = lastSubmissionCommandId(ws);
+      await replaceSocket(adapter, provider, ws);
+      events.length = 0;
+
+      // Reach guard source: the frame is decoded and routed by the retired
+      // wrapper (the decoder call count advances) before the identity fence.
+      const decodedBefore = session.decode.mock.calls.length;
+      ws.dispatchSynthetic("message", draftFrame("Delta", {
+        type: "StateUpdate", command_id: claimedId,
+        data: { state: matchState("wrong-match"), events: [{ marker: "wrong-match" }], full_key: fullKey },
+      }));
+      await vi.waitFor(() => expect(session.decode.mock.calls.length).toBeGreaterThan(decodedBefore));
+      // Drain the receive queue, then nothing may have settled or been emitted.
+      expect(await claimed()).toBe("never settled");
+      expect(events).not.toContainEqual({ type: "actionPendingChanged", pending: false });
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "gameStateUpdated" }));
+
+      // Positive control: a completion carrying the accepted key still settles
+      // the same command, with its own payload and not the rejected frame's.
+      ws.dispatchSynthetic("message", draftFrame("Delta", {
+        type: "StateUpdate", command_id: claimedId,
+        data: { state: matchState("right-match"), events: [{ marker: "right-match" }], full_key: FULL_KEY },
+      }));
+      await expect(claimed()).resolves.toMatchObject({
+        resolvedWith: { events: [{ marker: "right-match" }] },
+      });
+      expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
+      adapter.dispose();
+    },
+  );
+
   it("leaves a command claimed on the replacement pending when the retired socket closes", async () => {
     const session = draftCodecSession(decodeEnvelope);
     const { adapter, ws, provider } = await startCodecDraft(session.session);
@@ -3555,5 +3609,54 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
     });
     expect(session.close).toHaveBeenCalledOnce();
     expect(ws.close).toHaveBeenCalled();
+  });
+});
+
+describe("ServerDraftAdapter — production codec provider default", () => {
+  afterEach(() => { artIO.openCodec = null; });
+
+  it("advertises StateCodecV1 and decodes through the shared engine's session when no provider is injected", async () => {
+    const codec = draftCodecSession(decodeEnvelope);
+    const open = vi.fn(() => Promise.resolve(codec.session));
+    artIO.openCodec = open;
+    MockWebSocket.last = null;
+    // No options at all: the adapter's default provider applies.
+    const adapter = new ServerDraftAdapter("ws://localhost:9374/ws");
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    try {
+      const createPromise = adapter.createDraft({
+        displayName: "Alice",
+        setCodes: ["MKM"],
+        kind: "Premier",
+        public: true,
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+        podSize: 8,
+      });
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      const ws = MockWebSocket.last!;
+      ws.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await vi.waitFor(() => expect(ws.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"CreateDraftWithSettings"'),
+      ));
+      const hello = ws.send.mock.calls
+        .map(([text]) => JSON.parse(text as string) as { type?: string; data?: { state_codecs?: unknown } })
+        .find((frame) => frame.type === "ClientHello");
+      expect(hello?.data?.state_codecs).toEqual(["StateCodecV1"]);
+      expect(open).toHaveBeenCalledOnce();
+
+      ws.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+      receive(ws, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
+      await createPromise;
+      await enterCodecMatch(ws, events);
+      // The Full frames reached the adapter only through the shared engine's session.
+      expect(codec.decode).toHaveBeenCalledTimes(2);
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "gameStateUpdated", state: expect.objectContaining({ label: "accepted-update" }),
+      }));
+    } finally {
+      adapter.dispose();
+    }
   });
 });

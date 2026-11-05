@@ -1856,6 +1856,10 @@ describe("StateCodecAttachment", () => {
 
     const third = adopted();
     third.attachment.handleRecovery(third.binding, "recovering", socketA, false, () => undefined);
+    // Accepted first, so only a release that really drops the binding can
+    // turn the status back to pending.
+    third.attachment.accept(socketA);
+    expect(third.attachment.status(third.binding, socketA, false)).toBe("accepted");
     third.attachment.release();
     expect(blocked(third.attachment)).toBe(false);
     expect(third.attachment.status(third.binding, socketA, false)).toBe("pending");

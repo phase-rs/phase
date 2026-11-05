@@ -769,9 +769,16 @@ export class ServerDraftAdapter implements EngineAdapter {
     msg: { data?: unknown; command_id?: unknown },
   ): void {
     if (this.submissionSocket !== retired) return;
+    const data = (msg.data ?? {}) as {
+      events?: GameEvent[];
+      log_entries?: GameLogEntry[];
+      full_key?: FullSessionKey;
+    };
+    // The same Full-session identity fence the current socket's StateUpdate
+    // applies before it may take the submission slot.
+    if (!fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) return;
     const pending = this.submission.take(msg.command_id);
     if (!pending) return;
-    const data = (msg.data ?? {}) as { events?: GameEvent[]; log_entries?: GameLogEntry[] };
     pending.resolve({ events: data.events ?? [], log_entries: data.log_entries });
     this.emit({ type: "actionPendingChanged", pending: false });
   }
