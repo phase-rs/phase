@@ -2666,8 +2666,8 @@ mod tests {
         }
     }
 
-    /// R11: the wire shape of the sandbox discard action, pinned for the
-    /// TypeScript mirror.
+    /// Wire shape of the sandbox discard action, pinned for the TypeScript
+    /// mirror.
     #[test]
     fn debug_discard_wire_shape() {
         let discard = DebugAction::Discard {
