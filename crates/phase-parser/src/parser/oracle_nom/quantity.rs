@@ -6,8 +6,8 @@
 
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until, take_while1};
-use nom::character::complete::satisfy;
+use nom::bytes::complete::{tag, tag_no_case, take_until, take_while1};
+use nom::character::complete::{multispace1, satisfy};
 use nom::combinator::{
     all_consuming, consumed, eof, map, map_opt, map_res, not, opt, peek, value, verify,
 };
@@ -5590,6 +5590,21 @@ pub(crate) fn parse_event_context_opponent_dealt_damage(
     ))
 }
 
+/// CR 107.14 + CR 122.1: "{E} you've paid or lost this turn" counts the energy
+/// counters the controller removed from themselves this turn (Blaster Hulk).
+/// `multispace1` absorbs the double space left where the "(energy counter)"
+/// reminder text was stripped; `tag_no_case` accepts the symbol in either the
+/// printed (`{E}`) or lowered (`{e}`) form, since callers pass both.
+fn parse_for_each_energy_paid_or_lost_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = (
+        tag_no_case("{e}"),
+        multispace1,
+        tag("you've paid or lost this turn"),
+    )
+        .parse(input)?;
+    Ok((rest, QuantityRef::EnergyPaidOrLostThisTurn))
+}
+
 /// CR 106.4: "unspent [color] mana you have" counts floating mana in the
 /// controller's mana pool.
 fn parse_for_each_unspent_mana(input: &str) -> OracleResult<'_, QuantityRef> {
@@ -6001,7 +6016,10 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
         parse_for_each_battlefield_type,
         parse_for_each_commander_cast_count,
         parse_mana_spent_to_cast_ref,
-        parse_for_each_unspent_mana,
+        alt((
+            parse_for_each_unspent_mana,
+            parse_for_each_energy_paid_or_lost_this_turn,
+        )),
         parse_for_each_distinct_colors_among_permanents,
         // CR 122.1: "kind of counter on/among <filter>" (Bribe Taker). Placed
         // before the generic `<type> you control` arm so the leading "kind"
