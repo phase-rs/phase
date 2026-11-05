@@ -451,17 +451,22 @@ pub struct ParseContext {
     /// the dedicated `PutIntoGraveyard` cause only when a real Dig split
     /// actually precedes it.
     pub nearest_dig_rest_zone: Option<crate::types::zones::Zone>,
-    /// CR 608.2k + CR 122.1: the counter KIND a bare counter anaphor ("remove
+    /// CR 608.2c + CR 122.1: the counter KIND a bare counter anaphor ("remove
     /// those counters" / "remove them" / "remove all of them") in this chunk
-    /// refers back to, when the chunk's own condition introduced the counters
-    /// as a typed count on the ability source ("Then if there are three or
-    /// more promotion counters on her, remove those counters" — Beckett
-    /// Mariner; Prize Pig; Cursed Recording). `None` when the chunk has no such
-    /// antecedent, or the antecedent is every kind ("three or more counters on
-    /// it"), in which case the anaphor keeps its all-kinds reading.
+    /// refers back to, when the gating condition introduced the counters as a
+    /// typed count on the ability source ("Then if there are three or more
+    /// promotion counters on her, remove those counters" — Beckett Mariner;
+    /// Prize Pig; Cursed Recording; Treasure Map; Hostile Hostel). `None` when
+    /// there is no such antecedent, or the antecedent is every kind ("three or
+    /// more counters on it"), in which case the anaphor keeps its all-kinds
+    /// reading.
     ///
     /// Set per effect-chain chunk from that chunk's resolved condition (a
-    /// struct-literal chunk context, so it never leaks into the next chunk).
+    /// struct-literal chunk context, so it never leaks into the next chunk),
+    /// falling back to the kind an enclosing gate bound for the chunk. A gate
+    /// whose body spans several instructions ("remove those counters, transform
+    /// this artifact, and create …") binds its kind on the parent context for
+    /// the recursive body parse only, then restores it.
     /// Consumed by `oracle_effect::counter::try_parse_remove_counter`.
     pub counter_anaphor_kind: Option<crate::types::counter::CounterType>,
     /// Whether we are inside a replacement effect.

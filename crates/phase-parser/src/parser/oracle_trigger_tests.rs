@@ -42567,7 +42567,7 @@ fn peel_trailing_cast_mana_source_splits_only_a_trailing_self_reference() {
     );
 }
 
-/// CR 201.5 + CR 608.2k + CR 122.1: a counter-threshold continuation whose
+/// CR 201.5 + CR 608.2c + CR 122.1: a counter-threshold continuation whose
 /// subject is a gendered self-reference ("on her") gates the rest of the
 /// instruction, and its "remove those counters" anaphor names the counted KIND
 /// (promotion / ribbon), not every counter on the source. Verbatim Oracle text.
@@ -42621,6 +42621,68 @@ fn counter_threshold_continuation_binds_remove_those_counters_to_counted_kind() 
                 count: QuantityExpr::Fixed { value: -1 },
                 target: TargetFilter::SelfRef,
             },
+            "{name}"
+        );
+    }
+}
+
+/// CR 608.2c + CR 122.1: when the counter-threshold gate scopes over SEVERAL
+/// instructions ("remove those counters, transform this artifact, and create
+/// three Treasure tokens"), the body is parsed through the recursive
+/// conditional-body seam, and the counted KIND must still reach "remove those
+/// counters" there — landmark / soul, not every counter on the permanent. The
+/// gate also covers the removal itself. Verbatim Oracle text (MTGJSON).
+#[test]
+fn multi_instruction_counter_gate_binds_remove_those_counters_to_counted_kind() {
+    let cases = [
+        (
+            "{1}, {T}: Scry 1. Put a landmark counter on this artifact. Then if there are three or more landmark counters on it, remove those counters, transform this artifact, and create three Treasure tokens. (They're artifacts with \"{T}, Sacrifice this token: Add one mana of any color.\")",
+            "Treasure Map",
+            "Artifact",
+            "landmark",
+        ),
+        (
+            "{T}: Add {C}.\n{1}, {T}, Sacrifice a creature: Put a soul counter on this land. Then if there are three or more soul counters on it, remove those counters, transform it, then untap it. Activate only as a sorcery.",
+            "Hostile Hostel",
+            "Land",
+            "soul",
+        ),
+    ];
+    for (text, name, core_type, kind) in cases {
+        let parsed = parse_oracle_text(text, name, &[], &[core_type.to_string()], &[]);
+        let counter_type = crate::types::counter::parse_counter_type(kind);
+        let removals: Vec<&AbilityDefinition> = parsed
+            .abilities
+            .iter()
+            .flat_map(|ability| {
+                std::iter::successors(Some(ability), |def| def.sub_ability.as_deref())
+            })
+            .filter(|def| matches!(*def.effect, Effect::RemoveCounter { .. }))
+            .collect();
+        assert_eq!(removals.len(), 1, "{name}: {:#?}", parsed.abilities);
+        let remove = removals[0];
+        assert_no_unimplemented(remove);
+        assert_eq!(
+            *remove.effect,
+            Effect::RemoveCounter {
+                counter_type: Some(counter_type.clone()),
+                count: QuantityExpr::Fixed { value: -1 },
+                target: TargetFilter::SelfRef,
+            },
+            "{name}"
+        );
+        assert_eq!(
+            remove.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(counter_type),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            }),
             "{name}"
         );
     }

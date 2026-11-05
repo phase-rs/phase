@@ -3851,7 +3851,7 @@ fn build_zone_change_past_counter_condition(
     )
 }
 
-/// CR 608.2k + CR 122.1: the counter kind a condition counts on the ability
+/// CR 608.2c + CR 122.1: the counter kind a condition counts on the ability
 /// SOURCE ("if there are three or more promotion counters on her" →
 /// `promotion`), which a later counter anaphor in the same instruction ("remove
 /// those counters") refers back to. `None` for a condition that counts no typed
