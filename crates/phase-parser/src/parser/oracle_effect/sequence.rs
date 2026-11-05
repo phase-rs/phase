@@ -18,6 +18,7 @@ use super::super::oracle_nom::target::controller_phrase_among;
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase_folding};
 use super::super::oracle_util::{contains_possessive, parse_count_expr, parse_subtype, TextPair};
 use super::imperative::CHOOSER_DOMAIN_CONTROLLERS;
+use super::lower::WhereXBinding;
 use super::{apply_where_x_to_filter, release_iteration_destination, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
@@ -7441,7 +7442,8 @@ pub(super) fn parse_dig_from_among(
 
         let filter = parse_dig_from_among_filter(filter_text, ctx);
         // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-        let filter = apply_where_x_to_filter(filter, where_x_expression.as_deref())?;
+        let filter =
+            apply_where_x_to_filter(filter, WhereXBinding::bare(where_x_expression.as_deref()))?;
 
         // CR 110.2a: "... under your control" routes the kept cards to the
         // ability controller. Scan the FULL clause — the controller phrase
@@ -7539,7 +7541,8 @@ pub(super) fn parse_dig_from_among(
         // CR 202.3 + CR 107.3i: Bind the literal `X` in the filter's `Cmc` bound
         // with the stripped "where X is <expression>" defining clause.
         // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-        let filter = apply_where_x_to_filter(filter, where_x_expression.as_deref())?;
+        let filter =
+            apply_where_x_to_filter(filter, WhereXBinding::bare(where_x_expression.as_deref()))?;
 
         // CR 110.2a + CR 708.2a/708.3: detect "under your control" / "face down" on
         // the full clause for the from-among put-step.
