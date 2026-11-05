@@ -5055,12 +5055,20 @@ pub(crate) fn parse_otherwise_branch_connector(input: &str) -> OracleResult<'_, 
 /// `QuantityComparison { ObjectCountDistinct[quality](filter) >= N }`.
 ///
 /// Field of the Dead: "if you control seven or more lands with different
-/// names". Coven cards: "if you control three or more creatures with different
-/// powers". The quality axis is shared with search selection constraints and
+/// names". Seven of Nine, Unassimilated: "unless you control five or more
+/// differently named lands" (prefix-adjective spelling). Coven cards: "if you
+/// control three or more creatures with different powers". The quality axis is shared with search selection constraints and
 /// `QuantityRef::ObjectCountDistinct`.
 fn parse_control_count_ge_distinct_quality(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you control ").parse(input)?;
     let (rest, n) = parse_ge_threshold(rest)?;
+    // CR 201.2b: the distinct-name quality is printed either as the prefix
+    // adjective "differently named <type>" (Seven of Nine, Unassimilated) or as
+    // the suffix "<type> with different names" (Field of the Dead). Both are the
+    // same `ObjectCountDistinct[Name]` count; the prefix form owns its quality,
+    // so it must not also carry a "with different ..." suffix.
+    let (rest, prefix_quality) =
+        opt(value(SharedQuality::Name, tag("differently named "))).parse(rest)?;
     let type_text = rest.trim_end_matches('.');
     let (filter, remainder) = parse_type_phrase_folding(type_text);
     if matches!(filter, TargetFilter::Any) {
@@ -5069,15 +5077,17 @@ fn parse_control_count_ge_distinct_quality(input: &str) -> OracleResult<'_, Stat
             nom::error::ErrorKind::Fail,
         )));
     }
-    let trimmed = remainder.trim_start();
-    let (after_suffix, quality) = preceded(
-        tag("with different "),
-        alt((
-            value(SharedQuality::Name, tag("names")),
-            value(SharedQuality::Power, tag("powers")),
-        )),
-    )
-    .parse(trimmed)?;
+    let (after_suffix, quality) = match prefix_quality {
+        Some(quality) => (remainder, quality),
+        None => preceded(
+            tag("with different "),
+            alt((
+                value(SharedQuality::Name, tag("names")),
+                value(SharedQuality::Power, tag("powers")),
+            )),
+        )
+        .parse(remainder.trim_start())?,
+    };
     let filter = inject_controller_you(filter);
     let consumed = after_suffix.as_ptr() as usize - input.as_ptr() as usize;
     Ok((
@@ -15655,6 +15665,31 @@ mod tests {
             }
             _ => panic!("expected QuantityComparison, got {:?}", c),
         }
+    }
+
+    #[test]
+    fn test_you_control_n_or_more_differently_named_matches_suffix_spelling() {
+        // CR 201.2b: "differently named <type>" (prefix adjective) and "<type>
+        // with different names" (suffix) are one distinct-name threshold.
+        for (n, word) in [(5, "five"), (7, "seven")] {
+            let prefix_text = format!("you control {word} or more differently named lands");
+            let suffix_text = format!("you control {word} or more lands with different names");
+            let (rest, prefix) = parse_inner_condition(&prefix_text).unwrap();
+            assert_eq!(rest, "");
+            let (_, suffix) = parse_inner_condition(&suffix_text).unwrap();
+            assert_eq!(prefix, suffix);
+            let StaticCondition::QuantityComparison { rhs, .. } = prefix else {
+                panic!("expected QuantityComparison, got {prefix:?}");
+            };
+            assert_eq!(rhs, QuantityExpr::Fixed { value: n });
+        }
+        // The prefix form owns its quality: a second "with different ..."
+        // suffix is not consumed into the condition.
+        let (rest, _) = parse_inner_condition(
+            "you control five or more differently named lands with different powers",
+        )
+        .unwrap();
+        assert_ne!(rest, "", "doubled quality must not be all-consumed");
     }
 
     #[test]
