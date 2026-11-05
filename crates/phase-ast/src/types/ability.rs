@@ -9010,19 +9010,23 @@ pub fn filter_contains_filter_prop(
 ) -> bool {
     filter_grammar_any(filter, &|node| match node {
         FilterGrammarNode::Prop(prop) => predicate(prop),
-        FilterGrammarNode::Filter(_) => false,
+        FilterGrammarNode::Filter(_) | FilterGrammarNode::Player(_) => false,
     })
 }
 
 /// One node of the filter grammar as the grammar walkers below reach it: a
-/// `TargetFilter` at its entry, or a `FilterProp` at its entry. The walkers are
-/// generic over what a caller looks for; each entry that calls them names the
-/// node kind it tests (`filter_contains_filter_prop` above, and
-/// `crate::game::filter`'s `*_operands_contain` family).
+/// `TargetFilter`, a `FilterProp` or a `PlayerFilter` at its entry. The walkers
+/// are generic over what a caller looks for; each entry that calls them names
+/// the node kind it tests (`filter_contains_filter_prop` above, and
+/// `crate::game::filter`'s `*_operands_contain` family). A player filter is a
+/// node in its own right because some of its variants read state themselves
+/// (`TrackedSetPossessor` reads the chain's tracked set) rather than only
+/// through the target filters they nest.
 #[derive(Clone, Copy)]
 pub enum FilterGrammarNode<'a> {
     Filter(&'a TargetFilter),
     Prop(&'a FilterProp),
+    Player(&'a PlayerFilter),
 }
 
 /// The complete target → property → player → quantity topology of the filter
@@ -9249,6 +9253,9 @@ pub fn player_filter_grammar_any(
     filter: &PlayerFilter,
     visit: &dyn Fn(FilterGrammarNode<'_>) -> bool,
 ) -> bool {
+    if visit(FilterGrammarNode::Player(filter)) {
+        return true;
+    }
     match filter {
         PlayerFilter::OpponentDealtDamage { source, .. } => source
             .as_deref()
@@ -21621,6 +21628,35 @@ impl DigRestOrder {
     }
 }
 
+/// CR 701.20e + CR 608.2c: what happens to the cards a look-at Dig did NOT keep.
+///
+/// Looking at cards never moves them (CR 701.20e). An instruction that routes
+/// its chosen cards out of the library and stays silent about the others ("put
+/// any number of land cards from among them onto the battlefield tapped") leaves
+/// those others exactly where they are. That outcome is neither of the two
+/// states `rest_destination: Option<Zone>` can name: its `None` means the
+/// historical graveyard default (a move), and `Some(Zone::Library)` means an
+/// explicit "put the rest on the bottom" (also a move, and one that reorders
+/// the library under CR 401.4, changing the next draw of any such dig that has
+/// no later shuffle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DigRestRemainder {
+    /// Move the unkept cards to `rest_destination` (`None` = graveyard).
+    #[default]
+    Route,
+    /// The instruction named no destination for the unkept cards, so they are
+    /// never moved: they were only looked at and stay in the library in their
+    /// existing order.
+    StayInLibrary,
+}
+
+impl DigRestRemainder {
+    pub fn is_route(&self) -> bool {
+        matches!(self, DigRestRemainder::Route)
+    }
+}
+
 /// CR 701.20e + CR 608.2c: Discriminates where `Effect::Dig` reads its
 /// card set from. `Library` (the default) reads from the top of the library;
 /// `PriorLook` reads from `GameState::private_look_ids`, which was populated
@@ -22528,6 +22564,13 @@ pub enum Effect {
         /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
         #[serde(default)]
         rest_destination: Option<Zone>,
+        /// CR 701.20e: whether the unkept cards are moved at all. A silent
+        /// remainder ("… put any number of land cards from among them onto the
+        /// battlefield", with no clause naming the rest) stays in the library
+        /// untouched — `RestRemainder::StayInLibrary` — rather than being routed
+        /// to `rest_destination`'s graveyard default or to the library bottom.
+        #[serde(default, skip_serializing_if = "DigRestRemainder::is_route")]
+        rest_remainder: DigRestRemainder,
         /// CR 401.2 + CR 701.20e + CR 608.2c: Telling Time-class split of the
         /// unkept remainder between the two rules-legal positions of ONE
         /// library ("...one on top of your library, and one on the bottom of
@@ -37601,6 +37644,107 @@ impl AbilityCondition {
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
             | AbilityCondition::ScopedPlayerMatches { .. } => false,
+        }
+    }
+
+    /// CR 608.2c: whether any filter-grammar node this condition carries — a
+    /// `TargetFilter`, a `PlayerFilter`'s nested filters, a `FilterProp`, or a
+    /// filter inside a compared quantity — satisfies `visit`, through the `Not`
+    /// / `ConditionInstead` / `And` / `Or` wrappers. The filter-axis companion of
+    /// [`Self::any_quantity_expr`]: a gate that tests membership in the chain's
+    /// tracked set ("if it was put into your graveyard this way") reads it as
+    /// surely as one that counts it. Exhaustive, no wildcard arm, so a new
+    /// filter-bearing condition must say what it carries.
+    pub fn any_filter_grammar(&self, visit: &dyn Fn(FilterGrammarNode<'_>) -> bool) -> bool {
+        match self {
+            AbilityCondition::RevealedHasCardType {
+                additional_filter,
+                subtype_filter,
+                ..
+            } => {
+                additional_filter
+                    .as_ref()
+                    .is_some_and(|prop| filter_prop_grammar_any(prop, visit))
+                    || subtype_filter
+                        .as_deref()
+                        .is_some_and(|filter| filter_grammar_any(filter, visit))
+            }
+            AbilityCondition::ObjectsShareQuality {
+                subject, reference, ..
+            } => filter_grammar_any(subject, visit) || filter_grammar_any(reference, visit),
+            AbilityCondition::TargetSharesNameWithOtherExiledThisWay { target: filter }
+            | AbilityCondition::DiscardedCardMatchesFilter { filter }
+            | AbilityCondition::TargetMatchesFilter { filter, .. }
+            | AbilityCondition::TriggeringSpellTargetsFilter { filter }
+            | AbilityCondition::SourceMatchesFilter { filter }
+            | AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter }
+            | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
+            | AbilityCondition::ControllerControlsMatching { filter }
+            | AbilityCondition::ControllerControlledMatchingAsCast { filter }
+            | AbilityCondition::ZoneChangedThisWay { filter, .. }
+            | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
+                filter_grammar_any(filter, visit)
+            }
+            AbilityCondition::ScopedPlayerMatches { filter } => {
+                player_filter_grammar_any(filter, visit)
+            }
+            AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+                quantity_expr_grammar_any(lhs, visit) || quantity_expr_grammar_any(rhs, visit)
+            }
+            AbilityCondition::QuantityQuality { quantity, .. } => {
+                quantity_expr_grammar_any(quantity, visit)
+            }
+            AbilityCondition::PreviousEffectAmount { rhs, .. } => {
+                quantity_expr_grammar_any(rhs, visit)
+            }
+            AbilityCondition::Not { condition }
+            | AbilityCondition::ConditionInstead { inner: condition } => {
+                condition.any_filter_grammar(visit)
+            }
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                conditions
+                    .iter()
+                    .any(|condition| condition.any_filter_grammar(visit))
+            }
+            AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+            | AbilityCondition::TriggerEventTargetExploitedBySource
+            | AbilityCondition::AdditionalCostPaid { .. }
+            | AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::AlternativeManaCostPaid
+            | AbilityCondition::EffectOutcome { .. }
+            | AbilityCondition::EventOutcomeWon
+            | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
+            | AbilityCondition::WhenYouDo
+            | AbilityCondition::WasCast { .. }
+            | AbilityCondition::CastDuringPhase { .. }
+            | AbilityCondition::CurrentPhaseIs { .. }
+            | AbilityCondition::CastTimingPermission { .. }
+            | AbilityCondition::ManaColorSpent { .. }
+            | AbilityCondition::SourceEnteredThisTurn
+            | AbilityCondition::CastVariantPaid { .. }
+            | AbilityCondition::CastVariantPaidInstead { .. }
+            | AbilityCondition::HasMaxSpeed
+            | AbilityCondition::IsMonarch
+            | AbilityCondition::IsInitiative
+            | AbilityCondition::HasCityBlessing
+            | AbilityCondition::HasEnduringStory
+            | AbilityCondition::ControlsCommander { .. }
+            | AbilityCondition::IsRingBearer
+            | AbilityCondition::CompletedDungeon { .. }
+            | AbilityCondition::TargetHasKeywordInstead { .. }
+            | AbilityCondition::HasObjectTarget
+            | AbilityCondition::IsYourTurn
+            | AbilityCondition::WasStartingPlayer { .. }
+            | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+            | AbilityCondition::FirstCombatPhaseOfTurn
+            | AbilityCondition::FirstEndStepOfTurn
+            | AbilityCondition::SourceIsTapped
+            | AbilityCondition::SourceAttachedToCreature
+            | AbilityCondition::DayNightIsNeither
+            | AbilityCondition::DayNightIs { .. }
+            | AbilityCondition::AbilityUseCountThisTurn { .. }
+            | AbilityCondition::SourceLacksKeyword { .. } => false,
         }
     }
 

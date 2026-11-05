@@ -79,6 +79,7 @@ fn dig(keep: u32, count: i32, source: DigSource) -> Effect {
         up_to: false,
         filter: TargetFilter::Any,
         rest_destination: None,
+        rest_remainder: engine::types::ability::DigRestRemainder::Route,
         rest_split_top_count: None,
         rest_order: DigRestOrder::Preserve,
         reveal: true,
