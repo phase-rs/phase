@@ -322,6 +322,16 @@ impl CounterPlacement {
             | CounterPlacement::Energy { actor, .. } => *actor,
         }
     }
+
+    /// CR 122.1: the kind of counter put on an object. Player counters carry a
+    /// `PlayerCounterKind` (and energy is its own placement), so they have no
+    /// object counter type.
+    pub fn counter_type(&self) -> Option<&CounterType> {
+        match self {
+            CounterPlacement::Object { counter_type, .. } => Some(counter_type),
+            CounterPlacement::Player { .. } | CounterPlacement::Energy { .. } => None,
+        }
+    }
 }
 
 /// CR 707.2 + CR 707.5: Copy-token creation payload carried by the same

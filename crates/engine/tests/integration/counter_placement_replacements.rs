@@ -10,6 +10,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{Effect, RestrictionExpiry};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{CounterMoveChoice, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -29,6 +30,9 @@ const DJERUS_RENUNCIATION_ORACLE: &str = "Tap up to two target creatures.";
 const GLIMMER_OF_GENIUS_ORACLE: &str =
     "Scry 2, then draw two cards. You get {E}{E} (two energy counters).";
 const BIOSHIFT_ORACLE: &str = "Move any number of +1/+1 counters from target creature onto another target creature with the same controller.";
+const HALVING_SEASON_ORACLE: &str = "If an opponent would create one or more tokens, they create half that many of each of those kinds of tokens instead, rounded down.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
+const VORINCLEX: &str = "Vorinclex, Monstrous Raider";
+const VORINCLEX_ORACLE: &str = "Trample, haste\nIf you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
 const NESTING_GROUNDS_ORACLE: &str = "{T}: Add {C}.\n{1}, {T}: Move a counter from target permanent you control onto a second target permanent. Activate only as a sorcery.";
 
 fn charge() -> CounterType {
@@ -177,21 +181,32 @@ fn winding_constrictor_adds_one_to_counters_you_get() {
     let mut runner = scenario.build();
 
     let before = runner.state().players[0].energy;
-    let hand_before = runner.state().players[0].hand.len();
-    runner.cast(glimmer).resolve();
+    let outcome = runner.cast(glimmer).resolve();
+    // CR 701.22a: "Scry 2" ran — the caster looked at two cards.
+    let scry_look_count = outcome.events().iter().find_map(|event| match event {
+        GameEvent::PlayerPerformedAction {
+            player_id,
+            action: PlayerActionKind::Scry,
+            look_count,
+            ..
+        } if *player_id == P0 => Some(*look_count),
+        _ => None,
+    });
+    assert_eq!(
+        scry_look_count,
+        Some(Some(2)),
+        "Glimmer of Genius scries 2 before drawing"
+    );
+    // CR 121.1: "then draw two cards" ran after the scry.
+    assert_eq!(outcome.hand_drawn(P0), 2, "the caster drew two cards");
     // CR 608.2c: the scry, the draw and the energy placement all complete —
     // the spell leaves the stack and priority returns.
     assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { player } if *player == P0),
         "Glimmer of Genius must finish resolving, got {:?}",
-        runner.state().waiting_for
+        outcome.final_waiting_for()
     );
     assert!(runner.state().stack.is_empty(), "the spell left the stack");
-    assert_eq!(
-        runner.state().players[0].hand.len() + 1 - hand_before,
-        2,
-        "the draw ran (Glimmer itself left the hand)"
-    );
     assert_eq!(
         runner.state().players[0].energy - before,
         3,
@@ -476,15 +491,7 @@ fn prairie_dog_ignores_counters_an_opponent_moves_onto_your_creature() {
     runner.cast(grow).target_object(recipient).resolve();
     assert_eq!(counters(&runner, recipient, &CounterType::Plus1Plus1), 2);
 
-    // Hand priority to the opponent within the same main phase.
-    runner
-        .act(GameAction::PassPriority)
-        .expect("active player passes");
-    assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1),
-        "the opponent receives priority, got {:?}",
-        runner.state().waiting_for
-    );
+    pass_priority_to_opponent(&mut runner);
     bioshift(&mut runner, their_shift, donor, recipient, 2);
     assert_eq!(counters(&runner, donor, &CounterType::Plus1Plus1), 1);
     assert_eq!(
@@ -555,4 +562,107 @@ fn geordi_doubles_charge_counters_you_move_onto_your_artifact() {
         0
     );
     assert_eq!(counters(&runner, my_artifact, &CounterType::Plus1Plus1), 1);
+}
+
+/// Two creatures sharing a controller, the first carrying `donor_counters`
+/// +1/+1 counters — Bioshift's "from target creature onto another target
+/// creature with the same controller".
+fn add_bioshift_pair(
+    scenario: &mut GameScenario,
+    player: engine::types::player::PlayerId,
+    donor_counters: u32,
+) -> (ObjectId, ObjectId) {
+    let donor = scenario
+        .add_creature(player, "Donor", 2, 2)
+        .with_plus_counters(donor_counters)
+        .id();
+    let recipient = scenario.add_vanilla(player, 2, 2);
+    (donor, recipient)
+}
+
+/// Passes the active player's priority within the same step so the opponent
+/// can cast an instant.
+fn pass_priority_to_opponent(runner: &mut GameRunner) {
+    runner
+        .act(GameAction::PassPriority)
+        .expect("active player passes");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1),
+        "the opponent receives priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 122.5 + CR 608.2c + CR 614.1a: Halving Season's "if an opponent would
+/// put one or more counters on a permanent" reaches counters an opponent's
+/// Bioshift moves (three moved, one arrives — half, rounded down), while
+/// counters its controller moves are untouched.
+#[test]
+fn halving_season_halves_counters_an_opponent_moves() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Halving Season", HALVING_SEASON_ORACLE);
+    let (my_donor, my_recipient) = add_bioshift_pair(&mut scenario, P0, 3);
+    let (their_donor, their_recipient) = add_bioshift_pair(&mut scenario, P1, 3);
+    let my_shift = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bioshift", true, BIOSHIFT_ORACLE)
+        .id();
+    let their_shift = scenario
+        .add_spell_to_hand_from_oracle(P1, "Bioshift", true, BIOSHIFT_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+
+    // Its controller's own move is not an opponent's placement.
+    bioshift(&mut runner, my_shift, my_donor, my_recipient, 3);
+    assert_eq!(counters(&runner, my_donor, &CounterType::Plus1Plus1), 0);
+    assert_eq!(counters(&runner, my_recipient, &CounterType::Plus1Plus1), 3);
+
+    pass_priority_to_opponent(&mut runner);
+    bioshift(&mut runner, their_shift, their_donor, their_recipient, 3);
+    assert_eq!(
+        counters(&runner, their_donor, &CounterType::Plus1Plus1),
+        0,
+        "CR 122.5: all three moved counters leave the donor"
+    );
+    assert_eq!(
+        counters(&runner, their_recipient, &CounterType::Plus1Plus1),
+        1,
+        "half of three, rounded down"
+    );
+}
+
+/// CR 122.5 + CR 608.2c + CR 614.1a: Vorinclex names no card type, so it
+/// reaches counters moved onto any permanent on the battlefield — doubling
+/// counters you move and halving counters an opponent moves.
+#[test]
+fn vorinclex_doubles_counters_you_move_and_halves_counters_an_opponent_moves() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, VORINCLEX, 6, 6, VORINCLEX_ORACLE);
+    let (my_donor, my_recipient) = add_bioshift_pair(&mut scenario, P0, 3);
+    let (their_donor, their_recipient) = add_bioshift_pair(&mut scenario, P1, 3);
+    let my_shift = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bioshift", true, BIOSHIFT_ORACLE)
+        .id();
+    let their_shift = scenario
+        .add_spell_to_hand_from_oracle(P1, "Bioshift", true, BIOSHIFT_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+
+    bioshift(&mut runner, my_shift, my_donor, my_recipient, 2);
+    assert_eq!(counters(&runner, my_donor, &CounterType::Plus1Plus1), 1);
+    assert_eq!(
+        counters(&runner, my_recipient, &CounterType::Plus1Plus1),
+        4,
+        "two moved, twice that many put on"
+    );
+
+    pass_priority_to_opponent(&mut runner);
+    bioshift(&mut runner, their_shift, their_donor, their_recipient, 3);
+    assert_eq!(counters(&runner, their_donor, &CounterType::Plus1Plus1), 0);
+    assert_eq!(
+        counters(&runner, their_recipient, &CounterType::Plus1Plus1),
+        1,
+        "half of three, rounded down"
+    );
 }

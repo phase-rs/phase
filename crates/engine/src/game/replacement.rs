@@ -8272,47 +8272,29 @@ fn add_counter_replacement_scope_matches(
 }
 
 /// CR 122.1a + CR 614.1a: a counter replacement naming a counter type
-/// ("+1/+1 counters", "charge counters") applies only to that type.
+/// ("+1/+1 counters", "charge counters") applies only to that type. An
+/// `AddCounter` replacement reads the type through
+/// `ProposedEvent::counter_placement`, the same placement view the scope gate
+/// reads (CR 122.5: a counter move's add stage included).
 fn counter_type_filter_matches(repl_def: &ReplacementDefinition, event: &ProposedEvent) -> bool {
-    let event_counter_type = match (&repl_def.event, event) {
-        (
-            ReplacementEvent::AddCounter,
-            ProposedEvent::AddCounter {
-                placement:
-                    CounterPlacement::Object {
-                        counter_type: ev_ct,
-                        ..
-                    },
-                ..
-            },
-        )
-        | (
-            ReplacementEvent::AddCounter,
-            ProposedEvent::MoveCounter {
-                stage: CounterMoveStage::Add,
-                counter_type: ev_ct,
-                ..
-            },
-        )
-        | (
-            ReplacementEvent::RemoveCounter,
-            ProposedEvent::RemoveCounter {
-                counter_type: ev_ct,
-                ..
-            },
-        )
-        | (
-            ReplacementEvent::RemoveCounter,
-            ProposedEvent::MoveCounter {
-                stage: CounterMoveStage::Remove,
-                counter_type: ev_ct,
-                ..
-            },
-        ) => Some(ev_ct),
-        _ => None,
+    let Some(counter_match) = &repl_def.counter_match else {
+        return true;
     };
-    match (&repl_def.counter_match, event_counter_type) {
-        (Some(m), Some(ev_ct)) => m.matches(ev_ct),
+    match repl_def.event {
+        ReplacementEvent::AddCounter => event
+            .counter_placement()
+            .as_deref()
+            .and_then(CounterPlacement::counter_type)
+            .is_none_or(|ct| counter_match.matches(ct)),
+        ReplacementEvent::RemoveCounter => match event {
+            ProposedEvent::RemoveCounter { counter_type, .. }
+            | ProposedEvent::MoveCounter {
+                stage: CounterMoveStage::Remove,
+                counter_type,
+                ..
+            } => counter_match.matches(counter_type),
+            _ => true,
+        },
         _ => true,
     }
 }
