@@ -18787,49 +18787,38 @@ fn trigger_unless_intervening_controls_creature() {
 
 /// CR 608.2c: an "unless" bound to a LATER instruction gates only that
 /// instruction. Hoisting it onto the trigger would also skip the earlier
-/// instruction — both for a later sentence ("draw a card. Then discard a card
-/// unless ...") and for a ", then " sequencer inside one sentence.
+/// instruction. Splitskin Doll, verbatim Oracle text (Scryfall).
 ///
-/// Sentence form: Splitskin Doll, verbatim Oracle text (Scryfall).
-///
-/// Comma-then form: no printed card pairs ", then <instruction> unless" with a
-/// game-state predicate. The nearest printed card is Katara, Seeking Revenge
-/// ("When Katara enters, draw a card, then discard a card unless her
-/// additional cost was paid."), whose predicate is an additional-cost-paid
-/// referent rather than a game-state condition, so it never reaches the
-/// game-state unless hoist this test guards. The fixture is therefore
-/// Splitskin Doll's printed text with only its ". Then" sequencer respelled as
-/// Katara's ", then", isolating the ", then " branch of
-/// `unless_binds_to_later_instruction`.
+/// The ", then " branch of `unless_binds_to_later_instruction` is covered by
+/// printed cards in `oracle_effect/tests.rs`: `cyclone_paid_continuation_fails_closed`
+/// and `phantasmal_sphere_unless_binds_to_the_sacrifice`.
 #[test]
 fn trigger_unless_bound_to_later_instruction_is_not_hoisted() {
-    const SPLITSKIN_DOLL: &str = "When this creature enters, draw a card. Then discard a card \
-unless you control another creature with power 2 or less.";
-    const SPLITSKIN_DOLL_COMMA_THEN: &str = "When this creature enters, draw a card, then \
-discard a card unless you control another creature with power 2 or less.";
-    for text in [SPLITSKIN_DOLL, SPLITSKIN_DOLL_COMMA_THEN] {
-        let def = parse_trigger_line(text, "Splitskin Doll");
-        assert!(
-            def.condition.is_none(),
-            "later-instruction unless must not gate the trigger: {text}"
-        );
-        let execute = def.execute.as_ref().expect("trigger effect");
-        assert!(
-            matches!(*execute.effect, Effect::Draw { .. }),
-            "draw stays the unconditional first instruction: {text}"
-        );
-        assert!(execute.condition.is_none(), "draw is unconditional: {text}");
-        let discard = execute.sub_ability.as_ref().expect("discard instruction");
-        assert!(matches!(*discard.effect, Effect::Discard { .. }));
-        assert!(
-            matches!(
-                discard.condition,
-                Some(AbilityCondition::Not { .. }) | Some(AbilityCondition::QuantityCheck { .. })
-            ),
-            "the unless gate attaches to the discard: {:?}",
-            discard.condition
-        );
-    }
+    let def = parse_trigger_line(
+        "When this creature enters, draw a card. Then discard a card unless you control \
+another creature with power 2 or less.",
+        "Splitskin Doll",
+    );
+    assert!(
+        def.condition.is_none(),
+        "later-instruction unless must not gate the trigger"
+    );
+    let execute = def.execute.as_ref().expect("trigger effect");
+    assert!(
+        matches!(*execute.effect, Effect::Draw { .. }),
+        "draw stays the unconditional first instruction"
+    );
+    assert!(execute.condition.is_none(), "draw is unconditional");
+    let discard = execute.sub_ability.as_ref().expect("discard instruction");
+    assert!(matches!(*discard.effect, Effect::Discard { .. }));
+    assert!(
+        matches!(
+            discard.condition,
+            Some(AbilityCondition::Not { .. }) | Some(AbilityCondition::QuantityCheck { .. })
+        ),
+        "the unless gate attaches to the discard: {:?}",
+        discard.condition
+    );
 }
 
 #[test]
