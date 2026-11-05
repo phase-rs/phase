@@ -4689,6 +4689,7 @@ mod tests {
                 player_id: PlayerId(0),
                 sides: 6,
                 result: Some(4),
+                pre_entry_source: None,
             },
             GameEvent::EffectResolved {
                 kind: EffectKind::RollDie,
@@ -4713,6 +4714,7 @@ mod tests {
             player_id: PlayerId(0),
             sides: 6,
             result: Some(4),
+            pre_entry_source: None,
         }];
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount {

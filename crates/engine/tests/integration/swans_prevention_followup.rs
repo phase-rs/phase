@@ -77,6 +77,7 @@ fn swans_followup_draws_for_damage_sources_controller() {
             // installs no replacing object, so "you" falls back to the affected
             // object's controller exactly as before the slot existed.
             controller: None,
+            parked_entrants: Vec::new(),
         },
         ResidentDrainPolicy::Replace,
     );

@@ -987,6 +987,7 @@ fn stash_post_replacement_continuation(
             // `active_player` here would stamp a confident wrong answer in
             // place of that fallback.
             controller,
+            parked_entrants: Vec::new(),
         },
         ResidentDrainPolicy::KeepResident,
     );
@@ -13811,6 +13812,7 @@ fn continue_replacement_impl(
                         // zone-change drain rebinds `source` to the entering /
                         // moving object, so the branch's "you" needs its own slot.
                         controller: branch_controller,
+                        parked_entrants: Vec::new(),
                     },
                     ResidentDrainPolicy::Replace,
                 );
@@ -19342,6 +19344,7 @@ mod tests {
                     event_source: None,
                     event_target: Some(TargetRef::Player(PlayerId(0))),
                     controller: Some(PlayerId(0)),
+                    parked_entrants: Vec::new(),
                 },
                 ResidentDrainPolicy::KeepResident,
             );

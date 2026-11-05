@@ -569,8 +569,8 @@ fn die_roll_replacement_is_scoped_to_its_controller() {
 }
 
 /// V11 — the aggregate "equal to the result(s)" value is summed over SURVIVING
-/// dice only (CR 706.4 + CR 706.6), and the `rolled_any == false` branch clears
-/// it rather than stamping `Some(0)`.
+/// dice only (CR 706.4 + CR 706.6), and a zero-count instruction rolls no dice
+/// and stamps `Some(0)` (the total of no results is 0; Hydradoodle's ruling).
 #[test]
 fn aggregate_die_result_covers_survivors_only() {
     let mut scenario = GameScenario::new();
@@ -591,17 +591,16 @@ fn aggregate_die_result_covers_survivors_only() {
         "CR 706.4: the aggregate must be the sum of every surviving roll"
     );
 
-    // CR 614.6 / the `rolled_any == false` branch: a zero-count instruction
-    // clears the stamp rather than leaving `Some(0)`.
+    // A zero-count instruction rolls no dice. CR 706.4 leaves the use of the
+    // results to the ability's text, and the total of no results is 0
+    // (Hydradoodle's ruling: with X = 0 no dice are rolled and it enters as a
+    // 0/0), so the stamp is `Some(0)`, not left stale or cleared.
     let (events, die_result) = resolve_roll(&mut runner, source, 0, 20, None, vec![]);
     assert!(
         die_rolls(&events).is_empty(),
         "a zero-count instruction rolls nothing"
     );
-    assert_eq!(
-        die_result, None,
-        "CR 706.6: with no surviving roll the die result must be cleared, not Some(0)"
-    );
+    assert_eq!(die_result, Some(0), "the total of zero rolled dice is 0");
 }
 
 /// V10 (runtime half) — the modifier applies ONLY to surviving dice, and the

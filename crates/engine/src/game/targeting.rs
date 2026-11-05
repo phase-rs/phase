@@ -5021,6 +5021,7 @@ mod tests {
                 event_source: Some(c0),
                 event_target: None,
                 controller: None,
+                parked_entrants: Vec::new(),
             },
             ResidentDrainPolicy::Replace,
         );
@@ -5068,6 +5069,7 @@ mod tests {
                 event_target: Some(TargetRef::Object(c1)),
                 event_source: None,
                 controller: None,
+                parked_entrants: Vec::new(),
             },
             ResidentDrainPolicy::Replace,
         );
@@ -8679,6 +8681,7 @@ mod tests {
             player_id: PlayerId(0),
             sides: 8,
             result: Some(7),
+            pre_entry_source: None,
         };
         assert_eq!(extract_amount_from_event(&event), Some(7));
     }
@@ -8692,6 +8695,7 @@ mod tests {
             player_id: PlayerId(0),
             sides: 6,
             result: None,
+            pre_entry_source: None,
         };
         assert_eq!(extract_amount_from_event(&event), None);
     }

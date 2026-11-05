@@ -1274,6 +1274,7 @@ fn apply_pending_counter_post_action(
                     if to == Zone::Battlefield {
                         crate::game::engine_replacement::flush_deferred_entry_events_into_priority_scan(
                             state,
+                            object_id,
                             events,
                         );
                     }

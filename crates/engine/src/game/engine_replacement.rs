@@ -4,18 +4,20 @@ use crate::ai_support::copy_target_mana_value_ceiling;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     AbilityDefinition, AttachCardinality, AttachSelection, ChosenAttribute, CopyTargetPurpose,
-    Effect, EffectKind, PostReplacementContinuation, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectKind, PostReplacementContinuation, QuantityExpr, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    CounterCostRootSubtree, DeferredLifeCostResume, GameState, PendingCostMoveResume,
-    PendingCounterPostAction, PendingReplacement, TokenEntryEventEmission, UnrepresentablePolicy,
-    WaitingFor,
+    CounterCostRootSubtree, DeferredLifeCostResume, DrainStatus, GameState, ParkedEntry,
+    ParkedEntryState, PendingCostMoveResume, PendingCounterPostAction, PendingReplacement,
+    PostReplacementDrain, PostReplacementDrainStack, TokenEntryEventEmission,
+    UnrepresentablePolicy, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
@@ -25,6 +27,7 @@ use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def_with_targets;
+use super::arithmetic::u32_to_i32_saturating;
 use super::effects;
 use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext};
 use super::effects::destroy::apply_destroy_after_replacement;
@@ -57,9 +60,11 @@ fn maybe_drain_each_player_copy_chosen(state: &mut GameState, events: &mut Vec<G
 /// parked resolution frame once the child stack its own entry raised has retired.
 ///
 /// The parked frame is that child's structural PARENT, so it becomes the active
-/// frame only here — after this resume's drain stages have settled. `subject` is
-/// the object whose replacement this resume answered; the frame completes only
-/// when it is that same object's, so an unrelated parked spell is never touched.
+/// frame only here — after this resume's drain stages have settled. `subject`
+/// names the object whose frame may complete: the object whose replacement this
+/// resume answered or, from `finish_spell_resolution_exposed_by_retired_drain`,
+/// the exposed frame's own object once it is on the battlefield. An answering
+/// resume never completes another object's frame.
 /// `active_spell_resolution` stays top-only: this reads the frame the drain just
 /// exposed and never reaches through a live child. This function is the SINGLE
 /// settle authority for that completion — call sites add no `Priority` guard of
@@ -102,6 +107,29 @@ fn finish_spell_resolution_exposed_by_child(
         .take_active_spell_resolution()
         .expect("matching spell-resolution frame was checked above");
     apply_pending_spell_resolution(state, &ctx, events);
+}
+
+/// CR 608.3a + CR 616.1f: a post-replacement drain raised while the spell's
+/// entry replacements were being ordered sits above the spell's parked frame.
+/// Retiring it exposes that frame with the entry already delivered, and no
+/// answering action remains to finish it.
+pub(crate) fn finish_spell_resolution_exposed_by_retired_drain(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    if state.pending_replacement.is_some() {
+        return;
+    }
+    let subject = state
+        .active_spell_resolution()
+        .map(|ctx| ctx.object_id)
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|object| object.zone == Zone::Battlefield)
+        });
+    finish_spell_resolution_exposed_by_child(state, subject, events);
 }
 
 /// CR 614.13a + CR 702.82a/c: matches the broad as-enters shape of a Devour
@@ -414,6 +442,14 @@ fn handle_replacement_choice_inner(
         .pending_replacement
         .as_ref()
         .and_then(|pending| pending.proposed.affected_object_id());
+    // The object of a parked zone move, for the `Prevented` arm. No applier
+    // prevents a move onto the battlefield today; if one does, a played land's
+    // `LandPlayed` stays collectable, as it did before the park recorded state.
+    let parked_zone_change_object_id = state
+        .pending_replacement
+        .as_ref()
+        .filter(|pending| matches!(pending.proposed, ProposedEvent::ZoneChange { .. }))
+        .and_then(|pending| pending.proposed.affected_object_id());
     // A replacement-paused zone move belongs to its logical owner by both the
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
@@ -614,11 +650,15 @@ fn handle_replacement_choice_inner(
                     // The land has now entered, so flush the parked events into
                     // this action's `events` for the priority-time trigger scan,
                     // so "play a land" observers (City of Traitors) fire against
-                    // the realized, post-choice object (issue #8738). Gated on a
-                    // non-empty deferred store so every other replacement-resumed
-                    // zone change keeps its unchanged path.
+                    // the realized, post-choice object (issue #8738). Only this
+                    // object's entries move, so every other replacement-resumed
+                    // zone change keeps its unchanged path. A land a replacement
+                    // kept off the battlefield has no such resume, and its play
+                    // is recorded for the settled take.
                     if enters_battlefield {
-                        flush_deferred_entry_events_into_priority_scan(state, events);
+                        flush_deferred_entry_events_into_priority_scan(state, object_id, events);
+                    } else {
+                        record_parked_land_play_completion(state, object_id);
                     }
                 }
                 event @ ProposedEvent::TokenEntry { entry_ref, .. } => {
@@ -1672,6 +1712,9 @@ fn handle_replacement_choice_inner(
             ))
         }
         super::replacement::ReplacementResult::Prevented => {
+            if let Some(object_id) = parked_zone_change_object_id {
+                record_parked_land_play_completion(state, object_id);
+            }
             // CR 614.6: a prevented move never happened, so the paused discard
             // owned by this answer is never recorded. A carrier installed by a
             // substitute during this answer is a different value and survives.
@@ -2287,7 +2330,7 @@ fn complete_copy_surfaced_payment(
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
-    if !state.deferred_entry_events.is_empty() {
+    if entry_park_holds_entrant(state, *object_id) {
         if let Some(waiting_for) = replay_deferred_entry_events(state, *object_id, events)? {
             return Ok(waiting_for);
         }
@@ -3262,7 +3305,7 @@ pub(crate) fn resume_copy_target_choice_entry(
             .get(&entrant.object_id)
             .is_none_or(|object| object.zone != Zone::Battlefield)
     {
-        state.deferred_entry_events.clear();
+        let _ = take_parked_entries_of(state, entrant.object_id);
         state.finish_active_paused_post_replacement_dispatch();
         return Ok(CopyEntryResumption::Completed);
     }
@@ -3293,6 +3336,12 @@ fn finish_copy_target_choice_entry_after_counters(
     if let Some(choice) =
         super::replacement::current_self_enter_replacement_choice(state, source_id)
     {
+        let unowned_entrant = if replay_entry_events {
+            bind_copied_choice_entrant(state, source_id)
+        } else {
+            None
+        };
+        let child_stack_start = state.resolution_stack.capture_child_boundary();
         if let Some(waiting_for) = apply_post_replacement_effect(
             state,
             &choice,
@@ -3305,6 +3354,9 @@ fn finish_copy_target_choice_entry_after_counters(
             HashSet::new(),
             events,
         ) {
+            if let Some(entrant) = unowned_entrant {
+                park_copied_choice_owner(state, entrant, child_stack_start);
+            }
             return Ok(Some(waiting_for));
         }
     }
@@ -3490,13 +3542,16 @@ fn finish_copy_target_choice_entry_after_counters(
 /// before the permanent enters). [`collect_deferred_entry_replay`] queues what
 /// the entry triggered.
 ///
-/// Drained via `std::mem::take` so replay is idempotent — the event is fired
-/// exactly once and can never also reach a later `Priority`-result pipeline
-/// pass. Returns `None` (no pause) when `deferred_entry_events` is empty (the
-/// no-op guard for non-entry persisted choices, e.g. Pithing Needle naming),
-/// or when the entering source has left the battlefield (concede / error /
-/// chained-replacement paths leave a stale event we discard rather than fire
-/// against a phantom object).
+/// Takes `source_id`'s own parked entries and no others, except an entry a live
+/// logical owner's paused delivery holds, which that owner's custody and segment
+/// collect (CR 603.6d), so replay is idempotent
+/// — the event is fired exactly once and can never also reach a later
+/// `Priority`-result pipeline pass — and another entrant's parked entry waits for
+/// its own collector. Returns `None` (no pause) when the park holds nothing of
+/// `source_id` (the no-op guard for non-entry persisted choices, e.g. Pithing
+/// Needle naming), or when the entering source has left the battlefield
+/// (concede / error / chained-replacement paths leave a stale event we discard
+/// rather than fire against a phantom object).
 pub(super) fn replay_deferred_entry_events(
     state: &mut GameState,
     source_id: ObjectId,
@@ -3541,17 +3596,61 @@ pub(super) fn replay_deferred_entry_events(
 /// CR 614.12a + CR 117.5 + CR 603.3b: the choice was made before the permanent
 /// entered, so what its entry triggered waits for the next priority with
 /// everything else that triggered since the last one.
+///
+/// CR 603.2 + CR 603.6d: an entry a logical owner holds is collected by that
+/// owner, once. When a live owner's paused delivery holds the source's entry,
+/// the entry stays parked, recorded completed, for that owner's custody and
+/// segment, with any attacking seat it owes.
 pub(super) fn collect_deferred_entry_replay(state: &mut GameState, source_id: ObjectId) {
-    let deferred = std::mem::take(&mut state.deferred_entry_events);
-    let source_still_on_battlefield = state
+    let source = state
         .objects
         .get(&source_id)
-        .is_some_and(|obj| obj.zone == Zone::Battlefield);
-    if deferred.is_empty() || !source_still_on_battlefield {
+        .filter(|obj| obj.zone == Zone::Battlefield)
+        .map(ObjectIncarnationRef::from_object);
+    let Some(source) = source else {
+        take_parked_entries_of(state, source_id);
+        return;
+    };
+    let held = owner_held_delivery_events(state);
+    let deferred = take_parked_entries_of_except(state, source_id, &held);
+    // CR 614.12a: the choice has been made, so the entry happened.
+    if entry_park_holds_entrant(state, source_id) {
+        record_parked_entry_completion(state, &[source]);
+    }
+    if deferred.is_empty() {
         return;
     }
     super::triggers::collect_triggers_into_deferred(state, &deferred);
     super::triggers::collect_delayed_trigger_contexts_into_deferred(state, &deferred);
+}
+
+/// The paused deliveries a live logical owner will resume and collect: the
+/// `ChangeZone` owner's when its drain counts the member (the branch that runs
+/// custody), and the batch owner's. Each owner is found only as the top frame
+/// or as the exact parent of the active `PostReplacement` child the paused
+/// choice leaves on top.
+fn owner_held_delivery_events(state: &mut GameState) -> Vec<GameEvent> {
+    let mut held: Vec<GameEvent> = state
+        .resolution_stack
+        .active_change_zone_or_post_replacement_child()
+        .and_then(|frame| frame.pending.as_ref())
+        .and_then(|pending| pending.paused_current.as_ref())
+        .filter(|paused| {
+            matches!(
+                paused.count,
+                crate::types::game_state::PausedZoneChangeDeliveryCount::NeedsCount
+            )
+        })
+        .map(|paused| paused.delivery_events.clone())
+        .unwrap_or_default();
+    if let Some(paused) = state
+        .resolution_stack
+        .active_batch_delivery_or_post_replacement_child_mut()
+        .and_then(|pending| pending.paused_current.as_ref())
+    {
+        held.extend(paused.delivery_events.iter().cloned());
+    }
+    held
 }
 
 /// CR 305.1 + CR 603.2: The priority-settling counterpart to
@@ -3564,13 +3663,833 @@ pub(super) fn collect_deferred_entry_replay(state: &mut GameState, source_id: Ob
 /// for the ordinary priority-time trigger scan (`run_post_action_pipeline`) to
 /// fire "play a land" observers (City of Traitors) against the realized object
 /// (issue #8738). The non-priority `NamedChoice` resume path instead replays
-/// through `replay_deferred_entry_events`, so the two are disjoint.
+/// through `replay_deferred_entry_events`, so the two are disjoint. Moves only
+/// `entrant`'s own entries: this runs on every battlefield zone-change resume,
+/// and another entrant's parked entry waits for its own collector.
+///
+/// CR 603.6d + CR 603.2: an entry whose collector is still live (a paused
+/// as-enters continuation it is bound to, a logical owner holding its delivery,
+/// or an owed attacking seat, CR 508.4) is collected by that collector, once;
+/// this flush takes only entries no collector owns.
 pub(crate) fn flush_deferred_entry_events_into_priority_scan(
     state: &mut GameState,
+    entrant: ObjectId,
     events: &mut Vec<GameEvent>,
 ) {
-    let deferred = std::mem::take(&mut state.deferred_entry_events);
+    let owner_held = state.resolution_stack.paused_owner_delivery_events();
+    let bound: Vec<GameEvent> = state
+        .parked_entry_events()
+        .filter(|event| entry_is_bound_to_a_live_drain(state, event, entrant))
+        .cloned()
+        .collect();
+    let deferred = take_parked_entries_of_where(state, entrant, |parked| {
+        bound
+            .iter()
+            .chain(&owner_held)
+            .any(|event| parked_event_holds(&parked.event, event))
+            || parked.entry_attack.is_some()
+    });
     events.extend(deferred);
+}
+
+/// CR 603.6d + CR 614.12a + CR 400.7: is `event` a battlefield entry of
+/// `entrant` whose incarnation is bound to a live drain anywhere on the
+/// resolution stack? That drain's retirement records its completion. An entry
+/// recorded with no incarnation is read as the entrant's current one.
+fn entry_is_bound_to_a_live_drain(state: &GameState, event: &GameEvent, entrant: ObjectId) -> bool {
+    let GameEvent::ZoneChanged {
+        object_id,
+        to: Zone::Battlefield,
+        record,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    if *object_id != entrant {
+        return false;
+    }
+    record
+        .entered_incarnation
+        .or_else(|| state.objects.get(&entrant).map(|object| object.incarnation))
+        .is_some_and(|incarnation| {
+            state
+                .resolution_stack
+                .binds_parked_entrant(ObjectIncarnationRef {
+                    object_id: entrant,
+                    incarnation,
+                })
+        })
+}
+
+/// The three entry shapes a park holds for `source_id`: its battlefield
+/// `ZoneChanged`, its `LandPlayed` (CR 305.1), and its attach resolution. The
+/// single filter shared by the mid-entry choice capture, the as-enters
+/// continuation bracket and every narrowed park removal.
+pub(crate) fn is_entry_event_of(event: &GameEvent, source_id: ObjectId) -> bool {
+    match event {
+        GameEvent::ZoneChanged {
+            object_id,
+            to: Zone::Battlefield,
+            ..
+        }
+        | GameEvent::LandPlayed { object_id, .. } => *object_id == source_id,
+        GameEvent::EffectResolved {
+            kind: EffectKind::Attach,
+            source_id: attach_source_id,
+            ..
+        } => *attach_source_id == source_id,
+        _ => false,
+    }
+}
+
+/// Does the parked event `parked` hold `event`? A battlefield `ZoneChanged` is
+/// matched by its per-turn ledger key (the key
+/// `zones::settle_battlefield_entry_observations` uses), so later record
+/// stamping of the action's copy cannot unpark it; every other event, a
+/// `LandPlayed` and the attach resolution among them, by equality.
+fn parked_event_holds(parked: &GameEvent, event: &GameEvent) -> bool {
+    match event {
+        GameEvent::ZoneChanged {
+            to: Zone::Battlefield,
+            record,
+            ..
+        } => matches!(
+            parked,
+            GameEvent::ZoneChanged { record: parked_record, .. }
+                if parked_record.recorded_turn_number == record.recorded_turn_number
+                    && parked_record.turn_zone_change_index == record.turn_zone_change_index
+        ),
+        _ => parked == event,
+    }
+}
+
+/// CR 614.12a + CR 603.6d + CR 603.2c: the single hold predicate. True when
+/// `event` is an entry held in `deferred_entry_events`, in either state: one
+/// whose as-enters continuation (or mid-entry choice) has not completed, or one
+/// that completed and waits for its collector. Such an entry is collected only
+/// by its replay, its settled release or its logical owner's custody, never by a
+/// collector running at the pause.
+pub(crate) fn entry_event_is_parked(state: &GameState, event: &GameEvent) -> bool {
+    if state.deferred_entry_events.is_empty() {
+        return false;
+    }
+    state
+        .parked_entry_events()
+        .any(|parked| parked_event_holds(parked, event))
+}
+
+/// Park `event` as an entry that has not happened, latching the stack object
+/// whose resolution parked it (`None` outside a resolution). The one way an
+/// entry joins the park.
+pub(crate) fn park_pending_entry(state: &mut GameState, event: GameEvent) {
+    let carrier = state.resolving_stack_entry.as_ref().map(|entry| entry.id);
+    state
+        .deferred_entry_events
+        .push(ParkedEntry::pending(event, carrier));
+}
+
+/// CR 614.1c + CR 113.6: is `event` an entrant's own as-enters roll, stamped at
+/// emission because the entrant's entry had not happened?
+pub(crate) fn is_as_enters_roll(event: &GameEvent) -> bool {
+    matches!(
+        event,
+        GameEvent::DieRolled {
+            pre_entry_source: Some(_),
+            ..
+        }
+    )
+}
+
+/// CR 614.1c + CR 603.2 + CR 113.6: park an entrant's own as-enters roll beside
+/// its entry, holding `held_triggers`, the contexts its instruction triggered.
+/// The roll happened, so it is parked completed; the settled release places
+/// what it triggered with its entry, never the action that made it, so a prompt
+/// that ends that action cannot lose it.
+pub(crate) fn park_as_enters_roll(
+    state: &mut GameState,
+    event: GameEvent,
+    held_triggers: Vec<super::triggers::DeferredTrigger>,
+) {
+    debug_assert!(is_as_enters_roll(&event));
+    let mut parked = ParkedEntry::occurred(event);
+    parked.held_triggers = held_triggers;
+    state.deferred_entry_events.push(parked);
+}
+
+/// CR 603.2 + CR 603.10 + CR 603.2c: an as-enters roll triggers what is on the
+/// battlefield when it is rolled, once per instruction for a "one or more dice"
+/// ability; its triggers wait with its entry and are put on the stack with it
+/// (CR 603.3).
+///
+/// `rolls` are one instruction's stamped rolls. Their observers are collected
+/// now and held on the first; every roll joins the park.
+pub(crate) fn hold_as_enters_roll_occurrence(state: &mut GameState, rolls: Vec<GameEvent>) {
+    let mut observers = Some(super::triggers::collect_as_enters_roll_observers(
+        state, &rolls,
+    ));
+    for roll in rolls {
+        let held = observers.take().unwrap_or_default();
+        park_as_enters_roll(state, roll, held);
+    }
+}
+
+/// CR 508.4: the entrant's as-enters continuation paused, so its attacking seat is
+/// owed to the owner that resumes it. Stamps the parked battlefield entry of the
+/// entrant's current incarnation; returns whether one was parked. A pause no
+/// as-enters continuation owns parks nothing, and nothing is stamped.
+pub(crate) fn owe_entry_attack_seat(state: &mut GameState, entrant: ObjectId) -> bool {
+    let Some(reference) = state
+        .objects
+        .get(&entrant)
+        .map(ObjectIncarnationRef::from_object)
+    else {
+        return false;
+    };
+    let Some(parked) = state.deferred_entry_events.iter_mut().find(|parked| {
+        matches!(
+            parked.event,
+            GameEvent::ZoneChanged {
+                to: Zone::Battlefield,
+                ..
+            }
+        ) && parked_entry_is_of_incarnation(&parked.event, reference)
+    }) else {
+        return false;
+    };
+    parked.entry_attack = Some(crate::types::ability::EntryAttackDestination::AnyDefender);
+    true
+}
+
+/// CR 508.4 + CR 400.7: take the attacking seat the owner's paused delivery owes,
+/// once, from the parked entry custody will take (matched by its ledger key, not
+/// by the owner's pre-move member), with the entrant as it is now.
+///
+/// The owner that resumes the paused member takes it before its custody removes
+/// the entry, so a second pass after the seat's own prompt finds nothing to seat.
+/// The stamp is taken whatever follows: an entrant that is gone, or is a later
+/// incarnation than the one that entered, gives `None`.
+pub(crate) fn take_owed_entry_attack_seat(
+    state: &mut GameState,
+    delivery_events: &[GameEvent],
+) -> Option<(
+    ObjectIncarnationRef,
+    crate::types::ability::EntryAttackDestination,
+)> {
+    let objects = &state.objects;
+    state
+        .deferred_entry_events
+        .iter_mut()
+        .filter(|parked| {
+            delivery_events
+                .iter()
+                .any(|event| parked_event_holds(&parked.event, event))
+        })
+        .find_map(|parked| {
+            let GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                ..
+            } = parked.event
+            else {
+                return None;
+            };
+            let destination = parked.entry_attack.take()?;
+            Some(
+                objects
+                    .get(&object_id)
+                    .map(ObjectIncarnationRef::from_object)
+                    .filter(|entrant| parked_entry_is_of_incarnation(&parked.event, *entrant))
+                    .map(|entrant| (entrant, destination)),
+            )
+        })
+        .flatten()
+}
+
+/// CR 508.4 + CR 400.7: take the attacking seat `entrant`'s parked battlefield
+/// entry owes, once, for the seat frame that no logical owner's delivery keys.
+/// Returns the seat only while `entrant` is still that incarnation.
+pub(crate) fn take_owed_entry_attack_seat_of(
+    state: &mut GameState,
+    entrant: ObjectIncarnationRef,
+) -> Option<(
+    ObjectIncarnationRef,
+    crate::types::ability::EntryAttackDestination,
+)> {
+    let destination = state
+        .deferred_entry_events
+        .iter_mut()
+        .filter(|parked| {
+            matches!(
+                parked.event,
+                GameEvent::ZoneChanged {
+                    to: Zone::Battlefield,
+                    ..
+                }
+            ) && parked_entry_is_of_incarnation(&parked.event, entrant)
+        })
+        .find_map(|parked| parked.entry_attack.take())?;
+    entrant.is_current(state).then_some((entrant, destination))
+}
+
+/// CR 508.4: whether an attacking entrant's seat is owed to an authority that
+/// resumes after its delivery's pause (a logical owner or the seat frame).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwedEntrySeat {
+    Owed,
+    NotOwed,
+}
+
+/// CR 614.12a + CR 603.6d: the entry's as-enters continuation has not run, so
+/// the entry is not over; it is held from every collector until that
+/// continuation completes.
+///
+/// Parks every entry event of `entrant` in `delivery_events` (the delivery's own
+/// slice) that the park does not already hold. The chain's dispatch then adopts
+/// that custody by identity. With `OwedEntrySeat::Owed` it stamps the attacking
+/// seat on the record and returns whether one was stamped.
+pub(crate) fn park_entry_before_its_continuation(
+    state: &mut GameState,
+    entrant: ObjectId,
+    delivery_events: &[GameEvent],
+    owed_seat: OwedEntrySeat,
+) -> bool {
+    for event in delivery_events {
+        if is_entry_event_of(event, entrant) && !entry_event_is_parked(state, event) {
+            park_pending_entry(state, event.clone());
+        }
+    }
+    match owed_seat {
+        OwedEntrySeat::Owed => owe_entry_attack_seat(state, entrant),
+        OwedEntrySeat::NotOwed => false,
+    }
+}
+
+/// Take `entrant`'s own parked entries, in either state, and leave every other
+/// entry parked for its own collector. Every removal that answers one entrant
+/// goes through here.
+pub(crate) fn take_parked_entries_of(state: &mut GameState, entrant: ObjectId) -> Vec<GameEvent> {
+    take_parked_entries_of_except(state, entrant, &[])
+}
+
+/// Take `entrant`'s own parked entries except those a live logical owner's paused
+/// delivery holds, which stay for that owner's custody.
+fn take_parked_entries_of_except(
+    state: &mut GameState,
+    entrant: ObjectId,
+    owner_held: &[GameEvent],
+) -> Vec<GameEvent> {
+    take_parked_entries_of_where(state, entrant, |parked| {
+        owner_held
+            .iter()
+            .any(|event| parked_event_holds(&parked.event, event))
+    })
+}
+
+/// Take `entrant`'s own parked entries except those `keep` names, which stay
+/// parked for the collector that owns them.
+fn take_parked_entries_of_where(
+    state: &mut GameState,
+    entrant: ObjectId,
+    keep: impl Fn(&ParkedEntry) -> bool,
+) -> Vec<GameEvent> {
+    let (own, others): (Vec<ParkedEntry>, Vec<ParkedEntry>) =
+        std::mem::take(&mut state.deferred_entry_events)
+            .into_iter()
+            .partition(|parked| is_entry_event_of(&parked.event, entrant) && !keep(parked));
+    state.deferred_entry_events = others;
+    own.into_iter().map(|parked| parked.event).collect()
+}
+
+/// Does the park hold an entry of `entrant`, in either state?
+pub(crate) fn entry_park_holds_entrant(state: &GameState, entrant: ObjectId) -> bool {
+    state
+        .parked_entry_events()
+        .any(|parked| is_entry_event_of(parked, entrant))
+}
+
+/// CR 614.12a + CR 113.6: has `entrant`'s entry not happened yet? True while
+/// this incarnation's parked entry is pending. A completed entry has happened,
+/// so that entrant is an ordinary observer (CR 603.2), even though its entry
+/// waits for collection. The one park reader of the state outside the take and
+/// the carrier abandonment.
+pub(crate) fn entrant_entry_is_pending(state: &GameState, entrant: ObjectId) -> bool {
+    if state.deferred_entry_events.is_empty() {
+        return false;
+    }
+    let Some(object) = state.objects.get(&entrant) else {
+        return false;
+    };
+    let reference = ObjectIncarnationRef::from_object(object);
+    state.deferred_entry_events.iter().any(|parked| {
+        parked_entry_is_of_incarnation(&parked.event, reference)
+            && match parked.state {
+                ParkedEntryState::Pending { .. } => true,
+                ParkedEntryState::Completed => false,
+            }
+    })
+}
+
+/// CR 400.7: is `record` an entry of exactly `incarnation`? A record stamped
+/// with no incarnation cannot name a different one.
+fn entry_record_is_of_incarnation(
+    record: &crate::types::game_state::ZoneChangeRecord,
+    incarnation: u64,
+) -> bool {
+    record
+        .entered_incarnation
+        .is_none_or(|entered| entered == incarnation)
+}
+
+/// CR 400.7: does the parked `event` describe this exact incarnation of the
+/// entrant? A stale `ZoneChanged` of an earlier incarnation of the same
+/// `ObjectId` does not.
+fn parked_entry_is_of_incarnation(event: &GameEvent, entrant: ObjectIncarnationRef) -> bool {
+    is_entry_event_of(event, entrant.object_id)
+        && match event {
+            GameEvent::ZoneChanged { record, .. } => {
+                entry_record_is_of_incarnation(record, entrant.incarnation)
+            }
+            _ => true,
+        }
+}
+
+/// CR 603.2 + CR 603.10: the paused continuation that parked these entries is
+/// over, so each entry happened, even if a later instruction moved its entrant.
+///
+/// Design decision, not derived from a rule: the one refusal is an entrant not
+/// current on the battlefield whose owner or controller of record has left, so
+/// its entry stays pending. An owner conceding at the entrant's copied
+/// `TributeChoice` reaches this: the opponent's answer retires the drain after
+/// the entrant has gone. The test reads the moment the continuation ended, and a
+/// later departure changes nothing because the state is already recorded.
+pub(crate) fn record_parked_entry_completion(
+    state: &mut GameState,
+    entrants: &[ObjectIncarnationRef],
+) {
+    for entrant in entrants.iter().copied() {
+        let gone = !entrant.is_current(state)
+            || state
+                .objects
+                .get(&entrant.object_id)
+                .is_none_or(|object| object.zone != Zone::Battlefield);
+        let refused: Vec<bool> = state
+            .deferred_entry_events
+            .iter()
+            .map(|parked| gone && parked_entrant_left_the_game(state, &parked.event))
+            .collect();
+        for (parked, refused) in state.deferred_entry_events.iter_mut().zip(refused) {
+            if parked_entry_is_of_incarnation(&parked.event, entrant) && !refused {
+                parked.state = ParkedEntryState::Completed;
+            }
+        }
+    }
+}
+
+/// CR 305.1: record a played land's `LandPlayed` as completed when a replacement
+/// kept the land from entering, so nothing will flush it.
+///
+/// Design decision preserved from base, not derived from a rule: the play was
+/// committed by `finalize_committed_land_play`, so its `LandPlayed` stays
+/// collectable when a replacement stopped the land from entering.
+fn record_parked_land_play_completion(state: &mut GameState, land: ObjectId) {
+    for parked in &mut state.deferred_entry_events {
+        if matches!(parked.event, GameEvent::LandPlayed { object_id, .. } if object_id == land) {
+            parked.state = ParkedEntryState::Completed;
+        }
+    }
+}
+
+/// Whole-carrier abandonment's removal: drop the pending entries of the family
+/// that `carrier` parked. A completed entry happened and stays for the take, and
+/// a pending entry of another carrier stays for its own producer.
+pub(crate) fn drop_abandoned_family_entries(state: &mut GameState, carrier: Option<ObjectId>) {
+    state
+        .deferred_entry_events
+        .retain(|parked| match parked.state {
+            ParkedEntryState::Completed => true,
+            ParkedEntryState::Pending {
+                carrier: parked_carrier,
+            } => parked_carrier != carrier,
+        });
+}
+
+/// CR 616.1g: a retired dispatch's entries belong to whatever owns the rest of
+/// their entry: nothing if it completed, else the frame's new resident.
+fn settle_retired_dispatch_entrants(
+    state: &mut GameState,
+    dispatch: crate::types::resolution::IdentifiedPostReplacementDispatch,
+    entrants: Vec<ObjectIncarnationRef>,
+    waiting_for: Option<&WaitingFor>,
+) {
+    match waiting_for {
+        None => record_parked_entry_completion(state, &entrants),
+        Some(_) => {
+            for entrant in entrants {
+                let _ = state.bind_parked_entrant(dispatch, entrant);
+            }
+        }
+    }
+}
+
+/// CR 614.12a + CR 707.9: bind a copied as-enters choice's entrant to the active
+/// frame's resident drain, whose retirement then completes the entry. Returns the
+/// entrant when its entry is parked and no resident can carry it, so the caller
+/// parks an owner.
+fn bind_copied_choice_entrant(
+    state: &mut GameState,
+    source_id: ObjectId,
+) -> Option<ObjectIncarnationRef> {
+    if !entry_park_holds_entrant(state, source_id) {
+        return None;
+    }
+    let entrant = ObjectIncarnationRef::from_object(state.objects.get(&source_id)?);
+    (!state.bind_parked_entrant_to_active_drain(entrant)).then_some(entrant)
+}
+
+/// CR 614.12a + CR 707.9: a copied as-enters choice is the rest of this entry.
+/// Its chain ran outside a dispatch, so a paused drain below that chain owns the
+/// entry's completion, as it does for a printed choice.
+fn park_copied_choice_owner(
+    state: &mut GameState,
+    entrant: ObjectIncarnationRef,
+    child_stack_start: crate::types::resolution::ChildStackDepth,
+) {
+    let mut owner = PostReplacementDrainStack::default();
+    owner.install(
+        PostReplacementDrain::paused_owner_of(entrant),
+        crate::types::game_state::ResidentDrainPolicy::Replace,
+    );
+    match state
+        .resolution_stack
+        .capture_child_boundary()
+        .cmp(&child_stack_start)
+    {
+        std::cmp::Ordering::Less => {
+            panic!("a paused copied choice removed a parent frame before its owner was parked")
+        }
+        std::cmp::Ordering::Equal => state.resolution_stack.push_post_replacement(owner),
+        std::cmp::Ordering::Greater => state
+            .resolution_stack
+            .insert_parent_at_child_boundary(
+                crate::types::resolution::ResolutionFrame::PostReplacement(owner),
+                child_stack_start,
+            )
+            .expect("a copied choice's owner must be inserted below its complete child stack"),
+    }
+}
+
+/// CR 603.6d + CR 614.1c: the entrant whose own as-enters continuation is
+/// about to run: a `Moved` continuation for an object that is, right now, the
+/// exact entered incarnation (CR 400.7) of a battlefield entry in `events`
+/// whose key is not already parked. A "would die / would be exiled … instead"
+/// `Moved` continuation for an object that entered earlier in the same buffer
+/// fails the live-zone test.
+fn as_enters_continuation_entrant(
+    state: &GameState,
+    event: Option<&ReplacementEvent>,
+    source: Option<ObjectId>,
+    events: &[GameEvent],
+) -> Option<ObjectId> {
+    if event != Some(&ReplacementEvent::Moved) {
+        return None;
+    }
+    let source = source?;
+    let live = state
+        .objects
+        .get(&source)
+        .filter(|obj| obj.zone == Zone::Battlefield)?;
+    events
+        .iter()
+        .any(|entry| {
+            matches!(
+                entry,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    record,
+                    ..
+                } if *object_id == source
+                    && entry_record_is_of_incarnation(record, live.incarnation)
+                    && !entry_event_is_parked(state, entry)
+            )
+        })
+        .then_some(source)
+}
+
+/// The bracket that makes an as-enters continuation part of its entrant's entry
+/// (CR 603.6d + CR 614.1c). `open` parks the entrant's entry events as pending
+/// before the continuation runs, or adopts the custody its delivery already
+/// parked; `close` completes or unparks them when it completed inline and keeps
+/// them, bound to the paused dispatch, when it paused.
+struct EntryContinuationParking {
+    custody: EntryCustody,
+}
+
+/// Who holds the entry of the continuation's entrant while it runs.
+enum EntryCustody {
+    /// The continuation is no entrant's as-enters continuation.
+    None,
+    /// `open` parked these entry events of `entrant` from the dispatch's events.
+    Opened {
+        entrant: ObjectId,
+        parked: Vec<GameEvent>,
+    },
+    /// The entrant's delivery parked its entry at a pause before this
+    /// continuation ran (`park_entry_before_its_continuation`); the dispatch
+    /// adopts that custody by identity.
+    Adopted(ObjectIncarnationRef),
+}
+
+impl EntryContinuationParking {
+    /// CR 603.6d + CR 614.1c: the continuation's work is part of the entry, so
+    /// the entry is neither observed nor collected while it runs. The parked-key
+    /// skip in `zones::settle_battlefield_entry_observations` then refuses to
+    /// observe this entrant at every instruction boundary inside the
+    /// continuation; other entries of the same buffer still settle.
+    ///
+    /// `adopts`: the entrant's entry is already held pending and this dispatch
+    /// is its as-enters roll, so the custody is adopted, whatever `event` the
+    /// dispatch carries.
+    fn open(
+        state: &mut GameState,
+        adopts: bool,
+        event: Option<&ReplacementEvent>,
+        source: Option<ObjectId>,
+        events: &[GameEvent],
+    ) -> Self {
+        if adopts {
+            if let Some(reference) = source
+                .and_then(|source| state.objects.get(&source))
+                .map(ObjectIncarnationRef::from_object)
+            {
+                return Self {
+                    custody: EntryCustody::Adopted(reference),
+                };
+            }
+        }
+        let Some(entrant) = as_enters_continuation_entrant(state, event, source, events) else {
+            return Self {
+                custody: EntryCustody::None,
+            };
+        };
+        let parked: Vec<GameEvent> = events
+            .iter()
+            .filter(|entry| is_entry_event_of(entry, entrant))
+            .cloned()
+            .collect();
+        for entry in &parked {
+            park_pending_entry(state, entry.clone());
+        }
+        Self {
+            custody: EntryCustody::Opened { entrant, parked },
+        }
+    }
+
+    /// CR 614.12a + CR 603.6d: a continuation that completed inline leaves its
+    /// entry unparked; the entry's `ZoneChanged` is still in the action's events,
+    /// so its owning collector collects it against the realized entrant. A
+    /// paused continuation keeps the park for its release or owner custody, and
+    /// the dispatch that owns the prompt carries the binding to the completion
+    /// authority.
+    ///
+    /// CR 603.6d + CR 603.2: an adopted entry completes with its continuation
+    /// and waits for its collector. Its `ZoneChanged` belongs to an earlier
+    /// action's buffer, scanned while it was parked, so it is recorded completed
+    /// rather than unparked.
+    ///
+    /// An as-enters roll of this entrant stays parked in either arm. The settled
+    /// release takes it when the action settles, so an action that ends on a later
+    /// prompt cannot lose it (CR 603.2 + CR 603.3).
+    fn close(
+        self,
+        state: &mut GameState,
+        dispatch: crate::types::resolution::IdentifiedPostReplacementDispatch,
+        waiting_for: Option<&WaitingFor>,
+    ) {
+        match self.custody {
+            EntryCustody::None => {}
+            EntryCustody::Opened { entrant, parked } => match waiting_for {
+                None => state
+                    .deferred_entry_events
+                    .retain(|entry| !parked.contains(&entry.event)),
+                // CR 614.12a + CR 707.9: the entry of an object entering as a copy
+                // is not over at the copy answer. Counters and any copied
+                // as-enters choice or payment still follow, and the replay
+                // collects it.
+                Some(WaitingFor::CopyTargetChoice { source_id, .. }) if *source_id == entrant => {}
+                Some(_) => {
+                    if let Some(object) = state.objects.get(&entrant) {
+                        let reference = ObjectIncarnationRef::from_object(object);
+                        let _ = state.bind_parked_entrant(dispatch, reference);
+                    }
+                }
+            },
+            EntryCustody::Adopted(reference) => match waiting_for {
+                None => record_parked_entry_completion(state, &[reference]),
+                Some(WaitingFor::CopyTargetChoice { source_id, .. })
+                    if *source_id == reference.object_id => {}
+                Some(_) => {
+                    let _ = state.bind_parked_entrant(dispatch, reference);
+                }
+            },
+        }
+    }
+}
+
+/// CR 603.6d + CR 603.2c: a logical zone-change owner resuming its paused
+/// member takes custody of that member's parked entry: every parked event that
+/// holds an event of `delivery_events` leaves the park. The owner's segment
+/// collection that follows is the ordinary half; this runs the delayed half.
+///
+/// CR 603.2 + CR 603.7: a delayed triggered ability whose trigger event is the
+/// entry triggers on the realized entry, once, like a printed one.
+///
+/// An as-enters roll is left for the settled release, which places the contexts
+/// its instruction triggered as it was rolled (CR 603.2 + CR 603.10), so a roll
+/// taken here would lose them.
+pub(crate) fn take_entry_continuation_custody(
+    state: &mut GameState,
+    delivery_events: &[GameEvent],
+) {
+    if state.deferred_entry_events.is_empty() {
+        return;
+    }
+    let (taken, kept): (Vec<ParkedEntry>, Vec<ParkedEntry>) =
+        std::mem::take(&mut state.deferred_entry_events)
+            .into_iter()
+            .partition(|parked| {
+                !is_as_enters_roll(&parked.event)
+                    && delivery_events
+                        .iter()
+                        .any(|event| parked_event_holds(&parked.event, event))
+            });
+    state.deferred_entry_events = kept;
+    let taken: Vec<GameEvent> = taken.into_iter().map(|parked| parked.event).collect();
+    if !taken.is_empty() {
+        super::triggers::collect_delayed_trigger_contexts_into_deferred(state, &taken);
+    }
+}
+
+/// CR 800.4a: has the owner or the controller of record of the entrant this
+/// parked event describes left the game (its owner's objects leave the game;
+/// objects its controller still controls are exiled)? A `ZoneChanged` reads its record; a
+/// `LandPlayed` / attach event follows the parked `ZoneChanged` for the same
+/// object, else the object in `state.objects`.
+fn parked_entrant_left_the_game(state: &GameState, event: &GameEvent) -> bool {
+    let entrant_record = |object_id: ObjectId| {
+        state.parked_entry_events().find_map(|parked| match parked {
+            GameEvent::ZoneChanged {
+                object_id: parked_id,
+                to: Zone::Battlefield,
+                record,
+                ..
+            } if *parked_id == object_id => Some((record.owner, record.arrival.controller)),
+            _ => None,
+        })
+    };
+    let identity = match event {
+        GameEvent::ZoneChanged { record, .. } => Some((record.owner, record.arrival.controller)),
+        GameEvent::LandPlayed { object_id, .. }
+        | GameEvent::EffectResolved {
+            source_id: object_id,
+            ..
+        } => entrant_record(*object_id).or_else(|| {
+            state
+                .objects
+                .get(object_id)
+                .map(|obj| (obj.owner, obj.controller))
+        }),
+        _ => None,
+    };
+    identity.is_some_and(|(owner, controller)| {
+        !super::players::is_alive(state, owner) || !super::players::is_alive(state, controller)
+    })
+}
+
+/// CR 603.2 + CR 603.6a + CR 603.10 + CR 800.4a + CR 800.4d: take the parked
+/// entries whose as-enters continuations are settled. The gate is the complement of any pause
+/// (`WaitingFor::Priority`, as in `realize_settled_token_battlefield_entry`), no
+/// inline dispatch live on this thread, and the drain authority's own readiness
+/// predicate (`resolution_completion_can_settle`: no live resolution frame,
+/// replacement pause, payment or trigger construction). A take therefore means
+/// the entrant's continuation, and every frame above it, is no longer live.
+///
+/// CR 603.2 + CR 603.3: an as-enters roll is not returned. Its observers were
+/// collected when it was rolled, so the contexts it holds join
+/// `deferred_triggers` here, for the caller's placement beside its entry's;
+/// CR 800.4d: a context whose controller has left the game is retired.
+///
+/// The recorded state decides collection, not presence. The gate means no
+/// continuation is live, so a pending entry can only have been abandoned, and it
+/// is dropped. That is a design decision, not derived from a rule: the rules do
+/// not address a departure during a replacement's application (CR 104.3a allows
+/// concession at any time). A completed entry happened (CR 603.2; a played land's
+/// entry is its play, CR 305.1). Neither its owner leaving (CR 800.4a) nor the
+/// entrant leaving (CR 603.10) untriggers its observers, and abilities a departed
+/// player would control are retired at collection (CR 800.4d). The completed
+/// events pass the consumed-ledger and queued-witness authority, so a release
+/// never re-collects an occurrence another collector claimed or queued.
+fn take_settled_entry_continuation_events(state: &mut GameState) -> Vec<GameEvent> {
+    if state.deferred_entry_events.is_empty()
+        || !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        || post_replacement_dispatch_is_live()
+        || !super::triggers::resolution_completion_can_settle(state)
+    {
+        return Vec::new();
+    }
+    // CR 603.2c: a paused logical owner is a live frame, so it always fails the
+    // gate above and its member stays parked for its custody.
+    debug_assert!(super::engine_priority::retained_logical_zone_events(state).is_empty());
+    let mut completed: Vec<GameEvent> = Vec::new();
+    let mut held: Vec<super::triggers::DeferredTrigger> = Vec::new();
+    for parked in std::mem::take(&mut state.deferred_entry_events) {
+        match parked.state {
+            ParkedEntryState::Completed if is_as_enters_roll(&parked.event) => {
+                held.extend(parked.held_triggers);
+            }
+            ParkedEntryState::Completed => completed.push(parked.event),
+            ParkedEntryState::Pending { .. } => {}
+        }
+    }
+    let live = super::triggers::retire_departed_controller_contexts(state, held);
+    state.deferred_triggers.extend(live);
+    super::triggers::filter_already_collected_trigger_events_from(
+        state,
+        &completed,
+        0,
+        &state.consumed_before_priority_trigger_events,
+    )
+}
+
+/// CR 603.2 + CR 603.7: the settled-entry release authority. Takes the settled
+/// park and runs its delayed half here — a delayed triggered ability whose
+/// trigger event is the entry triggers on the realized entry, once, like a
+/// printed one — then returns the events for the caller's ordinary half. The
+/// queued (no-claim) delayed collector fits because the released events belong
+/// to no action buffer: taking the park is their claim. The replays'
+/// [`collect_deferred_entry_replay`] queues the same pair for the same reason.
+pub(crate) fn release_settled_entry_continuation(state: &mut GameState) -> Vec<GameEvent> {
+    let released = take_settled_entry_continuation_events(state);
+    if !released.is_empty() {
+        super::triggers::collect_delayed_trigger_contexts_into_deferred(state, &released);
+    }
+    released
+}
+
+/// CR 603.3 + CR 603.3b: the release for a point that queues — the settled
+/// entry's ordinary half joins `deferred_triggers` beside its delayed half and
+/// the contexts its as-enters rolls hold, and the caller's drain places them.
+/// Returns whether anything was released or queued.
+pub(crate) fn collect_settled_entry_continuation_triggers(state: &mut GameState) -> bool {
+    let queued_before = state.deferred_triggers.len();
+    let released = release_settled_entry_continuation(state);
+    let queued_held = state.deferred_triggers.len() != queued_before;
+    if released.is_empty() {
+        return queued_held;
+    }
+    super::triggers::collect_triggers_into_deferred(state, &released);
+    true
 }
 
 fn copy_effect_for_source(state: &GameState, source_id: ObjectId) -> Option<&AbilityDefinition> {
@@ -4017,6 +4936,11 @@ pub(crate) fn apply_pending_post_replacement_effect(
         .map(|drain| std::mem::take(&mut drain.applied))
         .unwrap_or_default();
 
+    // CR 614.12a + CR 603.6d: the entrant's delivery already holds its entry
+    // when a pause came before this as-enters roll; read before the dispatch
+    // takes the continuation.
+    let adopts = source.is_some_and(|entrant| entrant_entry_is_pending(state, entrant))
+        && as_enters_roll_chain_mut(state).is_some();
     let (continuation, dispatch) = state.begin_post_replacement_dispatch()?;
     // CR 603.3b + CR 608.2c: this dispatch is now live on this thread's call
     // stack. Constructed AFTER the mint so the `?` early-return path never
@@ -4025,6 +4949,10 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // (on unwind profiles) a panic. While it is held, the priority-boundary
     // sweeper must not treat a `Dispatching` resident as ownerless.
     let _live_dispatch = LiveDispatchGuard::enter();
+    // CR 603.6d + CR 614.1c: an as-enters continuation is part of its entrant's
+    // entry; park that entry while the continuation runs.
+    let entry_parking =
+        EntryContinuationParking::open(state, adopts, event.as_ref(), source, events);
     let waiting_for = match continuation {
         PostReplacementContinuation::Resolved(resolved) => {
             apply_post_replacement_resolved_effect(state, &resolved, replacement_applied, events)
@@ -4063,27 +4991,34 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // follows the frame through every `frames.insert` / `frames.swap`, never
     // resolves to a sibling, and is not invalidated by a nested same-frame
     // dispatch.
-    if waiting_for.is_some() && state.post_replacement_dispatch_is_resident_top(dispatch) {
-        // This dispatch's own work owns the prompt: park it so the paused-retire
-        // paths (`finish_active_paused_post_replacement_dispatch` and the
-        // `resume_resolution_frames` Paused branch) can finish it after the answer.
-        let _ = state.pause_post_replacement_dispatch(dispatch);
-    } else {
-        // Either the continuation completed, or a NESTED drain above this entry
-        // owns the prompt (CR 616.1g) — in both cases this entry's work is done.
-        // Retire exactly `dispatch`, addressed by frame id, wherever that frame
-        // now sits.
-        let _ = state.finish_post_replacement_dispatch(dispatch);
-        // Unchanged from the predecessor, and deliberately NOT folded into the
-        // call above: this removes any empty PostReplacement frame that is now the
-        // stack top, which is a wider set than "the frame this dispatch
-        // addressed". Narrowing it would be a second, unrelated behavioural delta.
-        state.remove_empty_active_post_replacement_frame();
-        // CR 614.12a + CR 614.13a: A Devour snapshot created by this completed
-        // entry can sit above this just-retired drain. It has no remaining
-        // iteration or prompt owner, so retire it before priority is restored.
-        state.clear_completed_active_devour_snapshot();
-    }
+    let retired_entrants =
+        if waiting_for.is_some() && state.post_replacement_dispatch_is_resident_top(dispatch) {
+            // This dispatch's own work owns the prompt: park it so the paused-retire
+            // paths (`finish_active_paused_post_replacement_dispatch` and the
+            // `resume_resolution_frames` Paused branch) can finish it after the answer.
+            // That retirement owns the completion of the entries bound to it.
+            let _ = state.pause_post_replacement_dispatch(dispatch);
+            Vec::new()
+        } else {
+            // Either the continuation completed, or a NESTED drain above this entry
+            // owns the prompt (CR 616.1g) — in both cases this entry's work is done.
+            // Retire exactly `dispatch`, addressed by frame id, wherever that frame
+            // now sits. A `Ready` drain can have inherited a binding, which
+            // `settle_retired_dispatch_entrants` hands on below.
+            let retired = state.finish_post_replacement_dispatch(dispatch);
+            // Unchanged from the predecessor, and deliberately NOT folded into the
+            // call above: this removes any empty PostReplacement frame that is now the
+            // stack top, which is a wider set than "the frame this dispatch
+            // addressed". Narrowing it would be a second, unrelated behavioural delta.
+            state.remove_empty_active_post_replacement_frame();
+            // CR 614.12a + CR 614.13a: A Devour snapshot created by this completed
+            // entry can sit above this just-retired drain. It has no remaining
+            // iteration or prompt owner, so retire it before priority is restored.
+            state.clear_completed_active_devour_snapshot();
+            retired
+                .map(|drain| drain.parked_entrants)
+                .unwrap_or_default()
+        };
     // NOTE: the inherited token-choice applied seed is intentionally NOT cleared
     // here. This drain runs for EVERY replacement continuation — including a
     // nested one that pauses inside an outer token-choice ChooseOneOf (issue
@@ -4105,6 +5040,11 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // copy replacements) and the `handle_replacement_choice` path (optional
     // "you may have this enter as a copy" replacements) defer uniformly.
     capture_deferred_entry_events_if_mid_entry_choice(state, waiting_for.as_ref(), events);
+    // CR 614.12a + CR 603.6d: a paused continuation keeps its entrant's entry
+    // parked and bound to the dispatch that owns the prompt, so that dispatch's
+    // retirement records completion; an inline one unparks it.
+    entry_parking.close(state, dispatch, waiting_for.as_ref());
+    settle_retired_dispatch_entrants(state, dispatch, retired_entrants, waiting_for.as_ref());
     waiting_for
 }
 
@@ -4114,7 +5054,7 @@ pub(crate) fn apply_pending_post_replacement_effect(
 /// pre-entry counter fold and the entering object's `ZoneChanged` event must be
 /// deferred until after the branch is chosen, so ETB observers see the chosen
 /// counter (CR 614.12a). Exhaustive — no wildcard accept.
-fn is_enters_counter_choice(branches: &[AbilityDefinition]) -> bool {
+pub(crate) fn is_enters_counter_choice(branches: &[AbilityDefinition]) -> bool {
     branches.len() >= 2
         && branches.iter().all(|b| {
             matches!(
@@ -4159,9 +5099,9 @@ fn is_enters_counter_choice(branches: &[AbilityDefinition]) -> bool {
 /// Pithing Needle naming, a `Choose` resolved off the stack — carry no such
 /// entry event, so nothing is captured and the downstream replay is a no-op.
 ///
-/// Defense in depth: clears any stale events from a prior choice that exited
-/// abnormally (concede mid-choice, eliminate_player, error return before drain)
-/// so the replay never fires triggers against a phantom object.
+/// Replaces only this source's own parked entries, so a stale entry of a prior
+/// choice that exited abnormally goes with it, and every other entrant's entry
+/// stays parked for its own collector.
 fn capture_deferred_entry_events_if_mid_entry_choice(
     state: &mut GameState,
     waiting_for: Option<&WaitingFor>,
@@ -4191,42 +5131,17 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
         }) if source.is_exact_object_and_resolution() => source.prompt.identity.reference.object_id,
         _ => return,
     };
-    // CR 614.12b boundary (inherited from the CopyTargetChoice path, NOT expanded
-    // here): mass-moving multiple pre-entry-choice permanents in one effect
-    // (`resolve_all` in change_zone.rs does not bail on a post-replacement choice)
-    // could let one object's capture `clear()`/overwrite another's deferred
-    // events. This already affects CopyTargetChoice today, is unreachable in real
-    // cards, and is the CR 614.12b simultaneous-entry boundary.
-    //
-    // The caller set is no longer entry-shaped. `CopyTargetPurpose::CopyTokenSource`
+    // The caller set is not entry-shaped. `CopyTargetPurpose::CopyTokenSource`
     // (Esix, Fractal Bloom) raises a `CopyTargetChoice` for a source that is a
     // RESIDENT permanent on a `CreateToken` replacement — it is not entering the
     // battlefield at all. The arm above still selects on that shape (it carries
-    // no `purpose` guard and no entering-object guard), and the `clear()` below
-    // still runs UNCONDITIONALLY for it; what comes back empty is the capture,
-    // because the entry-event filter in the loop below matches only a
-    // `ZoneChanged` to the battlefield for `source_id` and a non-entering source
-    // produces none. Clearing and capturing-nothing are separate facts here, and
-    // the clear is a write that happens either way.
-    state.deferred_entry_events.clear();
+    // no `purpose` guard and no entering-object guard). Nothing is written for
+    // it: the park holds no entry of that source, and the entry-event filter in
+    // the loop below matches nothing a non-entering source produces.
+    let _ = take_parked_entries_of(state, source_id);
     for event in events.iter() {
-        if matches!(
-            event,
-            GameEvent::ZoneChanged { object_id, to, .. }
-                if *object_id == source_id && *to == Zone::Battlefield
-        ) || matches!(
-            event,
-            GameEvent::LandPlayed { object_id, .. }
-                if *object_id == source_id
-        ) || matches!(
-            event,
-            GameEvent::EffectResolved {
-                kind: EffectKind::Attach,
-                source_id: attach_source_id,
-                ..
-            } if *attach_source_id == source_id
-        ) {
-            state.deferred_entry_events.push(event.clone());
+        if is_entry_event_of(event, source_id) {
+            park_pending_entry(state, event.clone());
         }
     }
     let is_meld_entry = state.liminal_entries.get(&source_id).is_some_and(|entry| {
@@ -4421,6 +5336,93 @@ pub(crate) fn apply_pending_spell_resolution(
             ));
         }
     }
+}
+
+/// CR 614.1c + CR 122.6 + CR 603.6d: an as-enters roll and its counters are
+/// part of the event that puts the permanent onto the battlefield, so the counters
+/// the entrant is given as it enters of the kind the roll places join that
+/// placement as one number, which a counter replacement affects once (CR 614.5).
+/// Called where the entry's contributions are first all known. Returns what
+/// delivery still places: the contributions of every other kind, in their order,
+/// and `counters` unchanged when the roll takes nothing.
+///
+/// Contributions of another kind stay on delivery's own counter step, because each
+/// kind is its own placement and a prompt of another kind stays ahead of the roll.
+///
+/// CR 603.6d + CR 614.1c + CR 122.6 + CR 614.5: counters of the roll's kind given
+/// as the entrant enters are one placement with the roll's, whatever put it onto
+/// the battlefield. CR 508.4: an attacking entrant whose continuation pauses is
+/// seated by the authority that resumes after it (`PausedEntryAttackSeat`).
+pub(crate) fn hand_entry_counters_to_as_enters_roll(
+    state: &mut GameState,
+    entrant: ObjectId,
+    counters: Vec<(CounterType, u32)>,
+) -> Vec<(CounterType, u32)> {
+    let Some((kind, placed)) = as_enters_roll_chain_mut(state)
+        .filter(|(source, _)| *source == Some(entrant))
+        .and_then(|(_, chain)| unconditional_self_placement_mut(chain))
+    else {
+        return counters;
+    };
+    let Some((_, taken)) = effects::counters::coalesce_entry_counters(counters.iter().cloned())
+        .into_iter()
+        .find(|(counter_type, _)| counter_type == kind)
+    else {
+        return counters;
+    };
+    let inner = std::mem::replace(placed, QuantityExpr::Fixed { value: 0 });
+    *placed = QuantityExpr::Offset {
+        inner: Box::new(inner),
+        offset: u32_to_i32_saturating(taken),
+    };
+    counters
+        .into_iter()
+        .filter(|(counter_type, _)| counter_type != kind)
+        .collect()
+}
+
+/// The not-yet-run as-enters roll the active drain will dispatch: its resident
+/// `Ready` template when that chain has `RollDie` at its head, with the drain's
+/// source.
+fn as_enters_roll_chain_mut(
+    state: &mut GameState,
+) -> Option<(Option<ObjectId>, &mut AbilityDefinition)> {
+    let drain = state.active_post_replacement_drains_mut()?.resident_mut()?;
+    let source = drain.source;
+    match &mut drain.status {
+        DrainStatus::Ready(PostReplacementContinuation::Template(chain)) => {
+            matches!(*chain.effect, Effect::RollDie { .. }).then_some((source, &mut **chain))
+        }
+        DrainStatus::Ready(PostReplacementContinuation::Resolved(_))
+        | DrainStatus::Dispatching
+        | DrainStatus::Paused => None,
+    }
+}
+
+/// CR 614.12a + CR 603.6d: is `entrant`'s as-enters roll still to run? True while
+/// the active drain's resident is that entrant's not-yet-run `RollDie` chain.
+pub(crate) fn entrant_awaits_as_enters_roll(state: &mut GameState, entrant: ObjectId) -> bool {
+    as_enters_roll_chain_mut(state).is_some_and(|(source, _)| source == Some(entrant))
+}
+
+/// The chain's first unconditional `PutCounter` on the entrant itself: the
+/// placement an entry's counters of its kind join.
+fn unconditional_self_placement_mut(
+    link: &mut AbilityDefinition,
+) -> Option<(&CounterType, &mut QuantityExpr)> {
+    if link.condition.is_none() {
+        if let Effect::PutCounter {
+            counter_type,
+            count,
+            target: TargetFilter::SelfRef,
+        } = link.effect.as_mut()
+        {
+            return Some((&*counter_type, count));
+        }
+    }
+    link.sub_ability
+        .as_deref_mut()
+        .and_then(unconditional_self_placement_mut)
 }
 
 /// CR 614.1c: Apply counters accumulated on a `ProposedEvent::ZoneChange` to
@@ -8367,7 +9369,7 @@ mod tests {
             "Callidus's battlefield-entry ZoneChanged must be deferred for replay"
         );
         assert!(matches!(
-            state.deferred_entry_events[0],
+            state.deferred_entry_events[0].event,
             GameEvent::ZoneChanged { object_id, to, .. }
                 if object_id == callidus && to == Zone::Battlefield
         ));
@@ -9966,5 +10968,1567 @@ mod tests {
             }
             other => panic!("expected a RevealChoice prompt, got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod entry_continuation_release_tests {
+    //! The settled-entry release — its gate, the recorded state deciding
+    //! collection, the owner-frame refusal, the ledger filter and the delayed
+    //! half — the as-enters entrant predicate, each park removal's ownership
+    //! rule, and the completion authority (CR 603.2 + CR 603.6a + CR 603.6d +
+    //! CR 603.7 + CR 603.10 + CR 614.12a + CR 800.4a).
+    use super::*;
+    use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use crate::game::zones::{create_object, record_and_emit_entry_from_no_zone};
+    use crate::types::ability::{
+        AbilityCondition, AbilityKind, DelayedTriggerCondition, DelayedTriggerKind,
+        DelayedTriggerLifetime, EntryAttackDestination, QuantityRef, TriggerDefinition,
+    };
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
+    use crate::types::game_state::{
+        DelayedTrigger, PendingBatchDeliveries, PendingCounterAdditionQueue,
+        PendingZoneChangeDelivery, ResidentDrainPolicy, ZoneDeliveryExileTracking,
+    };
+    use crate::types::identifiers::{CardId, DelayedInstallIdentity};
+    use crate::types::keywords::KeywordKind;
+    use crate::types::mana::ManaCost;
+    use crate::types::phase::Phase;
+    use crate::types::resolution::{IdentifiedPostReplacementDispatch, ResolutionFrame};
+    use crate::types::triggers::TriggerMode;
+    use crate::types::zones::EtbTapState;
+
+    const SOUL_WARDEN: &str = "Whenever another creature enters, you gain 1 life.";
+    const BECK: &str = "Whenever a creature enters this turn, you may draw a card.";
+
+    fn scenario(players: u8) -> GameScenario {
+        let mut scenario = GameScenario::new_n_player(players, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        scenario
+    }
+
+    const COMPLETED: ParkedEntryState = ParkedEntryState::Completed;
+    const PENDING: ParkedEntryState = ParkedEntryState::Pending { carrier: None };
+
+    fn seeded(event: GameEvent, state: ParkedEntryState) -> ParkedEntry {
+        ParkedEntry {
+            event,
+            state,
+            entry_attack: None,
+            held_triggers: Vec::new(),
+        }
+    }
+
+    /// A creature owned by `owner` and controlled by `controller` that has just
+    /// entered the battlefield; its entry event, parked alone in `parked_state`.
+    fn parked_entry(
+        state: &mut GameState,
+        card: u64,
+        owner: PlayerId,
+        controller: PlayerId,
+        parked_state: ParkedEntryState,
+    ) -> (ObjectId, GameEvent) {
+        let (id, entry) = entered(state, card, owner, controller);
+        state.deferred_entry_events = vec![seeded(entry.clone(), parked_state)];
+        (id, entry)
+    }
+
+    /// As [`parked_entry`], without touching the park.
+    fn entered(
+        state: &mut GameState,
+        card: u64,
+        owner: PlayerId,
+        controller: PlayerId,
+    ) -> (ObjectId, GameEvent) {
+        let id = create_object(
+            state,
+            CardId(card),
+            owner,
+            format!("Entrant {card}"),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).expect("entrant");
+        obj.controller = controller;
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(1);
+        obj.toughness = Some(1);
+        obj.base_power = Some(1);
+        obj.base_toughness = Some(1);
+        let mut events = Vec::new();
+        record_and_emit_entry_from_no_zone(state, id, &mut events).expect("entered");
+        let entry = events
+            .into_iter()
+            .find(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+            .expect("entry event");
+        (id, entry)
+    }
+
+    fn settled_state(players: u8) -> GameState {
+        scenario(players).build().state().clone()
+    }
+
+    /// CR 614.12a + CR 113.6 + CR 400.7: an entrant is mid-entry while this
+    /// incarnation's parked entry is pending, and at no other time. A completed
+    /// entry happened, though it still waits for its collector.
+    #[test]
+    fn only_a_pending_entry_of_this_incarnation_is_mid_entry() {
+        let mut state = settled_state(2);
+        let (id, _) = parked_entry(&mut state, 900, P0, P0, PENDING);
+        assert!(entrant_entry_is_pending(&state, id));
+
+        let (other, _) = entered(&mut state, 901, P0, P0);
+        assert!(!entrant_entry_is_pending(&state, other), "another entrant");
+
+        // CR 400.7: the entry the park holds was of an earlier incarnation.
+        state.objects.get_mut(&id).expect("entrant").incarnation += 1;
+        assert!(!entrant_entry_is_pending(&state, id), "earlier incarnation");
+
+        let mut state = settled_state(2);
+        let (id, _) = parked_entry(&mut state, 900, P0, P0, COMPLETED);
+        assert!(entry_park_holds_entrant(&state, id), "still parked");
+        assert!(!entrant_entry_is_pending(&state, id), "completed");
+
+        let mut state = settled_state(2);
+        let (id, _) = entered(&mut state, 900, P0, P0);
+        assert!(!entrant_entry_is_pending(&state, id), "an empty park");
+
+        let mut state = settled_state(2);
+        parked_entry(&mut state, 900, P0, P0, PENDING);
+        assert!(
+            !entrant_entry_is_pending(&state, ObjectId(9_999)),
+            "a missing object"
+        );
+    }
+
+    /// CR 110.2a: an entry parked before the controller override stamped the
+    /// action's copy, which leaves the two copies one ledger key and two records.
+    /// No printed route reaches this order: delivery stamps before its
+    /// continuation parks, and the meld refresh writes both copies. These rows run
+    /// the stamp out of order to pin what the park's readers key on.
+    fn stamped_parked_entry(state: &mut GameState) -> (ObjectId, Vec<GameEvent>) {
+        let (id, entry) = parked_entry(state, 900, P0, P0, PENDING);
+        let mut events = vec![entry.clone()];
+        crate::game::zones::apply_battlefield_entry_controller_override(state, &mut events, id, P1);
+        assert_ne!(events, vec![entry], "reach guard: the copy was stamped");
+        (id, events)
+    }
+
+    /// CR 614.12a + CR 603.2c: the hold predicate reads a battlefield entry by its
+    /// ledger key and every other event by equality, so it holds all that full
+    /// equality held.
+    #[test]
+    fn the_hold_predicate_reads_an_entrys_ledger_key_and_any_other_event_by_equality() {
+        let mut state = settled_state(2);
+        let (id, stamped) = stamped_parked_entry(&mut state);
+        assert!(entry_event_is_parked(&state, &stamped[0]), "a stamped copy");
+        let (other, other_entry) = entered(&mut state, 901, P0, P0);
+        assert!(
+            !entry_event_is_parked(&state, &other_entry),
+            "another entry"
+        );
+
+        let mut moved = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, other, Zone::Graveyard, &mut moved);
+        let departure = moved
+            .into_iter()
+            .find(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+            .expect("departure event");
+        let land_played = |object_id| GameEvent::LandPlayed {
+            object_id,
+            player_id: P0,
+            from_zone: Zone::Hand,
+        };
+        let attached = |source_id| GameEvent::EffectResolved {
+            kind: EffectKind::Attach,
+            source_id,
+            subject: None,
+        };
+        let tapped = |object_id| GameEvent::PermanentTapped {
+            object_id,
+            caused_by: None,
+            incarnation: None,
+        };
+        for parked in [land_played(id), attached(id), tapped(id), departure] {
+            state.deferred_entry_events = vec![seeded(parked.clone(), PENDING)];
+            assert!(entry_event_is_parked(&state, &parked), "{parked:?}");
+        }
+        for (parked, event) in [
+            (land_played(id), land_played(other)),
+            (attached(id), attached(other)),
+            (tapped(id), tapped(other)),
+        ] {
+            state.deferred_entry_events = vec![seeded(parked, PENDING)];
+            assert!(!entry_event_is_parked(&state, &event), "{event:?}");
+        }
+    }
+
+    /// A paused action's stamped entry, with the park as stamped when `held`, and
+    /// emptied otherwise as each reader row's reach guard.
+    fn paused_stamped_entry(held: bool) -> (GameState, Vec<GameEvent>) {
+        let mut state = settled_state(2);
+        let (id, events) = stamped_parked_entry(&mut state);
+        if !held {
+            state.deferred_entry_events.clear();
+        }
+        state.waiting_for = WaitingFor::ScryChoice {
+            player: P0,
+            cards: vec![id],
+        };
+        (state, events)
+    }
+
+    /// CR 603.2c + CR 614.12a: the post-action pass's ordinary scan leaves a
+    /// stamped copy of a parked entry to its collector.
+    #[test]
+    fn the_ordinary_scan_skips_a_stamped_copy_of_a_parked_entry() {
+        for (held, collected) in [(true, 0), (false, 1)] {
+            let (mut state, mut events) = paused_stamped_entry(held);
+            let paused = state.waiting_for.clone();
+            crate::game::engine_priority::run_post_action_pipeline(
+                &mut state,
+                &mut events,
+                &paused,
+                false,
+                false,
+            )
+            .expect("the pass settles");
+            assert_eq!(state.deferred_triggers.len(), collected, "held={held}");
+        }
+    }
+
+    /// CR 603.2c + CR 614.12a: the paused observer collector leaves a stamped copy
+    /// of a parked entry to its collector.
+    #[test]
+    fn the_paused_observer_collector_skips_a_stamped_copy_of_a_parked_entry() {
+        for (held, collected) in [(true, 0), (false, 1)] {
+            let (mut state, mut events) = paused_stamped_entry(held);
+            crate::game::triggers::park_observer_triggers_if_paused(&mut state, &mut events, 0);
+            assert_eq!(state.deferred_triggers.len(), collected, "held={held}");
+        }
+    }
+
+    /// CR 603.2 + CR 603.7 + CR 614.12a: a delivery-owned delayed scan's input
+    /// omits a stamped copy of a parked entry.
+    #[test]
+    fn the_delivery_delayed_input_omits_a_stamped_copy_of_a_parked_entry() {
+        for (held, kept) in [(true, 0), (false, 1)] {
+            let (mut state, events) = paused_stamped_entry(held);
+            let input = crate::game::engine_priority::unclaimed_delayed_trigger_input(
+                &mut state,
+                &events,
+                0,
+                &mut Vec::new(),
+                Some(0),
+            );
+            assert_eq!(input.events.len(), kept, "held={held}");
+        }
+    }
+
+    /// CR 603.3b + CR 603.12 + CR 614.12a: a stamped copy of a parked entry is not
+    /// an SBA-choice answer event, so it selects no closing `Any` scope, and an
+    /// unmatched reflexive stays live past the batch's ordering prompt, which ends
+    /// the pass before its closing delayed scan. With the entry unparked, the
+    /// scope closes it.
+    #[test]
+    fn a_stamped_copy_of_a_parked_entry_closes_no_sba_answer_scope() {
+        for (held, reflexives) in [(true, 1), (false, 0)] {
+            let mut scenario = scenario(2);
+            scenario.add_creature_from_oracle(
+                P0,
+                "Second Warden",
+                1,
+                1,
+                "Whenever another creature enters, you lose 1 life.",
+            );
+            let mut state = scenario.build().state().clone();
+            let (id, mut events) = stamped_parked_entry(&mut state);
+            if !held {
+                state.deferred_entry_events.clear();
+            }
+            let (_, parked_batch_entry) = entered(&mut state, 901, P0, P0);
+            crate::game::triggers::collect_parked_triggers_into_deferred(
+                &mut state,
+                std::slice::from_ref(&parked_batch_entry),
+                crate::game::triggers::DeferredTriggerBatchOrigin::StateBasedActionChoice,
+            );
+            assert!(
+                crate::game::triggers::has_sba_choice_trigger_batch(&state),
+                "reach guard: the SBA choice parked a batch"
+            );
+            state.delayed_triggers.push(DelayedTrigger {
+                condition: DelayedTriggerCondition::WhenNextEvent {
+                    trigger: Box::new(TriggerDefinition::new(TriggerMode::SpellCast)),
+                    or_trigger: None,
+                    lifetime: DelayedTriggerLifetime::Reflexive,
+                },
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                    Vec::new(),
+                    id,
+                    P0,
+                )),
+                controller: P0,
+                source_id: id,
+                one_shot: true,
+                kind: DelayedTriggerKind::Ordinary,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+            let priority = state.waiting_for.clone();
+            crate::game::engine_priority::run_post_action_pipeline(
+                &mut state,
+                &mut events,
+                &priority,
+                false,
+                false,
+            )
+            .expect("the pass settles");
+            assert!(
+                matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }),
+                "reach guard: the batch opened its ordering prompt: {:?}",
+                state.waiting_for
+            );
+            assert_eq!(state.delayed_triggers.len(), reflexives, "held={held}");
+        }
+    }
+
+    /// The printed chain's shape: the roll, then its counters on the entrant.
+    fn roll_chain() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 6,
+                results: Vec::new(),
+                modifier: None,
+            },
+        )
+        .sub_ability(rolled_placement())
+    }
+
+    fn rolled_placement() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: rolled_amount(),
+                target: TargetFilter::SelfRef,
+            },
+        )
+    }
+
+    fn rolled_amount() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        }
+    }
+
+    fn with_drain(entrant_source: Option<ObjectId>, status: DrainStatus) -> (GameState, ObjectId) {
+        let mut state = settled_state(2);
+        let (entrant, _) = entered(&mut state, 900, P0, P0);
+        let mut drain = PostReplacementDrain::ready(PostReplacementContinuation::Template(
+            Box::new(roll_chain()),
+        ));
+        drain.source = Some(entrant_source.unwrap_or(entrant));
+        drain.status = status;
+        state.install_post_replacement_drain(drain, ResidentDrainPolicy::Replace);
+        (state, entrant)
+    }
+
+    fn ready_chain(chain: AbilityDefinition) -> DrainStatus {
+        DrainStatus::Ready(PostReplacementContinuation::Template(Box::new(chain)))
+    }
+
+    fn resident_status(state: &GameState) -> DrainStatus {
+        state
+            .active_post_replacement_drains()
+            .and_then(PostReplacementDrainStack::resident)
+            .expect("the seeded drain")
+            .status
+            .clone()
+    }
+
+    fn resident_chain(state: &GameState) -> AbilityDefinition {
+        match resident_status(state) {
+            DrainStatus::Ready(PostReplacementContinuation::Template(chain)) => *chain,
+            other => panic!("expected a ready template, got {other:?}"),
+        }
+    }
+
+    fn placed_count(link: &AbilityDefinition) -> &QuantityExpr {
+        match link.effect.as_ref() {
+            Effect::PutCounter { count, .. } => count,
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
+    }
+
+    fn vigilance() -> CounterType {
+        CounterType::Keyword(KeywordKind::Vigilance)
+    }
+
+    /// CR 614.1c + CR 122.6 + CR 614.5: the roll's kind is one number, in the
+    /// roll's own placement.
+    #[test]
+    fn the_roll_takes_entry_counters_of_its_kind_as_one_placement() {
+        // Same kind: the printed placement carries them.
+        let (mut state, entrant) = with_drain(None, ready_chain(roll_chain()));
+        let left = hand_entry_counters_to_as_enters_roll(
+            &mut state,
+            entrant,
+            vec![(CounterType::Plus1Plus1, 2)],
+        );
+        assert!(left.is_empty());
+        let chain = resident_chain(&state);
+        let placement = chain.sub_ability.as_deref().expect("the placement");
+        assert_eq!(
+            placed_count(placement),
+            &QuantityExpr::Offset {
+                inner: Box::new(rolled_amount()),
+                offset: 2,
+            }
+        );
+        assert!(placement.sub_ability.is_none(), "no link of its own");
+
+        // Two contributions of a kind: one offset of their sum.
+        let (mut state, entrant) = with_drain(None, ready_chain(roll_chain()));
+        let left = hand_entry_counters_to_as_enters_roll(
+            &mut state,
+            entrant,
+            vec![(CounterType::Plus1Plus1, 1), (CounterType::Plus1Plus1, 2)],
+        );
+        assert!(left.is_empty());
+        let chain = resident_chain(&state);
+        let placement = chain.sub_ability.as_deref().expect("the placement");
+        assert_eq!(
+            placed_count(placement),
+            &QuantityExpr::Offset {
+                inner: Box::new(rolled_amount()),
+                offset: 3,
+            }
+        );
+
+        // Nothing to hand on: the chain stays as printed.
+        let (mut state, entrant) = with_drain(None, ready_chain(roll_chain()));
+        let left = hand_entry_counters_to_as_enters_roll(&mut state, entrant, Vec::new());
+        assert!(left.is_empty());
+        assert_eq!(resident_chain(&state), roll_chain());
+    }
+
+    /// CR 122.1: each kind is its own placement. The chain takes the roll's kind and
+    /// the list keeps only the other kinds, in their order. A list with nothing of
+    /// the roll's kind is refused: it comes back as built for delivery to place, and
+    /// the chain stays as printed.
+    #[test]
+    fn the_hand_on_keeps_only_other_kinds_and_refuses_a_list_of_only_those() {
+        let funk = CounterType::Generic("funk".to_string());
+
+        let (mut state, entrant) = with_drain(None, ready_chain(roll_chain()));
+        let left = hand_entry_counters_to_as_enters_roll(
+            &mut state,
+            entrant,
+            vec![
+                (vigilance(), 1),
+                (CounterType::Plus1Plus1, 1),
+                (funk.clone(), 1),
+                (CounterType::Plus1Plus1, 2),
+                (vigilance(), 2),
+            ],
+        );
+        assert_eq!(
+            left,
+            vec![(vigilance(), 1), (funk.clone(), 1), (vigilance(), 2)]
+        );
+        let chain = resident_chain(&state);
+        let placement = chain.sub_ability.as_deref().expect("the placement");
+        assert_eq!(
+            placed_count(placement),
+            &QuantityExpr::Offset {
+                inner: Box::new(rolled_amount()),
+                offset: 3,
+            }
+        );
+        assert!(placement.sub_ability.is_none(), "no link of its own");
+
+        for counters in [
+            vec![(vigilance(), 1)],
+            // The contributions stay apart.
+            vec![(vigilance(), 1), (funk.clone(), 1), (vigilance(), 2)],
+        ] {
+            let (mut state, entrant) = with_drain(None, ready_chain(roll_chain()));
+            let left = hand_entry_counters_to_as_enters_roll(&mut state, entrant, counters.clone());
+            assert_eq!(left, counters);
+            assert_eq!(resident_chain(&state), roll_chain());
+        }
+    }
+
+    /// A chain with no unconditional placement on the entrant has nothing for the
+    /// entry's counters to join. A conditional placement is not this entry's.
+    #[test]
+    fn the_hand_on_refuses_a_roll_with_no_unconditional_placement() {
+        let mut conditional = roll_chain();
+        conditional
+            .sub_ability
+            .as_deref_mut()
+            .expect("the placement")
+            .condition = Some(AbilityCondition::TriggerEventTargetExploitedBySource);
+        let mut unplaced = roll_chain();
+        unplaced.sub_ability = None;
+        let counters = vec![(CounterType::Plus1Plus1, 1)];
+        for chain in [conditional, unplaced] {
+            let (mut state, entrant) = with_drain(None, ready_chain(chain.clone()));
+            let left = hand_entry_counters_to_as_enters_roll(&mut state, entrant, counters.clone());
+            assert_eq!(left, counters);
+            assert_eq!(resident_chain(&state), chain);
+        }
+    }
+
+    /// The gate: every other drain is refused, and the list comes back whole for
+    /// delivery to place. The list and each chain below would be taken but for the
+    /// gate.
+    #[test]
+    fn the_hand_on_refuses_every_other_drain() {
+        let counters = vec![(CounterType::Plus1Plus1, 2)];
+        let non_roll = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .sub_ability(rolled_placement());
+        let resolved = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            P0,
+        );
+        for (source, status) in [
+            // Another source with a roll at its head: Barbarian Class's shape.
+            (Some(ObjectId(9_999)), ready_chain(roll_chain())),
+            (None, ready_chain(non_roll)),
+            (
+                None,
+                DrainStatus::Ready(PostReplacementContinuation::Resolved(Box::new(resolved))),
+            ),
+            (None, DrainStatus::Dispatching),
+            (None, DrainStatus::Paused),
+        ] {
+            let (mut state, entrant) = with_drain(source, status.clone());
+            let left = hand_entry_counters_to_as_enters_roll(&mut state, entrant, counters.clone());
+            assert_eq!(left, counters, "{status:?}");
+            assert_eq!(resident_status(&state), status);
+        }
+
+        // No drain at all.
+        let mut state = settled_state(2);
+        let (entrant, _) = entered(&mut state, 900, P0, P0);
+        let left = hand_entry_counters_to_as_enters_roll(&mut state, entrant, counters.clone());
+        assert_eq!(left, counters);
+    }
+
+    /// V6, U4-T2. The gate, the recorded state deciding collection, the
+    /// owner-frame refusal and the ledger filter.
+    #[test]
+    fn the_settled_release_gate_and_completion_rule() {
+        // Positive: Priority, entrant live, un-owned → its events.
+        let mut state = settled_state(2);
+        let (_, entry) = parked_entry(&mut state, 900, P0, P0, COMPLETED);
+        assert_eq!(release_settled_entry_continuation(&mut state), vec![entry]);
+        assert!(state.deferred_entry_events.is_empty());
+
+        // Not Priority → empty, park kept.
+        let mut state = settled_state(2);
+        let (id, entry) = parked_entry(&mut state, 900, P0, P0, COMPLETED);
+        state.waiting_for = WaitingFor::ScryChoice {
+            player: P0,
+            cards: vec![id],
+        };
+        assert!(release_settled_entry_continuation(&mut state).is_empty());
+        assert_eq!(state.deferred_entry_events, vec![seeded(entry, COMPLETED)]);
+
+        // Priority with a live resolution frame → empty, park kept.
+        let mut state = settled_state(2);
+        let (_, entry) = parked_entry(&mut state, 900, P0, P0, COMPLETED);
+        state.push_counter_additions(PendingCounterAdditionQueue {
+            remaining: Vec::new(),
+            completion: None,
+        });
+        assert!(release_settled_entry_continuation(&mut state).is_empty());
+        assert_eq!(state.deferred_entry_events, vec![seeded(entry, COMPLETED)]);
+
+        // Owner-frame gate case: the entry is the paused member of a logical
+        // owner whose frame is on top → refused by the readiness predicate.
+        let mut state = settled_state(2);
+        let (id, entry) = parked_entry(&mut state, 900, P0, P0, COMPLETED);
+        let mut paused = PendingZoneChangeDelivery::new(
+            ObjectIncarnationRef {
+                object_id: id,
+                incarnation: state.objects[&id].incarnation,
+            },
+            ProposedEvent::zone_change(id, Zone::Graveyard, Zone::Battlefield, None),
+        );
+        paused.delivery_events = vec![entry.clone()];
+        let logical_zone_change_group = state.allocate_logical_zone_change_group(&[]);
+        state
+            .resolution_stack
+            .push_inner(ResolutionFrame::BatchDelivery(Box::new(
+                PendingBatchDeliveries {
+                    logical_zone_change_group,
+                    paused_current: Some(paused),
+                    remaining: Vec::new(),
+                    destination: Zone::Battlefield,
+                    source_id: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    exile_tracking: ZoneDeliveryExileTracking::None,
+                    library_placement: None,
+                    completion: None,
+                    replacement_applied: HashSet::new(),
+                    requests: Vec::new(),
+                    attempted: Vec::new(),
+                    zone_change_record_start: 0,
+                    deferred_events: Vec::new(),
+                },
+            )));
+        assert!(!crate::game::engine_priority::retained_logical_zone_events(&state).is_empty());
+        assert!(release_settled_entry_continuation(&mut state).is_empty());
+        assert_eq!(state.deferred_entry_events, vec![seeded(entry, COMPLETED)]);
+
+        // An equal occurrence already queued → empty (the queued-witness filter),
+        // and the park is taken.
+        let mut state = settled_state(2);
+        let (_, entry) = parked_entry(&mut state, 900, P0, P0, COMPLETED);
+        state.deferred_entry_events.clear();
+        crate::game::triggers::collect_triggers_into_deferred(
+            &mut state,
+            std::slice::from_ref(&entry),
+        );
+        assert!(!state.deferred_triggers.is_empty(), "reach guard: queued");
+        state.deferred_entry_events = vec![seeded(entry, COMPLETED)];
+        assert!(release_settled_entry_continuation(&mut state).is_empty());
+        assert!(state.deferred_entry_events.is_empty());
+
+        // The entrant left the battlefield after its entry completed → still
+        // returned (CR 603.2 + CR 603.10).
+        let mut state = settled_state(2);
+        let (id, entry) = parked_entry(&mut state, 900, P0, P0, COMPLETED);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+        assert_eq!(state.objects[&id].zone, Zone::Graveyard);
+        assert_eq!(release_settled_entry_continuation(&mut state), vec![entry]);
+
+        // A pending entry is dropped with no one leaving: the gate means no
+        // continuation is live, so it can only have been abandoned.
+        let mut state = settled_state(2);
+        parked_entry(&mut state, 900, P0, P0, PENDING);
+        assert!(release_settled_entry_continuation(&mut state).is_empty());
+        assert!(state.deferred_entry_events.is_empty());
+
+        // Two entrants released together: only the completed one is returned.
+        let mut state = settled_state(2);
+        let (_, first) = entered(&mut state, 900, P0, P0);
+        let (_, second) = entered(&mut state, 901, P0, P0);
+        state.deferred_entry_events =
+            vec![seeded(first.clone(), COMPLETED), seeded(second, PENDING)];
+        assert_eq!(release_settled_entry_continuation(&mut state), vec![first]);
+        assert!(state.deferred_entry_events.is_empty());
+
+        // Predicate: a `Moved` continuation for an object no longer on the
+        // battlefield has no as-enters entrant; on the battlefield it does.
+        let mut state = settled_state(2);
+        let (id, entry) = parked_entry(&mut state, 900, P0, P0, COMPLETED);
+        state.deferred_entry_events.clear();
+        let events = vec![entry];
+        assert_eq!(
+            as_enters_continuation_entrant(
+                &state,
+                Some(&ReplacementEvent::Moved),
+                Some(id),
+                &events
+            ),
+            Some(id)
+        );
+        assert_eq!(
+            as_enters_continuation_entrant(&state, None, Some(id), &events),
+            None
+        );
+        let mut moved = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, id, Zone::Graveyard, &mut moved);
+        assert_eq!(
+            as_enters_continuation_entrant(
+                &state,
+                Some(&ReplacementEvent::Moved),
+                Some(id),
+                &events
+            ),
+            None
+        );
+    }
+
+    /// U4-T2, the delayed half: a matching "whenever a creature enters this
+    /// turn" delayed trigger is queued exactly once by the release itself.
+    #[test]
+    fn the_settled_release_runs_the_delayed_half() {
+        let mut scenario = scenario(2);
+        let beck = scenario
+            .add_spell_to_hand_from_oracle(P0, "Beck", false, BECK)
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        let mut runner: GameRunner = scenario.build();
+        runner.cast(beck).resolve();
+        runner.advance_until_stack_empty();
+        assert!(!runner.state().delayed_triggers.is_empty(), "reach guard");
+        let state = runner.state_mut();
+        let (_, entry) = parked_entry(state, 900, P0, P0, COMPLETED);
+        let released = release_settled_entry_continuation(state);
+        assert_eq!(released, vec![entry]);
+        let delayed = state
+            .deferred_triggers
+            .iter()
+            .filter(|context| context.pending.source_id == beck)
+            .count();
+        assert_eq!(delayed, 1, "{:?}", state.deferred_triggers);
+        let _ = GameAction::PassPriority;
+    }
+
+    /// V6, U4-T6. 3 players, owner ≠ controller: a departure does not decide the
+    /// take. CR 603.2 + CR 800.4a: a completed entry is returned whoever left, and
+    /// a pending one is dropped whoever left.
+    #[test]
+    fn a_departure_does_not_decide_the_take() {
+        for leaver in [P0, P1, PlayerId(2)] {
+            let mut state = settled_state(3);
+            let (_, entry) = parked_entry(&mut state, 900, P1, P0, COMPLETED);
+            let mut events = Vec::new();
+            crate::game::elimination::eliminate_player(&mut state, leaver, &mut events);
+            assert!(
+                !state.deferred_entry_events.is_empty(),
+                "reach guard: park kept"
+            );
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert_eq!(
+                release_settled_entry_continuation(&mut state),
+                vec![entry],
+                "{leaver:?} left"
+            );
+            assert!(state.deferred_entry_events.is_empty());
+
+            let mut state = settled_state(3);
+            parked_entry(&mut state, 900, P1, P0, PENDING);
+            let mut events = Vec::new();
+            crate::game::elimination::eliminate_player(&mut state, leaver, &mut events);
+            assert!(
+                !state.deferred_entry_events.is_empty(),
+                "reach guard: park kept"
+            );
+            assert!(
+                release_settled_entry_continuation(&mut state).is_empty(),
+                "{leaver:?} left"
+            );
+            assert!(state.deferred_entry_events.is_empty());
+        }
+
+        // Both the owner and the controller leave, with the game still going.
+        let mut state = settled_state(4);
+        let (_, entry) = parked_entry(&mut state, 900, P1, P0, COMPLETED);
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(&mut state, P0, &mut events);
+        crate::game::elimination::eliminate_player(&mut state, P1, &mut events);
+        assert_eq!(release_settled_entry_continuation(&mut state), vec![entry]);
+    }
+
+    /// V7, decision 3: every removal that answers one entrant takes that
+    /// entrant's entries, in either state, and leaves the others unchanged.
+    #[test]
+    fn a_removal_leaves_the_entries_it_does_not_own() {
+        type Removal = fn(&mut GameState, ObjectId, &[GameEvent]);
+        let removals: [(&str, Removal); 6] = [
+            ("replay", |state, entrant, _| {
+                // A prompt keeps the settled take out of the replay's own drain.
+                state.waiting_for = WaitingFor::ScryChoice {
+                    player: P0,
+                    cards: Vec::new(),
+                };
+                let mut events = Vec::new();
+                replay_deferred_entry_events(state, entrant, &mut events).expect("replay");
+            }),
+            ("flush", |state, entrant, _| {
+                let mut events = Vec::new();
+                flush_deferred_entry_events_into_priority_scan(state, entrant, &mut events);
+                assert!(!events.is_empty(), "the flush moved the entrant's entries");
+            }),
+            ("stale copy resume", |state, entrant, _| {
+                let reference = ObjectIncarnationRef::of(entrant, u64::MAX);
+                let mut events = Vec::new();
+                resume_copy_target_choice_entry(state, reference, &mut events).expect("resume");
+            }),
+            ("capture", |state, entrant, _| {
+                let waiting_for = WaitingFor::CopyTargetChoice {
+                    player: P0,
+                    source_id: entrant,
+                    valid_targets: Vec::new(),
+                    max_mana_value: None,
+                    purpose: CopyTargetPurpose::BecomeCopy,
+                };
+                let mut events = Vec::new();
+                capture_deferred_entry_events_if_mid_entry_choice(
+                    state,
+                    Some(&waiting_for),
+                    &mut events,
+                );
+            }),
+            ("custody", |state, _, own| {
+                take_entry_continuation_custody(state, own);
+            }),
+            ("inline close", |state, entrant, own| {
+                let dispatch = dispatch_on_a_fresh_frame(state);
+                EntryContinuationParking {
+                    custody: EntryCustody::Opened {
+                        entrant,
+                        parked: own.to_vec(),
+                    },
+                }
+                .close(state, dispatch, None);
+            }),
+        ];
+        for (name, remove) in removals {
+            for foreign_state in [COMPLETED, PENDING] {
+                for own_state in [COMPLETED, PENDING] {
+                    let mut state = settled_state(2);
+                    let (entrant, own) = entered(&mut state, 900, P0, P0);
+                    let (_, foreign) = entered(&mut state, 901, P0, P0);
+                    let land_played = GameEvent::LandPlayed {
+                        object_id: entrant,
+                        player_id: P0,
+                        from_zone: Zone::Hand,
+                    };
+                    state.deferred_entry_events = vec![
+                        seeded(own.clone(), own_state),
+                        seeded(foreign.clone(), foreign_state),
+                        seeded(land_played.clone(), own_state),
+                    ];
+                    remove(&mut state, entrant, &[own, land_played]);
+                    assert_eq!(
+                        state.deferred_entry_events,
+                        vec![seeded(foreign, foreign_state)],
+                        "{name}, own {own_state:?}"
+                    );
+                }
+            }
+        }
+
+        // The replay's positive half: the entrant's own entry reached collection.
+        let mut state = settled_state(2);
+        let (entrant, own) = parked_entry(&mut state, 900, P0, P0, PENDING);
+        let mut events = Vec::new();
+        replay_deferred_entry_events(&mut state, entrant, &mut events).expect("replay");
+        assert!(
+            !state.stack.is_empty() || !state.deferred_triggers.is_empty(),
+            "{own:?} reached Soul Warden"
+        );
+
+        // An empty park: every entrant-level removal is a no-op.
+        let mut state = settled_state(2);
+        assert!(take_parked_entries_of(&mut state, ObjectId(900)).is_empty());
+
+        // An attach resolution moves with its entrant.
+        let mut state = settled_state(2);
+        let attach = GameEvent::EffectResolved {
+            kind: EffectKind::Attach,
+            source_id: ObjectId(900),
+            subject: None,
+        };
+        state.deferred_entry_events = vec![seeded(attach.clone(), PENDING)];
+        assert_eq!(
+            take_parked_entries_of(&mut state, ObjectId(900)),
+            vec![attach]
+        );
+
+        // A non-entering source (the Esix shape): capture writes nothing and
+        // removes nothing of another entrant's.
+        let mut state = settled_state(2);
+        let (resident, _) = entered(&mut state, 900, P0, P0);
+        let (_, foreign) = parked_entry(&mut state, 901, P0, P0, COMPLETED);
+        let waiting_for = WaitingFor::CopyTargetChoice {
+            player: P0,
+            source_id: resident,
+            valid_targets: Vec::new(),
+            max_mana_value: None,
+            purpose: CopyTargetPurpose::CopyTokenSource,
+        };
+        let mut events = vec![foreign.clone()];
+        capture_deferred_entry_events_if_mid_entry_choice(
+            &mut state,
+            Some(&waiting_for),
+            &mut events,
+        );
+        assert_eq!(
+            state.deferred_entry_events,
+            vec![seeded(foreign, COMPLETED)]
+        );
+    }
+
+    fn inert_continuation() -> PostReplacementContinuation {
+        PostReplacementContinuation::Template(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented("test", "continuation"),
+        )))
+    }
+
+    /// One resident drain, begun, on a fresh stamped frame.
+    fn dispatch_on_a_fresh_frame(state: &mut GameState) -> IdentifiedPostReplacementDispatch {
+        state.install_post_replacement_drain(
+            PostReplacementDrain::ready(inert_continuation()),
+            ResidentDrainPolicy::Replace,
+        );
+        state
+            .begin_post_replacement_dispatch()
+            .expect("a ready drain dispatches")
+            .1
+    }
+
+    fn reference(state: &GameState, id: ObjectId) -> ObjectIncarnationRef {
+        ObjectIncarnationRef::from_object(&state.objects[&id])
+    }
+
+    /// A paused resident on a fresh frame, bound to `entrant`.
+    fn paused_owner(state: &mut GameState, entrant: ObjectIncarnationRef) {
+        let mut drains = PostReplacementDrainStack::default();
+        drains.install(
+            PostReplacementDrain::paused_owner_of(entrant),
+            ResidentDrainPolicy::Replace,
+        );
+        state.resolution_stack.push_post_replacement(drains);
+    }
+
+    /// V12. CR 603.2: the optional accept is a retire inside a running event, so
+    /// it reaches the completion authority; the abandonment path does not. The
+    /// gate reads the moment the continuation ended.
+    #[test]
+    fn the_optional_accept_records_and_the_abandonment_does_not() {
+        let mut state = settled_state(2);
+        let (id, entry) = parked_entry(&mut state, 900, P0, P0, PENDING);
+        let bound = reference(&state, id);
+        paused_owner(&mut state, bound);
+        state.abandon_active_post_replacement_drains();
+        assert_eq!(state.deferred_entry_events, vec![seeded(entry, COMPLETED)]);
+        assert!(state
+            .active_post_replacement_drains()
+            .is_some_and(PostReplacementDrainStack::is_empty));
+
+        let mut state = settled_state(2);
+        let (id, entry) = parked_entry(&mut state, 900, P0, P0, PENDING);
+        let bound = reference(&state, id);
+        paused_owner(&mut state, bound);
+        state.abandon_active_replacement_tails();
+        assert_eq!(state.deferred_entry_events, vec![seeded(entry, PENDING)]);
+
+        // Entrant gone and its owner left: stays pending.
+        let mut state = settled_state(3);
+        let (id, entry) = parked_entry(&mut state, 900, P1, P1, PENDING);
+        let bound = reference(&state, id);
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(&mut state, P1, &mut events);
+        record_parked_entry_completion(&mut state, &[bound]);
+        assert_eq!(state.deferred_entry_events, vec![seeded(entry, PENDING)]);
+
+        // Entrant gone and no one left: its entry happened (CR 603.10).
+        let mut state = settled_state(2);
+        let (id, entry) = parked_entry(&mut state, 900, P0, P0, PENDING);
+        let bound = reference(&state, id);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+        record_parked_entry_completion(&mut state, &[bound]);
+        assert_eq!(state.deferred_entry_events, vec![seeded(entry, COMPLETED)]);
+
+        // A stale entry of an earlier incarnation of the same id is not revived.
+        let mut state = settled_state(2);
+        let (id, entry) = parked_entry(&mut state, 900, P0, P0, PENDING);
+        let later = ObjectIncarnationRef::of(id, state.objects[&id].incarnation + 1);
+        record_parked_entry_completion(&mut state, &[later]);
+        assert_eq!(state.deferred_entry_events, vec![seeded(entry, PENDING)]);
+    }
+
+    /// V13 (b). CR 616.1g: a `Ready` drain that inherited a binding and runs its
+    /// continuation inline completes the entry at the dispatcher's else branch.
+    #[test]
+    fn an_inline_ready_drain_completes_an_inherited_binding() {
+        let mut state = settled_state(2);
+        let (id, entry) = parked_entry(&mut state, 900, P0, P0, PENDING);
+        let mut drain = PostReplacementDrain::ready(inert_continuation());
+        drain.parked_entrants.push(reference(&state, id));
+        state.install_post_replacement_drain(drain, ResidentDrainPolicy::Replace);
+        let mut events = Vec::new();
+        let waiting_for =
+            apply_pending_post_replacement_effect(&mut state, None, None, None, &mut events);
+        assert!(waiting_for.is_none());
+        assert_eq!(state.deferred_entry_events, vec![seeded(entry, COMPLETED)]);
+    }
+
+    /// V13 (c). CR 616.1g: with a prompt open, a retired dispatch's binding moves
+    /// to the frame's new resident and the entry stays pending.
+    #[test]
+    fn a_retired_dispatch_hands_its_binding_to_the_new_resident() {
+        let mut state = settled_state(2);
+        let (id, entry) = parked_entry(&mut state, 900, P0, P0, PENDING);
+        let bound = reference(&state, id);
+        let dispatch = dispatch_on_a_fresh_frame(&mut state);
+        assert!(state.bind_parked_entrant(dispatch, bound));
+        let nested = PostReplacementDrain {
+            status: DrainStatus::Paused,
+            ..PostReplacementDrain::ready(inert_continuation())
+        };
+        state
+            .active_post_replacement_drains_mut()
+            .expect("the frame")
+            .install(nested, ResidentDrainPolicy::Replace);
+        let retired = state
+            .finish_post_replacement_dispatch(dispatch)
+            .expect("the outer drain retires");
+        let prompt = WaitingFor::ScryChoice {
+            player: P0,
+            cards: Vec::new(),
+        };
+        settle_retired_dispatch_entrants(
+            &mut state,
+            dispatch,
+            retired.parked_entrants,
+            Some(&prompt),
+        );
+        let resident = state
+            .active_post_replacement_drains()
+            .and_then(PostReplacementDrainStack::resident)
+            .expect("the nested drain");
+        assert_eq!(resident.parked_entrants, vec![bound]);
+        assert_eq!(state.deferred_entry_events, vec![seeded(entry, PENDING)]);
+    }
+
+    /// V22. CR 614.12a + CR 707.9: a copied choice binds to the resident, whose
+    /// retirement completes the entry, and adds no owner.
+    #[test]
+    fn a_copied_choice_binds_to_the_resident_and_its_retirement_completes() {
+        let host = ObjectId(777);
+        let mut state = settled_state(2);
+        let (id, entry) = parked_entry(&mut state, 900, P0, P0, PENDING);
+        let mut drains = PostReplacementDrainStack::default();
+        drains.install(
+            PostReplacementDrain {
+                status: DrainStatus::Paused,
+                source: Some(host),
+                ..PostReplacementDrain::ready(inert_continuation())
+            },
+            ResidentDrainPolicy::Replace,
+        );
+        state.resolution_stack.push_post_replacement(drains);
+        assert_eq!(bind_copied_choice_entrant(&mut state, id), None);
+        let resident = state
+            .active_post_replacement_drains()
+            .and_then(PostReplacementDrainStack::resident)
+            .expect("the resident");
+        assert_eq!(resident.parked_entrants, vec![reference(&state, id)]);
+        assert_eq!(resident.source, Some(host));
+        assert_eq!(
+            state.deferred_entry_events,
+            vec![seeded(entry.clone(), PENDING)]
+        );
+        state.finish_active_paused_post_replacement_dispatch();
+        assert_eq!(state.deferred_entry_events, vec![seeded(entry, COMPLETED)]);
+
+        // No parked entry: nothing to bind.
+        let mut state = settled_state(2);
+        let (id, _) = entered(&mut state, 900, P0, P0);
+        assert_eq!(bind_copied_choice_entrant(&mut state, id), None);
+
+        // No resident: the caller parks the owner.
+        let mut state = settled_state(2);
+        let (id, _) = parked_entry(&mut state, 900, P0, P0, PENDING);
+        assert_eq!(
+            bind_copied_choice_entrant(&mut state, id),
+            Some(reference(&state, id))
+        );
+        assert!(state.active_post_replacement_drains().is_none());
+
+        // A resident bound to another entrant: nothing is written, and the caller
+        // parks the owner.
+        let mut state = settled_state(2);
+        let (id, entry) = parked_entry(&mut state, 900, P0, P0, PENDING);
+        let (other, _) = entered(&mut state, 901, P1, P1);
+        let bound = reference(&state, other);
+        let mut drains = PostReplacementDrainStack::default();
+        drains.install(
+            PostReplacementDrain {
+                status: DrainStatus::Paused,
+                source: Some(host),
+                parked_entrants: vec![bound],
+                ..PostReplacementDrain::ready(inert_continuation())
+            },
+            ResidentDrainPolicy::Replace,
+        );
+        state.resolution_stack.push_post_replacement(drains);
+        assert_eq!(
+            bind_copied_choice_entrant(&mut state, id),
+            Some(reference(&state, id))
+        );
+        let resident = state
+            .active_post_replacement_drains()
+            .and_then(PostReplacementDrainStack::resident)
+            .expect("the resident");
+        assert_eq!(resident.parked_entrants, vec![bound]);
+        assert_eq!(state.deferred_entry_events, vec![seeded(entry, PENDING)]);
+    }
+
+    /// U-1. CR 614.1c + CR 603.2 + CR 706.2: an entrant's own as-enters roll is
+    /// parked completed beside its entry. Closing A's inline continuation unparks
+    /// only A's entry, custody over the rolls takes nothing, an abandonment keeps
+    /// them because they happened, and the settled release takes each once. It
+    /// returns no roll: what a roll triggered was collected when it was rolled,
+    /// and the release queues those held contexts instead (none here).
+    #[test]
+    fn an_as_enters_roll_waits_in_the_park_for_the_settled_release() {
+        let mut state = settled_state(2);
+        let (a, entry_a) = entered(&mut state, 900, P0, P0);
+        let (b, entry_b) = entered(&mut state, 901, P0, P0);
+        let roll = |entrant| GameEvent::DieRolled {
+            player_id: P0,
+            sides: 6,
+            result: Some(4),
+            pre_entry_source: Some(entrant),
+        };
+        let (roll_a, roll_b) = (roll(a), roll(b));
+        state.deferred_entry_events.clear();
+        park_pending_entry(&mut state, entry_a.clone());
+        park_pending_entry(&mut state, entry_b.clone());
+        park_as_enters_roll(&mut state, roll_a.clone(), Vec::new());
+        park_as_enters_roll(&mut state, roll_b.clone(), Vec::new());
+
+        let dispatch = dispatch_on_a_fresh_frame(&mut state);
+        EntryContinuationParking {
+            custody: EntryCustody::Opened {
+                entrant: a,
+                parked: vec![entry_a],
+            },
+        }
+        .close(&mut state, dispatch, None);
+        let after_close = vec![
+            seeded(entry_b, PENDING),
+            seeded(roll_a.clone(), COMPLETED),
+            seeded(roll_b.clone(), COMPLETED),
+        ];
+        assert_eq!(state.deferred_entry_events, after_close, "A's entry only");
+
+        take_entry_continuation_custody(&mut state, &[roll_a.clone(), roll_b.clone()]);
+        assert_eq!(
+            state.deferred_entry_events, after_close,
+            "custody leaves rolls"
+        );
+
+        drop_abandoned_family_entries(&mut state, None);
+        assert_eq!(
+            state.deferred_entry_events,
+            vec![
+                seeded(roll_a.clone(), COMPLETED),
+                seeded(roll_b.clone(), COMPLETED)
+            ],
+            "the rolls happened"
+        );
+
+        *state.resolution_stack = Default::default();
+        assert!(take_settled_entry_continuation_events(&mut state).is_empty());
+        assert!(
+            state.deferred_entry_events.is_empty(),
+            "each roll is taken once"
+        );
+        assert!(state.deferred_triggers.is_empty());
+        assert!(take_settled_entry_continuation_events(&mut state).is_empty());
+    }
+
+    /// U-2. CR 508.4 + CR 400.7: an owed attacking seat is stamped on the
+    /// entrant's current incarnation's parked entry and taken once by the owner
+    /// whose paused delivery holds that entry's ledger key. Another entrant's
+    /// delivery, a stale incarnation's entry, or an entrant that has since become
+    /// a later incarnation takes nothing to seat.
+    #[test]
+    fn an_owed_attack_seat_is_taken_by_its_deliverys_ledger_key() {
+        let mut state = settled_state(2);
+        let (a, stale) = entered(&mut state, 900, P0, P0);
+        let mut moved = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, a, Zone::Graveyard, &mut moved);
+        let mut returned = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, a, Zone::Battlefield, &mut returned);
+        let current = returned
+            .into_iter()
+            .find(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        to: Zone::Battlefield,
+                        ..
+                    }
+                )
+            })
+            .expect("the re-entry");
+        let (b, entry_b) = entered(&mut state, 901, P0, P0);
+        assert!(
+            !parked_event_holds(&stale, &current) && !parked_event_holds(&current, &entry_b),
+            "reach guard: three ledger keys"
+        );
+        state.deferred_entry_events = vec![
+            seeded(stale.clone(), PENDING),
+            seeded(current.clone(), PENDING),
+            seeded(entry_b.clone(), PENDING),
+        ];
+        let stamps = |state: &GameState| -> Vec<Option<EntryAttackDestination>> {
+            state
+                .deferred_entry_events
+                .iter()
+                .map(|parked| parked.entry_attack.clone())
+                .collect()
+        };
+
+        assert!(owe_entry_attack_seat(&mut state, a));
+        assert_eq!(
+            stamps(&state),
+            vec![None, Some(EntryAttackDestination::AnyDefender), None],
+            "only A's current incarnation"
+        );
+        assert_eq!(take_owed_entry_attack_seat(&mut state, &[entry_b]), None);
+        assert_eq!(take_owed_entry_attack_seat(&mut state, &[stale]), None);
+        assert_eq!(
+            stamps(&state),
+            vec![None, Some(EntryAttackDestination::AnyDefender), None],
+            "A's stamp stays for A's owner"
+        );
+        assert_eq!(
+            take_owed_entry_attack_seat(&mut state, std::slice::from_ref(&current)),
+            Some((reference(&state, a), EntryAttackDestination::AnyDefender))
+        );
+        assert_eq!(
+            take_owed_entry_attack_seat(&mut state, std::slice::from_ref(&current)),
+            None,
+            "taken once"
+        );
+
+        assert!(owe_entry_attack_seat(&mut state, a));
+        state.objects.get_mut(&a).expect("A").incarnation += 1;
+        assert_eq!(
+            take_owed_entry_attack_seat(&mut state, std::slice::from_ref(&current)),
+            None,
+            "a later incarnation is not seated"
+        );
+        assert_eq!(stamps(&state), vec![None; 3], "the stamp is still taken");
+        assert!(owe_entry_attack_seat(&mut state, b), "B's own entry");
+    }
+
+    const BRAZEN_DWARF: &str =
+        "Whenever you roll one or more dice, this creature deals 1 damage to each opponent.";
+
+    /// Install `entrant`'s not-yet-run as-enters roll: a ready `RollDie` chain
+    /// sourced at it, on a fresh frame.
+    fn install_roll_chain(state: &mut GameState, entrant: ObjectId) {
+        let chain = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RollDie {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                sides: 6,
+                results: Vec::new(),
+                modifier: None,
+            },
+        );
+        state.install_post_replacement_drain(
+            PostReplacementDrain {
+                source: Some(entrant),
+                ..PostReplacementDrain::ready(PostReplacementContinuation::Template(Box::new(
+                    chain,
+                )))
+            },
+            ResidentDrainPolicy::Replace,
+        );
+    }
+
+    /// `id`'s parked battlefield entry, if any.
+    fn parked_entry_state(state: &GameState, entry: &GameEvent) -> Option<ParkedEntryState> {
+        state
+            .deferred_entry_events
+            .iter()
+            .find(|parked| parked.event == *entry)
+            .map(|parked| parked.state)
+    }
+
+    /// Move `id` out and back, returning its new battlefield entry (CR 400.7).
+    fn reenter(state: &mut GameState, id: ObjectId) -> GameEvent {
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(state, id, Zone::Graveyard, &mut events);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(state, id, Zone::Battlefield, &mut events);
+        events
+            .into_iter()
+            .find(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        to: Zone::Battlefield,
+                        ..
+                    }
+                )
+            })
+            .expect("the new entry")
+    }
+
+    /// R11. CR 614.12a + CR 603.6d + CR 400.7: an as-enters roll's dispatch adopts
+    /// the entry its delivery already parked, by identity, whatever event it
+    /// carries, and completes it with the continuation: recorded completed and
+    /// still parked for its collector, because its `ZoneChanged` belongs to an
+    /// earlier action's buffer. With nothing parked there is nothing to adopt,
+    /// and another incarnation's parked entry is not adopted.
+    #[test]
+    fn an_as_enters_roll_adopts_the_entry_its_delivery_parked() {
+        let mut state = settled_state(2);
+        let (x, entry) = parked_entry(&mut state, 900, P0, P0, PENDING);
+        install_roll_chain(&mut state, x);
+        let mut events = Vec::new();
+        let waiting_for =
+            apply_pending_post_replacement_effect(&mut state, None, None, None, &mut events);
+        assert!(waiting_for.is_none(), "{waiting_for:?}");
+        // Reach: the roll was made while the entry was held pending.
+        let stamped: Vec<_> = events
+            .iter()
+            .filter(|event| is_as_enters_roll(event))
+            .collect();
+        assert_eq!(stamped.len(), 1, "{events:?}");
+        assert_eq!(parked_entry_state(&state, &entry), Some(COMPLETED));
+
+        // Nothing parked: no custody is adopted or opened (the dispatch carries
+        // no `Moved` event), so nothing is parked and the roll is unstamped.
+        let mut state = settled_state(2);
+        let (y, entry) = entered(&mut state, 901, P0, P0);
+        state.deferred_entry_events.clear();
+        install_roll_chain(&mut state, y);
+        let mut events = Vec::new();
+        let _ = apply_pending_post_replacement_effect(&mut state, None, None, None, &mut events);
+        assert_eq!(parked_entry_state(&state, &entry), None);
+        assert!(
+            !events.iter().any(is_as_enters_roll),
+            "an entry not held is not mid-entry"
+        );
+
+        // Another incarnation's parked entry is not adopted (CR 400.7).
+        let mut state = settled_state(2);
+        let (z, stale) = parked_entry(&mut state, 902, P0, P0, PENDING);
+        let _ = reenter(&mut state, z);
+        install_roll_chain(&mut state, z);
+        let mut events = Vec::new();
+        let _ = apply_pending_post_replacement_effect(&mut state, None, None, None, &mut events);
+        assert_eq!(parked_entry_state(&state, &stale), Some(PENDING));
+    }
+
+    /// R12. CR 603.2 + CR 603.3 + CR 800.4d: a held roll context round-trips with
+    /// its parked roll, a legacy bare event still decodes completed with nothing
+    /// held, and the settled release queues a held context only while its
+    /// controller is in the game.
+    #[test]
+    fn a_held_roll_context_round_trips_and_is_placed_for_live_controllers() {
+        let board = || {
+            let mut scenario = scenario(3);
+            scenario.add_creature_from_oracle(P1, "Brazen Dwarf", 1, 3, BRAZEN_DWARF);
+            scenario.build().state().clone()
+        };
+        let roll = GameEvent::DieRolled {
+            player_id: P1,
+            sides: 6,
+            result: Some(4),
+            pre_entry_source: Some(ObjectId(900)),
+        };
+        let mut state = board();
+        let held = crate::game::triggers::collect_as_enters_roll_observers(
+            &mut state,
+            std::slice::from_ref(&roll),
+        );
+        assert_eq!(held.len(), 1, "reach: the Dwarf is held");
+        let mut parked = ParkedEntry::occurred(roll.clone());
+        parked.held_triggers = held;
+        let wire = serde_json::to_value(&parked).expect("serializes");
+        let decoded: ParkedEntry = serde_json::from_value(wire).expect("decodes");
+        assert_eq!(decoded, parked);
+        let legacy: ParkedEntry =
+            serde_json::from_value(serde_json::to_value(&roll).expect("event")).expect("legacy");
+        assert_eq!(legacy, ParkedEntry::occurred(roll.clone()));
+
+        let mut state = board();
+        state.deferred_entry_events = vec![parked.clone()];
+        assert!(take_settled_entry_continuation_events(&mut state).is_empty());
+        assert_eq!(
+            state.deferred_triggers.len(),
+            1,
+            "a live controller's context"
+        );
+
+        let mut state = board();
+        state.players[1].is_eliminated = true;
+        state.deferred_entry_events = vec![parked];
+        assert!(take_settled_entry_continuation_events(&mut state).is_empty());
+        assert!(
+            state.deferred_triggers.is_empty(),
+            "a departed controller's context is retired"
+        );
+        assert!(state.deferred_entry_events.is_empty());
+    }
+
+    /// A `ChangeZone` owner whose paused delivery of `x` carries `delivery`,
+    /// counted as `count` says, pushed on top.
+    fn change_zone_owner(
+        state: &mut GameState,
+        x: ObjectId,
+        delivery: GameEvent,
+        count: crate::types::game_state::PausedZoneChangeDeliveryCount,
+    ) {
+        let mut paused = PendingZoneChangeDelivery::new(
+            reference(state, x),
+            ProposedEvent::zone_change(x, Zone::Graveyard, Zone::Battlefield, None),
+        );
+        paused.delivery_events = vec![delivery];
+        paused.count = count;
+        let logical_zone_change_group = state.allocate_logical_zone_change_group(&[]);
+        state
+            .resolution_stack
+            .push_inner(ResolutionFrame::ChangeZone(Box::new(
+                crate::types::resolution::ChangeZoneFrame {
+                    pending: Some(crate::types::game_state::PendingChangeZoneIteration {
+                        logical_zone_change_group,
+                        pending_return_result_producer: None,
+                        paused_current: Some(paused),
+                        remaining: Vec::new(),
+                        source_id: x,
+                        controller: P0,
+                        origin: None,
+                        destination: Zone::Battlefield,
+                        enter_transformed: false,
+                        enters_under_player: None,
+                        duration: None,
+                        track_exiled_by_source: false,
+                        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+                        moved_count: None,
+                        face_down_profile: None,
+                        library_placement: None,
+                        enter_attached_to: None,
+                        effect_kind: crate::types::ability::EffectKind::ChangeZone,
+                    }),
+                    devour_eligible_snapshot: None,
+                },
+            )));
+    }
+
+    /// R15. CR 603.6d + CR 603.2 + CR 508.4 + CR 400.7: the delivery-tail flush
+    /// leaves every entry a live collector owns: one bound to a paused drain
+    /// beneath the top, one a batch owner's paused delivery holds deeper down,
+    /// one a `ChangeZone` owner's paused delivery holds while that owner still
+    /// counts its member, and one that owes its attacking seat. It takes the
+    /// entries no collector owns, including one whose `ChangeZone` owner already
+    /// counted it. No printed board separates the bound entry from the
+    /// owner-held one.
+    #[test]
+    fn the_delivery_tail_flush_takes_only_unowned_entries() {
+        use crate::types::game_state::PausedZoneChangeDeliveryCount;
+        let mut state = settled_state(2);
+        let (x, bound) = entered(&mut state, 900, P0, P0);
+        let bound_ref = reference(&state, x);
+        let held = reenter(&mut state, x);
+        let change_zone_held = reenter(&mut state, x);
+        let change_zone_counted = reenter(&mut state, x);
+        let stamped = reenter(&mut state, x);
+        let land_played = GameEvent::LandPlayed {
+            object_id: x,
+            player_id: P0,
+            from_zone: Zone::Hand,
+        };
+        let mut owed = seeded(stamped.clone(), PENDING);
+        owed.entry_attack = Some(EntryAttackDestination::AnyDefender);
+        state.deferred_entry_events = vec![
+            seeded(bound.clone(), PENDING),
+            seeded(held.clone(), PENDING),
+            seeded(change_zone_held.clone(), PENDING),
+            seeded(change_zone_counted.clone(), PENDING),
+            owed.clone(),
+            seeded(land_played.clone(), PENDING),
+        ];
+        let mut paused = PendingZoneChangeDelivery::new(
+            reference(&state, x),
+            ProposedEvent::zone_change(x, Zone::Graveyard, Zone::Battlefield, None),
+        );
+        paused.delivery_events = vec![held.clone()];
+        let logical_zone_change_group = state.allocate_logical_zone_change_group(&[]);
+        state
+            .resolution_stack
+            .push_inner(ResolutionFrame::BatchDelivery(Box::new(
+                PendingBatchDeliveries {
+                    logical_zone_change_group,
+                    paused_current: Some(paused),
+                    remaining: Vec::new(),
+                    destination: Zone::Battlefield,
+                    source_id: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    exile_tracking: ZoneDeliveryExileTracking::None,
+                    library_placement: None,
+                    completion: None,
+                    replacement_applied: HashSet::new(),
+                    requests: Vec::new(),
+                    attempted: Vec::new(),
+                    zone_change_record_start: 0,
+                    deferred_events: Vec::new(),
+                },
+            )));
+        change_zone_owner(
+            &mut state,
+            x,
+            change_zone_held.clone(),
+            PausedZoneChangeDeliveryCount::NeedsCount,
+        );
+        change_zone_owner(
+            &mut state,
+            x,
+            change_zone_counted.clone(),
+            PausedZoneChangeDeliveryCount::AlreadyCounted,
+        );
+        paused_owner(&mut state, bound_ref);
+        for _ in 0..2 {
+            state.push_counter_additions(PendingCounterAdditionQueue {
+                remaining: Vec::new(),
+                completion: None,
+            });
+        }
+        let mut events = Vec::new();
+        flush_deferred_entry_events_into_priority_scan(&mut state, x, &mut events);
+        assert_eq!(
+            events,
+            vec![change_zone_counted, land_played],
+            "only the unowned entries are flushed"
+        );
+        assert_eq!(
+            state.deferred_entry_events,
+            vec![
+                seeded(bound.clone(), PENDING),
+                seeded(held, PENDING),
+                seeded(change_zone_held, PENDING),
+                owed
+            ],
+            "the four owned entries stay parked"
+        );
+
+        // CR 400.7: a drain bound to another incarnation of X does not own this one.
+        let mut state = settled_state(2);
+        let (x, bound) = entered(&mut state, 900, P0, P0);
+        let _ = reenter(&mut state, x);
+        state.deferred_entry_events = vec![seeded(bound.clone(), PENDING)];
+        let current = reference(&state, x);
+        paused_owner(&mut state, current);
+        let mut events = Vec::new();
+        flush_deferred_entry_events_into_priority_scan(&mut state, x, &mut events);
+        assert_eq!(events, vec![bound]);
     }
 }

@@ -329,6 +329,14 @@ fn run_post_action_pipeline_core(
     // action may have already handled ordinary zone-event triggers, but its
     // just-emitted `SpellCast` still has to join the terminal batch before B's
     // parked trigger drains.
+    //
+    // CR 603.3 + CR 603.3b + CR 603.6d: a handler that processed its triggers
+    // inline set `skip_trigger_scan`; a settled, un-owned as-enters entry it
+    // left parked is released into the queue here, ahead of this pass's SBA
+    // loop, so the drain below places it.
+    if skip_trigger_scan {
+        crate::game::engine_replacement::collect_settled_entry_continuation_triggers(state);
+    }
     if !skip_trigger_scan || state.pending_resolution_completion.is_some() {
         // CR 904.9 + CR 603.1: resolve "as you set this scheme in motion"
         // choices before anything collects. An "as" choice is part of the
@@ -365,7 +373,7 @@ fn run_post_action_pipeline_core(
             .iter()
             .filter(|event| {
                 !matches!(event, GameEvent::PhaseChanged { .. })
-                    && !state.deferred_entry_events.contains(event)
+                    && !crate::game::engine_replacement::entry_event_is_parked(state, event)
                     && !retained_logical_zone_events.contains(event)
             })
             .cloned()
@@ -374,7 +382,7 @@ fn run_post_action_pipeline_core(
             .iter()
             .filter(|event| {
                 !matches!(event, GameEvent::PhaseChanged { .. })
-                    && !state.deferred_entry_events.contains(event)
+                    && !crate::game::engine_replacement::entry_event_is_parked(state, event)
                     && !retained_logical_zone_events.contains(event)
             })
             .cloned()
@@ -382,6 +390,13 @@ fn run_post_action_pipeline_core(
         if skip_trigger_scan {
             filtered_events.retain(|event| matches!(event, GameEvent::SpellCast { .. }));
             delayed_trigger_events.retain(|event| matches!(event, GameEvent::SpellCast { .. }));
+        } else {
+            // CR 603.2 + CR 603.6a + CR 603.6d: a settled, un-owned as-enters
+            // entry joins this action's batch (with, e.g., the answering
+            // action's `DieRolled`), ahead of the SBA loop. Its delayed half is
+            // already queued by the release; the drain below places it.
+            filtered_events
+                .extend(crate::game::engine_replacement::release_settled_entry_continuation(state));
         }
         // CR 603.3b: If the resolution step that just ran paused for a player
         // resolution-choice (Scry/Surveil/Dig/Search/...), the triggered
@@ -651,6 +666,11 @@ fn run_post_action_pipeline_core(
         // CR 117.5 + CR 603.3b: the boundary's own partition joins ungated, and
         // its ownership is consumed before any whole-queue take below.
         batch.append(&mut triggers::take_priority_boundary_batch(state));
+        // CR 603.3 + CR 603.3b: release a settled, un-owned as-enters entry into
+        // the queue before the gate reads it, so it shares this drain with the
+        // triggers already queued. Collecting is safe under every gate; only
+        // placement is gated.
+        crate::game::engine_replacement::collect_settled_entry_continuation_triggers(state);
         let queue_drains = if completion_settled {
             triggers::stack_object_announcement_drain_allowed(state)
         } else {
@@ -824,7 +844,7 @@ pub(super) fn unclaimed_delayed_trigger_input(
         retained.extend(retained_cost_events(state));
         input.retain(|event| {
             !matches!(event, GameEvent::PhaseChanged { .. })
-                && !state.deferred_entry_events.contains(event)
+                && !crate::game::engine_replacement::entry_event_is_parked(state, event)
                 && !retained.contains(event)
         });
     }
