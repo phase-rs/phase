@@ -732,6 +732,7 @@ impl ScriptedGame {
             | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
             | WaitingFor::SeparatePilesChoice { .. }
+            | WaitingFor::SecretAgendaChoice { .. }
             | WaitingFor::CompanionReveal { .. }
             | WaitingFor::ChooseLegend { .. }
             | WaitingFor::CommanderZoneChoice { .. }

@@ -120,6 +120,7 @@ fn normal_mulligan_decision(state: &GameState) -> WaitingFor {
     let pending = state
         .seat_order
         .iter()
+        .filter(|&&player| super::players::is_alive(state, player))
         // A seat with no opening hand has nothing to keep or mulligan; leaving
         // the Horde in `pending` would stall the game waiting on a decision it
         // can never meaningfully make (and its "Keep" would bottom cards from a
