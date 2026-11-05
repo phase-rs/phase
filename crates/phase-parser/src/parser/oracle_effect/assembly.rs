@@ -55,7 +55,7 @@ use super::lower::{
     fold_token_it_has_grants_into_token_statics, gate_other_revealed_card_on_multiplayer_reveal,
     gate_reflexive_rider_on_declined_optional_target, is_exile_until_cast_bottom_cleanup,
     is_land_enters_tapped_rider, is_linked_exile_cast_bottom_cleanup, is_stable_branch_amount,
-    match_create_of_those_tokens, nest_whenever_this_turn_token_cleanup_delayed_trigger,
+    nest_whenever_this_turn_token_cleanup_delayed_trigger,
     normalize_exile_until_cast_bottom_cleanup, normalize_linked_exile_cast_bottom_cleanup,
     parse_controlled_by_different_players_target_constraint,
     parse_same_zone_owner_target_constraint, parse_total_mana_value_target_constraint,
@@ -79,7 +79,7 @@ use super::{
     bind_anaphoric_damage_subject_keep_recipient, collapse_ephemeral_color_choice_mana,
     contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
     def_is_damage_dealer, def_is_dig_look, def_is_dig_or_mill, def_is_generic_effect_head,
-    def_is_keyword_counter_placement, def_is_perpetual_keyword_grant, def_is_token_creator,
+    def_is_keyword_counter_placement, def_is_perpetual_keyword_grant,
     demote_unbindable_batch_aggregate, draw_object_count_filter, fold_cast_copy_of_card_defs,
     has_explicit_player_target, inject_chosen_color_choice_grant,
     inject_printed_color_choice_filter, instead_override_body_mut, intrinsic_continuation_effect,
@@ -793,6 +793,10 @@ pub(super) enum AntecedentSelector {
     /// selector is accepted KNOWINGLY: the alternative is leaving a raw positional
     /// scan in the assembler, which reintroduces exactly the coupling U6 removes.
     Between { anchor: NodeId },
+    /// The node a clause body emitted, named by the parser's declared antecedent
+    /// `ClauseId` (CR 608.2c). Resolved over emission provenance, never by a
+    /// shape search of the output: the parser has already said which clause.
+    Clause(ClauseId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -902,12 +906,6 @@ pub(super) enum AntecedentRole {
     /// silently dropped instead of reaching the real copy further back. Same trap as
     /// narrowing `GenericEffectHead`, in the opposite direction.
     CopySpellBearer,
-    /// A `Token` or `CopyTokenOf` — the instruction a "create N of those tokens
-    /// instead" override restates (CR 111.1 + CR 608.2c). The override need not
-    /// follow it directly, and the chain's first instruction may be something
-    /// else (Conquest Mission puts a quest counter first), which is why this is
-    /// a role and neither `FirstEmitted` nor `LastEmitted`.
-    TokenCreator,
 }
 
 /// Membership predicates for the roles whose candidacy is **live** — recomputed
@@ -962,9 +960,6 @@ fn live_role_predicate(role: AntecedentRole) -> Option<fn(&AbilityDefinition) ->
         // the length changes, so a registry would miss that node's birth entirely — not
         // merely go stale on a rewrite, but never see it. Live, the role IS the scan.
         AntecedentRole::CopySpellBearer => Some(def_bears_retargetable_copy),
-        // LIVE, like `DamageDealer`: membership is the def's current effect
-        // variant, which length-preserving rewrites could change.
-        AntecedentRole::TokenCreator => Some(def_is_token_creator),
         AntecedentRole::Conditional
         | AntecedentRole::OptionalHead
         | AntecedentRole::DigOrRevealUntil
@@ -1325,7 +1320,6 @@ impl AssemblyEnv {
                 | AntecedentRole::DigLook
                 | AntecedentRole::DamageDealer
                 | AntecedentRole::CopySpellBearer
-                | AntecedentRole::TokenCreator
                 | AntecedentRole::PerpetualKeywordGrantHead => Vec::new(),
             },
         };
@@ -1365,6 +1359,12 @@ impl AssemblyEnv {
                 }
                 anchor_pos.and_then(|a| ((a + 1)..defs.len()).find(|i| passes(*i)))
             }
+            AntecedentSelector::Clause(clause) => self
+                .arena
+                .order
+                .iter()
+                .position(|id| self.arena.node(*id).prov.origin == Some(clause))
+                .filter(|i| passes(*i)),
             // "The most recent node with the role" IS the last member of the same
             // membership set the fan-out enumerates — one authority, two arities.
             AntecedentSelector::LastWithRole(role) => {
@@ -2638,7 +2638,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         }
                         true
                     }
-                    ReplaceMeaningKind::Instead(instead_def) => {
+                    ReplaceMeaningKind::Instead {
+                        def: instead_def,
+                        antecedent: declared_antecedent,
+                    } => {
                         // CR 614.1a + CR 608.2c: assemble a multi-clause base + an
                         // "instead" override so the runtime can produce both
                         // branches. Clause 1 becomes the root and is the Cow-swap
@@ -2677,6 +2680,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                 &env,
                                 &defs,
                                 instead_override_body_mut(&mut instead),
+                                *declared_antecedent,
                             );
                             // Identity: the base is MOVED out of `defs` and back in —
                             // it keeps its NodeId (U6-C2 ruling). Capture before the take.
@@ -4981,13 +4985,28 @@ fn bind_instead_body_to_antecedent(body: &mut AbilityDefinition, antecedent: &Ab
 /// "that damage" anaphor — `DealDamage` over a multiple of the event-context
 /// amount ("deals double that damage instead") — names the DAMAGE instruction
 /// it restates, so it binds to the nearest preceding `DamageDealer` instead.
-/// Likewise a "create N of those tokens" override binds to the `TokenCreator`
-/// role. Falls back to the first def when no such instruction exists.
+/// An override whose anaphor names an earlier clause binds to the clause the
+/// parser declared for it. Falls back to the first def otherwise.
 fn instead_antecedent_index(
     env: &AssemblyEnv,
     defs: &[AbilityDefinition],
     instead_def: &AbilityDefinition,
+    declared: Option<ClauseId>,
 ) -> usize {
+    // CR 111.1 + CR 608.2c: an override whose anaphor names an earlier clause
+    // ("create two of those tokens instead") binds to the clause the parser
+    // declared, not the chain's first instruction (Conquest Mission puts a
+    // quest counter first).
+    if let Some(clause) = declared {
+        return env
+            .resolve(
+                defs,
+                AntecedentSelector::Clause(clause),
+                None,
+                OnMiss::Ignore,
+            )
+            .unwrap_or(0);
+    }
     let restates_damage = matches!(
         instead_def.effect.as_ref(),
         Effect::DealDamage {
@@ -4998,19 +5017,12 @@ fn instead_antecedent_index(
             QuantityExpr::Ref { qty: QuantityRef::EventContextAmount }
         )
     );
-    // CR 111.1 + CR 608.2c: "create N of those tokens instead" names the token
-    // creation it restates through its own "those tokens" anaphor, bound by the
-    // declared `TokenCreator` role — not the chain's first instruction
-    // (Conquest Mission puts a quest counter first).
-    let restates_tokens = match_create_of_those_tokens(instead_def.effect.as_ref()).is_some();
-    let role = match (restates_damage, restates_tokens) {
-        (true, _) => AntecedentRole::DamageDealer,
-        (false, true) => AntecedentRole::TokenCreator,
-        (false, false) => return 0,
-    };
+    if !restates_damage {
+        return 0;
+    }
     env.resolve(
         defs,
-        AntecedentSelector::LastWithRole(role),
+        AntecedentSelector::LastWithRole(AntecedentRole::DamageDealer),
         None,
         OnMiss::Ignore,
     )
@@ -5059,7 +5071,7 @@ fn instead_replaces_optional_payment_continuation(root: &AbilityDefinition) -> b
 #[cfg(test)]
 mod arena_tests {
     use super::*;
-    use crate::parser::oracle_effect::{parse_effect_chain, parse_effect_chain_ir};
+    use crate::parser::oracle_effect::parse_effect_chain_ir;
     use crate::parser::oracle_ir::ast::parsed_clause;
     use crate::parser::oracle_ir::effect_chain::{ClauseIr, ClauseIrBuilder, InjectedColorChoice};
     use crate::parser::oracle_nom::context::ParseContext;
@@ -6481,20 +6493,29 @@ mod arena_tests {
             .expect("the chain carries an instead override")
     }
 
-    /// CR 111.1 + CR 608.2c: "create two of those tokens instead" binds through
-    /// the declared `TokenCreator` role to the token creation it restates, not
-    /// to the chain's first instruction (Conquest Mission's quest counter).
+    /// CR 111.1 + CR 608.2c: Conquest Mission, verbatim. "Create two of those
+    /// tokens instead" restates the Borg creation, which the parser declares by
+    /// `ClauseId`; the quest-counter instruction, printed first, stays the
+    /// unconditional head.
     #[test]
-    fn those_tokens_instead_binds_the_token_creator_role_not_the_first_instruction() {
-        let def = parse_effect_chain(
-            "Put a quest counter on ~. Create a 1/1 colorless Borg artifact creature token. If ~ has six or more quest counters on it, create two of those tokens instead.",
-            AbilityKind::Spell,
+    fn conquest_mission_instead_binds_its_declared_token_clause() {
+        use crate::parser::oracle::parse_oracle_text;
+        let parsed = parse_oracle_text(
+            "Whenever a nontoken artifact you control enters, put a quest counter on this enchantment. Create a 1/1 colorless Borg artifact creature token. If this enchantment has six or more quest counters on it, create two of those tokens instead.",
+            "Conquest Mission",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
         );
+        let def = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("the trigger has an effect");
         assert!(
             matches!(def.effect.as_ref(), Effect::PutCounter { .. }),
             "the counter stays the unconditional head: {def:?}"
         );
-        let (antecedent, override_def) = instead_antecedent(&def);
+        let (antecedent, override_def) = instead_antecedent(def);
         assert_eq!(
             token_name(antecedent),
             Some("Borg"),
@@ -6507,26 +6528,52 @@ mod arena_tests {
         );
     }
 
-    /// Forced diagonal for the same binding: with a second, EARLIER token
-    /// creation (a Treasure) and a non-token instruction between, the role's
-    /// `LastWithRole` selector must bind the Borg — neither the first emitted
-    /// def (the Treasure) nor the last emitted one (the quest counter).
+    /// The declaration itself, read off the parsed IR: the override clause names
+    /// the Borg clause's `ClauseId`, not the counter clause's.
     #[test]
-    fn those_tokens_instead_binds_the_nearest_token_creator_past_other_instructions() {
-        let def = parse_effect_chain(
-            "Create a Treasure token. Create a 1/1 colorless Borg artifact creature token. Put a quest counter on ~. If ~ has six or more quest counters on it, create two of those tokens instead.",
+    fn those_tokens_instead_declares_the_token_clause_id() {
+        let ir = parse_effect_chain_ir(
+            "Put a quest counter on ~. Create a 1/1 colorless Borg artifact creature token. If ~ has six or more quest counters on it, create two of those tokens instead.",
             AbilityKind::Spell,
+            &mut ParseContext::default(),
         );
-        let (antecedent, override_def) = instead_antecedent(&def);
-        assert_eq!(
-            token_name(antecedent),
-            Some("Borg"),
-            "bound to the Borg creation, got {antecedent:?}"
+        let token_clause = ir
+            .clauses
+            .iter()
+            .find(|clause| matches!(clause.parsed.effect, Effect::Token { .. }))
+            .expect("the Borg clause")
+            .id;
+        let declared = ir
+            .clauses
+            .iter()
+            .find_map(|clause| match &clause.disposition {
+                ClauseDisposition::ReplaceMeaning {
+                    kind: ReplaceMeaningKind::Instead { antecedent, .. },
+                } => Some(*antecedent),
+                _ => None,
+            });
+        assert_eq!(declared, Some(Some(token_clause)));
+    }
+
+    /// SYNTHETIC binding test — no printed card has this shape. With two
+    /// token-creating clauses "those tokens" is ambiguous, so the parser
+    /// declares no antecedent rather than picking one by proximity.
+    #[test]
+    fn synthetic_ambiguous_those_tokens_declares_no_antecedent() {
+        let ir = parse_effect_chain_ir(
+            "Create a Treasure token. Create a 1/1 colorless Borg artifact creature token. If ~ has six or more quest counters on it, create two of those tokens instead.",
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
         );
-        assert_eq!(
-            token_name(override_def),
-            Some("Borg"),
-            "the override restates the Borg token only: {override_def:?}"
-        );
+        let declared = ir
+            .clauses
+            .iter()
+            .find_map(|clause| match &clause.disposition {
+                ClauseDisposition::ReplaceMeaning {
+                    kind: ReplaceMeaningKind::Instead { antecedent, .. },
+                } => Some(*antecedent),
+                _ => None,
+            });
+        assert_eq!(declared, Some(None));
     }
 }
