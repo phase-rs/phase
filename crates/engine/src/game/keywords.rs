@@ -346,44 +346,121 @@ pub fn effective_harmonize_cost(state: &GameState, object_id: ObjectId) -> Optio
 /// graveyard, honoring off-zone keyword grants in addition to a printed
 /// `Keyword::BeamMeUp`. Resolves `ManaCost::SelfManaCost` (a grant whose cost
 /// equals the card's mana cost, e.g. Scotty, Miracle Worker) via
-/// `resolve_keyword_mana_cost`, mirroring `effective_harmonize_cost`. The
-/// keyword's rule number needs manual verification.
+/// `resolve_keyword_mana_cost`, mirroring `effective_harmonize_cost`. This is
+/// the cost of the first instance `beam_me_up_instances` lists. The keyword's
+/// rule number needs manual verification.
 pub fn effective_beam_me_up_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
-    let keyword = effective_keyword_for_object(state, object_id, KeywordKind::BeamMeUp)?;
-    match keyword {
-        Keyword::BeamMeUp(cost) => Some(resolve_keyword_mana_cost(state, object_id, &cost)),
-        _ => None,
-    }
+    beam_me_up_instances(state, object_id)
+        .into_iter()
+        .next()
+        .map(|instance| instance.cost)
 }
 
-/// CR 601.2b + CR 613.1f: the object whose static grants the beam me up
-/// `object_id` would be cast with — `None` for a printed beam me up (or none at
-/// all). Read off the same off-zone keyword contribution
-/// `effective_beam_me_up_cost` resolves, so the latched granter and the cost
-/// always come from one beam me up instance. Latched on
-/// `CastingVariant::BeamMeUp { granted_by }` at announcement, because the card
-/// leaves the graveyard for the stack (CR 601.2a) before the return is paid.
-/// Beam me up rule number: needs manual verification.
+/// One instance of beam me up on a card: its resolved cost and the object whose
+/// static grants it (`None` for a printed beam me up or a transient grant).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeamMeUpInstance {
+    pub cost: ManaCost,
+    pub granted_by: Option<ObjectIncarnationRef>,
+}
+
+/// CR 113.2c + CR 613.1f: every beam me up instance `object_id` has, in the
+/// order of its keyword contributions. The single authority for both the beam
+/// me up cost and the granter: each instance functions independently, so two
+/// Scottys give a graveyard card two instances, each scoping its own "can't be
+/// beamed up to cast a spell this way" prohibition. Beam me up rule number:
+/// needs manual verification.
+pub fn beam_me_up_instances(state: &GameState, object_id: ObjectId) -> Vec<BeamMeUpInstance> {
+    let mut instances: Vec<BeamMeUpInstance> = Vec::new();
+    let contributions =
+        crate::game::off_zone_characteristics::effective_off_zone_keyword_contributions(
+            state, object_id,
+        )
+        .into_iter()
+        .filter_map(|entry| {
+            let Keyword::BeamMeUp(cost) = &entry.keyword else {
+                return None;
+            };
+            let granted_by = match entry.origin {
+                Some(TriggerProducerOrigin::Static { source, .. }) => Some(source),
+                // A transient grant's source is a resolved spell or ability,
+                // which carries no functioning "this way" prohibition; a
+                // printed keyword has no granter.
+                Some(TriggerProducerOrigin::Transient { .. }) | None => None,
+            };
+            Some(BeamMeUpInstance {
+                cost: resolve_keyword_mana_cost(state, object_id, cost),
+                granted_by,
+            })
+        });
+    for instance in contributions {
+        if !instances.contains(&instance) {
+            instances.push(instance);
+        }
+    }
+    instances
+}
+
+/// CR 601.2b + CR 613.1f: the granter of the beam me up instance `object_id`
+/// is announced with — the first instance's, so the announced granter and
+/// `effective_beam_me_up_cost` always come from one instance. `None` for a
+/// printed beam me up (or none at all). Latched on
+/// `CastingVariant::BeamMeUp { granted_by }` at announcement. The engine keeps
+/// the card in its graveyard until the cast finalizes, but the granter can
+/// leave mid-cast (a mana ability that sacrifices it), and the latched
+/// incarnation then binds nothing (CR 400.7). The return choice may move the
+/// latch to another instance with the same cost
+/// (`beam_me_up_granter_for_return`). Beam me up rule number: needs manual
+/// verification.
 pub fn beam_me_up_granted_by(
     state: &GameState,
     object_id: ObjectId,
 ) -> Option<ObjectIncarnationRef> {
-    let obj = state.objects.get(&object_id)?;
-    if obj.zone == Zone::Battlefield {
-        return None;
+    beam_me_up_instances(state, object_id)
+        .into_iter()
+        .next()
+        .and_then(|instance| instance.granted_by)
+}
+
+/// CR 113.2c + CR 601.2b: the granters a beam me up cast latched to `latched`
+/// may be paid through. Each instance with the cost the cast pays (the first
+/// instance's) is interchangeable except for its own "this way" prohibition,
+/// so the return is legal if any of them admits it. `latched` comes first; it
+/// stays in the set after its granter leaves, where it binds nothing.
+/// Instances with a different cost are a different alternative cost and are
+/// not merged. Beam me up rule number: needs manual verification.
+pub fn beam_me_up_return_granters(
+    state: &GameState,
+    object_id: ObjectId,
+    latched: Option<ObjectIncarnationRef>,
+) -> Vec<Option<ObjectIncarnationRef>> {
+    let instances = beam_me_up_instances(state, object_id);
+    let mut granters = vec![latched];
+    if let Some(cast_cost) = instances.first().map(|instance| instance.cost.clone()) {
+        for instance in instances {
+            if instance.cost == cast_cost && !granters.contains(&instance.granted_by) {
+                granters.push(instance.granted_by);
+            }
+        }
     }
-    crate::game::off_zone_characteristics::effective_off_zone_keyword_contributions(
-        state, object_id,
-    )
-    .into_iter()
-    .find(|entry| entry.keyword.kind() == KeywordKind::BeamMeUp)
-    .and_then(|entry| match entry.origin {
-        Some(TriggerProducerOrigin::Static { source, .. }) => Some(source),
-        // A transient grant's source is a resolved spell or ability, which
-        // carries no functioning "this way" prohibition; a printed keyword has
-        // no granter.
-        Some(TriggerProducerOrigin::Transient { .. }) | None => None,
-    })
+    granters
+}
+
+/// CR 601.2b + CR 601.2h: the granter whose beam me up instance makes
+/// returning `returned` legal, latched once the return is chosen — `latched`
+/// when it already admits it, else the first other interchangeable granter
+/// (`beam_me_up_return_granters`) that does. Beam me up rule number: needs
+/// manual verification.
+pub fn beam_me_up_granter_for_return(
+    state: &GameState,
+    object_id: ObjectId,
+    latched: Option<ObjectIncarnationRef>,
+    returned: ObjectId,
+) -> Option<ObjectIncarnationRef> {
+    beam_me_up_return_granters(state, object_id, latched)
+        .into_iter()
+        .find(|&granter| can_be_beamed_up(state, returned, granter))
+        .unwrap_or(latched)
 }
 
 /// CR 702.190a: Effective Sneak alt-cost for an object, honoring off-zone characteristic

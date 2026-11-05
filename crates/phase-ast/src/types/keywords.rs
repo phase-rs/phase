@@ -2352,6 +2352,13 @@ impl Keyword {
     ///   silently lost. (Bloodthirst carries a `BloodthirstValue`, so the
     ///   granted-count is per DISTINCT value — a granted `bloodthirst 3` and a
     ///   printed `bloodthirst 1` never dedup regardless.)
+    /// - **Instance identity** (CR 113.2c): beam me up (TRK) scopes a "can't be
+    ///   beamed up to cast a spell this way" prohibition to the instance a cast
+    ///   uses, so two identical grants (two Scotty, Miracle Workers) are two
+    ///   instances whose granters both matter: through either one's grant the
+    ///   other Scotty is a legal return. Deduping them would leave only one
+    ///   granter and bar one return. Beam me up rule number needs manual
+    ///   verification.
     ///
     /// Distinct from `instances_function_separately` (which gates per-instance
     /// TRIGGER installation, and deliberately excludes Sunburst because its
@@ -2366,7 +2373,7 @@ impl Keyword {
     pub fn instances_must_coexist(&self) -> bool {
         matches!(
             self,
-            Keyword::Toxic(_) | Keyword::Sunburst | Keyword::Bloodthirst(_)
+            Keyword::Toxic(_) | Keyword::Sunburst | Keyword::Bloodthirst(_) | Keyword::BeamMeUp(_)
         )
     }
 

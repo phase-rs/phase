@@ -5419,6 +5419,20 @@ pub(crate) fn handle_return_to_hand_for_cost(
             ));
         }
     }
+    // CR 113.2c + CR 601.2b: the return choice offered every creature some
+    // interchangeable beam me up instance admits; latch the instance that makes
+    // this return legal, so the cast records the grant it was paid through.
+    if let (CastingVariant::BeamMeUp { granted_by }, [returned]) = (pending.casting_variant, chosen)
+    {
+        pending.casting_variant = CastingVariant::BeamMeUp {
+            granted_by: super::keywords::beam_me_up_granter_for_return(
+                state,
+                pending.object_id,
+                granted_by,
+                *returned,
+            ),
+        };
+    }
 
     if let Some(ability_index) = pending.activation_ability_index {
         if let Some(cost) = pending.activation_cost.take() {
@@ -10340,7 +10354,9 @@ fn cast_variant_cost_residual(
         CastingVariant::Retrace => return Some(retrace_discard_land_cost()),
         CastingVariant::JumpStart => return Some(jumpstart_discard_card_cost()),
         CastingVariant::BeamMeUp { granted_by } => {
-            return Some(beam_me_up_return_creature_cost(granted_by))
+            return Some(beam_me_up_return_creature_cost(
+                &super::keywords::beam_me_up_return_granters(state, object_id, granted_by),
+            ))
         }
         _ => {}
     }
@@ -13029,35 +13045,52 @@ pub(super) fn can_pay_jumpstart_additional_cost(
 /// The single constructor of beam me up's additional cost, read by both the
 /// payment residual (`cast_variant_cost_residual`) and the affordability
 /// precheck (`can_pay_beam_me_up_additional_cost`), so they cannot diverge.
-/// `granted_by` is the latched granter of the beam me up being cast (`None`
-/// when printed); it scopes that granter's "can't be beamed up to cast a spell
-/// this way" prohibition (Scotty, Miracle Worker's "return another creature").
-// CR 118.8 + CR 601.2h: "if you also return a creature you control to its owner's hand"; CR 101.2: FilterProp::CanBeBeamedUp honors "can't be beamed up". Beam me up rule number needs manual verification.
+/// `granters` are the interchangeable beam me up instances the cast may be
+/// paid through (`keywords::beam_me_up_return_granters`; `None` for a printed
+/// one). Each scopes its own "can't be beamed up to cast a spell this way"
+/// prohibition (Scotty, Miracle Worker's "return another creature"), and a
+/// creature is a legal return when any instance admits it, so with two
+/// Scottys either one may be returned through the other's grant.
+// CR 118.8 + CR 601.2h: "if you also return a creature you control to its owner's hand"; CR 101.2: FilterProp::CanBeBeamedUp honors "can't be beamed up"; CR 113.2c: each instance functions independently. Beam me up rule number needs manual verification.
 pub(super) fn beam_me_up_return_creature_cost(
-    granted_by: Option<crate::types::identifiers::ObjectIncarnationRef>,
+    granters: &[Option<crate::types::identifiers::ObjectIncarnationRef>],
 ) -> AbilityCost {
-    AbilityCost::ReturnToHand {
-        count: 1,
-        filter: Some(TargetFilter::Typed(
+    let returnable = |granted_by| {
+        TargetFilter::Typed(
             TypedFilter::creature()
                 .controller(crate::types::ability::ControllerRef::You)
                 .properties(vec![crate::types::ability::FilterProp::CanBeBeamedUp {
                     granted_by,
                 }]),
-        )),
+        )
+    };
+    let filter = match granters {
+        [] => returnable(None),
+        [granted_by] => returnable(*granted_by),
+        _ => TargetFilter::Or {
+            filters: granters.iter().copied().map(returnable).collect(),
+        },
+    };
+    AbilityCost::ReturnToHand {
+        count: 1,
+        filter: Some(filter),
         from_zone: None,
     }
 }
 
 /// CR 118.3: a beam me up cast is legal only while its additional cost can be
-/// paid fully — a creature you control that can be beamed up.
+/// paid fully — a creature you control that some interchangeable beam me up
+/// instance lets you return.
 pub(super) fn can_pay_beam_me_up_additional_cost(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
     granted_by: Option<crate::types::identifiers::ObjectIncarnationRef>,
 ) -> bool {
-    beam_me_up_return_creature_cost(granted_by).is_payable_for_spell(state, player, object_id)
+    beam_me_up_return_creature_cost(&super::keywords::beam_me_up_return_granters(
+        state, object_id, granted_by,
+    ))
+    .is_payable_for_spell(state, player, object_id)
 }
 
 /// CR 601.2f: What the lock seam at the head of [`pay_and_push_with_lock`] needs

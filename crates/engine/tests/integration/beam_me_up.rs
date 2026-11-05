@@ -15,7 +15,9 @@ use engine::ai_support::legal_actions;
 use engine::game::casting::current_casting_variant_choice_options;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::{AttachTarget, ObjectIncarnationRefExt};
-use engine::game::keywords::{beam_me_up_granted_by, can_be_beamed_up, effective_beam_me_up_cost};
+use engine::game::keywords::{
+    beam_me_up_granted_by, beam_me_up_instances, can_be_beamed_up, effective_beam_me_up_cost,
+};
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
@@ -25,7 +27,8 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{
-    CastPaymentMode, CastingVariant, CastingVariantChoiceOption, PayCostKind, WaitingFor,
+    CastPaymentMode, CastingVariant, CastingVariantChoiceOption, PayCostKind, StackEntryKind,
+    WaitingFor,
 };
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::keywords::Keyword;
@@ -1821,6 +1824,11 @@ fn scotty_leaving_before_the_return_is_paid_leaves_the_cast_intact() {
         );
     };
     assert_eq!(choices, vec![bears], "Scotty is never a return choice");
+    // Deliberate shortcut: the legal mid-cast exit is a mana ability that
+    // sacrifices Scotty (CR 601.2g), which comes before the return prompt is
+    // answered (CR 601.2h). Moving Scotty directly while the prompt is open is
+    // the latest point the granter can leave, so it stresses the latch harder
+    // than any legal route; it stands for that route, not a game action.
     send_to_graveyard(&mut runner, scotty);
     assert!(
         !scotty_ref.is_current(runner.state()),
@@ -1873,11 +1881,12 @@ fn scotty_leaving_with_the_spell_on_the_stack_still_exiles_it() {
     assert_eq!(zone(&runner, sorcery), Zone::Exile, "then exile that spell");
 }
 
-/// S9 (CR 613.1f + CR 113.6b): two Scottys. Each grants beam me up, but a card
-/// still has one beam me up cost and is offered exactly once; the cast raises no
-/// variant choice; each Scotty is barred from being returned only through its
-/// own grant (so the other Scotty is a legal return); and when one leaves, the
-/// other's grant keeps the card castable.
+/// S9 (CR 613.1f + CR 113.2c + CR 601.2b): two Scottys. Each grants its own
+/// beam me up instance with the same cost, so a card is offered exactly once
+/// and the cast raises no variant choice; each Scotty is barred from being
+/// returned only through its own grant, so the return prompt offers both and
+/// either may be chosen, latching the other Scotty's grant; and when one
+/// leaves, the other's grant keeps the card castable.
 #[test]
 fn two_scottys_grant_once_and_one_leaving_keeps_the_other_grant() {
     fn stage() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
@@ -1908,40 +1917,68 @@ fn two_scottys_grant_once_and_one_leaving_keeps_the_other_grant() {
         (runner, first, second, sorcery)
     }
 
-    let (mut runner, first, second, sorcery) = stage();
-    assert_eq!(
-        effective_beam_me_up_cost(runner.state(), sorcery),
-        Some(cost(2, &[ManaCostShard::Blue])),
-        "one beam me up cost, not two"
-    );
-    let casts = legal_actions(runner.state())
-        .iter()
-        .filter(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == sorcery))
-        .count();
-    assert_eq!(casts, 1, "the cast is offered exactly once");
-
-    // Whichever Scotty is latched, the other is a legal return.
-    let latched = beam_me_up_granted_by(runner.state(), sorcery).expect("a Scotty grants it");
-    let latched_id = latched.object_id;
-    let other = if latched_id == first { second } else { first };
-    assert!(latched_id == first || latched_id == second);
-    let record = cast_with(&mut runner, sorcery, CastIntent::returning(other));
-    assert_eq!(
-        record.return_choices,
-        Some(vec![other]),
-        "only the non-granting Scotty is returnable; no variant choice raised"
-    );
-    assert!(record.variant_options.is_none());
-    pass_until_prompt(&mut runner);
-    assert_settled(&runner);
-    assert_eq!(zone(&runner, sorcery), Zone::Exile);
-    assert_eq!(zone(&runner, other), Zone::Hand);
+    // Each Scotty grants its own instance (CR 113.2c): through one Scotty's
+    // grant the other is returnable, so the single return prompt offers both,
+    // and choosing either latches the grant that makes that return legal.
+    for returned_index in [0, 1] {
+        let (mut runner, first, second, sorcery) = stage();
+        let pair = [first, second];
+        let returned = pair[returned_index];
+        let kept = pair[1 - returned_index];
+        assert_eq!(
+            effective_beam_me_up_cost(runner.state(), sorcery),
+            Some(cost(2, &[ManaCostShard::Blue])),
+            "one beam me up cost, not two"
+        );
+        assert_eq!(
+            beam_me_up_instances(runner.state(), sorcery).len(),
+            2,
+            "each Scotty grants its own instance"
+        );
+        let casts = legal_actions(runner.state())
+            .iter()
+            .filter(
+                |a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == sorcery),
+            )
+            .count();
+        assert_eq!(casts, 1, "the cast is offered exactly once");
+        let record = cast_with(&mut runner, sorcery, CastIntent::returning(returned));
+        assert_eq!(
+            record.return_choices.as_deref().map(set),
+            Some(set(&pair)),
+            "either Scotty is returnable through the other's grant"
+        );
+        assert!(record.variant_options.is_none(), "no variant choice raised");
+        let kept_ref = ObjectIncarnationRef::of(kept, runner.state().objects[&kept].incarnation);
+        let latched = runner
+            .state()
+            .stack
+            .iter()
+            .find_map(|entry| match entry.kind {
+                StackEntryKind::Spell {
+                    casting_variant: CastingVariant::BeamMeUp { granted_by },
+                    ..
+                } if entry.id == sorcery => Some(granted_by),
+                _ => None,
+            });
+        assert_eq!(
+            latched,
+            Some(Some(kept_ref)),
+            "the cast latched the grant of the Scotty that stayed"
+        );
+        pass_until_prompt(&mut runner);
+        assert_settled(&runner);
+        assert_eq!(zone(&runner, sorcery), Zone::Exile);
+        assert_eq!(zone(&runner, returned), Zone::Hand);
+        assert_eq!(zone(&runner, kept), Zone::Battlefield);
+    }
 
     // One granter leaves: the other's grant stays in place.
-    for leaving in [first, second] {
+    for leaving_index in [0, 1] {
         let (mut runner, first, second, sorcery) = stage();
-        let remaining = if leaving == first { second } else { first };
-        let leaving = if leaving == first { first } else { second };
+        let pair = [first, second];
+        let leaving = pair[leaving_index];
+        let remaining = pair[1 - leaving_index];
         send_to_graveyard(&mut runner, leaving);
         let granter = beam_me_up_granted_by(runner.state(), sorcery)
             .expect("the remaining Scotty still grants beam me up");
