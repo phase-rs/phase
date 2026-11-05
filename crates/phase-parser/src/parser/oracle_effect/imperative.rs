@@ -29112,7 +29112,8 @@ mod tests {
                 name: "X".to_string(),
             },
         });
-        let cases: &[(&str, Option<(PreventionAmount, Option<QuantityExpr>)>)] = &[
+        type Decomposition = Option<(PreventionAmount, Option<QuantityExpr>)>;
+        let cases: &[(&str, Decomposition)] = &[
             (
                 "all damage that would be dealt this turn",
                 Some((PreventionAmount::All, None)),
