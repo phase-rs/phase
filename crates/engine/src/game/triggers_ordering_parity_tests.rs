@@ -134,17 +134,23 @@ const CATEGORY_1_ROWS: &[&str] = &[
 /// Grouped by class; each entry carries its one-line safety argument (§7 ledger
 /// source of truth).
 const DOCUMENTED_OVER_PROMPT: &[&str] = &[
-    // Adaptive Training Post: its source-local charge-counter intervening-if
-    // and the corresponding TriggeringSource counter write are disjoint for
-    // same-event sibling triggers, so they commute. The conservative prompt
-    // remains fail-closed until that per-source proof is structural.
-    "adaptive training post",
     // Woodwork Prodigy: its source-local prepared intervening-if
     // ("if this creature isn't prepared") and the corresponding BecomePrepared
     // write targeting SelfRef are disjoint for same-event sibling triggers,
     // so they commute. The conservative prompt remains fail-closed until that
     // per-source proof is structural.
     "woodwork prodigy",
+    // Paradox Shaper: same trigger shape as Woodwork Prodigy (Phase/Upkeep +
+    // OnlyDuringYourTurn + Not(SourceMatchesFilter Prepared) +
+    // BecomePrepared SelfRef Single — all structural fields verified identical
+    // in the export): source-local prepared gate and SelfRef write are
+    // disjoint across same-event siblings. Same justification as the woodwork
+    // row; fail-closed prompt until the per-source proof is structural.
+    "paradox shaper",
+    // Stingerquill Voxmancer: same Woodwork Prodigy trigger shape as paradox
+    // shaper above (structural fields verified identical). Disjoint
+    // per-source gate/write; fail-closed prompt.
+    "stingerquill voxmancer",
     // ---- L8-held: a self-scoped write can flip a sibling's re-checked
     // intervening-if (CR 603.4), but the flip is monotone/self-limiting, so
     // identical siblings still commute semantically. The L8 idempotence recognizer
@@ -159,6 +165,24 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // falls) and self-limiting, so identical siblings commute up to relabeling — either
     // order sweeps the board and sacrifices exactly one of the two copies.
     "planar collapse",
+    // Eye of Jace: Phase upkeep trigger, no intervening-if — Surveil 1, then
+    // GraveyardSize GE 7-gated Sacrifice(SelfRef) + DamageEachPlayer(2) +
+    // GainLife(2) (gate repeated on each node, AST measured). Both copies
+    // always fire and resolve; the graveyard only GROWS within the group
+    // (surveil adds, nothing removes), so a true gate stays true, and the two
+    // surveils are one controller's sequential choices off a fixed library
+    // order with identical information in either order. Identical siblings
+    // commute up to relabeling (planar-collapse-style monotone argument).
+    "eye of jace",
+    // Impending Disaster: Phase upkeep trigger — Sacrifice(SelfRef) gated on
+    // ObjectCount(Lands) GE 7, then DestroyAll lands as a DEPENDENT sub
+    // (sub_link None, AST measured: suppressed with a false gate, never an
+    // independent sibling). The first resolution sees the pre-resolution
+    // count; on 7+ it sacs itself and wipes the lands, leaving the sibling's
+    // re-read at 0 so it stays. Either order: exactly one copy sacs (up to
+    // relabeling) and the wipe happens iff 7+ lands were present — monotone
+    // census fall + self-limiting, the planar collapse argument verbatim.
+    "impending disaster",
     // Mill membership write × ZoneCardCount(gy, Creature) self-transform threshold —
     // monotone graveyard growth.
     "deathbonnet sprout",
@@ -182,14 +206,20 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // optional self-return-from-graveyard — self-limiting (second copy breaks the
     // gate; issue #5983 fixture regen surfaced this card in the sweep corpus).
     "nether spirit",
+    // Darklight Phoenix: Phase combat trigger + QuantityComparison
+    // (ZoneChangeCountThisTurn Battlefield→Graveyard Creature GE 2) gate +
+    // ChangeZone SelfRef graveyard→battlefield (AST measured). The gate reads
+    // turn-history deaths; within the group no deaths occur (self-returns are
+    // not deaths), so both copies see the identical count at fire and
+    // re-check, and each returns only itself (disjoint graveyard referents).
+    // The death-count read × zone-change write conflict is conservative.
+    "darklight phoenix",
     // Control(another nonland) read × self-Sacrifice — self-limiting.
     "reclusive wight",
     // Not(SourceIsTapped) read × untap-ALL write — idempotent.
     "reveille squad",
     // Token write × ObjectCount == 13 self-sacrifice — equality over symmetric writes.
     "stensia uprising",
-    // Mill + self-exile + put-on-top writes × ZoneCardCount(Library == 0) read.
-    "stillness in motion",
     // ---- osseous-class: owner-keyed read × owner-misaligned write ----
     // DistinctCardTypes{your gy} GE 4 read × opponent-Sacrifice write that lands in
     // the sacrificed permanent's OWNER's graveyard (CR 701.21a): a control-changed
@@ -211,12 +241,98 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     "elvish soultiller",
     // ---- parse-blocked commutes (underneath the mis-parse, the structure
     // commutes) ----
-    // RemoveCounter{TriggeringSource} mis-parse (should be SelfRef): each removes
-    // its own time counter.
-    "deep-sea kraken",
-    // HasCounters(oil) mis-reads the source Golem (should be the entering creature):
-    // both writes are monotone oil-adds on the shared object.
-    "ichorplate golem",
+    // Event-object-routed "it becomes X" transformation grants: these 16 cards
+    // (17 triggers — hidden stag has two) parse the self-transformation ("it
+    // becomes ...") as a GenericEffect Continuous grant with target null and
+    // nested affected=TriggeringSource (AST measured on all 17 triggers), so
+    // each grant lands on the SHARED event object (the spell/land/entering
+    // creature) instead of the source — an "it"-pronoun mis-target that needs
+    // its own card-fix (see the issue #8500 full-db diagnosis). UNDERNEATH
+    // it, the S2 structure commutes: each copy's SourceMatchesFilter gate
+    // reads its OWN type (disjoint across siblings, and unaffected by grants
+    // that hit the event object rather than either copy), and both copies'
+    // grants are byte-identical modification lists (Set P/T, AddType, ...)
+    // applied to the same object — idempotent under the layer system, with no
+    // counters/piles/choices consumed. The spell-characteristic reads
+    // (veiled sentry's EventSource-MV P/T, opal titan's spell-color
+    // protection) are frozen event reads no sibling writes. The prompt is
+    // conservative: the event-object characteristics+membership write (the
+    // ability_rw.rs GenericEffect arm) defeats the disjointness rows.
+    // Hidden Ancients: SpellCast/Enchantment trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "hidden ancients",
+    // Hidden Herd: LandPlayed/nonbasic-land trigger, Enchantment self-gate —
+    // idempotent shared-land grant, commutes (proof in section banner).
+    "hidden herd",
+    // Hidden Gibbons: SpellCast/Instant trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "hidden gibbons",
+    // Hidden Spider: SpellCast/flying-Creature trigger, Enchantment
+    // self-gate — idempotent shared-spell grant, commutes (banner).
+    "hidden spider",
+    // Hidden Guerrillas: SpellCast/Artifact trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "hidden guerrillas",
+    // Hidden Stag: LandPlayed ×2 triggers (opponent-land/Enchantment-gate +
+    // own-land/Creature-gate) — both carry the shared-land grant shape and
+    // both commute per the banner (hence two diff lines, one ledger row).
+    "hidden stag",
+    // Opal Champion: SpellCast/Creature trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "opal champion",
+    // Opal Titan: SpellCast/Creature trigger, Enchantment self-gate, plus a
+    // frozen spell-color protection read — idempotent grant, commutes.
+    "opal titan",
+    // Opal Gargoyle: SpellCast/Creature trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "opal gargoyle",
+    // Opal Acrolith: SpellCast/Creature trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "opal acrolith",
+    // Opal Caryatid: SpellCast/Creature trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "opal caryatid",
+    // Opal Archangel: SpellCast/Creature trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "opal archangel",
+    // Veiled Sentry: SpellCast(any) trigger, Enchantment self-gate, plus a
+    // frozen EventSource-MV P/T read — idempotent grant, commutes (banner).
+    "veiled sentry",
+    // Veiled Apparition: SpellCast(any) trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "veiled apparition",
+    // Veil of Birds: SpellCast(any) trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "veil of birds",
+    // Lurking Skirge: ChangesZone (creature→opponent-graveyard) trigger,
+    // Enchantment self-gate — idempotent grant on the shared dead creature,
+    // commutes (proof in section banner).
+    "lurking skirge",
+    // Romulan Bird-of-Prey: SpellCast(noncreature) + Not(SourceMatchesFilter
+    // Creature) per-source gate + PutCounter charge×2 → TriggeringSource (AST
+    // measured; Oracle "it" = the spacecraft — mistargeted to the cast spell,
+    // separate card-fix). Gates are disjoint per-copy reads; both copies add
+    // 2 charge to the SAME spell — additive (2+2 either order) — and the gate
+    // re-check reads only the copy's own type. Commutes.
+    "romulan bird-of-prey",
+    // Tactical Officer: YouAttack + EventTime(PropertyAggregate power GE 8)
+    // fire-time gate (evaluated at trigger time; the GE quantity is monotone
+    // within the group — each copy's +1/+1 only raises total power, so a
+    // fired gate stays fired at any re-check) + PutCounter P1P1 SelfRef
+    // (disjoint) + SetTapState Untap TriggeringSource (AST measured; Oracle
+    // "it" = the officer — mistargeted to the attack event's source, i.e. the
+    // sole attacker or a no-op; separate card-fix; idempotent either way). No
+    // flippable shared state. Commutes.
+    "tactical officer",
+    // ---- same-event additive shared writes with per-source gates (correct
+    // parses) ----
+    // Support Mission: ChangesZone ETB trigger (no intervening-if) —
+    // quest+1 SelfRef (disjoint per-copy piles) + ConditionInstead(own quest
+    // GE 5) → P1P1×2 ParentTarget else P1P1×1 TriggeringSource, both routed
+    // to the shared entering creature ("that creature", AST measured). Each
+    // copy's +1/+1 amount is fixed by its OWN quest count, which no sibling
+    // writes — the total added is the sum, order-independent. Commutes.
+    "support mission",
     // ---- owner-misalignment (osseous-class), batch — aligned-safe via sum-symmetry ----
     // dies-batch GainLife{ZoneCardCount(your gy, Creature)} + self-exile-from-gy:
     // the count-read × graveyard-self-exile is a genuine structural RW conflict, so
@@ -249,6 +365,18 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // Exploration misparse-fix fixture regen surfaced this card in the sweep
     // corpus; same adjudication as the #7031 branch).
     "arashin sovereign",
+    // ---- batch: symmetric shared-hand wheel (correct parse) ----
+    // U.S.S. Enterprise-C, Time-Tossed: dies-self trigger (BATCH; the ETB
+    // twin is self_ref-exempt from S2 and a non-departure): optional Discard
+    // hand + Draw #discarded (FilteredTrackedSetSize, AST measured). Two
+    // co-departing copies wheel sequentially off a fixed library order —
+    // A-then-B discards N, draws top-N, discards those, draws next-N;
+    // B-then-A draws the same 2N cards into the same slots. Final
+    // hand/graveyard/library identical; the per-resolution "may" (CR 603.5)
+    // is symmetric. NOT great desert hellion: hellion draws per-source
+    // Intensity (a≠b → order-dependent); this draws the tracked discard
+    // count (shared-hand-determined → symmetric). Commutes.
+    "u.s.s. enterprise-c, time-tossed",
     // ---- commander-census read × token-creation write (CR 903.3d) ----
     // "At the beginning of your upkeep, if you control a commander, create a token
     // that's a copy of this creature." The CR 603.4 intervening-if is a LIVE
@@ -290,6 +418,9 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // folded in here. The `over_prompt_hit members` line printed above the
     // assertion names the consumed set directly, so the next maintainer need not
     // re-derive it.
+    // UPDATE (Nov 2026 full-db reconciliation, issue #8500): those 18 landed
+    // as their own rows in this const (the "event-object-routed
+    // transformation grants" section plus "impending disaster").
     "biowaste blob",
     // ---- dynamic P/T read of frozen or per-source objects (CR 603.10a) ----
     // Token P/T = total power of the co-departed batch: a frozen LKI read no sibling's
@@ -313,6 +444,26 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // control" to the acting opponent; the pre-regen fixture carried
     // controller You, which the discriminator auto-ordered.
     "reservoir kraken",
+    // Dies self-return stamped by the CR 603.6 + CR 400.7e origin walk (AST
+    // measured): the inner ChangeZone is pinned to origin=Graveyard,
+    // target=SelfRef where the pre-regen fixture carried origin=null /
+    // target=TriggeringSource, which the batch discriminator auto-ordered.
+    // Each co-departing member returns ITS OWN source from its own graveyard
+    // departure — disjoint SelfRef referents, no shared pile, counter, or
+    // choice consumed — so identical siblings commute up to relabeling. The
+    // flipped prompt is fail-closed (CR 603.3b choice preserved), not
+    // rules-required. Class closed at 3: the export carries no other stamped
+    // self-return dies-aura.
+    "bronzehide lion",
+    // Same stamped self-return shape as bronzehide lion, plus a WasType(Creature)
+    // intervening-if ("if it was a creature"): the condition reads each member's
+    // OWN pre-departure type (per-source LKI, CR 608.2h), still disjoint, so the
+    // members commute. Fail-closed over-prompt, not genuine.
+    "harold and bob, first numens",
+    // Same stamped self-return shape as bronzehide lion, plus WasType(Creature)
+    // ("if it was a creature") — per-source condition read, disjoint referents,
+    // members commute. Fail-closed over-prompt, not genuine.
+    "old-growth troll",
 ];
 
 /// Batch-depth GENUINE order-dependence (kept SEPARATE from the same-event
@@ -959,11 +1110,26 @@ fn ordering_parity_sweep() {
             floor_hadcounters_batch_self >= 1,
             "HadCounters batch_self auto floor: {floor_hadcounters_batch_self} < 1"
         );
-        // retained_prompt: measured 285 @ b1b3c873e; floor = ⌈285·0.95⌉. Makes the D5
+        // retained_prompt: measured 266 @ ea0327b0b (Nov 2026 full-db
+        // reconciliation, issue #8500); floor = ⌈266·0.95⌉. Makes the D5
         // legacy-prompt override population a real regression tripwire (M4 → 0).
+        // Re-pinned from 271 (measured 285 @ b1b3c873e — a local measurement
+        // commit absent upstream, irreproducible from repo state since
+        // card-data.json is gitignored): the Nov-1→Nov-4 parser window rebound
+        // 27 self-return dies triggers from legacy event-context refs (origin
+        // null / target TriggeringSource) to precise origin=Graveyard /
+        // target=SelfRef — the d208c0c18 (#8851) whole-chain origin stamp,
+        // verified trigger-by-trigger across all 27 (mover list in the
+        // reconciliation PR body; zero gaps introduced, zero joiners). 24 went
+        // precise-auto (sound: disjoint SelfRef self-returns); 3 (bronzehide
+        // lion, harold and bob, old-growth troll) stayed prompt as documented
+        // over-prompts in DOCUMENTED_OVER_PROMPT. No sweep/profile code changed
+        // in the window (only a test-only commit touches those files), and the
+        // fixture-subset count pinned (75=75 across the window), so the
+        // export-side movement is fully accounted.
         assert!(
-            floor_retained_prompt >= 271,
-            "retained-prompt floor: {floor_retained_prompt} < 271"
+            floor_retained_prompt >= 253,
+            "retained-prompt floor: {floor_retained_prompt} < 253"
         );
         // t1_source_indep: measured 2871 @ b1b3c873e; floor = ⌊2871·0.95⌋.
         // Deterministic tripwire for the `source_independent` predicate (M1 → 0).

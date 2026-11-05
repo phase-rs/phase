@@ -4705,6 +4705,144 @@ fn repeated_unattach_activation_witness(
     (runner, source, [first, second])
 }
 
+/// Synthetic witness for a TWO-slot `UnattachFrom` leg. No printed card has a
+/// multi-attachment unattach cost (Captain America, First Avenger is the only
+/// `AbilityCost::UnattachFrom` card and its count is 1), so the distinctness
+/// conjunct — which a one-slot leg cannot distinguish — needs a count-2 leg.
+/// The nearest printed card is named as the justification for the shape; the
+/// behavior under test is CR 118.3 + CR 601.2h ("one object can't pay two
+/// slots"), not a claim about any printed card.
+fn two_slot_unattach_activation_witness() -> (
+    GameRunner,
+    engine::types::identifiers::ObjectId,
+    [engine::types::identifiers::ObjectId; 2],
+) {
+    let unattach = AbilityCost::UnattachFrom {
+        filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+        count: 2,
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Two-Slot Unattach Activation Witness", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(unattach),
+        )
+        .id();
+    let first = scenario
+        .add_creature(P0, "First Two-Slot Unattach Witness", 0, 1)
+        .as_artifact()
+        .id();
+    let second = scenario
+        .add_creature(P0, "Second Two-Slot Unattach Witness", 0, 1)
+        .as_artifact()
+        .id();
+    let mut runner = scenario.build();
+    for attachment in [first, second] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&attachment)
+            .unwrap()
+            .attached_to = Some(AttachTarget::Object(source));
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .attachments
+            .push(attachment);
+    }
+    (runner, source, [first, second])
+}
+
+/// CR 118.3 + CR 601.2h: a count-2 unattach leg needs two DISTINCT attachments.
+/// Submitting the same id twice passes the raw count (2 == 2) and detaches it
+/// once, so the leg is "paid" with one object — the duplicate guard must refuse
+/// it before any state changes, and the prompt must stay answerable.
+///
+/// Revert probe: at base the handler has no distinctness check, so `[a, a]`
+/// reaches the detach loop and the activation reaches the stack — the
+/// `expect_err` (and the exact-message assertion) panics.
+#[test]
+fn unattach_cost_rejects_the_same_attachment_for_two_slots() {
+    let (mut runner, source, [first, second]) = two_slot_unattach_activation_witness();
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the two-slot unattach cost surfaces its payment prompt");
+
+    match runner.state().waiting_for.clone() {
+        WaitingFor::PayCost {
+            kind: PayCostKind::UnattachFrom { .. },
+            count,
+            min_count,
+            ..
+        } => assert_eq!(
+            (count, min_count),
+            (2, 2),
+            "the prompt advertises the leg's exact cardinality"
+        ),
+        other => panic!("expected PayCost UnattachFrom, got {other:?}"),
+    }
+
+    let duplicate = runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, first],
+        })
+        .expect_err("CR 118.3: one attachment cannot pay two slots");
+    let engine::game::EngineError::InvalidAction(message) = &duplicate else {
+        panic!("a repeated attachment must be an InvalidAction, got {duplicate:?}");
+    };
+    assert_eq!(
+        message, "Cannot unattach the same attachment more than once for a cost",
+        "the distinctness guard must be what rejected the payment"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PayCost {
+            kind: PayCostKind::UnattachFrom { .. },
+            ..
+        }
+    ));
+    for attachment in [first, second] {
+        assert!(
+            runner.state().objects[&attachment].attached_to.is_some(),
+            "a rejected payment must not detach anything"
+        );
+        assert_eq!(runner.state().objects[&attachment].zone, Zone::Battlefield);
+    }
+    assert_eq!(runner.state().stack.len(), 0, "no stack entry on refusal");
+
+    // Reach guard: two distinct attachments pay the two-slot leg.
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, second],
+        })
+        .expect("two distinct attachments pay the two-slot cost");
+    for attachment in [first, second] {
+        assert!(
+            runner.state().objects[&attachment].attached_to.is_none(),
+            "each paid attachment detaches"
+        );
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "the activation reaches the stack"
+    );
+}
+
 #[test]
 fn repeated_and_one_of_interactive_activation_costs_surface_each_unpaid_leg() {
     for one_of in [false, true] {

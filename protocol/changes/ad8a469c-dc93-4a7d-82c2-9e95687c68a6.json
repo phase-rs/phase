@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Add WaitingFor::DigBottomOrder prompt for ordering looked-at cards on the library bottom (Petals of Insight)"
+}

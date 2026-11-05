@@ -31,6 +31,7 @@ use super::oracle_ir::feature::{
 };
 use super::oracle_nom::error::OracleError;
 use super::oracle_nom::primitives::{scan_contains, scan_preceded, split_sentence_units};
+use super::oracle_nom::quantity::parse_using_mana_produced_by_head;
 use super::oracle_target::{
     parse_block_pairing_clause, parse_source_blocked_history_clause, BlockPairingForm,
     CombatRelationSubjectWord,
@@ -38,15 +39,15 @@ use super::oracle_target::{
 use super::oracle_trigger::parse_distributed_x_cost_condition;
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission,
-    ChooseFromZoneConstraint, CoinFlipRun, CombatHistoryScope, CombatRelation,
-    CombatRelationSubject, Comparator, ContinuousModification, CopyRetargetPermission,
-    DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, ManaProduction,
-    ModalSelectionConstraint, OpponentMayScope, ParsedCondition, PerPlayerScope, PlayerFilter,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    RestrictionExpiry, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayScaling,
-    ZoneOwner,
+    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastManaObjectScope,
+    CastManaSpentMetric, CastingPermission, ChooseFromZoneConstraint, CoinFlipRun,
+    CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator, ContinuousModification,
+    CopyRetargetPermission, DamageModification, DelayedTriggerCondition, Duration, Effect,
+    FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope, ParsedCondition,
+    PerPlayerScope, PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, RestrictionExpiry, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, UnlessPayScaling, ZoneOwner,
 };
 use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
@@ -230,6 +231,7 @@ pub(crate) fn check_swallowed_clauses(
         detect_duration_this_turn(&cleaned, fragment, &evidence, &mut found);
         detect_combat_history_relation(&cleaned, fragment, &evidence, &mut found);
         detect_combat_pairing_relation(&cleaned, fragment, &evidence, &mut found);
+        detect_cast_mana_source_qualifier(&cleaned, fragment, &evidence, &mut found);
         detect_duration_next_turn(&cleaned, fragment, &evidence, &mut found);
         detect_optional_may_have(&cleaned, fragment, &evidence, &mut found);
         detect_apnap(&cleaned, fragment, &scoped, &mut found);
@@ -3361,6 +3363,28 @@ fn detect_dynamic_qty(
     if per_opponent_choices_cover_all_for_each_markers(cleaned, &markers, scoped) {
         return;
     }
+    // CR 406.3a + CR 611.2a: "For each card exiled this way, the player who
+    // exiled it may play it" (Vulcan Mind-Meld) distributes one grant per
+    // exiled card; its carrier is the per-object `PermissionGrantee::ObjectExiler`
+    // binding, not a `QuantityExpr`.
+    if markers == ["for each "]
+        && cleaned
+            .match_indices("for each ") // allow-noncombinator: swallow detector marker scan on classified text
+            .all(|(idx, _)| {
+                crate::parser::oracle_effect::is_object_exiler_play_grant(&cleaned[idx..])
+            })
+        && evidence.any_effect(|e| {
+            matches!(
+                e,
+                Effect::GrantCastingPermission {
+                    grantee: crate::types::ability::PermissionGrantee::ObjectExiler,
+                    ..
+                }
+            )
+        })
+    {
+        return;
+    }
     // CR 608.2c: each printed "For each <population>," is represented by its own
     // distinct co-scoped player_scope + ParentTarget iteration (occurrence-counted
     // per population); an unmatched occurrence is a swallowed clause.
@@ -6401,6 +6425,41 @@ fn detect_combat_pairing_relation(
     }
 }
 
+// ── Detector S: CastManaSourceQualifier ─────────────────────────────────
+
+/// CR 106.3 + CR 601.2h: "whenever you cast <spell> using mana produced by <source>"
+/// restricts the trigger event to spells paid for with that source's mana. The clause
+/// must surface as a `FromSource` read of the triggering spell's payment; otherwise the
+/// trigger fires on every matching spell. The audit reads un-normalized text, so only
+/// the name-independent head is scanned: `cleaned` holds the card's name, never `~`.
+/// CR 201.5: the source named is the card itself, so only a `SelfRef` source filter
+/// represents the clause; a `FromSource` read of some other source does not.
+fn detect_cast_mana_source_qualifier(
+    cleaned: &str,
+    original: &str,
+    evidence: &UnitEvidence,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
+    let represented = evidence.any_quantity_ref(|qty| {
+        matches!(
+            qty,
+            QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::TriggeringSpell,
+                metric: CastManaSpentMetric::FromSource {
+                    source_filter: TargetFilter::SelfRef,
+                },
+            }
+        )
+    });
+    if !represented && scan_preceded(cleaned, parse_using_mana_produced_by_head).is_some() {
+        diagnostics.push(OracleDiagnostic::swallowed_clause(
+            OracleSemanticFeature::CastManaSourceQualifier.detector_label(),
+            truncate(original, 140),
+            None,
+        ));
+    }
+}
+
 /// The `CombatRelationSubject` a pairing clause's subject denotes when it is
 /// represented: the source for "it" / "~" / "this creature", the parent
 /// target for "target creature".
@@ -6581,12 +6640,13 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode,
-        CardSelectionMode, CastFromZoneDriver, ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
-        Comparator, ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
-        EffectOutcomeSignal, FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition,
-        PlayerFilter, QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
-        StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, UnlessPayModifier,
-        ZoneChoiceCandidateSource, ZoneOwner,
+        CardSelectionMode, CastFromZoneDriver, CastManaObjectScope, CastManaSpentMetric,
+        ChooseFromZoneConstraint, ChooseOneOfKind, Chooser, Comparator, ContinuousModification,
+        CopyRetargetPermission, DamageModification, Effect, EffectOutcomeSignal, FilterProp,
+        ManaProduction, OutsideGameSourcePool, ParsedCondition, PlayerFilter, QuantityExpr,
+        QuantityRef, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+        TargetFilter, TriggerCondition, TypedFilter, UnlessPayModifier, ZoneChoiceCandidateSource,
+        ZoneOwner,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -6994,11 +7054,12 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     }
 
     /// The ten detector labels that pass `None` and are measured present in the phase-base
-    /// corpus. `ActivateLimit`, `ModalDynamicMaxDropped` and `CombatHistoryRelation` are
-    /// deliberately absent: none has a corpus warning (`CombatHistoryRelation`'s clause is
-    /// printed on exactly two cards, both represented since #9179), so no corpus fixture
-    /// can reach them. They are bought by the compiler instead — the constructor's new
-    /// parameter makes omission a compile error.
+    /// corpus. `ActivateLimit`, `ModalDynamicMaxDropped`, `CombatHistoryRelation` and
+    /// `CastManaSourceQualifier` are deliberately absent: none has a corpus warning
+    /// (`CombatHistoryRelation`'s clause is printed on exactly two cards, both represented
+    /// since #9179; `CastManaSourceQualifier`'s on exactly three, all represented), so no
+    /// corpus fixture can reach them. They are bought by the compiler instead — the
+    /// constructor's new parameter makes omission a compile error.
     ///
     /// "Non-phrase" here means "no gap axis wired at the push site", NOT "no phrase is
     /// nameable". `Replacement` is in this set and its axis names phrases perfectly well —
@@ -8950,6 +9011,46 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             "the bare 'for each player, choose' idiom must not be reported as a \
              swallowed dynamic quantity — its carrier is ChooseAndSacrificeRest, \
              not a QuantityExpr. Warnings: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// CR 406.3a: Vulcan Mind-Meld's "For each card exiled this way, the player
+    /// who exiled it may play it" is carried by the per-object `ObjectExiler`
+    /// grant. Reach-guard: that grant must be present (not `Unimplemented`)
+    /// before the negative; revert-to-red: dropping the exiler suppression
+    /// reintroduces the warning while the guard holds.
+    #[test]
+    fn vulcan_mind_meld_exiler_grant_does_not_flag_dynamic_qty() {
+        let parsed = parse_named(
+            "Target opponent looks at the top card of your library, then exiles it face down. \
+             You look at the top two cards of their library, then exile them face down. For \
+             each card exiled this way, the player who exiled it may play it for as long as it \
+             remains exiled. Mana of any type can be spent to cast spells this way.",
+            "Vulcan Mind-Meld",
+            &["Sorcery"],
+        );
+        let mut effects = Vec::new();
+        let mut node = parsed.abilities.first();
+        while let Some(def) = node {
+            effects.push(def.effect.as_ref());
+            node = def.sub_ability.as_deref();
+        }
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::GrantCastingPermission {
+                    grantee: crate::types::ability::PermissionGrantee::ObjectExiler,
+                    ..
+                }
+            )) && !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Unimplemented { .. })),
+            "premise: the exiler grant parses: {effects:?}"
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "DynamicQty"),
+            "{:?}",
             parsed.parse_warnings
         );
     }
@@ -15452,6 +15553,148 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         assert!(
             reports(&[&source, &target]),
             "a parent-target filter does not represent a source clause"
+        );
+    }
+
+    // ── Detector S: CastManaSourceQualifier ─────────────────────────────
+
+    const CAST_MANA_SOURCE_CARDS: [(&str, &[&str], &str); 3] = [
+        (
+            "Barracks of the Thousand",
+            &["Artifact", "Land"],
+            "(Transforms from Thousand Moons Smithy.)\n{T}: Add {W}.\nWhenever you cast an artifact or creature spell using mana produced by Barracks of the Thousand, create a white Gnome Soldier artifact creature token with \"This token's power and toughness are each equal to the number of artifacts and/or creatures you control.\"",
+        ),
+        (
+            "Tecutlan, the Searing Rift",
+            &["Land"],
+            "(Transforms from Brass's Tunnel-Grinder.)\n{T}: Add {R}.\nWhenever you cast a permanent spell using mana produced by Tecutlan, discover X, where X is that spell's mana value.",
+        ),
+        (
+            "The Myriad Pools",
+            &["Artifact", "Land"],
+            "(Transforms from The Everflowing Well.)\n{T}: Add {U}.\nWhenever you cast a permanent spell using mana produced by The Myriad Pools, up to one other target permanent you control becomes a copy of that spell until end of turn.",
+        ),
+    ];
+
+    /// CR 106.3 + CR 601.2h: a parse that drops the qualifier leaves a trigger that
+    /// fires on every matching spell. The audit reads un-normalized text, so the
+    /// detector must fire on the card's name, never on `~`: this is the case a
+    /// self-reference tail in the detector grammar would miss.
+    #[test]
+    fn cast_mana_source_detector_flags_a_qualifier_with_no_carrier() {
+        for (_, _, text) in CAST_MANA_SOURCE_CARDS {
+            let line = text.lines().last().expect("the trigger is the last line");
+            let cleaned = line.to_lowercase();
+            let mut parsed = no_activation_limit_abilities();
+            parsed
+                .triggers
+                .push(crate::types::ability::TriggerDefinition::new(
+                    TriggerMode::SpellCast,
+                ));
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "reach guard: an unimplemented unit is skipped before the detector runs"
+            );
+            let evidence = UnitEvidence::of(&parsed);
+            let mut found = Vec::new();
+            super::detect_cast_mana_source_qualifier(&cleaned, &cleaned, &evidence, &mut found);
+            assert!(
+                matches!(
+                    found.as_slice(),
+                    [OracleDiagnostic::SwallowedClause { detector, .. }]
+                        if detector == "CastManaSourceQualifier"
+                ),
+                "{line}: {found:?}"
+            );
+        }
+    }
+
+    /// The represented qualifier silences the detector on the real parse of all three
+    /// cards. Its carrier sits under `TriggerCondition::EventTime`, so this also pins
+    /// the evidence probe's reach into that wrapper.
+    #[test]
+    fn cast_mana_source_detector_is_silent_on_the_represented_qualifier() {
+        for (name, types, text) in CAST_MANA_SOURCE_CARDS {
+            let parsed = parse_named(text, name, types);
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name}: reach guard, an unimplemented unit is skipped before the detector runs"
+            );
+            let [trigger] = parsed.triggers.as_slice() else {
+                panic!("{name}: {:?}", parsed.triggers);
+            };
+            assert!(
+                matches!(
+                    &trigger.condition,
+                    Some(TriggerCondition::EventTime { condition })
+                        if matches!(
+                            &**condition,
+                            TriggerCondition::QuantityComparison { .. }
+                        )
+                ),
+                "{name}: reach guard, the qualifier must be represented: {:?}",
+                trigger.condition
+            );
+            assert!(
+                !has_swallowed_detector(&parsed, "CastManaSourceQualifier"),
+                "{name}: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// CR 201.5: "mana produced by ~" names the card itself, so a `FromSource` read of
+    /// another source (Treasure mana here) is not a carrier for it. The positive row swaps
+    /// the same unit's filter back to `SelfRef`, the shape the real parse carries.
+    #[test]
+    fn cast_mana_source_detector_flags_a_carrier_for_another_source() {
+        let (name, types, text) = CAST_MANA_SOURCE_CARDS[0];
+        let real = parse_named(text, name, types);
+        let line = text.lines().last().expect("the trigger is the last line");
+        let cleaned = line.to_lowercase();
+        let carrier = |source_filter: TargetFilter| TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::TriggeringSpell,
+                        metric: CastManaSpentMetric::FromSource { source_filter },
+                    },
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            }),
+        };
+        let [trigger] = real.triggers.as_slice() else {
+            panic!("{name}: {:?}", real.triggers);
+        };
+        assert_eq!(
+            trigger.condition,
+            Some(carrier(TargetFilter::SelfRef)),
+            "reach guard: the built carrier is the real parse's"
+        );
+        let detect = |source_filter: TargetFilter| {
+            let mut parsed = real.clone();
+            parsed.triggers[0].condition = Some(carrier(source_filter));
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "reach guard: an unimplemented unit is skipped before the detector runs"
+            );
+            let evidence = UnitEvidence::of(&parsed);
+            let mut found = Vec::new();
+            super::detect_cast_mana_source_qualifier(&cleaned, &cleaned, &evidence, &mut found);
+            found
+        };
+
+        assert_eq!(detect(TargetFilter::SelfRef), []);
+        let treasure =
+            TargetFilter::Typed(TypedFilter::permanent().subtype("Treasure".to_string()));
+        assert!(
+            matches!(
+                detect(treasure).as_slice(),
+                [OracleDiagnostic::SwallowedClause { detector, .. }]
+                    if detector == "CastManaSourceQualifier"
+            ),
+            "a Treasure carrier does not represent mana produced by {name}"
         );
     }
 }

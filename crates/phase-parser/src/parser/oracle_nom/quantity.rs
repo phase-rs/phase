@@ -8,7 +8,9 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
 use nom::character::complete::satisfy;
-use nom::combinator::{all_consuming, eof, map, map_opt, map_res, not, opt, peek, value, verify};
+use nom::combinator::{
+    all_consuming, consumed, eof, map, map_opt, map_res, not, opt, peek, value, verify,
+};
 use nom::multi::{many0, many1, separated_list1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -18,7 +20,7 @@ use super::duration::parse_cast_snapshot_suffix;
 use super::error::{oracle_err, OracleResult};
 use super::primitives::{
     parse_article, parse_color, parse_core_type, parse_counter_type_typed, parse_keyword_name,
-    parse_number, scan_preceded,
+    parse_number, scan_at_word_boundaries, scan_preceded,
 };
 use super::target::{
     parse_controller_phrase, parse_type_filter_word, ControllerForm, ControllerSubject,
@@ -5808,6 +5810,65 @@ fn parse_card_with_relative_clause(input: &str) -> OracleResult<'_, TargetFilter
     ))
 }
 
+/// CR 608.2c: whether `text` names a player through an anaphor ("they",
+/// "that player", "its controller", "its owner") in any position the shared
+/// population grammar binds to a fixed player regardless of the supplied
+/// antecedents. Lets a reader whose population grammar cannot bind an anaphor
+/// to its antecedent decline the phrase instead of accepting a context-free
+/// default. Direct players ("you control", "you own", "your graveyard") do not
+/// count.
+fn names_player_anaphor(text: &str) -> bool {
+    scan_at_word_boundaries(text, parse_population_player_anaphor).is_some()
+}
+
+/// CR 608.2c: one anaphoric player reference inside a population phrase.
+///
+/// * control — "they control", "that player controls", "its controller
+///   controls": the anaphoric subjects of the shared `parse_controller_phrase`;
+/// * CR 108.3 ownership — "they own", "that player owns", "owned by that
+///   player";
+/// * CR 404.1 zone owner — "their graveyard", "that player's graveyard", "its
+///   owner's graveyard", "its controller's graveyard".
+fn parse_population_player_anaphor(input: &str) -> OracleResult<'_, ()> {
+    let anaphoric_subject = || {
+        alt((
+            tag("that player"),
+            tag("they"),
+            preceded(alt((tag("its "), tag("their "))), tag("controller")),
+        ))
+    };
+    alt((
+        value(
+            (),
+            verify(parse_controller_phrase, |phrase| {
+                matches!(phrase.subject, ControllerSubject::Anaphoric(_))
+            }),
+        ),
+        value(
+            (),
+            (
+                anaphoric_subject(),
+                tag(" "),
+                alt((tag("owns"), tag("own"))),
+                not(satisfy(char::is_alphanumeric)),
+            ),
+        ),
+        value((), (tag("owned by "), anaphoric_subject())),
+        value(
+            (),
+            alt((
+                tag("their "),
+                tag("that player's "),
+                preceded(
+                    alt((tag("its "), tag("their "))),
+                    alt((tag("owner's "), tag("controller's "))),
+                ),
+            )),
+        ),
+    ))
+    .parse(input)
+}
+
 fn parse_for_each_clause_ref_with_they_controller<'a>(
     input: &'a str,
     antecedents: &PlayerAntecedents,
@@ -5851,9 +5912,41 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
             // CR 205.2a: "for each card type among <population>" and "card type
             // they share with <population>" share the population grammar; nested
             // to keep the outer `alt` within nom's tuple arity (21 items).
+            //
+            // CR 205.3m: "for every five creature types among non-Borg creatures
+            // you control" (Sarek) — the category-restricted distinct-subtype
+            // count shares the same population grammar, so the grouped
+            // "for each/every N …" reader can divide it. Its "<category> type"
+            // head must precede the generic controlled-type arms, whose leading
+            // "creature" token would otherwise commit.
             alt((
                 parse_distinct_card_types_among,
                 parse_shared_card_types_with,
+                // This for-each extension is creature-only; other categories
+                // retain their existing number-of quantity-reader support.
+                //
+                // CR 608.2c + CR 109.5: the shared population grammar reads its
+                // controller, owner and zone owner without this reader's player
+                // antecedents, so an anaphoric "they control" / "they own" /
+                // "their graveyard" would bind to a fixed player instead of the
+                // iterating or scoped one. No printed card uses that framing
+                // here (Sarek names "you control"), so the arm declines it
+                // rather than bind the wrong player.
+                map(
+                    verify(
+                        consumed(parse_distinct_category_subtypes_among),
+                        |(population, qty): &(&str, QuantityRef)| {
+                            matches!(
+                                qty,
+                                QuantityRef::DistinctSubtypes {
+                                    restrict: Some(SubtypeSet::Creature),
+                                    ..
+                                }
+                            ) && !names_player_anaphor(population)
+                        },
+                    ),
+                    |(_, qty)| qty,
+                ),
             )),
             // CR 108.3: owned-card populations; nested to keep the outer `alt`
             // within nom's tuple arity (21 items).
@@ -6272,6 +6365,21 @@ pub(crate) fn parse_mana_from_source_spent_to_cast(input: &str) -> OracleResult<
     // SelfObject literal retained: this ref form never accepts "that" subjects.
     let (rest, _scope) = parse_mana_spent_self_subject(rest)?;
     Ok((rest, source_filter))
+}
+
+/// CR 106.3 + CR 601.2h: the name-independent head of "using mana produced by
+/// <source>", the clause that says which source's mana paid for a spell.
+pub(crate) fn parse_using_mana_produced_by_head(input: &str) -> OracleResult<'_, &str> {
+    tag("using mana produced by ").parse(input)
+}
+
+/// CR 106.3 + CR 201.5: "using mana produced by ~", naming the trigger's own source.
+pub(crate) fn parse_using_mana_produced_by_self(input: &str) -> OracleResult<'_, ()> {
+    preceded(
+        parse_using_mana_produced_by_head,
+        super::duration::parse_self_reference_subject,
+    )
+    .parse(input)
 }
 
 pub(crate) fn parse_mana_source_filter(input: &str) -> OracleResult<'_, TargetFilter> {
@@ -10578,6 +10686,27 @@ mod tests {
         }
     }
 
+    /// CR 106.3 + CR 201.5: the clause reads the trigger's own source, whichever
+    /// self-reference token the text uses; the head alone is name-independent.
+    #[test]
+    fn parse_using_mana_produced_by_reads_only_a_self_reference_tail() {
+        for source in ["~", "this permanent", "this land"] {
+            let clause = format!("using mana produced by {source}");
+            assert_eq!(
+                parse_using_mana_produced_by_self(&clause),
+                Ok(("", ())),
+                "{clause:?}"
+            );
+        }
+        assert!(parse_using_mana_produced_by_self("using teamwork").is_err());
+        assert!(parse_using_mana_produced_by_self("using mana produced by a treasure").is_err());
+        assert_eq!(
+            parse_using_mana_produced_by_head("using mana produced by a treasure"),
+            Ok(("a treasure", "using mana produced by "))
+        );
+        assert!(parse_using_mana_produced_by_head("using teamwork").is_err());
+    }
+
     #[test]
     fn parse_for_each_unspent_mana_rejects_invalid_color_and_spent_to_cast() {
         assert!(parse_for_each_clause_ref("unspent purple mana you have").is_err());
@@ -11151,6 +11280,26 @@ mod tests {
                 .unwrap();
         assert_eq!(rest, "");
         assert!(matches!(q, QuantityRef::DistinctCounterKindsAmong { .. }));
+    }
+
+    #[test]
+    fn for_each_category_subtypes_accepts_creatures_without_extending_planeswalkers() {
+        // SHAPE: the for-each extension is limited to the creature-type class.
+        let (_, qty) = parse_for_each_clause_ref_complete(
+            "creature types among non-borg creatures you control",
+        )
+        .expect("the complete creature-type for-each clause parses");
+        assert!(matches!(
+            qty,
+            QuantityRef::DistinctSubtypes {
+                restrict: Some(SubtypeSet::Creature),
+                ..
+            }
+        ));
+        assert!(parse_for_each_clause_ref_complete(
+            "planeswalker types among planeswalkers you control"
+        )
+        .is_err());
     }
 
     #[test]
@@ -13567,6 +13716,78 @@ mod tests {
                 })
             }
         ));
+    }
+
+    /// CR 608.2c + CR 109.5: the creature-type for-each arm keeps a literal
+    /// "you control" / "you own" / "your graveyard" population under a supplied
+    /// player antecedent, and declines the anaphoric control, ownership and
+    /// zone-owner framings its population grammar cannot bind to that
+    /// antecedent.
+    #[test]
+    fn for_each_creature_types_among_discriminates_controller_from_antecedent() {
+        let ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..Default::default()
+        };
+        let (rest, q) = parse_for_each_clause_ref_with_context(
+            "creature types among non-borg creatures you control",
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::DistinctSubtypes {
+                source: CardTypeSetSource::Objects {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        controller: Some(ControllerRef::You),
+                        ..
+                    })
+                },
+                restrict: Some(SubtypeSet::Creature),
+                ..
+            }
+        ));
+        for direct in [
+            "creature types among creatures you own",
+            "creature types among creature cards in your graveyard",
+        ] {
+            let parsed = parse_for_each_clause_ref_with_context(direct, &ctx);
+            assert!(
+                matches!(
+                    parsed,
+                    Ok((
+                        "",
+                        QuantityRef::DistinctSubtypes {
+                            restrict: Some(SubtypeSet::Creature),
+                            ..
+                        }
+                    ))
+                ),
+                "{direct}: a direct player stays accepted, got {parsed:?}"
+            );
+        }
+        for anaphoric in [
+            "creature types among non-borg creatures they control",
+            "creature types among creatures that player controls",
+            "creature types among creatures they own",
+            "creature types among creatures owned by that player",
+            "creature types among creature cards in their graveyard",
+            "creature types among creature cards in that player's graveyard",
+        ] {
+            let parsed = parse_for_each_clause_ref_with_context(anaphoric, &ctx);
+            assert!(
+                !matches!(parsed, Ok((_, QuantityRef::DistinctSubtypes { .. }))),
+                "{anaphoric}: must not bind a subtype count, got {parsed:?}"
+            );
+            assert!(
+                !matches!(
+                    parse_for_each_clause_ref(anaphoric),
+                    Ok((_, QuantityRef::DistinctSubtypes { .. }))
+                ),
+                "{anaphoric}: unscoped reader must decline too"
+            );
+        }
     }
 
     #[test]
