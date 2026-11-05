@@ -31417,10 +31417,7 @@ mod tests {
         assert_eq!(trigger.destination, Some(Zone::Graveyard));
         assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
         let execute = trigger.execute.as_deref().expect("trigger execute");
-        assert!(
-            execute.optional,
-            "\"you may pay\" is optional: {trigger:?}"
-        );
+        assert!(execute.optional, "\"you may pay\" is optional: {trigger:?}");
         assert_eq!(
             *execute.effect,
             Effect::PayCost {
