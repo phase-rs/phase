@@ -328,6 +328,7 @@
   "podError": {
     "connection": "连接错误",
     "hostLeft": "主持人已离开轮抽",
+    "incompatible": "此轮抽与你的协议版本不兼容。",
     "kicked": "你已被移出轮抽桌",
     "retry": "尝试重新连接"
   },
