@@ -13400,20 +13400,10 @@ fn parse_assimilate_target(
     }
     match target.extract_in_zone() {
         Some(Zone::Graveyard) => Some((target, None)),
-        Some(Zone::Exile) if target_filter_names_linked_exile(&target) => {
+        Some(Zone::Exile) if target.references_exiled_by_source() => {
             Some((target, Some(Zone::Exile)))
         }
         _ => None,
-    }
-}
-
-/// CR 607.2a: true when `filter` constrains its objects to the source's linked
-/// "exiled with [this object]" pool.
-fn target_filter_names_linked_exile(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::ExiledBySource => true,
-        TargetFilter::And { filters } => filters.iter().any(target_filter_names_linked_exile),
-        _ => false,
     }
 }
 
