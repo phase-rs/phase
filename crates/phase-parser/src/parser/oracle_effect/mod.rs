@@ -35244,6 +35244,18 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     .parse(lower)
     .ok()?;
 
+    // CR 400.11 + CR 400.11a: outside the game is not a zone, and every shape
+    // this parser builds (`CastFromZone`) draws its card from an in-game zone.
+    // The outside-game authority (`imperative::try_parse_play_from_outside_game`,
+    // probed before this seam) claims the forms the engine models — one card
+    // from the sideboard pool via `SearchOutsideGame`. Any other "cast/play …
+    // from outside the game" clause that reaches here (Sovereign's Realm's
+    // plural "basic lands", Frontier Explorer's "one basic Plains card") has no
+    // carrier, so refuse it instead of granting an in-game cast.
+    if cast_origin_is_outside_the_game(rest) {
+        return Some(Effect::unimplemented(OUTSIDE_GAME_CAST_GAP, rest));
+    }
+
     // CR 305.2a: A bare "play lands" fragment is not an effect granting a
     // zone-scoped play permission. Static permission parsers own sourced forms
     // such as "play lands from your graveyard" and "play lands and cast spells
@@ -36163,6 +36175,19 @@ fn parse_additional_mana_cost_rider(rest: &str) -> Option<crate::types::mana::Ma
     .ok()?;
     eof::<_, E>(tail.trim_end_matches('.')).ok()?;
     Some(cost)
+}
+
+/// The parser gap name for a cast/play clause whose card comes from outside the
+/// game but which the outside-game authority does not model
+/// (`cast_origin_is_outside_the_game`).
+const OUTSIDE_GAME_CAST_GAP: &str = "cast_from_outside_the_game";
+
+/// CR 400.11: the cast clause names "outside the game" as its card's origin.
+fn cast_origin_is_outside_the_game(rest: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(rest, |input| {
+        value((), tag::<_, _, OracleError<'_>>("from outside the game")).parse(input)
+    })
+    .is_some()
 }
 
 /// The parser gap name for a cast of one spell from EACH of several graveyards

@@ -35500,3 +35500,68 @@ fn sen_triplets_lowers_restrictions_reveal_and_other_hand_permission() {
         controller: ControllerRef::ParentTargetController,
     }));
 }
+
+/// CR 400.11 + CR 400.11a: a "play/cast … from outside the game" permission
+/// that the outside-game authority does not model is refused at the shared
+/// cast seam rather than lowered to an in-game `CastFromZone`. Covers the
+/// plural form (Sovereign's Realm, reached through its leading "This turn,"
+/// duration) and the quantified singular form (Frontier Explorer, reached
+/// through "Until end of turn,"); Wish's modeled singular form keeps its
+/// `SearchOutsideGame` lowering.
+#[test]
+fn unmodeled_outside_game_play_permissions_stay_unsupported() {
+    fn effects_of(parsed: &ParsedAbilities) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for ability in &parsed.abilities {
+            let mut link = Some(ability);
+            while let Some(def) = link {
+                effects.push((*def.effect).clone());
+                link = def.sub_ability.as_deref();
+            }
+        }
+        effects
+    }
+    for (name, oracle, types) in [
+        (
+            "Sovereign's Realm",
+            "(Start the game with this conspiracy face up in the command zone.)\nYour starting deck can't have basic land cards and your starting hand size is five.\nExile a card from your hand: This turn, you may play basic lands from outside the game.\nBasic lands you control have \"{T}: Add one mana of any color.\"",
+            &["Conspiracy"][..],
+        ),
+        (
+            "Frontier Explorer",
+            "{3}, {T}: Until end of turn, you may play one basic Plains card from outside the game.",
+            &["Creature"][..],
+        ),
+    ] {
+        let parsed = parse(oracle, name, &[], types, &[]);
+        let effects = effects_of(&parsed);
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::CastFromZone { .. })),
+            "{name}: an outside-game permission must not become an in-game cast: {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Unimplemented { name, .. } if name == "cast_from_outside_the_game"
+            )),
+            "{name}: the outside-game permission must be named as unsupported: {effects:?}"
+        );
+    }
+
+    let wish = parse(
+        "You may play a card you own from outside the game this turn.",
+        "Wish",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        effects_of(&wish)
+            .iter()
+            .any(|effect| matches!(effect, Effect::SearchOutsideGame { .. })),
+        "Wish keeps the modeled outside-game lowering: {:?}",
+        effects_of(&wish)
+    );
+}
