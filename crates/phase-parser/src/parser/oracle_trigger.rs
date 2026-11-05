@@ -25167,6 +25167,45 @@ mod grenzo_bullet_modal_tests {
             "BULLET ExileTop player must be TriggeringPlayer (damaged player), got {exile_player:?}",
         );
     }
+
+    /// Thada Adel, Acquisitor: the controller searches the DAMAGED player's library
+    /// (not their own), and that same player shuffles.
+    #[test]
+    fn thada_adel_searches_damaged_players_library() {
+        let parsed = parse_oracle_text(
+            "Islandwalk (This creature can't be blocked as long as defending player controls an Island.)\nWhenever Thada Adel deals combat damage to a player, search that player's library for an artifact card and exile it. Then that player shuffles. Until end of turn, you may play that card.",
+            "Thada Adel, Acquisitor",
+            &[],
+            &["Creature".into()],
+            &["Merfolk".into()],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::DamageDone))
+            .expect("DamageDone trigger must parse");
+        let execute = trigger.execute.as_ref().expect("execute must be Some");
+        let effects = flatten_effects(execute);
+        let target_player = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::SearchLibrary { target_player, .. } => Some(target_player.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("must contain SearchLibrary, got {effects:?}"));
+        let Some(TargetFilter::Typed(tf)) = target_player else {
+            panic!(
+                "SearchLibrary must name the triggering player's library, got {target_player:?}"
+            );
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::TriggeringPlayer));
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::Shuffle {
+                target: TargetFilter::TriggeringPlayer
+            }
+        )));
+    }
 }
 
 #[cfg(test)]
