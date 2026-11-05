@@ -30961,6 +30961,142 @@ fn bare_copy_it_stays_copy_spell_not_cast_copy() {
     );
 }
 
+/// CR 707.12 + CR 707.12a: "Copy that card N times. You may cast the copies"
+/// keeps the copy multiplicity on the fused `CastCopyOfCard` as its
+/// `repeat_for`, for a fixed count (Mnemonic Deluge) and a where-X-bound count
+/// (Infinite Diversity) alike. Reverting the Case 1 carry in
+/// `fold_cast_copy_of_card_defs` drops it with the redundant `CopySpell`, so a
+/// single copy is cast.
+#[test]
+fn copy_card_n_times_then_cast_copies_keeps_multiplicity() {
+    let cases = [
+        (
+            "Exile target instant or sorcery card from a graveyard. Copy that card three times. You may cast the copies without paying their mana costs. Exile Mnemonic Deluge.",
+            "fixed",
+        ),
+        (
+            "Exile target instant or sorcery card from your graveyard. Copy that card X times, where X is the number of creature types among non-Borg creatures you control. You may cast the copies without paying their mana costs. Exile Infinite Diversity.",
+            "where-x",
+        ),
+    ];
+    for (text, label) in cases {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let cast_copy = def
+            .sub_ability
+            .as_deref()
+            .expect("card-copy cast sub-ability");
+        assert!(
+            matches!(
+                cast_copy.effect.as_ref(),
+                Effect::CastCopyOfCard {
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0)
+                    },
+                    count: None,
+                    ..
+                }
+            ),
+            "{label}: expected uncapped CastCopyOfCard, got {:?}",
+            cast_copy.effect
+        );
+        match (label, cast_copy.repeat_for.as_ref()) {
+            ("fixed", Some(QuantityExpr::Fixed { value: 3 })) => {}
+            (
+                "where-x",
+                Some(QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::DistinctSubtypes {
+                            restrict: Some(crate::types::card_type::SubtypeSet::Creature),
+                            ..
+                        },
+                }),
+            ) => {}
+            (_, other) => panic!("{label}: unexpected copy multiplicity {other:?}"),
+        }
+        let self_exile = cast_copy
+            .sub_ability
+            .as_deref()
+            .expect("self-exile follows the copy cast");
+        assert!(matches!(
+            self_exile.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+    }
+}
+
+/// CR 107.1a + CR 608.2c: "for every N <things>" is the marker spelling of
+/// "for each N <things>" in a verb's count position — a draw counts complete
+/// groups (Sarek, Federation Ambassador; class: any "<verb> a card for every N").
+#[test]
+fn draw_a_card_for_every_n_counts_complete_groups() {
+    let def = parse_effect_chain(
+        "Draw a card for every five creature types among non-Borg creatures you control.",
+        AbilityKind::Spell,
+    );
+    let Effect::Draw { count, .. } = def.effect.as_ref() else {
+        panic!("expected Draw, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::DivideRounded {
+                divisor: 5,
+                rounding: RoundingMode::Down,
+                inner,
+            } if matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref { qty: QuantityRef::DistinctSubtypes { .. } }
+            )
+        ),
+        "got {count:?}"
+    );
+    let def = parse_effect_chain(
+        "Draw a card for every three cards in your graveyard.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::Draw {
+                count: QuantityExpr::DivideRounded { divisor: 3, .. },
+                ..
+            }
+        ),
+        "got {:?}",
+        def.effect
+    );
+}
+
+/// SHAPE: extending creature-type quantities must leave Svega's unsupported
+/// planeswalker-type for-each activation honestly unparsed, independently of
+/// the other abilities on the card.
+#[test]
+fn svega_planeswalker_type_token_activation_keeps_unparsed_quantity() {
+    let parsed = parse_oracle_text(
+        "Landfall — Whenever a land enters under your control, put a loyalty counter on target planeswalker.\n−2: For each planeswalker type among planeswalkers you control, create a 1/1 Attendee creature token that's all colors.\n−X: Choose an Elspeth, Teferi, Liliana, Chandra, or Garruk planeswalker card name with mana value X. Create a copy of the card with the chosen name. You may cast the copy without paying its mana cost.\nSvega can be your commander.",
+        "Svega, the Unconventional",
+        &[],
+        &["Planeswalker".to_string()],
+        &["Svega".to_string()],
+    );
+    let activation = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(ability.cost, Some(AbilityCost::Loyalty { amount: -2 })))
+        .expect("Svega's printed −2 activation is retained");
+    assert!(
+        matches!(
+            activation.effect.as_ref(),
+            Effect::Unimplemented { name, .. } if name == "unparsed_quantity"
+        ),
+        "the specific −2 activation must fail honestly, got {:?}",
+        activation.effect
+    );
+}
+
 #[test]
 fn random_exile_then_copy_that_card_uses_tracked_set() {
     let def = parse_effect_chain(
