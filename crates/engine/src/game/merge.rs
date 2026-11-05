@@ -53,7 +53,9 @@ use std::sync::Arc;
 use crate::game::game_object::{DisplayIdentity, GameObject, ObjectIncarnationRefExt};
 use crate::game::printed_cards::intrinsic_copiable_values;
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
-use crate::types::ability::{ContinuousModification, CopiableValues, Duration, TargetFilter};
+use crate::types::ability::{
+    ContinuousModification, CopiableValues, Duration, LibraryPosition, TargetFilter,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -480,11 +482,33 @@ pub fn split_merged_permanent_on_leave(
 /// CR 903.9c: when an individual commander component accepts the CR 903.9b
 /// Hand/Library replacement, only that component's request changes to Command;
 /// noncommander components remain routed to their appropriate zones.
+#[cfg(test)]
 pub(crate) fn move_merged_permanent_on_leave(
     state: &mut GameState,
     merged_id: ObjectId,
     dest: Zone,
+    library_placement: Option<&LibraryPosition>,
     applied: &HashSet<AppliedReplacementKey>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    move_merged_permanent_for_parent(
+        state,
+        merged_id,
+        dest,
+        library_placement,
+        applied,
+        None,
+        events,
+    )
+}
+
+pub(crate) fn move_merged_permanent_for_parent(
+    state: &mut GameState,
+    merged_id: ObjectId,
+    dest: Zone,
+    library_placement: Option<&LibraryPosition>,
+    applied: &HashSet<AppliedReplacementKey>,
+    parent: Option<crate::types::game_state::PendingComponentDeliveryParent>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
     let Some(survivor) = state.objects.get(&merged_id) else {
@@ -520,12 +544,18 @@ pub(crate) fn move_merged_permanent_on_leave(
                     .expect("merged component exists")
                     .split_from_merge_survivor = Some(survivor_successor);
             }
-            ZoneMoveRequest::merged_component(component_id, dest)
-                .with_replacement_applied(applied.clone())
+            let request = ZoneMoveRequest::merged_component(component_id, dest)
+                .with_replacement_applied(applied.clone());
+            // CR 730.3: every component inherits the final approved destination
+            // and position; its own replacement consult may redirect it again.
+            match (dest, library_placement) {
+                (Zone::Library, Some(position)) => request.at_library_position(position.clone()),
+                _ => request,
+            }
         })
         .collect();
 
-    zone_pipeline::move_objects_simultaneously_then(state, requests, None, events)
+    zone_pipeline::move_component_batch_then(state, requests, None, parent, events)
 }
 
 /// CR 730.2d + CR 400.7 + CR 111.7: restore the survivor's intrinsic token-ness

@@ -6053,7 +6053,21 @@ mod tests {
             runner.state().waiting_for,
             WaitingFor::ReplacementChoice { .. }
         ));
-        assert!(runner.state().active_change_zone_frame().is_some());
+        // R4c: a three-member ChangeZone population parks the staged marker +
+        // batch child; the legacy `pending` carrier is gone for this shape. The
+        // typed completion is the family authority.
+        assert!(
+            !runner.state().active_change_zone_frame().is_some(),
+            "a multi-member population must not fall back to the legacy carrier"
+        );
+        assert!(
+            runner.state().resolution_stack.iter().any(|frame| matches!(
+                frame,
+                crate::types::resolution::ResolutionFrame::BatchDelivery(batch)
+                    if batch.is_change_zone_population()
+            )),
+            "the ChangeZone delivery parks its staged resume carrier at the replacement choice"
+        );
         assert!(runner.state().resolution_stack.iter().any(|frame| matches!(
             frame,
             crate::types::resolution::ResolutionFrame::AbilityContinuation(_)
@@ -6080,6 +6094,14 @@ mod tests {
             WaitingFor::Priority { .. }
         ));
         assert!(runner.state().active_change_zone_frame().is_none());
+        assert!(
+            !runner.state().resolution_stack.iter().any(|frame| matches!(
+                frame,
+                crate::types::resolution::ResolutionFrame::BatchDelivery(batch)
+                    if batch.staged.is_some()
+            )),
+            "answering the replacement choice drains the staged ChangeZone owner"
+        );
         assert!(runner.state().active_ability_continuation().is_none());
     }
 

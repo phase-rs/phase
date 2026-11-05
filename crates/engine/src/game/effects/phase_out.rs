@@ -161,6 +161,43 @@ pub(super) fn collect_object_targets(
     ability: &ResolvedAbility,
     target: &TargetFilter,
 ) -> Vec<ObjectId> {
+    if let TargetFilter::Or { filters } = target {
+        // CR 702.26a + CR 702.26h: gather the whole batch before phasing any
+        // member, so an attachment selected with its host phases indirectly.
+        let mut seen = HashSet::new();
+        return filters
+            .iter()
+            .flat_map(|filter| {
+                match filter {
+                    // CR 201.5 + CR 400.7: source identity is independent of the
+                    // announced target list, including a later same-ID incarnation.
+                    TargetFilter::SelfRef => {
+                        if ability.self_ref_is_current(state)
+                            && state
+                                .battlefield_phased_in_ids()
+                                .contains(&ability.source_id)
+                        {
+                            vec![ability.source_id]
+                        } else {
+                            Vec::new()
+                        }
+                    }
+                    // An explicitly empty announced set stays empty. Do not use
+                    // ParentTarget's event/source fallback for this compound leg.
+                    TargetFilter::ParentTarget => ability
+                        .live_object_targets(state)
+                        .iter()
+                        .filter_map(|target| match target {
+                            TargetRef::Object(id) => Some(*id),
+                            TargetRef::Player(_) => None,
+                        })
+                        .collect(),
+                    other => collect_object_targets(state, ability, other),
+                }
+            })
+            .filter(|id| seen.insert(*id))
+            .collect();
+    }
     let from_targets: Vec<ObjectId> = ability
         .targets
         .iter()
@@ -265,6 +302,94 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         id
+    }
+
+    #[test]
+    fn compound_phase_out_collects_source_and_announced_set_without_fallback() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let chosen = add_creature(&mut state, PlayerId(0), "Chosen");
+        let unrelated = add_creature(&mut state, PlayerId(0), "Unrelated");
+        let filter = TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+        };
+        for (targets, expected) in [
+            (vec![], vec![source]),
+            (vec![TargetRef::Object(chosen)], vec![source, chosen]),
+            (vec![TargetRef::Object(source)], vec![source]),
+        ] {
+            let ability = ResolvedAbility::new(
+                Effect::PhaseOut {
+                    target: filter.clone(),
+                },
+                targets,
+                source,
+                PlayerId(0),
+            );
+            let actual = collect_object_targets(&state, &ability, &filter);
+            assert_eq!(actual, expected);
+            assert!(!actual.contains(&unrelated));
+        }
+        let ability = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::SelfRef,
+            },
+            vec![TargetRef::Object(chosen)],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            collect_object_targets(&state, &ability, &TargetFilter::SelfRef),
+            vec![chosen],
+            "standalone explicit-target precedence is unchanged"
+        );
+    }
+
+    #[test]
+    fn compound_phase_out_batches_an_attachment_with_its_host_indirectly() {
+        let mut state = GameState::new_two_player(42);
+        let host = add_creature(&mut state, PlayerId(0), "Host");
+        let attachment = add_creature(&mut state, PlayerId(0), "Animated attachment");
+        // Raw collector fixture: ordinary creature attachments are detached by
+        // SBAs before a public priority boundary. This isolates batch precedence.
+        // An animated Equipment keeps its artifact type, so CR 702.26g cascades it.
+        state
+            .objects
+            .get_mut(&attachment)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Artifact);
+        state.objects.get_mut(&attachment).unwrap().attached_to = Some(host.into());
+        state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .attachments
+            .push(attachment);
+        let ability = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::Or {
+                    filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+                },
+            },
+            vec![TargetRef::Object(attachment)],
+            host,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert_eq!(
+            state.objects[&host].phase_status,
+            crate::game::game_object::PhaseStatus::PhasedOut {
+                cause: PhaseOutCause::Directly
+            }
+        );
+        assert_eq!(
+            state.objects[&attachment].phase_status,
+            crate::game::game_object::PhaseStatus::PhasedOut {
+                cause: PhaseOutCause::Indirectly
+            }
+        );
     }
 
     /// CR 702.26b: A mass phase-in effect specifically mentioning phased-out

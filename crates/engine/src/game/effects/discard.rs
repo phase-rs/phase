@@ -63,6 +63,7 @@ pub(crate) fn complete_discard_to_graveyard(
     // it through the pipeline so `Moved` redirects (Rest in Peace class) get
     // their consult. A plain discard previously moved raw and never saw them.
     let proposed = ProposedEvent::ZoneChange {
+        library_placement: None,
         object_id,
         from: Zone::Hand,
         to: Zone::Graveyard,
@@ -1812,6 +1813,7 @@ mod tests {
         state.push_change_zone_frame(ChangeZoneFrame {
             pending: None,
             devour_eligible_snapshot: None,
+            awaiting_batch: None,
         });
         assert!(
             !hand_off_recruit_discard_result(&mut state, discard_frame),

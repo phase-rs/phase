@@ -2306,8 +2306,11 @@ pub(super) fn change_zone_target_choice_timing(
     has_multi_target: bool,
     fragment_lower: &str,
 ) -> TargetChoiceTiming {
+    // A zone union is a fresh choice even without count metadata. Scalar
+    // filter-only seeds retain their established declaration behavior.
     let off_battlefield_origin = origin.is_some_and(|zone| zone != Zone::Battlefield)
-        || has_multi_target
+        || (has_multi_target
+            || matches!(target, TargetFilter::Typed(_)) && target.extract_zones().len() > 1)
             && target
                 .extract_zones()
                 .iter()
@@ -2326,12 +2329,68 @@ pub(super) fn change_zone_target_choice_timing(
         // CR 115.1: battlefield non-targeted picks (Sothera / Strategic Betrayal
         // edict class) resolve via EffectZoneChoice after player_scope rebinding,
         // not stack targeting.
-        // Graveyard/hand/library seeds without "target" (Deadly Cover-Up) keep
-        // stack-time selection — their filters carry explicit InZone constraints
-        // and origin is None (not off_battlefield_origin above).
         TargetChoiceTiming::Resolution
     } else {
         TargetChoiceTiming::Stack
+    }
+}
+
+#[cfg(test)]
+mod r2_zone_union_timing_tests {
+    use super::*;
+
+    #[test]
+    fn implicit_union_is_resolution_but_explicit_targets_and_scalar_choices_keep_timing() {
+        let union = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Spacecraft".into())],
+            controller: Some(ControllerRef::You),
+            properties: vec![FilterProp::InAnyZone {
+                zones: vec![Zone::Hand, Zone::Graveyard],
+            }],
+        });
+        assert_eq!(union.extract_zones(), vec![Zone::Hand, Zone::Graveyard]);
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &union,
+                false,
+                "put a spacecraft card from your hand or graveyard onto the battlefield"
+            ),
+            TargetChoiceTiming::Resolution
+        );
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &union,
+                false,
+                "return target card from your hand or graveyard"
+            ),
+            TargetChoiceTiming::Stack
+        );
+        for zone in [Zone::Hand, Zone::Library, Zone::Graveyard] {
+            let scalar = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Card],
+                properties: vec![FilterProp::InZone { zone }],
+                ..Default::default()
+            });
+            assert_eq!(
+                change_zone_target_choice_timing(None, &scalar, false, "choose a card"),
+                TargetChoiceTiming::Stack
+            );
+            assert_eq!(
+                change_zone_target_choice_timing(None, &scalar, true, "choose cards"),
+                TargetChoiceTiming::Resolution
+            );
+        }
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &TargetFilter::ParentTarget,
+                false,
+                "put it onto the battlefield"
+            ),
+            TargetChoiceTiming::Stack
+        );
     }
 }
 
@@ -9193,6 +9252,19 @@ pub(crate) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTar
             return (&text[consumed..], Some(MultiTargetSpec::unlimited(0)));
         }
         return (text, None);
+    }
+
+    // CR 115.1c + CR 115.6: an exact count before the target article
+    // ("choose two target players") declares a fixed number of slots.
+    if let Ok((remainder, count)) = parse_multi_target_count_expr(lower.as_str()) {
+        let consumed = lower.len() - remainder.len();
+        let rest = text[consumed..].trim_start();
+        if followed_by_target_article(&rest.to_ascii_lowercase()) {
+            if let QuantityExpr::Fixed { value } = count {
+                let n = value.max(0) as usize;
+                return (rest, Some(MultiTargetSpec::fixed(n, n)));
+            }
+        }
     }
 
     let Ok((after_up_to, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(lower.as_str()) else {

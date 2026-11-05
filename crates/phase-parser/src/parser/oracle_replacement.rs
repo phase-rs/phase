@@ -17769,13 +17769,14 @@ mod tests {
         assert!(
             matches!(
                 &*execute.effect,
-                Effect::ChangeZone {
+                Effect::ChangeZoneAll {
+                    destination: Zone::Library,
                     target: TargetFilter::PostReplacementDamageTarget,
-                    owner_library: true,
+                    library_shuffle: crate::types::ability::MassLibraryShuffleMode::TerminalShuffle,
                     ..
                 }
             ),
-            "ChangeZone must move the damaged creature to its owner's library, got {:?}",
+            "the move must return the damaged creature to its owner's library, got {:?}",
             execute.effect
         );
         let shuffle = execute.sub_ability.as_ref().expect("shuffle sub-ability");
@@ -17783,11 +17784,22 @@ mod tests {
             matches!(
                 &*shuffle.effect,
                 Effect::Shuffle {
-                    target: TargetFilter::PostReplacementDamageTargetOwner
+                    target: TargetFilter::ScopedPlayer
                 }
             ),
-            "Shuffle must resolve to the recipient's owner, got {:?}",
+            "Shuffle must resolve through the tracked owner scope, got {:?}",
             shuffle.effect
+        );
+        assert!(
+            matches!(
+                shuffle.player_scope,
+                Some(PlayerFilter::TrackedSetPossessor {
+                    possession: crate::types::ability::PossessionAxis::Owner,
+                    ..
+                })
+            ),
+            "the terminal shuffle must carry the owner scope, got {:?}",
+            shuffle.player_scope
         );
     }
 

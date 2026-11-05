@@ -8,6 +8,7 @@ use std::sync::Arc;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 use crate::database::card_db::CardDbHandle;
 use crate::game::game_object::ObjectIncarnationRefExt;
@@ -6707,6 +6708,16 @@ impl<'de> Deserialize<'de> for PendingCounterRemovalQueue {
     }
 }
 
+/// An explicit delegation of one original batch member to its component batch.
+/// The capture key remains distinct from the event approved after replacements.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingComponentDeliveryParent {
+    pub parent_group_id: LogicalZoneChangeGroupId,
+    pub member: ObjectIncarnationRef,
+    pub expected_event: ProposedEvent,
+    pub approved_event: ProposedEvent,
+}
+
 /// CR 603.10a + CR 616.1: The not-yet-delivered tail of a simultaneous
 /// zone-move batch, parked when a per-object `Moved` replacement surfaces a
 /// replacement choice mid-batch (e.g. two simultaneously-applicable
@@ -6723,6 +6734,8 @@ impl<'de> Deserialize<'de> for PendingCounterRemovalQueue {
 /// name change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingBatchDeliveries {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_delivery_parent: Option<PendingComponentDeliveryParent>,
     pub logical_zone_change_group: LogicalZoneChangeGroup,
     /// The request that paused for replacement/as-enters resolution. This lives
     /// beside an empty tail when the last member paused, so the resumed delivery
@@ -6791,6 +6804,475 @@ pub struct PendingBatchDeliveries {
     /// the full action settles so one co-departure/LKI batch is observable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_events: Vec<GameEvent>,
+    /// CR 101.4 + CR 616.1: staged common-approval lifecycle, if this batch was
+    /// admitted to it. `None` is every non-staged batch and every legacy save;
+    /// the `requests` loop above remains its authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged: Option<StagedBatchDelivery>,
+}
+
+impl PendingBatchDeliveries {
+    /// CR 608.2c: this batch is the ChangeZone family. The typed completion's
+    /// `ChangeZonePopulationSettled` tail is the only family authority, so no
+    /// parallel flag can disagree with it.
+    pub fn is_change_zone_population(&self) -> bool {
+        matches!(
+            self.completion.as_ref(),
+            Some(BatchCompletion::ChangeZonePopulationSettled { .. })
+        )
+    }
+
+    /// R4b structural validation for the staged lifecycle.
+    ///
+    /// `None` is inert: ordinary batches and every legacy save keep exactly the
+    /// existing rules. `Some` must be internally coherent before it is
+    /// serialized or can resume, so a malformed save cannot enter the staged
+    /// driver and silently drop approved members. Called by
+    /// `ResolutionStack::validate`, and therefore by `ResolutionStateWire` before
+    /// any save.
+    pub(crate) fn validate_staged(&self) -> Result<(), String> {
+        let Some(staged) = &self.staged else {
+            return Ok(());
+        };
+        let members = &staged.members;
+        if members.is_empty() {
+            return Err("staged batch delivery has no members".to_string());
+        }
+        if staged.cursor > members.len() {
+            return Err("staged batch cursor is past its members".to_string());
+        }
+        if staged.arrangement_cursor > staged.arrangements.len() {
+            return Err("staged arrangement cursor is past its groups".to_string());
+        }
+
+        let mut object_ids = HashSet::new();
+        for (index, member) in members.iter().enumerate() {
+            if member.announcement_index != index as u32 {
+                return Err("staged batch announcement indices are not their positions".to_string());
+            }
+            if !object_ids.insert(member.identity.object_id) {
+                return Err("staged batch announces one object twice".to_string());
+            }
+            if member.request.object_id != member.identity.object_id {
+                return Err("staged member request names another object".to_string());
+            }
+            Self::validate_staged_member(member)?;
+        }
+        // CR 101.4: one batch is one operation family.
+        let destroy_family = matches!(members[0].operation, StagedMemberOperation::Destroy(_));
+        if members.iter().any(|member| {
+            matches!(member.operation, StagedMemberOperation::Destroy(_)) != destroy_family
+        }) {
+            return Err("staged batch mixes operation families".to_string());
+        }
+        if destroy_family
+            && matches!(
+                self.completion.as_ref(),
+                Some(BatchCompletion::ChangeZonePopulationSettled { .. })
+            )
+        {
+            return Err("a destroy staged batch carries a ChangeZone completion".to_string());
+        }
+        // CR 101.4 + CR 608.2c: the ChangeZone family is exactly the typed
+        // completion's tail, and that tail names this batch's own logical group.
+        // There is no second family flag to disagree with it.
+        if let Some(BatchCompletion::ChangeZonePopulationSettled { tail, .. }) =
+            self.completion.as_ref()
+        {
+            if tail.group_id != self.logical_zone_change_group.logical_group_id {
+                return Err("ChangeZone tail names another logical group".to_string());
+            }
+        }
+
+        // `requests`/`remaining` are exactly the not-yet-consulted members in
+        // announcement order. A member abandoned because its owner left the
+        // game is neither consulted nor delivered, so it is excluded from both
+        // without shifting the frozen announcement indices. `attempted` is the
+        // whole original cohort.
+        let unconsulted: Vec<&StagedBatchMember> = members
+            .iter()
+            .filter(|member| member.state == StagedBatchMemberState::Unconsulted)
+            .collect();
+        let expected_requests: Vec<&PendingBatchZoneMoveRequest> =
+            unconsulted.iter().map(|member| &member.request).collect();
+        if self.requests.len() != expected_requests.len()
+            || !self
+                .requests
+                .iter()
+                .zip(expected_requests.iter())
+                .all(|(request, expected)| request == *expected)
+        {
+            return Err(
+                "staged batch requests are not the unconsulted suffix in order".to_string(),
+            );
+        }
+        let expected_remaining: Vec<ObjectId> = unconsulted
+            .iter()
+            .map(|member| member.identity.object_id)
+            .collect();
+        if self.remaining != expected_remaining {
+            return Err("staged batch remaining is not the unconsulted suffix".to_string());
+        }
+        let attempted: HashSet<ObjectId> = self.attempted.iter().copied().collect();
+        if attempted.len() != self.attempted.len() || attempted != object_ids {
+            return Err("staged batch attempted is not the original cohort".to_string());
+        }
+
+        self.validate_staged_stage(staged)?;
+        for arrangement in &staged.arrangements {
+            Self::validate_staged_arrangement(staged, arrangement)?;
+        }
+        Ok(())
+    }
+
+    fn validate_staged_member(member: &StagedBatchMember) -> Result<(), String> {
+        let approved_object = |event: &ProposedEvent| match event {
+            ProposedEvent::ZoneChange { object_id, .. } => *object_id == member.identity.object_id,
+            ProposedEvent::Destroy { object_id, .. } => *object_id == member.identity.object_id,
+            _ => false,
+        };
+        let is_destroy = matches!(member.operation, StagedMemberOperation::Destroy(_));
+        if member.outer_destroy_approved && !is_destroy {
+            return Err("a zone-move staged member carries the destroy approval flag".to_string());
+        }
+        // CR 701.8a: the outer approval exists only after that outer consult
+        // returned Execute(Destroy); a crafted state cannot settle a member as
+        // destroyed before the consult ever happened.
+        if member.outer_destroy_approved
+            && !matches!(
+                member.state,
+                StagedBatchMemberState::InnerConsulting
+                    | StagedBatchMemberState::Approved
+                    | StagedBatchMemberState::PreventedWithChild
+                    | StagedBatchMemberState::Terminal
+                    | StagedBatchMemberState::Abandoned
+            )
+        {
+            return Err(
+                "a staged member carries the destroy approval before its outer consult".to_string(),
+            );
+        }
+        match member.state {
+            StagedBatchMemberState::Unconsulted => {
+                if member.approved_event.is_some()
+                    || member.pending_outcome.is_some()
+                    || member.terminal.is_some()
+                {
+                    return Err(
+                        "an unconsulted staged member already carries an outcome".to_string()
+                    );
+                }
+            }
+            StagedBatchMemberState::OuterConsulting => {
+                // CR 701.8a: only the later Destroy adapter has an outer event.
+                if !is_destroy {
+                    return Err(
+                        "a zone-move staged member is in the outer-consulting state".to_string()
+                    );
+                }
+                if member.approved_event.is_some() || member.terminal.is_some() {
+                    return Err(
+                        "a consulting staged member already carries an approval or terminal"
+                            .to_string(),
+                    );
+                }
+                if let Some(outcome) = &member.pending_outcome {
+                    match outcome {
+                        StagedMemberOutcome::Approved(event)
+                            if approved_object(event)
+                                && matches!(event, ProposedEvent::Destroy { .. }) => {}
+                        StagedMemberOutcome::Prevented => {}
+                        StagedMemberOutcome::Approved(_) => {
+                            return Err("an outer-consulting staged member approved another event"
+                                .to_string())
+                        }
+                    }
+                }
+            }
+            StagedBatchMemberState::InnerConsulting => {
+                // F1: this keeps the accepted R4b meaning for BOTH operations —
+                // the single-consult state with no outcome while the choice is
+                // unresolved or a `ZoneChange` outcome. It must not require
+                // Destroy.
+                if member.approved_event.is_some() || member.terminal.is_some() {
+                    return Err(
+                        "a consulting staged member already carries an approval or terminal"
+                            .to_string(),
+                    );
+                }
+                if let Some(outcome) = &member.pending_outcome {
+                    match outcome {
+                        StagedMemberOutcome::Approved(event)
+                            if approved_object(event)
+                                && matches!(event, ProposedEvent::ZoneChange { .. }) => {}
+                        StagedMemberOutcome::Prevented => {}
+                        StagedMemberOutcome::Approved(_) => {
+                            return Err(
+                                "a consulting staged member approved another object".to_string()
+                            )
+                        }
+                    }
+                }
+            }
+            StagedBatchMemberState::Approved => {
+                let Some(event) = &member.approved_event else {
+                    return Err("an approved staged member has no approved event".to_string());
+                };
+                if !matches!(event, ProposedEvent::ZoneChange { .. }) || !approved_object(event) {
+                    return Err("an approved staged member approved another object".to_string());
+                }
+                if member.pending_outcome.is_some() || member.terminal.is_some() {
+                    return Err(
+                        "an approved staged member carries a pending outcome or terminal"
+                            .to_string(),
+                    );
+                }
+            }
+            StagedBatchMemberState::PreventedWithChild => {
+                if member.pending_outcome != Some(StagedMemberOutcome::Prevented) {
+                    return Err(
+                        "a prevented staged member with a child has no prevented outcome"
+                            .to_string(),
+                    );
+                }
+                if member.approved_event.is_some() || member.terminal.is_some() {
+                    return Err(
+                        "a prevented staged member with a child carries an approval or terminal"
+                            .to_string(),
+                    );
+                }
+            }
+            StagedBatchMemberState::Terminal => {
+                if member.terminal.is_none() {
+                    return Err("a terminal staged member has no terminal outcome".to_string());
+                }
+            }
+            StagedBatchMemberState::Abandoned => {
+                if member.approved_event.is_some()
+                    || member.pending_outcome.is_some()
+                    || member.terminal.is_some()
+                {
+                    return Err(
+                        "an abandoned staged member still carries delivery data".to_string()
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_staged_stage(&self, staged: &StagedBatchDelivery) -> Result<(), String> {
+        let members = &staged.members;
+        match staged.stage {
+            BatchDeliveryStage::Approving => {
+                for (index, member) in members.iter().enumerate() {
+                    let unconsulted = member.state == StagedBatchMemberState::Unconsulted;
+                    if index < staged.cursor && unconsulted {
+                        return Err(
+                            "an unconsulted staged member precedes the approval cursor".to_string()
+                        );
+                    }
+                    if index > staged.cursor
+                        && !unconsulted
+                        && member.state != StagedBatchMemberState::Abandoned
+                    {
+                        return Err(
+                            "a consulted staged member follows the approval cursor".to_string()
+                        );
+                    }
+                }
+                // A parked boundary belongs to the cursor member; the member
+                // itself may still have no terminal (a bare `NeedsChoice`).
+                if let Some(paused) = &self.paused_current {
+                    let Some(member) = members.get(staged.cursor) else {
+                        return Err("a staged batch paused past its member cohort".to_string());
+                    };
+                    if paused.member != member.identity {
+                        return Err("a staged approval pause does not capture the cursor member"
+                            .to_string());
+                    }
+                }
+            }
+            BatchDeliveryStage::Arranging => {
+                if self.paused_current.is_some() {
+                    return Err(
+                        "an arranging staged batch still holds a paused delivery".to_string()
+                    );
+                }
+                if members
+                    .iter()
+                    .any(|member| member.state == StagedBatchMemberState::Unconsulted)
+                {
+                    return Err(
+                        "an unconsulted staged member survived into arrangement".to_string()
+                    );
+                }
+                for (index, arrangement) in staged.arrangements.iter().enumerate() {
+                    if index != staged.arrangement_cursor
+                        && arrangement.status == StagedArrangementStatus::Offered
+                    {
+                        return Err(
+                            "a staged arrangement other than the cursor is offered".to_string()
+                        );
+                    }
+                    if index < staged.arrangement_cursor
+                        && !matches!(
+                            arrangement.status,
+                            StagedArrangementStatus::Derived | StagedArrangementStatus::Submitted
+                        )
+                    {
+                        return Err(
+                            "a staged arrangement before the cursor is still pending".to_string()
+                        );
+                    }
+                }
+            }
+            BatchDeliveryStage::Delivering => {
+                for (index, member) in members.iter().enumerate() {
+                    if !matches!(
+                        member.state,
+                        StagedBatchMemberState::Approved
+                            | StagedBatchMemberState::Terminal
+                            | StagedBatchMemberState::Abandoned
+                    ) {
+                        return Err(
+                            "a staged member entered delivery without a final approval".to_string()
+                        );
+                    }
+                    // CR 608.2c: the cursor is the next member to deliver, so
+                    // every member behind it has already been delivered and
+                    // must carry its terminal (or be abandoned because its owner
+                    // left). A still-`Approved` member there would be reported
+                    // Delivered without ever producing an outcome, and
+                    // `change_zone_settled_facts` would then reject the
+                    // remaining Pending slot it settled with. Members ahead of
+                    // the cursor may legitimately already be Terminal: approval
+                    // settles a prevented or remained member before the delivery
+                    // cursor resets to zero.
+                    if index < staged.cursor
+                        && !matches!(
+                            member.state,
+                            StagedBatchMemberState::Terminal | StagedBatchMemberState::Abandoned
+                        )
+                    {
+                        return Err(
+                            "an undelivered staged member precedes the delivery cursor".to_string()
+                        );
+                    }
+                }
+                if staged.arrangements.iter().any(|arrangement| {
+                    matches!(
+                        arrangement.status,
+                        StagedArrangementStatus::Awaiting | StagedArrangementStatus::Offered
+                    )
+                }) {
+                    return Err("a staged arrangement is still pending at delivery".to_string());
+                }
+                // A delivery pause captures the cursor member. Its terminal may
+                // still be absent while a component expansion's child batch owns
+                // the delivery; the child handback records it on resume.
+                if let Some(paused) = &self.paused_current {
+                    let Some(member) = members.get(staged.cursor) else {
+                        return Err("a staged batch paused past its member cohort".to_string());
+                    };
+                    if paused.member != member.identity {
+                        return Err("a staged delivery pause does not capture the cursor member"
+                            .to_string());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_staged_arrangement(
+        staged: &StagedBatchDelivery,
+        arrangement: &StagedLibraryArrangement,
+    ) -> Result<(), String> {
+        if !matches!(
+            arrangement.position,
+            LibraryPosition::Top | LibraryPosition::Bottom
+        ) {
+            return Err("a staged arrangement groups a non-Top/Bottom position".to_string());
+        }
+        if arrangement.batch.arranger.is_some() {
+            return Err("a staged arrangement has a named arranger".to_string());
+        }
+        let mut seen = HashSet::new();
+        for ordered in &arrangement.batch.members {
+            if !seen.insert(ordered.identity) {
+                return Err("a staged arrangement repeats one member".to_string());
+            }
+            let Some(member) = staged
+                .members
+                .iter()
+                .find(|member| member.identity.object_id == ordered.identity.object_id)
+            else {
+                return Err("a staged arrangement names a foreign member".to_string());
+            };
+            if member.identity != ordered.identity {
+                return Err("a staged arrangement rebinds a stale incarnation".to_string());
+            }
+            if member.owner != arrangement.batch.owner {
+                return Err("a staged arrangement mixes library owners".to_string());
+            }
+        }
+        if staged.stage == BatchDeliveryStage::Arranging {
+            let expected: Vec<ObjectIncarnationRef> = staged
+                .members
+                .iter()
+                .filter(|member| {
+                    member.state == StagedBatchMemberState::Approved
+                        && member.owner == arrangement.batch.owner
+                        && member.approved_event.as_ref().is_some_and(|event| {
+                            matches!(
+                                event,
+                                ProposedEvent::ZoneChange {
+                                    to: Zone::Library,
+                                    library_placement: Some(position),
+                                    ..
+                                } if *position == arrangement.position
+                            )
+                        })
+                })
+                .map(|member| member.identity)
+                .collect();
+            let offered: HashSet<ObjectIncarnationRef> = arrangement
+                .batch
+                .members
+                .iter()
+                .map(|m| m.identity)
+                .collect();
+            if offered.len() != expected.len() || offered != expected.iter().copied().collect() {
+                return Err(
+                    "a staged arrangement is not the exact approved group membership".to_string(),
+                );
+            }
+            if arrangement.status == StagedArrangementStatus::Awaiting
+                || arrangement.status == StagedArrangementStatus::Offered
+            {
+                let announcement: Vec<ObjectIncarnationRef> = staged
+                    .members
+                    .iter()
+                    .filter(|member| offered.contains(&member.identity))
+                    .map(|member| member.identity)
+                    .collect();
+                let offered_order: Vec<ObjectIncarnationRef> = arrangement
+                    .batch
+                    .members
+                    .iter()
+                    .map(|m| m.identity)
+                    .collect();
+                if offered_order != announcement {
+                    return Err(
+                        "an unpublished staged arrangement is not in announcement order"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6867,6 +7349,152 @@ pub struct PendingBatchZoneMoveRequest {
         skip_serializing_if = "crate::types::ability::ExileConcealment::is_public"
     )]
     pub face_down_in_exile: crate::types::ability::ExileConcealment,
+}
+
+/// CR 101.4 + CR 616.1: staged common-approval lifecycle for one simultaneous
+/// request group that retains every member's exact approval through
+/// consultation, arranges positional subsets privately, and delivers the whole
+/// cohort once. Hangs off the existing [`PendingBatchDeliveries`] authority;
+/// it is not a second queue or transaction.
+///
+/// `None` on the owner is every non-staged batch and every legacy save: the
+/// existing per-member loop and drain remain its authority. `Some` is created
+/// only when a batch is admitted to the staged driver and then owns the whole
+/// lifecycle for that batch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StagedBatchDelivery {
+    pub stage: BatchDeliveryStage,
+    /// Original membership in announcement order; fixed length after entry.
+    pub members: Vec<StagedBatchMember>,
+    /// Next member to consult (`Approving`) or deliver (`Delivering`).
+    pub cursor: usize,
+    /// Owner/position groups derived from final approvals, in prompt order.
+    pub arrangements: Vec<StagedLibraryArrangement>,
+    /// Next arrangement group to prompt (`Arranging`).
+    pub arrangement_cursor: usize,
+}
+
+/// CR 400.7 + CR 608.2c: the legacy per-member ChangeZone bookkeeping the
+/// producer loop ran inline after each move. A staged member may pause before
+/// delivery, so the rule runs at the delivery terminal instead — derived from
+/// the member's own typed request tracking and the batch completion's typed
+/// count policy, never from parallel flags.
+///
+/// CR 101.4: the three distinct stages of one admitted batch. Consultation and
+/// arrangement may each pause; delivery never re-enters consultation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BatchDeliveryStage {
+    Approving,
+    Arranging,
+    Delivering,
+}
+
+/// CR 101.4: the operation family a staged member belongs to. A batch is
+/// homogeneous: every member is one variant or the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum StagedMemberOperation {
+    /// An ordinary replaceable zone move; the member's request IS the event.
+    #[default]
+    ZoneMove,
+    /// CR 701.8a: an `Effect::Destroy`/`DestroyAll` member. The outer
+    /// `ProposedEvent::Destroy` is rebuilt from this provenance, never from the
+    /// retained inner request.
+    Destroy(StagedDestroyOperation),
+}
+
+/// CR 701.8a + CR 702.12b: the outer destruction a staged member re-proposes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedDestroyOperation {
+    pub source: ObjectId,
+    pub cant_regenerate: bool,
+}
+
+/// One retained member of a staged batch. The exact original request, its
+/// pre-consultation incarnation and the announcement index are frozen at entry,
+/// so no later object with the same id can satisfy this entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StagedBatchMember {
+    pub announcement_index: u32,
+    pub request: PendingBatchZoneMoveRequest,
+    pub identity: ObjectIncarnationRef,
+    /// CR 400.3 owner recorded at approval; validated live before delivery.
+    pub owner: PlayerId,
+    pub state: StagedBatchMemberState,
+    /// Exact final replaced event, present once approved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_event: Option<ProposedEvent>,
+    /// Consultation result retained while a post-replacement child is live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_outcome: Option<StagedMemberOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<ZoneMoveCompletion>,
+    /// CR 101.4 + CR 701.8a: this member's operation family. Legacy saves and
+    /// every R4b member decode as `ZoneMove`.
+    #[serde(default)]
+    pub operation: StagedMemberOperation,
+    /// CR 701.8a: set once the outer `Destroy` event was approved (not
+    /// prevented, not redirected). The singleton pushes `CreatureDestroyed` for
+    /// both an inner `Moved` and an inner `Prevented` (`destroy.rs:60-63`), so
+    /// this flag is the exact emission witness.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outer_destroy_approved: bool,
+}
+
+/// The charter's current-member states. `OuterConsulting` is produced only by
+/// the later outer-event adapters; this stage never writes it, but the wire
+/// enum carries it now so extending the carriers does not change the saved
+/// enum a second time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StagedBatchMemberState {
+    Unconsulted,
+    OuterConsulting,
+    InnerConsulting,
+    Approved,
+    PreventedWithChild,
+    Terminal,
+    Abandoned,
+}
+
+/// CR 614.5: one consultation's exact result, retained while a post-replacement
+/// child remains live so the child's later settlement cannot re-run the
+/// replacement choice.
+///
+/// `Approved` carries the exact approved `ProposedEvent` inline: the value
+/// lives on the staged owner for one paused consultation and is matched by
+/// value in the approval handback, so boxing it would allocate per member
+/// without saving retained state.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum StagedMemberOutcome {
+    Approved(ProposedEvent),
+    Prevented,
+}
+
+/// CR 401.4 + CR 101.4: one private owner/position arrangement group derived
+/// from final approvals. Only `Top` and `Bottom` are grouped; other positions
+/// stay on the ordinary per-member placement path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedLibraryArrangement {
+    /// Only `Top` and `Bottom` are grouped (see the phase scope note).
+    pub position: LibraryPosition,
+    /// Reused vocabulary: `owner` is the library owner, `arranger: None`
+    /// means CR 401.4 owner arranging, and `members` holds the final order for
+    /// `Derived`/`Submitted` and the offered order for `Offered`/`Awaiting`.
+    pub batch: MassLibraryOrderBatch,
+    pub status: StagedArrangementStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StagedArrangementStatus {
+    /// Request-origin: no owner prompt; `batch.members` is the legacy-replayed
+    /// final order and is already authoritative.
+    Derived,
+    /// Needs a prompt but has not been published yet.
+    Awaiting,
+    /// Prompt published; `batch.members` is only the offered order.
+    Offered,
+    /// Owner permutation stored; `batch.members` is the final order.
+    Submitted,
 }
 
 /// CR 701.25a / manifest dread: the post-loop cleanup a rest-pile batch must run
@@ -7064,8 +7692,37 @@ pub(crate) fn settle_batch_delivery_outcome(
     completion: &mut BatchCompletion,
     state: &GameState,
     group: &LogicalZoneChangeGroup,
+    members: &[StagedBatchMember],
 ) {
     match completion {
+        BatchCompletion::DestroyPopulationSettled {
+            settled_destroyed, ..
+        } => {
+            assert!(
+                settled_destroyed.is_none(),
+                "destroy population settled twice"
+            );
+            *settled_destroyed = Some(
+                members
+                    .iter()
+                    .filter(|member| {
+                        member.outer_destroy_approved
+                            && member.state != StagedBatchMemberState::Abandoned
+                    })
+                    .map(|member| member.identity.object_id)
+                    .collect(),
+            );
+        }
+        BatchCompletion::ChangeZonePopulationSettled { tail, settled } => {
+            assert!(settled.is_none(), "ChangeZone population settled twice");
+            *settled = Some(change_zone_settled_facts(
+                state,
+                group,
+                members,
+                &tail.count,
+                tail.destination,
+            ));
+        }
         BatchCompletion::RecordInstructionZoneResult {
             settled_records, ..
         } => {
@@ -7114,6 +7771,102 @@ pub(crate) fn settled_logical_zone_change_records(
             Some((**record).clone())
         })
         .collect()
+}
+
+/// CR 614.1 + CR 616.1: compute one settled ChangeZone population's exact
+/// facts. Transient per-member inputs only: no member vector is retained.
+pub(crate) fn change_zone_settled_facts(
+    _state: &GameState,
+    group: &LogicalZoneChangeGroup,
+    members: &[StagedBatchMember],
+    policy: &ChangeZoneCountPolicy,
+    destination: Zone,
+) -> ChangeZoneSettled {
+    let mut records = Vec::new();
+    let mut policy_count = 0i32;
+    let mut arrival_count = 0usize;
+    for member in members {
+        if member.state == StagedBatchMemberState::Abandoned {
+            continue;
+        }
+        // CR 614.1 + CR 616.1: the group's own terminal outcomes are the
+        // authoritative per-member settlement facts. `Moved` names the exact
+        // action-local occurrence ordinal, which covers every origin zone —
+        // unlike the battlefield-departure projection, an occurrence from the
+        // graveyard/hand/exile/library is retained here.
+        let group_index = group
+            .prospective_battlefield_members
+            .iter()
+            .position(|prospective| prospective.identity == member.identity);
+        let outcome = group_index.and_then(|index| group.terminal_outcomes.get(index));
+        let mut moved_record = None;
+        let mut final_zone = None;
+        let mut moved = false;
+        match outcome {
+            Some(LogicalZoneChangeTerminalOutcome::Moved { occurrence_ordinal }) => {
+                if let Some(occurrence) = group.all_origin_occurrences.get(*occurrence_ordinal) {
+                    let GameEvent::ZoneChanged { record, .. } = &occurrence.event else {
+                        panic!("moved member names a non-zone-change occurrence");
+                    };
+                    final_zone = Some(record.to_zone);
+                    moved_record = Some((**record).clone());
+                    moved = true;
+                }
+            }
+            Some(
+                LogicalZoneChangeTerminalOutcome::Prevented
+                | LogicalZoneChangeTerminalOutcome::Remained
+                | LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft,
+            )
+            | None => {}
+            Some(LogicalZoneChangeTerminalOutcome::Pending) => {
+                panic!("settled ChangeZone population retains a pending member")
+            }
+        }
+        if !moved && member.terminal == Some(ZoneMoveCompletion::Moved) {
+            // Fallback for a member the logical group did not enrol (family
+            // entries enrol every announced member, so this is defensive): use
+            // its own occurrence by object identity.
+            for occurrence in &group.all_origin_occurrences {
+                if let GameEvent::ZoneChanged { record, .. } = &occurrence.event {
+                    if record.object_id == member.identity.object_id {
+                        final_zone = Some(record.to_zone);
+                        moved_record = Some((**record).clone());
+                        moved = true;
+                    }
+                }
+            }
+        }
+        let arrived = moved && final_zone == Some(destination);
+        if arrived {
+            arrival_count += 1;
+        }
+        if moved {
+            if let Some(record) = moved_record {
+                records.push(record);
+            }
+        }
+        let selected = match policy {
+            ChangeZoneCountPolicy::TargetedArrivals { selected }
+            | ChangeZoneCountPolicy::ChoiceSelected { chosen: selected } => {
+                Some(selected.as_slice())
+            }
+            ChangeZoneCountPolicy::MassAllMembers => None,
+        };
+        match selected {
+            None => policy_count += 1,
+            Some(selected) => {
+                if selected.contains(&member.identity.object_id) && arrived {
+                    policy_count += 1;
+                }
+            }
+        }
+    }
+    ChangeZoneSettled {
+        policy_count,
+        arrival_count,
+        records,
+    }
 }
 
 impl BatchCompletion {
@@ -7547,6 +8300,107 @@ pub enum BatchCompletion {
         /// actually departed the library, so the set is a candidate list rather
         /// than a result.
         cards: Vec<ObjectId>,
+    },
+    /// CR 701.8a + CR 614.5 + CR 603.10a: one admitted destruction population
+    /// settled. `settled_destroyed` is filled exactly once by settlement with
+    /// the members whose outer `Destroy` was approved and whose terminal is not
+    /// `Abandoned` (Moved, Remained or inner-Prevented) — the singleton's exact
+    /// `CreatureDestroyed` emission rule.
+    ///
+    /// CR 701.8a + CR 608.2c: the population is already settled here — every
+    /// member's destruction was resolved during approval — so this completion
+    /// does not destroy anything again. It publishes the settled population in
+    /// the instruction's own order, once, after the last member's terminal.
+    DestroyPopulationSettled {
+        ability: Box<ResolvedAbility>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settled_destroyed: Option<Vec<ObjectId>>,
+    },
+    /// CR 608.2c + CR 614.1 + CR 603.10a: one admitted ChangeZone population
+    /// settled. The tail carries the producer's finish parameters; `settled`
+    /// is filled exactly once by settlement from the member terminals and the
+    /// logical group's all-origin occurrences.
+    ChangeZonePopulationSettled {
+        tail: Box<ChangeZoneBatchTail>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settled: Option<ChangeZoneSettled>,
+    },
+}
+
+/// CR 608.2c + CR 614.1: the ChangeZone producer's finish parameters, carried
+/// onto the batch owner when the population may pause before delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeZoneBatchTail {
+    pub group_id: LogicalZoneChangeGroupId,
+    pub effect_kind: EffectKind,
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    pub destination: Zone,
+    pub count: ChangeZoneCountPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_return_result_producer: Option<(ReturnResultOccurrenceId, ReturnResultId)>,
+    /// The paused path takes the drain's this-way stamp; the synchronous
+    /// targeted/mass paths do not.
+    #[serde(default)]
+    pub stamp_this_way: bool,
+    /// CR 400.7 + CR 608.2c: this population selected its members by the
+    /// source's own exile links (`TargetFilter::ExiledBySource`), so each moved
+    /// member's link is consumed at its terminal. Every other population keeps
+    /// its links — including one that CREATES them for a later return
+    /// (Worldgorger Dragon's mass exile).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub consumes_own_exile_links: bool,
+}
+
+/// CR 608.2c: how a settled ChangeZone population contributes
+/// `last_effect_count`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChangeZoneCountPolicy {
+    /// Targeted `resolve`: only selected members that actually arrived at the
+    /// destination.
+    TargetedArrivals { selected: Vec<ObjectId> },
+    /// Mass `ChangeZoneAll`: every non-abandoned member regardless of terminal.
+    MassAllMembers,
+    /// Effect `EffectZoneChoice`: the synchronous producer keeps
+    /// `chosen.len()`; the paused completion counts arrivals among the chosen.
+    ChoiceSelected { chosen: Vec<ObjectId> },
+}
+
+/// CR 614.1 + CR 616.1: the exact counts and moved records of a settled
+/// ChangeZone population.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeZoneSettled {
+    /// Policy value for `last_effect_count`.
+    pub policy_count: i32,
+    /// Arrival value for the this-way stamp.
+    pub arrival_count: usize,
+    /// Moved member records from `all_origin_occurrences`, for the
+    /// selected-return publisher and the moved-id ledger.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<ZoneChangeRecord>,
+}
+
+/// CR 401.2 + CR 401.4 + CR 608.2c: what finishing a
+/// [`WaitingFor::DigRestSplitChoice`] must do, parameterized so the existing
+/// prompt can also carry a batch-owned CR 401.4 arrangement without a second
+/// prompt variant or a new `GameAction`.
+///
+/// The enum is `untagged` because the two arms are shape-disjoint by
+/// construction: [`BatchCompletion`] is externally tagged, so a legacy save's
+/// completion object is a single-key map that can never be an
+/// `ApprovedBatch { logical_group_id }` map. The `Requests` arm therefore
+/// serializes transparently as the legacy object, keeping old saves
+/// byte-identical and needing no migration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LibraryPlacementContinuation {
+    /// Existing dig/search remainder route; the wire shape is the legacy
+    /// externally tagged `BatchCompletion` object.
+    Requests(Box<BatchCompletion>),
+    /// Batch-owned CR 401.4 arrangement; the id selects the exact staged batch
+    /// that owns the prompt.
+    ApprovedBatch {
+        logical_group_id: LogicalZoneChangeGroupId,
     },
 }
 
@@ -17602,8 +18456,13 @@ pub enum WaitingFor {
         /// moving any card, rather than completing the move and dropping the
         /// dig's reveal-marker cleanup and tracked-set publication on the
         /// floor.
+        ///
+        /// [`LibraryPlacementContinuation`] keeps that legacy `Requests` tail
+        /// wire-identical while letting a batch-owned CR 401.4 arrangement
+        /// reuse this same prompt; its group id is stripped together with the
+        /// tail in every client projection.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        completion: Option<Box<BatchCompletion>>,
+        completion: Option<LibraryPlacementContinuation>,
     },
     SurveilChoice {
         player: PlayerId,
@@ -20042,6 +20901,52 @@ impl WaitingFor {
         scope: DigRestSplitScope,
         source_id: Option<ObjectId>,
         completion: Option<Box<BatchCompletion>>,
+    ) -> Self {
+        Self::new_dig_rest_split_with_continuation(
+            chooser,
+            library_owner,
+            cards,
+            top_count,
+            scope,
+            source_id,
+            completion.map(LibraryPlacementContinuation::Requests),
+        )
+    }
+
+    /// CR 401.4 + CR 101.4: the same prompt addressed to a library owner for a
+    /// batch-owned arrangement group. The prompt carries no
+    /// `BatchCompletion`: its continuation names the exact staged batch, and
+    /// that batch's frame owns the completion.
+    pub fn new_dig_rest_split_for_batch(
+        chooser: PlayerId,
+        library_owner: PlayerId,
+        cards: Vec<ObjectId>,
+        top_count: usize,
+        scope: DigRestSplitScope,
+        source_id: Option<ObjectId>,
+        logical_group_id: LogicalZoneChangeGroupId,
+    ) -> Self {
+        Self::new_dig_rest_split_with_continuation(
+            chooser,
+            library_owner,
+            cards,
+            top_count,
+            scope,
+            source_id,
+            Some(LibraryPlacementContinuation::ApprovedBatch { logical_group_id }),
+        )
+    }
+
+    /// The one place the prompt's derived fields are computed, so every
+    /// constructor shares the same clamp and actor mapping.
+    fn new_dig_rest_split_with_continuation(
+        chooser: PlayerId,
+        library_owner: PlayerId,
+        cards: Vec<ObjectId>,
+        top_count: usize,
+        scope: DigRestSplitScope,
+        source_id: Option<ObjectId>,
+        completion: Option<LibraryPlacementContinuation>,
     ) -> Self {
         let top_count = top_count.min(cards.len());
         let bottom_count = cards.len() - top_count;
@@ -26457,6 +27362,498 @@ fn migrate_legacy_spell_cost_elections(value: &mut serde_json::Value) -> Result<
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) mod replacement_library_placement_wire_tests {
+    use super::*;
+    use crate::types::ability::LibraryPosition;
+    use serde_json::{json, Value};
+
+    // Infrastructure fixture: public producer and resume witnesses live in
+    // zone_pipeline's library-placement tests. No printed replacement is claimed.
+    pub(crate) fn state_with_pending() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        let object = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "placement subject".into(),
+            Zone::Hand,
+        );
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "replacement authority".into(),
+            Zone::Battlefield,
+        );
+        let mut proposed =
+            ProposedEvent::zone_change(object, Zone::Hand, Zone::Library, Some(source));
+        if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
+            applied.insert(
+                crate::types::proposed_event::AppliedReplacementKey::Object { source, index: 1 },
+            );
+        }
+        state.pending_replacement = Some(
+            serde_json::from_value(json!({
+                "proposed": proposed, "candidates": [{"source": source, "index": 0}],
+                "depth": 2, "choice_player": PlayerId(0), "is_optional": true,
+                "library_placement": LibraryPosition::Top
+            }))
+            .unwrap(),
+        );
+        state.waiting_for =
+            crate::game::replacement::replacement_choice_waiting_for(PlayerId(0), &state);
+        state
+    }
+
+    pub(crate) fn nested_states() -> Vec<GameState> {
+        let mut entry = state_with_pending();
+        let pending = entry.pending_replacement.take().unwrap();
+        entry.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::PayAmount {
+            player: PlayerId(0),
+            total: 2,
+            resume_at_resolution_depth: 0,
+            pending_entry: Some(Box::new(pending)),
+        });
+        let mut outer = state_with_pending();
+        let pending = outer.pending_replacement.take().unwrap();
+        let ProposedEvent::ZoneChange {
+            object_id,
+            cause: Some(source_id),
+            ..
+        } = pending.proposed
+        else {
+            panic!("fixture zone change")
+        };
+        outer.pending_cost_move_resume = Some(PendingCostMoveResume::ReplacementMayCost {
+            source_id,
+            current: object_id,
+            remaining: Vec::new(),
+            paid_count: 1,
+            outer_replacement: Some(Box::new(pending)),
+        });
+        vec![entry, outer]
+    }
+
+    pub(crate) fn change_carriers(
+        value: &mut Value,
+        current: Option<&Value>,
+        mirror: Option<&Value>,
+        to: Zone,
+    ) {
+        match value {
+            Value::Array(values) => {
+                for value in values {
+                    change_carriers(value, current, mirror, to);
+                }
+            }
+            Value::Object(object) => {
+                for key in ["pending_replacement", "pending_entry", "outer_replacement"] {
+                    if let Some(carrier) = object.get_mut(key).and_then(Value::as_object_mut) {
+                        match mirror {
+                            Some(value) => {
+                                carrier.insert("library_placement".into(), value.clone());
+                            }
+                            None => {
+                                carrier.remove("library_placement");
+                            }
+                        }
+                        if let Some(event) = carrier
+                            .get_mut("proposed")
+                            .and_then(|event| event.get_mut("ZoneChange"))
+                            .and_then(Value::as_object_mut)
+                        {
+                            event.insert("to".into(), serde_json::to_value(to).unwrap());
+                            match current {
+                                Some(value) => {
+                                    event.insert("library_placement".into(), value.clone());
+                                }
+                                None => {
+                                    event.remove("library_placement");
+                                }
+                            }
+                        }
+                    }
+                }
+                for value in object.values_mut() {
+                    change_carriers(value, current, mirror, to);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn assert_placement(state: &GameState, expected: Option<LibraryPosition>) {
+        let pending = state
+            .pending_replacement
+            .as_ref()
+            .or(match state.pending_deferred_life_cost_resume.as_ref() {
+                Some(DeferredLifeCostResume::PayAmount { pending_entry, .. }) => {
+                    pending_entry.as_deref()
+                }
+                _ => None,
+            })
+            .or(match state.pending_cost_move_resume.as_ref() {
+                Some(PendingCostMoveResume::ReplacementMayCost {
+                    outer_replacement, ..
+                }) => outer_replacement.as_deref(),
+                _ => None,
+            })
+            .expect("nonempty replacement carrier survives");
+        let ProposedEvent::ZoneChange {
+            library_placement,
+            cause,
+            applied,
+            ..
+        } = &pending.proposed
+        else {
+            panic!("zone event survives")
+        };
+        assert_eq!(library_placement, &expected);
+        assert_eq!(pending.depth, 2);
+        assert_eq!(pending.choice_player, Some(PlayerId(0)));
+        assert_eq!(pending.candidates.len(), 1);
+        assert_eq!(*cause, Some(pending.candidates[0].source));
+        assert!(applied.contains(
+            &crate::types::proposed_event::AppliedReplacementKey::Object {
+                source: pending.candidates[0].source,
+                index: 1
+            }
+        ));
+        let encoded = serde_json::to_value(&pending.proposed).unwrap();
+        assert!(encoded["ZoneChange"].get("library_placement").is_some());
+        assert_eq!(
+            encoded["ZoneChange"]["library_placement"],
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn replacement_library_placement_raw_and_persisted_presence_matrix() {
+        let top = serde_json::to_value(LibraryPosition::Top).unwrap();
+        let bottom = serde_json::to_value(LibraryPosition::Bottom).unwrap();
+        for state in std::iter::once(state_with_pending()).chain(nested_states()) {
+            for to in [Zone::Library, Zone::Exile] {
+                for current in [None, Some(Value::Null), Some(bottom.clone())] {
+                    for mirror in [None, Some(Value::Null), Some(top.clone())] {
+                        let expected = current.clone().unwrap_or_else(|| {
+                            if to == Zone::Library {
+                                mirror.clone().unwrap_or(Value::Null)
+                            } else {
+                                Value::Null
+                            }
+                        });
+                        let expected: Option<LibraryPosition> =
+                            serde_json::from_value(expected).unwrap();
+                        let mut raw = serde_json::to_value(&state).unwrap();
+                        change_carriers(&mut raw, current.as_ref(), mirror.as_ref(), to);
+                        let direct: GameState = serde_json::from_value(raw.clone()).unwrap();
+                        assert_placement(&direct, expected.clone());
+                        let again: GameState =
+                            serde_json::from_value(serde_json::to_value(&direct).unwrap()).unwrap();
+                        assert_eq!(direct, again);
+                        let mut trusted =
+                            serde_json::to_value(PersistedGameState::capture(state.clone()))
+                                .unwrap();
+                        change_carriers(&mut trusted, current.as_ref(), mirror.as_ref(), to);
+                        for wire in [raw, trusted] {
+                            let restored = serde_json::from_value::<PersistedGameState>(wire)
+                                .unwrap()
+                                .into_game_state()
+                                .unwrap();
+                            assert_placement(&restored, expected.clone());
+                            let again = serde_json::from_value::<PersistedGameState>(
+                                serde_json::to_value(PersistedGameState::capture(restored.clone()))
+                                    .unwrap(),
+                            )
+                            .unwrap()
+                            .into_game_state()
+                            .unwrap();
+                            assert_eq!(restored, again);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn replacement_library_placement_malformed_current_never_uses_mirror() {
+        for state in std::iter::once(state_with_pending()).chain(nested_states()) {
+            let mut raw = serde_json::to_value(&state).unwrap();
+            let mut trusted = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
+            let invalid = json!({"type": "NotAPosition"});
+            let top = serde_json::to_value(LibraryPosition::Top).unwrap();
+            change_carriers(&mut raw, Some(&invalid), Some(&top), Zone::Library);
+            change_carriers(&mut trusted, Some(&invalid), Some(&top), Zone::Library);
+            assert!(serde_json::from_value::<GameState>(raw.clone()).is_err());
+            assert!(serde_json::from_value::<PersistedGameState>(raw).is_err());
+            assert!(serde_json::from_value::<PersistedGameState>(trusted).is_err());
+        }
+    }
+
+    #[test]
+    fn replacement_library_placement_migration_is_bounded_and_idempotent() {
+        let pending =
+            serde_json::to_value(state_with_pending().pending_replacement.unwrap()).unwrap();
+        let mut wire = json!({"resolution_frames": [{"nested": {"pending_entry": pending.clone(), "outer_replacement": pending.clone()}}], "unrelated": pending,
+            "pending_replacement": {"proposed": {"Draw": {"player_id": 0, "count": 1, "applied": []}}, "library_placement": {"type": "Top"}}});
+        change_carriers(
+            &mut wire,
+            None,
+            Some(&json!({"type": "Top"})),
+            Zone::Library,
+        );
+        let unrelated = wire["unrelated"].clone();
+        let draw = wire["pending_replacement"].clone();
+        migrate_legacy_replacement_library_placement(&mut wire).unwrap();
+        assert_eq!(
+            wire["resolution_frames"][0]["nested"]["pending_entry"]["proposed"]["ZoneChange"]
+                ["library_placement"],
+            json!({"type": "Top"})
+        );
+        assert_eq!(
+            wire["resolution_frames"][0]["nested"]["outer_replacement"]["proposed"]["ZoneChange"]
+                ["library_placement"],
+            json!({"type": "Top"})
+        );
+        assert_eq!(wire["unrelated"], unrelated);
+        assert_eq!(wire["pending_replacement"], draw);
+        let once = wire.clone();
+        migrate_legacy_replacement_library_placement(&mut wire).unwrap();
+        assert_eq!(wire, once);
+    }
+}
+
+/// Import only absent event placement from known legacy replacement carriers.
+/// Current null and current values must survive unchanged, including malformed
+/// values that typed decoding will reject.
+fn migrate_legacy_replacement_library_placement(
+    value: &mut serde_json::Value,
+) -> Result<(), String> {
+    fn child_path(path: &str, key: &str) -> String {
+        format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"))
+    }
+
+    fn event_without_placement(event: &Value) -> Value {
+        let mut event = event.clone();
+        if let Some(zone) = event.get_mut("ZoneChange").and_then(Value::as_object_mut) {
+            zone.remove("library_placement");
+        }
+        event
+    }
+
+    fn placement(event: &Value, mirror: &Value) -> Value {
+        event["ZoneChange"]
+            .get("library_placement")
+            .cloned()
+            .unwrap_or_else(|| {
+                if event["ZoneChange"]["to"].as_str() == Some("Library") {
+                    mirror.clone()
+                } else {
+                    Value::Null
+                }
+            })
+    }
+
+    fn retain_edit(
+        snapshot: &Value,
+        edits: &mut BTreeMap<String, Value>,
+        event_path: &str,
+        placement: &Value,
+    ) -> Result<(), String> {
+        let path = format!("{event_path}/ZoneChange/library_placement");
+        if let Some(current) = snapshot.pointer(&path) {
+            if current != placement {
+                return Err(
+                    "conflicting replacement library placement in exact owner copies".into(),
+                );
+            }
+        } else if let Some(previous) = edits.insert(path, placement.clone()) {
+            if previous != *placement {
+                return Err("ambiguous replacement library placement for one owner copy".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn frame_owner(frame: &Value, path: &str) -> Option<String> {
+        match frame["type"].as_str() {
+            Some("BatchDelivery") => Some(format!("{path}/data")),
+            Some("ChangeZone") => Some(format!("{path}/data/pending")),
+            _ => None,
+        }
+    }
+
+    // Paths refer exclusively to the immutable original wire. In particular,
+    // normalizing a proposal cannot change the key used to associate its owner.
+    fn collect(
+        snapshot: &Value,
+        node: &Value,
+        path: &str,
+        enclosing_owners: &[String],
+        edits: &mut BTreeMap<String, Value>,
+    ) -> Result<(), String> {
+        match node {
+            Value::Array(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    collect(
+                        snapshot,
+                        value,
+                        &child_path(path, &index.to_string()),
+                        enclosing_owners,
+                        edits,
+                    )?;
+                }
+            }
+            Value::Object(object) => {
+                let mut local_owners = enclosing_owners.to_vec();
+                // Runtime capture is top-only. Older independent owners below
+                // this frame are not candidates, even with identical events.
+                if object.contains_key("resolution_stack")
+                    || object.contains_key("resolution_frames")
+                {
+                    local_owners.clear();
+                    for key in ["resolution_stack", "resolution_frames"] {
+                        let Some(stack) = object.get(key) else {
+                            continue;
+                        };
+                        // Raw live state wraps frames in `{"frames": [...]}`; the
+                        // versioned resolution wire serializes the transparent
+                        // frame vector as a bare array.
+                        let (frames, frames_path) =
+                            match stack.get("frames").and_then(Value::as_array) {
+                                Some(frames) => (frames, format!("{path}/{key}/frames")),
+                                None => match stack.as_array() {
+                                    Some(frames) => (frames, format!("{path}/{key}")),
+                                    None => continue,
+                                },
+                            };
+                        if let Some((index, frame)) = frames.iter().enumerate().next_back() {
+                            if let Some(owner) =
+                                frame_owner(frame, &format!("{frames_path}/{index}"))
+                            {
+                                local_owners.push(owner);
+                            }
+                        }
+                    }
+                }
+                for key in ["pending_batch_deliveries", "pending_change_zone_iteration"] {
+                    if object.get(key).is_some_and(|owner| !owner.is_null()) {
+                        local_owners.push(child_path(path, key));
+                    }
+                }
+                // A carrier inside a typed frame belongs to that frame, not
+                // to a different frame selected by its surrounding stack.
+                if object.contains_key("type") && object.contains_key("data") {
+                    local_owners = frame_owner(node, path).into_iter().collect();
+                }
+                for key in ["pending_replacement", "pending_entry", "outer_replacement"] {
+                    let Some(carrier) = object.get(key).filter(|value| value.is_object()) else {
+                        continue;
+                    };
+                    let carrier_path = child_path(path, key);
+                    let proposal = &carrier["proposed"];
+                    let mirror = carrier.get("library_placement").unwrap_or(&Value::Null);
+                    if proposal.get("ZoneChange").is_some() {
+                        retain_edit(
+                            snapshot,
+                            edits,
+                            &format!("{carrier_path}/proposed"),
+                            &placement(proposal, mirror),
+                        )?;
+                    }
+                    let (boundary, boundary_path) = match carrier
+                        .get("delivery_boundary")
+                        .filter(|event| !event.is_null())
+                    {
+                        Some(event) => (event, format!("{carrier_path}/delivery_boundary")),
+                        None => (proposal, format!("{carrier_path}/proposed")),
+                    };
+                    if boundary.get("ZoneChange").is_none() {
+                        continue;
+                    }
+                    let boundary_placement = placement(boundary, mirror);
+                    retain_edit(snapshot, edits, &boundary_path, &boundary_placement)?;
+                    let mut associated = Vec::new();
+                    for owner_path in &local_owners {
+                        let Some(owner) = snapshot.pointer(owner_path) else {
+                            continue;
+                        };
+                        let paused = &owner["paused_current"];
+                        let expected = &paused["expected_event"];
+                        if event_without_placement(expected) != event_without_placement(boundary) {
+                            continue;
+                        }
+                        let member: ObjectIncarnationRef =
+                            serde_json::from_value(paused["member"].clone()).map_err(|error| {
+                                format!("invalid replacement delivery member: {error}")
+                            })?;
+                        if serde_json::to_value(member.object_id)
+                            .map_err(|error| error.to_string())?
+                            != boundary["ZoneChange"]["object_id"]
+                        {
+                            return Err(
+                                "replacement delivery boundary disagrees with retained member"
+                                    .into(),
+                            );
+                        }
+                        associated.push((owner_path, owner));
+                    }
+                    // Duplicate representations must identify the same owner,
+                    // including the retained incarnation and logical group.
+                    if let Some((_, first)) = associated.first() {
+                        for (_, other) in associated.iter().skip(1) {
+                            if first["logical_zone_change_group"]
+                                != other["logical_zone_change_group"]
+                                || first["paused_current"]["member"]
+                                    != other["paused_current"]["member"]
+                            {
+                                return Err(
+                                    "ambiguous replacement delivery owner association".into()
+                                );
+                            }
+                        }
+                    }
+                    for (owner_path, _) in associated {
+                        retain_edit(
+                            snapshot,
+                            edits,
+                            &format!("{owner_path}/paused_current/expected_event"),
+                            &boundary_placement,
+                        )?;
+                    }
+                }
+                for (key, value) in object {
+                    collect(
+                        snapshot,
+                        value,
+                        &child_path(path, key),
+                        &local_owners,
+                        edits,
+                    )?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    let mut edits = BTreeMap::new();
+    collect(value, value, "", &[], &mut edits)?;
+    for (path, placement) in edits {
+        let parent = path
+            .strip_suffix("/library_placement")
+            .expect("placement edit path");
+        value
+            .pointer_mut(parent)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| "replacement placement migration lost its event".to_string())?
+            .insert("library_placement".into(), placement);
+    }
+    Ok(())
+}
+
 /// Field-migrate the former paid-resolution offer into its canonical cleanup
 /// carrier. This runs before raw, persisted, trusted and versioned decoding
 /// materializes `CastOfferKind`, independent of the transport.
@@ -26965,9 +28362,11 @@ fn visit_batch_completion_chains<'a>(
     match completion {
         BatchCompletion::CastFromZoneExileDeliveryComplete { ability, .. }
         | BatchCompletion::TopCardContestRoundComplete { ability, .. }
+        | BatchCompletion::DestroyPopulationSettled { ability, .. }
         | BatchCompletion::ForEachCategoryExileComplete { ability, .. } => {
             f(ability, SuspendedChainEvent::Ambient)
         }
+        BatchCompletion::ChangeZonePopulationSettled { .. } => Ok(()),
         // CR 701.23a + CR 608.2c: a settled search delivery resumes its scoped
         // "after the search" tail.
         BatchCompletion::LibrarySearchDeliverySettled { resume }
@@ -27105,7 +28504,10 @@ fn visit_waiting_for_chains<'a>(
             visit_mana_choice_context_chains(context, f)?
         }
         WaitingFor::DigRestSplitChoice { completion, .. } => {
-            if let Some(completion) = completion.as_deref() {
+            // Only the dig-route arm carries a `BatchCompletion` chain; a
+            // batch-owned arrangement's completion lives on its staged batch
+            // frame and is visited through that frame instead.
+            if let Some(LibraryPlacementContinuation::Requests(completion)) = completion.as_ref() {
                 visit_batch_completion_chains(completion, f)?;
             }
         }
@@ -27711,6 +29113,7 @@ impl GameStateDecode {
         migrate_legacy_attack_exert_conditions(&mut value)?;
         migrate_legacy_spell_cost_elections(&mut value)?;
         migrate_legacy_graveyard_paid_cast_cleanup(&mut value)?;
+        migrate_legacy_replacement_library_placement(&mut value)?;
         migrate_legacy_shortcut_repetition_bound(&mut value)?;
         migrate_legacy_offer_road(&mut value);
         let mut state = Self::materialize_prepared(value)?;
@@ -27780,6 +29183,7 @@ impl GameStateDecode {
         migrate_legacy_attack_exert_conditions(value)?;
         migrate_legacy_spell_cost_elections(value)?;
         migrate_legacy_graveyard_paid_cast_cleanup(value)?;
+        migrate_legacy_replacement_library_placement(value)?;
         migrate_legacy_shortcut_repetition_bound(value)?;
         migrate_legacy_offer_road(value);
         Ok(())
@@ -28959,12 +30363,9 @@ pub struct PendingReplacement {
     /// the affected player.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub choice_player: Option<PlayerId>,
-    /// CR 701.24a: the library placement requested by the original `move_object`
-    /// call whose replacement consult parked here (W3 library-placement arm only).
-    /// `Some` solely for a parked Library-targeting `ZoneChange`; the resume path
-    /// (`handle_replacement_choice`) threads it back into the delivery so the
-    /// object lands at the requested index instead of the tail auto-shuffling it
-    /// away. `None` for every other parked event (the common case).
+    /// Legacy save mirror. Decode imports this only when a Library-targeting
+    /// proposed ZoneChange lacks its own `library_placement` key. Current event
+    /// null and values are authoritative; execution must not consult this mirror.
     #[serde(default)]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
     /// CR 603.3a + CR 109.5: preserve the controller that resolved a
@@ -29797,6 +31198,21 @@ impl GameState {
         self.resolution_stack.active_ability_continuation()
     }
 
+    /// CR 608.2c + CR 400.7j: the ability continuation that is the stack top or
+    /// its immediate parent (the staged ChangeZone batch parks above it).
+    pub fn ability_continuation_at_top_or_parent(&self) -> Option<&AbilityContinuationFrame> {
+        self.resolution_stack
+            .ability_continuation_at_top_or_parent()
+    }
+
+    /// Mutable twin of [`Self::ability_continuation_at_top_or_parent`].
+    pub fn ability_continuation_at_top_or_parent_mut(
+        &mut self,
+    ) -> Option<&mut AbilityContinuationFrame> {
+        self.resolution_stack
+            .ability_continuation_at_top_or_parent_mut()
+    }
+
     /// Mutably accesses only the active continuation frame.
     pub fn active_ability_continuation_frame_mut(
         &mut self,
@@ -29979,7 +31395,23 @@ impl GameState {
         self.push_change_zone_frame(ChangeZoneFrame {
             pending: None,
             devour_eligible_snapshot: Some(snapshot),
+            awaiting_batch: None,
         });
+    }
+
+    /// CR 616.1: the exact boundary a staged outer `Destroy` consultation
+    /// parked on. Unlike the zone-change helper, the parked proposal is the
+    /// outer event itself.
+    pub fn pending_staged_approval_boundary(
+        &self,
+    ) -> Option<(ObjectIncarnationRef, ProposedEvent)> {
+        let pending = self.pending_replacement.as_ref()?;
+        let object_id = pending.proposed.affected_object_id()?;
+        let object = self.objects.get(&object_id)?;
+        Some((
+            ObjectIncarnationRef::from_object(object),
+            pending.proposed.clone(),
+        ))
     }
 
     /// CR 614.12a + CR 614.13a: A Devour-only ChangeZone frame owns the
@@ -29988,7 +31420,9 @@ impl GameState {
     /// iteration, retire the now-ownerless frame.
     pub fn clear_completed_active_devour_snapshot(&mut self) -> bool {
         if !self.active_change_zone_frame().is_some_and(|frame| {
-            frame.pending.is_none() && frame.devour_eligible_snapshot.is_some()
+            frame.pending.is_none()
+                && frame.awaiting_batch.is_none()
+                && frame.devour_eligible_snapshot.is_some()
         }) {
             return false;
         }
@@ -30005,7 +31439,7 @@ impl GameState {
     pub fn push_change_zone_iteration(&mut self, pending: PendingChangeZoneIteration) {
         if self
             .active_change_zone_frame()
-            .is_some_and(|frame| frame.pending.is_none())
+            .is_some_and(|frame| frame.pending.is_none() && frame.awaiting_batch.is_none())
         {
             let devour_eligible_snapshot = self
                 .active_change_zone_frame()
@@ -30013,14 +31447,82 @@ impl GameState {
             self.replace_active_change_zone_frame(ChangeZoneFrame {
                 pending: Some(pending),
                 devour_eligible_snapshot,
+                awaiting_batch: None,
             })
             .expect("Devour-only ChangeZone frame must re-park atomically");
         } else {
             self.push_change_zone_frame(ChangeZoneFrame {
                 pending: Some(pending),
                 devour_eligible_snapshot: None,
+                awaiting_batch: None,
             });
         }
+    }
+
+    /// CR 101.4 + CR 608.2c: install the ChangeZone family's structural parent
+    /// for one staged batch child. The depth was captured before the batch was
+    /// parked, so the marker lands immediately below the child.
+    pub fn insert_change_zone_batch_parent_at_child_boundary(
+        &mut self,
+        group_id: crate::types::identifiers::LogicalZoneChangeGroupId,
+        devour_eligible_snapshot: Option<HashSet<ObjectId>>,
+        child_stack_start: ChildStackDepth,
+    ) {
+        self.resolution_stack
+            .insert_parent_at_child_boundary(
+                crate::types::resolution::ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
+                    pending: None,
+                    devour_eligible_snapshot,
+                    awaiting_batch: Some(crate::types::resolution::ChangeZoneBatchMarker {
+                        group_id,
+                    }),
+                })),
+                child_stack_start,
+            )
+            .expect("staged ChangeZone batch parent must be inserted below its child");
+    }
+
+    /// CR 101.4 + CR 608.2c: re-park a detached staged batch owner after a run
+    /// that may have raised a delivery child (an ETB-counter/choice frame).
+    /// The batch belongs immediately BELOW that child and above its ChangeZone
+    /// marker, so a plain top parking would bury the marker under the child.
+    /// `boundary` is the stack depth captured right after the owner was taken
+    /// off the stack; when the run raised nothing above it the owner parks
+    /// normally.
+    pub fn repark_batch_owner_below_children(
+        &mut self,
+        owner: PendingBatchDeliveries,
+        boundary: ChildStackDepth,
+    ) {
+        match self
+            .resolution_stack
+            .capture_child_boundary()
+            .cmp(&boundary)
+        {
+            std::cmp::Ordering::Greater => self
+                .resolution_stack
+                .insert_parent_at_child_boundary(
+                    crate::types::resolution::ResolutionFrame::BatchDelivery(Box::new(owner)),
+                    boundary,
+                )
+                .expect("re-parked staged batch inserts below its delivery child stack"),
+            std::cmp::Ordering::Less | std::cmp::Ordering::Equal => self
+                .resolution_stack
+                .park_batch_owner(owner)
+                .expect("staged batch re-parks its exact owner"),
+        }
+    }
+
+    /// CR 101.4 + CR 608.2c: retire the ChangeZone marker frame that awaits
+    /// exactly `group_id` when it is the stack top or the immediate parent of
+    /// the resolving continuation that the staged delivery spliced above it.
+    /// Returns whether a frame was consumed.
+    pub fn take_change_zone_batch_marker(
+        &mut self,
+        group_id: crate::types::identifiers::LogicalZoneChangeGroupId,
+    ) -> bool {
+        self.resolution_stack
+            .take_change_zone_batch_marker_at_top_or_parent(group_id)
     }
 
     /// Park a newly paused ChangeZone iteration beneath the complete child
@@ -30057,6 +31559,7 @@ impl GameState {
         self.replace_active_change_zone_frame(ChangeZoneFrame {
             pending: Some(pending),
             devour_eligible_snapshot,
+            awaiting_batch: None,
         })
         .expect("re-paused ChangeZone must own the active frame");
     }
@@ -39129,6 +40632,7 @@ mod tests {
     };
     use crate::types::card_printing::CardPrinting;
     use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
+    use crate::types::identifiers::LogicalZoneChangeGroupId;
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
         LEGACY_INCARNATION,
@@ -51659,6 +53163,212 @@ mod tests {
         assert!(state.exile.is_empty());
     }
 
+    /// CR 800.4a + CR 701.8a: concession pruning leaves a Destroy member
+    /// `Abandoned` without clearing its outer approval flag. That is a legal
+    /// producer state and must pass the staged validator.
+    #[test]
+    fn abandoned_destroy_member_with_outer_approval_validates() {
+        let member = StagedBatchMember {
+            announcement_index: 0,
+            request: PendingBatchZoneMoveRequest {
+                object_id: ObjectId(1),
+                destination: Zone::Graveyard,
+                cause: PendingBatchZoneChangeCause::Effect {
+                    source: ObjectId(1),
+                },
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_transformed: false,
+                controller_override: None,
+                enter_with_counters: Vec::new(),
+                face_down_profile: None,
+                chain_referent: Default::default(),
+                attach_to: None,
+                performed_by: None,
+                library_placement: None,
+                exile_duration: None,
+                exile_controller: None,
+                exile_tracking: ZoneDeliveryExileTracking::None,
+                replacement_applied: std::collections::HashSet::new(),
+                face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+            },
+            identity: ObjectIncarnationRef::of(ObjectId(1), 0),
+            owner: PlayerId(0),
+            state: StagedBatchMemberState::Abandoned,
+            approved_event: None,
+            pending_outcome: None,
+            terminal: None,
+            operation: StagedMemberOperation::Destroy(StagedDestroyOperation {
+                source: ObjectId(1),
+                cant_regenerate: false,
+            }),
+            outer_destroy_approved: true,
+        };
+        PendingBatchDeliveries::validate_staged_member(&member)
+            .expect("concession-pruned destroy member with its outer approval is legal");
+    }
+
+    fn cursor_member(
+        object: u64,
+        state: StagedBatchMemberState,
+        terminal: Option<ZoneMoveCompletion>,
+        approved: bool,
+    ) -> StagedBatchMember {
+        let object_id = ObjectId(object);
+        let event = ProposedEvent::zone_change(
+            object_id,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Some(ObjectId(999)),
+        );
+        StagedBatchMember {
+            announcement_index: 0,
+            request: PendingBatchZoneMoveRequest {
+                object_id,
+                destination: Zone::Graveyard,
+                cause: PendingBatchZoneChangeCause::Effect {
+                    source: ObjectId(999),
+                },
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_transformed: false,
+                controller_override: None,
+                enter_with_counters: Vec::new(),
+                face_down_profile: None,
+                chain_referent: Default::default(),
+                attach_to: None,
+                performed_by: None,
+                library_placement: None,
+                exile_duration: None,
+                exile_controller: None,
+                exile_tracking: ZoneDeliveryExileTracking::None,
+                replacement_applied: std::collections::HashSet::new(),
+                face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+            },
+            identity: ObjectIncarnationRef::of(object_id, 0),
+            owner: PlayerId(0),
+            state,
+            approved_event: approved.then_some(event),
+            pending_outcome: None,
+            terminal,
+            operation: StagedMemberOperation::ZoneMove,
+            outer_destroy_approved: false,
+        }
+    }
+
+    fn cursor_validation_deliveries(
+        members: Vec<StagedBatchMember>,
+        cursor: usize,
+    ) -> PendingBatchDeliveries {
+        let mut state = GameState::new_two_player(7);
+        let mut logical_zone_change_group = state.allocate_logical_zone_change_group(&[]);
+        logical_zone_change_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("empty group latches");
+        let attempted = members
+            .iter()
+            .map(|member| member.identity.object_id)
+            .collect();
+        PendingBatchDeliveries {
+            component_delivery_parent: None,
+            logical_zone_change_group,
+            paused_current: None,
+            remaining: Vec::new(),
+            destination: Zone::Graveyard,
+            source_id: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: std::collections::HashSet::new(),
+            requests: Vec::new(),
+            attempted,
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+            staged: Some(StagedBatchDelivery {
+                stage: BatchDeliveryStage::Delivering,
+                members,
+                cursor,
+                arrangements: Vec::new(),
+                arrangement_cursor: 0,
+            }),
+        }
+    }
+
+    /// CR 608.2c: the delivery cursor is the next member to deliver, so no
+    /// still-`Approved` member may sit behind it — `deliver_staged_members`
+    /// would report it Delivered with no outcome, and the settlement would then
+    /// find a Pending slot it cannot settle.
+    #[test]
+    fn delivery_cursor_rejects_still_approved_members_behind_it() {
+        let deliveries = cursor_validation_deliveries(
+            vec![
+                cursor_member(1, StagedBatchMemberState::Approved, None, true),
+                cursor_member(
+                    2,
+                    StagedBatchMemberState::Terminal,
+                    Some(ZoneMoveCompletion::Moved),
+                    true,
+                ),
+            ],
+            2,
+        );
+        let staged = deliveries.staged.as_ref().expect("staged payload");
+        let error = deliveries
+            .validate_staged_stage(staged)
+            .expect_err("an undelivered member behind the cursor must be rejected");
+        assert!(
+            error.contains("precedes the delivery cursor"),
+            "unexpected error: {error}"
+        );
+
+        // Both terminal behind the cursor is the real delivered shape.
+        let delivered = cursor_validation_deliveries(
+            vec![
+                cursor_member(
+                    1,
+                    StagedBatchMemberState::Terminal,
+                    Some(ZoneMoveCompletion::Moved),
+                    true,
+                ),
+                cursor_member(
+                    2,
+                    StagedBatchMemberState::Terminal,
+                    Some(ZoneMoveCompletion::Prevented),
+                    true,
+                ),
+            ],
+            2,
+        );
+        delivered
+            .validate_staged_stage(delivered.staged.as_ref().expect("staged payload"))
+            .expect("every delivered member carries its terminal");
+
+        // Approval legitimately terminalizes prevented/remained members BEFORE
+        // the delivery cursor resets to zero, so a future Terminal member is
+        // still legal.
+        let future_terminal = cursor_validation_deliveries(
+            vec![
+                cursor_member(
+                    1,
+                    StagedBatchMemberState::Terminal,
+                    Some(ZoneMoveCompletion::Moved),
+                    true,
+                ),
+                cursor_member(
+                    2,
+                    StagedBatchMemberState::Terminal,
+                    Some(ZoneMoveCompletion::Remained),
+                    true,
+                ),
+            ],
+            1,
+        );
+        future_terminal
+            .validate_staged_stage(future_terminal.staged.as_ref().expect("staged payload"))
+            .expect("a future terminal member is a legitimate approval outcome");
+    }
+
     #[test]
     fn game_state_has_seeded_rng() {
         let state1 = GameState::new_two_player(42);
@@ -53539,6 +55249,87 @@ mod tests {
             serde_json::json!([[1, [2, 3]]]),
             "a legacy mass-order queue must retain its migration authority across a save"
         );
+    }
+
+    /// CR 401.2 + CR 401.4: the `DigRestSplitChoice` continuation is parameterized
+    /// so a batch-owned arrangement can reuse the prompt. The `untagged`
+    /// wrapping must stay wire-transparent for the legacy dig route: an old save's
+    /// externally tagged `BatchCompletion` object decodes as `Requests`, the
+    /// wrapped arm re-serializes byte-identically, and the batch-owned arm
+    /// round-trips without being mistaken for a legacy completion.
+    #[test]
+    fn dig_rest_split_continuation_preserves_legacy_wire_shape() {
+        let legacy = BatchCompletion::ReturnAsAuraNoTargetComplete {
+            source_id: ObjectId(7),
+        };
+
+        // The wrapper is wire-transparent: the `Requests` arm serializes exactly
+        // like the legacy externally tagged `BatchCompletion` object.
+        let wrapped = LibraryPlacementContinuation::Requests(Box::new(legacy.clone()));
+        assert_eq!(
+            serde_json::to_string(&wrapped).unwrap(),
+            serde_json::to_string(&legacy).unwrap(),
+            "the Requests arm must not add a tag or wrapper object"
+        );
+
+        // A legacy save's completion object decodes as `Requests`.
+        let decoded: LibraryPlacementContinuation =
+            serde_json::from_str(&serde_json::to_string(&legacy).unwrap()).unwrap();
+        match decoded {
+            LibraryPlacementContinuation::Requests(completion) => assert_eq!(*completion, legacy),
+            other => panic!("a legacy completion must decode as Requests, got {other:?}"),
+        }
+
+        // The batch-owned arm round-trips and is never a legacy completion.
+        let batch = LibraryPlacementContinuation::ApprovedBatch {
+            logical_group_id: LogicalZoneChangeGroupId(9),
+        };
+        let batch_json = serde_json::to_string(&batch).unwrap();
+        assert_eq!(
+            serde_json::from_str::<LibraryPlacementContinuation>(&batch_json).unwrap(),
+            batch
+        );
+
+        // End to end: the legacy prompt's own JSON shape is unchanged.
+        let prompt = WaitingFor::new_dig_rest_split(
+            PlayerId(0),
+            PlayerId(0),
+            vec![ObjectId(3), ObjectId(4)],
+            1,
+            DigRestSplitScope::PartitionAndOrder,
+            Some(ObjectId(5)),
+            Some(Box::new(legacy.clone())),
+        );
+        let wire = serde_json::to_value(&prompt).unwrap();
+        assert_eq!(
+            wire["data"]["completion"],
+            serde_json::to_value(&legacy).unwrap(),
+            "a legacy prompt must serialize its completion exactly as before"
+        );
+        let WaitingFor::DigRestSplitChoice { completion, .. } =
+            serde_json::from_value::<WaitingFor>(wire.clone()).unwrap()
+        else {
+            panic!("the prompt round-trips as DigRestSplitChoice");
+        };
+        assert_eq!(
+            completion,
+            Some(LibraryPlacementContinuation::Requests(Box::new(legacy)))
+        );
+
+        // `None` remains the redaction signal, untouched by the new arm.
+        let redacted = WaitingFor::new_dig_rest_split(
+            PlayerId(0),
+            PlayerId(0),
+            vec![ObjectId(3), ObjectId(4)],
+            1,
+            DigRestSplitScope::PartitionAndOrder,
+            Some(ObjectId(5)),
+            None,
+        );
+        let WaitingFor::DigRestSplitChoice { completion, .. } = redacted else {
+            panic!("the prompt is a DigRestSplitChoice");
+        };
+        assert!(completion.is_none(), "None stays the redaction signal");
     }
 
     /// CR 608.2c: a player-scope sacrifice carrier saved before it recorded the
@@ -58073,6 +59864,7 @@ mod restored_exact_attack_authority_tests {
                         .latch_immediately_before(Vec::new(), Vec::new())
                         .expect("test batch owner has explicit pre-delivery authority");
                     state.push_batch_delivery(PendingBatchDeliveries {
+                        component_delivery_parent: None,
                         logical_zone_change_group: group,
                         paused_current: None,
                         remaining: Vec::new(),
@@ -58092,6 +59884,7 @@ mod restored_exact_attack_authority_tests {
                         attempted: Vec::new(),
                         zone_change_record_start: 0,
                         deferred_events: Vec::new(),
+                        staged: None,
                     });
                     state.waiting_for.clone()
                 }

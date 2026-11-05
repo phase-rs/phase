@@ -14,9 +14,10 @@ use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, BatchCompletion, CastOfferKind, ChosenDamageSource, ContinuationXAnnouncement,
-    CopyChosenSelection, CostResume, GameState, OutsideGameChoiceSource, PayCostKind,
-    PayableResource, PendingContinuation, PendingPlayerScopeSacrificeCompletion,
-    PersistentAxisMaterialization, WaitingFor, ZoneOpponentChooserPurpose,
+    CopyChosenSelection, CostResume, GameState, LibraryPlacementContinuation,
+    OutsideGameChoiceSource, PayCostKind, PayableResource, PendingContinuation,
+    PendingPlayerScopeSacrificeCompletion, PersistentAxisMaterialization, WaitingFor,
+    ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::resolved_commands::{
@@ -4683,12 +4684,35 @@ pub(super) fn handle_resolution_choice(
             // echoed back (or a hand-built/corrupt state), not a real pending
             // dig. Reject it before a single card moves rather than finishing
             // the split against bookkeeping that is not there.
-            let Some(completion) = completion else {
+            let Some(continuation) = completion else {
                 return Err(EngineError::InvalidAction(
                     "rest-split state has no pending dig completion to finish; \
                      refusing to move cards against missing bookkeeping"
                         .to_string(),
                 ));
+            };
+            // CR 401.4 + CR 101.4: a batch-owned arrangement prompt names the
+            // exact staged batch that owns the completion. Its submission is
+            // validated against that batch and stored privately; the dig route
+            // (`Requests`) keeps its existing deferred tail.
+            let completion = match continuation {
+                LibraryPlacementContinuation::ApprovedBatch { logical_group_id } => {
+                    crate::game::zone_pipeline::submit_staged_batch_arrangement(
+                        state,
+                        logical_group_id,
+                        library_owner,
+                        &cards,
+                        top_count,
+                        scope,
+                        &arrangement,
+                        events,
+                    )
+                    .map_err(EngineError::InvalidAction)?;
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        state.waiting_for.clone(),
+                    ));
+                }
+                LibraryPlacementContinuation::Requests(completion) => completion,
             };
             // Total: `top_count` was clamped to `cards.len()` at park time and
             // `arrangement` was just proven to be a permutation of `cards`.
@@ -7131,8 +7155,82 @@ pub(super) fn handle_resolution_choice(
                         &entry_spec,
                         &chosen_ids,
                     );
+                    // CR 101.4 + CR 608.2c: two or more chosen cards are one
+                    // announced simultaneous ChangeZone population. The
+                    // selection is published before the family entry can park.
+                    let staged_settled =
+                        if effect_kind == EffectKind::ChangeZone && chosen_ids.len() >= 2 {
+                            publish_effect_zone_choice_tracked_set(
+                                state,
+                                effect_kind,
+                                destination,
+                                &chosen_ids,
+                                library_position.clone(),
+                                true,
+                            );
+                            let ctx = effects::change_zone::ChangeZoneIterationCtx {
+                                source_id,
+                                controller: player,
+                                // The request is the delivery authority; the
+                                // selected cards may span zones.
+                                origin: None,
+                                destination: dest_zone,
+                                enter_transformed,
+                                enters_under_player,
+                                duration: duration.clone(),
+                                track_exiled_by_source,
+                                face_down_in_exile,
+                                face_down_profile: face_down_profile.clone(),
+                                library_placement: None,
+                                enter_attached_to: None,
+                            };
+                            let requests =
+                                effects::change_zone::change_zone_member_requests(&ctx, &members);
+                            let tail = crate::types::game_state::ChangeZoneBatchTail {
+                            group_id: logical_zone_change_group.logical_group_id,
+                            effect_kind,
+                            source_id,
+                            controller: player,
+                            destination: dest_zone,
+                            count: crate::types::game_state::ChangeZoneCountPolicy::ChoiceSelected {
+                                chosen: chosen_ids.clone(),
+                            },
+                            pending_return_result_producer,
+                            stamp_this_way: true,
+                            consumes_own_exile_links: false,
+                        };
+                            match crate::game::zone_pipeline::deliver_staged_change_zone_batch(
+                                state,
+                                requests,
+                                logical_zone_change_group,
+                                tail,
+                                events,
+                            ) {
+                                crate::game::zone_pipeline::StagedChangeZoneOutcome::Paused => {
+                                    return Ok(action_result_outcome(
+                                        events,
+                                        state.waiting_for.clone(),
+                                    ));
+                                }
+                                crate::game::zone_pipeline::StagedChangeZoneOutcome::Settled {
+                                    group,
+                                    members,
+                                } => {
+                                    logical_zone_change_group = group;
+                                    Some(members)
+                                }
+                            }
+                        } else {
+                            None
+                        };
                     let logical_group_event_start = events.len();
-                    for (i, member) in members.iter().enumerate() {
+                    let legacy_members: &[crate::types::game_state::ChangeZoneMemberEntry] =
+                        if staged_settled.is_some() {
+                            &[]
+                        } else {
+                            &members
+                        };
+                    for (i, member) in legacy_members.iter().enumerate() {
                         let card_id = &member.object_id;
                         let origin = state
                             .objects
@@ -7219,7 +7317,7 @@ pub(super) fn handle_resolution_choice(
                                             boundary.mark_counted();
                                             boundary
                                         }),
-                                        remaining: members[i + 1..].to_vec(),
+                                        remaining: legacy_members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
                                         // EffectZoneChoice can select across multiple
@@ -7296,7 +7394,7 @@ pub(super) fn handle_resolution_choice(
                                                 })
                                                 .expect("zone-change pause must retain its exact boundary"),
                                         ),
-                                        remaining: members[i + 1..].to_vec(),
+                                        remaining: legacy_members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
                                         // EffectZoneChoice can select across multiple
@@ -7340,12 +7438,14 @@ pub(super) fn handle_resolution_choice(
                             }
                         }
                     }
-                    crate::game::triggers::complete_logical_zone_trigger_collection(
-                        state,
-                        &mut logical_zone_change_group,
-                        &mut events[logical_group_event_start..],
-                    )
-                    .expect("completed EffectZoneChoice owns every terminal member outcome");
+                    if staged_settled.is_none() {
+                        crate::game::triggers::complete_logical_zone_trigger_collection(
+                            state,
+                            &mut logical_zone_change_group,
+                            &mut events[logical_group_event_start..],
+                        )
+                        .expect("completed EffectZoneChoice owns every terminal member outcome");
+                    }
                     if let Some((occurrence_id, result_id)) = pending_return_result_producer {
                         effects::publish_return_result(
                             state,
@@ -11076,6 +11176,67 @@ pub(crate) fn run_batch_completion(
         }
         BatchCompletion::MeldRedirect { source_id } => {
             crate::game::meld::finish_deferred_meld_resolution(state, source_id, events);
+            crate::game::zone_pipeline::BatchMoveResult::Done
+        }
+        BatchCompletion::DestroyPopulationSettled {
+            ability,
+            settled_destroyed,
+        } => {
+            let destroyed =
+                settled_destroyed.expect("destroy population completion must be settled");
+            effects::publish_tracked_set_with_causes(
+                state,
+                destroyed
+                    .iter()
+                    .map(|id| (*id, Some(crate::types::ability::ThisWayCause::Destroyed)))
+                    .collect(),
+            );
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            crate::game::zone_pipeline::BatchMoveResult::Done
+        }
+        BatchCompletion::ChangeZonePopulationSettled { tail, settled } => {
+            let settled = settled.expect("ChangeZone population completion must be settled");
+            // CR 608.2c + CR 400.7j: retire the structural parent first so the
+            // resolving continuation is the stack top for the stamp below.
+            let _ = state.take_change_zone_batch_marker(tail.group_id);
+            state.last_effect_count = Some(settled.policy_count);
+            if tail.stamp_this_way {
+                if let Some(cause) = effects::this_way_cause_for_zone(tail.destination) {
+                    effects::stamp_active_player_action_completion(
+                        state,
+                        tail.source_id,
+                        crate::types::ability::EffectResolutionResult {
+                            cause,
+                            count: settled.arrival_count,
+                        },
+                    );
+                }
+            }
+            // CR 608.2c + CR 400.7: the moved-object ledger is written from
+            // the members that actually moved, never from the selection.
+            state.last_zone_changed_ids = settled
+                .records
+                .iter()
+                .map(|record| record.object_id)
+                .collect();
+            if let Some((occurrence_id, result_id)) = tail.pending_return_result_producer {
+                effects::publish_return_result(
+                    state,
+                    occurrence_id,
+                    result_id,
+                    settled.records.clone(),
+                )
+                .expect("settled selected return publishes its exact result once");
+            }
+            events.push(GameEvent::EffectResolved {
+                kind: tail.effect_kind,
+                source_id: tail.source_id,
+                subject: None,
+            });
             crate::game::zone_pipeline::BatchMoveResult::Done
         }
     }
