@@ -192,7 +192,68 @@ pub(super) fn collect_object_targets(
                             TargetRef::Player(_) => None,
                         })
                         .collect(),
-                    other => collect_object_targets(state, ability, other),
+                    // Every other shape (including a nested `Or`) resolves through the
+                    // single-filter path. Listed exhaustively so a new `TargetFilter`
+                    // variant must choose its compound-leg behavior here.
+                    TargetFilter::None
+                    | TargetFilter::Any
+                    | TargetFilter::Player
+                    | TargetFilter::Controller
+                    | TargetFilter::SourceController
+                    | TargetFilter::ControllerAndControlledPermanents { .. }
+                    | TargetFilter::Opponent
+                    | TargetFilter::GrantingObject { .. }
+                    | TargetFilter::SourceOrPaired
+                    | TargetFilter::Typed(_)
+                    | TargetFilter::Not { .. }
+                    | TargetFilter::Or { .. }
+                    | TargetFilter::And { .. }
+                    | TargetFilter::StackAbility { .. }
+                    | TargetFilter::StackSpell
+                    | TargetFilter::CastingSpell
+                    | TargetFilter::SpecificObject { .. }
+                    | TargetFilter::SpecificPlayer { .. }
+                    | TargetFilter::PlayerWhoChoseLabel { .. }
+                    | TargetFilter::PlayerMatching { .. }
+                    | TargetFilter::Neighbor { .. }
+                    | TargetFilter::ScopedPlayer
+                    | TargetFilter::AttachedTo
+                    | TargetFilter::LastCreated
+                    | TargetFilter::LastRevealed
+                    | TargetFilter::LastZoneChanged
+                    | TargetFilter::CostPaidObject
+                    | TargetFilter::AmassedArmy
+                    | TargetFilter::ChosenCard
+                    | TargetFilter::TrackedSet { .. }
+                    | TargetFilter::TrackedSetFiltered { .. }
+                    | TargetFilter::ExiledBySource
+                    | TargetFilter::ExiledCardByIndex { .. }
+                    | TargetFilter::TriggeringSpellController
+                    | TargetFilter::TriggeringSpellOwner
+                    | TargetFilter::TriggeringPlayer
+                    | TargetFilter::TriggeringSource
+                    | TargetFilter::AttackedPlayerOrPlaneswalker
+                    | TargetFilter::EventTarget
+                    | TargetFilter::TriggeringSourceController
+                    | TargetFilter::EventTargetController
+                    | TargetFilter::ParentTargetSlot { .. }
+                    | TargetFilter::DeclaredPlayer { .. }
+                    | TargetFilter::ParentTargetController
+                    | TargetFilter::ParentTargetOwner
+                    | TargetFilter::AffectedObjectOwner
+                    | TargetFilter::SourceChosenPlayer
+                    | TargetFilter::OriginalController
+                    | TargetFilter::OriginalSource
+                    | TargetFilter::PostReplacementSourceController
+                    | TargetFilter::PostReplacementDamageSource
+                    | TargetFilter::PostReplacementDamageTarget
+                    | TargetFilter::PostReplacementDamageTargetOwner
+                    | TargetFilter::DefendingPlayer
+                    | TargetFilter::HasChosenName
+                    | TargetFilter::ChosenDamageSource { .. }
+                    | TargetFilter::Named { .. }
+                    | TargetFilter::Owner
+                    | TargetFilter::AllPlayers => collect_object_targets(state, ability, filter),
                 }
             })
             .filter(|id| seen.insert(*id))

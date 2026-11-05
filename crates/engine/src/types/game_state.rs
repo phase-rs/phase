@@ -26718,7 +26718,7 @@ pub(crate) mod replacement_library_placement_wire_tests {
         );
         let unrelated = wire["unrelated"].clone();
         let draw = wire["pending_replacement"].clone();
-        migrate_legacy_replacement_library_placement(&mut wire).unwrap();
+        migrate_legacy_replacement_library_placement(&mut wire, &[]).unwrap();
         assert_eq!(
             wire["resolution_frames"][0]["nested"]["pending_entry"]["proposed"]["ZoneChange"]
                 ["library_placement"],
@@ -26732,7 +26732,7 @@ pub(crate) mod replacement_library_placement_wire_tests {
         assert_eq!(wire["unrelated"], unrelated);
         assert_eq!(wire["pending_replacement"], draw);
         let once = wire.clone();
-        migrate_legacy_replacement_library_placement(&mut wire).unwrap();
+        migrate_legacy_replacement_library_placement(&mut wire, &[]).unwrap();
         assert_eq!(wire, once);
     }
 }
@@ -26740,8 +26740,15 @@ pub(crate) mod replacement_library_placement_wire_tests {
 /// Import only absent event placement from known legacy replacement carriers.
 /// Current null and current values must survive unchanged, including malformed
 /// values that typed decoding will reject.
-fn migrate_legacy_replacement_library_placement(
+///
+/// `legacy_owner_roots` names the top-level keys that are legacy delivery-owner
+/// roots (`pending_batch_deliveries`, `pending_change_zone_iteration`). Those
+/// are v1 resolution-wire input keys, so only the v1 reader (in `resolution.rs`)
+/// supplies them; every other caller passes `&[]` and associates owners through
+/// typed resolution frames alone.
+pub(crate) fn migrate_legacy_replacement_library_placement(
     value: &mut serde_json::Value,
+    legacy_owner_roots: &[&str],
 ) -> Result<(), String> {
     fn child_path(path: &str, key: &str) -> String {
         format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"))
@@ -26804,6 +26811,7 @@ fn migrate_legacy_replacement_library_placement(
         node: &Value,
         path: &str,
         enclosing_owners: &[String],
+        legacy_owner_roots: &[&str],
         edits: &mut BTreeMap<String, Value>,
     ) -> Result<(), String> {
         match node {
@@ -26814,6 +26822,7 @@ fn migrate_legacy_replacement_library_placement(
                         value,
                         &child_path(path, &index.to_string()),
                         enclosing_owners,
+                        legacy_owner_roots,
                         edits,
                     )?;
                 }
@@ -26850,8 +26859,8 @@ fn migrate_legacy_replacement_library_placement(
                         }
                     }
                 }
-                for key in ["pending_batch_deliveries", "pending_change_zone_iteration"] {
-                    if object.get(key).is_some_and(|owner| !owner.is_null()) {
+                for key in legacy_owner_roots {
+                    if object.get(*key).is_some_and(|owner| !owner.is_null()) {
                         local_owners.push(child_path(path, key));
                     }
                 }
@@ -26942,6 +26951,7 @@ fn migrate_legacy_replacement_library_placement(
                         value,
                         &child_path(path, key),
                         &local_owners,
+                        legacy_owner_roots,
                         edits,
                     )?;
                 }
@@ -26952,7 +26962,7 @@ fn migrate_legacy_replacement_library_placement(
     }
 
     let mut edits = BTreeMap::new();
-    collect(value, value, "", &[], &mut edits)?;
+    collect(value, value, "", &[], legacy_owner_roots, &mut edits)?;
     for (path, placement) in edits {
         let parent = path
             .strip_suffix("/library_placement")
@@ -28221,7 +28231,7 @@ impl GameStateDecode {
         migrate_legacy_attack_exert_conditions(&mut value)?;
         migrate_legacy_spell_cost_elections(&mut value)?;
         migrate_legacy_graveyard_paid_cast_cleanup(&mut value)?;
-        migrate_legacy_replacement_library_placement(&mut value)?;
+        migrate_legacy_replacement_library_placement(&mut value, &[])?;
         migrate_legacy_shortcut_repetition_bound(&mut value)?;
         migrate_legacy_offer_road(&mut value);
         let mut state = Self::materialize_prepared(value)?;
@@ -28291,7 +28301,11 @@ impl GameStateDecode {
         migrate_legacy_attack_exert_conditions(value)?;
         migrate_legacy_spell_cost_elections(value)?;
         migrate_legacy_graveyard_paid_cast_cleanup(value)?;
-        migrate_legacy_replacement_library_placement(value)?;
+        // The v1 reader owns the v1 delivery-owner roots, so it runs this
+        // migration itself (`resolution.rs`); no other mode has such roots.
+        if !matches!(mode, GameStateDecodeMode::ResolutionWireV1) {
+            migrate_legacy_replacement_library_placement(value, &[])?;
+        }
         migrate_legacy_shortcut_repetition_bound(value)?;
         migrate_legacy_offer_road(value);
         Ok(())

@@ -7434,6 +7434,86 @@ mod w3_library_placement_tests {
         assert_eq!(again, restored);
     }
 
+    /// CR 616.1 + CR 701.24a + save compatibility: a v1 resolution wire parks its
+    /// batch delivery owner under the top-level `pending_batch_deliveries` key,
+    /// not in a typed frame. Only the v1 reader names that root, so it must pass
+    /// it to the library-placement migration; otherwise the owner copy of the
+    /// positioned boundary is never associated and loses its `Bottom` placement.
+    #[test]
+    fn legacy_v1_batch_delivery_owner_imports_library_placement() {
+        let (mut parked, first, _, _) = positioned_batch_fixture();
+        let mut events = Vec::new();
+        assert!(matches!(
+            move_objects_simultaneously(
+                &mut parked,
+                vec![ZoneMoveRequest::effect(first, Zone::Library, first)
+                    .at_library_position(LibraryPosition::Bottom)],
+                &mut events
+            ),
+            BatchMoveResult::NeedsChoice
+        ));
+
+        // Reshape the authentic parked state into a v1 wire: the delivery owner
+        // moves from its typed frame to the legacy root key.
+        let pending = parked
+            .active_batch_delivery()
+            .cloned()
+            .expect("authentic positioned pause parks a batch delivery owner");
+        let mut wire = serde_json::to_value(&parked).expect("positioned pause serializes");
+        {
+            let object = wire.as_object_mut().expect("state serializes as an object");
+            object.remove("resolution_stack");
+            object.insert(
+                "pending_batch_deliveries".to_string(),
+                serde_json::to_value(&pending).expect("batch delivery owner serializes"),
+            );
+            object.insert(
+                "resolution_state_version".to_string(),
+                serde_json::Value::from(1),
+            );
+        }
+        // The legacy event copies carry no placement; only the carrier mirror
+        // retains `Bottom`.
+        {
+            let carrier = find_key_mut(&mut wire, "pending_replacement")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("the pause retains its replacement carrier");
+            carrier["proposed"]["ZoneChange"]
+                .as_object_mut()
+                .expect("proposal is a ZoneChange")
+                .remove("library_placement");
+            carrier["library_placement"] = serde_json::json!({"type": "Bottom"});
+        }
+        let owner = wire["pending_batch_deliveries"]["paused_current"]
+            .as_object_mut()
+            .expect("the v1 delivery owner retains its paused member");
+        owner["expected_event"]["ZoneChange"]
+            .as_object_mut()
+            .expect("owner expected event is a ZoneChange")
+            .remove("library_placement");
+        // Reach guard: the owner copy really is placement-less going in, so a
+        // `Bottom` coming out can only be the migration's import.
+        assert!(
+            wire["pending_batch_deliveries"]["paused_current"]["expected_event"]["ZoneChange"]
+                .get("library_placement")
+                .is_none()
+        );
+
+        let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+            .expect("v1 positioned batch restores")
+            .into_game_state();
+        let owner = restored
+            .active_batch_delivery()
+            .and_then(|batch| batch.paused_current.as_ref())
+            .expect("the v1 delivery owner restores as the active batch delivery");
+        assert_eq!(
+            event_placement(&owner.expected_event),
+            Some(LibraryPosition::Bottom),
+            "the v1 owner copy follows the carrier mirror through the v1 owner root"
+        );
+        assert_parked_position(&restored, first, Some(LibraryPosition::Bottom));
+    }
+
     /// F-A (CR 616.1 + CR 701.24a): the library placement must survive a SECOND
     /// sequential park on the same event. The first optional redirect parks (the
     /// placement is stashed onto `PendingReplacement` by the W3 arm); declining
