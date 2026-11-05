@@ -16611,12 +16611,11 @@ fn try_parse_event(
         // class, so fail the arm closed. ("anywhere other than your graveyard"
         // reaches here as a bare "anywhere" followed by "other than ": the
         // exclusion list is unreadable without the possessive zone.)
-        // `find_effect_boundary` ends the condition at the first ", " that is not
-        // a recognized list continuation (type, action or zone-change-clause
-        // lists); a zone-list leg ("from the battlefield, your graveyard, or
-        // exile") is none of those, so the condition ends at that comma and the
-        // list never reaches this tail; only the comma-less connective forms
-        // below can arrive here.
+        // `find_effect_boundary` ends the condition at the first ", " that none of
+        // its list-continuation predicates claim; a zone-list leg ("from the
+        // battlefield, your graveyard, or exile") is claimed by none of them, so
+        // the condition ends at that comma and the list never reaches this tail;
+        // only the comma-less connective forms below can arrive here.
         let tail = tail.trim_start();
         if alt((
             value((), tag::<_, _, OracleError<'_>>("or ")),
