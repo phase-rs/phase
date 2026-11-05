@@ -20921,6 +20921,53 @@ fn peel_library_placement_cardinality(input: &str) -> (LibraryPlacementCardinali
     (LibraryPlacementCardinality::Unstated, input)
 }
 
+/// CR 608.2c: the noun phrase a positional bottom-of-library placement puts,
+/// read from the instruction around it. The verb may follow a conditional or
+/// optional prefix ("If you don't, put …", "You may put …"), so it is located
+/// structurally rather than required at byte 0. The cardinality itself is NOT
+/// re-derived here — the caller hands this phrase to the shared
+/// `peel_library_placement_cardinality` authority.
+fn bottom_library_placement_noun_phrase(text_lower: &str) -> Option<&str> {
+    // `take_until` yields `(remaining_at_the_terminator, taken_prefix)`, so the
+    // verb is consumed by pairing the scan with its own `tag` rather than by a
+    // post-hoc prefix strip.
+    let (after_verb, _) = preceded(take_until::<_, _, OracleError<'_>>("put "), tag("put "))
+        .parse(text_lower)
+        .ok()?;
+    let (_, noun_phrase) = take_until::<_, _, OracleError<'_>>(" on the bottom of")
+        .parse(after_verb)
+        .ok()?;
+    Some(noun_phrase)
+}
+
+/// CR 608.2c + CR 701.20e: does this instruction put the WHOLE set its noun
+/// phrase names ("put those cards on the bottom of your library"), rather than
+/// an explicit one/N/any-number SUBSET of it ("put one of those cards …")?
+///
+/// The placement's effect cannot answer this: `LibraryPlacementCardinality::
+/// Unstated` and an explicit `Exact(1)` both lower to `count: Fixed(1)`. The
+/// distinction exists only in the grammar, so it is read back through the same
+/// cardinality authority the lowering used. The noun phrase must additionally
+/// BE the whole-set anaphor, which keeps the answer narrower than "no numeral
+/// in front": a quantified phrase the peel does not recognize ("up to two of
+/// those cards") is a subset and is refused here too.
+pub(super) fn library_placement_puts_whole_noun_phrase_set(text_lower: &str) -> bool {
+    let Some(noun_phrase) = bottom_library_placement_noun_phrase(text_lower) else {
+        return false;
+    };
+    let (LibraryPlacementCardinality::Unstated, rest) =
+        peel_library_placement_cardinality(noun_phrase)
+    else {
+        return false;
+    };
+    all_consuming(terminated(
+        alt((tag::<_, _, OracleError<'_>>("those cards"), tag("them"))),
+        multispace0,
+    ))
+    .parse(rest)
+    .is_ok()
+}
+
 /// CR 115.1 + CR 601.2c: does a positional placement's noun phrase name its
 /// objects as TARGETS — a target cardinality ("two target …", "up to N
 /// target …", "any number of target …") or a bare declared-target prefix
@@ -21127,7 +21174,24 @@ fn refine_put_at_library_position(
                 }
             }
             match cardinality {
-                LibraryPlacementCardinality::Unstated => {}
+                // CR 401.4 + CR 608.2c: "those cards" (a tracked set the chain
+                // already named) placed "in any order" is ordered by the player
+                // following the instruction, not each card's owner. A bare
+                // pronoun partition ("any number of them") is not a named set
+                // and keeps its owner-arranged base shape.
+                LibraryPlacementCardinality::Unstated => {
+                    if orders_in_any_order
+                        && matches!(
+                            *target,
+                            TargetFilter::TrackedSet { .. }
+                                | TargetFilter::TrackedSetFiltered { .. }
+                        )
+                    {
+                        if let Some(follower) = follower {
+                            *arranger = Some(follower.clone());
+                        }
+                    }
+                }
                 LibraryPlacementCardinality::Exact(count_expr) => *count = count_expr,
                 // CR 601.2c + CR 115.1: the announced targets, rather than the
                 // effect's default count, define a targeted placement's size.
@@ -36959,6 +37023,15 @@ pub(super) fn def_is_dig_look(def: &AbilityDefinition) -> bool {
     matches!(&*def.effect, Effect::Dig { .. })
 }
 
+/// CR 701.20e + CR 608.2c: A bare private peek Dig ("look at the top N cards"
+/// with no destination, no keep, no reveal, source=Library). This is the
+/// antecedent for "put those cards on the bottom" continuations (Petals of
+/// Insight, Lim-Dûl's Vault). The recognizers only emit the continuation when
+/// they see this exact shape, so the role must match exactly.
+pub(super) fn def_is_bare_private_peek(def: &AbilityDefinition) -> bool {
+    effect_is_bare_private_peek(&def.effect)
+}
+
 /// CR 608.2c: Apply a "Repeat this process for <keyword list>" continuation
 /// (Kathril, Aspect Warper). Walks `defs` from the back for the most recent
 /// conditional keyword-counter placement (`PutCounter { counter_type:
@@ -38718,17 +38791,19 @@ fn clause_ir_is_exile_producer(clause: &ClauseIr) -> bool {
         || continuation_is_exile_producer(clause.disposition.intrinsic())
 }
 
-/// CR 701.20e + CR 608.2c: the RAW "look at the top N cards" shape a private
-/// peek carries BEFORE the assembly pure-peek lowering stamps `keep_count =
-/// Some(0)`. Single authority shared by the assembly lowering match and the
-/// `ClauseIr` seed predicate so the two sites cannot drift on which `Dig` shape
-/// counts as a bare peek.
+/// CR 701.20e + CR 608.2c: A bare private peek Dig ("look at the top N cards"
+/// with no destination, no keep, no reveal, source=Library). This matches both
+/// the RAW shape (keep_count=None) emitted by the parser and the NORMALIZED
+/// shape (keep_count=Some(0)) after the assembly pure-peek lowering pass.
+/// Single authority shared by the assembly lowering match, the `ClauseIr` seed
+/// predicate, and the `DigBarePrivatePeek` antecedent role so the three sites
+/// cannot drift on which `Dig` shape counts as a bare peek.
 pub(super) fn effect_is_bare_private_peek(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::Dig {
             reveal: false,
-            keep_count: None,
+            keep_count: None | Some(0),
             keep_count_expr: None,
             filter: TargetFilter::Any,
             destination: None,

@@ -1129,6 +1129,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::RippleRevealChoice { .. }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::DigBottomOrder { .. }
             | WaitingFor::CastOffer {
                 kind: CastOfferKind::FreeCastWindow { .. },
                 ..
@@ -3343,6 +3344,62 @@ pub(super) fn handle_resolution_choice(
                 events,
             );
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        // CR 701.20e + CR 608.2c: In a PriorLook Dig where the player chooses to
+        // put all looked-at cards on the bottom of the library "in any order",
+        // the controller announces the order. `order` must be a permutation of
+        // the offered pile.
+        (
+            WaitingFor::DigBottomOrder {
+                player,
+                source_id,
+                cards,
+            },
+            GameAction::SelectCards { cards: order },
+        ) => {
+            if order.len() != cards.len()
+                || order.iter().collect::<std::collections::HashSet<_>>().len() != order.len()
+                || !order.iter().all(|id| cards.contains(id))
+            {
+                return Err(EngineError::InvalidAction(
+                    "Dig bottom order must be a permutation of the looked-at cards".to_string(),
+                ));
+            }
+            // Move the cards to the bottom of the library in the chosen order.
+            // The cards are currently in private_look_ids (still in the library).
+            let result = crate::game::zone_pipeline::move_objects_simultaneously_then(
+                state,
+                order
+                    .iter()
+                    .map(|&obj_id| {
+                        crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                            obj_id,
+                            Zone::Library,
+                            source_id,
+                        )
+                        .at_library_position(crate::types::ability::LibraryPosition::Bottom)
+                    })
+                    .collect(),
+                Some(
+                    crate::types::game_state::BatchCompletion::DigPriorLookRestComplete {
+                        player,
+                        source_id,
+                    },
+                ),
+                events,
+            );
+            // If the move completed synchronously, the DigPriorLookRestComplete completion
+            // has already run finish_with_continuation and updated state.waiting_for.
+            // If it paused (NeedsChoice), state.waiting_for is still DigBottomOrder and
+            // will be updated when the batch drains.
+            match result {
+                crate::game::zone_pipeline::BatchMoveResult::Done => {
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
+                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
+            }
         }
         // CR 608.2g + CR 601.2 + CR 202.3: Invoke Calamity's free-cast window —
         // the controller either picks one candidate to cast for free or declines

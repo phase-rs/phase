@@ -749,7 +749,7 @@ fn parse_put_rest_on_bottom_line(input: &str) -> OracleResult<'_, DigRestOrder> 
         .parse(input)?;
     let (input, rest_order) = opt(alt((
         value(DigRestOrder::Random, tag(" in a random order")),
-        value(DigRestOrder::Preserve, tag(" in any order")),
+        value(DigRestOrder::PlayerChoice, tag(" in any order")),
     )))
     .parse(input)?;
     let (input, _) = opt(tag(".")).parse(input)?;
@@ -8056,10 +8056,13 @@ fn parse_of_them_rest_destination(lower: &str) -> Option<(Zone, DigRestOrder)> {
     .parse(after_rest)
     .ok()
     .is_some_and(|(_, matched)| matched.is_some());
+    let player_choice = nom_primitives::scan_contains(after_rest, "in any order");
     Some((
         destination,
         if random {
             DigRestOrder::Random
+        } else if player_choice {
+            DigRestOrder::PlayerChoice
         } else {
             DigRestOrder::Preserve
         },
@@ -9118,10 +9121,11 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         // destination has no rest-pile reading), so it parses as its own
         // instruction (Game Preserve: "put those cards onto the battlefield").
         Effect::Dig { .. }
-            if (nom_primitives::scan_contains(&lower, "put them back")
-                || nom_primitives::scan_contains(&lower, "put the rest")
-                || nom_primitives::scan_contains(&lower, "put those cards"))
-                && !nom_primitives::scan_contains(&lower, "onto the battlefield") =>
+            if !nom_primitives::scan_contains(&lower, "you may")
+                && !nom_primitives::scan_contains(&lower, "onto the battlefield")
+                && (nom_primitives::scan_contains(&lower, "put them back")
+                    || nom_primitives::scan_contains(&lower, "put the rest")
+                    || nom_primitives::scan_contains(&lower, "put those cards")) =>
         {
             let destination = if nom_primitives::scan_contains(&lower, "into your graveyard")
                 || nom_primitives::scan_contains(&lower, "into their graveyard")
@@ -9137,7 +9141,17 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
             };
             let rest_order = parse_put_rest_on_bottom_line(&lower)
                 .map(|(_, order)| order)
-                .unwrap_or(DigRestOrder::Preserve);
+                .unwrap_or_else(|_| {
+                    // CR 401.4: "put those cards on the bottom ... in any order" also
+                    // indicates player-chosen order, not just "put the rest on the bottom".
+                    if destination == Zone::Library
+                        && nom_primitives::scan_contains(&lower, "in any order")
+                    {
+                        DigRestOrder::PlayerChoice
+                    } else {
+                        DigRestOrder::Preserve
+                    }
+                });
             Some(ContinuationAst::PutRest {
                 destination,
                 reorder_all: false,
@@ -13213,7 +13227,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: false,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
             })
         );
     }
@@ -13321,7 +13335,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: false,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
             })
         );
     }
@@ -13345,7 +13359,7 @@ mod tests {
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13373,7 +13387,7 @@ mod tests {
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13460,7 +13474,7 @@ mod tests {
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -15147,6 +15161,176 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn test_petals_of_insight_parse() {
+        let def = parse_effect_chain(
+            "Look at the top three cards of your library. You may put those cards on the bottom of your library in any order. If you do, return ~ to its owner's hand. Otherwise, draw three cards.",
+            AbilityKind::Spell,
+        );
+        let Effect::Dig {
+            count,
+            keep_count,
+            destination,
+            rest_destination,
+            source,
+            ..
+        } = def.effect.as_ref()
+        else {
+            panic!("root must be Dig, got {:?}", def.effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
+        assert_eq!(*keep_count, Some(0), "pure peek keeps 0 cards");
+        assert_eq!(*destination, None);
+        assert_eq!(*rest_destination, None);
+        assert_eq!(*source, DigSource::Library);
+
+        let sub = def
+            .sub_ability
+            .as_deref()
+            .expect("must have sub_ability for optional bottom placement");
+        assert!(sub.optional, "must be optional choice");
+        let Effect::Dig {
+            count: sub_count,
+            keep_count: sub_keep,
+            rest_destination: sub_rest,
+            rest_order: sub_rest_order,
+            source: sub_src,
+            ..
+        } = sub.effect.as_ref()
+        else {
+            panic!(
+                "sub_ability effect must be PriorLook Dig, got {:?}",
+                sub.effect
+            );
+        };
+        assert_eq!(*sub_count, QuantityExpr::Fixed { value: 0 });
+        assert_eq!(*sub_keep, Some(0));
+        assert_eq!(*sub_rest, Some(Zone::Library));
+        assert_eq!(
+            *sub_rest_order,
+            crate::types::ability::DigRestOrder::PlayerChoice,
+            "CR 401.4: Petals' \"in any order\" is the player's arrangement choice"
+        );
+        assert_eq!(*sub_src, DigSource::PriorLook);
+
+        let if_you_do = sub
+            .sub_ability
+            .as_deref()
+            .expect("must have if-you-do sub_ability");
+        assert_eq!(
+            if_you_do.condition,
+            Some(AbilityCondition::effect_performed())
+        );
+        let Effect::Bounce { target, .. } = if_you_do.effect.as_ref() else {
+            panic!(
+                "if_you_do effect must be Bounce, got {:?}",
+                if_you_do.effect
+            );
+        };
+        assert_eq!(*target, TargetFilter::SelfRef);
+
+        let otherwise = if_you_do
+            .else_ability
+            .as_deref()
+            .expect("must have otherwise else_ability");
+        let Effect::Draw {
+            count: draw_count, ..
+        } = otherwise.effect.as_ref()
+        else {
+            panic!("otherwise effect must be Draw, got {:?}", otherwise.effect);
+        };
+        assert_eq!(*draw_count, QuantityExpr::Fixed { value: 3 });
+    }
+
+    // SHAPE: The next three tests are synthetic perturbations for the private-look
+    // binding mechanism (CR 608.2c: follow instructions in written order), not
+    // support claims for additional cards. No printed card in the inspected
+    // AtomicCards pool has these exact revealed-look, future-producer or
+    // intervening-Draw sequences. The nearest printed card is Petals of Insight:
+    // "Look at the top three cards of your library. You may put those cards on the
+    // bottom of your library in any order. If you do, return Petals of Insight to
+    // its owner's hand. Otherwise, draw three cards."
+    #[test]
+    fn revealed_look_does_not_bind_prior_look_bottom() {
+        let def = parse_effect_chain(
+            "Reveal the top three cards of your library. You may put those cards on the bottom of your library in any order.",
+            AbilityKind::Spell,
+        );
+        let sub = def.sub_ability.as_deref().expect("must have sub_ability");
+        assert!(
+            !matches!(
+                &*sub.effect,
+                Effect::Dig {
+                    source: DigSource::PriorLook,
+                    ..
+                }
+            ),
+            "revealed top cards must not bind to private PriorLook Dig, got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
+    fn competing_future_producer_does_not_rebind_prior_look_bottom() {
+        let def = parse_effect_chain(
+            "Look at the top three cards of target player's library. You may put those cards on the bottom of that player's library in any order. Look at the top five cards of your library.",
+            AbilityKind::Spell,
+        );
+        let Effect::Dig {
+            player: first_player,
+            source: first_src,
+            ..
+        } = def.effect.as_ref()
+        else {
+            panic!("first effect must be Dig, got {:?}", def.effect);
+        };
+        assert_eq!(*first_src, DigSource::Library);
+        assert_eq!(*first_player, TargetFilter::Player);
+
+        let sub = def.sub_ability.as_deref().expect("must have sub_ability");
+        let Effect::Dig {
+            player: second_player,
+            source: second_src,
+            ..
+        } = sub.effect.as_ref()
+        else {
+            panic!("second effect must be PriorLook Dig, got {:?}", sub.effect);
+        };
+        assert_eq!(*second_src, DigSource::PriorLook);
+        assert_eq!(
+            *second_player,
+            TargetFilter::Player,
+            "must bind preceding producer's target player, not future producer"
+        );
+    }
+
+    #[test]
+    fn intervening_nontransparent_clause_prevents_prior_look_binding() {
+        let def = parse_effect_chain(
+            "Look at the top three cards of your library. Draw a card. You may put those cards on the bottom of your library in any order.",
+            AbilityKind::Spell,
+        );
+        let mut curr = Some(&def);
+        let mut found_prior_look = false;
+        while let Some(node) = curr {
+            if matches!(
+                &*node.effect,
+                Effect::Dig {
+                    source: DigSource::PriorLook,
+                    ..
+                }
+            ) {
+                found_prior_look = true;
+                break;
+            }
+            curr = node.sub_ability.as_deref();
+        }
+        assert!(
+            !found_prior_look,
+            "intervening Draw clause must prevent PriorLook rewrite"
+        );
     }
 
     #[test]
@@ -17094,6 +17278,27 @@ mod tests {
                 .map(|(_, order)| order),
             Some(DigRestOrder::Preserve)
         );
+    }
+
+    /// CR 401.4: "in any order" is the owner's arrangement instruction on the
+    /// whole-line continuation combinator itself, and stays distinct from the
+    /// randomized "in a random order" mapping pinned above.
+    #[test]
+    fn put_the_rest_on_the_bottom_reads_any_order_as_player_choice() {
+        for text in [
+            "put the rest on the bottom of your library in any order",
+            "put the rest on the bottom of their library in any order",
+            "put the rest on the bottom of that library in any order.",
+            "put the rest on the bottom of that player's library in any order",
+        ] {
+            assert_eq!(
+                parse_put_rest_on_bottom_line(text)
+                    .ok()
+                    .map(|(_, order)| order),
+                Some(DigRestOrder::PlayerChoice),
+                "{text}"
+            );
+        }
     }
 
     /// Black Cat, Cunning Thief: the number axis is the shared `parse_number`, so "two"
