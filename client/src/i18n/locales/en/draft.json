@@ -662,6 +662,7 @@
     "kicked": "You were kicked from the pod",
     "hostLeft": "Host left the draft",
     "connection": "Connection Error",
+    "incompatible": "This draft is incompatible with your protocol version.",
     "retry": "Try Reconnecting"
   },
   "spectator": {

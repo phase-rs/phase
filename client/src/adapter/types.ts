@@ -1769,6 +1769,7 @@ export interface GameObject {
   goaded_by?: PlayerId[];
   casting_permissions?: CastingPermission[];
   is_emblem?: boolean;
+  is_conspiracy?: boolean;
   /**
    * CR 114: Display-only provenance of the source that created this emblem
    * (e.g. the planeswalker whose ultimate made it). The frontend renders the
@@ -2841,6 +2842,7 @@ export type WaitingFor =
   | { type: "RippleRevealChoice"; data: { player: PlayerId; source_id: ObjectId; count: number } }
   | { type: "RippleBottomOrder"; data: { player: PlayerId; source_id: ObjectId; cards: ObjectId[]; final_cast?: ObjectId | null } }
   | { type: "RevealUntilBottomOrder"; data: { player: PlayerId; source_id: ObjectId; cards: ObjectId[]; clear_markers?: ObjectId[]; emit_reveal_until_resolved?: ObjectId | null; reveal_until_hit_snapshot?: unknown } }
+  | { type: "DigBottomOrder"; data: { player: PlayerId; source_id: ObjectId; cards: ObjectId[] } }
   | { type: "ArrangePlanarDeckTopChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_on_top: number } }
   | { type: "RedistributeLifeTotals"; data: { player: PlayerId; options: { assignment: [PlayerId, number][] }[] } }
   | { type: "CoinFlipKeepChoice"; data: { player: PlayerId; results: boolean[]; keep_count: number } }
@@ -2957,6 +2959,7 @@ export type WaitingFor =
   | { type: "RepeatDecision"; data: { player: PlayerId; ability: unknown } }
   | { type: "TopOrBottomChoice"; data: { player: PlayerId; object_id: ObjectId; top_position?: LibraryPosition } }
   | { type: "PopulateChoice"; data: { player: PlayerId; source_id: ObjectId; valid_tokens: ObjectId[] } }
+  | { type: "SecretAgendaChoice"; data: { player: PlayerId; object_id: ObjectId; name_count: number } }
   | { type: "CompanionReveal"; data: { player: PlayerId; eligible_companions: CompanionRevealChoice[] } }
   | { type: "ChooseLegend"; data: { player: PlayerId; legend_name: string; candidates: ObjectId[] } }
   | { type: "CommanderZoneChoice"; data: { player: PlayerId; commander_id: ObjectId; current_zone: string } }
@@ -2973,7 +2976,7 @@ export type WaitingFor =
   // the active player divides that blocker's combat damage among the attackers
   // it's blocking (free division, no lethal ordering).
   | { type: "AssignBlockerDamage"; data: { player: PlayerId; blocker_id: ObjectId; total_damage: number; attackers: ObjectId[] } }
-  | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit } }
+  | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit; scope?: DistributionScope } }
   | { type: "MoveCountersDistribution"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; destinations: ObjectId[]; pending_effect: unknown } }
   | { type: "RemoveCountersChoice"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; max_total?: number | null; pending_effect: unknown } }
   | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; up_to?: boolean; constraint?: ChooseFromZoneConstraint | null; source_id: ObjectId; reciprocal_role?: "Produce" | "Consume" | null } }
@@ -3197,6 +3200,16 @@ export type MulliganChoice =
   | { type: "FreeReveal" };
 
 // ── Distribution ─────────────────────────────────────────────────────────
+
+/**
+ * CR 601.2d / CR 608.2d: when a `DistributeAmong` division is chosen. Absent on
+ * the wire for the announce-time default (`AnnouncedTargets`: every announced
+ * target receives at least one); `ResolutionCandidates` is an untargeted
+ * division chosen while the effect is applied, among any number of `targets`.
+ */
+export type DistributionScope =
+  | { type: "AnnouncedTargets" }
+  | { type: "ResolutionCandidates"; data: { pending_effect: unknown } };
 
 export type DistributionUnit =
   | { type: "Damage" }
@@ -3503,6 +3516,7 @@ export type GameAction =
   | { type: "ChooseExert"; data: { exert: boolean } }
   | { type: "ChooseEnlist"; data: { target: ObjectId | null } }
   | { type: "HarmonizeTap"; data: { creature_id: ObjectId | null } }
+  | { type: "ChooseSecretAgendaNames"; data: { names: string[] } }
   | { type: "DeclareCompanion"; data: { choice: CompanionDeclaration } }
   | { type: "CompanionToHand" }
   // CR 116.2c: special action — pay a continuous effect's printed termination

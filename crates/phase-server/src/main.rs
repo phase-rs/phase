@@ -20726,7 +20726,7 @@ mod game_submission_tests {
 
     fn oversized_submission() -> InteractionSubmission {
         submission(InteractionResponse::Text {
-            value: "x".repeat(MAX_INTERACTION_STRING_LEN + 1),
+            values: vec!["x".repeat(MAX_INTERACTION_STRING_LEN + 1)],
         })
     }
 
