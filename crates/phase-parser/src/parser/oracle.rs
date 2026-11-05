@@ -12,13 +12,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     filter_contains_filter_prop, graveyard_destination_rider, is_graveyard_exile_rider_subability,
-    retarget_chosen_card_type_to_creature_type, AbilityCondition, AbilityCost, AbilityDefinition,
-    AbilityKind, AbilityTag, ActivationManaPaymentRestriction, ActivationRestriction,
-    AdditionalCost, CardPlayMode, CastManaSpentMetric, CastTimingPermission, CastingPermission,
-    CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-    CostReduction, CounterSourceRider, DamageRedirectTarget, DelayedTriggerCondition, Duration,
-    Effect, EffectScope, FilterProp, GuardReading, ManaProduction, ModalChoice, ParsedCondition,
-    PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
+    rebind_chosen_parity_to_source, retarget_chosen_card_type_to_creature_type, AbilityCondition,
+    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationManaPaymentRestriction,
+    ActivationRestriction, AdditionalCost, CardPlayMode, CastFromZoneDriver, CastManaSpentMetric,
+    CastTimingPermission, CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind,
+    ContinuousModification, ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, GuardReading,
+    ManaProduction, ModalChoice, ParitySource, ParsedCondition, PermissionGrantee, PlayerFilter,
+    QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, ResolutionCastWindow,
     SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
     TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard,
     VoteSubject,
@@ -139,9 +140,9 @@ use super::oracle_static::{
     is_speed_unlock_sentence, lower_static_ir, parse_alternative_keyword_cost,
     parse_cast_spells_alternative_cost_multi, parse_collect_evidence_alt_cost,
     parse_flashback_trailing_self_spell_cost_reduction, parse_spells_alternative_cost,
-    parse_static_line, parse_static_line_multi, try_parse_graveyard_keyword_grant_clause,
-    try_parse_graveyard_keyword_grant_static, try_parse_top_of_library_cast_permission,
-    GrantedCastKeywordKind,
+    parse_static_line, parse_static_line_multi, try_parse_exclusive_own_cast_permission,
+    try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
+    try_parse_top_of_library_cast_permission, GrantedCastKeywordKind,
 };
 use super::oracle_trigger::{
     lower_trigger_ir, lower_trigger_node_ir, parse_trigger_lines_at_index,
@@ -1677,6 +1678,7 @@ fn detect_document_relations(items: &[OracleItemIr], types: &[String]) -> Vec<Do
     detect_linked_choice_constrained_card_type_static(items, &mut relations);
     detect_linked_choice_type_statics(items, types, &mut relations);
     detect_linked_choice_persisted_player(items, &mut relations);
+    detect_linked_choice_persisted_parity(items, &mut relations);
     detect_linked_choice_copy_chosen_host(items, &mut relations);
     detect_etb_exile_ltb_return(items, &mut relations);
     detect_active_player_punisher(items, &mut relations);
@@ -2689,11 +2691,166 @@ fn deliver_coordinated_graveyard_permission_in_ability(def: &mut AbilityDefiniti
             def.optional_player = None;
             def.optional_for = None;
             def.optional_targeting = false;
+        } else {
+            deliver_coordinated_exile_play_permission(def);
         }
     }
 
     if let Some(sub) = def.sub_ability.as_mut() {
         deliver_coordinated_graveyard_permission_in_ability(sub);
+    }
+}
+
+/// CR 701.18b + CR 305.1 + CR 608.2g: the exile-batch sibling of the graveyard
+/// delivery above — "you may play lands **and** cast spells from among cards
+/// exiled this way …" (Gix, Yawgmoth Praetor; Magus of the Mind) and "… from
+/// among the exiled cards for as long as they remain exiled" (Elder Brain).
+///
+/// The splitter leaves the same refused `"play lands"` head followed by the cast
+/// half, which here lowers to a grant over the resolution's exiled batch. Playing
+/// a card is casting it or playing it as a land (CR 701.18b), so the printed pair
+/// is exactly the cast grant in `Play` mode: the head is dropped and the cast
+/// node takes its place with `mode: Play`. Decided on the cast node's EFFECT
+/// SHAPE ([`coordinated_exile_play_effect`]), never on its text; any other shape
+/// keeps the refused head (the card stays honestly unsupported).
+///
+/// The head's `may` is the permission itself (the window's decline, or the
+/// standing grant), not a CR 608.2d resolution choice — the same reasoning as the
+/// graveyard arm — so the adopted node keeps the cast node's own (non-optional)
+/// flags. The cast node is adopted only when the head carries nothing the cast
+/// node lacks, so no head-level field is silently dropped.
+fn deliver_coordinated_exile_play_permission(def: &mut AbilityDefinition) {
+    let Some(cast_node) = def.sub_ability.as_deref() else {
+        return;
+    };
+    let Some(play_effect) = coordinated_exile_play_effect(&cast_node.effect) else {
+        return;
+    };
+    if !head_adds_nothing_to_cast_node(def, cast_node) {
+        return;
+    }
+    let sub_link = def.sub_link;
+    let Some(cast_node) = def.sub_ability.take() else {
+        return;
+    };
+    *def = *cast_node;
+    *def.effect = play_effect;
+    def.sub_link = sub_link;
+}
+
+/// True when the refused land-play `head` and the `cast` node it precedes agree
+/// on every field except the ones the splice deliberately replaces: the effect
+/// and chain links, the head's CR 608.2d optionality (see
+/// [`deliver_coordinated_exile_play_permission`]), its provenance strings, and the
+/// cast node's resolution-time target timing. A head duration must be absent or
+/// equal to the cast node's (a leading "Until end of turn, " is stamped on both).
+fn head_adds_nothing_to_cast_node(head: &AbilityDefinition, cast: &AbilityDefinition) -> bool {
+    if head.duration.is_some() && head.duration != cast.duration {
+        return false;
+    }
+    let normalize = |def: &AbilityDefinition| {
+        let mut def = def.clone();
+        def.effect = Box::new(Effect::unimplemented("coordinated_play_probe", ""));
+        def.sub_ability = None;
+        def.sub_link = Default::default();
+        def.optional = false;
+        def.optional_player = None;
+        def.optional_for = None;
+        def.optional_targeting = false;
+        def.description = None;
+        def.target_prompt = None;
+        def.target_choice_timing = cast.target_choice_timing;
+        def.duration = cast.duration.clone();
+        def
+    };
+    normalize(head) == normalize(cast)
+}
+
+/// CR 701.18b + CR 305.1: the `Play`-mode form of a cast grant over an exiled
+/// batch, or `None` for any shape whose `Play` reading would not be exactly the
+/// printed "play lands and cast spells":
+///
+/// - a type-gated spell half (target other than the bare `ExiledBySource`, or a
+///   `card_filter`) — `Play` over the gate would exclude the lands;
+/// - a printed cap or budget (`ResolutionWindow` bounds, `single_use`);
+/// - a lingering cast half with NO stated duration — CR 611.2a would make the
+///   grant last until the end of the game;
+/// - any alternative / additional cost, cost modifier, constraint, or
+///   transformed cast.
+fn coordinated_exile_play_effect(effect: &Effect) -> Option<Effect> {
+    match effect {
+        Effect::CastFromZone {
+            target: TargetFilter::ExiledBySource,
+            without_paying_mana_cost,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration,
+            driver,
+            mana_spend_permission: None,
+            additional_cost: None,
+            cast_cost_modifier: None,
+        } => {
+            let faithful = match driver {
+                // CR 608.2g: Gix — played and cast as the ability resolves.
+                CastFromZoneDriver::ResolutionWindow { bounds } => {
+                    *without_paying_mana_cost
+                        && duration.is_none()
+                        && *bounds == ResolutionCastWindow::UNBOUNDED
+                }
+                // CR 611.2a: Magus of the Mind — "Until end of turn".
+                CastFromZoneDriver::LingeringPermission => duration.is_some(),
+                CastFromZoneDriver::DuringResolution => false,
+            };
+            faithful.then(|| {
+                let mut effect = effect.clone();
+                if let Effect::CastFromZone { mode, .. } = &mut effect {
+                    *mode = CardPlayMode::Play;
+                }
+                effect
+            })
+        }
+        Effect::GrantCastingPermission {
+            permission:
+                CastingPermission::PlayFromExile {
+                    mode: CardPlayMode::Cast,
+                    frequency: CastFrequency::Unlimited,
+                    card_filter: None,
+                    single_use: false,
+                    single_use_group: None,
+                    alt_ability_cost: None,
+                    without_paying_mana_cost: false,
+                    cast_cost_modifier: None,
+                    // CR 611.2a: the grant's own window carries over unchanged;
+                    // `granted_to` is the parse-time placeholder
+                    // `grant_permission::resolve` rewrites.
+                    duration: _,
+                    granted_to: _,
+                    source_id: None,
+                    exiled_by_ability_controller: None,
+                    // CR 609.4b: a spend permission scopes only how a spell
+                    // cast this way is paid (Elder Brain); a land play pays
+                    // nothing, so `Play` leaves it exactly as printed.
+                    mana_spend_permission: _,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    invalidation: None,
+                    provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                },
+            target: TargetFilter::TrackedSet { .. },
+            grantee,
+        } if *grantee == PermissionGrantee::default() => {
+            let mut effect = effect.clone();
+            if let Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile { mode, .. },
+                ..
+            } = &mut effect
+            {
+                *mode = CardPlayMode::Play;
+            }
+            Some(effect)
+        }
+        _ => None,
     }
 }
 
@@ -2956,6 +3113,97 @@ fn apply_linked_choice_persisted_player(
                 if let Some(execute) = result.triggers[pos].execute.as_mut() {
                     persist_player_choice_in_ability(execute);
                 }
+            }
+        }
+    }
+}
+
+// --- CR 607.2d: persisted odd/even choice → source-bound parity readers ---
+
+/// CR 607.2d: A permanent that persists an "As ~ enters, choose odd or even"
+/// choice links its statics, replacements and triggers that read "the chosen
+/// quality" to that choice (Ashling's Prerogative; Gollum, Riddle Master). Without the link those readers would
+/// consult the last odd/even choice any resolution named, which a static ability
+/// or replacement has no resolution of its own to supply.
+fn detect_linked_choice_persisted_parity(
+    items: &[OracleItemIr],
+    relations: &mut Vec<DocumentRelationIr>,
+) {
+    let has_persisted_chooser = items.iter().any(|item| {
+        item_replacement(item)
+            .and_then(|replacement| replacement.execute.as_deref())
+            .is_some_and(|execute| {
+                matches!(
+                    &*execute.effect,
+                    Effect::Choose {
+                        choice_type: ChoiceType::OddOrEven,
+                        persist: true,
+                        ..
+                    }
+                )
+            })
+    });
+    if !has_persisted_chooser {
+        return;
+    }
+    let reads_named_parity = |filter: &TargetFilter| {
+        target_filter_uses_filter_prop(filter, &|prop| {
+            matches!(
+                prop,
+                FilterProp::ManaValueParity {
+                    parity: ParitySource::LastNamedChoice
+                }
+            )
+        })
+    };
+    let readers: Vec<OracleItemId> = items
+        .iter()
+        .filter(|item| {
+            item_static(item)
+                .and_then(|def| def.affected.as_ref())
+                .is_some_and(reads_named_parity)
+                || item_replacement(item)
+                    .and_then(|def| def.valid_card.as_ref())
+                    .is_some_and(reads_named_parity)
+                || item_trigger(item)
+                    .is_some_and(|def| def.valid_card.as_ref().is_some_and(reads_named_parity))
+        })
+        .map(|item| item.id)
+        .collect();
+    if !readers.is_empty() {
+        relations.push(DocumentRelationIr::LinkedChoice(
+            LinkedChoiceKind::PersistedParity { readers },
+        ));
+    }
+}
+
+/// Rebind each linked reader's parity to the source's persisted choice, by id.
+fn apply_linked_choice_persisted_parity(
+    result: &mut ParsedAbilities,
+    relations: &[DocumentRelationIr],
+    static_ids: &[OracleItemId],
+    replacement_ids: &[OracleItemId],
+    trigger_ids: &[OracleItemId],
+) {
+    for relation in relations {
+        let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::PersistedParity { readers }) =
+            relation
+        else {
+            continue;
+        };
+        for id in readers {
+            if let Some(filter) =
+                position_of(static_ids, *id).and_then(|pos| result.statics[pos].affected.as_mut())
+            {
+                rebind_chosen_parity_to_source(filter);
+            } else if let Some(filter) = position_of(replacement_ids, *id)
+                .and_then(|pos| result.replacements[pos].valid_card.as_mut())
+            {
+                rebind_chosen_parity_to_source(filter);
+            } else if let Some(filter) = position_of(trigger_ids, *id)
+                .and_then(|pos| result.triggers[pos].valid_card.as_mut())
+            {
+                rebind_chosen_parity_to_source(filter);
             }
         }
     }
@@ -4429,6 +4677,13 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // actually reads.
     deliver_coordinated_graveyard_permission(&mut result);
     apply_linked_choice_persisted_player(&mut result, &ir.relations, &ability_ids, &trigger_ids);
+    apply_linked_choice_persisted_parity(
+        &mut result,
+        &ir.relations,
+        &static_ids,
+        &replacement_ids,
+        &trigger_ids,
+    );
 
     // Architectural rule: the parser must never silently discard Oracle text. Run
     // the swallow audit against the parsed result so any unrepresented clause
@@ -7318,6 +7573,22 @@ fn parse_normalized_oracle_ir(
                     continue;
                 }
             }
+        }
+
+        // CR 601.3 + CR 113.6f: "You may cast this card from <zones>, but not from
+        // anywhere else." (Haakon, Stromgald Scourge) — the card's own cast permission
+        // plus a restriction confining every cast of it to those zones. Both halves
+        // come from one sentence, so both are emitted for this line. This arm must
+        // run ahead of the Priority 7 static parser, whose permission rule refuses
+        // the residual rider; whenever this split declines, the line stays an honest
+        // `static_structure` gap.
+        if let Some((permission, restriction)) =
+            try_parse_exclusive_own_cast_permission(&line, &lower)
+        {
+            emitter.static_ir_at(item_line, StaticIr::from_definition(&line, permission));
+            emitter.casting_restriction_at(item_line, restriction);
+            i += 1;
+            continue;
         }
 
         // Priority 7: Static/continuous patterns
