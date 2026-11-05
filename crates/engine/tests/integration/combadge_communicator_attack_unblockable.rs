@@ -172,6 +172,13 @@ fn no_other_communicator_leaves_the_attacker_blockable() {
 #[test]
 fn two_combadges_on_the_attacker_do_not_make_it_unblockable() {
     let mut board = board(AllyGear::SecondBadgeOnAttacker);
+    let state = board.runner.state();
+    let badges = state.objects[&board.attacker]
+        .attachments
+        .iter()
+        .filter(|id| state.objects[id].name == "Combadge")
+        .count();
+    assert_eq!(badges, 2, "precondition: the attacker wears both Combadges");
     assert!(
         !attack_to_blocks(&mut board),
         "the attacker wearing both Combadges is not \"another creature\""

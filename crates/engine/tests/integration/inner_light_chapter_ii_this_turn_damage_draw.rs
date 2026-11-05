@@ -137,7 +137,8 @@ fn chosen_creature_dealing_combat_damage_this_turn_draws_that_many() {
 
 /// CR 603.7c + CR 608.2c: the delayed trigger watches only the chosen creature
 /// ("it"). A different creature of ours dealing combat damage the same turn
-/// draws nothing; the chosen one still draws its own damage.
+/// draws nothing; the chosen one still draws its own damage. Both attack, so
+/// the total drawn equals only the chosen creature's 3 damage, not the 5 dealt.
 #[test]
 fn a_non_chosen_creature_dealing_combat_damage_draws_nothing() {
     let (mut runner, saga, wurm, bystander) = setup_with_bystander(true);
@@ -146,12 +147,16 @@ fn a_non_chosen_creature_dealing_combat_damage_draws_nothing() {
 
     runner.advance_to_combat();
     runner
-        .declare_attackers(&[(bystander, AttackTarget::Player(P1))])
-        .expect("the non-chosen Grizzly Bears attacks alone");
+        .declare_attackers(&[
+            (wurm, AttackTarget::Player(P1)),
+            (bystander, AttackTarget::Player(P1)),
+        ])
+        .expect("the chosen Craw Wurm and the non-chosen Grizzly Bears attack");
     let outcome = runner.combat_damage();
-    // Reach guard: the bystander did deal its combat damage.
-    outcome.assert_life_delta(P1, -2);
-    outcome.assert_hand_drawn(P0, 0);
+    // Reach guard: both creatures dealt their combat damage (3 + 2).
+    outcome.assert_life_delta(P1, -5);
+    // Only the chosen creature's 3 damage draws; the bystander's 2 adds nothing.
+    outcome.assert_hand_drawn(P0, 3);
 }
 
 #[test]
