@@ -19,6 +19,8 @@ use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
+
+use crate::policies::effect_classify::ControllerYield;
 use engine::types::zones::Zone;
 use engine::util::Deadline;
 
@@ -1425,7 +1427,7 @@ fn expanded_multiplayer_choice(
             let damage_prevented = player_damage_prevented(state, defender, attacker_id);
             if damage_prevented
                 && !input.mandatory.contains(&attacker_id)
-                && !has_self_attack_payoff(state, attacker_id)
+                && !attack_trigger_payoff(state, attacker_id)
             {
                 continue;
             }
@@ -1514,7 +1516,7 @@ fn expanded_multiplayer_choice(
             if !damage_prevented {
                 open_damage +=
                     engine::game::combat_damage::combat_damage_to_defender(state, attacker_id, &[]);
-            } else if has_self_attack_payoff(state, attacker_id) {
+            } else if attack_trigger_payoff(state, attacker_id) {
                 prevented_payoff = true;
             }
             // A one-block exchange does not model menace or any other minimum
@@ -1718,39 +1720,73 @@ fn player_damage_prevented(state: &GameState, defender: PlayerId, attacker: Obje
     engine::game::static_abilities::player_protection_from(state, defender, Some(attacker))
 }
 
-/// Whether attacking pays `attacker` off through its own trigger rather than
-/// through combat damage, so prevention (CR 702.16j) doesn't make the attack
-/// pointless:
-/// - CR 508.3a: "Whenever [this creature] attacks" pays off on the declaration
-///   itself — including the combined "enters or attacks" (Grave Titan) and
-///   "attacks or blocks" modes.
-/// - CR 508.3f + CR 509.3g: "Whenever [this creature] attacks and isn't
-///   blocked" triggers in the declare blockers step when no creature blocks it.
-///   Its payoff is often not damage at all — a life total becoming 1 (Master of
-///   Cruelties), a discard (Abyssal Nightstalker), a draw (Ophidian).
+/// Whether declaring `attacker` pays its controller off through attack
+/// triggers rather than combat damage, so prevention (CR 702.16j) doesn't make
+/// the attack pointless. Reads every attack trigger the declaration fires for
+/// that player:
+/// - the attacker's own — CR 508.3a "whenever [this creature] attacks"
+///   (including "enters or attacks" and "attacks or blocks") and CR 508.3f +
+///   CR 509.3g "attacks and isn't blocked";
+/// - CR 603.2: each functioning permanent the same player controls whose
+///   "whenever a creature you control attacks" matches it (Druids'
+///   Repository, Mardu Ascendancy), decided by the engine's own attacker
+///   matcher.
 ///
-/// The trigger's effect isn't classified: a self pump (Cybermat) or a damage
-/// trigger counts too, though protection may leave it nothing to do.
+/// Each trigger's whole chain is classified by
+/// `ability_chain_controller_yield`: a harm vetoes the attack (Ebonblade
+/// Reaper's "you lose half your life"), and only a provable gain counts —
+/// Goblin Guide's land for the defending player doesn't, nor does a recipient
+/// the parse leaves unbound.
 ///
-/// Controller-scoped "whenever you attack" payoffs (CR 508.3d) on other
-/// permanents are not read here: they ask whether any creature attacks, not
-/// whether this one should. Nor is a targeted trigger's target availability:
-/// against a protected player (CR 702.16j: can't be targeted) a damage trigger
-/// such as Inferno Titan's still counts, even if only the attacker's own side
-/// offers targets.
-fn has_self_attack_payoff(state: &GameState, attacker: ObjectId) -> bool {
-    state.objects.get(&attacker).is_some_and(|obj| {
-        engine::game::functioning_abilities::active_trigger_definitions(state, obj).any(|active| {
-            matches!(
-                active.definition.mode,
-                TriggerMode::Attacks
-                    | TriggerMode::EntersOrAttacks
-                    | TriggerMode::AttacksOrBlocks
-                    | TriggerMode::AttackerUnblocked
-                    | TriggerMode::AttackerUnblockedOnce
-            ) && matches!(active.definition.valid_card, Some(TargetFilter::SelfRef))
-        })
-    })
+/// Not read: controller-scoped "whenever you attack" payoffs (CR 508.3d),
+/// intervening-if conditions, and a targeted trigger's target availability —
+/// against a protected player (CR 702.16j: can't be targeted) a damage
+/// trigger such as Inferno Titan's still counts, even if only the attacker's
+/// own side offers targets.
+fn attack_trigger_payoff(state: &GameState, attacker: ObjectId) -> bool {
+    let Some(controller) = state.objects.get(&attacker).map(|obj| obj.controller) else {
+        return false;
+    };
+    let mut gain = false;
+    for source in state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| obj.controller == controller)
+    {
+        for active in engine::game::functioning_abilities::active_trigger_definitions(state, source)
+        {
+            let trigger = active.definition;
+            let fires = if matches!(trigger.valid_card, Some(TargetFilter::SelfRef)) {
+                source.id == attacker
+                    && matches!(
+                        trigger.mode,
+                        TriggerMode::Attacks
+                            | TriggerMode::EntersOrAttacks
+                            | TriggerMode::AttacksOrBlocks
+                            | TriggerMode::AttackerUnblocked
+                            | TriggerMode::AttackerUnblockedOnce
+                    )
+            } else {
+                matches!(trigger.mode, TriggerMode::Attacks)
+                    && engine::game::triggers::attack_trigger_matches_attacker(
+                        state, source, trigger, attacker,
+                    )
+            };
+            if !fires {
+                continue;
+            }
+            match trigger.execute.as_deref().map_or(
+                ControllerYield::Neutral,
+                crate::policies::effect_classify::ability_chain_controller_yield,
+            ) {
+                ControllerYield::Harm => return false,
+                ControllerYield::Gain => gain = true,
+                ControllerYield::Neutral => {}
+            }
+        }
+    }
+    gain
 }
 
 /// CR 702.16e + CR 702.16j: the opponents at least one candidate's combat
@@ -1772,8 +1808,8 @@ fn damageable_opponents(
 }
 
 /// CR 702.16e + CR 702.16j: the opponents an attack can do something to — at
-/// least one candidate's combat damage reaches them, or a candidate's own
-/// trigger pays off whoever it attacks (`has_self_attack_payoff`).
+/// least one candidate's combat damage reaches them, or a candidate's attack
+/// triggers pay off whoever it attacks (`attack_trigger_payoff`).
 fn attack_worthy_opponents(
     state: &GameState,
     opponents: &[PlayerId],
@@ -1784,7 +1820,7 @@ fn attack_worthy_opponents(
         .copied()
         .filter(|&opponent| {
             candidates.iter().any(|&id| {
-                !player_damage_prevented(state, opponent, id) || has_self_attack_payoff(state, id)
+                !player_damage_prevented(state, opponent, id) || attack_trigger_payoff(state, id)
             })
         })
         .collect()
@@ -1866,7 +1902,7 @@ fn attack_can_matter(
     attacker_legal_targets(targeting, attackable, attacker)
         .iter()
         .any(|&target| target_takes_damage_from(state, target, attacker))
-        || has_self_attack_payoff(state, attacker)
+        || attack_trigger_payoff(state, attacker)
 }
 
 /// CR 702.16e + CR 702.16j: settle each assignment against the engine-issued
@@ -1875,8 +1911,8 @@ fn attack_can_matter(
 /// A must-attack creature (CR 508.1d) keeps a legal assignment even when its
 /// damage is prevented; an illegal one is repaired by `mandatory_repair_target`.
 ///
-/// A voluntary attack stays when its target takes the damage or its own trigger
-/// pays off (`has_self_attack_payoff`). Otherwise it moves only to another
+/// A voluntary attack stays when its target takes the damage or its attack
+/// triggers pay off (`attack_trigger_payoff`). Otherwise it moves only to another
 /// target with the same defending player (CR 508.5) — that player's
 /// planeswalker or battle, defended by the blockers the attack was evaluated
 /// against — or is dropped. It never moves to a different player, whose blocks
@@ -1899,7 +1935,7 @@ fn retarget_prevented_player_attacks(
                     .or_else(|| mandatory_repair_target(state, id, legal))
                     .map(|chosen| (id, chosen));
             }
-            let payoff = has_self_attack_payoff(state, id);
+            let payoff = attack_trigger_payoff(state, id);
             if legal.contains(&target) && (payoff || target_takes_damage_from(state, target, id)) {
                 return Some((id, target));
             }
@@ -10227,7 +10263,7 @@ mod tests {
         for card in ["Aclazotz, Deepest Betrayal", "Inferno Titan"] {
             let (mut state, attacker) = state_with_real_attacker(card);
             assert!(
-                has_self_attack_payoff(&state, attacker),
+                attack_trigger_payoff(&state, attacker),
                 "{card}'s parsed attack trigger must be recognized"
             );
             let target = add_creature(&mut state, PlayerId(1), "Bear", 2, 2, vec![]);
@@ -10262,7 +10298,7 @@ mod tests {
             let object = state.objects.get_mut(&attacker).unwrap();
             object.summoning_sick = false;
             object.entered_battlefield_turn = Some(1);
-            assert!(has_self_attack_payoff(&state, attacker));
+            assert!(attack_trigger_payoff(&state, attacker));
 
             let old_target = AttackTarget::Player(PlayerId(1));
             let legal_target = AttackTarget::Player(PlayerId(2));
@@ -10522,46 +10558,42 @@ mod tests {
 
     /// CR 508.3f + CR 509.3g + CR 702.16j: an "attacks and isn't blocked"
     /// payoff isn't damage, so a player whose protection prevents the damage
-    /// still suffers it. The AI attacks that player with Master of Cruelties
-    /// (that player's life total becomes 1) and Abyssal Nightstalker (that
-    /// player discards a card), and Nightstalker's discard resolves.
+    /// still suffers it. The AI attacks that player with Abyssal Nightstalker,
+    /// and the defending player's discard resolves.
+    ///
+    /// Master of Cruelties is the control: its "that player's life total
+    /// becomes 1" parses with "that player" bound to `ParentTarget`, which the
+    /// engine doesn't resolve to the defending player, so the AI credits it
+    /// nothing and declines.
     #[test]
     fn unblocked_attack_payoff_still_attacks_a_protected_player() {
-        for card in ["Master of Cruelties", "Abyssal Nightstalker"] {
-            let (mut state, attacker) = state_with_real_attacker(card);
-            assert!(
-                has_self_attack_payoff(&state, attacker),
-                "{card}'s parsed unblocked trigger must be recognized"
-            );
-            let card_id = CardId(state.next_object_id);
-            let in_hand = create_object(
-                &mut state,
-                card_id,
-                PlayerId(1),
-                "Card in hand".to_string(),
-                Zone::Hand,
-            );
-            grant_protection_from_everything(&mut state, PlayerId(1));
+        let (mut state, attacker) = state_with_real_attacker("Abyssal Nightstalker");
+        assert!(
+            attack_trigger_payoff(&state, attacker),
+            "Nightstalker's parsed unblocked trigger must be recognized"
+        );
+        let card_id = CardId(state.next_object_id);
+        let in_hand = create_object(
+            &mut state,
+            card_id,
+            PlayerId(1),
+            "Card in hand".to_string(),
+            Zone::Hand,
+        );
+        grant_protection_from_everything(&mut state, PlayerId(1));
 
-            let attacks = choose_from_engine_prompt(&mut state);
-            assert_eq!(
-                attacks,
-                vec![(attacker, AttackTarget::Player(PlayerId(1)))],
-                "{card} must attack the protected player for its payoff"
-            );
+        let attacks = choose_from_engine_prompt(&mut state);
+        assert_eq!(attacks, vec![(attacker, AttackTarget::Player(PlayerId(1)))]);
+        let after = declare_and_resolve_unblocked(state, &attacks);
+        assert!(
+            !after.players[1].hand.contains(&in_hand),
+            "Abyssal Nightstalker's discard must resolve"
+        );
 
-            // Master's "that player's life total becomes 1" currently does not
-            // resolve against the defending player (its trigger binds "that
-            // player" to `ParentTarget`), a defect independent of this choice,
-            // so only Nightstalker's payoff is observed here.
-            if card == "Abyssal Nightstalker" {
-                let after = declare_and_resolve_unblocked(state, &attacks);
-                assert!(
-                    !after.players[1].hand.contains(&in_hand),
-                    "Abyssal Nightstalker's discard must resolve"
-                );
-            }
-        }
+        let (mut state, master) = state_with_real_attacker("Master of Cruelties");
+        assert!(!attack_trigger_payoff(&state, master));
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert!(choose_from_engine_prompt(&mut state).is_empty());
     }
 
     /// CR 508.5 + CR 702.16e: a voluntary attack is never moved to a
@@ -10725,10 +10757,10 @@ mod tests {
         }
     }
 
-    /// CR 508.3a + CR 702.16j: one creature with an attack trigger doesn't pull
-    /// the plain attackers onto a protected player. P1 (next seat) has The One
-    /// Ring's protection; P2 is open. Goblin Guide may attack either, but both
-    /// Grizzly Bears attack P2, on the comparison and rollout paths.
+    /// CR 508.3a + CR 702.16j: one creature with an attack-trigger payoff
+    /// doesn't pull the plain attackers onto a protected player. P1 (next seat)
+    /// has The One Ring's protection; P2 is open. Aclazotz may attack either,
+    /// but both Grizzly Bears attack P2, on the comparison and rollout paths.
     #[test]
     fn attack_trigger_creature_does_not_redirect_plain_attackers() {
         let mut scenario = GameScenario::new_with_format(
@@ -10739,7 +10771,7 @@ mod tests {
         scenario.at_phase(engine::types::phase::Phase::DeclareAttackers);
         let guide = scenario.add_real_card(
             P0,
-            "Goblin Guide",
+            "Aclazotz, Deepest Betrayal",
             Zone::Battlefield,
             crate::test_support::shared_integration_card_db(),
         );
@@ -10754,7 +10786,7 @@ mod tests {
             object.summoning_sick = false;
             object.entered_battlefield_turn = Some(1);
         }
-        assert!(has_self_attack_payoff(&state, guide));
+        assert!(attack_trigger_payoff(&state, guide));
         grant_protection_from_everything(&mut state, PlayerId(1));
 
         for comparison_deadline in [Some(Deadline::none()), None] {
@@ -10831,6 +10863,130 @@ mod tests {
         ];
         expected.sort();
         assert_eq!(sorted, expected, "got {attacks:?}");
+    }
+
+    /// A two-player state at P0's declare-attackers step, with P0's creatures
+    /// ready to attack.
+    fn ready_two_player_state(scenario: GameScenario, attackers: &[ObjectId]) -> GameState {
+        let mut state = scenario.build().state().clone();
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        for attacker in attackers {
+            let object = state.objects.get_mut(attacker).unwrap();
+            object.summoning_sick = false;
+            object.entered_battlefield_turn = Some(1);
+        }
+        state
+    }
+
+    /// CR 508.3a + CR 702.16j + CR 704.5a: a self attack trigger that harms
+    /// its controller, or helps only the defending player, is no reason to
+    /// attack a player who prevents the damage. Ebonblade Reaper's "you lose
+    /// half your life" at 1 life would lose the game; Goblin Guide's trigger
+    /// can give the defender a land. Both stay home. Reaper's harm also vetoes
+    /// a friendly Druids' Repository's charge counter.
+    #[test]
+    fn harmful_or_defender_only_attack_trigger_is_no_reason_to_attack() {
+        // Verbatim local MTGJSON Oracle.
+        let mut scenario = GameScenario::new();
+        let reaper = scenario
+            .add_creature_from_oracle(P0, "Ebonblade Reaper", 1, 1, "Whenever this creature attacks, you lose half your life, rounded up.\nWhenever this creature deals combat damage to a player, that player loses half their life, rounded up.")
+            .id();
+        let mut state = ready_two_player_state(scenario, &[reaper]);
+        state.players[0].life = 1;
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert!(!attack_trigger_payoff(&state, reaper));
+        assert!(choose_from_engine_prompt(&mut state.clone()).is_empty());
+
+        let mut scenario = GameScenario::new();
+        let reaper = scenario
+            .add_creature_from_oracle(P0, "Ebonblade Reaper", 1, 1, "Whenever this creature attacks, you lose half your life, rounded up.\nWhenever this creature deals combat damage to a player, that player loses half their life, rounded up.")
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Druids' Repository", "Whenever a creature you control attacks, put a charge counter on this enchantment.\nRemove a charge counter from this enchantment: Add one mana of any color.");
+        let mut state = ready_two_player_state(scenario, &[reaper]);
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert!(
+            !attack_trigger_payoff(&state, reaper),
+            "the controller's life loss vetoes the charge counter"
+        );
+        assert!(choose_from_engine_prompt(&mut state).is_empty());
+
+        let (mut state, guide) = state_with_real_attacker("Goblin Guide");
+        assert!(!attack_trigger_payoff(&state, guide));
+        assert_eq!(
+            choose_from_engine_prompt(&mut state.clone()),
+            vec![(guide, AttackTarget::Player(PlayerId(1)))],
+            "control: an unprotected defender takes the damage"
+        );
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert!(choose_from_engine_prompt(&mut state).is_empty());
+    }
+
+    /// CR 508.3a + CR 603.2 + CR 702.16j: a friendly permanent's "whenever a
+    /// creature you control attacks" pays off even when the defender prevents
+    /// the damage. A vanilla Grizzly Bears attacks a protected player for
+    /// Druids' Repository's charge counter and for Mardu Ascendancy's Goblin
+    /// token, and each resolves; Beastmaster Ascension's quest counter is
+    /// recognized too. Without such a permanent the Bears stay home.
+    #[test]
+    fn friendly_attack_trigger_payoff_attacks_a_protected_player() {
+        // Control: no observer, so the attack does nothing.
+        let mut scenario = GameScenario::new();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let mut state = ready_two_player_state(scenario, &[bears]);
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert!(!attack_trigger_payoff(&state, bears));
+        assert!(choose_from_engine_prompt(&mut state).is_empty());
+
+        // Verbatim local MTGJSON Oracle.
+        for (name, oracle) in [
+            ("Druids' Repository", "Whenever a creature you control attacks, put a charge counter on this enchantment.\nRemove a charge counter from this enchantment: Add one mana of any color."),
+            ("Mardu Ascendancy", "Whenever a nontoken creature you control attacks, create a 1/1 red Goblin creature token that's tapped and attacking.\nSacrifice this enchantment: Creatures you control get +0/+3 until end of turn."),
+            ("Beastmaster Ascension", "Whenever a creature you control attacks, you may put a quest counter on this enchantment.\nAs long as this enchantment has seven or more quest counters on it, creatures you control get +5/+5."),
+        ] {
+            let mut scenario = GameScenario::new();
+            let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+            let observer = scenario.add_enchantment_from_oracle(P0, name, oracle).id();
+            let mut state = ready_two_player_state(scenario, &[bears]);
+            grant_protection_from_everything(&mut state, PlayerId(1));
+            assert!(attack_trigger_payoff(&state, bears), "{name} pays off");
+
+            let attacks = choose_from_engine_prompt(&mut state);
+            assert_eq!(
+                attacks,
+                vec![(bears, AttackTarget::Player(PlayerId(1)))],
+                "{name}"
+            );
+            match name {
+                "Druids' Repository" => {
+                    let after = declare_and_resolve_unblocked(state, &attacks);
+                    assert_eq!(
+                        after.objects[&observer]
+                            .counters
+                            .get(&engine::types::counter::CounterType::Generic(
+                                "charge".to_string()
+                            ))
+                            .copied(),
+                        Some(1),
+                        "the charge counter must resolve"
+                    );
+                }
+                "Mardu Ascendancy" => {
+                    let after = declare_and_resolve_unblocked(state, &attacks);
+                    assert!(
+                        after.battlefield.iter().any(|id| {
+                            let object = &after.objects[id];
+                            object.is_token && object.name == "Goblin" && object.controller == P0
+                        }),
+                        "the Goblin token must resolve"
+                    );
+                }
+                // "You may put a quest counter" asks a question mid-combat;
+                // recognizing the payoff is the claim here.
+                _ => {}
+            }
+        }
     }
 
     /// CR 508.5 + CR 702.16e: when the alpha strike can finish the weakest

@@ -129,6 +129,110 @@ fn pt_value_is_non_negative(value: &PtValue) -> bool {
     }
 }
 
+/// What an ability's whole resolution does for its controller: a provable
+/// gain, a provable harm, or nothing this classifier can establish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControllerYield {
+    Gain,
+    Harm,
+    Neutral,
+}
+
+/// Whose resource a player-role filter names, relative to the ability's
+/// controller.
+enum PlayerRecipient {
+    Controller,
+    Opponents,
+    Unknown,
+}
+
+/// CR 109.5 + CR 608.2: resolve a player role inside an ability whose
+/// `player_scope` (if any) iterates `scope`. Outside an iteration "you" is the
+/// controller; inside one, `Controller`/`ScopedPlayer` name the iterated
+/// player ("each opponent discards a card"). Anything not provably one side —
+/// a parent-target anaphor, a triggering player — is `Unknown`.
+fn player_recipient(role: &TargetFilter, scope: Option<&PlayerFilter>) -> PlayerRecipient {
+    match role {
+        TargetFilter::Controller | TargetFilter::ScopedPlayer => match scope {
+            None | Some(PlayerFilter::Controller) => PlayerRecipient::Controller,
+            Some(PlayerFilter::Opponent | PlayerFilter::DefendingPlayer) => {
+                PlayerRecipient::Opponents
+            }
+            Some(_) => PlayerRecipient::Unknown,
+        },
+        TargetFilter::OriginalController | TargetFilter::SourceController => {
+            PlayerRecipient::Controller
+        }
+        TargetFilter::Opponent | TargetFilter::DefendingPlayer => PlayerRecipient::Opponents,
+        _ => PlayerRecipient::Unknown,
+    }
+}
+
+/// One effect's yield for the ability's controller. Player resources take
+/// their sign from who receives them: a draw, life or token for the controller
+/// or a discard or life loss for opponents is a gain, and the reverse a harm.
+/// A counter the ability puts on its own source carries that counter's
+/// polarity, where a resource counter (charge, quest) is the source's own
+/// currency (CR 122.1). Damage to a target the controller chooses (CR 115.1)
+/// is a gain. Every other shape, and every unresolved recipient, is neutral.
+fn effect_controller_yield(effect: &Effect, scope: Option<&PlayerFilter>) -> ControllerYield {
+    let to = |role: &TargetFilter, polarity: EffectPolarity| match (
+        player_recipient(role, scope),
+        polarity,
+    ) {
+        (PlayerRecipient::Controller, EffectPolarity::Beneficial)
+        | (PlayerRecipient::Opponents, EffectPolarity::Harmful) => ControllerYield::Gain,
+        (PlayerRecipient::Controller, EffectPolarity::Harmful)
+        | (PlayerRecipient::Opponents, EffectPolarity::Beneficial) => ControllerYield::Harm,
+        _ => ControllerYield::Neutral,
+    };
+    match effect {
+        Effect::Draw { target, .. } => to(target, EffectPolarity::Beneficial),
+        Effect::GainLife { player, .. } => to(player, EffectPolarity::Beneficial),
+        Effect::Token { owner, .. } => to(owner, EffectPolarity::Beneficial),
+        Effect::Discard { target, .. } => to(target, EffectPolarity::Harmful),
+        Effect::LoseLife {
+            target: Some(target),
+            ..
+        } => to(target, EffectPolarity::Harmful),
+        Effect::PutCounter {
+            target: TargetFilter::SelfRef,
+            ..
+        } => match effect_polarity(effect) {
+            EffectPolarity::Harmful => ControllerYield::Harm,
+            EffectPolarity::Beneficial | EffectPolarity::Contextual => ControllerYield::Gain,
+        },
+        Effect::DealDamage { target, .. } if !target.is_context_ref() => ControllerYield::Gain,
+        _ => ControllerYield::Neutral,
+    }
+}
+
+/// The yield of `ability`'s whole chain — its effect, sub-abilities and else
+/// branches, each under the `player_scope` it runs in (CR 608.2: a scoped
+/// chain runs once per iterated player). Any harm makes the chain a harm;
+/// otherwise any gain makes it a gain. Modal modes aren't read, so a modal
+/// ability is neutral.
+pub(crate) fn ability_chain_controller_yield(ability: &AbilityDefinition) -> ControllerYield {
+    let mut gain = false;
+    let mut pending = vec![(ability, None::<&PlayerFilter>)];
+    while let Some((node, inherited)) = pending.pop() {
+        let scope = node.player_scope.as_ref().or(inherited);
+        match effect_controller_yield(&node.effect, scope) {
+            ControllerYield::Harm => return ControllerYield::Harm,
+            ControllerYield::Gain => gain = true,
+            ControllerYield::Neutral => {}
+        }
+        for next in node.sub_ability.iter().chain(node.else_ability.iter()) {
+            pending.push((next, scope));
+        }
+    }
+    if gain {
+        ControllerYield::Gain
+    } else {
+        ControllerYield::Neutral
+    }
+}
+
 pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
     match effect {
         // Pump: beneficial only if both modifiers are non-negative. The sign
@@ -6050,6 +6154,115 @@ mod attacked_referent_domain_tests {
         assert_eq!(
             filter_domain(&TargetFilter::AttackedPlayerOrPlaneswalker),
             FilterDomain::ANYTHING
+        );
+    }
+}
+
+#[cfg(test)]
+mod controller_yield_tests {
+    use super::*;
+
+    /// An ability as the Oracle parser emits it (the card-data JSON shape).
+    fn ability(json: &str) -> AbilityDefinition {
+        serde_json::from_str(json).expect("parser-shaped ability JSON")
+    }
+
+    /// CR 109.5 + CR 608.2: inside a `player_scope` iteration, `Controller` is
+    /// the iterated player, so "each opponent discards" is a gain, and the
+    /// chained "you draw" (`OriginalController`) stays the controller's
+    /// (Aclazotz, Deepest Betrayal).
+    #[test]
+    fn scoped_controller_is_the_iterated_opponent() {
+        let aclazotz = ability(
+            r#"{"kind":"Spell","effect":{"type":"Discard","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}},"sub_ability":{"kind":"Spell","effect":{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"OriginalController"}}},"player_scope":{"type":"Opponent"}}"#,
+        );
+        assert_eq!(
+            ability_chain_controller_yield(&aclazotz),
+            ControllerYield::Gain
+        );
+        let unscoped_discard = ability(
+            r#"{"kind":"Spell","effect":{"type":"Discard","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}}}"#,
+        );
+        assert_eq!(
+            ability_chain_controller_yield(&unscoped_discard),
+            ControllerYield::Harm
+        );
+    }
+
+    /// Recipients decide the sign: the controller's life loss is a harm
+    /// (Ebonblade Reaper), a defending player's discard a gain (Abyssal
+    /// Nightstalker), the controller's token a gain (Mardu Ascendancy), and an
+    /// unbound parent target nothing (Master of Cruelties' life setting).
+    #[test]
+    fn recipients_decide_the_sign() {
+        for (json, expected) in [
+            (
+                r#"{"kind":"Spell","effect":{"type":"LoseLife","amount":{"type":"Fixed","value":1},"target":{"type":"Controller"}}}"#,
+                ControllerYield::Harm,
+            ),
+            (
+                r#"{"kind":"Spell","effect":{"type":"Discard","count":{"type":"Fixed","value":1},"target":{"type":"DefendingPlayer"}}}"#,
+                ControllerYield::Gain,
+            ),
+            (
+                r#"{"kind":"Spell","effect":{"type":"Token","name":"Goblin","power":{"type":"Fixed","value":1},"toughness":{"type":"Fixed","value":1},"types":["Creature","Goblin"],"colors":["Red"],"keywords":[],"tapped":true,"count":{"type":"Fixed","value":1},"owner":{"type":"Controller"},"enters_attacking":true}}"#,
+                ControllerYield::Gain,
+            ),
+            (
+                r#"{"kind":"Spell","effect":{"type":"SetLifeTotal","target":{"type":"ParentTarget"},"amount":{"type":"Fixed","value":1}}}"#,
+                ControllerYield::Neutral,
+            ),
+        ] {
+            assert_eq!(
+                ability_chain_controller_yield(&ability(json)),
+                expected,
+                "{json}"
+            );
+        }
+    }
+
+    /// CR 122.1: a counter an ability puts on its own source is its own
+    /// currency unless the counter itself is a drawback (Druids' Repository's
+    /// charge counter is a gain; a -1/-1 counter a harm). Damage to a chosen
+    /// target is a gain (Inferno Titan); a reveal for the defending player is
+    /// nothing (Goblin Guide).
+    #[test]
+    fn source_counters_damage_and_reveals() {
+        for (json, expected) in [
+            (
+                r#"{"kind":"Spell","effect":{"type":"PutCounter","counter_type":"charge","count":{"type":"Fixed","value":1},"target":{"type":"SelfRef"}}}"#,
+                ControllerYield::Gain,
+            ),
+            (
+                r#"{"kind":"Spell","effect":{"type":"PutCounter","counter_type":"M1M1","count":{"type":"Fixed","value":1},"target":{"type":"SelfRef"}}}"#,
+                ControllerYield::Harm,
+            ),
+            (
+                r#"{"kind":"Spell","effect":{"type":"DealDamage","amount":{"type":"Fixed","value":3},"target":{"type":"Any"}}}"#,
+                ControllerYield::Gain,
+            ),
+            (
+                r#"{"kind":"Spell","effect":{"type":"RevealTop","player":{"type":"DefendingPlayer"},"count":1}}"#,
+                ControllerYield::Neutral,
+            ),
+        ] {
+            assert_eq!(
+                ability_chain_controller_yield(&ability(json)),
+                expected,
+                "{json}"
+            );
+        }
+    }
+
+    /// A harm anywhere in the chain outweighs a gain elsewhere in it.
+    #[test]
+    fn harm_outweighs_gain() {
+        let draw_then_lose = ability(
+            r#"{"kind":"Spell","effect":{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}},"sub_ability":{"kind":"Spell","effect":{"type":"LoseLife","amount":{"type":"Fixed","value":2},"target":{"type":"Controller"}}}}"#,
+        );
+        assert_eq!(
+            ability_chain_controller_yield(&draw_then_lose),
+            ControllerYield::Harm
         );
     }
 }

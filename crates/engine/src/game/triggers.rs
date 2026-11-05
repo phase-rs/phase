@@ -63,7 +63,9 @@ use super::speed::{
 use super::stack;
 
 // Re-export so existing paths stay valid.
-pub use super::trigger_matchers::{build_trigger_registry, trigger_matcher, trigger_registry};
+pub use super::trigger_matchers::{
+    attack_trigger_matches_attacker, build_trigger_registry, trigger_matcher, trigger_registry,
+};
 
 /// Function signature for trigger matchers: returns true if event matches the trigger.
 pub type TriggerMatcher = fn(
