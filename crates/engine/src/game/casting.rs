@@ -8920,19 +8920,35 @@ fn prepare_casting_variant_on_face(
     }
 }
 
+/// CR 702.102a: whether `player` may cast `obj` as a fused split spell. Fuse
+/// functions only while the card is in a hand, and only "a player [who] casts a
+/// split card with fuse from their hand" may cast both halves — so a permission
+/// to cast from ANOTHER player's hand (Sen Triplets) lets that player cast
+/// either half, never the fused spell. The single gate for both offering the
+/// Fuse candidate and admitting a `CastingVariant::Fuse` preparation.
+fn fuse_route_open(state: &GameState, obj: &GameObject, player: PlayerId) -> bool {
+    is_hand_fuse_split(obj) && state.object_in_players_zone(obj, Zone::Hand, player)
+}
+
+/// CR 702.102a + CR 709.3: a split card with fuse sitting in some player's hand
+/// — the zone where fuse functions and its halves are offered per face.
+fn is_hand_fuse_split(obj: &GameObject) -> bool {
+    obj.zone == Zone::Hand
+        && obj
+            .keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Fuse))
+        && obj
+            .back_face
+            .as_ref()
+            .is_some_and(|back| back.layout_kind == Some(LayoutKind::Split))
+}
+
 fn is_uncommitted_hand_fuse_pair(state: &GameState, object_id: ObjectId) -> bool {
-    state.objects.get(&object_id).is_some_and(|object| {
-        object.zone == Zone::Hand
-            && object
-                .keywords
-                .iter()
-                .any(|keyword| matches!(keyword, Keyword::Fuse))
-            && object
-                .back_face
-                .as_ref()
-                .is_some_and(|back| back.layout_kind == Some(LayoutKind::Split))
-            && !object.cast_face_committed
-    })
+    state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| is_hand_fuse_split(object) && !object.cast_face_committed)
 }
 
 fn casting_variant_choice_set(
@@ -9294,7 +9310,7 @@ fn casting_candidates(
     // characteristics would surface an option the later non-fused preparation can't
     // honor (the granted keyword no longer matches the front half), wrongly falling
     // back to the printed cost. The Fuse candidate itself is gated intrinsically by
-    // `has_fuse_candidate` (printed Fuse keyword + Split back face) below.
+    // `fuse_route_open` (printed Fuse keyword + Split back face, own hand) below.
 
     if graveyard_keyword_routes_open(state, obj, player) {
         if super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Escape)
@@ -9571,18 +9587,17 @@ fn casting_candidates(
     // the card is in a player's hand. It lets the caster cast both halves as a
     // fused split spell. Only offered when the back face is the right (Split)
     // half so single-faced cards never surface it.
-    let has_fuse_candidate = obj.zone == Zone::Hand
-        && obj
-            .keywords
-            .iter()
-            .any(|k| matches!(k, crate::types::keywords::Keyword::Fuse))
-        && obj
-            .back_face
-            .as_ref()
-            .is_some_and(|bf| bf.layout_kind == Some(LayoutKind::Split));
-    if has_fuse_candidate {
+    //
+    // A fuse split card in ANOTHER player's hand (cast under a borrowed-hand
+    // permission — Sen Triplets) keeps its per-half `Normal` menu: either half
+    // may be cast (CR 709.3), but the fused spell is offered only from the
+    // caster's own hand (`fuse_route_open`).
+    let hand_fuse_split = is_hand_fuse_split(obj);
+    if hand_fuse_split {
         candidates.push(CastingVariant::Normal);
-        candidates.push(CastingVariant::Fuse);
+        if fuse_route_open(state, obj, player) {
+            candidates.push(CastingVariant::Fuse);
+        }
     }
 
     // CR 118.9 + CR 118.9a + CR 601.2b: When an `Unlimited` `CastFromHandFree`
@@ -9611,7 +9626,7 @@ fn casting_candidates(
             // with consecutive-only `Vec::dedup` (no preceding sort), so pushing
             // `Normal` again here would leave two identical "Cast Normally" options
             // in the menu. Only offer `Normal` when the Fuse block didn't.
-            if !has_fuse_candidate {
+            if !hand_fuse_split {
                 candidates.push(CastingVariant::Normal);
             }
 
@@ -9718,6 +9733,14 @@ fn prepare_spell_cast_announced(
     // cost seams must derive fusion from this override. If a future change ever
     // infers Fuse elsewhere, this discriminator must be revisited.
     let is_fuse_variant = variant_override == Some(CastingVariant::Fuse);
+    // CR 702.102a: a fused split spell is cast only from the caster's own hand.
+    // Admission mirrors the offer (`fuse_route_open`), so a direct Fuse request
+    // for a card in another player's hand is refused, not merely unoffered.
+    if is_fuse_variant && !fuse_route_open(state, obj, player) {
+        return Err(EngineError::ActionNotAllowed(
+            "Fuse can only be used to cast a split card from your own hand".to_string(),
+        ));
+    }
     // CR 702.34 / CR 702.81 / CR 702.138 / CR 702.180: Cards in graveyard with
     // graveyard-cast keywords.
     let graveyard_keywords_open = graveyard_keyword_routes_open(state, obj, player);

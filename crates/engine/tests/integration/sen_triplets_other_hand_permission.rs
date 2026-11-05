@@ -289,6 +289,8 @@ fn sen_triplets_locks_reveals_and_lends_the_opponents_hand_this_turn() {
 /// Real printed cards for the borrowed-hand casting-method boundaries, reparsed
 /// from a small MTGJSON fixture:
 ///   - Zoetic Cavern — "{T}: Add {C}. Morph {2}" (a Land with morph).
+///   - Wear // Tear — "Wear: Destroy target artifact. Fuse" // "Tear: Destroy
+///     target enchantment. Fuse".
 fn borrowed_hand_db() -> &'static engine::database::card_db::CardDatabase {
     static DB: std::sync::OnceLock<engine::database::card_db::CardDatabase> =
         std::sync::OnceLock::new();
@@ -389,5 +391,122 @@ fn sen_triplets_offers_and_casts_a_borrowed_morph_land_face_down() {
         runner.state().lands_played_this_turn,
         0,
         "casting the morph face down is not a land play"
+    );
+}
+
+struct FuseBoard {
+    borrowed: ObjectId,
+    own: ObjectId,
+    artifact: ObjectId,
+    enchantment: ObjectId,
+}
+
+/// P1 holds a Wear // Tear (borrowed by Sen Triplets) and P0 holds its own; P0
+/// can pay for the fused spell ({1}{R} + {W}) and P1 controls one artifact and
+/// one enchantment for the halves to destroy.
+fn fuse_board() -> (GameRunner, FuseBoard) {
+    borrowed_hand_board(|scenario| {
+        scenario.add_basic_land(P0, ManaColor::Red);
+        scenario.add_basic_land(P0, ManaColor::Red);
+        scenario.add_basic_land(P0, ManaColor::White);
+        let artifact = scenario
+            .add_artifact_from_oracle(P1, "Plain Artifact", "")
+            .id();
+        let enchantment = scenario
+            .add_enchantment_from_oracle(P1, "Plain Enchantment", "")
+            .id();
+        let borrowed = scenario.add_real_card(P1, "Wear", Zone::Hand, borrowed_hand_db());
+        let own = scenario.add_real_card(P0, "Wear", Zone::Hand, borrowed_hand_db());
+        FuseBoard {
+            borrowed,
+            own,
+            artifact,
+            enchantment,
+        }
+    })
+}
+
+fn variant_options(runner: &GameRunner) -> Vec<(CastingVariant, CastingVariantFace)> {
+    match &runner.state().waiting_for {
+        WaitingFor::CastingVariantChoice { options, .. } => options
+            .iter()
+            .map(|option| (option.variant, option.face))
+            .collect(),
+        other => panic!("expected the casting-variant menu, got {other:?}"),
+    }
+}
+
+/// CR 702.102a + CR 709.3: casting P1's Wear // Tear under the borrowed-hand
+/// permission offers each half but never the fused spell — fuse applies only to
+/// a split card cast from the caster's own hand. The right half is cast and
+/// destroys only the enchantment.
+#[test]
+fn sen_triplets_borrowed_split_card_offers_each_half_but_not_fuse() {
+    let (mut runner, board) = fuse_board();
+    resolve_upkeep_trigger(&mut runner);
+
+    cast_spell(&mut runner, board.borrowed).expect("P0 casts P1's Wear // Tear");
+    let options = variant_options(&runner);
+    assert!(
+        options.contains(&(CastingVariant::Normal, CastingVariantFace::Left))
+            && options.contains(&(CastingVariant::Normal, CastingVariantFace::Right)),
+        "both halves must be offered from the borrowed hand: {options:?}"
+    );
+    assert!(
+        options
+            .iter()
+            .all(|(variant, _)| *variant != CastingVariant::Fuse),
+        "Fuse must not be offered from another player's hand: {options:?}"
+    );
+
+    let tear = options
+        .iter()
+        .position(|option| *option == (CastingVariant::Normal, CastingVariantFace::Right))
+        .expect("Tear option");
+    runner
+        .act(GameAction::ChooseCastingVariant { index: tear })
+        .expect("choose Tear");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(board.enchantment)),
+            })
+            .expect("target the enchantment");
+    }
+    assert_eq!(runner.state().objects[&board.borrowed].zone, Zone::Stack);
+    assert_eq!(runner.state().objects[&board.borrowed].controller, P0);
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&board.enchantment].zone,
+        Zone::Graveyard,
+        "Tear destroys the enchantment"
+    );
+    assert_eq!(
+        runner.state().objects[&board.artifact].zone,
+        Zone::Battlefield,
+        "Wear was not cast, so the artifact survives"
+    );
+}
+
+/// CR 702.102a: the paired positive — the same card in P0's OWN hand, on the
+/// same borrowed-hand turn and with the same mana, does offer the fused spell.
+#[test]
+fn sen_triplets_turn_still_offers_fuse_from_the_casters_own_hand() {
+    let (mut runner, board) = fuse_board();
+    resolve_upkeep_trigger(&mut runner);
+
+    cast_spell(&mut runner, board.own).expect("P0 casts its own Wear // Tear");
+    let options = variant_options(&runner);
+    assert!(
+        options.contains(&(CastingVariant::Fuse, CastingVariantFace::Left)),
+        "Fuse must be offered from the caster's own hand: {options:?}"
+    );
+    assert!(
+        options.contains(&(CastingVariant::Normal, CastingVariantFace::Left))
+            && options.contains(&(CastingVariant::Normal, CastingVariantFace::Right)),
+        "each half stays available from the own hand: {options:?}"
     );
 }

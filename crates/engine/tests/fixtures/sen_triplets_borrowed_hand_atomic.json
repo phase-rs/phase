@@ -4,6 +4,70 @@
     "version": "5.3.0+20261103"
   },
   "data": {
+    "Wear // Tear": [
+      {
+        "colorIdentity": [
+          "R",
+          "W"
+        ],
+        "colors": [
+          "R"
+        ],
+        "convertedManaCost": 3.0,
+        "faceConvertedManaCost": 2.0,
+        "faceManaValue": 2.0,
+        "faceName": "Wear",
+        "identifiers": {
+          "scryfallOracleId": "9842734c-1eac-4509-a731-4c22017ae586"
+        },
+        "keywords": [
+          "Fuse"
+        ],
+        "layout": "split",
+        "manaCost": "{1}{R}",
+        "manaValue": 3.0,
+        "name": "Wear // Tear",
+        "side": "a",
+        "subtypes": [],
+        "supertypes": [],
+        "text": "Destroy target artifact.\nFuse (You may cast one or both halves of this card from your hand.)",
+        "type": "Instant",
+        "types": [
+          "Instant"
+        ]
+      },
+      {
+        "colorIdentity": [
+          "R",
+          "W"
+        ],
+        "colors": [
+          "W"
+        ],
+        "convertedManaCost": 3.0,
+        "faceConvertedManaCost": 1.0,
+        "faceManaValue": 1.0,
+        "faceName": "Tear",
+        "identifiers": {
+          "scryfallOracleId": "9842734c-1eac-4509-a731-4c22017ae586"
+        },
+        "keywords": [
+          "Fuse"
+        ],
+        "layout": "split",
+        "manaCost": "{W}",
+        "manaValue": 3.0,
+        "name": "Wear // Tear",
+        "side": "b",
+        "subtypes": [],
+        "supertypes": [],
+        "text": "Destroy target enchantment.\nFuse (You may cast one or both halves of this card from your hand.)",
+        "type": "Instant",
+        "types": [
+          "Instant"
+        ]
+      }
+    ],
     "Zoetic Cavern": [
       {
         "colorIdentity": [],
