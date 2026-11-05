@@ -4525,11 +4525,26 @@ pub(crate) fn parse_cast_this_way_enters_with_counter(lower: &str) -> Option<(Co
     .parse(lower)
     .map(|(rest, _)| rest)
     .unwrap_or(lower);
-    // Anaphoric subject for the spell just granted casting permission.
+    // Anaphoric subject for the spell just granted casting permission: "that"
+    // + the permission's printed type noun phrase, which may stack several
+    // card types (CR 205.2b, "that artifact creature enters with …": Overflow
+    // Submatrix) or name the generic "permanent".
+    let anaphoric_type_noun = separated_list1(
+        tag::<_, _, OracleError<'_>>(" "),
+        alt((
+            value((), nom_primitives::parse_core_type),
+            value((), tag("permanent")),
+        )),
+    );
     let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("that creature enters with "),
-        tag("that permanent enters with "),
-        tag("that artifact enters with "),
+        value(
+            (),
+            (
+                tag::<_, _, OracleError<'_>>("that "),
+                anaphoric_type_noun,
+                tag(" enters with "),
+            ),
+        ),
         // Self-granting permission (Undead Sprinter) refers to itself as "this
         // creature" in the printed Oracle text. The main parse pipeline
         // normalizes that phrase to the `~` self-reference token upstream
@@ -4540,11 +4555,11 @@ pub(crate) fn parse_cast_this_way_enters_with_counter(lower: &str) -> Option<(Co
         // the normalized and literal CR 201.5 self-reference forms must be
         // accepted here — distinct from the anaphoric "that creature" a
         // separate-source grant uses.
-        tag("~ enters with "),
-        tag("it enters with "),
-        tag("this creature enters with "),
-        tag("this permanent enters with "),
-        tag("this artifact enters with "),
+        value((), tag("~ enters with ")),
+        value((), tag("it enters with ")),
+        value((), tag("this creature enters with ")),
+        value((), tag("this permanent enters with ")),
+        value((), tag("this artifact enters with ")),
     ))
     .parse(lower)
     .ok()?;
@@ -39704,6 +39719,57 @@ pub(crate) fn singular_battlefield_recall(lower: &str) -> bool {
         && scan_contains_phrase(lower, "battlefield")
 }
 
+/// CR 608.2c: a clause led by a PLURAL recall anaphor — "Return them to the
+/// battlefield …", "Put them into your hand".
+///
+/// The singular sibling ("Return it …") names ONE object: the parent's chosen
+/// target or the creating event's source. Both surface pronouns lower to the
+/// same `ParentTarget` filter, so number is the only thing that distinguishes a
+/// reference to a published SET from a reference to a single referent.
+fn starts_with_plural_recall_anaphor(lower: &str) -> bool {
+    (
+        alt((tag::<_, _, OracleError<'_>>("return "), tag("put "))),
+        tag("them "),
+    )
+        .parse(lower.trim_start())
+        .is_ok()
+}
+
+/// CR 608.2c + CR 603.7c: bind a delayed payload whose own clause begins with a
+/// PLURAL recall anaphor to the tracked set a prior instruction of this chain
+/// published.
+///
+/// The suffix-delayed wrapper (`strip_temporal_suffix` -> `CreateDelayedTrigger`)
+/// is built before the tracked-set pass runs, and
+/// [`rewrite_parent_targets_to_tracked_set`] deliberately does not descend into
+/// it: a SINGULAR recall inside the payload ("Return it …") names the parent's
+/// chosen object or the creating event's source — Fortune, Loyal Steed's "exile
+/// it and up to one creature that saddled it this turn" — and a recursive
+/// rewrite would replace that referent with the whole set (CR 608.2c: the
+/// instruction's actual English referent governs). The clause head's number is
+/// the authority here, not the absence of a declared target slot, which is
+/// equally true of both shapes.
+fn rebind_plural_recall_delayed_payload_to_tracked_set(effect: &mut Effect) {
+    let Effect::CreateDelayedTrigger {
+        effect: payload,
+        uses_tracked_set,
+        ..
+    } = effect
+    else {
+        return;
+    };
+    if let Effect::ChangeZone { target, .. } = &mut *payload.effect {
+        rewrite_filter_parent_to_tracked_set(target);
+        // CR 603.7 + CR 608.2c: the payload now READS the chain's published set, so
+        // the delayed trigger must bind that set at creation. The generic
+        // `has_tracked_ref` gate that marks the wrapper can miss this phrasing —
+        // "Put them into their owners' hands" is neither a battlefield recall nor
+        // a "those cards" reference — and an unbound `TrackedSet` sentinel would
+        // resolve against whatever set happens to be latest when it fires.
+        *uses_tracked_set = true;
+    }
+}
+
 fn mark_uses_tracked_set(def: &mut AbilityDefinition) {
     if let Effect::CreateDelayedTrigger {
         uses_tracked_set, ..
@@ -47449,6 +47515,17 @@ fn parse_effect_chain_ir_body(
                     );
                 }
                 ctx.next_declared_player_group = chain_declared_groups;
+                // CR 608.2c + CR 122.1: the outer gate's counted counter kind is
+                // the antecedent of a counter anaphor in ANY of its body
+                // instructions (Treasure Map: "Then if there are three or more
+                // landmark counters on it, remove those counters, transform this
+                // artifact, and …"). The body chunks are parsed without that
+                // condition, so bind the kind on `ctx` across this recursion and
+                // restore it afterward so it never reaches a later instruction.
+                let enclosing_counter_anaphor_kind = ctx.counter_anaphor_kind.clone();
+                if let Some(counted) = conditions::source_counter_kind_counted_by(outer_condition) {
+                    ctx.counter_anaphor_kind = Some(counted);
+                }
                 let mut body_ir = parse_effect_chain_ir_with_damage_context(
                     &text,
                     kind,
@@ -47456,6 +47533,7 @@ fn parse_effect_chain_ir_body(
                     0,
                     Some(damage_context),
                 );
+                ctx.counter_anaphor_kind = enclosing_counter_anaphor_kind;
                 chain_declared_groups = ctx.next_declared_player_group;
                 // CR 608.2c + CR 614.6: an "instead" body is one replacement of the
                 // earlier instruction, not N independently gated instructions.
@@ -48371,6 +48449,16 @@ fn parse_effect_chain_ir_body(
             in_trigger: ctx.in_trigger,
             bare_card_aggregate_source,
             nearest_dig_rest_zone,
+            // CR 608.2c + CR 122.1: a bare counter anaphor in this chunk's body
+            // ("remove those counters") names the counter kind its own condition
+            // counted on the source. A chunk with no counting condition of its
+            // own falls back to the kind bound by an enclosing gate whose body
+            // this chunk belongs to (the multi-instruction conditional-body seam
+            // above binds it on `ctx` for the duration of that recursion only).
+            counter_anaphor_kind: condition
+                .as_ref()
+                .and_then(conditions::source_counter_kind_counted_by)
+                .or_else(|| ctx.counter_anaphor_kind.clone()),
             // CR 611.2a: this chunk's leading duration was peeled by
             // `sequence::expand_leading_duration_chunks` before the chunk text was
             // handed to the body parser, so the body can no longer see it. Publish

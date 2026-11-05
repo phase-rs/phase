@@ -89,16 +89,16 @@ use super::{
     mark_uses_tracked_set, nearest_self_move_destination, parse_spell_graveyard_replacement_rider,
     parse_spells_cast_this_way_graveyard_replacement_rider, plural_library_shuffle_recall,
     publishes_aggregate_set_from_resolution, publishes_exiled_cause_at_resolution,
-    publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
-    release_iteration_destination, resolve_difference_anaphor_in_ability,
-    retarget_counter_additional_cost_to_target, rewrite_delayed_singular_recall_to_self,
-    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set,
-    rewrite_plural_library_recall_to_tracked_set, rewrite_rounding_mode,
-    rewrite_singular_battlefield_recall_to_self, rewrite_that_type_mana_instead,
-    scan_contains_phrase, singular_battlefield_recall, stamp_delayed_returns,
-    starts_with_plural_subject_anaphor, starts_with_singular_subject_anaphor,
-    try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback, PrintedColorCarrier,
-    PrintedColorCarrierScope,
+    publishes_tracked_set_from_resolution, rebind_plural_recall_delayed_payload_to_tracked_set,
+    rebind_tracked_aggregate_to_chain_set, release_iteration_destination,
+    resolve_difference_anaphor_in_ability, retarget_counter_additional_cost_to_target,
+    rewrite_delayed_singular_recall_to_self, rewrite_grant_parent_to_filter,
+    rewrite_parent_targets_to_tracked_set, rewrite_plural_library_recall_to_tracked_set,
+    rewrite_rounding_mode, rewrite_singular_battlefield_recall_to_self,
+    rewrite_that_type_mana_instead, scan_contains_phrase, singular_battlefield_recall,
+    stamp_delayed_returns, starts_with_plural_recall_anaphor, starts_with_plural_subject_anaphor,
+    starts_with_singular_subject_anaphor, try_fold_token_repeat_into_count,
+    wire_optional_cast_decline_fallback, PrintedColorCarrier, PrintedColorCarrierScope,
 };
 
 /// CR 601.2c: True when the assembled head chose one or more players at
@@ -3998,6 +3998,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             let any_prior_publishes = defs
                 .iter()
                 .any(|d| publishes_tracked_set_from_resolution(&d.effect));
+            // CR 608.2c + CR 603.7c: a clause whose own head is the PLURAL recall
+            // anaphor ("Return them …", Golden Argosy) names the set this chain
+            // published. Applied AFTER the origin stamp below, so the CR 400.7 zone
+            // guard that stamp establishes rides along with the set binding;
+            // changing the referent must not drop the zone the referent is in.
+            let plural_recall_delayed_payload =
+                any_prior_publishes && starts_with_plural_recall_anaphor(&source_text_lower);
             if any_prior_publishes {
                 let has_tracked_ref = contains_explicit_tracked_set_pronoun(&source_text_lower)
                     || contains_implicit_tracked_set_pronoun(&source_text_lower);
@@ -4211,6 +4218,18 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     for current in &mut current_defs {
                         stamp_delayed_returns(&mut current.effect, zone);
                     }
+                }
+            }
+
+            // CR 608.2c + CR 603.7c: the delayed wrapper was built above, and
+            // `rewrite_parent_targets_to_tracked_set` does not descend into
+            // `CreateDelayedTrigger` — a SINGULAR recall inside a payload ("Return
+            // it …") names the parent's chosen object or the creating event's
+            // source and must keep that binding. Bind only a payload whose own
+            // clause head is the PLURAL anaphor, and only after the origin stamp.
+            if plural_recall_delayed_payload {
+                for current in &mut current_defs {
+                    rebind_plural_recall_delayed_payload_to_tracked_set(&mut current.effect);
                 }
             }
         }
