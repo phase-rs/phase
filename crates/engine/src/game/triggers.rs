@@ -1577,9 +1577,9 @@ fn attack_fires_per_defending_player(trig_def: &TriggerDefinition) -> bool {
 ///
 /// For removal, the recipient's removal events are then summed into one
 /// event (`FiringGroup::fold_counter_removed`) so "that much" reads every counter
-/// removed from that recipient at once (CR 120.3c / CR 306.8: simultaneous
-/// damage from several sources to one planeswalker removes its loyalty
-/// counters in one event).
+/// removed from that recipient at once (Scryfall ruling on Chandra, Fire
+/// Artisan; each source's CR 120.3c removal lands in the same simultaneous
+/// batch).
 fn counter_event_fires_per_recipient(trig_def: &TriggerDefinition) -> bool {
     trig_def.batched
         && matches!(
