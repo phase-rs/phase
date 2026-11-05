@@ -19,8 +19,6 @@ use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
-
-use crate::policies::effect_classify::ControllerYield;
 use engine::types::zones::Zone;
 use engine::util::Deadline;
 
@@ -1732,11 +1730,11 @@ fn player_damage_prevented(state: &GameState, defender: PlayerId, attacker: Obje
 ///   Repository, Mardu Ascendancy), decided by the engine's own attacker
 ///   matcher.
 ///
-/// Each trigger's whole chain is classified by
-/// `ability_chain_controller_yield`: a harm vetoes the attack (Ebonblade
-/// Reaper's "you lose half your life"), and only a provable gain counts —
-/// Goblin Guide's land for the defending player doesn't, nor does a recipient
-/// the parse leaves unbound.
+/// The triggers' values to that player (`resolved_ability_value_for_controller`)
+/// are summed, and only a net gain counts: Ebonblade Reaper's "you lose half
+/// your life" outweighs a Druids' Repository counter, Goblin Guide's land for
+/// the defending player is worth nothing, and so is a recipient the parse
+/// leaves unbound.
 ///
 /// Not read: controller-scoped "whenever you attack" payoffs (CR 508.3d),
 /// intervening-if conditions, and a targeted trigger's target availability —
@@ -1747,7 +1745,7 @@ fn attack_trigger_payoff(state: &GameState, attacker: ObjectId) -> bool {
     let Some(controller) = state.objects.get(&attacker).map(|obj| obj.controller) else {
         return false;
     };
-    let mut gain = false;
+    let mut value = 0.0;
     for source in state
         .battlefield
         .iter()
@@ -1776,17 +1774,17 @@ fn attack_trigger_payoff(state: &GameState, attacker: ObjectId) -> bool {
             if !fires {
                 continue;
             }
-            match trigger.execute.as_deref().map_or(
-                ControllerYield::Neutral,
-                crate::policies::effect_classify::ability_chain_controller_yield,
-            ) {
-                ControllerYield::Harm => return false,
-                ControllerYield::Gain => gain = true,
-                ControllerYield::Neutral => {}
+            if let Some(execute) = trigger.execute.as_deref() {
+                let ability = engine::game::ability_utils::build_resolved_from_def(
+                    execute, source.id, controller,
+                );
+                value += crate::policies::effect_classify::resolved_ability_value_for_controller(
+                    state, &ability,
+                );
             }
         }
     }
-    gain
+    value > 0.0
 }
 
 /// CR 702.16e + CR 702.16j: the opponents at least one candidate's combat
@@ -1935,10 +1933,12 @@ fn retarget_prevented_player_attacks(
                     .or_else(|| mandatory_repair_target(state, id, legal))
                     .map(|chosen| (id, chosen));
             }
-            let payoff = attack_trigger_payoff(state, id);
-            if legal.contains(&target) && (payoff || target_takes_damage_from(state, target, id)) {
+            if legal.contains(&target)
+                && (target_takes_damage_from(state, target, id) || attack_trigger_payoff(state, id))
+            {
                 return Some((id, target));
             }
+            let payoff = attack_trigger_payoff(state, id);
             let defender = engine::game::combat::defending_player_for_target(state, target);
             let same_defender = |other: &AttackTarget| {
                 defender.is_some()
@@ -10985,6 +10985,83 @@ mod tests {
                 // "You may put a quest counter" asks a question mid-combat;
                 // recognizing the payoff is the claim here.
                 _ => {}
+            }
+        }
+    }
+
+    /// CR 508.3a + CR 119.3 + CR 702.16j: life loss isn't damage, so "each
+    /// opponent loses 1 life and you gain 1 life" lands on a protected player.
+    /// Sanguine Syphoner attacks one, and both life changes resolve.
+    #[test]
+    fn drain_attack_trigger_attacks_a_protected_player() {
+        // Verbatim local MTGJSON Oracle.
+        let mut scenario = GameScenario::new();
+        let syphoner = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Sanguine Syphoner",
+                1,
+                3,
+                "Whenever this creature attacks, each opponent loses 1 life and you gain 1 life.",
+            )
+            .id();
+        let mut state = ready_two_player_state(scenario, &[syphoner]);
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert!(attack_trigger_payoff(&state, syphoner));
+
+        let attacks = choose_from_engine_prompt(&mut state);
+        assert_eq!(attacks, vec![(syphoner, AttackTarget::Player(PlayerId(1)))]);
+        let after = declare_and_resolve_unblocked(state, &attacks);
+        assert_eq!(after.players[1].life, 19);
+        assert_eq!(after.players[0].life, 21);
+    }
+
+    /// CR 603.2 + CR 702.16j: in a free-for-all where every opponent is
+    /// protected, the per-defender comparison and the rollout path both carry
+    /// a friendly observer's payoff and a self trigger's harm. Grizzly Bears
+    /// attack for Druids' Repository's counter; Ebonblade Reaper, whose life
+    /// loss outweighs that counter, stays home.
+    #[test]
+    fn free_for_all_carries_observer_payoffs_and_harms() {
+        for comparison_deadline in [Some(Deadline::none()), None] {
+            let comparison = comparison_deadline.is_some();
+            for harmful in [false, true] {
+                let mut scenario = GameScenario::new_with_format(
+                    engine::types::format::FormatConfig::free_for_all(),
+                    3,
+                    42,
+                );
+                scenario.at_phase(engine::types::phase::Phase::DeclareAttackers);
+                // Verbatim local MTGJSON Oracle.
+                let attacker = if harmful {
+                    scenario
+                        .add_creature_from_oracle(P0, "Ebonblade Reaper", 1, 1, "Whenever this creature attacks, you lose half your life, rounded up.\nWhenever this creature deals combat damage to a player, that player loses half their life, rounded up.")
+                        .id()
+                } else {
+                    scenario.add_creature(P0, "Grizzly Bears", 2, 2).id()
+                };
+                scenario.add_enchantment_from_oracle(P0, "Druids' Repository", "Whenever a creature you control attacks, put a charge counter on this enchantment.\nRemove a charge counter from this enchantment: Add one mana of any color.");
+                let mut state = scenario.build().state().clone();
+                state.turn_number = 2;
+                let object = state.objects.get_mut(&attacker).unwrap();
+                object.summoning_sick = false;
+                object.entered_battlefield_turn = Some(1);
+                grant_protection_from_everything(&mut state, PlayerId(1));
+                grant_protection_from_everything(&mut state, PlayerId(2));
+
+                let attacks = choose_from_engine_prompt_with(&mut state, comparison_deadline);
+                if harmful {
+                    assert!(
+                        attacks.is_empty(),
+                        "Reaper must stay home, got {attacks:?} (comparison={comparison})"
+                    );
+                } else {
+                    assert!(
+                        matches!(attacks[..], [(id, AttackTarget::Player(_))] if id == attacker),
+                        "the Bears attack for the counter, got {attacks:?} \
+                         (comparison={comparison})"
+                    );
+                }
             }
         }
     }

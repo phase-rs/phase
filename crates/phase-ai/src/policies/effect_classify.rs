@@ -129,107 +129,113 @@ fn pt_value_is_non_negative(value: &PtValue) -> bool {
     }
 }
 
-/// What an ability's whole resolution does for its controller: a provable
-/// gain, a provable harm, or nothing this classifier can establish.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ControllerYield {
-    Gain,
-    Harm,
-    Neutral,
+/// CR 608.2: the net value of `ability`'s resolution to its controller, on
+/// `player_impact`'s scale — positive a gain, negative a harm, zero nothing
+/// this classifier can establish.
+///
+/// Walks the chain the way it resolves: a `player_scope` chain is split by the
+/// engine's own `split_player_scope_chain` into the template that runs per
+/// iterated player and the tail that runs once, unscoped (CR 109.5 + CR
+/// 608.2c). An optional instruction is the controller's choice, so a net harm
+/// in it and its continuation is declined (CR 608.2d); an else branch counts
+/// only for the harm it may bring. Modal modes aren't read.
+pub(crate) fn resolved_ability_value_for_controller(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> f64 {
+    resolved_node_value(state, ability, None)
 }
 
-/// Whose resource a player-role filter names, relative to the ability's
-/// controller.
-enum PlayerRecipient {
-    Controller,
-    Opponents,
-    Unknown,
-}
-
-/// CR 109.5 + CR 608.2: resolve a player role inside an ability whose
-/// `player_scope` (if any) iterates `scope`. Outside an iteration "you" is the
-/// controller; inside one, `Controller`/`ScopedPlayer` name the iterated
-/// player ("each opponent discards a card"). Anything not provably one side —
-/// a parent-target anaphor, a triggering player — is `Unknown`.
-fn player_recipient(role: &TargetFilter, scope: Option<&PlayerFilter>) -> PlayerRecipient {
-    match role {
-        TargetFilter::Controller | TargetFilter::ScopedPlayer => match scope {
-            None | Some(PlayerFilter::Controller) => PlayerRecipient::Controller,
-            Some(PlayerFilter::Opponent | PlayerFilter::DefendingPlayer) => {
-                PlayerRecipient::Opponents
-            }
-            Some(_) => PlayerRecipient::Unknown,
-        },
-        TargetFilter::OriginalController | TargetFilter::SourceController => {
-            PlayerRecipient::Controller
-        }
-        TargetFilter::Opponent | TargetFilter::DefendingPlayer => PlayerRecipient::Opponents,
-        _ => PlayerRecipient::Unknown,
+fn resolved_node_value(
+    state: &GameState,
+    node: &ResolvedAbility,
+    scope: Option<&PlayerFilter>,
+) -> f64 {
+    if let Some(node_scope) = node.player_scope.as_ref() {
+        let (template, tail) = engine::game::effects::split_player_scope_chain(node, node_scope);
+        return resolved_node_value(state, &template, Some(node_scope))
+            + tail.map_or(0.0, |tail| resolved_node_value(state, &tail, None));
+    }
+    let total = resolved_effect_value(state, node, scope)
+        + node
+            .sub_ability
+            .as_deref()
+            .map_or(0.0, |sub| resolved_node_value(state, sub, scope))
+        + node.else_ability.as_deref().map_or(0.0, |other| {
+            resolved_node_value(state, other, scope).min(0.0)
+        });
+    if node.optional {
+        total.max(0.0)
+    } else {
+        total
     }
 }
 
-/// One effect's yield for the ability's controller. Player resources take
-/// their sign from who receives them: a draw, life or token for the controller
-/// or a discard or life loss for opponents is a gain, and the reverse a harm.
-/// A counter the ability puts on its own source carries that counter's
-/// polarity, where a resource counter (charge, quest) is the source's own
-/// currency (CR 122.1). Damage to a target the controller chooses (CR 115.1)
-/// is a gain. Every other shape, and every unresolved recipient, is neutral.
-fn effect_controller_yield(effect: &Effect, scope: Option<&PlayerFilter>) -> ControllerYield {
-    let to = |role: &TargetFilter, polarity: EffectPolarity| match (
-        player_recipient(role, scope),
-        polarity,
-    ) {
-        (PlayerRecipient::Controller, EffectPolarity::Beneficial)
-        | (PlayerRecipient::Opponents, EffectPolarity::Harmful) => ControllerYield::Gain,
-        (PlayerRecipient::Controller, EffectPolarity::Harmful)
-        | (PlayerRecipient::Opponents, EffectPolarity::Beneficial) => ControllerYield::Harm,
-        _ => ControllerYield::Neutral,
-    };
-    match effect {
-        Effect::Draw { target, .. } => to(target, EffectPolarity::Beneficial),
-        Effect::GainLife { player, .. } => to(player, EffectPolarity::Beneficial),
-        Effect::Token { owner, .. } => to(owner, EffectPolarity::Beneficial),
-        Effect::Discard { target, .. } => to(target, EffectPolarity::Harmful),
-        Effect::LoseLife {
-            target: Some(target),
-            ..
-        } => to(target, EffectPolarity::Harmful),
+/// One instruction's value to the controller: its `player_impact` magnitude,
+/// signed by whose side its recipient is on (`resolved_recipient_side`). A
+/// recipient the controller chooses (CR 115.1) is aimed their way. Two shapes
+/// take their own reading:
+/// - a temporary combat modifier (a pump) is worth nothing apart from the
+///   combat damage it changes;
+/// - a resource counter (charge, quest) the ability puts on its own source is
+///   that source's own currency (CR 122.1).
+///
+/// The controller losing at least their life total is no trade at all (CR
+/// 704.5a).
+fn resolved_effect_value(
+    state: &GameState,
+    node: &ResolvedAbility,
+    scope: Option<&PlayerFilter>,
+) -> f64 {
+    let effect = &node.effect;
+    if effect_with_duration_is_temporary_combat_modifier(effect, node.duration.as_ref()) {
+        return 0.0;
+    }
+    let side = resolved_recipient_side(effect, scope);
+    if let (BoonTargetSide::Holder, Effect::LoseLife { amount, .. }) = (&side, effect) {
+        let life = state.players[node.controller.0 as usize].life;
+        if try_resolve_quantity_in_source_context(state, amount, node.controller, node.source_id)
+            .is_some_and(|loss| loss >= life)
+        {
+            return f64::NEG_INFINITY;
+        }
+    }
+    let magnitude = match effect {
         Effect::PutCounter {
+            counter_type: CounterType::Generic(_),
             target: TargetFilter::SelfRef,
             ..
-        } => match effect_polarity(effect) {
-            EffectPolarity::Harmful => ControllerYield::Harm,
-            EffectPolarity::Beneficial | EffectPolarity::Contextual => ControllerYield::Gain,
-        },
-        Effect::DealDamage { target, .. } if !target.is_context_ref() => ControllerYield::Gain,
-        _ => ControllerYield::Neutral,
+        } => 1.0,
+        _ => player_impact(
+            Some(state),
+            Some(node.controller),
+            Some(node.source_id),
+            effect,
+        ),
+    };
+    match side {
+        BoonTargetSide::Holder => magnitude,
+        BoonTargetSide::Enemy => -magnitude,
+        BoonTargetSide::Chosen => magnitude.abs(),
+        BoonTargetSide::Unknown => 0.0,
     }
 }
 
-/// The yield of `ability`'s whole chain — its effect, sub-abilities and else
-/// branches, each under the `player_scope` it runs in (CR 608.2: a scoped
-/// chain runs once per iterated player). Any harm makes the chain a harm;
-/// otherwise any gain makes it a gain. Modal modes aren't read, so a modal
-/// ability is neutral.
-pub(crate) fn ability_chain_controller_yield(ability: &AbilityDefinition) -> ControllerYield {
-    let mut gain = false;
-    let mut pending = vec![(ability, None::<&PlayerFilter>)];
-    while let Some((node, inherited)) = pending.pop() {
-        let scope = node.player_scope.as_ref().or(inherited);
-        match effect_controller_yield(&node.effect, scope) {
-            ControllerYield::Harm => return ControllerYield::Harm,
-            ControllerYield::Gain => gain = true,
-            ControllerYield::Neutral => {}
+/// Whose side an instruction's recipient is on. The recipient is the engine's
+/// own `Effect::target_filter`; with none, the controller is the default (CR
+/// 608.2c). Inside a per-player iteration, the controller roles name the
+/// iterated player (CR 109.5). A parent-target anaphor is bound only at
+/// resolution, so it names no side here.
+fn resolved_recipient_side(effect: &Effect, scope: Option<&PlayerFilter>) -> BoonTargetSide {
+    match (effect.target_filter(), scope) {
+        (Some(TargetFilter::Controller | TargetFilter::ScopedPlayer) | None, Some(scope)) => {
+            boon_player_filter_side(scope)
         }
-        for next in node.sub_ability.iter().chain(node.else_ability.iter()) {
-            pending.push((next, scope));
+        (None, None) => BoonTargetSide::Holder,
+        (Some(TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }), _) => {
+            BoonTargetSide::Unknown
         }
-    }
-    if gain {
-        ControllerYield::Gain
-    } else {
-        ControllerYield::Neutral
+        (Some(filter), _) => boon_filter_side(filter),
     }
 }
 
@@ -1963,7 +1969,9 @@ fn boon_inner_target_side(exec: &AbilityDefinition) -> BoonTargetSide {
 fn boon_player_filter_side(player: &PlayerFilter) -> BoonTargetSide {
     match player {
         PlayerFilter::Controller => BoonTargetSide::Holder,
+        // CR 506.2: the defending player is always an opponent of the attacker.
         PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
         | PlayerFilter::OpponentLostLife
         | PlayerFilter::OpponentGainedLife => BoonTargetSide::Enemy,
         _ => BoonTargetSide::Unknown,
@@ -1979,16 +1987,22 @@ fn boon_filter_side(filter: &TargetFilter) -> BoonTargetSide {
     match filter {
         TargetFilter::Controller
         | TargetFilter::SourceController
+        | TargetFilter::OriginalController
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::SelfRef
         | TargetFilter::ParentTarget => BoonTargetSide::Holder,
-        TargetFilter::Opponent => BoonTargetSide::Enemy,
+        // CR 506.2: the defending player is always an opponent of the attacker.
+        TargetFilter::Opponent | TargetFilter::DefendingPlayer => BoonTargetSide::Enemy,
         TargetFilter::Player | TargetFilter::Any => BoonTargetSide::Chosen,
         TargetFilter::Typed(typed) => match typed.controller {
             // Unrestricted "target creature" — the holder aims it.
             None => BoonTargetSide::Chosen,
             Some(ControllerRef::You) => BoonTargetSide::Holder,
-            Some(ControllerRef::Opponent | ControllerRef::TargetOpponent) => BoonTargetSide::Enemy,
+            Some(
+                ControllerRef::Opponent
+                | ControllerRef::TargetOpponent
+                | ControllerRef::DefendingPlayer,
+            ) => BoonTargetSide::Enemy,
             // The holder targets the player first, then aims within.
             Some(ControllerRef::TargetPlayer) => BoonTargetSide::Chosen,
             _ => BoonTargetSide::Unknown,
@@ -2155,8 +2169,17 @@ pub(crate) fn ability_is_temporary_combat_modifier(ability: &AbilityDefinition) 
 }
 
 fn ability_effect_is_temporary_combat_modifier(ability: &AbilityDefinition) -> bool {
-    match &*ability.effect {
-        Effect::Pump { .. } => matches!(ability.duration, Some(Duration::UntilEndOfTurn)),
+    effect_with_duration_is_temporary_combat_modifier(&ability.effect, ability.duration.as_ref())
+}
+
+/// `effect` under its ability's `duration`: an until-end-of-turn pump, or a
+/// temporary combat modifier grant.
+fn effect_with_duration_is_temporary_combat_modifier(
+    effect: &Effect,
+    duration: Option<&Duration>,
+) -> bool {
+    match effect {
+        Effect::Pump { .. } => matches!(duration, Some(Duration::UntilEndOfTurn)),
         effect => effect_is_temporary_combat_modifier(effect),
     }
 }
@@ -6159,110 +6182,132 @@ mod attacked_referent_domain_tests {
 }
 
 #[cfg(test)]
-mod controller_yield_tests {
+mod controller_value_tests {
     use super::*;
+    use engine::game::scenario::{GameScenario, P0};
 
-    /// An ability as the Oracle parser emits it (the card-data JSON shape).
-    fn ability(json: &str) -> AbilityDefinition {
-        serde_json::from_str(json).expect("parser-shaped ability JSON")
+    /// How one card's attack-trigger body reads to its controller.
+    #[derive(Debug, PartialEq)]
+    enum Reading {
+        Gain,
+        Harm,
+        Nothing,
     }
 
-    /// CR 109.5 + CR 608.2: inside a `player_scope` iteration, `Controller` is
-    /// the iterated player, so "each opponent discards" is a gain, and the
-    /// chained "you draw" (`OriginalController`) stays the controller's
-    /// (Aclazotz, Deepest Betrayal).
-    #[test]
-    fn scoped_controller_is_the_iterated_opponent() {
-        let aclazotz = ability(
-            r#"{"kind":"Spell","effect":{"type":"Discard","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}},"sub_ability":{"kind":"Spell","effect":{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"OriginalController"}}},"player_scope":{"type":"Opponent"}}"#,
-        );
-        assert_eq!(
-            ability_chain_controller_yield(&aclazotz),
-            ControllerYield::Gain
-        );
-        let unscoped_discard = ability(
-            r#"{"kind":"Spell","effect":{"type":"Discard","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}}}"#,
-        );
-        assert_eq!(
-            ability_chain_controller_yield(&unscoped_discard),
-            ControllerYield::Harm
-        );
+    /// The value of a parser-emitted (card-data) trigger body, resolved for a
+    /// creature P0 controls at `life`.
+    fn value_at(json: &str, life: i32) -> f64 {
+        let definition: AbilityDefinition =
+            serde_json::from_str(json).expect("card-data trigger body");
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_creature(P0, "Source", 2, 2).id();
+        let mut state = scenario.build().state().clone();
+        state.players[0].life = life;
+        let ability =
+            engine::game::ability_utils::build_resolved_from_def(&definition, source, PlayerId(0));
+        resolved_ability_value_for_controller(&state, &ability)
     }
 
-    /// Recipients decide the sign: the controller's life loss is a harm
-    /// (Ebonblade Reaper), a defending player's discard a gain (Abyssal
-    /// Nightstalker), the controller's token a gain (Mardu Ascendancy), and an
-    /// unbound parent target nothing (Master of Cruelties' life setting).
-    #[test]
-    fn recipients_decide_the_sign() {
-        for (json, expected) in [
-            (
-                r#"{"kind":"Spell","effect":{"type":"LoseLife","amount":{"type":"Fixed","value":1},"target":{"type":"Controller"}}}"#,
-                ControllerYield::Harm,
-            ),
-            (
-                r#"{"kind":"Spell","effect":{"type":"Discard","count":{"type":"Fixed","value":1},"target":{"type":"DefendingPlayer"}}}"#,
-                ControllerYield::Gain,
-            ),
-            (
-                r#"{"kind":"Spell","effect":{"type":"Token","name":"Goblin","power":{"type":"Fixed","value":1},"toughness":{"type":"Fixed","value":1},"types":["Creature","Goblin"],"colors":["Red"],"keywords":[],"tapped":true,"count":{"type":"Fixed","value":1},"owner":{"type":"Controller"},"enters_attacking":true}}"#,
-                ControllerYield::Gain,
-            ),
-            (
-                r#"{"kind":"Spell","effect":{"type":"SetLifeTotal","target":{"type":"ParentTarget"},"amount":{"type":"Fixed","value":1}}}"#,
-                ControllerYield::Neutral,
-            ),
-        ] {
-            assert_eq!(
-                ability_chain_controller_yield(&ability(json)),
-                expected,
-                "{json}"
-            );
+    fn reading(value: f64) -> Reading {
+        if value > 0.0 {
+            Reading::Gain
+        } else if value < 0.0 {
+            Reading::Harm
+        } else {
+            Reading::Nothing
         }
     }
 
-    /// CR 122.1: a counter an ability puts on its own source is its own
-    /// currency unless the counter itself is a drawback (Druids' Repository's
-    /// charge counter is a gain; a -1/-1 counter a harm). Damage to a chosen
-    /// target is a gain (Inferno Titan); a reveal for the defending player is
-    /// nothing (Goblin Guide).
+    /// Real attack-trigger bodies across the class, each read for its
+    /// controller at 20 life.
     #[test]
-    fn source_counters_damage_and_reveals() {
+    fn attack_trigger_bodies_read_by_recipient() {
         for (json, expected) in [
             (
-                r#"{"kind":"Spell","effect":{"type":"PutCounter","counter_type":"charge","count":{"type":"Fixed","value":1},"target":{"type":"SelfRef"}}}"#,
-                ControllerYield::Gain,
+                // Sanguine Syphoner: each opponent loses 1; the engine runs "you gain 1" as the unscoped tail (CR 608.2c).
+                r#"{"kind":"Spell","effect":{"type":"LoseLife","amount":{"type":"Fixed","value":1}},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"GainLife","amount":{"type":"Fixed","value":1}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"player_scope":{"type":"Opponent"}}"#,
+                Reading::Gain,
             ),
             (
-                r#"{"kind":"Spell","effect":{"type":"PutCounter","counter_type":"M1M1","count":{"type":"Fixed","value":1},"target":{"type":"SelfRef"}}}"#,
-                ControllerYield::Harm,
+                // Pulse Tracker: a targetless LoseLife under "each opponent" hits each opponent.
+                r#"{"kind":"Spell","effect":{"type":"LoseLife","amount":{"type":"Fixed","value":1}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"player_scope":{"type":"Opponent"}}"#,
+                Reading::Gain,
             ),
             (
-                r#"{"kind":"Spell","effect":{"type":"DealDamage","amount":{"type":"Fixed","value":3},"target":{"type":"Any"}}}"#,
-                ControllerYield::Gain,
+                // Aclazotz: each opponent discards; you draw for each who can't.
+                r#"{"kind":"Spell","effect":{"type":"Discard","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"OriginalController"}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":{"type":"Not","condition":{"type":"EffectOutcome","signal":"CurrentScopeSucceeded"}},"optional_targeting":false,"optional":false,"forward_result":false},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"player_scope":{"type":"Opponent"}}"#,
+                Reading::Gain,
             ),
             (
-                r#"{"kind":"Spell","effect":{"type":"RevealTop","player":{"type":"DefendingPlayer"},"count":1}}"#,
-                ControllerYield::Neutral,
+                // Abyssal Nightstalker: the defending player discards.
+                r#"{"kind":"Spell","effect":{"type":"Discard","count":{"type":"Fixed","value":1},"target":{"type":"DefendingPlayer"}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Gain,
+            ),
+            (
+                // Annihilator 6 (CR 702.86a): the defending player sacrifices.
+                r#"{"kind":"Spell","effect":{"type":"Sacrifice","target":{"type":"Typed","type_filters":["Permanent"],"controller":"DefendingPlayer","properties":[]},"count":{"type":"Fixed","value":6}},"cost":null,"sub_ability":null,"duration":null,"description":"Defending player sacrifices 6 permanents","target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Gain,
+            ),
+            (
+                // Inferno Titan: damage divided among targets its controller chooses (CR 115.1).
+                r#"{"kind":"Spell","effect":{"type":"DealDamage","amount":{"type":"Fixed","value":3},"target":{"type":"Any"}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"multi_target":{"min":1,"max":{"type":"Fixed","value":3}},"distribute":{"type":"Damage"},"forward_result":false}"#,
+                Reading::Gain,
+            ),
+            (
+                // Audacious Thief: you draw a card and lose 1 life.
+                r#"{"kind":"Spell","effect":{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"LoseLife","amount":{"type":"Fixed","value":1},"target":{"type":"Controller"}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Gain,
+            ),
+            (
+                // Smuggler's Copter: an optional loot nets below zero, so its controller declines it (CR 608.2d).
+                r#"{"kind":"Spell","effect":{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"Discard","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":{"type":"EffectOutcome","signal":"OptionalEffectPerformed"},"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":true,"forward_result":false}"#,
+                Reading::Nothing,
+            ),
+            (
+                // Goblin Guide: a reveal and a parent-target move name no gain for you.
+                r#"{"kind":"Spell","effect":{"type":"RevealTop","player":{"type":"DefendingPlayer"},"count":1},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"ChangeZone","origin":null,"destination":"Hand","target":{"type":"ParentTarget"},"owner_library":false,"enter_transformed":false,"enter_tapped":false,"enters_attacking":false},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":{"type":"RevealedHasCardType","card_types":["Land"]},"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Nothing,
+            ),
+            (
+                // Master of Cruelties: "that player" is an unbound parent target.
+                r#"{"kind":"Spell","effect":{"type":"SetLifeTotal","target":{"type":"ParentTarget"},"amount":{"type":"Fixed","value":1}},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"GenericEffect","static_abilities":[{"mode":"AssignNoCombatDamage","affected":{"type":"SelfRef"},"modifications":[{"type":"AssignNoCombatDamage"}],"condition":null,"affected_zone":null,"effect_zone":null,"active_zones":[],"characteristic_defining":false,"description":null}],"duration":"UntilEndOfTurn","target":null},"cost":null,"sub_ability":null,"duration":"UntilEndOfTurn","description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Nothing,
             ),
         ] {
-            assert_eq!(
-                ability_chain_controller_yield(&ability(json)),
-                expected,
-                "{json}"
-            );
+            assert_eq!(reading(value_at(json, 20)), expected, "{json}");
         }
     }
 
-    /// A harm anywhere in the chain outweighs a gain elsewhere in it.
+    /// Ebonblade Reaper: "you lose half your life, rounded up" is a harm, and
+    /// at 1 life it is losing the game (CR 704.5a), which no gain offsets.
     #[test]
-    fn harm_outweighs_gain() {
-        let draw_then_lose = ability(
-            r#"{"kind":"Spell","effect":{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}},"sub_ability":{"kind":"Spell","effect":{"type":"LoseLife","amount":{"type":"Fixed","value":2},"target":{"type":"Controller"}}}}"#,
-        );
-        assert_eq!(
-            ability_chain_controller_yield(&draw_then_lose),
-            ControllerYield::Harm
-        );
+    fn controller_life_loss_is_a_harm_and_lethal_loss_is_absolute() {
+        let reaper = r#"{"kind":"Spell","effect":{"type":"LoseLife","amount":{"type":"DivideRounded","inner":{"type":"Ref","qty":{"type":"LifeTotal","player":{"type":"Controller"}}},"divisor":2,"rounding":"Up"},"target":{"type":"Controller"}}}"#;
+        assert_eq!(reading(value_at(reaper, 20)), Reading::Harm);
+        assert_eq!(value_at(reaper, 1), f64::NEG_INFINITY);
+    }
+
+    /// CR 122.1: a resource counter on the ability's own source is a gain, a
+    /// -1/-1 counter a harm, and a clock counter (time) nothing.
+    #[test]
+    fn counters_on_the_source_carry_their_own_reading() {
+        for (counter, expected) in [
+            ("charge", Reading::Gain),
+            ("M1M1", Reading::Harm),
+            ("time", Reading::Nothing),
+        ] {
+            let json = format!(
+                r#"{{"kind":"Spell","effect":{{"type":"PutCounter","counter_type":"{counter}","count":{{"type":"Fixed","value":1}},"target":{{"type":"SelfRef"}}}}}}"#
+            );
+            assert_eq!(reading(value_at(&json, 20)), expected, "{counter}");
+        }
+    }
+
+    /// A pump until end of turn is worth nothing on its own: its value is the
+    /// combat damage it changes.
+    #[test]
+    fn temporary_pump_is_worth_nothing_by_itself() {
+        let pump = r#"{"kind":"Spell","effect":{"type":"Pump","power":{"type":"Fixed","value":2},"toughness":{"type":"Fixed","value":0},"target":{"type":"SelfRef"}},"duration":"UntilEndOfTurn"}"#;
+        assert_eq!(reading(value_at(pump, 20)), Reading::Nothing);
     }
 }

@@ -1857,6 +1857,15 @@ fn quantity_expr_is_source_context_previewable(
         QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
         } => target_filter_is_source_context_free(filter),
+        // CR 119: the source's controller's current life total is bound by
+        // the source alone. Other players' totals need a recipient or an
+        // iteration the preview doesn't have.
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+        } => true,
         QuantityExpr::Ref { .. } => false,
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
