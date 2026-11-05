@@ -8152,13 +8152,18 @@ fn object_replacement_candidate_applies(
 /// replacement's "you" refers to — the hosting object's controller, or the
 /// installing player latched in `source_controller` for a floating replacement
 /// created by a resolved spell or ability (Brad Boimler, Prairie Dog).
+///
+/// CR 122.5: the placement is read through `ProposedEvent::counter_placement`,
+/// so a counter move's add stage (Bioshift, Nesting Grounds) is gated exactly
+/// like an ordinary placement — its actor is the moving effect's controller and
+/// its recipient the destination object.
 fn add_counter_replacement_scope_matches(
     repl_def: &ReplacementDefinition,
     event: &ProposedEvent,
     state: &GameState,
     scope_controller: PlayerId,
 ) -> bool {
-    if let ProposedEvent::AddCounter { placement, .. } = event {
+    if let Some(placement) = event.counter_placement() {
         // CR 122.1: a clause naming only players ("If you would get one or more
         // counters" — Winding Constrictor) never reaches counters put on an
         // object.

@@ -10,7 +10,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{Effect, RestrictionExpiry};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CounterMoveChoice, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -28,6 +28,8 @@ const BATTLEGROWTH_ORACLE: &str = "Put a +1/+1 counter on target creature.";
 const DJERUS_RENUNCIATION_ORACLE: &str = "Tap up to two target creatures.";
 const GLIMMER_OF_GENIUS_ORACLE: &str =
     "Scry 2, then draw two cards. You get {E}{E} (two energy counters).";
+const BIOSHIFT_ORACLE: &str = "Move any number of +1/+1 counters from target creature onto another target creature with the same controller.";
+const NESTING_GROUNDS_ORACLE: &str = "{T}: Add {C}.\n{1}, {T}: Move a counter from target permanent you control onto a second target permanent. Activate only as a sorcery.";
 
 fn charge() -> CounterType {
     CounterType::Generic("charge".to_string())
@@ -333,4 +335,224 @@ fn prairie_dog_activation_adds_one_to_plus_one_counters_until_end_of_turn() {
         1,
         "only +1/+1 counters are modified"
     );
+}
+
+/// Activates Prairie Dog's `{4}{W}` replacement install and resolves it.
+fn activate_prairie_dog(runner: &mut GameRunner, dog: ObjectId) {
+    let activated = runner.state().objects[&dog]
+        .abilities
+        .iter()
+        .position(|a| a.cost.is_some())
+        .expect("Prairie Dog has an activated ability");
+    runner.activate(dog, activated).resolve();
+    assert!(
+        runner
+            .state()
+            .pending_damage_replacements
+            .iter()
+            .any(|r| r.event == ReplacementEvent::AddCounter),
+        "Prairie Dog's activation installed its replacement"
+    );
+}
+
+fn prairie_dog_mana() -> Vec<ManaUnit> {
+    let mut pool = colorless(4);
+    pool.push(ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]));
+    pool
+}
+
+/// Casts Bioshift (as whoever holds priority) moving `count` +1/+1 counters
+/// from `from` onto `onto`, answering its resolution-time distribution prompt,
+/// and asserts the spell finished resolving.
+fn bioshift(runner: &mut GameRunner, spell: ObjectId, from: ObjectId, onto: ObjectId, count: u32) {
+    let caster = runner.state().objects[&spell].controller;
+    runner.cast(spell).target_objects(&[from, onto]).resolve();
+    let WaitingFor::MoveCountersDistribution {
+        player,
+        source_id,
+        destinations,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "Bioshift must ask how many counters to move (CR 608.2d), got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, caster, "Bioshift's controller distributes");
+    assert_eq!(source_id, from);
+    assert_eq!(destinations, vec![onto]);
+    runner
+        .act(GameAction::ChooseCounterMoveDistribution {
+            selections: vec![CounterMoveChoice {
+                destination_id: onto,
+                counter_type: CounterType::Plus1Plus1,
+                count,
+            }],
+        })
+        .expect("move the chosen counters");
+    runner.advance_to_priority_window();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "Bioshift must finish resolving, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty(), "Bioshift left the stack");
+}
+
+/// CR 122.5 + CR 608.2c + CR 614.1a: moving a counter puts it onto the second
+/// object, and the moving spell's controller is the one putting it there — so
+/// Prairie Dog's "if you would put one or more +1/+1 counters on a creature you
+/// control" applies to counters your Bioshift moves onto your creature, exactly
+/// as it does to an ordinary placement.
+#[test]
+fn prairie_dog_adds_one_to_counters_you_move_onto_your_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dog = scenario
+        .add_creature_from_oracle(P0, "Prairie Dog", 2, 2, PRAIRIE_DOG_ORACLE)
+        .id();
+    let donor = scenario
+        .add_creature(P0, "Donor", 2, 2)
+        .with_plus_counters(3)
+        .id();
+    let recipient = scenario.add_vanilla(P0, 2, 2);
+    let shift = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bioshift", true, BIOSHIFT_ORACLE)
+        .id();
+    let grow = scenario
+        .add_spell_to_hand_from_oracle(P0, "Battlegrowth", true, BATTLEGROWTH_ORACLE)
+        .id();
+    scenario.with_mana_pool(P0, prairie_dog_mana());
+    let mut runner = scenario.build();
+
+    activate_prairie_dog(&mut runner, dog);
+
+    // Ordinary placement: one +1/+1 counter becomes two.
+    runner.cast(grow).target_object(recipient).resolve();
+    assert_eq!(counters(&runner, recipient, &CounterType::Plus1Plus1), 2);
+
+    // Moved counters: two removed from the donor, three put on the recipient.
+    bioshift(&mut runner, shift, donor, recipient, 2);
+    assert_eq!(
+        counters(&runner, donor, &CounterType::Plus1Plus1),
+        1,
+        "CR 122.5: exactly the moved counters leave the donor"
+    );
+    assert_eq!(
+        counters(&runner, recipient, &CounterType::Plus1Plus1),
+        5,
+        "2 already there + (2 moved + 1)"
+    );
+}
+
+/// CR 608.2c + CR 614.1a: when an opponent's Bioshift moves counters between
+/// your creatures, the opponent is the one putting them on — Prairie Dog's
+/// "if you would put" does not apply, though the creature is yours.
+#[test]
+fn prairie_dog_ignores_counters_an_opponent_moves_onto_your_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dog = scenario
+        .add_creature_from_oracle(P0, "Prairie Dog", 2, 2, PRAIRIE_DOG_ORACLE)
+        .id();
+    let donor = scenario
+        .add_creature(P0, "Donor", 2, 2)
+        .with_plus_counters(3)
+        .id();
+    let recipient = scenario.add_vanilla(P0, 2, 2);
+    let their_shift = scenario
+        .add_spell_to_hand_from_oracle(P1, "Bioshift", true, BIOSHIFT_ORACLE)
+        .id();
+    let grow = scenario
+        .add_spell_to_hand_from_oracle(P0, "Battlegrowth", true, BATTLEGROWTH_ORACLE)
+        .id();
+    scenario.with_mana_pool(P0, prairie_dog_mana());
+    let mut runner = scenario.build();
+
+    activate_prairie_dog(&mut runner, dog);
+
+    // Reach guard: the replacement is live for a placement you make.
+    runner.cast(grow).target_object(recipient).resolve();
+    assert_eq!(counters(&runner, recipient, &CounterType::Plus1Plus1), 2);
+
+    // Hand priority to the opponent within the same main phase.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("active player passes");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1),
+        "the opponent receives priority, got {:?}",
+        runner.state().waiting_for
+    );
+    bioshift(&mut runner, their_shift, donor, recipient, 2);
+    assert_eq!(counters(&runner, donor, &CounterType::Plus1Plus1), 1);
+    assert_eq!(
+        counters(&runner, recipient, &CounterType::Plus1Plus1),
+        4,
+        "2 already there + 2 moved by the opponent, unmodified"
+    );
+}
+
+/// CR 122.5 + CR 614.1a: Geordi doubles charge counters you move onto an
+/// artifact you control with Nesting Grounds — keeping his counter-type and
+/// "artifact you control" restrictions for moved counters too.
+#[test]
+fn geordi_doubles_charge_counters_you_move_onto_your_artifact() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, GEORDI, 3, 2, GEORDI_ORACLE);
+    let grounds: Vec<ObjectId> = (0..3)
+        .map(|_| {
+            scenario
+                .add_land_from_oracle(P0, "Nesting Grounds", NESTING_GROUNDS_ORACLE)
+                .id()
+        })
+        .collect();
+    let node = add_surge_node(&mut scenario);
+    let ordinary_node = add_surge_node(&mut scenario);
+    let my_artifact = scenario.add_artifact_from_oracle(P0, "Mind Stone", "").id();
+    let their_artifact = scenario.add_artifact_from_oracle(P1, "Mind Stone", "").id();
+    let my_artifact_creature = scenario
+        .add_creature(P0, "Ornithopter", 0, 2)
+        .as_artifact_creature()
+        .with_plus_counters(1)
+        .id();
+    scenario.with_mana_pool(P0, colorless(4));
+    let mut runner = scenario.build();
+
+    let move_one = |runner: &mut GameRunner, land: ObjectId, from: ObjectId, onto: ObjectId| {
+        runner
+            .activate(land, 1)
+            .target_objects(&[from, onto])
+            .resolve();
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "Nesting Grounds' activation must finish resolving, got {:?}",
+            runner.state().waiting_for
+        );
+        assert!(runner.state().stack.is_empty(), "the ability resolved");
+    };
+
+    // Ordinary placement positive: one charge counter becomes two.
+    activate_surge_node(&mut runner, ordinary_node, my_artifact);
+    assert_eq!(counters(&runner, my_artifact, &charge()), 2);
+
+    // A moved charge counter onto my artifact is doubled.
+    move_one(&mut runner, grounds[0], node, my_artifact);
+    assert_eq!(counters(&runner, node, &charge()), 5, "one counter left");
+    assert_eq!(counters(&runner, my_artifact, &charge()), 4, "2 + (1 * 2)");
+
+    // An opponent's artifact is outside "an artifact you control".
+    move_one(&mut runner, grounds[1], node, their_artifact);
+    assert_eq!(counters(&runner, node, &charge()), 4);
+    assert_eq!(counters(&runner, their_artifact, &charge()), 1);
+
+    // A moved +1/+1 counter is not a charge counter.
+    move_one(&mut runner, grounds[2], my_artifact_creature, my_artifact);
+    assert_eq!(
+        counters(&runner, my_artifact_creature, &CounterType::Plus1Plus1),
+        0
+    );
+    assert_eq!(counters(&runner, my_artifact, &CounterType::Plus1Plus1), 1);
 }
