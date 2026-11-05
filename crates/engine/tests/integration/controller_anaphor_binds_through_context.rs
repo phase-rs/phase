@@ -929,7 +929,7 @@ fn acidic_soil_counts_each_players_own_lands() {
 const CITADEL_OF_PAIN: &str = "At the beginning of each player's end step, this enchantment deals X damage to that player, where X is the number of untapped lands they control.";
 const PSYCHIC_ALLERGY: &str = "As this enchantment enters, choose a color.\nAt the beginning of each opponent's upkeep, this enchantment deals X damage to that player, where X is the number of nontoken permanents of the chosen color they control.\nAt the beginning of your upkeep, destroy this enchantment unless you sacrifice two Islands.";
 
-/// CR 107.3c + CR 608.2c: Citadel of Pain's where-X count says "they control"
+/// CR 107.3 + CR 608.2c: Citadel of Pain's where-X count says "they control"
 /// of the player whose end step it is, so each player is dealt damage equal to
 /// THEIR OWN untapped lands. The per-player sibling of the Curious Herd row —
 /// same grammar, different antecedent.
