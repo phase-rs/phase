@@ -82,36 +82,120 @@ fn single_counter_kind_gets_one_more_of_that_kind() {
     assert_eq!(counters(&runner, ench, CounterType::Stun), 2);
 }
 
-#[test]
-fn two_kinds_prompt_and_only_the_chosen_kind_grows() {
-    let (mut runner, dathon, ench) = setup(&[(CounterType::Stun, 1), (CounterType::Shield, 1)]);
-    let idx = activated_index(&runner, dathon);
-    runner.activate(dathon, idx).target_object(ench).resolve();
-
-    let WaitingFor::NamedChoice { options, .. } = runner.state().waiting_for.clone() else {
-        panic!(
-            "two counter kinds must prompt, got {:?}",
-            runner.state().waiting_for
-        );
-    };
-    assert_eq!(options.len(), 2, "one option per kind on the target");
-    let choice = options.last().cloned().expect("option");
-    runner
-        .act(GameAction::ChooseOption { choice })
-        .expect("answer the counter-kind choice");
+/// Settle the stack after the counter-kind answer.
+fn settle(runner: &mut GameRunner) {
     for _ in 0..10 {
         if runner.state().stack.is_empty() {
             break;
         }
         runner.act(GameAction::PassPriority).expect("pass");
     }
-    let stun = counters(&runner, ench, CounterType::Stun);
-    let shield = counters(&runner, ench, CounterType::Shield);
-    assert_eq!(stun + shield, 3, "exactly one counter added");
-    assert!(
-        (stun, shield) == (1, 2) || (stun, shield) == (2, 1),
-        "one kind has 2, the other stays 1: {stun}/{shield}"
+}
+
+/// CR 608.2d + CR 122.6: with two kinds present, Dathon's controller is asked
+/// which one, and exactly the chosen kind grows — checked for each kind, so an
+/// implementation that ignored the answer cannot pass both.
+#[test]
+fn two_kinds_prompt_and_only_the_chosen_kind_grows() {
+    for (chosen, other) in [
+        (CounterType::Stun, CounterType::Shield),
+        (CounterType::Shield, CounterType::Stun),
+    ] {
+        let (mut runner, dathon, ench) = setup(&[(CounterType::Stun, 1), (CounterType::Shield, 1)]);
+        let idx = activated_index(&runner, dathon);
+        runner.activate(dathon, idx).target_object(ench).resolve();
+
+        let WaitingFor::NamedChoice {
+            player, options, ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "two counter kinds must prompt, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(player, P0, "Dathon's controller chooses the kind");
+        assert_eq!(options.len(), 2, "one option per kind on the target");
+        let choice = options
+            .iter()
+            .find(|option| option.eq_ignore_ascii_case(chosen.as_str().as_ref()))
+            .cloned()
+            .unwrap_or_else(|| panic!("{chosen:?} is an option: {options:?}"));
+        runner
+            .act(GameAction::ChooseOption { choice })
+            .expect("answer the counter-kind choice");
+        settle(&mut runner);
+
+        assert_eq!(
+            counters(&runner, ench, chosen.clone()),
+            2,
+            "{chosen:?} grew"
+        );
+        assert_eq!(
+            counters(&runner, ench, other.clone()),
+            1,
+            "{other:?} unchanged"
+        );
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+/// Clockspinning shares the "choose a counter on target ..." clause: "Choose a
+/// counter on target permanent or suspended card. Remove that counter from
+/// that permanent or card or put another of those counters on it." CR 608.2c:
+/// "that counter" is the kind just chosen, so after choosing Stun only the two
+/// Stun adjustments are offered.
+#[test]
+fn clockspinning_offers_only_the_chosen_kinds_adjustments() {
+    const CLOCKSPINNING: &str = "Choose a counter on target permanent or suspended card. Remove that counter from that permanent or card or put another of those counters on it.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ench = scenario
+        .add_enchantment_from_oracle(P0, "Test Enchantment", "")
+        .id();
+    scenario.with_counter(ench, CounterType::Stun, 1);
+    scenario.with_counter(ench, CounterType::Shield, 1);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Clockspinning", true, CLOCKSPINNING)
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).target_object(ench).commit().resolve();
+    let WaitingFor::NamedChoice { options, .. } = outcome.final_waiting_for().clone() else {
+        panic!(
+            "the counter is chosen first, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    let choice = options
+        .iter()
+        .find(|option| option.eq_ignore_ascii_case("stun"))
+        .cloned()
+        .expect("Stun is an option");
+    runner
+        .act(GameAction::ChooseOption { choice })
+        .expect("choose the Stun counter");
+    let WaitingFor::ChooseOneOfBranch { branches, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "the adjustment is offered next, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        branches.len(),
+        2,
+        "remove or add a Stun counter only: {branches:?}"
     );
+    runner
+        .act(GameAction::ChooseBranch { index: 1 })
+        .expect("put another Stun counter");
+    settle(&mut runner);
+    assert_eq!(counters(&runner, ench, CounterType::Stun), 2);
+    assert_eq!(counters(&runner, ench, CounterType::Shield), 1);
 }
 
 #[test]

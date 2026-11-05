@@ -1847,6 +1847,17 @@ pub(crate) enum ChooseImperativeAst {
         domain: CounterKindDomain,
         chooser: CounterKindChooser,
     },
+    /// CR 115.1 + CR 608.2d + CR 122.1: "choose a counter on target <object>"
+    /// (Dathon, His Heart Open; Ichormoon Gauntlet; Clockspinning). The object
+    /// is a declared target, designated when the ability is put on the stack;
+    /// the kind of counter on it is chosen while the ability resolves. The
+    /// clause itself lowers to both: a `TargetOnly` owning the declared slot
+    /// and, chained beneath it, a `ChooseCounterKind` over that same target
+    /// (`ParentTarget`), so the choice's object is bound by the clause that
+    /// prints it rather than inferred from neighbouring instructions.
+    CounterKindOnTarget {
+        target: TargetFilter,
+    },
     /// CR 115.1 + CR 608.2d: A standalone, NON-target battlefield-object choice
     /// ("choose a creature an opponent controls"). The chooser is the ability's
     /// controller; the pick is made while the effect resolves (CR 608.2d), not

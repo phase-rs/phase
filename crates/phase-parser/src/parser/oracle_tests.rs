@@ -1275,7 +1275,24 @@ fn clockspinning_parses_choose_counter_adjustment_with_zero_unimplemented() {
     };
     assert_eq!(filters.len(), 2, "permanent + suspended card legs");
 
-    let sub = ability
+    // CR 608.2d + CR 122.1: sentence 1 chooses the counter on its own target.
+    let choice = ability
+        .sub_ability
+        .as_ref()
+        .expect("sentence-1 ChooseCounterKind over the declared target");
+    assert!(
+        matches!(
+            choice.effect.as_ref(),
+            Effect::ChooseCounterKind {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "got {:?}",
+        choice.effect
+    );
+
+    let sub = choice
         .sub_ability
         .as_ref()
         .expect("sentence-2 ChooseCounterAdjustment sub-ability");

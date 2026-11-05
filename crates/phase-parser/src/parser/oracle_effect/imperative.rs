@@ -4648,7 +4648,7 @@ fn try_parse_choose_counter_on_target(rest: &str) -> Option<ChooseImperativeAst>
     {
         return None;
     }
-    Some(ChooseImperativeAst::TargetOnly { target })
+    Some(ChooseImperativeAst::CounterKindOnTarget { target })
 }
 
 /// CR 701.9a + CR 107.1b: "[Target player] chooses a card in their hand and
@@ -7106,6 +7106,13 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
         // `lower_choose_ast` are restricted to single-effect contexts and do
         // not exercise this variant.
         ChooseImperativeAst::TwoTargets { target_a, .. } => Effect::TargetOnly { target: target_a },
+        // A bare `Effect` cannot hold both the declared target and the
+        // counter-kind choice over it, so this entry point fails closed; the
+        // chain lowering emits both.
+        ChooseImperativeAst::CounterKindOnTarget { .. } => Effect::unimplemented(
+            "counter_kind_on_declared_target",
+            "choose a counter on target",
+        ),
         // CR 608.2d + CR 122.1: "choose a counter on it" → interactive
         // counter-kind selection on the anaphoric object.
         ChooseImperativeAst::CounterKind {
@@ -17131,6 +17138,25 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.sub_ability = Some(Box::new(target_b_clause));
             clause
         }
+        // CR 115.1 + CR 608.2d + CR 122.1: "choose a counter on target X" —
+        // the declared target is owned by `TargetOnly` (stack-time slot), and
+        // the counter-kind choice over that same object is its chained child,
+        // read through `ParentTarget` at resolution. A following "counter of
+        // that kind" instruction reads the kind this choice binds.
+        ImperativeFamilyAst::Structured(ImperativeAst::Choose(
+            ChooseImperativeAst::CounterKindOnTarget { target },
+        )) => {
+            let mut clause = parsed_clause(Effect::TargetOnly { target });
+            clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseCounterKind {
+                    target: TargetFilter::ParentTarget,
+                    domain: CounterKindDomain::default(),
+                    chooser: CounterKindChooser::default(),
+                },
+            )));
+            clause
+        }
         // CR 115.10a + CR 608.2d: untargeted object and player choices resolve
         // in order. The parser marks only the object head as Resolution-timed.
         ImperativeFamilyAst::Structured(ImperativeAst::Choose(
@@ -19863,8 +19889,8 @@ mod tests {
         let ast =
             try_parse_choose_counter_on_target("a counter on target permanent or suspended card.")
                 .expect("counter-on-target designation must parse");
-        let ChooseImperativeAst::TargetOnly { target } = ast else {
-            panic!("expected TargetOnly, got {ast:?}");
+        let ChooseImperativeAst::CounterKindOnTarget { target } = ast else {
+            panic!("expected CounterKindOnTarget, got {ast:?}");
         };
         let TargetFilter::Or { filters } = target else {
             panic!("expected an Or target pool, got {target:?}");
@@ -19954,8 +19980,48 @@ mod tests {
         assert!(
             try_parse_choose_counter_kind("a counter on target permanent or suspended card.")
                 .is_none(),
-            "Clockspinning literal target must stay in TargetOnly parsing"
+            "Clockspinning literal target must stay in the declared-target parsing"
         );
+    }
+
+    /// CR 115.1 + CR 608.2d + CR 122.1: the declared-target counter choice
+    /// lowers, by itself, to the stack-time `TargetOnly` slot with the
+    /// resolution-time `ChooseCounterKind` over that same target chained
+    /// beneath it. The binding is the clause's own: it holds with no
+    /// "counter of that kind" instruction anywhere after it, which a
+    /// neighbour-shape inference could not produce.
+    #[test]
+    fn choose_counter_on_declared_target_binds_its_own_kind_choice() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        for text in [
+            "Choose a counter on target enchantment you control. Draw a card.",
+            "Choose a counter on target enchantment you control.",
+        ] {
+            let def = parse_effect_chain(text, AbilityKind::Spell);
+            let Effect::TargetOnly {
+                target: TargetFilter::Typed(filter),
+            } = def.effect.as_ref()
+            else {
+                panic!("the declared target owns the head slot: {def:?}");
+            };
+            assert_eq!(filter.type_filters, vec![TypeFilter::Enchantment]);
+            assert_eq!(filter.controller, Some(ControllerRef::You));
+            let choice = def
+                .sub_ability
+                .as_deref()
+                .expect("the counter-kind choice is chained under its target");
+            assert!(
+                matches!(
+                    choice.effect.as_ref(),
+                    Effect::ChooseCounterKind {
+                        target: TargetFilter::ParentTarget,
+                        domain: CounterKindDomain::OnTarget,
+                        chooser: CounterKindChooser::Controller,
+                    }
+                ),
+                "{text}: the choice reads the declared target, got {choice:?}"
+            );
+        }
     }
 
     /// CR 608.2d + CR 122.1: Every supported definite anaphor binds the

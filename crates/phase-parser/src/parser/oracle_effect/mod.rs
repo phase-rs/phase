@@ -36835,6 +36835,21 @@ pub(super) fn def_is_damage_dealer(def: &AbilityDefinition) -> bool {
     )
 }
 
+/// Membership mirror for `AntecedentRole::TokenCreator` — the token-creating
+/// instruction a "create N of those tokens instead" override restates
+/// (CR 111.1 + CR 608.2c).
+///
+/// The effect variant alone (`Token` / `CopyTokenOf`): the override's own
+/// "those tokens" anaphor names a token creation, and nothing else creates the
+/// tokens it counts. `ChangeZone`/`Meld` (the wider `PermanentCreator` class)
+/// put existing objects onto the battlefield and are not "those tokens".
+pub(super) fn def_is_token_creator(def: &AbilityDefinition) -> bool {
+    matches!(
+        &*def.effect,
+        Effect::Token { .. } | Effect::CopyTokenOf { .. }
+    )
+}
+
 /// Mutable counterpart to `def_is_damage_dealer` — the effect to patch when a
 /// rider binds to the `DamageDealer` role, unwrapping the same `TargetOnly`
 /// head.
