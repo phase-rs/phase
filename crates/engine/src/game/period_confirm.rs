@@ -2964,14 +2964,15 @@ pub(crate) fn perform_cycle(
     .map(drop)
 }
 
-/// CR 732.2a: performs `declared` forward from `start`, a frame where `holder` has priority, for
-/// at most `n` repetitions of the period `items` make, and states how far it reached.
+/// CR 732.2a: performs `declared` (the recorded answers when `None`) forward from `start`, a frame
+/// where `holder` has priority, for at most `n` repetitions of the period `items` make, and states
+/// how far it reached.
 pub(crate) fn perform_declared(
     start: &GameState,
     items: &[PeriodItem],
     reach: PeriodReach,
     holder: PlayerId,
-    declared: &DecisionTemplate,
+    declared: Option<&DecisionTemplate>,
     n: u32,
 ) -> PerformedReach {
     use crate::game::engine::{repetition_verdict, RepetitionVerdict};
@@ -2990,7 +2991,7 @@ pub(crate) fn perform_declared(
             None,
             &mut Vec::new(),
             None,
-            Some((declared, k)),
+            declared.map(|template| (template, k)),
         )
         .is_ok();
         match repetition_verdict(&replay, completed, holder, None) {
@@ -3006,7 +3007,7 @@ pub(crate) fn perform_declared(
         }
     }
     PerformedReach {
-        decisions: declared.decisions.clone(),
+        decisions: declared.map_or_else(Vec::new, |template| template.decisions.clone()),
         reach: count.survived(holder),
         winner,
     }
@@ -3022,12 +3023,20 @@ pub(crate) fn perform_declared_on(
 ) -> PerformedReach {
     let mut start = replay_base(state, holder);
     start.waiting_for = WaitingFor::Priority { player: holder };
-    perform_declared(&start, &period.items, period.reach, holder, declared, n)
+    perform_declared(
+        &start,
+        &period.items,
+        period.reach,
+        holder,
+        Some(declared),
+        n,
+    )
 }
 
 /// CR 732.2a: performs the offer's own declaration and its suggestion from `start` to the count
-/// the threshold authority published, publishes the suggestion's reach (the own's without one),
-/// withdraws a suggestion that reaches no further than the own, and returns both records.
+/// the threshold authority published, publishes the suggestion's reach (the own's without one; the
+/// recorded answers' without either), withdraws a suggestion that reaches no further than the own,
+/// and returns the declarations' records.
 fn perform_published(
     parts: &mut BoundedOfferParts,
     start: &GameState,
@@ -3041,6 +3050,11 @@ fn perform_published(
     };
     let mut performed = Vec::new();
     let mut published = None;
+    if parts.declaration.is_none() && parts.schema.suggested_declaration.is_none() {
+        // Kept out of `performed`: a record there makes a take conform to a declaration, and this
+        // offer has none.
+        published = Some(perform_declared(start, items, reach, holder, None, n));
+    }
     for declaration in [
         parts.declaration.as_mut(),
         parts.schema.suggested_declaration.as_mut(),
@@ -3048,7 +3062,7 @@ fn perform_published(
     .into_iter()
     .flatten()
     {
-        let record = perform_declared(start, items, reach, holder, declaration, n);
+        let record = perform_declared(start, items, reach, holder, Some(&*declaration), n);
         declaration.replay = ReplayMode::Scheduled {
             count: IterationCount::Fixed(record.reach),
         };
@@ -3664,8 +3678,15 @@ mod tests {
             },
             key: DecisionGroupKey::from_sources(&[], DecisionKind::LoopChoice),
         };
-        let reached =
-            perform_declared(&start, &[], PeriodReach::InStep, PlayerId(0), &declared, 1).reach;
+        let reached = perform_declared(
+            &start,
+            &[],
+            PeriodReach::InStep,
+            PlayerId(0),
+            Some(&declared),
+            1,
+        )
+        .reach;
         assert_eq!(reached, 0);
         let mut parts =
             crate::game::engine::counted_offer(&[start.clone()], Vec::new(), 1, 1, None);

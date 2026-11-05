@@ -7737,7 +7737,8 @@ fn sieve_board(
 
 /// Drives the Time Sieve board until turn `last` ends, casting Thopter Assembly and sacrificing
 /// its Thopters to the Sieve each main phase, discarding an Island at cleanup and declining every
-/// offer; each offer's turn and count, and each of P0's precombat-main windows.
+/// offer; each offer's turn and count, and each of P0's precombat-main windows (an offered one as
+/// its offer stands).
 fn sieve_windows(
     (mut runner, sieve, assembly): (GameRunner, ObjectId, ObjectId),
     last: u32,
@@ -7751,6 +7752,7 @@ fn sieve_windows(
         if is_offer(state) {
             assert_eq!(state.phase, Phase::PreCombatMain, "{}", state.turn_number);
             offers.push((state.turn_number, fixed(&offer_of(state).1)));
+            windows.push(state.clone());
             act(&mut runner, GameAction::DeclineShortcut);
             continue;
         }
@@ -7884,7 +7886,8 @@ fn first_discard_offer(
 /// CR 514.1 + CR 401.2 + CR 504.1 + CR 704.5b + CR 732.2a: once the span records a cleanup
 /// discard, the count is the lesser of the cards in hand sharing the discarded card's name, which
 /// the recorded discard can name, and the cards left to draw. With 25 cards the window holds eight
-/// Islands and the Assembly over a 16-card library: 8. With 14 cards the library holds 5: 5.
+/// Islands and the Assembly over a 16-card library: 8, and a take of 8 performs eight turns, each
+/// discarding an Island, while 9 is refused. With 14 cards the library holds 5: 5.
 #[test]
 fn a_recorded_cleanup_discard_window_is_offered_the_lesser_of_its_named_hand_and_library() {
     let Some(db) = shared_card_db() else { return };
@@ -7896,6 +7899,21 @@ fn a_recorded_cleanup_discard_window_is_offered_the_lesser_of_its_named_hand_and
             "{library}"
         );
         assert_eq!(offered, Some(count), "{library}");
+        if library == 25 {
+            let discarded = |state: &GameState| {
+                state.players[0]
+                    .graveyard
+                    .iter()
+                    .filter(|id| state.objects[id].name == "Island")
+                    .count()
+            };
+            let after = taken(&window, 8);
+            assert_eq!(
+                (after.turn_number, library_term(&after), discarded(&after)),
+                (window.turn_number + 8, left - 8, discarded(&window) + 8)
+            );
+            assert_declaration_refused(&window, 9);
+        }
     }
 }
 
