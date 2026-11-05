@@ -5400,13 +5400,10 @@ fn turn_face_up_applier(
         return ApplyResult::Modified(event);
     };
 
-    let Some(source) = state.objects.get(&rid.source) else {
+    let Some(definition) = replacement_choice_definition(state, rid) else {
         return ApplyResult::Modified(ProposedEvent::TurnFaceUp { object_id, applied });
     };
-    let controller = source.controller;
-    let Some(definition) = source.replacement_definitions.get(rid.index) else {
-        return ApplyResult::Modified(ProposedEvent::TurnFaceUp { object_id, applied });
-    };
+    let controller = replacement_ability_controller(state, rid, definition);
     let runtime_execute = definition.runtime_execute.clone();
     let execute = definition.execute.clone();
 
@@ -13620,6 +13617,43 @@ mod tests {
                 "an accepted turn-up body must not be replayed, and declining must do nothing"
             );
         }
+    }
+
+    #[test]
+    fn turn_face_up_reads_a_registry_owned_runtime_replacement() {
+        let affected = ObjectId(10);
+        let mut state = test_state_with_object(affected, Zone::Battlefield, vec![]);
+        let runtime = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(99),
+            PlayerId(1),
+        );
+        state.pending_damage_replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::TurnFaceUp).runtime_execute(runtime),
+        );
+        let mut events = Vec::new();
+        let result = apply_single_replacement(
+            &mut state,
+            ProposedEvent::TurnFaceUp {
+                object_id: affected,
+                applied: HashSet::new(),
+            },
+            ReplacementId {
+                source: ObjectId(0),
+                index: 0,
+            },
+            ReplacementBranch::Execute,
+            replacement_registry(),
+            &mut events,
+        );
+        assert!(matches!(result, Ok(ProposedEvent::TurnFaceUp { .. })));
+        assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.players[1].life, 23);
+        assert!(!state.has_post_replacement_drain());
     }
 
     fn reset_indexed_replacement_consults() {
