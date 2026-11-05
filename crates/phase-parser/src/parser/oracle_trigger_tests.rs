@@ -42630,7 +42630,7 @@ fn peel_trailing_cast_mana_source_splits_only_a_trailing_self_reference() {
 /// readings the granted quoted ability must not disturb:
 /// - CR 201.5c: the one-letter short name "Q" is a self-reference, so the
 ///   trigger is a self-ETB (`SelfRef`), not "whenever a Q creature enters";
-/// - CR 603.2 + CR 602.5b: the quoted "Activate only during your turn"
+/// - CR 603.2 + CR 602.5c: the quoted "Activate only during your turn"
 ///   restricts the GRANTED ability, never this trigger;
 /// - CR 608.2c: "That nonland card" names the card the exile-until loop found,
 ///   so the grant does not bind the trigger source (`TriggeringSource`).

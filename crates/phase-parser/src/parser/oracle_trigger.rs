@@ -2065,7 +2065,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     let relative_player_scope = effect_ctx.relative_player_scope.clone();
 
     // Constraint from full text (parsed during IR production so lowering has it).
-    // CR 603.2 + CR 602.5b: a quoted ability the trigger GRANTS carries its own
+    // CR 603.2 + CR 602.5c: a quoted ability the trigger GRANTS carries its own
     // restrictions ("Activate only during your turn" on Q, Stacking the Deck's
     // granted ability); they restrict that ability, never this trigger, so the
     // quoted spans are masked before the constraint scan.
