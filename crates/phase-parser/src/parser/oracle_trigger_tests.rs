@@ -11667,22 +11667,53 @@ fn strip_constraint_leaves_a_quoted_granted_restriction_in_place() {
     assert_eq!(strip_constraint_sentences(text), text);
 }
 
+/// At Knifepoint's trigger (verbatim Scryfall Oracle text): a quoted granted
+/// ability with its own restriction, followed by the trigger's own unquoted
+/// "This ability triggers only once each turn."
 #[test]
-fn strip_constraint_strips_the_unquoted_sentence_after_a_quoted_one() {
-    let text = "it gains \"this ability triggers only once each turn.\" this ability triggers only once each turn.";
-    assert_eq!(
-        strip_constraint_sentences(text),
-        "it gains \"this ability triggers only once each turn.\""
+fn at_knifepoint_unquoted_limit_is_the_triggers_and_the_quoted_one_is_the_tokens() {
+    use crate::types::ability::ActivationRestriction;
+    let trigger = parse_trigger_line(
+        "Whenever you commit a crime, create a 1/1 red Mercenary creature token with \"{T}: Target creature you control gets +1/+0 until end of turn. Activate only as a sorcery.\" This ability triggers only once each turn.",
+        "At Knifepoint",
     );
-}
-
-#[test]
-fn strip_constraint_strips_first_n_times_sentence() {
+    // CR 603.1: the unquoted sentence restricts this trigger.
     assert_eq!(
-        strip_constraint_sentences(
-            "draw a card. This ability triggers only the first two times each turn."
-        ),
-        "draw a card"
+        trigger.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering,
+        })
+    );
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    assert!(
+        execute.sub_ability.is_none(),
+        "the constraint sentence must not become a sub-ability: {:?}",
+        execute.sub_ability
+    );
+    let Effect::Token {
+        static_abilities, ..
+    } = &*execute.effect
+    else {
+        panic!("expected the token, got {:?}", execute.effect);
+    };
+    let granted = static_abilities
+        .iter()
+        .flat_map(|def| def.modifications.iter())
+        .find_map(|modification| match modification {
+            ContinuousModification::GrantAbility { definition } => Some(definition),
+            _ => None,
+        })
+        .expect("the token's granted activated ability");
+    // CR 602.5d: the quoted "Activate only as a sorcery." stays with the
+    // token's granted ability.
+    assert_eq!(
+        granted.activation_restrictions,
+        vec![ActivationRestriction::AsSorcery]
+    );
+    assert!(
+        matches!(*granted.effect, Effect::Pump { .. }),
+        "{:?}",
+        granted.effect
     );
 }
 

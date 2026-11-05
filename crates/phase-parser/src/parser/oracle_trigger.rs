@@ -4999,12 +4999,10 @@ fn unquoted_phrase_span<O>(
     text: &str,
     mut combinator: impl for<'a> FnMut(&'a str) -> OracleResult<'a, O>,
 ) -> Option<std::ops::Range<usize>> {
-    let masked_lower = nom_primitives::mask_double_quoted_spans_preserving_len(text).to_lowercase();
-    // Lowercasing can change the byte length of some non-ASCII text; offsets
-    // would then no longer index `text`, so report no match rather than mis-slice.
-    if masked_lower.len() != text.len() {
-        return None;
-    }
+    // ASCII lowercasing preserves byte length (the matched phrases are ASCII),
+    // so offsets in the mask index `text` directly.
+    let masked_lower =
+        nom_primitives::mask_double_quoted_spans_preserving_len(text).to_ascii_lowercase();
     let (before, _, rest) = scan_preceded(&masked_lower, &mut combinator)?;
     Some(before.len()..masked_lower.len() - rest.len())
 }
