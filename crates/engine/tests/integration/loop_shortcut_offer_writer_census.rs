@@ -309,9 +309,12 @@ fn census(needle: &str) -> Vec<Hit> {
 /// * 24 ⇒ 28: the reduction's typed-absence rows — three READS in
 ///   `engine/src/game/engine.rs` and one fixture WRITER in
 ///   `engine/src/game/interaction.rs`.
-/// * 28 ⇒ the pinned value: `offer_period` in `phase-ai/src/policies/loop_shortcut.rs`'s
+/// * 28 ⇒ 29: `offer_period` in `phase-ai/src/policies/loop_shortcut.rs`'s
 ///   `#[cfg(test)]` module — a READ of an offer `apply()` minted (its period and
 ///   declaration), minting none.
+/// * 29 ⇒ the pinned value: `kilo_interruptibility_tests` in `engine/src/game/engine.rs`
+///   — three `matches!` READS of `waiting_for` added and one `=> return` arm removed,
+///   minting none.
 ///
 /// EVERY addition listed above is in a `#[cfg(test)]` scope — mints and reads
 /// both — which is the benign case this row's own failure message names: a test
