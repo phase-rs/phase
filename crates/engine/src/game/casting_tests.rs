@@ -53842,11 +53842,18 @@ fn cast_keywords_after_payment(state: &GameState, spell: ObjectId) -> Vec<Keywor
     obj.cast_spell_keywords.clone()
 }
 
-/// Assert the spell's payment was attributed to `source` — the fixture-integrity
-/// guard for a provenance-qualified filter. An unattributed unit (one whose
-/// `source_id` names no permanent) stamps no `ManaSpentSourceSnapshot`, so the
-/// filter would have nothing to match and the leg would prove nothing.
-fn assert_paid_from(state: &GameState, spell: ObjectId, source: ObjectId) {
+/// Assert the spell's payment was attributed to exactly the `sources` set — the
+/// fixture-integrity guard for a provenance-qualified filter. An unattributed unit
+/// (one whose `source_id` names no permanent) stamps no
+/// `ManaSpentSourceSnapshot`, so the filter would have nothing to match and the
+/// leg would prove nothing.
+///
+/// The set, rather than a single id, is what makes a MIXED payment assertable:
+/// every spent unit must name one of `sources`, and every named source must fund
+/// at least one unit. A leg that claims two sources therefore fails outright when
+/// the pool degenerates to one of them, instead of quietly re-running a
+/// single-source leg with a mix-shaped assertion around it.
+fn assert_paid_from(state: &GameState, spell: ObjectId, sources: &[ObjectId]) {
     let obj = &state.objects[&spell];
     assert!(
         !obj.mana_spent_source_snapshots.is_empty(),
@@ -53857,15 +53864,21 @@ fn assert_paid_from(state: &GameState, spell: ObjectId, source: ObjectId) {
         obj.mana_spent_to_cast_amount as usize,
         "every spent unit must name its source"
     );
-    assert!(
-        obj.mana_spent_source_snapshots
-            .iter()
-            .all(|snapshot| snapshot.source_id == source),
-        "fixture integrity: the spell must be funded by the intended source, got {:?}",
-        obj.mana_spent_source_snapshots
-            .iter()
-            .map(|snapshot| snapshot.source_id)
-            .collect::<Vec<_>>()
+    // Which distinct permanents funded the payment, order-independent: the pool
+    // does not promise which unit `pay_mana_cost` consumes first.
+    let mut paid: Vec<ObjectId> = obj
+        .mana_spent_source_snapshots
+        .iter()
+        .map(|snapshot| snapshot.source_id)
+        .collect();
+    paid.sort_unstable();
+    paid.dedup();
+    let mut expected = sources.to_vec();
+    expected.sort_unstable();
+    expected.dedup();
+    assert_eq!(
+        paid, expected,
+        "fixture integrity: the spell must be funded by exactly {expected:?}"
     );
 }
 
@@ -53966,7 +53979,18 @@ fn first_qualifying_spell_enqueues_cascade_second_does_not() {
 ///   leg C — a third `{2}` sorcery paid by a Treasure: its affected filter matches,
 ///           so only the GATE (`SpellsCastThisTurn(qualified) == 0`) can refuse it.
 ///
-/// Reverting the parser fix makes the grant unconditional: all three legs receive
+/// A fourth leg pays from TWO sources at once — one Treasure unit and one land
+/// unit. It needs its own game because leg B consumes the single qualification a
+/// turn allows, so a mixed payment that expects the grant must be the turn's first
+/// cast:
+///   leg D — a mixed Treasure/land payment still qualifies. "Mana from a Treasure
+///           was spent to cast" asks whether a Treasure unit was spent, not
+///           whether every unit came from a Treasure, so the grant applies. This
+///           is the one leg that distinguishes the existential reading from an
+///           all-units-must-match misreading; a single-source leg agrees under
+///           both.
+///
+/// Reverting the parser fix makes the grant unconditional: every leg receives
 /// Cascade and legs A and C fail.
 #[test]
 fn rain_of_riches_grants_cascade_only_to_a_treasure_funded_first_spell() {
@@ -53996,7 +54020,7 @@ fn rain_of_riches_grants_cascade_only_to_a_treasure_funded_first_spell() {
     );
     runner.cast(leg_a).commit();
     let keywords = cast_keywords_after_payment(runner.state(), leg_a);
-    assert_paid_from(runner.state(), leg_a, land);
+    assert_paid_from(runner.state(), leg_a, &[land]);
     assert!(
         !keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
         "a first spell not funded by a Treasure must not receive the grant; got {keywords:?}"
@@ -54013,7 +54037,7 @@ fn rain_of_riches_grants_cascade_only_to_a_treasure_funded_first_spell() {
     );
     runner.cast(leg_b).commit();
     let keywords = cast_keywords_after_payment(runner.state(), leg_b);
-    assert_paid_from(runner.state(), leg_b, treasure);
+    assert_paid_from(runner.state(), leg_b, &[treasure]);
     assert!(
         keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
         "the first Treasure-funded spell of the turn must receive Cascade; got {keywords:?}"
@@ -54030,11 +54054,54 @@ fn rain_of_riches_grants_cascade_only_to_a_treasure_funded_first_spell() {
     );
     runner.cast(leg_c).commit();
     let keywords = cast_keywords_after_payment(runner.state(), leg_c);
-    assert_paid_from(runner.state(), leg_c, treasure);
+    assert_paid_from(runner.state(), leg_c, &[treasure]);
     assert!(
         !keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
         "a second Treasure-funded spell of the same turn must not receive Cascade; got {keywords:?}"
     );
+
+    // Leg D: a MIXED payment — one unit from the Treasure, one from the land —
+    // in its own game, because the turn's one qualification is consumed by leg B
+    // and a mixed payment expecting the grant must be the turn's first cast.
+    {
+        let mut state = setup_game_at_main_phase();
+        install_first_spell_cascade_grant(
+            &mut state,
+            "Rain of Riches",
+            CardId(7_106),
+            "The first spell you cast each turn that mana from a Treasure was spent to cast has cascade.",
+        );
+        let land = plain_mana_source(&mut state, CardId(7_107));
+        let treasure = treasure_permanent(&mut state, CardId(7_108));
+        let mixed =
+            create_paid_sorcery(&mut state, CardId(7_109), PlayerId(0), ManaCost::generic(2));
+        let mut runner = crate::game::scenario::GameRunner::from_state(state);
+
+        add_mana_from_source(
+            runner.state_mut(),
+            PlayerId(0),
+            ManaType::Colorless,
+            1,
+            treasure,
+        );
+        add_mana_from_source(
+            runner.state_mut(),
+            PlayerId(0),
+            ManaType::Colorless,
+            1,
+            land,
+        );
+        runner.cast(mixed).commit();
+        let keywords = cast_keywords_after_payment(runner.state(), mixed);
+        // Both sources must have funded a unit, or this is not a mixed payment.
+        assert_paid_from(runner.state(), mixed, &[treasure, land]);
+        assert!(
+            keywords.iter().any(|k| matches!(k, Keyword::Cascade)),
+            "a spell paid with ONE Treasure unit and ONE land unit still qualifies — \
+             the qualifier asks whether a Treasure unit was spent, not whether every \
+             unit was; got {keywords:?}"
+        );
+    }
 }
 
 /// CR 202.3 + CR 604.2 + CR 611.3b: TARDIS Bay — "The first spell you cast during

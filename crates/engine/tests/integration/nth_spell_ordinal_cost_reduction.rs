@@ -39,9 +39,11 @@ fn doom_blade_cost() -> ManaCost {
     }
 }
 
-/// The Head of the Class board: the enchantment, two creature victims (the first
-/// is destroyed by a prior targeting cast, so the second targeting spell still has
-/// a legal creature target), and two Doom Blades in hand.
+/// The Head of the Class board: the creature (a printed 2/2 `{W}{B}` Kithkin
+/// Cleric — its cost-modification static is what is under test, and the body is
+/// the card's real body), two creature victims (the first is destroyed by a prior
+/// targeting cast, so the second targeting spell still has a legal creature
+/// target), and two Doom Blades in hand.
 struct HeadBoard {
     runner: GameRunner,
     blade_a: ObjectId,
@@ -53,7 +55,7 @@ struct HeadBoard {
 fn head_of_the_class_board() -> HeadBoard {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.add_enchantment_from_oracle(P0, "Head of the Class", HEAD_OF_THE_CLASS_ORACLE);
+    scenario.add_creature_from_oracle(P0, "Head of the Class", 2, 2, HEAD_OF_THE_CLASS_ORACLE);
     let victim_a = scenario.add_vanilla(P0, 1, 1);
     let victim_b = scenario.add_vanilla(P0, 1, 1);
     let blade_a = scenario
@@ -206,7 +208,7 @@ fn head_of_the_class_discount_survives_a_prior_nontargeting_spell() {
     {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
-        scenario.add_enchantment_from_oracle(P0, "Head of the Class", HEAD_OF_THE_CLASS_ORACLE);
+        scenario.add_creature_from_oracle(P0, "Head of the Class", 2, 2, HEAD_OF_THE_CLASS_ORACLE);
         let victim_a = scenario.add_vanilla(P0, 1, 1);
         let prior = scenario
             .add_creature_to_hand(P0, "Prior Bystander", 1, 1)
