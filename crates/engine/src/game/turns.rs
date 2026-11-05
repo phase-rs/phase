@@ -2073,6 +2073,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         // CR 603.4: Snapshot life lost before reset for "lost life during their last turn" conditions.
         player.life_lost_last_turn = player.life_lost_this_turn;
         player.life_lost_this_turn = 0;
+        player.energy_paid_or_lost_this_turn = 0;
         player.descended_this_turn = false;
         // CR 603.4: Snapshot draws before reset for "if you drew a card last
         // turn" conditions, mirroring the life-lost snapshot above.

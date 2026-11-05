@@ -5407,6 +5407,14 @@ pub struct PendingPerPlayerZoneChoice {
     /// cleared when it completes or is skipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nominee: Option<PlayerId>,
+    /// CR 608.2c + CR 608.2d: the chain tracked set a `Tracked` pool reads,
+    /// pinned when the iteration begins ("choose a land card that player owns
+    /// exiled this way" — Ensign Pavel Chekov). Each pick rebinds the chain's
+    /// tracked set to the chosen cards, so a later player's pool must read the
+    /// set the instruction named, never the previous player's picks. `None` for
+    /// every zone-backed (`Direct` / `Legacy`) or other source-bound pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracked_pool: Option<TrackedSetId>,
 }
 
 /// CR 401.4 + CR 101.4 + CR 608.2c: Per-owner library-order prompts for one
@@ -5635,6 +5643,33 @@ pub enum PendingPlayerScopeSacrificeFollowUp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exploiter_incarnation: Option<u64>,
     },
+}
+
+/// CR 701.9a + CR 614.6: a frameless single-card effect discard (connive,
+/// learn rummage) whose move paused for a replacement choice: either a
+/// CR 616.1 choice among two or more applicable replacement effects (two
+/// Rest in Peace), or the apply-or-decline choice of a single optional
+/// replacement whose own text says "you may ... instead" (Library of Leng).
+///
+/// CR 614.6: "If an event is replaced, it never happens. A modified event
+/// occurs instead." A hand -> graveyard redirect (Rest in Peace) or an optional
+/// "discard it, but ... instead" replacement (Library of Leng) therefore still
+/// discards the card; CR 701.9c presupposes the same for a card put into a
+/// hidden zone instead. The resumed zone-change delivery records a `Discarded`
+/// event only for a provenance-framed discard, so this carrier names the
+/// pre-move occurrence for the settle step to record exactly once
+/// (`effects::settle_paused_single_discard`).
+///
+/// Batches (Mind Rot) park [`PendingDiscardBatch`] instead; the two carriers
+/// are never installed together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingSingleDiscard {
+    /// CR 400.7: the pre-move hand occurrence that paused.
+    pub paused_card: ObjectIncarnationRef,
+    /// The discarding player.
+    pub player: PlayerId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<ObjectId>,
 }
 
 /// One discard instruction, parked mid-batch while an optional replacement
@@ -13995,13 +14030,8 @@ pub(crate) fn has_return_result_metadata(ability: &ResolvedAbility) -> bool {
     ability.declares_return_result.is_some()
         || ability.reads_return_result.is_some()
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(has_return_result_metadata)
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(has_return_result_metadata)
+            .child_links()
+            .any(|(_, child)| has_return_result_metadata(child))
 }
 
 pub(crate) fn reads_return_result_id(ability: &ResolvedAbility, result_id: ReturnResultId) -> bool {
@@ -14010,13 +14040,8 @@ pub(crate) fn reads_return_result_id(ability: &ResolvedAbility, result_id: Retur
         .as_ref()
         .is_some_and(|(id, _)| *id == result_id)
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(|sub| reads_return_result_id(sub, result_id))
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(|branch| reads_return_result_id(branch, result_id))
+            .child_links()
+            .any(|(_, child)| reads_return_result_id(child, result_id))
 }
 
 pub(crate) fn live_return_result_occurrences(
@@ -16342,11 +16367,8 @@ impl GameState {
                     return Err(format!("root {label} {:?} is not a seat", player));
                 }
             }
-            if let Some(sub) = ability.sub_ability.as_deref() {
-                validate_ability(sub, valid)?;
-            }
-            if let Some(otherwise) = ability.else_ability.as_deref() {
-                validate_ability(otherwise, valid)?;
+            for (_, child) in ability.child_links() {
+                validate_ability(child, valid)?;
             }
             Ok(())
         }
@@ -17385,6 +17407,18 @@ pub enum WaitingFor {
         emit_reveal_until_resolved: Option<ObjectId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reveal_until_hit_snapshot: Option<Box<EventObjectSnapshot>>,
+    },
+    /// CR 701.20e + CR 401.4 + CR 608.2d: In a `Dig` resolution (PriorLook source) where
+    /// all looked-at cards are put on the bottom of the library "in any order"
+    /// (`DigRestOrder::PlayerChoice`), the controller announces the order for
+    /// the cards. The response is `GameAction::SelectCards { cards }` carrying
+    /// a permutation of `cards`; the engine places them on the library bottom in
+    /// that submitted order. Raised only when 2+ cards are bottomed — a single
+    /// card has no ordering choice.
+    DigBottomOrder {
+        player: PlayerId,
+        source_id: ObjectId,
+        cards: Vec<ObjectId>,
     },
     /// CR 901.15 + CR 701.22a analogue: Arrange the top N cards of the planar
     /// deck — put exactly `keep_on_top` on top in the submitted order and the
@@ -19093,6 +19127,14 @@ pub enum WaitingFor {
         #[serde(default = "default_pile_source_battlefield")]
         pile_source: PileSource,
     },
+    /// CR 702.106a / CR 702.106f: As a face-down agenda conspiracy is put into the
+    /// command zone, its owner secretly chooses `name_count` card names.
+    /// `name_count` is shown only to `player`; viewer projections report 1.
+    SecretAgendaChoice {
+        player: PlayerId,
+        object_id: ObjectId,
+        name_count: u8,
+    },
     /// CR 702.139a: Before the game begins, reveal companion from outside the game.
     CompanionReveal {
         player: PlayerId,
@@ -19414,15 +19456,23 @@ pub enum WaitingFor {
         total_damage: u32,
         attackers: Vec<ObjectId>,
     },
-    /// CR 601.2d: Distribute N among targets at casting time ("divide N damage among").
-    /// Infrastructure ready: handler in engine.rs, AI candidates, continuation match.
-    /// TODO: Wire trigger in casting.rs when a "divide/distribute" ability is being cast.
-    /// Requires parser support for "divide N damage among" Oracle text patterns.
+    /// CR 601.2d: divide N among the announced targets while a spell or ability
+    /// is cast, activated, or put on the stack ("divided as you choose among any
+    /// number of targets"); or CR 608.2d: divide N among untargeted resolution
+    /// candidates while the effect is applied ("divided as its controller chooses
+    /// among any number of those Wolves"). `scope` says which (see
+    /// [`DistributionScope`]); `targets` holds the announced targets or the
+    /// resolution candidates respectively.
     DistributeAmong {
         player: PlayerId,
         total: u32,
         targets: Vec<TargetRef>,
         unit: DistributionUnit,
+        #[serde(
+            default,
+            skip_serializing_if = "DistributionScope::is_announced_targets"
+        )]
+        scope: DistributionScope,
     },
     /// CR 122.5 + CR 608.2d: "Move any number of counters ... onto [set]"
     /// chooses destinations and counts as the ability resolves.
@@ -19719,6 +19769,34 @@ pub struct DamageSlot {
     pub lethal_minimum: u32,
 }
 
+/// CR 601.2d / CR 608.2d: when a `WaitingFor::DistributeAmong` division is
+/// chosen and what it must cover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type", content = "data")]
+pub enum DistributionScope {
+    /// CR 601.2d + CR 603.3d: announced among the spell's/ability's targets while
+    /// it is cast, activated, or put on the stack; each target receives at least one.
+    #[default]
+    AnnouncedTargets,
+    /// CR 608.2d + CR 115.10a: an untargeted division chosen while the effect is
+    /// applied, among any number of `targets` (the resolution candidates); each
+    /// chosen object receives at least one and the whole amount is divided.
+    /// `pending_effect` is the paused node (its `sub_ability`/`else_ability`
+    /// cleared — the continuation owns the tail), resolved with the chosen
+    /// portions stamped into `ResolvedAbility::distribution`.
+    ResolutionCandidates {
+        pending_effect: Box<ResolvedAbility>,
+    },
+}
+
+impl DistributionScope {
+    /// Serde skip predicate: the announce-time scope is the wire default, so
+    /// payloads that predate `scope` round-trip byte-identically.
+    pub fn is_announced_targets(&self) -> bool {
+        matches!(self, Self::AnnouncedTargets)
+    }
+}
+
 /// CR 107.14 + CR 118.8: Quantity named in a "pay any amount of X" prompt.
 /// Typed so the same `WaitingFor::PayAmountChoice` variant generalizes to future
 /// classes without re-introducing boolean flags. Most variants deduct a real
@@ -19858,17 +19936,17 @@ impl LoopCollapseAxis {
 /// CR 601.2c: one descent step from a stack entry's root `ResolvedAbility`
 /// toward a node that owns declared targets.
 ///
-/// Two variants because `ResolvedAbility` has exactly two child links. The
-/// enumerator (`ability_utils::chain_retarget_slots`) emits only `SubAbility`
-/// today, because `assign_targets_recursive` never descends into
-/// `else_ability` — read-verified; only `stamp_other_batch_source_targets`
-/// visits that branch, and its writes are synthesized rather than declared.
-/// `ElseAbility` exists so that a future else-branch owner is addressed
-/// correctly instead of being silently mis-addressed as a sub-branch one.
+/// Announcement addresses include independently declaring coin outcomes before
+/// the sequential sub-chain. Ordinary else edges remain addressable for
+/// declared-view readers but are not announcement routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChainStep {
     SubAbility,
     ElseAbility,
+    /// CR 705.2: The instructions selected by winning or losing the flip.
+    CoinFlipBranch {
+        result: CoinFlipResult,
+    },
 }
 
 /// CR 115.7d: the address of ONE declared-target slot inside a resolved chain.
@@ -20035,6 +20113,7 @@ impl WaitingFor {
             WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
             WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
             WaitingFor::RevealUntilBottomOrder { .. } => "RevealUntilBottomOrder",
+            WaitingFor::DigBottomOrder { .. } => "DigBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
@@ -20122,6 +20201,7 @@ impl WaitingFor {
             WaitingFor::SeparatePilesChooseOpponent { .. } => "SeparatePilesChooseOpponent",
             WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
             WaitingFor::SeparatePilesChoice { .. } => "SeparatePilesChoice",
+            WaitingFor::SecretAgendaChoice { .. } => "SecretAgendaChoice",
             WaitingFor::CompanionReveal { .. } => "CompanionReveal",
             WaitingFor::ChooseLegend { .. } => "ChooseLegend",
             WaitingFor::CommanderZoneChoice { .. } => "CommanderZoneChoice",
@@ -20203,6 +20283,7 @@ impl WaitingFor {
             | WaitingFor::RippleRevealChoice { player, .. }
             | WaitingFor::RippleBottomOrder { player, .. }
             | WaitingFor::RevealUntilBottomOrder { player, .. }
+            | WaitingFor::DigBottomOrder { player, .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { player, .. }
             | WaitingFor::RedistributeLifeTotals { player, .. }
             | WaitingFor::CoinFlipKeepChoice { player, .. }
@@ -20277,6 +20358,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneOpponentChooser { player, .. }
             | WaitingFor::ChooseAnnouncingOpponent { player, .. }
             | WaitingFor::ClashCardPlacement { player, .. }
+            | WaitingFor::SecretAgendaChoice { player, .. }
             | WaitingFor::CompanionReveal { player, .. }
             | WaitingFor::ChooseLegend { player, .. }
             | WaitingFor::BattleProtectorChoice { player, .. }
@@ -20567,6 +20649,7 @@ impl WaitingFor {
             | WaitingFor::RippleRevealChoice { .. }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::DigBottomOrder { .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
@@ -20643,6 +20726,7 @@ impl WaitingFor {
             | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
             | WaitingFor::SeparatePilesChoice { .. }
+            | WaitingFor::SecretAgendaChoice { .. }
             | WaitingFor::CompanionReveal { .. }
             | WaitingFor::ChooseLegend { .. }
             | WaitingFor::CommanderZoneChoice { .. }
@@ -20771,6 +20855,7 @@ impl WaitingFor {
             | WaitingFor::RippleRevealChoice { .. }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::DigBottomOrder { .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
@@ -20853,6 +20938,7 @@ impl WaitingFor {
             | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
             | WaitingFor::SeparatePilesChoice { .. }
+            | WaitingFor::SecretAgendaChoice { .. }
             | WaitingFor::CompanionReveal { .. }
             | WaitingFor::ChooseLegend { .. }
             | WaitingFor::CommanderZoneChoice { .. }
@@ -21110,6 +21196,7 @@ impl WaitingFor {
                 // only lists {identity}, so `apply()` is the real validator.
                 | WaitingFor::RippleBottomOrder { .. }
                 | WaitingFor::RevealUntilBottomOrder { .. }
+                | WaitingFor::DigBottomOrder { .. }
         )
     }
 
@@ -22216,12 +22303,12 @@ fn layers_read_current_step_unknown() -> bool {
 /// continuous `static_definitions` entry (including `GrantStaticAbility` hosts)
 /// and command-zone emblems. The opt-in-zone / off-zone arm (Incarnation cycle —
 /// Anger/Brawn/Filth/Wonder/Valor, `active_zones`-gated statics functioning from
-/// the graveyard) is INTENTIONALLY NOT indexed: its generator-set changes (e.g.
-/// self-milling an Anger into the graveyard) do not all mark `layers_dirty`
-/// (`zones.rs` marks dirty only on battlefield/hand transitions; mill/effect
-/// movers add no mark), so a `layers_dirty`-gated cache of off-zone generators
-/// would go stale. That arm keeps its live `state.objects` scan in
-/// `for_each_static_effect_source`.
+/// the graveyard) is INTENTIONALLY NOT indexed. A source's arrival in or
+/// departure from a zone its own `active_zones` declares NOW marks `layers_dirty`
+/// (#10400, via `zones::move_to_zone` and `zones::move_to_library_at_index` →
+/// `static_layer_dependency_for_zone_transition`), but indexing the arm remains a
+/// separate optimization with no measured need, so it keeps its live
+/// `state.objects` scan in `for_each_static_effect_source`.
 ///
 /// Backed by `im::Vector` so `GameState::clone()` stays O(1) structural share
 /// (and `GameState: Send` is preserved — no `Rc`). Rebuilt at the TOP of
@@ -25090,6 +25177,13 @@ declare_game_state! {
     /// box.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_discard_batch: Option<Box<PendingDiscardBatch>>,
+    /// CR 701.9a + CR 614.6: a frameless single-card effect discard (connive,
+    /// learn rummage) paused by a replacement choice. See [`PendingSingleDiscard`].
+    ///
+    /// Boxed for the same stack-budget reason as `pending_discard_batch`
+    /// (`types/game_state_size.rs`); populated only during a pause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_single_discard: Option<Box<PendingSingleDiscard>>,
     /// CR 608.2c + CR 616.1: Progress for a replacement-suspended exile loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_exile_from_top_until: Option<Box<PendingExileFromTopUntil>>,
@@ -27084,6 +27178,7 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::RevealUntilBottomOrder { .. }
+        | WaitingFor::DigBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::CoinFlipKeepChoice { .. }
@@ -27144,6 +27239,7 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesPartition { .. }
         | WaitingFor::SeparatePilesChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
         | WaitingFor::CommanderZoneChoice { .. }
@@ -32151,7 +32247,17 @@ impl GameState {
                 }
             }
             ResolvedPlayerEdit::Energy { delta } => {
-                player.energy = apply_u32_delta(player.energy, *delta)?;
+                let energy = apply_u32_delta(player.energy, *delta)?;
+                // CR 107.14 + CR 122.1: Paying {E} removes energy counters, so
+                // every decrement (payment or other loss) counts toward
+                // "{E} you've paid or lost this turn".
+                if *delta < 0 {
+                    player.energy_paid_or_lost_this_turn = player
+                        .energy_paid_or_lost_this_turn
+                        .checked_add(nonzero_delta_magnitude(*delta)?)
+                        .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
+                }
+                player.energy = energy;
             }
             ResolvedPlayerEdit::Counter { kind, delta } => {
                 let count = apply_u32_delta(player.player_counter(kind), *delta)?;
@@ -33230,6 +33336,7 @@ impl GameState {
             pending_player_scope_sacrifice_choice: None,
             pending_player_scope_unless_payment: None,
             pending_discard_batch: None,
+            pending_single_discard: None,
             pending_exile_from_top_until: None,
             pending_mass_library_order_choice: None,
             pending_scoped_library_search: None,
@@ -37188,6 +37295,10 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_player_scope_sacrifice_choice: _,
         pending_player_scope_unless_payment: _,
         pending_discard_batch: _,
+        // `pending_single_discard`: COMPARED (hand-written `impl PartialEq` conjunct) — the
+        // single-card sibling of `pending_discard_batch`, `None` outside a pause, so COMPARING
+        // it can never suppress a legitimate loop's detection.
+        pending_single_discard: _,
         pending_exile_from_top_until: _,
         pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
@@ -37427,6 +37538,7 @@ impl PartialEq for GameState {
             && self.pending_player_scope_unless_payment
                 == other.pending_player_scope_unless_payment
             && self.pending_discard_batch == other.pending_discard_batch
+            && self.pending_single_discard == other.pending_single_discard
             && self.pending_exile_from_top_until == other.pending_exile_from_top_until
             && self.pending_combat_lifelink == other.pending_combat_lifelink
             && self.pending_mass_library_order_choice
@@ -49200,7 +49312,6 @@ mod tests {
                         source_id: ObjectId(5),
                         controller: PlayerId(0),
                         flipper: PlayerId(0),
-                        targets: vec![],
                         win_effect: None,
                         lose_effect: None,
                         kind: PendingCoinFlipKind::Exactly { remaining: 0 },
@@ -56738,6 +56849,59 @@ mod tests {
         .expect("the marked export parses");
         assert_eq!(via_string, marked);
     }
+
+    /// C2.5 wire compatibility: a `DistributeAmong` payload serialized before
+    /// `scope` existed deserializes as the CR 601.2d announce-time scope and
+    /// re-serializes byte-identically; a CR 608.2d resolution-time wait carries
+    /// its scope on the wire and round-trips.
+    #[test]
+    fn distribute_among_scope_is_wire_compatible() {
+        let legacy = r#"{"type":"DistributeAmong","data":{"player":1,"total":3,"targets":[{"Object":7},{"Object":8}],"unit":{"type":"Damage"}}}"#;
+        let decoded: WaitingFor =
+            serde_json::from_str(legacy).expect("scope-less payload must deserialize");
+        match &decoded {
+            WaitingFor::DistributeAmong { scope, .. } => {
+                assert_eq!(scope, &DistributionScope::AnnouncedTargets);
+            }
+            other => panic!("expected DistributeAmong, got {other:?}"),
+        }
+        assert_eq!(
+            serde_json::to_string(&decoded).expect("serialize"),
+            legacy,
+            "announce-time scope must not appear on the wire"
+        );
+
+        let pending = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let resolution = WaitingFor::DistributeAmong {
+            player: PlayerId(1),
+            total: 3,
+            targets: vec![
+                TargetRef::Object(ObjectId(7)),
+                TargetRef::Object(ObjectId(8)),
+            ],
+            unit: DistributionUnit::Damage,
+            scope: DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            },
+        };
+        let json = serde_json::to_string(&resolution).expect("serialize");
+        assert!(
+            json.contains(r#""scope":{"type":"ResolutionCandidates""#),
+            "resolution-time scope must be on the wire: {json}"
+        );
+        let back: WaitingFor = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(back, resolution);
+    }
 }
 
 #[cfg(test)]
@@ -57615,6 +57779,7 @@ mod restored_exact_attack_authority_tests {
                     accumulated: false,
                     current: None,
                     nominee: None,
+                    tracked_pool: None,
                 }),
                 3 => ResolutionFrame::PerCategoryZoneChoice(PerCategoryZoneChoiceFrame {
                     pending: PendingPerCategoryZoneChoice {

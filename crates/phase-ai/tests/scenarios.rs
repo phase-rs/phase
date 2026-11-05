@@ -348,8 +348,9 @@ fn a_draw_replacement_is_not_held_in_the_upkeep() {
             &|action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == words),
         ) - score(&|action| matches!(action, GameAction::PassPriority))
     };
-    // At Hard the patience hold moves the root margin by about 0.17 (its -1.68 verdict times the
-    // 0.1 root tactical weight); with the draw replacement exempt, the floating-mana reference
+    // At Hard a patience hold would move the root margin by its full -1.68 verdict (the search
+    // root applies ActivationPatience unweighted) and lift Pass by the held line's continuation;
+    // with the draw replacement exempt, neither board is held, so the floating-mana reference
     // must agree with the unfloated board well inside that.
     let held = margin(Phase::Upkeep, true) - margin(Phase::Upkeep, false);
     assert!(
@@ -490,7 +491,11 @@ fn scenario_multiplayer_attacks_to_finish_exposed_player() {
         };
     }
 
-    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+    // Measurement mode: this assertion is about the attack a deterministic search
+    // finds, not about how much of that search fits in the wall-clock budget. A
+    // loaded CI shard can expire `AI_SEARCH_TIME_BUDGET_MS` mid-search, which
+    // degrades the action to "declined to attack" and fakes a regression.
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native).into_measurement(14);
     let mut rng = SmallRng::seed_from_u64(14);
     let action = choose_action(runner.state(), P0, &config, &mut rng);
 
