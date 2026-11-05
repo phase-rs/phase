@@ -9853,8 +9853,8 @@ mod tests {
     }
 
     /// CR 903.3e + CR 903.3d: the verbatim Oracle text of the two printed cards
-    /// that aggregate over "your commanders" reads every zone, and Command Chair's
-    /// "commanders you control" keeps its controller scope.
+    /// that read the greatest mana value among "your commanders" reads every zone,
+    /// and Command Chair's "commanders you control" keeps its controller scope.
     #[test]
     fn printed_commander_aggregate_text_reads_every_zone() {
         use crate::parser::oracle::parse_oracle_text;

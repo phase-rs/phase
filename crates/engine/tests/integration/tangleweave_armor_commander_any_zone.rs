@@ -3,8 +3,8 @@
 //! modified by continuous effects and other rules, in all zones, including that
 //! player’s library and hand."
 //!
-//! Two printed cards aggregate over "your commanders", and both carry a ruling that
-//! says "It doesn't matter where your commander is":
+//! Two printed cards read the greatest mana value among "your commanders", and both
+//! carry a ruling that says "It doesn't matter where your commander is":
 //!
 //! - Tangleweave Armor: "Living weapon (When this Equipment enters, create a 0/0
 //!   black Phyrexian Germ creature token, then attach this to it.)\nEquipped creature
@@ -424,8 +424,8 @@ fn x_stops_counting_when_the_commander_spell_is_countered() {
     assert_germ(runner.state(), armor, 2);
 }
 
-/// Activates Cactus Preserve's {3} ability for P0, then asserts the land resolved into
-/// an `expected`/`expected` creature that survives.
+/// Activates Cactus Preserve's {3} ability for P0, then asserts the land resolved with
+/// `expected` power and toughness and is still on the battlefield.
 #[track_caller]
 fn assert_cactus_preserve_becomes(
     mut scenario: GameScenario,

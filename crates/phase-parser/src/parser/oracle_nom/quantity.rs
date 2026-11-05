@@ -1703,7 +1703,7 @@ fn your_commanders_in_every_zone(filter: TargetFilter) -> TargetFilter {
 /// Used for flashback costs with "where X is the greatest mana value of a commander you own
 /// on the battlefield or in the command zone".
 ///
-/// Maps to `QuantityRef::Aggregate` with Max function to handle partner commanders.
+/// Maps to `QuantityRef::PropertyAggregate` with Max function to handle partner commanders.
 fn parse_greatest_commander_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("the greatest ").parse(input)?;
     let (rest, property) = parse_mana_value_phrase(rest)?;
@@ -4742,7 +4742,7 @@ fn parse_cost_paid_object_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
             scope: ObjectScope::CostPaidObject,
         },
-        // ManaSymbolCount is produced only via `QuantityRef::Aggregate`, never
+        // ManaSymbolCount is produced only via `QuantityRef::PropertyAggregate`, never
         // as a single cost-paid-object reference.
         ObjectProperty::ManaSymbolCount(_) => return Err(oracle_err(input)),
     };
