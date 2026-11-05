@@ -1816,9 +1816,10 @@ impl ResolutionStack {
     /// park can push more than one frame above the batch (counter ordering, the
     /// continuation tail). Owners are matched by the pre-move occurrence
     /// (member incarnation, object, origin zone), so a CR 614.6 destination
-    /// redirect on the approved event does not defeat the match. Ambiguity (0 or
-    /// >1 matching owners) fails closed, and the incarnation-bearing member key
-    /// makes a collision impossible for a single batch.
+    /// redirect on the approved event does not defeat the match. Ambiguity (no
+    /// matching owner, or more than one) fails closed, and the
+    /// incarnation-bearing member key makes a collision impossible for a single
+    /// batch.
     pub fn paused_batch_delivery_mut_for_member(
         &mut self,
         member: crate::types::identifiers::ObjectIncarnationRef,
@@ -6713,8 +6714,9 @@ mod tests {
     }
 
     /// The approved resume event for `expected`: the same pre-move occurrence
-    /// (object, origin) with a CR 614.6 destination redirect and the entry
-    /// counter the redirect's controller-side replacement carries (CR 614.1c).
+    /// (object, origin) with a CR 614.6 destination redirect; the entry counter
+    /// stands in for any other replacement-controlled modifier (CR 614.1c /
+    /// CR 614.1d) the key must also ignore.
     fn approved_with_redirect(expected: &ProposedEvent, destination: Zone) -> ProposedEvent {
         let mut approved = expected.clone();
         match &mut approved {
@@ -6766,11 +6768,13 @@ mod tests {
             .terminal_completion
     }
 
-    // CR 400.7 + CR 614.6 + CR 616.1: the buried-owner lookup matches the
-    // pre-move occurrence, so a destination redirect on the approved event does
-    // not defeat it. Both redirect directions: Hand -> Graveyard redirected onto
-    // the battlefield (Obstinate Baloth shape) and Library -> Battlefield
-    // redirected into exile (Containment Priest shape).
+    // CR 400.7 + CR 614.6 + CR 616.1: typed-invariant row. No printed card
+    // currently reaches a destination redirect under a buried BatchDelivery
+    // owner: Obstinate Baloth-class discard redirects are owned by
+    // PendingDiscardBatch/PendingSingleDiscard, and a Containment Priest exile
+    // redirect of a reveal-until entrant has no ETB tail park, so the fixed
+    // relation captures it. Both directions are exercised so the predicate is
+    // proven to ignore `to`.
     #[test]
     fn resumed_lookup_matches_a_buried_owner_by_pre_move_occurrence_across_a_destination_redirect()
     {

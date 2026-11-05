@@ -292,7 +292,7 @@ fn proteus_staff_activation_batch_settles_through_tap_then_counter_ordering() {
     answer_counter_ordering(&mut runner);
 
     // CR 608.2n + CR 117.3b: with no priority pass in between, the activation's
-    // resolution is complete and its controller receives priority with the batch
+    // resolution is complete and the active player (P0) receives priority with the batch
     // and every resolution carrier retired.
     let state = runner.state();
     assert!(
