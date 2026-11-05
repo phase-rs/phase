@@ -5121,7 +5121,9 @@ pub enum SimultaneousDepartureStage {
     /// instructions run with it) surfaced a choice. The delivery itself
     /// finishes through that choice's own owner; the batch then records the
     /// member and delivers the rest. Its rider has been handed to the delivery.
-    Delivering { member: QueuedSimultaneousDeparture },
+    Delivering {
+        member: Box<QueuedSimultaneousDeparture>,
+    },
 }
 
 /// The logical owner whose completion a simultaneous departure finishes.

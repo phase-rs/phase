@@ -809,7 +809,9 @@ fn advance_simultaneous_departure(
         if paused {
             // CR 608.2c: the member's delivery finishes through the choice's
             // own work; the batch records it once that work has settled.
-            pending.stage = Some(SimultaneousDepartureStage::Delivering { member: queued });
+            pending.stage = Some(SimultaneousDepartureStage::Delivering {
+                member: Box::new(queued),
+            });
             park_simultaneous_departure(state, pending, child_stack_start, stamp_from, events);
             return SimultaneousDepartureOutcome::Paused;
         }
