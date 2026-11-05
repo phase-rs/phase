@@ -14,6 +14,7 @@
 //! once for the first time it becomes a target this turn and not again.
 
 use engine::game::scenario::{GameScenario, P0};
+use engine::types::game_state::WaitingFor;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -95,6 +96,11 @@ fn niambi_granted_draw_trigger_fires_only_once_each_turn() {
 
     let outcome = runner.cast(growths[0]).target_object(bears).resolve();
     assert!(outcome.state().stack.is_empty());
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the first targeting spell and granted draw finish resolving: {:?}",
+        outcome.final_waiting_for()
+    );
     assert_eq!(
         library_size(&runner),
         before - 1,
@@ -103,6 +109,11 @@ fn niambi_granted_draw_trigger_fires_only_once_each_turn() {
 
     let outcome = runner.cast(growths[1]).target_object(bears).resolve();
     assert!(outcome.state().stack.is_empty());
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the second targeting spell finishes resolving: {:?}",
+        outcome.final_waiting_for()
+    );
     assert_eq!(
         library_size(&runner),
         before - 1,
