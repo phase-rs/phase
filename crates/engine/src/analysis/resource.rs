@@ -3598,9 +3598,10 @@ fn resolve_cost_multiplier(
 /// journal (e.g. `EnergyPaidOrLostThisTurn`), else `None`. Every non-modifier variant binds
 /// read-free, so a new variant must be classified here before it compiles.
 ///
-/// ONE authority for this axis, shared by the constant-depth veto
-/// ([`cost_modifier_reads_changed_projected_resource`]) and by
-/// [`static_mode_references_growing_class`] — both scans ask the same question.
+/// ONE authority for this axis, read by the period-tied veto
+/// ([`cost_modifier_reads_changed_projected_resource`]) at every consumer that extrapolates a
+/// recurrence: the constant-depth equality, the stack-growth cover, the object-growth cover,
+/// and `game::engine::take_route`.
 fn static_mode_projected_count(mode: &crate::types::statics::StaticMode) -> Option<&QuantityRef> {
     use crate::game::ability_scan::quantity_ref_references_projected_resource as reads_projected;
     use crate::types::statics::StaticMode;
@@ -3733,12 +3734,6 @@ fn static_mode_projected_count(mode: &crate::types::statics::StaticMode) -> Opti
         | StaticMode::CountsAsNamed { .. }
         | StaticMode::Other(..) => None,
     }
-}
-
-/// [`static_mode_projected_count`] as a predicate: the projected axis of
-/// [`static_mode_references_growing_class`]'s cost-modifier arm.
-fn static_mode_reads_projected_resource(mode: &crate::types::statics::StaticMode) -> bool {
-    static_mode_projected_count(mode).is_some()
 }
 
 /// CR 110.1: a permanent is a card or token on the battlefield — this captures one such
@@ -4752,7 +4747,10 @@ fn flush_clone(state: &GameState) -> GameState {
 ///     covers ([`eq_except_growable`]);
 /// 2″. every grown object is churn-inert ([`grown_objects_are_inert`]);
 /// 4″. no cost surface references the growing class (CR 732.2a — the EXHAUSTIVE cost scan
-///     plus the cost-keyword keystone rejectors).
+///     plus the cost-keyword keystone rejectors). A cost modifier pricing a PROJECTED per-turn
+///     journal is the one cost surface this scan does not answer: it is period-tied, not
+///     presence-tied, and gate 1″ vetoes it only when the journal actually moved
+///     ([`cost_modifier_reads_changed_projected_resource`]).
 pub(crate) fn loop_states_cover_modulo_object_growth(
     prior: &GameState,
     current: &GameState,
@@ -4786,6 +4784,12 @@ pub(crate) fn loop_states_cover_modulo_object_growth(
     if !(board_covers(&pa, &pb, &grown_ids)
         && object_resource_axes_match(prior, current)
         && loyalty_activation_counts_match(&pa, &pb)
+        // CR 601.2f + CR 732.2a: a live cost modifier whose projected journal MOVED between
+        // the compared frames prices the next repeat differently, so the covered recurrence is
+        // not constant. Period-tied, not presence-tied — the same authority the constant-depth
+        // equality and the stack-growth cover use, and the reason
+        // `static_mode_references_growing_class` no longer vetoes the projected read alone.
+        && !cost_modifier_reads_changed_projected_resource(prior, current)
         && eq_except_growable(&pa, &pb, &grown_ids))
     {
         return false;
@@ -7068,20 +7072,22 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         // `dynamic_count: Option<QuantityRef>` ("for each X you control"). An
         // `ObjectCount` of the grown class reads |G|, so route it fail-closed — for
         // BOTH directions: `Raise`+`ObjectCount` is the false-positive-∞ case, and
-        // `Reduce` is the keystone-REJECT case. A PROJECTED read (a per-turn journal
-        // such as Blaster Hulk's `EnergyPaidOrLostThisTurn`) is the same hazard one
-        // axis over: it grows with every repeat while `project_out_resources` zeroes
-        // it, so the cost changes per iteration and the cover must not certify the
-        // recurrence. `amount` (a fixed `ManaCost`) and every other field are
-        // read-free.
+        // `Reduce` is the keystone-REJECT case. `amount` (a fixed `ManaCost`) and
+        // every other field are read-free.
+        //
+        // A PROJECTED read (a per-turn journal such as Blaster Hulk's
+        // `EnergyPaidOrLostThisTurn`) is deliberately NOT vetoed here: presence is not a
+        // dependency. `project_out_resources` zeroes the journal on BOTH compared frames, so
+        // the only period in which the next repeat costs something else is one where the
+        // journal MOVED. That period-tied question is asked once, by
+        // [`cost_modifier_reads_changed_projected_resource`], at the cover's own gate. Vetoing
+        // on presence would refuse an unrelated, energy-free recurrence merely because an
+        // uncast Blaster Hulk sits in hand, where its self-spell reduction is live (CR 113.6)
+        // but prices nothing.
         StaticMode::ModifyCost { dynamic_count, .. }
-        | StaticMode::ReduceAbilityCost { dynamic_count, .. } => {
-            let reads_sibling = dynamic_count
-                .as_ref()
-                .is_some_and(qty_reads);
-            let reads_projected = static_mode_reads_projected_resource(mode);
-            reads_sibling || reads_projected
-        }
+        | StaticMode::ReduceAbilityCost { dynamic_count, .. } => dynamic_count
+            .as_ref()
+            .is_some_and(qty_reads),
         // CR 118.8 / CR 118.9 / CR 601.2f: variants carrying an `AbilityCost` payment
         // — the additional/alternative cast cost — route it through the exhaustive
         // `AbilityCost` scanner (a `PayLife`/`ManaDynamic`/… reading `ObjectCount`
@@ -14765,13 +14771,17 @@ mod tests {
     }
 
     /// A `ModifyCost { dynamic_count: Some(<projected per-turn journal>) }` static on
-    /// a STABLE object over a growing board REJECTs: `EnergyPaidOrLostThisTurn`
-    /// (Blaster Hulk's multiplier) grows with every repeat of a loop while
-    /// `project_out_resources` zeroes it, so the cost reads a different value each
-    /// iteration and the cover must not certify the recurrence. Non-vacuous: the same
-    /// static with `dynamic_count: None` (a fixed reduction) COVERS.
+    /// a STABLE object over a growing board is PERIOD-TIED, exactly as the constant-depth
+    /// equality is: `project_out_resources` zeroes `EnergyPaidOrLostThisTurn` (Blaster Hulk's
+    /// multiplier) on BOTH frames, so the cover must reject only when the journal actually
+    /// MOVED between them — that is the one period in which the next repeat costs something
+    /// else. Non-vacuous in BOTH directions on the SAME board and the SAME static: held journal
+    /// ⇒ COVER, moved journal ⇒ REJECT. The fixed control (`dynamic_count: None`) covers with
+    /// the journal moved, proving the dynamic-multiplier read is the differentiator rather than
+    /// the journal delta alone. Reverting to the presence scan flips the first assertion (an
+    /// uncast Hulk in hand would refuse an energy-free recurrence, CR 113.6).
     #[test]
-    fn object_growth_r_e2_modifycost_projected_dynamic_rejects() {
+    fn object_growth_r_e2_modifycost_projected_dynamic_is_period_tied() {
         use crate::types::mana::ManaCost;
         use crate::types::statics::CostModifyMode;
         let modify = |dynamic_count| StaticMode::ModifyCost {
@@ -14781,13 +14791,38 @@ mod tests {
             dynamic_count,
             reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         };
+        // `cover_with_static_on_stable`'s board with the period's energy journal as the only
+        // variable: the source stays put, one inert fodder token is minted, and the CURRENT
+        // frame carries the journal one repeat's payment left behind.
+        let cover_with_journal = |mode: StaticMode, energy_paid: u32| -> bool {
+            let mut prior = GameState::new_two_player(7);
+            let sid = inert_token(&mut prior, 600, 0, "StaticSource");
+            inert_token(&mut prior, 700, 0, "Saproling");
+            inert_token(&mut prior, 701, 0, "Saproling");
+            prior
+                .objects
+                .get_mut(&sid)
+                .unwrap()
+                .static_definitions
+                .push(StaticDefinition::new(mode));
+            let mut current = prior.clone();
+            inert_token(&mut current, 702, 0, "Saproling");
+            current.players[0].energy_paid_or_lost_this_turn = energy_paid;
+            cover(&prior, &current)
+        };
+        let projected = || modify(Some(QuantityRef::EnergyPaidOrLostThisTurn));
         assert!(
-            !cover_with_static_on_stable(modify(Some(QuantityRef::EnergyPaidOrLostThisTurn))),
-            "R-e2-projected: ModifyCost.dynamic_count reading a projected journal must REJECT"
+            cover_with_journal(projected(), 0),
+            "R-e2-projected: an UNMOVED journal prices both frames the same ⇒ COVER"
         );
         assert!(
-            cover_with_static_on_stable(modify(None)),
-            "R-e2-projected control: a fixed (dynamic_count = None) ModifyCost must COVER"
+            !cover_with_journal(projected(), 2),
+            "R-e2-projected: a MOVED journal changes the reduction every repeat ⇒ REJECT"
+        );
+        assert!(
+            cover_with_journal(modify(None), 2),
+            "R-e2-projected control: a fixed (dynamic_count = None) reduction covers \
+             regardless of the journal"
         );
     }
 

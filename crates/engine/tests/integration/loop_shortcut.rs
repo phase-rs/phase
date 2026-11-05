@@ -135,6 +135,11 @@ pub(crate) fn setup_2p_drain(mode: LoopDetectionMode) -> (GameRunner, ObjectId) 
 /// card sits uncast in hand — the metadata that must not veto an energy-free recurrence.
 const BLASTER_HULK: &str = "This spell costs {1} less to cast for each {E} (energy counter) you've paid or lost this turn.\nHaste\nWhenever this creature attacks, you get {E}{E}, then you may pay eight {E}. When you do, this creature deals 8 damage divided as you choose among up to eight targets.";
 
+/// Longtusk Cub verbatim (`data/card-data.json`): a `{E}{E}` ACTIVATION cost — the production
+/// route by which `energy_paid_or_lost_this_turn` advances (CR 107.14), as opposed to the
+/// hand-assigned journal value the helper-level comparison uses.
+const LONGTUSK_CUB: &str = "Whenever this creature deals combat damage to a player, you get {E}{E} (two energy counters).\nPay {E}{E}: Put a +1/+1 counter on this creature.";
+
 /// Park a REAL Blaster Hulk in `P0`'s hand, parsed by the production parser.
 fn add_uncast_blaster_hulk(scenario: &mut GameScenario) -> ObjectId {
     let mut builder =
@@ -240,6 +245,93 @@ fn moved_energy_journal_with_live_hulk_rejects_the_recurrence() {
     assert!(
         !loop_states_equal_modulo_resources(runner.state(), &paid),
         "CR 601.2f: the live Hulk prices the moved journal ⇒ the recurrence is not constant"
+    );
+}
+
+/// The shipped 2p drain pair plus a REAL Longtusk Cub holding two energy counters.
+/// `include_hulk` parks the uncast Blaster Hulk in `P0`'s hand — the only variable between the
+/// two runs below. Returns runner, kickoff, and the payer.
+fn setup_2p_drain_with_energy_payer(include_hulk: bool) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 6);
+    scenario.add_creature_from_oracle(P0, "Test Drain Cleric", 2, 2, DRAIN_CLERIC);
+    scenario.add_creature_from_oracle(P0, "Test Blood Sipper", 2, 2, BLOOD_SIPPER);
+    let kickoff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .id();
+    let cub = {
+        let mut builder = scenario.add_creature_from_oracle(P0, "Longtusk Cub", 2, 2, LONGTUSK_CUB);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        });
+        builder.id()
+    };
+    if include_hulk {
+        add_uncast_blaster_hulk(&mut scenario);
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::On;
+    // CR 107.14: the Cub holds, but has not spent, two energy counters.
+    runner.state_mut().players[P0.0 as usize].energy = 2;
+    (runner, kickoff, cub)
+}
+
+/// CR 107.14 + CR 601.2f + CR 732.2a: the recurrence veto driven off a REAL payment instead of a
+/// hand-assigned journal. `GameRunner::activate` pays the Cub's `{E}{E}` through the shared cost
+/// resolver (`costs.rs`) — the only production route that advances
+/// `energy_paid_or_lost_this_turn`. The predicate the reconcile bridge consults
+/// ([`loop_states_equal_modulo_resources`]) must then refuse to certify the pair, so the engine
+/// confirms no period for it and no take exists on which `TakeRoute::Mark` could be chosen.
+///
+/// The no-Hulk control is the SAME payment on the SAME board: with nothing live pricing the
+/// journal (its reserve, counter and journal are all projected out) the frames compare EQUAL, so
+/// the refusal in the first half is the modifier's, not the payment's.
+#[test]
+fn real_energy_payment_through_game_runner_rejects_the_recurrence() {
+    let (mut with_hulk, _kickoff, cub) = setup_2p_drain_with_energy_payer(true);
+    let before = with_hulk.state().clone();
+    with_hulk.activate(cub, 0).resolve();
+
+    // Reach guard: the production resolver really paid, so the journal the Hulk prices on moved.
+    assert_eq!(
+        with_hulk.state().players[P0.0 as usize].energy,
+        0,
+        "CR 107.14: paying {{E}}{{E}} removes both counters"
+    );
+    assert_eq!(
+        with_hulk.state().players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        2,
+        "the production cost resolver advances the journal Blaster Hulk's reduction reads"
+    );
+    assert!(
+        !matches!(
+            with_hulk.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "the payment itself certifies nothing; the next compared period must be refused"
+    );
+    assert!(
+        !loop_states_equal_modulo_resources(&before, with_hulk.state()),
+        "CR 601.2f: the live Hulk prices the journal the real payment moved ⇒ the recurrence is \
+         not constant, so no period is confirmed and TakeRoute::Mark is unreachable"
+    );
+
+    // Control: identical payment, nothing pricing the journal ⇒ the frames compare EQUAL.
+    let (mut no_hulk, _kickoff, cub) = setup_2p_drain_with_energy_payer(false);
+    let before = no_hulk.state().clone();
+    no_hulk.activate(cub, 0).resolve();
+    assert_eq!(
+        no_hulk.state().players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        2,
+        "reach guard: the control ran the same real payment"
+    );
+    assert!(
+        loop_states_equal_modulo_resources(&before, no_hulk.state()),
+        "control: with no live modifier reading the journal the same payment stays projected \
+         history ⇒ EQUAL"
     );
 }
 
