@@ -53,7 +53,7 @@ import { P2PDraftHost } from "../../adapter/p2p-draft-host";
 import { preflightDraftPodHostRecovery } from "../../adapter/draftPodHostAdapter";
 import { DRAFT_KINDS, DraftAdapter, type RestorableDraftSessionVerdict } from "../../adapter/draft-adapter";
 import * as compatibility from "../../adapter/draft-compatibility";
-import { Draft27IncompatibilityError, admitDraft27HostValue } from "../../adapter/draft-compatibility";
+import { Draft27IncompatibilityError, classifyDraft27Compatibility } from "../../adapter/draft-compatibility";
 import {
   MAX_MATERIALIZED_VIRTUAL_BASICS,
   validateWorkspaceState,
@@ -298,7 +298,7 @@ describe("draftPersistence", () => {
       it("refuses a saved session the draft engine refuses, though the client admits it", async () => {
         const raw = startedHost();
         // Reach: the client's top-level check admits the saved host.
-        expect(admitDraft27HostValue(raw).ok).toBe(true);
+        expect(classifyDraft27Compatibility(raw).ok).toBe(true);
         const check = engineAnswers({ type: "Incompatible" });
 
         const preflight = await preflightDraftPodHostRecovery({ session: raw, raw });
@@ -312,15 +312,15 @@ describe("draftPersistence", () => {
       it("refuses a saved session the draft engine refuses, whatever the client classifier admits", async () => {
         const fifo = savedSession("fifo_drafting");
         const raw = { ...testSession, draftSessionJson: fifo.text };
-        const realAdmission = compatibility.admitDraft27HostValue;
+        const realClassifier = compatibility.classifyDraft27Compatibility;
         // Reach: the client's top-level check admits the saved host.
-        expect(realAdmission(raw).ok).toBe(true);
+        expect(realClassifier(raw).ok).toBe(true);
         // A classifier that admits a FIFO flow value without a session.
-        const admission = vi.spyOn(compatibility, "admitDraft27HostValue").mockImplementation(((value: unknown) => {
+        const classifier = vi.spyOn(compatibility, "classifyDraft27Compatibility").mockImplementation(((value: unknown) => {
           const record = value as Record<string, unknown> | null;
-          if (record?.flow === "FifoAsync" && !("draftSessionJson" in record)) return { ok: true, value };
-          return realAdmission(value);
-        }) as typeof realAdmission);
+          if (record?.flow === "FifoAsync" && !("draftSessionJson" in record)) return { ok: true };
+          return realClassifier(value);
+        }) as typeof realClassifier);
         const check = engineAnswers(fifo.verdict);
 
         const preflight = await preflightDraftPodHostRecovery({ session: raw, raw });
@@ -330,7 +330,7 @@ describe("draftPersistence", () => {
         expect(check).toHaveBeenCalledWith(raw.draftSessionJson);
         expect(preflight.type).toBe("incompatible");
         expect(preflight.type === "incompatible" && preflight.error).toBeInstanceOf(Draft27IncompatibilityError);
-        expect(admission.mock.calls.map(([value]) => value)).toEqual([]);
+        expect(classifier.mock.calls.map(([value]) => value)).toEqual([]);
       });
 
       it("names the draft engine's refusal of a legacy-flow session with a burn policy", async () => {
@@ -339,7 +339,7 @@ describe("draftPersistence", () => {
         // Reach: the parsed session has no flow, carries the policy, and the client admits it.
         expect(config.flow).toBeUndefined();
         expect(config.selection_policy).toEqual({ burns_per_pick: 1, discard_threshold: 0 });
-        expect(admitDraft27HostValue(raw).ok).toBe(true);
+        expect(classifyDraft27Compatibility(raw).ok).toBe(true);
         engineAnswers({ type: "Incompatible" });
 
         const preflight = await preflightDraftPodHostRecovery({ session: raw, raw });
@@ -364,7 +364,7 @@ describe("draftPersistence", () => {
       it("rejects with the check's own error when the draft engine cannot answer", async () => {
         const raw = startedHost();
         // Reach: the client's top-level check admits the saved host.
-        expect(admitDraft27HostValue(raw).ok).toBe(true);
+        expect(classifyDraft27Compatibility(raw).ok).toBe(true);
         engineAnswers(new Error("draft engine unavailable"));
 
         await expect(async () => preflightDraftPodHostRecovery({ session: raw, raw })).rejects.toThrow("draft engine unavailable");
@@ -417,7 +417,7 @@ describe("draftPersistence", () => {
       it("admits a saved session the client admits and the draft engine cannot read", async () => {
         const raw = startedHost();
         // Reach: the client's top-level check admits the saved host.
-        expect(admitDraft27HostValue(raw).ok).toBe(true);
+        expect(classifyDraft27Compatibility(raw).ok).toBe(true);
         engineAnswers({ type: "Unreadable" });
 
         expect(await preflightDraftPodHostRecovery({ session: raw, raw })).toEqual({ type: "admitted" });

@@ -107,7 +107,7 @@ import { isHostedPodRecoveryFailureCurrent, useDraftPodStore } from "../draftPod
 import { useConnectivityStore } from "../connectivityStore";
 import { DraftPodHostAdapter } from "../../adapter/draftPodHostAdapter";
 import { P2PDraftHost } from "../../adapter/p2p-draft-host";
-import { Draft27IncompatibilityError, admitDraft27GuestView } from "../../adapter/draft-compatibility";
+import { Draft27IncompatibilityError, classifyDraft27Compatibility } from "../../adapter/draft-compatibility";
 import { inspectActiveDraftPod } from "../../services/draftPersistence";
 import type { PersistedDraftHostSession } from "../../services/draftPersistence";
 
@@ -183,7 +183,7 @@ function holdAfterImport(): { release: () => void; reached: Promise<void> } {
 
 /** The typed refusal a restore raises for a draft this client does not admit. */
 function incompatibleRestore(): Draft27IncompatibilityError {
-  const refusal = admitDraft27GuestView({ status: "Review" });
+  const refusal = classifyDraft27Compatibility({ status: "Review" });
   if (refusal.ok) throw new Error("A Review draft must be refused");
   return new Draft27IncompatibilityError(refusal.error);
 }

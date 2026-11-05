@@ -634,19 +634,14 @@ export interface LegacyDraftViewArm {
   fifo?: undefined;
 }
 
+/**
+ * A FIFO player view carries its FIFO data: the contract the core publishes.
+ * `isFifoPlayerView` stays the wire validator, and the presentation reads a
+ * received view's FIFO data only after that check passes.
+ */
 export interface FifoPlayerDraftViewArm {
   flow: "FifoAsync";
   fifo: FifoPlayerView;
-}
-
-/**
- * Compatibility input for existing fixture-facing view values.  Complete FIFO
- * views retain the arm above; consumers must still call `isFifoPlayerView`
- * before treating this partial wire shape as actionable.
- */
-export interface FifoPlayerDraftViewCompatibilityArm {
-  flow?: "FifoAsync";
-  fifo?: FifoPlayerView;
 }
 
 export interface FifoSpectatorDraftViewArm {
@@ -960,7 +955,7 @@ export interface DraftPlayerViewFields {
 }
 
 export type DraftPlayerView = DraftPlayerViewFields
-  & (LegacyDraftViewArm | FifoPlayerDraftViewArm | FifoPlayerDraftViewCompatibilityArm);
+  & (LegacyDraftViewArm | FifoPlayerDraftViewArm);
 
 export type MultiplayerSeatDescriptor =
   | { type: "Human"; player_id: number; display_name: string }

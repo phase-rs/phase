@@ -78,6 +78,11 @@ function ephemeralHost(hostDisplayName: string): P2PDraftHost {
   );
 }
 
+/** A guest's deck command as the wire delivers it. */
+function deckCommand(submissionId: string): DraftP2PMessage {
+  return { type: "draft_submit_deck", submissionId, mainDeck: ["Island"], commanders: [] };
+}
+
 describe("P2PDraftHost persistence disposal", () => {
   afterEach(() => {
     vi.clearAllMocks();
@@ -657,7 +662,7 @@ describe("P2PDraftHost persistence disposal", () => {
       };
       draftStarted: boolean;
       guestSessions: Map<number, { send: ReturnType<typeof vi.fn> }>;
-      handleDeckSubmission: (seat: number, cards: string[], commanders: string[], submissionId: string) => Promise<unknown>;
+      handleGuestMessage: (seat: number, message: DraftP2PMessage) => Promise<void>;
     };
     const view = {
       status: "Deckbuilding",
@@ -673,7 +678,7 @@ describe("P2PDraftHost persistence disposal", () => {
     const session = { send: vi.fn(async () => {}) };
     privateHost.guestSessions.set(1, session);
 
-    await privateHost.handleDeckSubmission(1, ["Island"], [], "submission-1");
+    await privateHost.handleGuestMessage(1, deckCommand("submission-1"));
     expect(saveDraftHostSession).toHaveBeenCalledWith("shared-recovery", expect.objectContaining({
       deckSubmissionReceipts: [{ seat: 1, submissionId: "submission-1", payloadFingerprint: expect.any(String) }],
     }));
@@ -683,7 +688,7 @@ describe("P2PDraftHost persistence disposal", () => {
       submissionId: "submission-1",
     }));
 
-    await privateHost.handleDeckSubmission(1, ["Island"], [], "submission-1");
+    await privateHost.handleGuestMessage(1, deckCommand("submission-1"));
     expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledOnce();
   });
 
@@ -767,7 +772,7 @@ describe("P2PDraftHost persistence disposal", () => {
       draftStarted: boolean;
       guestSessions: Map<number, { send: ReturnType<typeof vi.fn> }>;
       generatePairingsInner: ReturnType<typeof vi.fn>;
-      handleDeckSubmission: (seat: number, cards: string[], commanders: string[], submissionId: string) => Promise<unknown>;
+      handleGuestMessage: (seat: number, message: DraftP2PMessage) => Promise<void>;
     };
     const view = { status: "Pairing", seats: [{ has_submitted_deck: true, is_bot: false }] };
     privateHost.draftStarted = true;
@@ -779,13 +784,13 @@ describe("P2PDraftHost persistence disposal", () => {
     privateHost.guestSessions.set(1, session);
     saveDraftHostSession.mockRejectedValueOnce(new Error("IDB unavailable"));
 
-    await expect(privateHost.handleDeckSubmission(1, ["Island"], [], "submission-1"))
+    await expect(privateHost.handleGuestMessage(1, deckCommand("submission-1")))
       .rejects.toThrow("IDB unavailable");
     expect(session.send).toHaveBeenCalledWith(expect.objectContaining({
       type: "draft_error", submissionId: "submission-1", submissionDisposition: "Retryable",
     }));
 
-    await privateHost.handleDeckSubmission(1, ["Island"], [], "submission-1");
+    await privateHost.handleGuestMessage(1, deckCommand("submission-1"));
     expect(privateHost.generatePairingsInner).toHaveBeenCalledOnce();
     const recoveredSnapshot = saveDraftHostSession.mock.calls[
       saveDraftHostSession.mock.calls.length - 1
@@ -801,18 +806,83 @@ describe("P2PDraftHost persistence disposal", () => {
       draftStarted: boolean;
       guestSessions: Map<number, { send: ReturnType<typeof vi.fn> }>;
       generatePairingsInner: ReturnType<typeof vi.fn>;
-      handleDeckSubmission: (seat: number, cards: string[], commanders: string[], submissionId: string) => Promise<unknown>;
+      handleGuestMessage: (seat: number, message: DraftP2PMessage) => Promise<void>;
     };
     recoveredPrivate.adapter.submitDeckForSeat = vi.fn(async () => view);
     recoveredPrivate.adapter.getViewForSeat = vi.fn(async () => ({ ...view, status: "MatchInProgress" }));
     recoveredPrivate.adapter.exportSession = vi.fn(async () => "{\"status\":\"Deckbuilding\"}");
     recoveredPrivate.generatePairingsInner = vi.fn(async () => {});
-    recoveredPrivate.guestSessions.set(1, { send: vi.fn(async () => {}) });
-    await recoveredPrivate.handleDeckSubmission(1, ["Island"], [], "submission-1");
+    const recoveredSession = { send: vi.fn(async () => {}) };
+    recoveredPrivate.guestSessions.set(1, recoveredSession);
+    await recoveredPrivate.handleGuestMessage(1, deckCommand("submission-1"));
 
+    // Reach: the recovered host answered the retried command from its receipt.
+    expect(recoveredSession.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: "draft_deck_submit_ack", submissionId: "submission-1",
+    }));
     expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledOnce();
     expect(recoveredPrivate.adapter.submitDeckForSeat).not.toHaveBeenCalled();
     expect(recoveredPrivate.generatePairingsInner).not.toHaveBeenCalled();
+  });
+
+  it("runs a connection's deck commands one at a time and settles each on its own command", async () => {
+    const host = recoveredHost("Host");
+    const privateHost = host as unknown as {
+      adapter: {
+        submitDeckForSeat: ReturnType<typeof vi.fn>;
+        getViewForSeat: ReturnType<typeof vi.fn>;
+        exportSession: ReturnType<typeof vi.fn>;
+      };
+      draftStarted: boolean;
+      guestSessions: Map<number, { send: ReturnType<typeof vi.fn> }>;
+      handleGuestSessionMessage: (seat: number, message: DraftP2PMessage, session: unknown) => void;
+      mutationQueue: Promise<void>;
+    };
+    const view = { status: "Deckbuilding", seats: [{ has_submitted_deck: false, is_bot: false }] };
+    let releaseFirst!: () => void;
+    const firstReduced = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    privateHost.draftStarted = true;
+    privateHost.adapter.submitDeckForSeat = vi.fn()
+      .mockImplementationOnce(async () => { await firstReduced; return view; })
+      .mockImplementation(async () => view);
+    privateHost.adapter.getViewForSeat = vi.fn(async () => view);
+    privateHost.adapter.exportSession = vi.fn(async () => "{\"status\":\"Deckbuilding\"}");
+    const session = { send: vi.fn(async (_message: DraftP2PMessage) => {}) };
+    privateHost.guestSessions.set(1, session);
+    saveDraftHostSession.mockRejectedValueOnce(new Error("IDB unavailable"));
+    const reported = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    privateHost.handleGuestSessionMessage(1, deckCommand("submission-1"), session);
+    privateHost.handleGuestSessionMessage(1, deckCommand("submission-2"), session);
+    await vi.waitFor(() => expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledOnce());
+    // The second command waits behind the first, which is still in its reducer.
+    await Promise.resolve();
+    expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledOnce();
+
+    releaseFirst();
+    await vi.waitFor(() => expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledTimes(2));
+    await privateHost.mutationQueue;
+
+    const outcomes = session.send.mock.calls.flatMap(([message]): { type: string; submissionId?: string; disposition?: string }[] => {
+      switch (message.type) {
+        case "draft_error":
+          return [{ type: message.type, submissionId: message.submissionId, disposition: message.submissionDisposition }];
+        case "draft_deck_submit_ack":
+          return [{ type: message.type, submissionId: message.submissionId }];
+        default:
+          return [];
+      }
+    });
+    expect(outcomes).toEqual([
+      { type: "draft_error", submissionId: "submission-1", disposition: "Retryable" },
+      { type: "draft_deck_submit_ack", submissionId: "submission-2" },
+    ]);
+    // Reach: the first command failed inside the queue's detached mutation.
+    expect(reported).toHaveBeenCalledWith(
+      "[P2PDraftHost] guest message failed:",
+      expect.objectContaining({ message: "IDB unavailable" }),
+    );
+    reported.mockRestore();
   });
 
   it("generates pairings once for an ordinarily durable final deck submission", async () => {

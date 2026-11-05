@@ -418,6 +418,21 @@ describe("multiplayerDraftStore", () => {
       expect(draftViewPresentation(malformed)).toEqual({ podPhase: "drafting", isReadOnly: true });
     });
 
+    it("pairs the FIFO flow with its FIFO data at compile time and reads a mismatch as read-only", () => {
+      const legacy = mockView("Drafting");
+      const fifo = fifoView("Drafting").fifo!;
+      // The two directives surface only under `tsc`: a view naming the FIFO
+      // flow without its data, or carrying the data without the flow, is not a
+      // DraftPlayerView. The wire validator still reads every received view.
+      // @ts-expect-error a FIFO-flow view carries its FIFO data
+      const flowOnly: DraftPlayerView = { ...legacy, flow: "FifoAsync" };
+      // @ts-expect-error FIFO data arrives only with the FIFO flow
+      const dataOnly: DraftPlayerView = { ...legacy, fifo };
+
+      expect(draftViewPresentation(flowOnly)).toEqual({ podPhase: "drafting", isReadOnly: true });
+      expect(draftViewPresentation(dataOnly)).toEqual({ podPhase: "drafting", isReadOnly: true });
+    });
+
     it("accepts the FIFO effect options the core publishes and refuses a per-card effect list", () => {
       const drafting = fifoView("Drafting");
       // Positive reach guard: the core publishes absent effect options as
@@ -428,6 +443,7 @@ describe("multiplayerDraftStore", () => {
       const fifo = drafting.fifo!;
       const withOptions: DraftPlayerView = {
         ...drafting,
+        flow: "FifoAsync",
         fifo: {
           ...fifo,
           effects: {
