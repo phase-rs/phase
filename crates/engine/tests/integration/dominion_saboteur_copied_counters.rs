@@ -178,3 +178,100 @@ fn declining_the_copy_enters_a_plain_creature_without_counters() {
     );
     assert_eq!((entered.power, entered.toughness), (Some(3), Some(3)));
 }
+
+/// Zombify {3}{B} Sorcery — verbatim Oracle text.
+const ZOMBIFY: &str = "Return target creature card from your graveyard to the battlefield.";
+/// Cackling Counterpart {1}{U}{U} Instant — verbatim Oracle text.
+const CACKLING_COUNTERPART: &str = "Create a token that's a copy of target creature you control.\nFlashback {5}{U}{U} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+
+/// CR 614.1c + CR 614.12a: the enter-as-copy replacement applies however the
+/// creature enters, not only when it is cast. Returned from the graveyard by
+/// an effect, it still copies the chosen permanent and its counters.
+#[test]
+fn returned_from_the_graveyard_it_still_copies_the_counters() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let donor = scenario
+        .add_creature_from_oracle(P1, "Legendary Bear", 2, 2, "")
+        .as_legendary()
+        .id();
+    scenario.with_counter(donor, CounterType::Plus1Plus1, 2);
+    let saboteur = scenario
+        .add_creature_to_graveyard(P0, "Dominion Saboteur", 3, 3)
+        .from_oracle_text(DOMINION_SABOTEUR)
+        .id();
+    let zombify = scenario
+        .add_spell_to_hand_from_oracle(P0, "Zombify", false, ZOMBIFY)
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner
+        .cast(zombify)
+        .target_object(saboteur)
+        .replacement_choice(0)
+        .copy_target(donor)
+        .resolve();
+    assert_eq!(outcome.zone_of(saboteur), Zone::Battlefield);
+
+    let entered = &runner.state().objects[&saboteur];
+    assert_eq!(entered.name, "Legendary Bear");
+    assert!(!entered
+        .card_types
+        .supertypes
+        .contains(&Supertype::Legendary));
+    assert_eq!(
+        entered.counters.get(&CounterType::Plus1Plus1).copied(),
+        Some(2)
+    );
+    assert_eq!(entered.counters.len(), 1);
+    assert_eq!((entered.power, entered.toughness), (Some(4), Some(4)));
+}
+
+/// CR 707.2 + CR 614.1c: a token copy of an uncopied Dominion Saboteur has its
+/// enter-as-copy ability as it enters, so the token may itself enter as a copy
+/// of another permanent, with that permanent's counters.
+#[test]
+fn a_token_copy_created_by_an_effect_copies_the_counters() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let donor = scenario
+        .add_artifact_from_oracle(P1, "Charged Relic", "")
+        .id();
+    let charge = CounterType::Generic("charge".to_string());
+    scenario.with_counter(donor, charge.clone(), 3);
+    let saboteur = scenario
+        .add_creature_from_oracle(P0, "Dominion Saboteur", 3, 3, DOMINION_SABOTEUR)
+        .id();
+    let counterpart = scenario
+        .add_spell_to_hand_from_oracle(P0, "Cackling Counterpart", true, CACKLING_COUNTERPART)
+        .id();
+    let mut runner = scenario.build();
+
+    let _ = runner
+        .cast(counterpart)
+        .target_object(saboteur)
+        .replacement_choice(0)
+        .copy_target(donor)
+        .resolve();
+    assert_settled(&mut runner);
+
+    let state = runner.state();
+    let tokens: Vec<_> = state
+        .objects
+        .values()
+        .filter(|object| object.is_token && object.zone == Zone::Battlefield)
+        .collect();
+    assert_eq!(tokens.len(), 1, "exactly one token copy enters");
+    let token = tokens[0];
+    assert_eq!(token.name, "Charged Relic");
+    assert_eq!(
+        token.counters.get(&charge).copied(),
+        Some(3),
+        "the token enters with the copied artifact's three charge counters"
+    );
+    assert_eq!(token.counters.len(), 1);
+    // The uncopied Saboteur the token copied is untouched.
+    let original = &state.objects[&saboteur];
+    assert_eq!(original.name, "Dominion Saboteur");
+    assert!(original.counters.is_empty());
+}

@@ -388,9 +388,13 @@ pub(crate) fn snapshot_copied_counter_exceptions(
     }) {
         return;
     }
+    // CR 608.2h + CR 400.7: the copied *permanent* is read on the battlefield;
+    // once it has left (a card keeps its storage id in its new zone, where it
+    // is a new object with no counters), its last-known counters apply.
     let counters = state
         .objects
         .get(&copied_id)
+        .filter(|object| object.zone == crate::types::zones::Zone::Battlefield)
         .map(|object| &object.counters)
         .or_else(|| state.lki_cache.get(&copied_id).map(|lki| &lki.counters));
     let mut copied: Vec<(crate::types::counter::CounterType, u32)> = counters
@@ -3156,6 +3160,94 @@ mod tests {
                 .unwrap_or(0)
                 >= 1,
             "Persist copy must re-enter with a -1/-1 counter"
+        );
+    }
+
+    // ── Copied-counters rider (Dominion Saboteur) ────────────────────────
+
+    /// CR 608.2h + CR 400.7 + CR 707.2: a copied permanent that has left the
+    /// battlefield before the rider is read is a new object in its new zone
+    /// (with no counters); the rider reads its last-known counters instead.
+    #[test]
+    fn copied_counters_snapshot_reads_last_known_counters_after_the_donor_leaves() {
+        let mut state = GameState::new_two_player(42);
+        let donor = create_creature(&mut state, 1, PlayerId(1), "Bear", 2, 2);
+        let charge = CounterType::Generic("charge".to_string());
+        {
+            let obj = state.objects.get_mut(&donor).unwrap();
+            obj.counters.insert(CounterType::Plus1Plus1, 2);
+            obj.counters.insert(charge.clone(), 1);
+        }
+        let mut events = Vec::new();
+        move_to_zone(&mut state, donor, Zone::Graveyard, &mut events);
+        // The card keeps its storage id in the graveyard, without counters.
+        assert_eq!(state.objects[&donor].zone, Zone::Graveyard);
+        assert!(state.objects[&donor].counters.is_empty());
+
+        let mut modifications = vec![
+            ContinuousModification::RemoveSupertype {
+                supertype: crate::types::card_type::Supertype::Legendary,
+            },
+            ContinuousModification::AddCopiedCountersOnEnter,
+        ];
+        snapshot_copied_counter_exceptions(&state, donor, &mut modifications);
+
+        let mut expected = vec![(CounterType::Plus1Plus1, 2), (charge, 1)];
+        expected.sort();
+        let mut expected_modifications = vec![ContinuousModification::RemoveSupertype {
+            supertype: crate::types::card_type::Supertype::Legendary,
+        }];
+        expected_modifications.extend(expected.into_iter().map(|(counter_type, count)| {
+            ContinuousModification::AddCounterOnEnter {
+                counter_type,
+                count: crate::types::ability::QuantityExpr::Fixed { value: count },
+                if_type: None,
+            }
+        }));
+        assert_eq!(modifications, expected_modifications);
+    }
+
+    /// CR 707.2 + CR 122.6: an unexpanded copied-counters rider that reaches
+    /// copy installation (a copy path that skipped the snapshot) fails closed:
+    /// the copy still applies, no counters are placed, and nothing panics.
+    #[test]
+    fn unexpanded_copied_counters_rider_places_no_counters_and_does_not_panic() {
+        let mut state = GameState::new_two_player(42);
+        let donor = create_creature(&mut state, 1, PlayerId(1), "Bear", 2, 2);
+        state
+            .objects
+            .get_mut(&donor)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+        let recipient = create_creature(&mut state, 2, PlayerId(0), "Saboteur", 3, 3);
+        let donor_object = state.objects.get(&donor).unwrap();
+        let copy = PrecomputedCopyValues {
+            source_id: recipient,
+            controller: PlayerId(0),
+            duration_subject: ObjectIncarnationRef::from_object(&state.objects[&recipient]),
+            duration: Duration::Permanent,
+            values: intrinsic_copiable_values(donor_object),
+            display: donor_object.display_identity(),
+            additional_modifications: vec![ContinuousModification::AddCopiedCountersOnEnter],
+            effect_kind: EffectKind::BecomeCopy,
+        };
+        assert_eq!(
+            ContinuousModification::AddCopiedCountersOnEnter.layer(),
+            crate::types::Layer::Copy,
+            "an unexpanded rider orders with its copy effect instead of panicking"
+        );
+
+        let mut events = Vec::new();
+        apply_precomputed_copy_values(&mut state, recipient, copy, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let copied = &state.objects[&recipient];
+        assert_eq!(copied.name, "Bear");
+        assert!(
+            copied.counters.is_empty(),
+            "an unexpanded rider must add no counters, got {:?}",
+            copied.counters
         );
     }
 }

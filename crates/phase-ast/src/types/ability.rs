@@ -42828,7 +42828,9 @@ pub enum ContinuousModification {
     /// Like `AddCounterOnEnter`, this is NOT a continuous effect. The copy
     /// resolver snapshots the copied object's counters into concrete
     /// `AddCounterOnEnter` exceptions before any entry-counter placement, so it
-    /// never reaches the layer system or the counter-placement authority.
+    /// never reaches the layer system or the counter-placement authority. An
+    /// unexpanded occurrence fails closed everywhere: it places no counters and
+    /// never panics.
     AddCopiedCountersOnEnter,
     /// CR 707.9b + CR 306.5b/c: Override the starting loyalty declared by a
     /// copy exception ("its starting loyalty is N"). Like `AddCounterOnEnter`,

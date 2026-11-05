@@ -12362,12 +12362,22 @@ fn apply_continuous_effect_filtered(
             // CR 122.1 + CR 614.1c: One-shot counter placement is consumed at
             // copy resolution by token_copy::resolve / become_copy::resolve.
             // Reaching this arm means a wiring bug.
-            ContinuousModification::AddCounterOnEnter { .. }
-            | ContinuousModification::AddCopiedCountersOnEnter => {
+            ContinuousModification::AddCounterOnEnter { .. } => {
                 debug_assert!(
                     false,
                     "AddCounterOnEnter must be consumed at resolution time, \
                      not via apply_continuous_effect"
+                );
+            }
+            // CR 707.2 + CR 122.6: a copied-counters rider that a copy path
+            // failed to snapshot fails closed: it places no counters (counters
+            // are never copiable values, so no layer can supply them) and is
+            // logged as the wiring bug it is.
+            ContinuousModification::AddCopiedCountersOnEnter => {
+                tracing::error!(
+                    object = ?id,
+                    "AddCopiedCountersOnEnter reached the layer system unexpanded; \
+                     a copy path skipped become_copy::snapshot_copied_counter_exceptions"
                 );
             }
             // CR 707.9b + CR 306.5b/c: Starting-loyalty exceptions are folded
