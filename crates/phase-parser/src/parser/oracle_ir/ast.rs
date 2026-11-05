@@ -879,6 +879,11 @@ pub(crate) enum ImperativeFamilyAst {
         /// The card the keyword action moves — "target creature card from an
         /// opponent's graveyard" (CR 115.2: a non-battlefield-zone target).
         target: TargetFilter,
+        /// CR 115.2 + CR 607.2a: `None` for the graveyard form (the zone
+        /// constraint travels on the target filter); `Some(Exile)` for the
+        /// linked-exile form ("a creature card exiled with it"), an untargeted
+        /// off-battlefield pick made while the ability resolves (CR 608.2d).
+        origin: Option<Zone>,
     },
     /// CR 509.1c: Block this turn/combat if able.
     ForceBlock {

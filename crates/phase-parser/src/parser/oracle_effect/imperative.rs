@@ -13374,7 +13374,19 @@ fn anaphoric_trigger_body_note_value(rest: &str) -> Option<QuantityExpr> {
 ///     on the target filter), and a non-graveyard `assimilate` phrasing is a
 ///     shape this production does not model, so it must keep reporting as
 ///     unsupported rather than be silently lowered into a reanimation.
-fn parse_assimilate_target(lower: &str, ctx: &mut ParseContext) -> Option<TargetFilter> {
+///
+/// CR 607.2a + CR 406.6: the exile form ("assimilate a creature card exiled
+/// with it" — Borg Cube, Assimilation Assessor) names a card from the source's
+/// linked exile pool (`TargetFilter::ExiledBySource`). It is an untargeted
+/// choice from a zone other than the battlefield, so it carries an explicit
+/// `origin: Some(Exile)`; the clause-timing ladder
+/// (`change_zone_target_choice_timing`) then makes it a resolution-time pick
+/// (CR 608.2d), exactly like Sothera's and Tomb of the Dusk Rose's "put a
+/// creature card exiled with ~ onto the battlefield".
+fn parse_assimilate_target(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<(TargetFilter, Option<Zone>)> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("assimilate ")
         .parse(lower.trim())
         .ok()?;
@@ -13382,7 +13394,23 @@ fn parse_assimilate_target(lower: &str, ctx: &mut ParseContext) -> Option<Target
     if !remainder.trim().is_empty() {
         return None;
     }
-    (target.extract_in_zone() == Some(Zone::Graveyard)).then_some(target)
+    match target.extract_in_zone() {
+        Some(Zone::Graveyard) => Some((target, None)),
+        Some(Zone::Exile) if target_filter_names_linked_exile(&target) => {
+            Some((target, Some(Zone::Exile)))
+        }
+        _ => None,
+    }
+}
+
+/// CR 607.2a: true when `filter` constrains its objects to the source's linked
+/// "exiled with [this object]" pool.
+fn target_filter_names_linked_exile(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::ExiledBySource => true,
+        TargetFilter::And { filters } => filters.iter().any(target_filter_names_linked_exile),
+        _ => false,
+    }
 }
 
 /// CR 701.71a: recognize the `empower Jace N` keyword action.
@@ -14199,8 +14227,8 @@ pub(super) fn parse_imperative_family_ast(
     // `recruit`, rather than as a `match first_word` arm: a new string-literal
     // match arm is exactly what `scripts/check-parser-combinators.sh` family (B)
     // forbids.
-    if let Some(target) = parse_assimilate_target(lower, ctx) {
-        return Some(ImperativeFamilyAst::Assimilate { target });
+    if let Some((target, origin)) = parse_assimilate_target(lower, ctx) {
+        return Some(ImperativeFamilyAst::Assimilate { target, origin });
     }
 
     // CR 701.71a: `empower Jace N` is a standalone keyword action. Anchored nom
@@ -16744,7 +16772,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
         // targeted graveyard card to the battlefield under the instruction's
         // controller with a +1/+1 counter, then install a Duration::Permanent
         // layer-4 type override on that same object.
-        ImperativeFamilyAst::Assimilate { target } => {
+        ImperativeFamilyAst::Assimilate { target, origin } => {
             // CR 205.1b: "becomes a '[creature type or types] artifact
             // creature'" RETAINS every prior card type, supertype, and
             // non-creature subtype and REPLACES only the creature types.
@@ -16818,7 +16846,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             // CR 122.1: the +1/+1 counter is placed as part of the entry event;
             // it modifies P/T in layer 7c (CR 613.4c), never in the layer-4
             // modification list above.
-            // CR 115.2: `origin` stays None — the graveyard constraint travels
+            // CR 115.2: for the graveyard form `origin` is None — the graveyard constraint travels
             // on the target filter (FilterProp::InZone{Graveyard} +
             // FilterProp::Owned{Opponent}), which is what both target
             // enumeration and resolution-time re-legality consult. This matches
@@ -16826,9 +16854,10 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             // graveyard"): Ashen Powder, Puppeteer Clique, Macabre Mockery all
             // store origin: None. (Cards phrased "from A graveyard" — Rise from
             // the Grave, Reanimate — store Some(Graveyard); that is a different
-            // phrase and not this card's.)
+            // phrase and not this card's.) The linked-exile form carries
+            // Some(Exile) so its card is chosen at resolution (CR 608.2d).
             let mut clause = parsed_clause(Effect::ChangeZone {
-                origin: None,
+                origin,
                 destination: Zone::Battlefield,
                 target,
                 owner_library: false,

@@ -14913,6 +14913,32 @@ fn gated_run_keeps_ledger_for_this_way_head(ability: &ResolvedAbility) -> bool {
         )
 }
 
+/// CR 608.2c: Whether this node is a characteristic-changing step applied to the
+/// object the preceding instruction just moved (a `GenericEffect` bound to
+/// `ParentTarget` — "put it onto the battlefield … It's a Borg artifact
+/// creature", the expansion of `assimilate`) and is directly followed by a
+/// "… this way" reader, including the negated "If you can't" form. The step is
+/// part of the moving instruction, not a separate instruction, so the reader's
+/// "this way" still names the move. The caller applies this only when the node
+/// moved no objects.
+fn moved_object_step_keeps_ledger_for_this_way_head(ability: &ResolvedAbility) -> bool {
+    let reads_this_way_ledger = |condition: &AbilityCondition| match condition {
+        AbilityCondition::Not { condition } => condition.zone_changed_this_way_head().is_some(),
+        other => other.zone_changed_this_way_head().is_some(),
+    };
+    matches!(
+        ability.effect,
+        Effect::GenericEffect {
+            target: Some(TargetFilter::ParentTarget),
+            ..
+        }
+    ) && ability
+        .sub_ability
+        .as_ref()
+        .and_then(|sub| sub.condition.as_ref())
+        .is_some_and(reads_this_way_ledger)
+}
+
 /// CR 603.12 + CR 701.9a: Effect kinds whose reflexive "when you do" needs an
 /// actual move event even though their "if you do" (CR 118.12) treats a
 /// started-but-empty move as performed: a mass zone move, and a discard — which
@@ -24140,7 +24166,9 @@ fn resolve_chain_body(
     // turn") directly followed by a "this way" head is not that instruction,
     // so it leaves the moving instruction's ledger in place for the head.
     if !permission_node_keeps_ledger_for_this_way_head(ability)
-        && !(zone_changed_ids.is_empty() && gated_run_keeps_ledger_for_this_way_head(ability))
+        && !(zone_changed_ids.is_empty()
+            && (gated_run_keeps_ledger_for_this_way_head(ability)
+                || moved_object_step_keeps_ledger_for_this_way_head(ability)))
     {
         state.last_zone_changed_ids = zone_changed_ids;
     }
