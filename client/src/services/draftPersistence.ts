@@ -165,6 +165,7 @@ export type ActiveDraftGuestLoadResult =
 export type ActiveDraftPodPhase =
   | "lobby"
   | "drafting"
+  | "review"
   | "deckbuilding"
   | "pairing"
   | "matchInProgress"
@@ -197,9 +198,24 @@ export type ActiveDraftPodLoadResult =
 
 export type PersistedDraftHostSessionState = "live" | "terminal" | "invalid";
 
+/**
+ * Host recovery must keep absence, malformed storage, terminal history and an
+ * IndexedDB failure distinct.  In particular, a read failure keeps the saved
+ * record for a source-bound retry and does not authorize locator cleanup.
+ * The loader reads a saved draft session only for its status; whether the
+ * draft engine can restore it is the engine's own check.
+ */
+export type DraftHostSessionLoadResult =
+  | { type: "absent" }
+  | { type: "invalid"; raw: unknown }
+  | { type: "terminal"; session: PersistedDraftHostSession; raw: unknown }
+  | { type: "admitted"; session: PersistedDraftHostSession; raw: unknown }
+  | { type: "readFailure"; error: unknown };
+
 const PERSISTED_DRAFT_STATUS: Record<DraftStatus, PersistedDraftHostSessionState> = {
   Lobby: "live",
   Drafting: "live",
+  Review: "live",
   Paused: "live",
   Deckbuilding: "live",
   Pairing: "live",
@@ -245,37 +261,47 @@ export async function saveDraftHostSession(
 
 export async function loadDraftHostSession(
   id: string,
-): Promise<PersistedDraftHostSession | null> {
+): Promise<DraftHostSessionLoadResult> {
   try {
-    const s = await get<PersistedDraftHostSession>(
+    const raw = await get<unknown>(
       DRAFT_HOST_PREFIX + id,
       getDraftStore(),
     );
-    if (!s) return null;
-    if (!isPersistedDraftHostSession(s)) return null;
+    // IndexedDB deletion is represented by a nullish read.  Falsy values are
+    // still values: they must pass through the structural classifier so a
+    // corrupt `false`, `0`, or empty string cannot take the absent/guest
+    // fallback route by truthiness.
+    if (raw === undefined || raw === null) return { type: "absent" };
+    if (!isPersistedDraftHostSession(raw)) return { type: "invalid", raw };
+    const s = raw;
 
     const snapshots: Record<number, DraftWorkspaceState> = {};
     if (s.perSeatWorkspaceSnapshots !== undefined) {
-      if (!isPlainRecord(s.perSeatWorkspaceSnapshots)) return null;
+      if (!isPlainRecord(s.perSeatWorkspaceSnapshots)) return { type: "invalid", raw };
       const rawSnapshots = s.perSeatWorkspaceSnapshots as unknown as Record<PropertyKey, unknown>;
       for (const key of Reflect.ownKeys(rawSnapshots)) {
         if (
           typeof key !== "string"
           || !Object.prototype.propertyIsEnumerable.call(rawSnapshots, key)
         ) {
-          return null;
+          return { type: "invalid", raw };
         }
         const seat = Number(key);
-        if (!Number.isSafeInteger(seat) || seat < 0 || String(seat) !== key) return null;
+        if (!Number.isSafeInteger(seat) || seat < 0 || String(seat) !== key) return { type: "invalid", raw };
         const snapshot = validateWorkspaceState(rawSnapshots[key]);
-        if ("error" in snapshot) return null;
+        if ("error" in snapshot) return { type: "invalid", raw };
         snapshots[seat] = snapshot;
       }
     }
 
-    return { ...s, perSeatWorkspaceSnapshots: snapshots };
-  } catch {
-    return null;
+    const session = { ...s, perSeatWorkspaceSnapshots: snapshots };
+
+    const state = persistedDraftHostSessionState(session);
+    if (state === "invalid") return { type: "invalid", raw };
+    if (state === "terminal") return { type: "terminal", session, raw };
+    return { type: "admitted", session, raw };
+  } catch (error) {
+    return { type: "readFailure", error };
   }
 }
 
@@ -459,7 +485,7 @@ function isActiveDraftPodMeta(value: unknown): value is ActiveDraftPodMeta {
     typeof value.hostDisplayName === "string" &&
     (value.tournamentFormat === "Swiss" || value.tournamentFormat === "SingleElimination") &&
     (value.podPolicy === "Competitive" || value.podPolicy === "Casual") &&
-    (value.phase === "lobby" || value.phase === "drafting" || value.phase === "deckbuilding" ||
+    (value.phase === "lobby" || value.phase === "drafting" || value.phase === "review" || value.phase === "deckbuilding" ||
       value.phase === "pairing" || value.phase === "matchInProgress" || value.phase === "complete") &&
     isNonnegativeInteger(value.pickCount) &&
     isPositiveFiniteNumber(value.updatedAt)
