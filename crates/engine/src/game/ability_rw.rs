@@ -7857,8 +7857,9 @@ fn rw_library_instruction_actor(x: &LibraryInstructionActor) -> RwProfile {
         // The spell or ability's controller — a `ResolvedAbility` field, not a
         // filter read.
         LibraryInstructionActor::Controller => RwProfile::empty(),
-        // The library's owner — the instruction's own `player` selector, which
-        // the calling arm classifies.
+        // The library's owner — the instruction's own `player` selector. The rw
+        // walk does not profile that selector (the library-player convention
+        // shared with Dig/Mill/RevealTop); its frozen tags reach `legacy_effect`.
         LibraryInstructionActor::LibraryPlayer => RwProfile::empty(),
         // A named subject other than the library's owner ("Target opponent
         // looks at the top card of your library, then exiles it face down" —
