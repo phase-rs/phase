@@ -462,19 +462,43 @@ pub enum TriggerDoublerOrigin {
         affected: Option<super::ability::TargetFilter>,
     },
     /// CR 611.2a + CR 611.2c: a rule-modifying continuous effect a resolved
-    /// ability created ("if a triggered ability of that creature triggers,
-    /// that ability triggers an additional time" — Lwaxana Troi, Charming
-    /// Guest). It covers exactly the triggered abilities of one object
-    /// incarnation (CR 400.7). `effect_id` is the transient continuous
-    /// effect's own identity, so two resolutions are two effects and each
-    /// counts (CR 603.2d); `controller` is the player who controlled the
-    /// resolving ability, the effect's "you" (CR 109.5).
-    ResolvedEffect {
-        effect_id: u64,
-        source_id: ObjectId,
-        controller: PlayerId,
-        object: ObjectIncarnationRef,
-    },
+    /// ability created (Lwaxana Troi, Charming Guest).
+    ResolvedEffect(ResolvedEffectDoubler),
+}
+
+/// CR 611.2a + CR 611.2c + CR 603.2d: a rule-modifying continuous effect a
+/// resolved ability created ("if a triggered ability of that creature
+/// triggers, that ability triggers an additional time" — Lwaxana Troi,
+/// Charming Guest). It covers exactly the triggered abilities of one object
+/// incarnation (CR 400.7). `effect_id` is the transient continuous effect's
+/// own identity, so two resolutions are two effects and each counts
+/// (CR 603.2d); `source_id` is the object whose ability created it;
+/// `controller` is the player who controlled the resolving ability, the
+/// effect's "you" (CR 109.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedEffectDoubler {
+    pub effect_id: u64,
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    pub object: ObjectIncarnationRef,
+}
+
+/// CR 603.10a + CR 603.2d: a resolved-effect doubler as a battlefield
+/// departure latched it (`ZoneChangeRecord::trigger_doublers`): only a
+/// resolved effect is latched there, so the type admits no static origin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DepartureLatchedDoubler {
+    pub cause: super::statics::TriggerCause,
+    pub effect: ResolvedEffectDoubler,
+}
+
+impl DepartureLatchedDoubler {
+    pub fn to_latched(&self) -> LatchedTriggerDoubler {
+        LatchedTriggerDoubler {
+            cause: self.cause.clone(),
+            origin: TriggerDoublerOrigin::ResolvedEffect(self.effect),
+        }
+    }
 }
 
 impl LatchedTriggerDoubler {
@@ -483,7 +507,7 @@ impl LatchedTriggerDoubler {
     pub fn source_id(&self) -> ObjectId {
         match &self.origin {
             TriggerDoublerOrigin::Static { source, .. } => source.identity.reference.object_id,
-            TriggerDoublerOrigin::ResolvedEffect { source_id, .. } => *source_id,
+            TriggerDoublerOrigin::ResolvedEffect(effect) => effect.source_id,
         }
     }
 
@@ -491,7 +515,7 @@ impl LatchedTriggerDoubler {
     pub fn controller(&self) -> PlayerId {
         match &self.origin {
             TriggerDoublerOrigin::Static { source, .. } => source.lki.controller,
-            TriggerDoublerOrigin::ResolvedEffect { controller, .. } => *controller,
+            TriggerDoublerOrigin::ResolvedEffect(effect) => effect.controller,
         }
     }
 
@@ -499,7 +523,7 @@ impl LatchedTriggerDoubler {
     pub fn resolved_effect_id(&self) -> Option<u64> {
         match &self.origin {
             TriggerDoublerOrigin::Static { .. } => None,
-            TriggerDoublerOrigin::ResolvedEffect { effect_id, .. } => Some(*effect_id),
+            TriggerDoublerOrigin::ResolvedEffect(effect) => Some(effect.effect_id),
         }
     }
 }

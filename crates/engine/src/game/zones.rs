@@ -1201,10 +1201,12 @@ fn clear_hand_or_graveyard_casting_permissions_on_exit(
 }
 
 /// CR 603.10a + CR 603.2d: latch onto a battlefield departure's record the
-/// resolved trigger-doubling effects bound to the departing object, before exit
-/// cleanup ends them with it (`prune_object_bound_effects_on_exit`, CR 400.7).
-/// Its leaves-the-battlefield abilities look back in time, so they still
-/// trigger the additional times those effects called for.
+/// live resolved trigger-doubling effects the departing object is involved in
+/// (bound to it, or created by its ability), before exit cleanup ends them
+/// (`prune_object_bound_effects_on_exit`, CR 400.7; a source-bound duration).
+/// The bound object's leaves-the-battlefield abilities look back in time, so
+/// they still trigger the additional times those effects called for, even when
+/// the effect's source left first in the same simultaneous event.
 fn latch_departure_trigger_doublers(
     state: &GameState,
     record: &mut crate::types::game_state::ZoneChangeRecord,
@@ -1219,7 +1221,7 @@ fn latch_departure_trigger_doublers(
         return;
     };
     record.trigger_doublers =
-        super::triggers::resolved_effect_trigger_doublers_bound_to(state, object);
+        super::triggers::resolved_effect_trigger_doublers_involving(state, object);
 }
 
 /// CR 400.7: an object that moves to a new zone is a new object, so a

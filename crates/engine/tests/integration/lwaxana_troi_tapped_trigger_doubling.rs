@@ -31,6 +31,8 @@ const VITALIZE_ORACLE: &str = "Untap all creatures you control.";
 const ILLUSIONISTS_BRACERS_ORACLE: &str = "Whenever an ability of equipped creature is activated, if it isn't a mana ability, copy that ability. You may choose new targets for the copy.\nEquip {3}";
 const SOLEMN_SIMULACRUM_ORACLE: &str = "When this creature enters, you may search your library for a basic land card, put that card onto the battlefield tapped, then shuffle.\nWhen this creature dies, you may draw a card.";
 const MURDER_ORACLE: &str = "Destroy target creature.";
+const WRATH_OF_GOD_ORACLE: &str = "Destroy all creatures. They can't be regenerated.";
+const PYROCLASM_ORACLE: &str = "Pyroclasm deals 2 damage to each creature.";
 const HARMONIC_PRODIGY_ORACLE: &str = "Prowess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn.)\nIf a triggered ability of a Shaman or another Wizard you control triggers, that ability triggers an additional time.";
 const SHOCK_ORACLE: &str = "Shock deals 2 damage to any target.";
 
@@ -221,51 +223,83 @@ fn a_copied_activation_is_a_second_independent_doubling_effect() {
     assert_eq!(attack_with_both(&mut board), 4);
 }
 
-/// CR 603.10a + CR 603.2d: the chosen creature's own dies trigger looks back
-/// to the moment it died, when Lwaxana's effect still applied to it.
-#[test]
-fn the_chosen_creatures_dies_trigger_triggers_an_additional_time() {
-    let (mut scenario, lwaxana) = main_phase(ManaType::Black, 5);
-    let solemn = scenario
-        .add_creature(P0, "Solemn Simulacrum", 2, 2)
-        .as_artifact_creature()
-        .with_subtypes(vec!["Golem"])
-        .from_oracle_text(SOLEMN_SIMULACRUM_ORACLE)
-        .id();
-    let murder = scenario
-        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER_ORACLE)
-        .id();
-    let mut runner = scenario.build();
+/// Which of Lwaxana and Solemn Simulacrum comes first on the battlefield —
+/// the order a sweeper moves them in.
+#[derive(Clone, Copy)]
+enum BattlefieldOrder {
+    LwaxanaFirst,
+    SolemnFirst,
+}
 
+struct SolemnBoard {
+    runner: GameRunner,
+    lwaxana: ObjectId,
+    solemn: ObjectId,
+    spell: ObjectId,
+}
+
+/// Lwaxana and Solemn Simulacrum (in `order`), the given sorcery or instant
+/// in hand, and `mana` of one type; Lwaxana's ability has resolved on Solemn.
+fn solemn_board(
+    order: BattlefieldOrder,
+    mana: ManaType,
+    amount: usize,
+    spell: (&str, bool, &str),
+) -> SolemnBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let add_solemn = |scenario: &mut GameScenario| {
+        scenario
+            .add_creature(P0, "Solemn Simulacrum", 2, 2)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Golem"])
+            .from_oracle_text(SOLEMN_SIMULACRUM_ORACLE)
+            .id()
+    };
+    let add_lwaxana = |scenario: &mut GameScenario| {
+        scenario
+            .add_creature_from_oracle(P0, LWAXANA, 2, 2, LWAXANA_ORACLE)
+            .id()
+    };
+    let (lwaxana, solemn) = match order {
+        BattlefieldOrder::LwaxanaFirst => {
+            let lwaxana = add_lwaxana(&mut scenario);
+            (lwaxana, add_solemn(&mut scenario))
+        }
+        BattlefieldOrder::SolemnFirst => {
+            let solemn = add_solemn(&mut scenario);
+            (add_lwaxana(&mut scenario), solemn)
+        }
+    };
+    let (name, is_instant, oracle) = spell;
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, name, is_instant, oracle)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        std::iter::repeat_n(mana, amount)
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    scenario.with_library_top(P0, &["Plains"; 5]);
+    scenario.with_library_top(P1, &["Plains"; 5]);
+    let mut runner = scenario.build();
     runner
         .activate(lwaxana, 0)
         .target_objects(&[solemn])
         .resolve();
-    assert!(runner.state().objects[&lwaxana].tapped);
-    let library_before = runner.state().players[0].library.len();
+    assert!(runner.state().objects[&lwaxana].tapped, "Lwaxana taps");
+    assert!(runner.state().stack.is_empty(), "the activation resolves");
+    SolemnBoard {
+        runner,
+        lwaxana,
+        solemn,
+        spell,
+    }
+}
 
-    runner.cast(murder).target_object(solemn).commit();
-    // Resolve Murder; stop when its dies triggers are pending or stacked.
-    for _ in 0..16 {
-        let state = runner.state();
-        let solemn_triggers = state
-            .stack
-            .iter()
-            .filter(|entry| {
-                entry.source_id == solemn
-                    && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
-            })
-            .count();
-        if solemn_triggers > 0 || matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
-            break;
-        }
-        runner.act(GameAction::PassPriority).expect("pass");
-    }
-    assert_eq!(runner.state().objects[&solemn].zone, Zone::Graveyard);
-    if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
-        drain_order_triggers_with_identity(runner.state_mut());
-    }
-    let solemn_triggers = runner
+fn solemn_dies_triggers(runner: &GameRunner, solemn: ObjectId) -> usize {
+    runner
         .state()
         .stack
         .iter()
@@ -273,17 +307,164 @@ fn the_chosen_creatures_dies_trigger_triggers_an_additional_time() {
             entry.source_id == solemn
                 && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
         })
-        .count();
+        .count()
+}
+
+/// Resolves the committed kill spell until Solemn's dies triggers are on the
+/// stack, then asserts how many there are and that each draws a card.
+fn assert_solemn_dies_twice(board: &mut SolemnBoard) {
+    let library_before = board.runner.state().players[0].library.len();
+    for _ in 0..16 {
+        if solemn_dies_triggers(&board.runner, board.solemn) > 0
+            || matches!(
+                board.runner.state().waiting_for,
+                WaitingFor::OrderTriggers { .. }
+            )
+        {
+            break;
+        }
+        board.runner.act(GameAction::PassPriority).expect("pass");
+    }
     assert_eq!(
-        solemn_triggers, 2,
+        board.runner.state().objects[&board.solemn].zone,
+        Zone::Graveyard,
+        "Solemn died"
+    );
+    if matches!(
+        board.runner.state().waiting_for,
+        WaitingFor::OrderTriggers { .. }
+    ) {
+        drain_order_triggers_with_identity(board.runner.state_mut());
+    }
+    assert_eq!(
+        solemn_dies_triggers(&board.runner, board.solemn),
+        2,
         "Solemn's dies trigger triggers an additional time"
     );
-
-    resolve_all(&mut runner);
+    resolve_all(&mut board.runner);
     assert_eq!(
-        library_before - runner.state().players[0].library.len(),
+        library_before - board.runner.state().players[0].library.len(),
         2,
         "each instance offers a draw, and both are accepted"
+    );
+}
+
+/// CR 603.10a + CR 603.2d: the chosen creature's own dies trigger looks back
+/// to the moment it died, when Lwaxana's effect still applied to it.
+#[test]
+fn the_chosen_creatures_dies_trigger_triggers_an_additional_time() {
+    let mut board = solemn_board(
+        BattlefieldOrder::LwaxanaFirst,
+        ManaType::Black,
+        5,
+        ("Murder", true, MURDER_ORACLE),
+    );
+    let (murder, solemn) = (board.spell, board.solemn);
+    board.runner.cast(murder).target_object(solemn).commit();
+    assert_solemn_dies_twice(&mut board);
+    assert!(
+        board.runner.state().objects[&board.lwaxana].tapped,
+        "Lwaxana survives, still tapped"
+    );
+}
+
+/// CR 603.10a: Lwaxana dying in the same event as the chosen creature still
+/// applied immediately before it (cf. the Teysa Karlov ruling: a creature
+/// dying at the same time as the doubler still triggers an additional time),
+/// whichever of the two the sweeper moves first.
+fn wrath_kills_both(order: BattlefieldOrder) {
+    let mut board = solemn_board(
+        order,
+        ManaType::White,
+        6,
+        ("Wrath of God", false, WRATH_OF_GOD_ORACLE),
+    );
+    let wrath = board.spell;
+    board.runner.cast(wrath).commit();
+    assert_solemn_dies_twice(&mut board);
+    assert_eq!(
+        board.runner.state().objects[&board.lwaxana].zone,
+        Zone::Graveyard,
+        "Lwaxana died in the same event"
+    );
+}
+
+#[test]
+fn wrath_of_god_lwaxana_first_still_doubles_the_dies_trigger() {
+    wrath_kills_both(BattlefieldOrder::LwaxanaFirst);
+}
+
+#[test]
+fn wrath_of_god_solemn_first_still_doubles_the_dies_trigger() {
+    wrath_kills_both(BattlefieldOrder::SolemnFirst);
+}
+
+/// CR 704.3 + CR 603.10a: the same look-back for a state-based-action death
+/// batch — Pyroclasm's 2 damage kills both 2-toughness creatures at once.
+fn pyroclasm_kills_both(order: BattlefieldOrder) {
+    let mut board = solemn_board(
+        order,
+        ManaType::Red,
+        4,
+        ("Pyroclasm", false, PYROCLASM_ORACLE),
+    );
+    let pyroclasm = board.spell;
+    board.runner.cast(pyroclasm).commit();
+    assert_solemn_dies_twice(&mut board);
+    assert_eq!(
+        board.runner.state().objects[&board.lwaxana].zone,
+        Zone::Graveyard,
+        "Lwaxana died in the same state-based-action pass"
+    );
+}
+
+#[test]
+fn pyroclasm_lwaxana_first_still_doubles_the_dies_trigger() {
+    pyroclasm_kills_both(BattlefieldOrder::LwaxanaFirst);
+}
+
+#[test]
+fn pyroclasm_solemn_first_still_doubles_the_dies_trigger() {
+    pyroclasm_kills_both(BattlefieldOrder::SolemnFirst);
+}
+
+/// CR 611.2b + CR 603.10a: Lwaxana dying in an EARLIER event ended the
+/// effect, so the chosen creature's later death looks back to no doubler.
+#[test]
+fn lwaxana_dying_first_in_a_separate_event_ends_the_doubling() {
+    let (mut scenario, lwaxana) = main_phase(ManaType::Black, 8);
+    let solemn = scenario
+        .add_creature(P0, "Solemn Simulacrum", 2, 2)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Golem"])
+        .from_oracle_text(SOLEMN_SIMULACRUM_ORACLE)
+        .id();
+    let first = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER_ORACLE)
+        .id();
+    let second = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .activate(lwaxana, 0)
+        .target_objects(&[solemn])
+        .resolve();
+    runner.cast(first).target_object(lwaxana).resolve();
+    assert_eq!(runner.state().objects[&lwaxana].zone, Zone::Graveyard);
+
+    runner.cast(second).target_object(solemn).commit();
+    for _ in 0..16 {
+        if solemn_dies_triggers(&runner, solemn) > 0 {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass");
+    }
+    assert_eq!(runner.state().objects[&solemn].zone, Zone::Graveyard);
+    assert_eq!(
+        solemn_dies_triggers(&runner, solemn),
+        1,
+        "the effect ended with Lwaxana's earlier death"
     );
 }
 
