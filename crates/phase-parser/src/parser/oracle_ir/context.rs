@@ -13,6 +13,53 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
 
+/// CR 611.2a + CR 608.2c: the window a chunk's clause printed at its head, read by
+/// the clause parser itself rather than re-derived from the chunk's source text.
+///
+/// A duration that heads a sentence scopes every coordinated predicate of it
+/// ("Until your next turn, X and Y"), so assembly distributes it to the
+/// sentence's later clauses. Whether the clause heads with one is only knowable
+/// AFTER the chunk loop has lifted the clause's leading guards (a general
+/// conditional, a reflexive "If you do,", …) and the clause shell has peeled its
+/// slots; re-peeling the printed fragment downstream would have to re-implement
+/// that whole guard stack. So the chunk loop arms this probe immediately before
+/// the clause's main parse, the clause parser settles it on the text it actually
+/// lowers, and the chunk loop lifts the result onto `ClauseIr::head_window`.
+///
+/// `Unarmed` (the default, and every standalone parse) records nothing. An
+/// `Armed` probe the parse never settled — a recognizer that returned before
+/// reading its head — means "no head window": it states nothing to distribute.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum HeadWindowProbe {
+    #[default]
+    Unarmed,
+    Armed,
+    Read(Option<Duration>),
+}
+
+impl HeadWindowProbe {
+    pub(crate) fn is_armed(&self) -> bool {
+        matches!(self, Self::Armed)
+    }
+
+    /// Settle an armed probe with the window read at the clause head; a probe
+    /// that is unarmed or already settled is left untouched, so a nested clause
+    /// parse cannot overwrite the head reading.
+    pub(crate) fn settle(&mut self, window: Option<Duration>) {
+        if self.is_armed() {
+            *self = Self::Read(window);
+        }
+    }
+
+    /// Disarm the probe, yielding the head window it recorded (if any).
+    pub(crate) fn take_window(&mut self) -> Option<Duration> {
+        match std::mem::take(self) {
+            Self::Read(window) => window,
+            Self::Unarmed | Self::Armed => None,
+        }
+    }
+}
+
 /// The players an anaphoric controller phrase can bind to, read from the parse
 /// context (`ParseContext::player_antecedents`) or supplied by a named seed.
 /// `None` means no antecedent is in scope.
@@ -383,6 +430,9 @@ pub struct ParseContext {
     /// paid, duration-scoped, capped-at-one `from among` batch grant to the
     /// `GrantCastingPermission { PlayFromExile { single_use: true } }` shape.
     pub stated_clause_duration: Option<Duration>,
+    /// CR 611.2a + CR 608.2c: whether the clause the chain chunk loop is about
+    /// to parse printed a window at its HEAD. See [`HeadWindowProbe`].
+    pub head_window: HeadWindowProbe,
     /// CR 608.2c + CR 400.7: the REST-partition destination zone of the
     /// nearest preceding `Effect::Dig` in this chain whose kept and rest
     /// destinations differ (a genuine reveal/split, e.g. Dihada, Binder of

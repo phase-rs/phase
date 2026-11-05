@@ -2,9 +2,13 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { WaitingFor } from "../../../adapter/types.ts";
-import { NamedChoiceModal } from "../NamedChoiceModal.tsx";
+import { NamedChoiceModal, SecretAgendaModal } from "../NamedChoiceModal.tsx";
 
 const dispatchMock = vi.fn();
+
+vi.mock("../../../services/cardNames.ts", () => ({
+  getCardNames: () => Promise.resolve(["Grizzly Bears", "Runeclaw Bear"]),
+}));
 
 vi.mock("../../../hooks/useGameDispatch.ts", () => ({
   useGameDispatch: () => dispatchMock,
@@ -121,6 +125,43 @@ describe("NamedChoiceModal", () => {
 
       expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: "1" })).toBeInTheDocument();
+    });
+  });
+});
+
+describe("SecretAgendaModal", () => {
+  async function nameCard(query: string) {
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: query } });
+    fireEvent.click(await screen.findByRole("button", { name: query }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+  }
+
+  it("answers a hidden agenda with its one name", async () => {
+    render(<SecretAgendaModal data={{ player: 0, object_id: 9, name_count: 1 }} />);
+
+    await nameCard("Grizzly Bears");
+
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "ChooseSecretAgendaNames",
+      data: { names: ["Grizzly Bears"] },
+    });
+  });
+
+  it("collects both double agenda names before sending one answer", async () => {
+    render(<SecretAgendaModal data={{ player: 0, object_id: 9, name_count: 2 }} />);
+
+    expect(screen.getByRole("heading", { name: /1 of 2/ })).toBeInTheDocument();
+    await nameCard("Grizzly Bears");
+    expect(dispatchMock).not.toHaveBeenCalled();
+
+    expect(await screen.findByRole("heading", { name: /2 of 2/ })).toBeInTheDocument();
+    await nameCard("Runeclaw Bear");
+
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "ChooseSecretAgendaNames",
+      data: { names: ["Grizzly Bears", "Runeclaw Bear"] },
     });
   });
 });
