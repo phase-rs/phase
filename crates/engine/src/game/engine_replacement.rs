@@ -571,9 +571,9 @@ fn handle_replacement_choice_inner(
                                 crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_)
                             )
                         {
-                            // CR 603.10a: the member's `ZoneChanged` is already in
-                            // this slice, so the forwarded-result marker settles
-                            // against the same record the Done path uses.
+                            // CR 614.6: the replaced move's terminal `ZoneChanged` is
+                            // already in this slice, so the forwarded-result marker
+                            // settles against the same record the Done path uses.
                             effects::settle_replaced_forwarded_zone_delivery(
                                 state,
                                 paused.member,

@@ -4580,8 +4580,8 @@ pub struct PendingZoneChangeDelivery {
     /// Exact terminal classification of the paused delivery once it has
     /// completed. It remains absent only while the original replacement or
     /// as-enters prompt is unresolved; the resume seam records it before either
-    /// delivery terminal (issue #10431), so a resumed owner is always
-    /// classified by the time `drain_pending_batch_deliveries` reads it.
+    /// delivery terminal (issue #10431), so every resumed member the seam can
+    /// match is classified before `drain_pending_batch_deliveries` reads it.
     pub terminal_completion: Option<ZoneMoveCompletion>,
     pub count: PausedZoneChangeDeliveryCount,
     /// CR 406.3: A batch delivery requested concealment on an Exile landing.
