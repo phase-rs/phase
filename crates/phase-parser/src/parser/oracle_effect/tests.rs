@@ -96804,3 +96804,83 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
         );
     }
 }
+
+/// CR 702.26b + CR 115.1: the compound "<source> and <target> phase out" arm
+/// requires a DECLARED second target slot. Dream Fighter's "that creature" is
+/// only the triggering-event creature (a context reference that announces no
+/// target), so the trigger must stay an honest strict failure rather than parse
+/// to `TargetOnly{TriggeringSource}` > `PhaseOut{Or[SelfRef, ParentTarget]}`,
+/// which would phase out only Dream Fighter itself. The positive reach guard
+/// drives the same helper over U.S.S. Defiant's declared-target clause.
+#[test]
+fn compound_phase_out_requires_a_declared_second_target_slot() {
+    fn mentions_phase_out_union(def: &AbilityDefinition) -> bool {
+        let this_node = matches!(def.effect.as_ref(), Effect::TargetOnly { .. })
+            || matches!(
+                def.effect.as_ref(),
+                Effect::PhaseOut {
+                    target: TargetFilter::Or { .. }
+                }
+            );
+        this_node
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(mentions_phase_out_union)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(mentions_phase_out_union)
+    }
+    fn has_unimplemented(def: &AbilityDefinition) -> bool {
+        matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
+            || def.sub_ability.as_deref().is_some_and(has_unimplemented)
+            || def.else_ability.as_deref().is_some_and(has_unimplemented)
+    }
+
+    // Positive reach guard: the helper accepts the declared-target class.
+    let mut ctx = ParseContext::default();
+    let defiant = subject::try_parse_source_and_target_phase_out(
+        "~ and up to one target creature you control phase out.",
+        &mut ctx,
+    )
+    .expect("declared second target slot parses to the union");
+    assert!(matches!(defiant.effect, Effect::TargetOnly { .. }));
+    assert_eq!(
+        *defiant.sub_ability.expect("one phasing batch").effect,
+        Effect::PhaseOut {
+            target: TargetFilter::Or {
+                filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget]
+            }
+        }
+    );
+
+    // The helper rejects a context-reference second conjunct.
+    assert!(
+        subject::try_parse_source_and_target_phase_out(
+            "~ and that creature phase out",
+            &mut ParseContext::default()
+        )
+        .is_none(),
+        "\"that creature\" declares no target slot"
+    );
+
+    // Dream Fighter, verbatim Oracle (MTGJSON AtomicCards).
+    let parsed = parse_oracle_text(
+        "Whenever this creature blocks or becomes blocked by a creature, this creature and that creature phase out. (While they're phased out, they're treated as though they don't exist. Each one phases in before its controller untaps during their next untap step.)",
+        "Dream Fighter",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Soldier".to_string()],
+    );
+    assert_eq!(parsed.triggers.len(), 1, "{parsed:#?}");
+    let execute = parsed.triggers[0].execute.as_ref().expect("trigger body");
+    assert!(
+        !mentions_phase_out_union(execute),
+        "no TargetOnly / PhaseOut union for an undeclared second conjunct: {execute:#?}"
+    );
+    assert!(
+        has_unimplemented(execute),
+        "the unsupported clause must stay a visible strict failure: {execute:#?}"
+    );
+}

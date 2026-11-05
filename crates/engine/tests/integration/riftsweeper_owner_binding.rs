@@ -915,7 +915,7 @@ fn watery_grasp_waterbend_shuffles_the_enchanted_creature_without_a_target() {
     runner.cast(grasp).target_object(host).resolve();
     // Reach guard: the Aura resolved onto the host.
     assert_eq!(runner.state().objects[&grasp].zone, Zone::Battlefield);
-    assert_eq!(runner.state().objects[&grasp].attached_to.is_some(), true);
+    assert!(runner.state().objects[&grasp].attached_to.is_some());
 
     let mut events = runner
         .act(GameAction::ActivateAbility {

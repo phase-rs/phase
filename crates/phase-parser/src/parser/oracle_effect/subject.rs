@@ -1884,12 +1884,19 @@ fn parse_source_and_target_subjects(
         ctx,
         AnaphorConsumer::AffectedObject,
     )?;
-    // The secondary conjunct must carry its own target slot ("up to one other
-    // target creature"); a bare conjunction with no second target is not this
-    // class and is left to the generic subject split. The primary conjunct, by
-    // contrast, must NOT introduce its own target slot — its grant rides as a
-    // direct (self-ref/anaphor) static, with the predicate's multi_target empty.
-    secondary_application.target.as_ref()?;
+    // The secondary conjunct must carry its own DECLARED target slot ("up to one
+    // other target creature"); a bare conjunction with no second target — or one
+    // whose second conjunct is only a context reference such as the triggering
+    // object of "that creature" — is not this class and is left to the generic
+    // subject split. `TargetFilter::is_context_ref` is the slot authority: it
+    // names every filter that resolves without announcing a target (CR 115.1).
+    // The primary conjunct, by contrast, must NOT introduce its own target slot —
+    // its grant rides as a direct (self-ref/anaphor) static, with the predicate's
+    // multi_target empty.
+    secondary_application
+        .target
+        .as_ref()
+        .filter(|target| !target.is_context_ref())?;
     if primary_application.target.is_some() || primary_application.multi_target.is_some() {
         return None;
     }

@@ -53003,6 +53003,7 @@ mod tests {
 
         // Audacious Swap: the owner's exiled top card is the "it" of the land
         // deployment (and its else-branch cast), all inside the iteration.
+        // Deliberate ability EXCERPT: the printed "Casualty 2 (...)" line is omitted so the spell paragraph is the first parsed ability; the full card runs in electrostatic_bolt::audacious_swap_runtime_distinguishes_nonland_from_land.
         let (swap, scope) = owner_shuffle_chain(
             "The owner of target nonenchantment permanent shuffles it into their library, then exiles the top card of their library. If it's a land card, they put it onto the battlefield. Otherwise, they may cast it without paying its mana cost.",
             &[],
