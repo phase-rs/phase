@@ -47,7 +47,6 @@ fn q_etb_exiles_until_nonland_and_grants_to_the_found_card_not_q() {
     let forest = scenario.add_land_to_library_top(P0, "Forest").id();
     let spell = scenario
         .add_spell_to_library_top(P0, "Probe Growth", false)
-        .from_oracle_text("You gain 3 life.")
         .id();
     let mountain = scenario.add_land_to_library_top(P0, "Mountain").id();
     scenario.with_mana_pool(

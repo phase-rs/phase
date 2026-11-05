@@ -11661,6 +11661,32 @@ fn strip_constraint_does_not_affect_effect() {
 }
 
 #[test]
+fn strip_constraint_leaves_a_quoted_granted_restriction_in_place() {
+    // CR 113.1a + CR 603.1: the quoted sentence belongs to the granted ability.
+    let text = "return it to the battlefield. it perpetually gains \"whenever this creature becomes the target of a spell or ability, draw a card. this ability triggers only once each turn.\"";
+    assert_eq!(strip_constraint_sentences(text), text);
+}
+
+#[test]
+fn strip_constraint_strips_the_unquoted_sentence_after_a_quoted_one() {
+    let text = "it gains \"this ability triggers only once each turn.\" this ability triggers only once each turn.";
+    assert_eq!(
+        strip_constraint_sentences(text),
+        "it gains \"this ability triggers only once each turn.\""
+    );
+}
+
+#[test]
+fn strip_constraint_strips_first_n_times_sentence() {
+    assert_eq!(
+        strip_constraint_sentences(
+            "draw a card. This ability triggers only the first two times each turn."
+        ),
+        "draw a card"
+    );
+}
+
+#[test]
 fn strip_constraint_preserves_plain_effect() {
     let result = strip_constraint_sentences("put a +1/+1 counter on ~");
     assert_eq!(result, "put a +1/+1 counter on ~");
@@ -42653,5 +42679,70 @@ fn q_stacking_the_deck_granted_ability_body_stays_unimplemented() {
         matches!(*granted.effect, Effect::Unimplemented { .. }),
         "the granted body must stay Unimplemented so Q remains unsupported, got {:?}",
         granted.effect
+    );
+}
+
+/// Niambi, Beloved Protector (verbatim Scryfall Oracle text). CR 113.1a +
+/// CR 603.1: the quoted "This ability triggers only once each turn." is part of
+/// the GRANTED trigger's own text. It must not restrict Niambi's ETB, and it must
+/// survive constraint-sentence stripping so the granted trigger carries it.
+#[test]
+fn niambi_quoted_once_each_turn_restricts_only_the_granted_trigger() {
+    use crate::types::ability::PerpetualGrantModification;
+    let text = "Flash\nWhen Niambi, Beloved Protector enters, if you cast it, choose target nonlegendary creature card in your graveyard that was put there from the battlefield this turn. Return it to the battlefield. It perpetually gains \"Whenever this creature becomes the target of a spell or ability, draw a card. This ability triggers only once each turn.\"";
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let parsed = parse_oracle_text(
+        text,
+        "Niambi, Beloved Protector",
+        &owned(&["Flash"]),
+        &owned(&["Legendary", "Creature"]),
+        &owned(&["Human", "Cleric"]),
+    );
+    assert_eq!(parsed.triggers.len(), 1, "{:?}", parsed.triggers);
+    let etb = &parsed.triggers[0];
+    assert_eq!(etb.constraint, None, "the quoted limit is not the ETB's");
+
+    let mut node = etb.execute.as_deref();
+    let granted = std::iter::from_fn(|| {
+        let current = node?;
+        node = current.sub_ability.as_deref();
+        Some(current)
+    })
+    .find_map(|ability| match &*ability.effect {
+        Effect::ApplyPerpetual { modification, .. } => Some(modification),
+        _ => None,
+    })
+    .expect("perpetual grant in the ETB chain");
+    let granted_trigger = match granted {
+        PerpetualModification::GrantAbility { modifications } => modifications
+            .iter()
+            .find_map(|modification| match modification {
+                PerpetualGrantModification::GrantTrigger { trigger } => Some(trigger),
+                _ => None,
+            })
+            .expect("granted trigger"),
+        other => panic!("expected a granted ability, got {other:?}"),
+    };
+    assert_eq!(granted_trigger.mode, TriggerMode::BecomesTarget);
+    assert_eq!(
+        granted_trigger.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering,
+        })
+    );
+    assert!(
+        matches!(
+            granted_trigger.execute.as_deref().map(|e| &*e.effect),
+            Some(Effect::Draw { .. })
+        ),
+        "{:?}",
+        granted_trigger.execute
+    );
+    assert!(
+        granted_trigger
+            .execute
+            .as_deref()
+            .is_some_and(|e| e.sub_ability.is_none()),
+        "the restriction must not leak into the granted body"
     );
 }

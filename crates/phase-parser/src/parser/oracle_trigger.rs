@@ -4967,50 +4967,22 @@ fn has_single_indicated_action_instruction(def: &AbilityDefinition) -> bool {
 
 /// Strip constraint sentences from effect text so they don't produce spurious sub-abilities.
 /// The constraint itself is already extracted by `parse_trigger_constraint` from the full text.
+///
+/// CR 113.1a + CR 603.1: a quoted ability the effect GRANTS ("It perpetually
+/// gains \"Whenever this creature becomes the target …, draw a card. This ability
+/// triggers only once each turn.\"" on Niambi, Beloved Protector) carries its own
+/// restriction as part of its own text. Only an unquoted sentence restricts this
+/// trigger; a quoted one is left in place so the granted ability's own parser
+/// reads it.
 fn strip_constraint_sentences(text: &str) -> String {
-    let patterns = [
-        "this ability triggers only once each turn.",
-        "this ability triggers only once each turn",
-        "triggers only once each turn.",
-        "triggers only once each turn",
-        "this ability triggers only once.",
-        "this ability triggers only once",
-        "this ability triggers only during your turn.",
-        "this ability triggers only during your turn",
-        "do this only once each turn.",
-        "do this only once each turn",
-    ];
     let mut result = text.to_string();
-    // Case-insensitive match: Oracle text is mixed-case ("This ability triggers...")
-    // but patterns are lowercase, so find on lowered text and remove from original.
-    let lower_for_static = result.to_lowercase();
-    for pattern in &patterns {
-        if let Some(pos) = lower_for_static.find(pattern) {
-            result.replace_range(pos..pos + pattern.len(), "");
-            break; // At most one constraint sentence per trigger
-        }
+    // At most one fixed-form constraint sentence per trigger.
+    if let Some(span) = unquoted_phrase_span(&result, parse_fixed_constraint_sentence) {
+        result.replace_range(span, "");
     }
-    // Dynamic pattern: "this ability triggers only the first N time(s) each turn."
-    // Uses scan_split_at_phrase + split_once_on instead of raw .find() for dispatch.
-    let lower = result.to_lowercase();
-    if let Some((prefix_text, matched_start)) = scan_split_at_phrase(&lower, |i| {
-        tag::<_, _, OracleError<'_>>("this ability triggers only the first ").parse(i)
-    }) {
-        let start = prefix_text.len();
-        if let Ok((_, (_, after_each_turn))) =
-            nom_primitives::split_once_on(matched_start, "each turn")
-        {
-            let end_pos = lower.len() - after_each_turn.len();
-            let end_pos = if tag::<_, _, OracleError<'_>>(".")
-                .parse(after_each_turn)
-                .is_ok()
-            {
-                end_pos + 1
-            } else {
-                end_pos
-            };
-            result = format!("{}{}", &result[..start], &result[end_pos..]);
-        }
+    // Dynamic form: "this ability triggers only the first N time(s) each turn."
+    if let Some(span) = unquoted_phrase_span(&result, parse_first_n_times_constraint_sentence) {
+        result.replace_range(span, "");
     }
     let result = result.trim().to_string();
     if result.ends_with('.') {
@@ -5018,6 +4990,58 @@ fn strip_constraint_sentences(text: &str) -> String {
     } else {
         result
     }
+}
+
+/// Byte range in `text` of the first word-boundary match of `combinator` that
+/// lies outside every double-quoted span. Matching runs on a lowercased,
+/// length-preserving quote mask, so the range indexes the original text.
+fn unquoted_phrase_span<O>(
+    text: &str,
+    mut combinator: impl for<'a> FnMut(&'a str) -> OracleResult<'a, O>,
+) -> Option<std::ops::Range<usize>> {
+    let masked_lower = nom_primitives::mask_double_quoted_spans_preserving_len(text).to_lowercase();
+    // Lowercasing can change the byte length of some non-ASCII text; offsets
+    // would then no longer index `text`, so report no match rather than mis-slice.
+    if masked_lower.len() != text.len() {
+        return None;
+    }
+    let (before, _, rest) = scan_preceded(&masked_lower, &mut combinator)?;
+    Some(before.len()..masked_lower.len() - rest.len())
+}
+
+/// A fixed-form trigger frequency sentence, with its terminal period if present.
+fn parse_fixed_constraint_sentence(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        terminated(
+            alt((
+                preceded(
+                    tag("this ability triggers only "),
+                    alt((tag("once each turn"), tag("once"), tag("during your turn"))),
+                ),
+                tag("triggers only once each turn"),
+                // CR 603.2h: "Do this only once each turn."
+                tag("do this only once each turn"),
+            )),
+            opt(tag(".")),
+        ),
+    )
+    .parse(input)
+}
+
+/// "this ability triggers only the first N time(s) each turn", with its
+/// terminal period if present.
+fn parse_first_n_times_constraint_sentence(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("this ability triggers only the first "),
+            take_until("each turn"),
+            tag("each turn"),
+            opt(tag(".")),
+        ),
+    )
+    .parse(input)
 }
 
 /// CR 118.12a + CR 107.4: Parse mana / energy unless-payment tails after
