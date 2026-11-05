@@ -945,14 +945,13 @@ fn apply_debug_counter_gain(
     Ok(())
 }
 
-/// CR 701.9a: Discard one card from its owner's hand through the single
-/// discard authority, as an effect-caused discard with no source object.
-/// The discarding player is the card's owner, not the submitting seat.
-fn apply_debug_discard(
-    state: &mut GameState,
+/// Validates that `object_id` is a hand card whose owner is still in the game and
+/// returns that owner. Single authority for both `apply_debug_discard` and the
+/// viewer-projected discard availability.
+pub(crate) fn validate_debug_discard(
+    state: &GameState,
     object_id: ObjectId,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EngineError> {
+) -> Result<PlayerId, EngineError> {
     validate_object(state, object_id)?;
     // The discard authority reports silent success for a card that is not in
     // a hand, so reject it here before any proposal is made.
@@ -971,6 +970,18 @@ fn apply_debug_discard(
             owner.0
         )));
     }
+    Ok(owner)
+}
+
+/// CR 701.9a: Discard one card from its owner's hand through the single
+/// discard authority, as an effect-caused discard with no source object.
+/// The discarding player is the card's owner, not the submitting seat.
+fn apply_debug_discard(
+    state: &mut GameState,
+    object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let owner = validate_debug_discard(state, object_id)?;
     let event_start = events.len();
     match super::effects::discard::discard_caused_by_effect_with_source(
         state, object_id, owner, None, events,

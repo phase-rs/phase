@@ -4285,6 +4285,11 @@ export interface DerivedViews {
    */
   debug_library_cards?: DebugLibraryCardView[];
   /**
+   * Debug-only, viewer-scoped: hand-card ids the engine would currently accept
+   * for a `Discard` debug action. Ids are already in the viewer's projection.
+   */
+  debug_discardable_hand_cards?: ObjectId[];
+  /**
    * Mirrors `engine::game::derived_views::SharedPilesView`. Present only for a
    * format that shares a library or graveyard; a missing key means that zone is
    * per-player.

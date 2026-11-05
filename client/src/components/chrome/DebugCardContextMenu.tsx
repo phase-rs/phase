@@ -167,6 +167,10 @@ function DebugCardContextMenuInner({
   if (liveObject) retainedObjectRef.current = liveObject;
   const obj = liveObject ?? retainedObjectRef.current;
   const players = useGameStore((s) => s.gameState?.players);
+  // Engine-projected, viewer-scoped discard availability; the client only renders it.
+  const discardableHandCards = useGameStore(
+    (s) => s.gameState?.derived?.debug_discardable_hand_cards,
+  );
   const dispatch = useGameDispatch();
   const isMobile = useIsMobile();
   const headerId = useId();
@@ -330,7 +334,7 @@ function DebugCardContextMenuInner({
   if (!obj) return null;
 
   const onBattlefield = obj.zone === "Battlefield";
-  const inHand = obj.zone === "Hand";
+  const canDiscard = discardableHandCards?.includes(objectId) ?? false;
   const isCreature = obj.card_types?.core_types?.includes("Creature") ?? false;
   const hasSummoningSickness = obj.has_summoning_sickness ?? false;
   const currentKeywords = obj.keywords ?? [];
@@ -481,8 +485,9 @@ function DebugCardContextMenuInner({
       )}
 
       {/* Discard — routes through the engine's discard pipeline so discard
-          replacements and triggers apply. Offered for hand cards only. */}
-      {inHand && (
+          replacements and triggers apply. Offered only for the hand cards the
+          engine projects as discardable right now. */}
+      {canDiscard && (
         <div className="border-b border-gray-800 py-0.5">
           <MenuItem
             label={t("sandboxTools.discard")}

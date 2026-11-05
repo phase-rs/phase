@@ -46,7 +46,8 @@ describe("DebugCardContextMenu discard item", () => {
       gameState: gameStateFactory
         .withPlayers(0, 1)
         .withObjects(inHand, onBattlefield)
-        .build(),
+        // Settled-Priority projection: the engine lists the hand card as discardable.
+        .build({ derived: { debug_discardable_hand_cards: [11] } }),
     });
     act(() => {
       useUiStore.setState({ debugContextMenu: null, selectedObjectId: null });
@@ -82,6 +83,34 @@ describe("DebugCardContextMenu discard item", () => {
     // Reach guard: the battlefield-only Sacrifice item is present.
     expect(
       within(menu).getByRole("menuitem", { name: "Sacrifice" }),
+    ).toBeInTheDocument();
+    expect(
+      within(menu).queryByRole("menuitem", { name: "Discard" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not offer Discard for a hand card the engine does not project as discardable", () => {
+    // Replacement-choice projection: the same hand card, but the engine's list is empty.
+    setGameStoreForTest({
+      gameState: gameStateFactory
+        .withPlayers(0, 1)
+        .withObjects(
+          gameObjectFactory
+            .creature(2, 2)
+            .inHand()
+            .withId(11)
+            .named("Grizzly Bears")
+            .build(),
+        )
+        .build({ derived: {} }),
+    });
+    render(<DebugCardContextMenu surface="game" />);
+    openMenuFor(11);
+
+    const menu = screen.getByRole("menu", { name: "Grizzly Bears" });
+    // Reach guard: the menu rendered and another item is still present.
+    expect(
+      within(menu).getByRole("menuitem", { name: "Remove" }),
     ).toBeInTheDocument();
     expect(
       within(menu).queryByRole("menuitem", { name: "Discard" }),

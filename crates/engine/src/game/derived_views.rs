@@ -658,6 +658,12 @@ pub struct DerivedViews {
     /// intentionally narrow so a debug browser can select a card by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub debug_library_cards: Vec<DebugLibraryCardView>,
+    /// Debug-only, viewer-scoped: ids of hand cards the viewer may discard through
+    /// `DebugAction::Discard` right now (the engine's own preflight and hand/owner
+    /// validation). Every id is already present in the viewer's projection, so this
+    /// discloses no identity (CR 400.2); the client only renders it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub debug_discardable_hand_cards: Vec<ObjectId>,
     /// Present only for a format that shares a library or graveyard; names the
     /// seat whose `Player` container stores each shared pile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1541,6 +1547,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
             .and_then(|viewer| crate::game::interaction::scry_prompt_id_for_viewer(state, viewer)),
         blocker_assignment_pairs: blocker_assignment_pairs(state),
         debug_library_cards: debug_library_cards(state, viewer),
+        debug_discardable_hand_cards: debug_discardable_hand_cards(state, state, viewer),
         shared_piles: shared_piles(state),
         current_target_kind: current_target_kind(state),
         dungeon_rooms: dungeon_rooms(state),
@@ -2174,6 +2181,8 @@ pub fn derive_filtered_views(
     views.waiting_for_identity = delivered_prompt_identity(filtered_state).ok();
     views.state_revision = Some(authoritative_state.state_revision);
     views.debug_library_cards = debug_library_cards(authoritative_state, viewer);
+    views.debug_discardable_hand_cards =
+        debug_discardable_hand_cards(authoritative_state, filtered_state, viewer);
     views.visible_exile_object_ids = visible_exile_object_ids(filtered_state);
     // CR 509.1g: blocking relationships are public information. Preserve this
     // display projection even when a viewer-safe state intentionally omits raw
@@ -2253,6 +2262,29 @@ fn shared_piles(state: &GameState) -> Option<SharedPilesView> {
         graveyard: state.shared_zone_holder(Zone::Graveyard),
     };
     (view.library.is_some() || view.graveyard.is_some()).then_some(view)
+}
+
+/// Hand cards the viewer may discard via `DebugAction::Discard`. Candidates come
+/// from `candidate_state` (the viewer's projection) so no id the viewer cannot
+/// already see is added; availability is decided on the authoritative state by
+/// `debug_discard_available`.
+fn debug_discardable_hand_cards(
+    authoritative_state: &GameState,
+    candidate_state: &GameState,
+    viewer: Option<PlayerId>,
+) -> Vec<ObjectId> {
+    let Some(viewer) = viewer else {
+        return Vec::new();
+    };
+    let mut ids = candidate_state
+        .objects
+        .iter()
+        .filter(|(_, object)| object.zone == Zone::Hand)
+        .map(|(id, _)| *id)
+        .filter(|id| crate::game::engine::debug_discard_available(authoritative_state, viewer, *id))
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
 }
 
 fn debug_library_cards(state: &GameState, viewer: Option<PlayerId>) -> Vec<DebugLibraryCardView> {
@@ -4752,6 +4784,71 @@ mod tests {
         let legacy: DebugLibraryCardView = serde_json::from_value(wire).unwrap();
         assert_eq!(legacy.printed_ref, None);
         assert_eq!(legacy.object_id, id);
+    }
+
+    #[test]
+    fn debug_discardable_hand_cards_follow_engine_discard_availability() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        state.debug_mode = true;
+        state.debug_permitted.insert(PlayerId(0));
+        let hand = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hand Card".to_string(),
+            Zone::Hand,
+        );
+        let library = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Library Card".to_string(),
+            Zone::Library,
+        );
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        assert_eq!(
+            derive_views(&state, Some(PlayerId(0))).debug_discardable_hand_cards,
+            vec![hand],
+            "a hand card is discardable at a settled Priority window (non-hand cards never are)"
+        );
+        let filtered = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(
+            derive_filtered_views(&state, &filtered, Some(PlayerId(0)))
+                .debug_discardable_hand_cards,
+            vec![hand],
+            "the filtered projection carries the same list"
+        );
+        assert!(
+            !derive_views(&state, Some(PlayerId(0)))
+                .debug_discardable_hand_cards
+                .contains(&library),
+            "a library card is not a discard candidate"
+        );
+        assert!(
+            derive_views(&state, Some(PlayerId(1)))
+                .debug_discardable_hand_cards
+                .is_empty(),
+            "a seat outside debug_permitted gets no availability"
+        );
+        assert!(derive_views(&state, None)
+            .debug_discardable_hand_cards
+            .is_empty());
+
+        // CR 616.1: outside a settled Priority window the engine rejects the discard,
+        // so the projection must not offer it.
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: None,
+        };
+        assert!(
+            derive_views(&state, Some(PlayerId(0)))
+                .debug_discardable_hand_cards
+                .is_empty(),
+            "a parked non-Priority prompt withdraws discard availability"
+        );
     }
 
     #[test]

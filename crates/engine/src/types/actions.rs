@@ -1745,7 +1745,14 @@ impl DebugAction {
                 format!("Sacrifice ({})", obj(*object_id))
             }
             DebugAction::Discard { object_id } => {
-                format!("Discard ({})", obj(*object_id))
+                // CR 400.2: a hand is a hidden zone, and the discarded card may end up
+                // unrevealed (e.g. put on top of its owner's library). This description
+                // is broadcast to opponents and spectators, so it names the public owner
+                // and never the card.
+                match state.objects.get(object_id) {
+                    Some(o) => format!("Discard (a card from {}'s hand)", player_label(o.owner)),
+                    None => "Discard (a card)".to_string(),
+                }
             }
             DebugAction::Reveal { player_id, count } => {
                 format!("Reveal (top {} of {})", count, player_label(*player_id))

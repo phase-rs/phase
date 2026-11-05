@@ -33,8 +33,9 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastOfferKind, WaitingFor};
+use engine::types::game_state::{ActionResult, CastOfferKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::log::LogSegment;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -508,4 +509,133 @@ fn r10_non_priority_window_rejects_discard() {
     let before = digest(&runner);
     assert!(runner.act(discard(second)).is_err());
     assert_eq!(digest(&runner), before);
+}
+
+/// Viewers that are not the discarding seat: the opponent and an unseated
+/// spectator (`filter_events_for_viewer` treats an id with no seat as one).
+const SPECTATOR: PlayerId = PlayerId(99);
+
+/// CR 400.2: the distinctive hand card for the privacy rows.
+const SECRET_NAME: &str = "Grizzly Bears";
+
+/// CR 400.2 + CR 701.9c: a hand card discarded into a hidden zone unrevealed
+/// must not be named anywhere in the public stream. For the opponent and a
+/// spectator, the whole filtered event stream and the public audit text
+/// (`log_entries`, as `apply` produced them) of every result must be free of
+/// the card's name, while the `DebugActionUsed` event is still delivered.
+fn assert_no_card_identity(runner: &GameRunner, results: &[&ActionResult]) {
+    let events: Vec<GameEvent> = results
+        .iter()
+        .flat_map(|result| result.events.iter().cloned())
+        .collect();
+    for viewer in [P1, SPECTATOR] {
+        let filtered =
+            engine::game::visibility::filter_events_for_viewer(&events, runner.state(), viewer);
+        assert!(
+            filtered
+                .iter()
+                .any(|event| matches!(event, GameEvent::DebugActionUsed { .. })),
+            "viewer {viewer:?} must receive the DebugActionUsed event"
+        );
+        let wire = serde_json::to_string(&filtered).expect("serialize filtered events");
+        assert!(
+            !wire.contains(SECRET_NAME),
+            "viewer {viewer:?}: filtered events name the hand card: {wire}"
+        );
+    }
+    let entries: Vec<_> = results
+        .iter()
+        .flat_map(|result| result.log_entries.iter())
+        .collect();
+    assert!(!entries.is_empty(), "the action must be logged");
+    let rendered = serde_json::to_string(&entries).expect("serialize log entries");
+    assert!(
+        !rendered.contains(SECRET_NAME),
+        "public audit text names the hand card: {rendered}"
+    );
+}
+
+/// R11 (CR 400.2): a parked Library of Leng prompt has not revealed the hand
+/// card, so the broadcast debug description must not name it.
+#[test]
+fn r11_parked_discard_description_does_not_name_the_hand_card() {
+    let Some(db) = load_db() else { return };
+    let mut card = None;
+    let mut runner = table(db, |s, db| {
+        s.add_real_card(P0, "Library of Leng", Zone::Battlefield, db);
+        card = Some(s.add_real_card(P0, SECRET_NAME, Zone::Hand, db));
+    });
+    let card = card.unwrap();
+
+    let parked = runner.act(discard(card)).expect("discard parks a choice");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+
+    assert_no_card_identity(&runner, &[&parked]);
+}
+
+/// R12 (CR 400.2): after the Leng answer puts the card on the library
+/// unrevealed, the `DebugActionUsed` events and their public log entries still
+/// do not name it. The whole-stream check of R11 is not asserted after the
+/// library answer because the Leng replacement currently routes the card
+/// through the graveyard before the library (pre-existing; reported separately).
+#[test]
+fn r12_library_answer_discard_description_does_not_name_the_hand_card() {
+    let Some(db) = load_db() else { return };
+    let mut card = None;
+    let mut runner = table(db, |s, db| {
+        s.add_real_card(P0, "Library of Leng", Zone::Battlefield, db);
+        card = Some(s.add_real_card(P0, SECRET_NAME, Zone::Hand, db));
+    });
+    let card = card.unwrap();
+
+    let parked = runner.act(discard(card)).expect("discard parks a choice");
+    let accept = choice_index(&runner, P0, "Library of Leng prompt", |d| d != "Decline");
+    let answered = runner
+        .act(GameAction::ChooseReplacement { index: accept })
+        .expect("choosing the library option succeeds");
+    assert_eq!(zone_of(&runner, card), Zone::Library);
+
+    let events: Vec<GameEvent> = [&parked, &answered]
+        .iter()
+        .flat_map(|result| result.events.iter().cloned())
+        .collect();
+    for viewer in [P1, SPECTATOR] {
+        let debug_events: Vec<GameEvent> =
+            engine::game::visibility::filter_events_for_viewer(&events, runner.state(), viewer)
+                .into_iter()
+                .filter(|event| matches!(event, GameEvent::DebugActionUsed { .. }))
+                .collect();
+        assert!(
+            !debug_events.is_empty(),
+            "viewer {viewer:?} must receive the DebugActionUsed event"
+        );
+        let wire = serde_json::to_string(&debug_events).expect("serialize debug events");
+        assert!(
+            !wire.contains(SECRET_NAME),
+            "viewer {viewer:?}: DebugActionUsed names the hand card: {wire}"
+        );
+    }
+
+    let debug_entries: Vec<_> = [&parked, &answered]
+        .iter()
+        .flat_map(|result| result.log_entries.iter())
+        .filter(|entry| {
+            entry
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, LogSegment::Text(t) if t.contains("used debug")))
+        })
+        .collect();
+    assert!(
+        !debug_entries.is_empty(),
+        "the debug action must be logged publicly"
+    );
+    let rendered = serde_json::to_string(&debug_entries).expect("serialize log entries");
+    assert!(
+        !rendered.contains(SECRET_NAME),
+        "public debug log entry names the hand card: {rendered}"
+    );
 }

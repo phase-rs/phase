@@ -17943,6 +17943,14 @@ fn apply_non_priority_pass_action(
     Ok(ActionResult::applied(events, waiting_for))
 }
 
+/// Whether `actor` may currently discard hand card `object_id` through
+/// `DebugAction::Discard`. Reuses the preflight and the discard validation, so
+/// the viewer-projected availability can never diverge from what `apply` accepts.
+pub fn debug_discard_available(state: &GameState, actor: PlayerId, object_id: ObjectId) -> bool {
+    preflight_debug_action(state, actor, &DebugAction::Discard { object_id }).is_ok()
+        && super::engine_debug::validate_debug_discard(state, object_id).is_ok()
+}
+
 /// Validate one debug action before any transport-specific lookup or engine
 /// mutation. Source-bound Create Card requests use this same authority again
 /// immediately before materialization.
