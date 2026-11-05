@@ -1015,6 +1015,13 @@ pub(crate) struct ClauseIr {
     /// delayed payload and is consumed by `assemble_effect_chain`'s relocation step.
     #[serde(default, skip_serializing_if = "ClausePlacement::is_sibling")]
     pub(crate) placement: ClausePlacement,
+    /// CR 611.2a + CR 608.2c: the window this clause printed at its HEAD, as read by
+    /// the clause parser on the guard-free text it lowered (lifted from
+    /// `ParseContext::head_window` by the chain chunk loop). `assemble_effect_chain`
+    /// distributes it to the sentence's later coordinated clauses; `None` states
+    /// nothing to distribute, including for a clause whose window is trailing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) head_window: Option<Duration>,
     /// Construction seal: a private field forces all construction through
     /// [`ClauseIrBuilder`], so no call site can mint a clause without identity,
     /// source, disposition, and provenance (Plan 01 §5 construction gate).
@@ -1067,6 +1074,7 @@ impl ClauseIr {
             declared_player_group,
             chosen_color_grant,
             placement,
+            head_window,
             _sealed: _,
         } = self;
         *declares_chosen_clause = None;
@@ -1099,6 +1107,7 @@ impl ClauseIr {
         *declared_player_group = None;
         *chosen_color_grant = None;
         *placement = ClausePlacement::Sibling;
+        *head_window = None;
     }
 }
 
@@ -1274,6 +1283,7 @@ impl ClauseIrBuilder {
             printed_color_choice: None,
             declared_player_group: None,
             placement: ClausePlacement::Sibling,
+            head_window: None,
         }
     }
 
@@ -1359,6 +1369,7 @@ impl ClauseIrBuilder {
         .declared_target_choice_timing(c.declared_target_choice_timing)
         .printed_color_choice(c.printed_color_choice)
         .declared_player_group(c.declared_player_group)
+        .head_window(c.head_window)
         .push();
         if let Some(absorbed) = self.clauses.last_mut() {
             absorbed.target_reads = c.target_reads;
@@ -1400,6 +1411,7 @@ pub(crate) struct ClauseDraft<'a> {
     printed_color_choice: Option<ChoiceType>,
     declared_player_group: Option<ChosenGroupId>,
     placement: ClausePlacement,
+    head_window: Option<Duration>,
 }
 
 impl ClauseDraft<'_> {
@@ -1494,6 +1506,13 @@ impl ClauseDraft<'_> {
         self.declared_player_group = v;
         self
     }
+    /// CR 611.2a: declare the window this clause's text printed at its head (see
+    /// `ClauseIr::head_window`). The only writer is the chain chunk loop, lifting
+    /// `ParseContext::head_window` after the clause's main parse.
+    pub(crate) fn head_window(mut self, v: Option<Duration>) -> Self {
+        self.head_window = v;
+        self
+    }
 
     /// Mint the `ClauseId` + `ChainRelative` `OracleUnitSource` and commit the
     /// clause into the builder's source-ordered list.
@@ -1520,19 +1539,12 @@ impl ClauseDraft<'_> {
             // NOTE those two cards are cited for the RECOGNIZER's behaviour, not as
             // traffic through this seam: `starts_clause_text_or_conjugated` excludes
             // "its", so Dovin Baan's bare " and its ..." never splits and never
-            // reaches `push` at all. Its link is governed by
-            // `with_clause_chain_duration`'s sub-link walk, whose gate is still
-            // CARRIER-based and therefore still cannot tell an injected default from
-            // a printed window — measured, Dovin Baan, Edifice of Authority and
-            // Mythos of Vadrok carry a link stuck at `UntilEndOfTurn` under an
-            // `UntilNextTurnOf` head. Teferi's Protection is a fourth instance in a
-            // different shape and from a DIFFERENT CAUSE — carrier `None` (which
-            // would PASS the walk's gate), injected `UntilEndOfTurn` on the EMBEDDED
-            // effect duration, different recognizer — so the head window never
-            // reaches that link at all. Both are KNOWN REMAINING GAPS this seam does
-            // not fix, and the second is not closed by the injected-default class
-            // remedy alone; see the U1 section note in the 7923 integration test for
-            // the measured detail and tasks #138/#144 in `game/effects/effect.rs`.
+            // reaches `push` at all. Nor does the gate need to carry that class any
+            // more: #7962 removed the injection at the source, so this recognizer now
+            // emits the parsed `Option` verbatim (a printed `ForAsLongAs` for Braided
+            // Net, `None` for Dovin Baan / Xathrid Gorgon), and the link those cards
+            // leave unstamped is reached by `oracle_effect::assembly`'s
+            // sentence-scoped stamp instead of by this chunk-level seam.
             //
             // COUPLING: `strip_trailing_duration` finds only trailing windows, so a
             // conjunct printing a LEADING window of its own would read as unprinted.
@@ -1748,6 +1760,7 @@ impl ClauseDraft<'_> {
             ),
             declared_player_group: self.declared_player_group,
             placement: self.placement,
+            head_window: self.head_window,
             _sealed: (),
         });
     }

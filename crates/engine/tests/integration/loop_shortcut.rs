@@ -4804,8 +4804,8 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // ── the classifier's own reach-guard: the enum was actually found ──
     let total = enum_variants(&enum_src, "WaitingFor").len();
     assert_eq!(
-        total, 144,
-        "`WaitingFor` has 144 variants at this tip, read off the `syn` parse. This number is \
+        total, 145,
+        "`WaitingFor` has 145 variants at this tip, read off the `syn` parse. This number is \
          pinned so a variant REMOVED is as visible as one added; if you added a variant and it \
          carries no `DecisionTemplate`, update this number. A wildly different count means the \
          reader lost its anchor, and every assertion below would then be measuring an empty enum"
@@ -4881,6 +4881,9 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // real-time physical clicking contest driven by the host engine contest driver,
     // not a shortcut-style template — so it is not a third carrier and the carrier
     // assertion below is unchanged by it.
+    // 144 ⇒ 145 is ADJUDICATED: the conspiracy agenda prompt added
+    // `SecretAgendaChoice { player, object_id, name_count }`. That body holds NO
+    // `DecisionTemplate`, so it is not a third carrier either.
 
     let carriers = carriers_in_source(&enum_src, "WaitingFor", &corpus, &marker, true);
     assert_eq!(
