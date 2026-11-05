@@ -3049,6 +3049,9 @@ impl GameObject {
             // CR 800.4a: stamped by the player-leaves-game procedure, which owns
             // that fact; every other move is an ordinary move.
             departure: crate::types::game_state::ZoneDeparture::Moved,
+            // CR 603.10a: latched from the board by the zone-change authority
+            // (`zones::latch_departure_trigger_doublers`), which has the state.
+            trigger_doublers: Vec::new(),
         }
     }
 

@@ -1782,6 +1782,15 @@ pub struct ZoneChangeRecord {
     /// stamps it. Omitted on the wire when `Moved`.
     #[serde(default, skip_serializing_if = "ZoneDeparture::is_moved")]
     pub departure: ZoneDeparture,
+    /// CR 603.10a + CR 603.2d: the resolved effects that made this object's
+    /// triggered abilities trigger an additional time, as they stood
+    /// immediately before it left the battlefield (Lwaxana Troi, Charming
+    /// Guest). Such an effect is bound to this exact object and ends with it
+    /// (CR 400.7), so the object's leaves-the-battlefield abilities, which look
+    /// back in time, are counted against this latch. Captured at the
+    /// zone-change authority before exit cleanup; empty for every other move.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_doublers: Vec<crate::types::events::LatchedTriggerDoubler>,
 }
 
 /// CR 800.4a + CR 603.6c: how an object left the zone a [`ZoneChangeRecord`]
@@ -1893,6 +1902,8 @@ struct ZoneChangeRecordWire {
     was_prepared: bool,
     #[serde(default)]
     departure: ZoneDeparture,
+    #[serde(default)]
+    trigger_doublers: Vec<crate::types::events::LatchedTriggerDoubler>,
 }
 
 impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
@@ -1932,6 +1943,7 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             is_suspected,
             was_prepared,
             departure,
+            trigger_doublers,
         } = wire;
         Self {
             object_id,
@@ -1968,6 +1980,7 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             is_suspected,
             was_prepared,
             departure,
+            trigger_doublers,
         }
     }
 }
@@ -2340,6 +2353,7 @@ impl ZoneChangeRecord {
             is_suspected: false,
             was_prepared: false,
             departure: ZoneDeparture::Moved,
+            trigger_doublers: Vec::new(),
         }
     }
 }
@@ -35310,10 +35324,27 @@ impl GameState {
                 is_suspected: _,
                 was_prepared: _,
                 departure: _,
+                trigger_doublers,
             } = &mut **record;
             attachment_incarnations(attachments, f);
             linked_exile_incarnations(linked_exile_snapshot, f);
             block_pair_incarnations(block_pairs, f);
+            for crate::types::events::LatchedTriggerDoubler { cause: _, origin } in trigger_doublers
+            {
+                let reference = match origin {
+                    crate::types::events::TriggerDoublerOrigin::Static {
+                        source,
+                        affected: _,
+                    } => &mut source.identity.reference,
+                    crate::types::events::TriggerDoublerOrigin::ResolvedEffect {
+                        effect_id: _,
+                        source_id: _,
+                        controller: _,
+                        object,
+                    } => object,
+                };
+                f(reference.object_id, &mut reference.incarnation);
+            }
             let Some(TriggerSourceContext {
                 identity,
                 lki,

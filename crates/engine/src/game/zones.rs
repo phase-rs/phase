@@ -1200,6 +1200,28 @@ fn clear_hand_or_graveyard_casting_permissions_on_exit(
     }
 }
 
+/// CR 603.10a + CR 603.2d: latch onto a battlefield departure's record the
+/// resolved trigger-doubling effects bound to the departing object, before exit
+/// cleanup ends them with it (`prune_object_bound_effects_on_exit`, CR 400.7).
+/// Its leaves-the-battlefield abilities look back in time, so they still
+/// trigger the additional times those effects called for.
+fn latch_departure_trigger_doublers(
+    state: &GameState,
+    record: &mut crate::types::game_state::ZoneChangeRecord,
+) {
+    if record.from_zone != Some(Zone::Battlefield) {
+        return;
+    }
+    let Some(object) = record
+        .trigger_source_context()
+        .map(|context| context.identity.reference)
+    else {
+        return;
+    };
+    record.trigger_doublers =
+        super::triggers::resolved_effect_trigger_doublers_bound_to(state, object);
+}
+
 /// CR 400.7: an object that moves to a new zone is a new object, so a
 /// continuous effect a resolved spell or ability bound to THIS object
 /// (`SpecificObject`) ends with it on every zone exit (issue #8795: Delay's
@@ -1756,6 +1778,7 @@ pub(crate) fn move_to_zone_with_entry_flags(
         capture_combat_status(state, object_id)
     };
     zone_change_record.sync_trigger_source_context();
+    latch_departure_trigger_doublers(state, &mut zone_change_record);
 
     let severed_attachments = sever_battlefield_attachment_graph_on_exit(state, object_id);
     // CR 730.2d + CR 111.7: for a merged permanent whose topmost component
@@ -2791,6 +2814,7 @@ pub fn move_to_library_at_index(
             .unwrap_or_default(),
     );
     zone_change_record.sync_trigger_source_context();
+    latch_departure_trigger_doublers(state, &mut zone_change_record);
 
     let severed_attachments = sever_battlefield_attachment_graph_on_exit(state, object_id);
 

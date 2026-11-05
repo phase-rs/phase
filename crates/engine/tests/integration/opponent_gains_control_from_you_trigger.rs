@@ -8,7 +8,7 @@ use engine::game::{filter_events_for_viewer, filter_state_for_viewer};
 use engine::types::ability::{TargetFilter, TypedFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::events::{ControlChangeEvidence, GameEvent};
+use engine::types::events::{ControlChangeEvidence, GameEvent, TriggerDoublerOrigin};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -3125,8 +3125,11 @@ fn a_latched_doubler_is_judged_with_its_power_then() {
             .iter()
             .find(|latched| latched.source_id() == doubler)
             .expect("REACH: the doubler is latched");
+        let TriggerDoublerOrigin::Static { source, .. } = &latched.origin else {
+            panic!("REACH: the doubler is a static ability");
+        };
         assert_eq!(
-            (latched.controller(), latched.source.lki.power),
+            (latched.controller(), source.lki.power),
             (P0, Some(2)),
             "REACH: latched as P0's 2-power doubler"
         );

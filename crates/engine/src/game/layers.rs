@@ -9365,13 +9365,22 @@ fn gather_transient_continuous_effects_with(
             // `iter_cast_free_permission_source_ids`, giving one grant two
             // sources. CR 701.15b: `Goaded` is likewise a designation, not
             // an ability on the recipient; combat reads the live TCE directly.
+            // CR 603.2d + CR 611.2c: a resolved `DoubleTriggers` ("if a
+            // triggered ability of that creature triggers, that ability
+            // triggers an additional time" — Lwaxana Troi, Charming Guest)
+            // modifies the rules, not the creature. It is read directly off the
+            // TCE by `triggers::active_trigger_doublers`, one doubler per
+            // effect; grafted onto the creature, two resolutions would collapse
+            // into one structurally equal static and the effect would vanish
+            // with the creature before its look-back dies trigger is counted.
             if matches!(
                 modification,
                 ContinuousModification::AddStaticMode {
                     mode: StaticMode::MayLookAtFaceDown
                         | StaticMode::ReduceAbilityCost { .. }
                         | StaticMode::CastFromHandFree { .. }
-                        | StaticMode::Goaded,
+                        | StaticMode::Goaded
+                        | StaticMode::DoubleTriggers { .. },
                 }
             ) {
                 continue;

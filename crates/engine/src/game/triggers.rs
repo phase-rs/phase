@@ -12529,33 +12529,104 @@ fn trigger_source_matches_doubler_filter(
     }
 }
 
-/// CR 603.2d: every functioning trigger-doubling static on the battlefield, as
-/// the board stands now. CR 702.26b + CR 604.1: `active_static_definitions`
-/// owns the gating, so a phased-out doubler doubles nothing. Also latched by
-/// each control-change instruction's capture
-/// (`gain_control::capture_control_change_instruction`).
+/// CR 603.2d: every functioning trigger-doubling effect, as the board stands
+/// now: each battlefield static (CR 702.26b + CR 604.1:
+/// `active_static_definitions` owns the gating, so a phased-out doubler
+/// doubles nothing), then each live resolved effect
+/// (`resolved_effect_trigger_doublers`). Also latched by each control-change
+/// instruction's capture (`gain_control::capture_control_change_instruction`).
 pub(crate) fn active_trigger_doublers(
     state: &GameState,
 ) -> Vec<crate::types::events::LatchedTriggerDoubler> {
-    // CR 603.2d: each doubling effect counts on its own, so a permanent with
-    // two doubling statics (its own plus one a resolved ability gave it —
-    // Lwaxana Troi, Charming Guest) contributes one doubler per static.
     state
         .battlefield
         .iter()
-        .filter_map(|obj_id| state.objects.get(obj_id))
-        .flat_map(|obj| {
-            super::functioning_abilities::active_static_definitions(state, obj).filter_map(
-                move |doubler| {
-                    let StaticMode::DoubleTriggers { cause } = &doubler.mode else {
-                        return None;
-                    };
-                    Some(crate::types::events::LatchedTriggerDoubler {
-                        source: trigger_source_context_for_latch(state, obj),
-                        cause: cause.clone(),
-                        affected: doubler.affected.clone(),
-                    })
+        .filter_map(|&obj_id| {
+            let obj = state.objects.get(&obj_id)?;
+            let doubler = super::functioning_abilities::active_static_definitions(state, obj)
+                .find(|sd| matches!(sd.mode, StaticMode::DoubleTriggers { .. }))?;
+            let StaticMode::DoubleTriggers { cause } = &doubler.mode else {
+                unreachable!("filter above guarantees DoubleTriggers");
+            };
+            Some(crate::types::events::LatchedTriggerDoubler {
+                cause: cause.clone(),
+                origin: crate::types::events::TriggerDoublerOrigin::Static {
+                    source: Box::new(trigger_source_context_for_latch(state, obj)),
+                    affected: doubler.affected.clone(),
                 },
+            })
+        })
+        .chain(resolved_effect_trigger_doublers(state))
+        .collect()
+}
+
+/// CR 611.2a + CR 611.2c + CR 603.2d: one doubler per live transient
+/// continuous effect that makes an object's triggered abilities trigger an
+/// additional time (Lwaxana Troi, Charming Guest). Such an effect modifies the
+/// rules, not the object, so it is never grafted onto the object as a static
+/// ability (`layers::gather_transient_continuous_effects_with` skips it); it is
+/// read here, off the effect itself, so each resolution keeps its own identity
+/// and lifetime. The bound incarnation is the effect's captured recipient, else
+/// the object its `SpecificObject` names: an effect bound to an object ends
+/// when that object leaves its zone (`zones::prune_object_bound_effects_on_exit`,
+/// CR 400.7), so while the effect exists that id names the bound incarnation.
+fn resolved_effect_trigger_doublers(
+    state: &GameState,
+) -> impl Iterator<Item = crate::types::events::LatchedTriggerDoubler> + '_ {
+    state
+        .transient_continuous_effects
+        .iter()
+        .filter(|tce| {
+            tce.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    crate::types::ability::ContinuousModification::AddStaticMode {
+                        mode: StaticMode::DoubleTriggers { .. },
+                    }
+                )
+            }) && super::layers::transient_effect_is_live(state, tce)
+        })
+        .flat_map(move |tce| {
+            let object = tce.affected_recipient.or_else(|| match tce.affected {
+                TargetFilter::SpecificObject { id } => state
+                    .objects
+                    .get(&id)
+                    .map(ObjectIncarnationRef::from_object),
+                _ => None,
+            });
+            tce.modifications
+                .iter()
+                .filter_map(move |modification| match modification {
+                    crate::types::ability::ContinuousModification::AddStaticMode {
+                        mode: StaticMode::DoubleTriggers { cause },
+                    } => Some(crate::types::events::LatchedTriggerDoubler {
+                        cause: cause.clone(),
+                        origin: crate::types::events::TriggerDoublerOrigin::ResolvedEffect {
+                            effect_id: tce.id,
+                            source_id: tce.source_id,
+                            controller: tce.controller,
+                            object: object?,
+                        },
+                    }),
+                    _ => None,
+                })
+        })
+}
+
+/// CR 603.10a + CR 603.2d: the live resolved-effect doublers bound to the
+/// exact incarnation `object`, latched by its battlefield departure record
+/// (`ZoneChangeRecord::trigger_doublers`) before the effects end with it, so
+/// its look-back triggers still count them.
+pub(crate) fn resolved_effect_trigger_doublers_bound_to(
+    state: &GameState,
+    object: ObjectIncarnationRef,
+) -> Vec<crate::types::events::LatchedTriggerDoubler> {
+    resolved_effect_trigger_doublers(state)
+        .filter(|doubler| {
+            matches!(
+                doubler.origin,
+                crate::types::events::TriggerDoublerOrigin::ResolvedEffect { object: bound, .. }
+                    if bound == object
             )
         })
         .collect()
@@ -12606,14 +12677,14 @@ fn latched_source_matches_doubler_filter(
     state: &GameState,
     source: &TriggerSourceContext,
     filter: &TargetFilter,
-    doubler: &crate::types::events::LatchedTriggerDoubler,
+    doubler_source: &TriggerSourceContext,
 ) -> bool {
     if doubler_filter_requires_battlefield_permanent(filter)
         && source.identity.expected_zone != Zone::Battlefield
     {
         return false;
     }
-    latched_doubler_scope(state, source, filter, doubler).unwrap_or(false)
+    latched_doubler_scope(state, source, filter, doubler_source).unwrap_or(false)
 }
 
 /// A latched doubler's scope, classified structurally (no game state): the one
@@ -12797,12 +12868,12 @@ fn latched_controller_clause_is_judged(
 fn latched_controller_clause_matches(
     controller: Option<&crate::types::ability::ControllerRef>,
     watcher: &TriggerSourceContext,
-    doubler: &crate::types::events::LatchedTriggerDoubler,
+    doubler_source: &TriggerSourceContext,
 ) -> bool {
     use crate::types::ability::ControllerRef;
     match controller {
         None => true,
-        Some(ControllerRef::You) => watcher.lki.controller == doubler.controller(),
+        Some(ControllerRef::You) => watcher.lki.controller == doubler_source.lki.controller,
         // Never admitted by `latched_controller_clause_is_judged`.
         Some(
             ControllerRef::Opponent
@@ -12968,23 +13039,22 @@ fn latched_doubler_scope(
     state: &GameState,
     watcher: &TriggerSourceContext,
     filter: &TargetFilter,
-    doubler: &crate::types::events::LatchedTriggerDoubler,
+    doubler: &TriggerSourceContext,
 ) -> Option<bool> {
     latched_doubler_scope_plan(filter)
         .map(|plan| latched_scope_plan_matches(state, watcher, &plan, doubler))
 }
 
+/// `doubler` is the static doubler's latched source context.
 fn latched_scope_plan_matches(
     state: &GameState,
     watcher: &TriggerSourceContext,
     plan: &LatchedScopePlan,
-    doubler: &crate::types::events::LatchedTriggerDoubler,
+    doubler: &TriggerSourceContext,
 ) -> bool {
     match plan {
         LatchedScopePlan::Any => true,
-        LatchedScopePlan::SelfRef => {
-            watcher.identity.reference == doubler.source.identity.reference
-        }
+        LatchedScopePlan::SelfRef => watcher.identity.reference == doubler.identity.reference,
         LatchedScopePlan::Object(id) => watcher.identity.reference.object_id == *id,
         LatchedScopePlan::Or(plans) => plans
             .iter()
@@ -13017,12 +13087,12 @@ fn latched_relative_matches(
     state: &GameState,
     watcher: &TriggerSourceContext,
     property: LatchedRelativeProperty,
-    doubler: &crate::types::events::LatchedTriggerDoubler,
+    doubler: &TriggerSourceContext,
 ) -> bool {
     use crate::types::ability::AttachmentKind;
-    let doubler_id = doubler.source_id();
+    let doubler_id = doubler.identity.reference.object_id;
     let watcher_id = watcher.identity.reference.object_id;
-    let doubler_lki = &doubler.source.lki;
+    let doubler_lki = &doubler.lki;
     match property {
         LatchedRelativeProperty::Another => watcher_id != doubler_id,
         // CR 603.2d + CR 603.10d: judge additional triggers using the captured
@@ -13046,7 +13116,7 @@ fn latched_relative_matches(
         }
         // Mirrors the live `EquippedBy`: an attached doubler names its host; an
         // unattached Equipment names nothing; otherwise any Equipment.
-        LatchedRelativeProperty::EquippedByDoubler => match doubler.source.attached_to {
+        LatchedRelativeProperty::EquippedByDoubler => match doubler.attached_to {
             Some(target) => target.as_object() == Some(watcher_id),
             None if doubler_lki.subtypes.iter().any(|s| s == "Equipment") => false,
             None => watcher
@@ -13072,30 +13142,13 @@ fn doubler_applies(
     doubler: &crate::types::events::LatchedTriggerDoubler,
     latched_source: Option<&TriggerSourceContext>,
 ) -> bool {
+    use crate::types::events::TriggerDoublerOrigin;
     let trigger = &trigger_context.pending;
     // CR 603.2d: A delayed trigger is already the exact ability that
     // was created by its originating effect. Trigger doublers apply to
     // the event that creates a delayed trigger, not again when that
     // delayed ability later fires.
     if trigger_context.firing().is_delayed() {
-        return false;
-    }
-    // Controller match: trigger source must be controlled by the doubler's controller
-    if trigger.controller != doubler.controller() {
-        return false;
-    }
-    // CR 603.2d: Self-exclusion. A doubler normally never doubles its own
-    // triggered abilities — Panharmonicon/Yarok/Isshin/Wayta all scope to
-    // OTHER permanents. The carve-out: when the doubler's `affected` filter
-    // references the source itself (`~`, e.g. Cloud's "a triggered ability
-    // of Cloud or an Equipment attached to it"), CR 603.2d makes its own
-    // triggered abilities eligible, so skip the exclusion and let the
-    // `affected` match below decide.
-    let affected_references_self = doubler
-        .affected
-        .as_ref()
-        .is_some_and(filter_references_self);
-    if !affected_references_self && trigger.source_id == doubler.source_id() {
         return false;
     }
     // CR 603.2d: Check the cause predicate against the spawning event.
@@ -13107,17 +13160,86 @@ fn doubler_applies(
     ) {
         return false;
     }
-    // CR 603.2d: If the doubler specifies an affected filter (e.g. "creature you
-    // control of the chosen type"), only double triggers from matching sources.
-    doubler
-        .affected
-        .as_ref()
-        .is_none_or(|filter| match latched_source {
-            Some(source) => latched_source_matches_doubler_filter(state, source, filter, doubler),
-            None => {
-                trigger_source_matches_doubler_filter(state, trigger, filter, doubler.source_id())
+    match &doubler.origin {
+        TriggerDoublerOrigin::Static { source, affected } => {
+            // Controller match: trigger source must be controlled by the doubler's controller
+            if trigger.controller != doubler.controller() {
+                return false;
             }
-        })
+            // CR 603.2d: Self-exclusion. A doubler normally never doubles its own
+            // triggered abilities — Panharmonicon/Yarok/Isshin/Wayta all scope to
+            // OTHER permanents. The carve-out: when the doubler's `affected` filter
+            // references the source itself (`~`, e.g. Cloud's "a triggered ability
+            // of Cloud or an Equipment attached to it"), CR 603.2d makes its own
+            // triggered abilities eligible, so skip the exclusion and let the
+            // `affected` match below decide.
+            let affected_references_self = affected.as_ref().is_some_and(filter_references_self);
+            if !affected_references_self && trigger.source_id == doubler.source_id() {
+                return false;
+            }
+            // CR 603.2d: If the doubler specifies an affected filter (e.g. "creature you
+            // control of the chosen type"), only double triggers from matching sources.
+            affected.as_ref().is_none_or(|filter| match latched_source {
+                Some(trigger_source) => {
+                    latched_source_matches_doubler_filter(state, trigger_source, filter, source)
+                }
+                None => trigger_source_matches_doubler_filter(
+                    state,
+                    trigger,
+                    filter,
+                    doubler.source_id(),
+                ),
+            })
+        }
+        // CR 603.2d + CR 400.7: "a triggered ability of that creature" names one
+        // object, not a controller-relative population, so only the trigger's
+        // source identity decides: the triggered abilities that exact
+        // incarnation has, whoever controls them now.
+        TriggerDoublerOrigin::ResolvedEffect { object, .. } => {
+            trigger_is_ability_of_incarnation(state, trigger, latched_source, *object)
+        }
+    }
+}
+
+/// CR 603.2d + CR 400.7: whether `trigger` is a triggered ability of exactly
+/// the object incarnation `object`, judged on the trigger's event-time source
+/// (its latched look-back source, else the source context it captured when it
+/// triggered — for a leaves-the-battlefield ability, the object as it last
+/// existed on the battlefield, CR 603.10a).
+fn trigger_is_ability_of_incarnation(
+    state: &GameState,
+    trigger: &PendingTrigger,
+    latched_source: Option<&TriggerSourceContext>,
+    object: ObjectIncarnationRef,
+) -> bool {
+    match latched_source.or(trigger.ability.trigger_source.as_ref()) {
+        Some(source) => source.identity.reference == object,
+        // Built-in keyword triggers are collected only from battlefield
+        // candidates and capture no source context; their source is still the
+        // live object during this collection pass.
+        None => state.objects.get(&trigger.source_id).is_some_and(|obj| {
+            obj.zone == Zone::Battlefield && ObjectIncarnationRef::from_object(obj) == object
+        }),
+    }
+}
+
+/// CR 603.10a + CR 603.2d: the doublers a departed trigger source carried when
+/// it left the battlefield. A resolved effect bound to an object ends with that
+/// object (CR 400.7), before the leaves-the-battlefield abilities it looked
+/// back to are put on the stack, so its departure record latches it
+/// (`ZoneChangeRecord::trigger_doublers`) and the source's look-back triggers
+/// are counted against that latch.
+fn departure_latched_doublers<'a>(
+    state: &'a GameState,
+    trigger: &PendingTrigger,
+) -> &'a [crate::types::events::LatchedTriggerDoubler] {
+    trigger
+        .ability
+        .trigger_source
+        .as_ref()
+        .filter(|source| source.identity.expected_zone == Zone::Battlefield)
+        .and_then(|source| state.incarnation_departure_record(source.identity.reference))
+        .map_or(&[], |record| record.trigger_doublers.as_slice())
 }
 
 fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTriggerContext>) {
@@ -13142,6 +13264,23 @@ fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTriggerCon
         };
         for doubler in doublers {
             if doubler_applies(state, trigger_context, doubler, Some(source)) {
+                extra.push(trigger_context.clone());
+            }
+        }
+    }
+    // CR 603.10a + CR 603.2d: a departed source's look-back trigger also counts
+    // the resolved effects bound to it as it left. Each effect counts once: one
+    // the live board still holds was already counted above.
+    for trigger_context in pending.iter() {
+        if control_change_doubling_authority(state, &trigger_context.pending).is_some() {
+            continue;
+        }
+        for doubler in departure_latched_doublers(state, &trigger_context.pending) {
+            let counted_live = doubler.resolved_effect_id().is_some_and(|effect_id| {
+                live.iter()
+                    .any(|live| live.resolved_effect_id() == Some(effect_id))
+            });
+            if !counted_live && doubler_applies(state, trigger_context, doubler, None) {
                 extra.push(trigger_context.clone());
             }
         }
@@ -19813,11 +19952,7 @@ pub mod tests {
             Zone::Battlefield,
         );
         let watcher = trigger_source_context_for_latch(&state, &state.objects[&watcher]);
-        let doubler = crate::types::events::LatchedTriggerDoubler {
-            source: trigger_source_context_for_latch(&state, &state.objects[&doubler]),
-            cause: TriggerCause::Any,
-            affected: None,
-        };
+        let doubler = trigger_source_context_for_latch(&state, &state.objects[&doubler]);
         for (card, shape) in [
             (
                 "Ancient Greenwarden",

@@ -17646,11 +17646,13 @@ fn is_object_trigger_doubling_clause(lower: &str) -> bool {
     parse_object_trigger_doubling(lower.trim()).is_ok()
 }
 
-/// CR 603.2d + CR 611.2a: lower the object-scoped doubler to a continuous
-/// effect from a resolved ability that gives the referenced object an
-/// unrestricted trigger-doubling static (`DoubleTriggers { cause: Any }`, scoped
-/// to the object's own triggered abilities). Its duration comes from the
-/// surrounding clause ("for as long as ~ remains tapped", CR 611.2b).
+/// CR 603.2d + CR 611.2a + CR 611.2c: lower the object-scoped doubler to a
+/// rule-modifying continuous effect from a resolved ability, bound to the
+/// referenced object: an unrestricted `DoubleTriggers { cause: Any }` covering
+/// that object's own triggered abilities. The engine reads it off the resolved
+/// effect (one doubler per resolution) rather than grafting it onto the object.
+/// Its duration comes from the surrounding clause ("for as long as ~ remains
+/// tapped", CR 611.2b).
 fn try_parse_object_trigger_doubling(tp: TextPair) -> Option<ParsedEffectClause> {
     let (_, affected) = parse_object_trigger_doubling(tp.lower.trim()).ok()?;
     let mode = StaticMode::DoubleTriggers {

@@ -114,6 +114,7 @@ fn captain_nghathrod_end_step_skips_eliminated_opponent_graveyard() {
             is_suspected: false,
             was_prepared: false,
             departure: engine::types::game_state::ZoneDeparture::Moved,
+            trigger_doublers: Vec::new(),
         });
 
     let mut events = Vec::new();

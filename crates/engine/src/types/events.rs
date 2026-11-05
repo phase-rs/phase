@@ -429,34 +429,78 @@ pub struct ControlChangeObservation {
     /// controller, immediately before the instruction. One list is shared by
     /// every event the instruction publishes.
     pub watchers: std::sync::Arc<Vec<TriggerSourceContext>>,
-    /// CR 603.2d + CR 603.10d: every functioning trigger-doubling static, with
-    /// its controller, immediately before the instruction. A look-back
+    /// CR 603.2d + CR 603.10d: every functioning trigger-doubling effect (a
+    /// static ability or a resolved effect), with its controller, immediately
+    /// before the instruction. A look-back
     /// watcher's trigger counts its additional triggers against these, not
     /// against a doubler the instruction itself moved or removed.
     #[serde(default, skip_serializing_if = "latched_doublers_are_empty")]
     pub doublers: std::sync::Arc<Vec<LatchedTriggerDoubler>>,
 }
 
-/// CR 603.2d: one functioning "triggers an additional time" static ability
-/// (`StaticMode::DoubleTriggers`) as it stood when latched: its source, as an
-/// observed source context (its controller is "you", and its chosen
-/// attributes answer source-relative scope such as "of the chosen type"), the
-/// spawning-event predicate and the trigger-source scope.
+/// CR 603.2d: one functioning "triggers an additional time" effect
+/// (`StaticMode::DoubleTriggers`) as it stood when latched: the spawning-event
+/// predicate and where the effect comes from, which fixes its scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatchedTriggerDoubler {
-    pub source: TriggerSourceContext,
     pub cause: super::statics::TriggerCause,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub affected: Option<super::ability::TargetFilter>,
+    pub origin: TriggerDoublerOrigin,
+}
+
+/// CR 603.2d: the effect that makes triggered abilities trigger an additional
+/// time, by kind (CR 604.1 static ability / CR 611.2a continuous effect from a
+/// resolved ability).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TriggerDoublerOrigin {
+    /// A static ability (Panharmonicon, Harmonic Prodigy): its source as an
+    /// observed source context (its controller is "you", and its chosen
+    /// attributes answer source-relative scope such as "of the chosen type")
+    /// and its printed trigger-source scope (`None` = unrestricted).
+    Static {
+        source: Box<TriggerSourceContext>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        affected: Option<super::ability::TargetFilter>,
+    },
+    /// CR 611.2a + CR 611.2c: a rule-modifying continuous effect a resolved
+    /// ability created ("if a triggered ability of that creature triggers,
+    /// that ability triggers an additional time" — Lwaxana Troi, Charming
+    /// Guest). It covers exactly the triggered abilities of one object
+    /// incarnation (CR 400.7). `effect_id` is the transient continuous
+    /// effect's own identity, so two resolutions are two effects and each
+    /// counts (CR 603.2d); `controller` is the player who controlled the
+    /// resolving ability, the effect's "you" (CR 109.5).
+    ResolvedEffect {
+        effect_id: u64,
+        source_id: ObjectId,
+        controller: PlayerId,
+        object: ObjectIncarnationRef,
+    },
 }
 
 impl LatchedTriggerDoubler {
+    /// The object whose static ability, or whose resolved ability, is the
+    /// doubling effect.
     pub fn source_id(&self) -> ObjectId {
-        self.source.identity.reference.object_id
+        match &self.origin {
+            TriggerDoublerOrigin::Static { source, .. } => source.identity.reference.object_id,
+            TriggerDoublerOrigin::ResolvedEffect { source_id, .. } => *source_id,
+        }
     }
 
+    /// CR 109.5: the doubling effect's controller ("you").
     pub fn controller(&self) -> PlayerId {
-        self.source.lki.controller
+        match &self.origin {
+            TriggerDoublerOrigin::Static { source, .. } => source.lki.controller,
+            TriggerDoublerOrigin::ResolvedEffect { controller, .. } => *controller,
+        }
+    }
+
+    /// The resolved effect's identity, for a doubler that is one.
+    pub fn resolved_effect_id(&self) -> Option<u64> {
+        match &self.origin {
+            TriggerDoublerOrigin::Static { .. } => None,
+            TriggerDoublerOrigin::ResolvedEffect { effect_id, .. } => Some(*effect_id),
+        }
     }
 }
 
