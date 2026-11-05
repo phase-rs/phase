@@ -12666,6 +12666,66 @@ fn return_each_card_they_exiled_this_way_uses_exiled_tracked_set() {
 /// `ExiledBySource` (resolved at runtime via `exile_links`), not the chain-local
 /// `TrackedSet(0)` sentinel that is empty at LTB time. Third emission site of the
 /// #5571 cross-resolution fix (after the Copy verb and `try_parse_cast_effect`).
+/// CR 603.7 + CR 608.2c: the plural-recall rebind is itself the act of making
+/// the delayed payload read the chain's published set, so it must also mark the
+/// wrapper as a tracked-set consumer. The generic "those cards" / battlefield
+/// gates do not recognize "Put them into their owners' hands", and an unbound
+/// `TrackedSet` sentinel would resolve against whatever set happens to be
+/// latest when the trigger fires instead of the set this chain published.
+#[test]
+fn plural_recall_rebind_marks_the_delayed_payload_as_a_tracked_set_consumer() {
+    let mut effect = Effect::CreateDelayedTrigger {
+        condition: crate::types::ability::DelayedTriggerCondition::AtNextPhase {
+            phase: crate::types::phase::Phase::End,
+        },
+        effect: Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )),
+        uses_tracked_set: false,
+    };
+
+    rebind_plural_recall_delayed_payload_to_tracked_set(&mut effect);
+
+    let Effect::CreateDelayedTrigger {
+        effect: payload,
+        uses_tracked_set,
+        ..
+    } = &effect
+    else {
+        panic!("expected the delayed wrapper to survive the rebind");
+    };
+    assert!(
+        *uses_tracked_set,
+        "the rebind must mark the delayed trigger as reading the published set"
+    );
+    assert!(
+        matches!(
+            &*payload.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::TrackedSet { id },
+                ..
+            } if *id == crate::types::identifiers::TrackedSetId(0)
+        ),
+        "the plural recall must bind the tracked-set sentinel: {:?}",
+        payload.effect
+    );
+}
+
 #[test]
 fn hideaway_ltb_put_exiled_card_binds_exiled_by_source() {
     let parsed = parse_oracle_text(

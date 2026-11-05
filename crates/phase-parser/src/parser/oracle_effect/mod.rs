@@ -39661,13 +39661,22 @@ fn starts_with_plural_recall_anaphor(lower: &str) -> bool {
 /// equally true of both shapes.
 fn rebind_plural_recall_delayed_payload_to_tracked_set(effect: &mut Effect) {
     let Effect::CreateDelayedTrigger {
-        effect: payload, ..
+        effect: payload,
+        uses_tracked_set,
+        ..
     } = effect
     else {
         return;
     };
     if let Effect::ChangeZone { target, .. } = &mut *payload.effect {
         rewrite_filter_parent_to_tracked_set(target);
+        // CR 603.7 + CR 608.2c: the payload now READS the chain's published set, so
+        // the delayed trigger must bind that set at creation. The generic
+        // `has_tracked_ref` gate that marks the wrapper can miss this phrasing —
+        // "Put them into their owners' hands" is neither a battlefield recall nor
+        // a "those cards" reference — and an unbound `TrackedSet` sentinel would
+        // resolve against whatever set happens to be latest when it fires.
+        *uses_tracked_set = true;
     }
 }
 
