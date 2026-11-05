@@ -460,10 +460,10 @@ fn push_first_no_legal_modes_modal_trigger_dropped_silently() {
     );
 }
 
-/// CR 700.2b (override) + CR 701.9b (analogous): a modal triggered ability
-/// declared "choose one at random" (Cult of Skaro) must NOT prompt the
-/// controller with `AbilityModeChoice` — the game picks the mode via
-/// `state.rng` and the ability reaches the stack with a resolved,
+/// CR 700.2b: the controller chooses the mode; "at random" fixes how it is
+/// picked. A modal triggered ability declared "choose one at random" (Cult of
+/// Skaro) must NOT prompt the controller with `AbilityModeChoice` — the mode is
+/// drawn via `state.rng` and the ability reaches the stack with a resolved,
 /// non-modal mode. Regression test for the unconsumed-random-axis defect.
 #[test]
 fn random_modal_trigger_resolves_without_prompting() {

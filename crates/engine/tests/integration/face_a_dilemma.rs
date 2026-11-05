@@ -598,6 +598,8 @@ fn random_modes_face_a_dilemma() {
     let mut scenario = board();
     let cult = scenario
         .add_creature_from_oracle(P0, "Cult of Skaro", 4, 4, CULT_OF_SKARO)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Dalek"])
         .id();
     let seven = add_seven(&mut scenario, P0);
     let mut runner = scenario.build();

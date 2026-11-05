@@ -18703,8 +18703,9 @@ pub(super) fn begin_pending_trigger_target_selection(
                 return Ok(None);
             };
 
-            // CR 700.2b (override) + CR 701.9b (analogous): "choose ... at
-            // random" modal triggers (Cult of Skaro) are resolved inline by
+            // CR 700.2b: the controller chooses the mode; "at random" fixes how
+            // it is picked. "Choose ... at random" modal triggers (Cult of
+            // Skaro) are resolved inline by
             // `dispatch_pending_trigger_context` via `state.rng` — they clear
             // `modal` before this re-entry surfaces a `WaitingFor`, so reaching
             // here with a `Random` selection means the dispatcher was bypassed.

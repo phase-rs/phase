@@ -11049,10 +11049,9 @@ fn dispatch_pending_trigger_context_core(
             state.pending_trigger_firing = Some(firing);
             state.pending_trigger_entry = Some(entry_id);
 
-            // CR 700.2b (override) + CR 701.9b (analogous): "choose ... at random"
-            // (Cult of Skaro). The game — not `chooser` — picks the mode(s), so
-            // resolve them immediately via `state.rng` instead of pausing on
-            // `AbilityModeChoice`. Mirrors the `TargetSelectionMode::Random`
+            // CR 700.2b: the controller chooses the mode; "at random" (Cult of
+            // Skaro) fixes how it is picked, so draw it immediately via
+            // `state.rng` instead of pausing on `AbilityModeChoice`. Mirrors the `TargetSelectionMode::Random`
             // short-circuit used for targets below.
             if modal_for_player.selection.is_random() {
                 match super::engine_modes::resolve_random_modal_trigger(

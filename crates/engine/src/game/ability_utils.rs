@@ -2062,10 +2062,10 @@ pub fn random_select_targets_for_ability(
     Ok(chosen)
 }
 
-/// CR 700.2b (override) + CR 701.9b (analogous): Resolve a modal ability whose
-/// `selection` is `Random` (Cult of Skaro "choose one at random") by uniformly
-/// drawing mode index/indices from the legal set using the engine's seeded RNG
-/// (`state.rng`). The game — not `modal.chooser` — makes the selection, so no
+/// CR 700.2b: the controller chooses the mode; "at random" fixes how it is
+/// picked. Resolve a modal ability whose `selection` is `Random` (Cult of Skaro
+/// "choose one at random") by uniformly drawing mode index/indices from the
+/// legal set using the engine's seeded RNG (`state.rng`), so no
 /// `WaitingFor::AbilityModeChoice` is emitted. Mirrors
 /// `random_select_targets_for_ability` for the mode-selection axis.
 ///

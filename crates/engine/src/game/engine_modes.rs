@@ -577,9 +577,9 @@ struct TriggeredModeChoice {
     indices: Vec<usize>,
 }
 
-/// CR 700.2b (override) + CR 701.9b (analogous): Complete a modal *triggered*
-/// ability whose `selection` is `Random` (Cult of Skaro "choose one at random")
-/// without prompting `modal.chooser`. The game draws the mode index/indices via
+/// CR 700.2b: the controller chooses the mode; "at random" fixes how it is
+/// picked. Complete a modal *triggered* ability whose `selection` is `Random`
+/// (Cult of Skaro "choose one at random") without prompting `modal.chooser`. The game draws the mode index/indices via
 /// `random_select_modal_indices` (seeded `state.rng`), then routes through the
 /// SAME finalization path the interactive controller-choice flow uses
 /// (`handle_triggered_mode_choice`) so target legality, per-mode labels, and

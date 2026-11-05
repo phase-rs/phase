@@ -172,6 +172,7 @@ fn sisko_board(charms: usize) -> (GameRunner, Vec<ObjectId>) {
     // declaration.
     scenario
         .add_creature_from_oracle(P0, "Captain Benjamin Sisko", 2, 2, SISKO)
+        .with_subtypes(vec!["Human", "Officer"])
         .with_summoning_sickness();
     let charms = (0..charms)
         .map(|_| {
@@ -300,9 +301,10 @@ fn caretaker_does_not_trigger_without_a_dilemma() {
 }
 
 /// S4 — Sisko's activated ability: exile the top five; P0 may cast spells
-/// among them with mana value ≤ the number of Officers P0 controls (two here)
-/// without paying their mana costs (CR 608.2g). Sacred Nectar (mana value 2,
-/// CR 202.3) is castable; Angel's Mercy (mana value 4) is not.
+/// among them with mana value ≤ the number of Officers P0 controls (three
+/// here: Sisko is a Human Officer, plus two Officer tokens) without paying
+/// their mana costs (CR 608.2g). Sacred Nectar (mana value 2, CR 202.3) is
+/// castable; Angel's Mercy (mana value 4, one over the count) is not.
 #[test]
 fn sisko_casts_only_spells_within_the_officer_count() {
     let mut scenario = GameScenario::new();
@@ -320,6 +322,7 @@ fn sisko_casts_only_spells_within_the_officer_count() {
         .from_oracle_text(SACRED_NECTAR);
     let sisko = scenario
         .add_creature_from_oracle(P0, "Captain Benjamin Sisko", 2, 2, SISKO)
+        .with_subtypes(vec!["Human", "Officer"])
         .id();
     for _ in 0..2 {
         scenario
