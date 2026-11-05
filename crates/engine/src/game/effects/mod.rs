@@ -8639,8 +8639,8 @@ fn effect_fields_read_filter_population(
 ) -> bool {
     use crate::types::ability::{
         CastingPermission, ChoiceType, ConjureSource, CopyRecipient, CounterSourceRider,
-        ExiledSpellRider, GameRestriction, GuessSubject, ManaTargetRole, SearchSelectionConstraint,
-        UntilCondition, VoteSubject,
+        ExiledSpellRider, GameRestriction, GuessSubject, LibraryInstructionActor, ManaTargetRole,
+        SearchSelectionConstraint, UntilCondition, VoteSubject,
     };
     use crate::types::mana::ManaSpellGrant;
 
@@ -9156,7 +9156,17 @@ fn effect_fields_read_filter_population(
         Effect::RevealFromHand { filter, .. } => has_filter(filter),
         Effect::Reveal { target } => has_filter(target),
         Effect::RevealTop { player, .. } => has_filter(player),
-        Effect::ExileTop { player, .. } => has_filter(player),
+        Effect::ExileTop { player, actor, .. } => {
+            has_filter(player)
+                || match actor {
+                    // CR 608.2c: the controller and the library's owner carry no
+                    // filter of their own; a named subject's player filter is read
+                    // at resolution (`exile_top.rs`).
+                    LibraryInstructionActor::Controller
+                    | LibraryInstructionActor::LibraryPlayer => false,
+                    LibraryInstructionActor::Player { player } => has_filter(player),
+                }
+        }
         Effect::ExileFaceDownPile { object, player, .. } => {
             has_filter(object) || has_filter(player)
         }
@@ -51345,6 +51355,38 @@ mod tests {
             amount: one(),
             player: TargetFilter::Controller,
         })));
+    }
+
+    /// CR 608.2c: `ExileTop.actor` names the player who performs the exile; a
+    /// named subject's player filter is an own-field read position, the
+    /// fieldless controller and library-owner roles are not.
+    /// Revert-probe: restore `Effect::ExileTop { player, .. } => has_filter(player)`
+    /// ⇒ the named-subject row reads `false`.
+    #[test]
+    fn exile_top_named_actor_is_a_filter_population_read() {
+        let exile_top = |actor| Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Top,
+            face_down: true,
+            actor,
+        };
+        let last_created: &dyn Fn(&TargetFilter) -> bool = &filter_contains_last_created;
+        assert!(effect_fields_read_filter_population(
+            &exile_top(LibraryInstructionActor::Player {
+                player: TargetFilter::LastCreated,
+            }),
+            last_created,
+        ));
+        for fieldless in [
+            LibraryInstructionActor::Controller,
+            LibraryInstructionActor::LibraryPlayer,
+        ] {
+            assert!(!effect_fields_read_filter_population(
+                &exile_top(fieldless),
+                last_created,
+            ));
+        }
     }
 
     /// Round-4 review r1 (MED): positions evaluated LATER — when an event fires,

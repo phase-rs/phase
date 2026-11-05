@@ -1103,6 +1103,55 @@ fn each_target_filter_mut_does_not_visit_shuffle() {
     );
 }
 
+/// CR 608.2c: the player who performs an `ExileTop` is a player slot like the
+/// library owner, so an anaphor rewrite reaches a named subject; the fieldless
+/// controller and library-owner roles stay fieldless.
+#[test]
+fn each_target_filter_mut_visits_exile_top_named_actor() {
+    use crate::types::ability::{LibraryInstructionActor, LibraryPosition};
+
+    let exile_top = |actor| Effect::ExileTop {
+        player: TargetFilter::TriggeringPlayer,
+        count: QuantityExpr::Fixed { value: 1 },
+        position: LibraryPosition::Top,
+        face_down: true,
+        actor,
+    };
+    let rewrite = |mut effect: Effect| {
+        each_target_filter_mut(&mut effect, &mut |f| {
+            if matches!(f, TargetFilter::TriggeringPlayer) {
+                *f = TargetFilter::SelfRef;
+            }
+        });
+        effect
+    };
+
+    assert_eq!(
+        rewrite(exile_top(LibraryInstructionActor::Player {
+            player: TargetFilter::TriggeringPlayer,
+        })),
+        Effect::ExileTop {
+            player: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Top,
+            face_down: true,
+            actor: LibraryInstructionActor::Player {
+                player: TargetFilter::SelfRef,
+            },
+        }
+    );
+    for fieldless in [
+        LibraryInstructionActor::Controller,
+        LibraryInstructionActor::LibraryPlayer,
+    ] {
+        let Effect::ExileTop { player, actor, .. } = rewrite(exile_top(fieldless.clone())) else {
+            unreachable!("the walker keeps the effect variant");
+        };
+        assert_eq!(player, TargetFilter::SelfRef);
+        assert_eq!(actor, fieldless);
+    }
+}
+
 #[test]
 fn player_scope_rewrite_reaches_modal_mode_abilities() {
     let mode = AbilityDefinition::new(

@@ -40228,7 +40228,6 @@ pub fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mut Targe
         | Effect::Surveil { target, .. }
         | Effect::Dig { player: target, .. }
         | Effect::RevealTop { player: target, .. }
-        | Effect::ExileTop { player: target, .. }
         | Effect::Manifest { target, .. }
         // CR 701.60a: Suspect acts on a target permanent; expose its filter so
         // anaphor rewrites (e.g. self-targeting "Otherwise, suspect it") reach it.
@@ -40238,6 +40237,16 @@ pub fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mut Targe
         // "~ is no longer suspected") reach it.
         | Effect::Unsuspect { target, .. }
         | Effect::TargetOnly { target, .. } => f(target),
+        // CR 608.2c: a named subject that performs the exile is a player slot
+        // like the library owner, so an anaphor rewrite reaches both alike.
+        Effect::ExileTop { player, actor, .. } => {
+            f(player);
+            match actor {
+                crate::types::ability::LibraryInstructionActor::Controller
+                | crate::types::ability::LibraryInstructionActor::LibraryPlayer => {}
+                crate::types::ability::LibraryInstructionActor::Player { player } => f(player),
+            }
+        }
         Effect::PutCounter { target, .. } | Effect::RemoveCounter { target, .. } => f(target),
         Effect::GoadAll { target } => f(target),
         Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => f(target),
