@@ -6952,6 +6952,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::MayLookAtTopOfLibrary
         | StaticMode::MayLookAtFaceDown
         | StaticMode::CantBeTurnedFaceUp
+        | StaticMode::CantBeBeamedUp { .. }
         | StaticMode::MayChooseNotToUntap
         | StaticMode::AdditionalLandDrop { .. }
         | StaticMode::EmblemStatic

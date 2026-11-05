@@ -2,15 +2,17 @@ use std::str::FromStr;
 
 use crate::game::casting_costs::cost_has_x;
 use crate::game::combat::AttackTarget;
-use crate::game::game_object::GameObject;
+use crate::game::game_object::{GameObject, ObjectIncarnationRefExt};
+use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, CastVariantPaid, Effect, NinjutsuVariant, RuntimeHandler,
+    TriggerProducerOrigin,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{
     BestowCost, BlitzCost, EmbalmCost, EmergeCost, EternalizeCost, EvokeCost, FlashbackCost,
     GiftKind, Keyword, KeywordKind, ProtectionColorSet, ProtectionTarget,
@@ -18,7 +20,7 @@ use crate::types::keywords::{
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::statics::{CostModifyMode, StaticMode};
+use crate::types::statics::{BeamMeUpProhibitionScope, CostModifyMode, StaticMode};
 use crate::types::zones::Zone;
 
 use super::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
@@ -139,6 +141,51 @@ pub fn stack_has_split_second(state: &GameState) -> bool {
             .objects
             .get(&entry.id)
             .is_some_and(|obj| has_keyword(obj, &Keyword::SplitSecond))
+    })
+}
+
+/// CR 101.2 + CR 604.1 + CR 611.3a: whether `object_id` may be returned to pay a
+/// beam me up cost — false while a functioning `StaticMode::CantBeBeamedUp`
+/// binding this cast applies to it. The single reader of that mode;
+/// `FilterProp::CanBeBeamedUp` delegates here. The static's `affected` resolves
+/// from its own source, so `EnchantedBy` binds to the Aura's live host.
+///
+/// - `BeamMeUpProhibitionScope::AnyCast` binds every beam me up cast (Marooned:
+///   "Enchanted permanent … can't be beamed up.").
+/// - `BeamMeUpProhibitionScope::GrantedBySource` binds only a cast through the
+///   beam me up `granted_by` grants (Scotty, Miracle Worker: "Scotty can't be
+///   beamed up to cast a spell this way."). CR 400.7: `granted_by` names one
+///   incarnation, so a granter that has since changed zones binds nothing.
+///
+/// Beam me up rule number: needs manual verification.
+pub fn can_be_beamed_up(
+    state: &GameState,
+    object_id: ObjectId,
+    granted_by: Option<ObjectIncarnationRef>,
+) -> bool {
+    let context = StaticCheckContext {
+        target_id: Some(object_id),
+        ..Default::default()
+    };
+    if check_static_ability(
+        state,
+        StaticMode::CantBeBeamedUp {
+            scope: BeamMeUpProhibitionScope::AnyCast,
+        },
+        &context,
+    ) {
+        return false;
+    }
+    !granted_by.is_some_and(|granter| {
+        granter.is_current(state)
+            && crate::game::static_abilities::carrier_static_applies(
+                state,
+                granter.object_id,
+                &StaticMode::CantBeBeamedUp {
+                    scope: BeamMeUpProhibitionScope::GrantedBySource,
+                },
+                &context,
+            )
     })
 }
 
@@ -295,6 +342,183 @@ pub fn effective_harmonize_cost(state: &GameState, object_id: ObjectId) -> Optio
     }
 }
 
+/// CR 118.9 + CR 601.3: Effective beam me up alternative cost for a card in a
+/// graveyard, honoring off-zone keyword grants in addition to a printed
+/// `Keyword::BeamMeUp`. Resolves `ManaCost::SelfManaCost` (a grant whose cost
+/// equals the card's mana cost, e.g. Scotty, Miracle Worker) via
+/// `resolve_keyword_mana_cost`, mirroring `effective_harmonize_cost`. This is
+/// the cost of the first instance `beam_me_up_instances` lists (the default
+/// announcement); a cast pays the cost of the instance it announced
+/// (`beam_me_up_cost_for`). The keyword's rule number needs manual
+/// verification.
+pub fn effective_beam_me_up_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
+    beam_me_up_instances(state, object_id)
+        .into_iter()
+        .next()
+        .map(|instance| instance.cost)
+}
+
+/// One instance of beam me up on a card: its resolved cost and the object whose
+/// static grants it (`None` for a printed beam me up or a transient grant).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeamMeUpInstance {
+    pub cost: ManaCost,
+    pub granted_by: Option<ObjectIncarnationRef>,
+}
+
+/// CR 113.2c + CR 613.1f: every beam me up instance `object_id` has, in the
+/// order of its keyword contributions. The single authority for both the beam
+/// me up cost and the granter: each instance functions independently, so two
+/// Scottys give a graveyard card two instances, each scoping its own "can't be
+/// beamed up to cast a spell this way" prohibition.
+///
+/// CR 118.6: an instance whose cost is based on the mana cost of a card with no
+/// mana cost (Scotty, Miracle Worker's grant on Ancestral Vision) is unpayable,
+/// so it is not listed: it would otherwise concretize to `ManaCost::NoCost` and
+/// read as free. A payable instance on the same card (a printed beam me up, or
+/// a {0} mana cost) is unaffected. Beam me up rule number: needs manual
+/// verification.
+pub fn beam_me_up_instances(state: &GameState, object_id: ObjectId) -> Vec<BeamMeUpInstance> {
+    let mut instances: Vec<BeamMeUpInstance> = Vec::new();
+    let contributions =
+        crate::game::off_zone_characteristics::effective_off_zone_keyword_contributions(
+            state, object_id,
+        )
+        .into_iter()
+        .filter_map(|entry| {
+            let Keyword::BeamMeUp(cost) = &entry.keyword else {
+                return None;
+            };
+            if self_mana_cost_is_unpayable(state, object_id, cost) {
+                return None;
+            }
+            let granted_by = match entry.origin {
+                Some(TriggerProducerOrigin::Static { source, .. }) => Some(source),
+                // A transient grant's source is a resolved spell or ability,
+                // which carries no functioning "this way" prohibition; a
+                // printed keyword has no granter.
+                Some(TriggerProducerOrigin::Transient { .. }) | None => None,
+            };
+            Some(BeamMeUpInstance {
+                cost: resolve_keyword_mana_cost(state, object_id, cost),
+                granted_by,
+            })
+        });
+    for instance in contributions {
+        if !instances.contains(&instance) {
+            instances.push(instance);
+        }
+    }
+    instances
+}
+
+/// CR 601.2b + CR 613.1f: the granter of the beam me up instance `object_id`
+/// is announced with by default — the first instance's, so the default
+/// granter and `effective_beam_me_up_cost` always come from one instance. A
+/// player choosing among costs announces another option's granter instead
+/// (`beam_me_up_cast_options`). `None` for a
+/// printed beam me up (or none at all). Latched on
+/// `CastingVariant::BeamMeUp { granted_by }` at announcement. The engine keeps
+/// the card in its graveyard until the cast finalizes, but the granter can
+/// leave mid-cast (a mana ability that sacrifices it), and the latched
+/// incarnation then binds nothing (CR 400.7). The return choice may move the
+/// latch to another instance with the same cost
+/// (`beam_me_up_granter_for_return`). Beam me up rule number: needs manual
+/// verification.
+pub fn beam_me_up_granted_by(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<ObjectIncarnationRef> {
+    beam_me_up_instances(state, object_id)
+        .into_iter()
+        .next()
+        .and_then(|instance| instance.granted_by)
+}
+
+/// CR 113.2c + CR 601.2b + CR 118.9: the beam me up casts a player may
+/// announce for `object_id` — one per distinct beam me up cost, represented by
+/// the first instance with that cost. A printed beam me up and a Scotty,
+/// Miracle Worker grant usually cost different amounts (Transporter
+/// Malfunction's {3}{R}{R}{R} against its {1}{R} mana cost), so each is its own
+/// alternative cost and both are offered. Same-cost instances are one option:
+/// they differ only in their own "this way" prohibition, and the return choice
+/// may pay through any of them (`beam_me_up_return_granters`).
+///
+/// An option is announced by its `granted_by` (`CastingVariant::BeamMeUp`), so
+/// two different-cost instances that both lack a granter (a printed one and a
+/// transient grant) cannot both be named; only the first-listed is offered. No
+/// printed card grants beam me up transiently. Beam me up rule number: needs
+/// manual verification.
+pub fn beam_me_up_cast_options(state: &GameState, object_id: ObjectId) -> Vec<BeamMeUpInstance> {
+    let mut options: Vec<BeamMeUpInstance> = Vec::new();
+    for instance in beam_me_up_instances(state, object_id) {
+        if !options
+            .iter()
+            .any(|option| option.cost == instance.cost || option.granted_by == instance.granted_by)
+        {
+            options.push(instance);
+        }
+    }
+    options
+}
+
+/// CR 601.2b + CR 601.2f: the beam me up cost of the cast announced through
+/// `latched` — the cost of the instance that granter gives `object_id` (the
+/// first-listed one with no granter for `None`, matching
+/// `beam_me_up_cast_options`). `None` when no such instance exists. Beam me up
+/// rule number: needs manual verification.
+pub fn beam_me_up_cost_for(
+    state: &GameState,
+    object_id: ObjectId,
+    latched: Option<ObjectIncarnationRef>,
+) -> Option<ManaCost> {
+    beam_me_up_instances(state, object_id)
+        .into_iter()
+        .find(|instance| instance.granted_by == latched)
+        .map(|instance| instance.cost)
+}
+
+/// CR 113.2c + CR 601.2b: the granters a beam me up cast latched to `latched`
+/// may be paid through. Each instance with the cost the cast pays (the latched
+/// instance's, `beam_me_up_cost_for`) is interchangeable except for its own
+/// "this way" prohibition, so the return is legal if any of them admits it.
+/// `latched` comes first; it stays in the set after its granter leaves, where
+/// it binds nothing. Instances with a different cost are a different
+/// alternative cost (`beam_me_up_cast_options`) and are not merged. Beam me up
+/// rule number: needs manual verification.
+pub fn beam_me_up_return_granters(
+    state: &GameState,
+    object_id: ObjectId,
+    latched: Option<ObjectIncarnationRef>,
+) -> Vec<Option<ObjectIncarnationRef>> {
+    let mut granters = vec![latched];
+    if let Some(cast_cost) = beam_me_up_cost_for(state, object_id, latched) {
+        for instance in beam_me_up_instances(state, object_id) {
+            if instance.cost == cast_cost && !granters.contains(&instance.granted_by) {
+                granters.push(instance.granted_by);
+            }
+        }
+    }
+    granters
+}
+
+/// CR 601.2b + CR 601.2h: the granter whose beam me up instance makes
+/// returning `returned` legal, latched once the return is chosen — `latched`
+/// when it already admits it, else the first other interchangeable granter
+/// (`beam_me_up_return_granters`) that does. Beam me up rule number: needs
+/// manual verification.
+pub fn beam_me_up_granter_for_return(
+    state: &GameState,
+    object_id: ObjectId,
+    latched: Option<ObjectIncarnationRef>,
+    returned: ObjectId,
+) -> Option<ObjectIncarnationRef> {
+    beam_me_up_return_granters(state, object_id, latched)
+        .into_iter()
+        .find(|&granter| can_be_beamed_up(state, returned, granter))
+        .unwrap_or(latched)
+}
+
 /// CR 702.190a: Effective Sneak alt-cost for an object, honoring off-zone characteristic
 /// grants (e.g., Ninja Teen's "creature cards in your graveyard have sneak {cost}").
 pub fn effective_sneak_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
@@ -353,6 +577,7 @@ pub fn effective_keyword_mana_cost(
         KeywordKind::Mayhem => effective_mayhem_cost(state, object_id),
         KeywordKind::Harmonize => effective_harmonize_cost(state, object_id),
         KeywordKind::Disturb => effective_disturb_cost(state, object_id),
+        KeywordKind::BeamMeUp => effective_beam_me_up_cost(state, object_id),
         _ => None,
     }
 }

@@ -459,6 +459,8 @@ pub enum KeywordKind {
     /// CR 702.127: Aftermath — see `Keyword::Aftermath`.
     Aftermath,
     JumpStart,
+    /// Beam me up (TRK) — see `Keyword::BeamMeUp`.
+    BeamMeUp,
     Cipher,
     Transmute,
     /// CR 702.71: Transfigure — see `Keyword::Transfigure`.
@@ -1164,6 +1166,15 @@ pub enum Keyword {
     Sneak(ManaCost),
     /// CR 702.49 variant: Web-slinging — return a tapped creature to cast.
     WebSlinging(ManaCost),
+    /// Beam me up [cost] (TRK): "You may cast this card from your graveyard for
+    /// [cost] if you also return a creature you control to its owner's hand.
+    /// Then exile this spell." The keyword's CR number is unpublished — needs
+    /// manual verification. The cost is an alternative cost (CR 118.9), the
+    /// return is an additional cost (CR 118.8) paid per CR 601.2h, and the
+    /// keyword is the CR 601.3 permission to cast from the graveyard.
+    /// Runtime: `CastingVariant::BeamMeUp` (`engine::game::casting`), cost via
+    /// `keywords::effective_beam_me_up_cost`.
+    BeamMeUp(ManaCost),
     /// Mobilize N — when this creature attacks, create N 1/1 red Warrior tokens
     /// tapped and attacking, sacrifice them at end of combat.
     Mobilize(QuantityExpr),
@@ -1662,6 +1673,7 @@ impl Keyword {
             | Keyword::Augment
             | Keyword::Aftermath
             | Keyword::JumpStart
+            | Keyword::BeamMeUp(_)
             | Keyword::Cipher
             | Keyword::Transmute(_)
             | Keyword::Escalate(_)
@@ -1834,6 +1846,7 @@ impl Keyword {
             Keyword::Augment => KeywordKind::Augment,
             Keyword::Aftermath => KeywordKind::Aftermath,
             Keyword::JumpStart => KeywordKind::JumpStart,
+            Keyword::BeamMeUp(_) => KeywordKind::BeamMeUp,
             Keyword::Cipher => KeywordKind::Cipher,
             Keyword::Transmute(_) => KeywordKind::Transmute,
             Keyword::Transfigure(_) => KeywordKind::Transfigure,
@@ -2124,6 +2137,7 @@ impl Keyword {
             | Keyword::Gift(_)
             | Keyword::Graft(_)
             | Keyword::Harmonize(_)
+            | Keyword::BeamMeUp(_)
             | Keyword::Haste
             | Keyword::Horsemanship
             | Keyword::Increment
@@ -2244,6 +2258,7 @@ impl Keyword {
                 | Keyword::Squad(_)
                 | Keyword::Conspire
                 | Keyword::Harmonize(_)
+                | Keyword::BeamMeUp(_)
                 | Keyword::Casualty(_)
                 | Keyword::Aftermath
                 | Keyword::Disturb(_)
@@ -2337,6 +2352,13 @@ impl Keyword {
     ///   silently lost. (Bloodthirst carries a `BloodthirstValue`, so the
     ///   granted-count is per DISTINCT value — a granted `bloodthirst 3` and a
     ///   printed `bloodthirst 1` never dedup regardless.)
+    /// - **Instance identity** (CR 113.2c): beam me up (TRK) scopes a "can't be
+    ///   beamed up to cast a spell this way" prohibition to the instance a cast
+    ///   uses, so two identical grants (two Scotty, Miracle Workers) are two
+    ///   instances whose granters both matter: through either one's grant the
+    ///   other Scotty is a legal return. Deduping them would leave only one
+    ///   granter and bar one return. Beam me up rule number needs manual
+    ///   verification.
     ///
     /// Distinct from `instances_function_separately` (which gates per-instance
     /// TRIGGER installation, and deliberately excludes Sunburst because its
@@ -2351,7 +2373,7 @@ impl Keyword {
     pub fn instances_must_coexist(&self) -> bool {
         matches!(
             self,
-            Keyword::Toxic(_) | Keyword::Sunburst | Keyword::Bloodthirst(_)
+            Keyword::Toxic(_) | Keyword::Sunburst | Keyword::Bloodthirst(_) | Keyword::BeamMeUp(_)
         )
     }
 
@@ -2926,6 +2948,10 @@ impl FromStr for Keyword {
                     )))
                 }
                 "harmonize" => return Ok(Keyword::Harmonize(parse_keyword_mana_cost(p))),
+                // Beam me up [cost] (TRK; rule number needs manual verification).
+                "beam me up" | "beammeup" => {
+                    return Ok(Keyword::BeamMeUp(parse_keyword_mana_cost(p)))
+                }
                 "escape" => {
                     // CR 702.138a: MTGJSON's keywords array carries only the bare
                     // escape mana cost. This placeholder (mana sub-cost, no exile
@@ -3751,6 +3777,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Warp" => Ok(Keyword::Warp(mana(data)?)),
         "Sneak" => Ok(Keyword::Sneak(mana(data)?)),
         "WebSlinging" => Ok(Keyword::WebSlinging(mana(data)?)),
+        "BeamMeUp" => Ok(Keyword::BeamMeUp(mana(data)?)),
         // Parameterized: u32 (new keywords)
         "Mobilize" => {
             // Accept both integer (legacy) and QuantityExpr object
@@ -4380,6 +4407,7 @@ pub mod test_helpers {
             Keyword::Warp(mc("{2}{R}")),
             Keyword::Sneak(mc("{2}{R}")),
             Keyword::WebSlinging(mc("{2}{R}")),
+            Keyword::BeamMeUp(mc("{3}{R}{R}{R}")),
             Keyword::Mobilize(QuantityExpr::Fixed { value: 3 }),
             // CR 702.174a: Longstalk Brawl promises a Fish, not a card.
             Keyword::Gift(GiftKind::TappedFish),
@@ -6117,6 +6145,42 @@ mod tests {
         }
     }
 
+    /// Beam me up [cost] (TRK; the keyword's rule number needs manual
+    /// verification): both `FromStr` spellings, the kind and classifications,
+    /// and tagged deserialization (not the `Unknown` fallthrough).
+    #[test]
+    fn beam_me_up_from_str_kind_and_tagged_round_trip() {
+        assert_eq!(
+            Keyword::from_str("beam me up:{3}{R}{R}{R}").unwrap(),
+            Keyword::BeamMeUp(parse_keyword_mana_cost("{3}{R}{R}{R}"))
+        );
+        assert_eq!(
+            Keyword::from_str("BeamMeUp:{2}{U}").unwrap(),
+            Keyword::BeamMeUp(parse_keyword_mana_cost("{2}{U}"))
+        );
+        // Bare name without a cost is not this keyword (grant recognition is
+        // the next cluster's work).
+        assert!(matches!(
+            Keyword::from_str("beam me up").unwrap(),
+            Keyword::Unknown(_)
+        ));
+
+        let kw = Keyword::BeamMeUp(parse_keyword_mana_cost("{3}{R}{R}{R}"));
+        assert_eq!(kw.kind(), KeywordKind::BeamMeUp);
+        assert!(kw.kind_identifies_ability());
+        assert!(kw.is_spell_casting_only());
+        assert!(!kw.is_battlefield_display_relevant());
+
+        let tagged: Keyword = serde_json::from_value(serde_json::json!({
+            "BeamMeUp": {"type": "Cost", "shards": ["Red", "Red", "Red"], "generic": 3}
+        }))
+        .unwrap();
+        assert_eq!(tagged, kw);
+        let json = serde_json::to_value(&kw).unwrap();
+        let round_trip: Keyword = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(round_trip, kw, "round-trip failed for {json}");
+    }
+
     #[test]
     fn parameterized_keywords_survive_serde_round_trip() {
         // Serialize emits these as externally-tagged objects
@@ -6407,6 +6471,7 @@ mod tests {
             Keyword::Warp(..) => Some("Warp"),
             Keyword::Sneak(..) => Some("Sneak"),
             Keyword::WebSlinging(..) => Some("WebSlinging"),
+            Keyword::BeamMeUp(..) => Some("BeamMeUp"),
             Keyword::Mobilize(..) => Some("Mobilize"),
             Keyword::Gift(..) => Some("Gift"),
             Keyword::Discover(..) => Some("Discover"),

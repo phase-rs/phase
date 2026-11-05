@@ -5396,6 +5396,7 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
         | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InTrackedSet { .. }
@@ -5565,6 +5566,7 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
         | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InTrackedSet { .. }

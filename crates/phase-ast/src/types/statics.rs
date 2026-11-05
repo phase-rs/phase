@@ -1069,6 +1069,21 @@ impl<'de> Deserialize<'de> for RequiredDefender {
     }
 }
 
+/// CR 101.2 + CR 604.1: which beam me up casts a `StaticMode::CantBeBeamedUp`
+/// prohibition binds. The beam me up rule number is unpublished — needs manual
+/// verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BeamMeUpProhibitionScope {
+    /// "can't be beamed up" — no beam me up cast may return the affected
+    /// permanents (Marooned).
+    AnyCast,
+    /// "can't be beamed up to cast a spell this way" — only a cast through the
+    /// beam me up this static's own source grants is barred from returning the
+    /// affected permanents (Scotty, Miracle Worker). A printed beam me up, or one
+    /// another object grants, may still return them.
+    GrantedBySource,
+}
+
 /// All static ability modes from Forge's static ability registry.
 /// Matched case-sensitively against Forge mode strings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2206,6 +2221,17 @@ pub enum StaticMode {
     /// controller, so `controller: Opponent` means the source controller's
     /// opponents' permanents. Enforced in `morph::turn_face_up`.
     CantBeTurnedFaceUp,
+    /// CR 101.2 + CR 604.1: prohibition — the permanents matched by
+    /// `StaticDefinition::affected` can't be returned to pay a beam me up cost.
+    /// `scope` says which beam me up casts it binds: every one (Marooned:
+    /// "Enchanted permanent … can't be beamed up.") or only casts through the
+    /// beam me up this static's own source grants (Scotty, Miracle Worker:
+    /// "Scotty can't be beamed up to cast a spell this way."). The beam me up
+    /// rule number is unpublished — needs manual verification. Enforced only
+    /// by `engine::game::keywords::can_be_beamed_up`.
+    CantBeBeamedUp {
+        scope: BeamMeUpProhibitionScope,
+    },
 
     // -- Tier 3: Parser-produced statics --
     /// CR 502.3: You may choose not to untap this permanent during your untap step.
@@ -2588,6 +2614,7 @@ pub enum StaticModeKind {
     MayLookAtTopOfLibrary,
     MayLookAtFaceDown,
     CantBeTurnedFaceUp,
+    CantBeBeamedUp,
     MayChooseNotToUntap,
     AdditionalLandDrop,
     EmblemStatic,
@@ -2757,6 +2784,7 @@ impl StaticMode {
             StaticMode::MayLookAtTopOfLibrary => StaticModeKind::MayLookAtTopOfLibrary,
             StaticMode::MayLookAtFaceDown => StaticModeKind::MayLookAtFaceDown,
             StaticMode::CantBeTurnedFaceUp => StaticModeKind::CantBeTurnedFaceUp,
+            StaticMode::CantBeBeamedUp { .. } => StaticModeKind::CantBeBeamedUp,
             StaticMode::MayChooseNotToUntap => StaticModeKind::MayChooseNotToUntap,
             StaticMode::AdditionalLandDrop { .. } => StaticModeKind::AdditionalLandDrop,
             StaticMode::EmblemStatic => StaticModeKind::EmblemStatic,
@@ -2912,6 +2940,7 @@ impl StaticMode {
             | StaticMode::MayLookAtTopOfLibrary
             | StaticMode::MayLookAtFaceDown
             | StaticMode::CantBeTurnedFaceUp
+            | StaticMode::CantBeBeamedUp { .. }
             | StaticMode::MayChooseNotToUntap
             | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::EmblemStatic
@@ -3296,6 +3325,7 @@ impl StaticMode {
             | StaticMode::MayLookAtTopOfLibrary
             | StaticMode::MayLookAtFaceDown
             | StaticMode::CantBeTurnedFaceUp
+            | StaticMode::CantBeBeamedUp { .. }
             | StaticMode::MayChooseNotToUntap
             | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::EmblemStatic
@@ -3719,6 +3749,12 @@ impl fmt::Display for StaticMode {
             StaticMode::MayLookAtTopOfLibrary => write!(f, "MayLookAtTopOfLibrary"),
             StaticMode::MayLookAtFaceDown => write!(f, "MayLookAtFaceDown"),
             StaticMode::CantBeTurnedFaceUp => write!(f, "CantBeTurnedFaceUp"),
+            StaticMode::CantBeBeamedUp {
+                scope: BeamMeUpProhibitionScope::AnyCast,
+            } => write!(f, "CantBeBeamedUp"),
+            StaticMode::CantBeBeamedUp {
+                scope: BeamMeUpProhibitionScope::GrantedBySource,
+            } => write!(f, "CantBeBeamedUpThisWay"),
             // Tier 3
             StaticMode::MayChooseNotToUntap => write!(f, "MayChooseNotToUntap"),
             StaticMode::AdditionalLandDrop { count } => {
@@ -4253,6 +4289,12 @@ impl FromStr for StaticMode {
             "MayLookAtTopOfLibrary" => StaticMode::MayLookAtTopOfLibrary,
             "MayLookAtFaceDown" => StaticMode::MayLookAtFaceDown,
             "CantBeTurnedFaceUp" => StaticMode::CantBeTurnedFaceUp,
+            "CantBeBeamedUp" => StaticMode::CantBeBeamedUp {
+                scope: BeamMeUpProhibitionScope::AnyCast,
+            },
+            "CantBeBeamedUpThisWay" => StaticMode::CantBeBeamedUp {
+                scope: BeamMeUpProhibitionScope::GrantedBySource,
+            },
             // Tier 3
             "MayChooseNotToUntap" => StaticMode::MayChooseNotToUntap,
             // AdditionalLandDrop is parameterized — parsed in the `other` branch below
@@ -4965,6 +5007,12 @@ mod tests {
             StaticMode::TopOfLibraryPlotPermission,
             StaticMode::MayLookAtFaceDown,
             StaticMode::CantBeTurnedFaceUp,
+            StaticMode::CantBeBeamedUp {
+                scope: BeamMeUpProhibitionScope::AnyCast,
+            },
+            StaticMode::CantBeBeamedUp {
+                scope: BeamMeUpProhibitionScope::GrantedBySource,
+            },
             // Tier 3: parser-produced statics
             StaticMode::MayChooseNotToUntap,
             StaticMode::AdditionalLandDrop { count: 1 },

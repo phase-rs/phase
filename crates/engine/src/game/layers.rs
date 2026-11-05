@@ -2312,6 +2312,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::FirstCombatPhaseOfTurn
+        | StaticCondition::CurrentPhaseIs { .. }
         | StaticCondition::None => false,
     }
 }
@@ -2469,6 +2470,7 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::FirstCombatPhaseOfTurn
+        | StaticCondition::CurrentPhaseIs { .. }
         | StaticCondition::None => CharacteristicKinds::EMPTY,
     }
 }
@@ -2615,6 +2617,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::FirstCombatPhaseOfTurn
+        | StaticCondition::CurrentPhaseIs { .. }
         | StaticCondition::None => false,
     }
 }
@@ -2852,6 +2855,11 @@ fn evaluate_condition_inner(
         StaticCondition::FirstCombatPhaseOfTurn => {
             STEP_READ.set(true);
             super::conditions::first_combat_phase_in_progress(state)
+        }
+        // CR 500.1 + CR 505.1: true while the current phase/step is one of `phases`.
+        StaticCondition::CurrentPhaseIs { phases } => {
+            STEP_READ.set(true);
+            phases.contains(&state.phase)
         }
         // CR 103.1: True when the scoped player took the first turn of the
         // game (fixed at game start). The parser emits `ControllerRef::You`.
@@ -5304,6 +5312,7 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InAnyZone { .. }
@@ -5510,6 +5519,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::FirstCombatPhaseOfTurn
+        | StaticCondition::CurrentPhaseIs { .. }
         | StaticCondition::None => false,
     }
 }

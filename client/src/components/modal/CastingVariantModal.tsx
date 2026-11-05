@@ -33,6 +33,7 @@ const VARIANT_KEYS: Partial<Record<CastingVariant["type"], ParseKeys<"game">>> =
   Mayhem: "castingVariant.variantMayhem",
   Flashback: "castingVariant.variantFlashback",
   Aftermath: "castingVariant.variantAftermath",
+  BeamMeUp: "castingVariant.variantBeamMeUp",
   GraveyardPermission: "castingVariant.variantGraveyardPermission",
   HandPermission: "castingVariant.variantHandPermission",
   Miracle: "castingVariant.variantMiracle",

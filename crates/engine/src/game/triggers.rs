@@ -12915,6 +12915,7 @@ fn latched_property_kind(
         | FilterProp::Suspected
         | FilterProp::Renowned
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::Prepared
         | FilterProp::PowerExceedsBase
         | FilterProp::InTrackedSet { .. }
@@ -14891,6 +14892,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::Modified
         | FilterProp::IsSaddled
         | FilterProp::Unpaired
@@ -49556,6 +49558,7 @@ pub mod tests {
             | Keyword::Warp(_)
             | Keyword::Sneak(_)
             | Keyword::WebSlinging(_)
+            | Keyword::BeamMeUp(_)
             | Keyword::Mobilize(_)
             | Keyword::Gift(_)
             | Keyword::Discover(_)

@@ -265,9 +265,9 @@ describe("keyword detail over the engine's keyword payload golden", () => {
   const manaBearing = samples.filter((kw) => manaCostsIn(payloadOf(kw)).length > 0);
 
   it("reaches every mana-cost-bearing Keyword variant", () => {
-    // 40 bare ManaCost + 10 Mana/NonMana wrappers + 9 structs with a cost field
+    // 41 bare ManaCost + 10 Mana/NonMana wrappers + 9 structs with a cost field
     // + Disguise + Ward + 2 AbilityCost keywords.
-    expect(new Set(manaBearing.map(keyOf)).size).toBe(63);
+    expect(new Set(manaBearing.map(keyOf)).size).toBe(64);
   });
 
   it("renders every sample's mana cost in its detail", () => {
@@ -290,6 +290,7 @@ describe("keyword detail over the engine's keyword payload golden", () => {
     const isType = (type: string) => (kw: Keyword) =>
       (payloadOf(kw) as { type?: string }).type === type;
     expect(detailOf("Suspend")).toBe("Suspend 2—{1}{R}");
+    expect(detailOf("BeamMeUp")).toBe("Beam Me Up {3}{R}{R}{R}");
     expect(detailOf("Awaken")).toBe("Awaken 4—{5}{W}{W}{W}");
     expect(detailOf("Reinforce")).toBe("Reinforce 3—{2}{G}");
     expect(detailOf("Impending")).toBe("Impending 4—{2}{W}");

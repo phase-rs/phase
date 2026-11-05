@@ -1796,9 +1796,12 @@ fn graveyard_spell_objects_available_to_cast(
         }
 
         // CR 702.34 / CR 702.81 / CR 702.127 / CR 702.138 / CR 702.180:
-        // Cards in graveyard with graveyard-cast keywords. Escape and Retrace
-        // must have enough eligible non-mana additional-cost material available.
-        if has_effective_graveyard_cast_keyword(state, player, obj_id, obj)
+        // Cards in graveyard with graveyard-cast keywords. Escape, Retrace,
+        // Jump-start and beam me up must have enough eligible non-mana
+        // additional-cost material available. Beam me up restricts the SPELL,
+        // not the card, so it is judged per face the player may cast
+        // (`beam_me_up_offered_from_graveyard`).
+        if (has_effective_graveyard_cast_keyword(state, player, obj_id, obj)
             && (has_harmonize_keyword(state, obj_id)
                 || has_flashback_keyword(state, obj_id)
                 || has_aftermath_keyword(state, obj_id)
@@ -1808,7 +1811,8 @@ fn graveyard_spell_objects_available_to_cast(
                 || can_pay_escape_additional_cost(state, player, obj_id)
                 // CR 702.187b: Mayhem is eligible only while the card was
                 // discarded this turn.
-                || mayhem_castable_from_graveyard(state, player, obj_id))
+                || mayhem_castable_from_graveyard(state, player, obj_id)))
+            || beam_me_up_offered_from_graveyard(state, player, obj_id)
         {
             keyword_objects.push(obj_id);
         }
@@ -1954,6 +1958,101 @@ fn jumpstart_has_discardable_card(
 ) -> bool {
     jumpstart_castable_from_graveyard(state, object_id)
         && casting_costs::can_pay_jumpstart_additional_cost(state, player, object_id)
+}
+
+/// CR 601.3: beam me up is a permission to cast the card from a graveyard,
+/// keyed on the effective (printed or granted) keyword cost. Like CR 702.34a
+/// and CR 702.133a, it applies only if the resulting spell is an instant or
+/// sorcery spell: Scotty, Miracle Worker's reminder text — which, per CR
+/// 207.2a, summarizes the beam me up rule rather than adding one — reads "Only
+/// instant and sorcery spells can be cast this way." Every printed beam me up
+/// card is a sorcery, so the gate only binds a granted beam me up (Scotty grants
+/// it to every card in your graveyard). The gate reads the face being cast
+/// (CR 712.11c): a chosen modal DFC back face is swapped in before
+/// preparation, and discovery tries each face the player may choose
+/// (`beam_me_up_offered_from_graveyard`). The keyword's rule number needs
+/// manual verification.
+fn beam_me_up_castable_from_graveyard(state: &GameState, object_id: ObjectId) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        obj.zone == Zone::Graveyard
+            && obj.card_types.core_types.iter().any(|ct| {
+                matches!(
+                    ct,
+                    crate::types::card_type::CoreType::Instant
+                        | crate::types::card_type::CoreType::Sorcery
+                )
+            })
+            && super::keywords::effective_beam_me_up_cost(state, object_id).is_some()
+    })
+}
+
+/// CR 712.11b + CR 712.11c: beam me up casts only instant and sorcery SPELLS,
+/// and the caster of a spell//spell split card or modal DFC chooses the face
+/// cast, so the graveyard route is offered when SOME face the player may cast
+/// is beam-me-up castable — Journey to the Oracle, the sorcery back face of
+/// Jadzi, Oracle of Arcavios, though the card in the graveyard is a creature
+/// (CR 712.8a). Discovery only: once the face is chosen, preparation and the
+/// beam me up cost read the chosen face's own characteristics and mana cost
+/// (`beam_me_up_castable_from_graveyard`, `keywords::beam_me_up_instances`).
+fn beam_me_up_offered_from_graveyard(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    some_prospective_spell_face(state, object_id, |state| {
+        beam_me_up_has_returnable_creature(state, player, object_id)
+    })
+}
+
+/// CR 709.3 + CR 712.11b + CR 712.11c: whether `admits` holds for some spell
+/// face `object_id` may be cast as from its current zone — the face it shows
+/// now, and, for a spell//spell split card or modal DFC whose face choice is
+/// offered there (`cast_spell_face_choice_offered_from_zone`), the other face
+/// simulated as chosen on a clone (`simulate_chosen_split_spell_back_face`, the
+/// swap the `ModalFaceChoice` handler performs). Each face is evaluated alone,
+/// as only the face put on the stack is evaluated to determine if it can be
+/// cast.
+fn some_prospective_spell_face(
+    state: &GameState,
+    object_id: ObjectId,
+    admits: impl Fn(&GameState) -> bool,
+) -> bool {
+    if admits(state) {
+        return true;
+    }
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if !cast_spell_face_choice_offered_from_zone(state, obj) {
+        return false;
+    }
+    let mut chosen_back = state.clone();
+    let Some(back) = chosen_back.objects.get_mut(&object_id) else {
+        return false;
+    };
+    simulate_chosen_split_spell_back_face(back);
+    admits(&chosen_back)
+}
+
+/// CR 118.3 + CR 601.2h: a beam me up cast also returns a creature you control
+/// that can be beamed up, so it is offered only while one exists for some
+/// announceable beam me up cost.
+fn beam_me_up_has_returnable_creature(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    beam_me_up_castable_from_graveyard(state, object_id)
+        && super::keywords::beam_me_up_cast_options(state, object_id)
+            .into_iter()
+            .any(|option| {
+                casting_costs::can_pay_beam_me_up_additional_cost(
+                    state,
+                    player,
+                    object_id,
+                    option.granted_by,
+                )
+            })
 }
 
 /// CR 702.146: Check if an object has the Disturb keyword.
@@ -2616,7 +2715,8 @@ pub(crate) fn complete_foretell_cost_move(
 
 // CR 702.34 (Flashback) / CR 702.81 (Retrace) / CR 702.127 (Aftermath) /
 // CR 702.133 (Jump-start) / CR 702.138 (Escape) / CR 702.146 (Disturb) /
-// CR 702.180 (Harmonize): graveyard-cast alternative permissions. Sneak
+// CR 702.180 (Harmonize) / beam me up (rule number needs manual verification):
+// graveyard-cast alternative permissions. Sneak
 // (CR 702.190a) is a HAND-cast alt-cost and is deliberately NOT listed here —
 // including it would misclassify graveyard objects with a granted Sneak as
 // castable from the graveyard, which the rules do not permit.
@@ -2631,6 +2731,7 @@ fn has_effective_graveyard_cast_keyword(
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Escape)
         || has_retrace_keyword(state, object_id)
         || jumpstart_castable_from_graveyard(state, object_id)
+        || beam_me_up_castable_from_graveyard(state, object_id)
         || has_harmonize_keyword(state, object_id)
         || has_flashback_keyword(state, object_id)
         || has_aftermath_keyword(state, object_id)
@@ -2641,7 +2742,8 @@ fn has_effective_graveyard_cast_keyword(
 }
 
 /// CR 109.5 + CR 702.34a / CR 702.81a / CR 702.127a / CR 702.133a / CR 702.138a /
-/// CR 702.146a / CR 702.180a: each graveyard-cast keyword means "you may cast
+/// CR 702.146a / CR 702.180a (and beam me up, rule number needs manual
+/// verification): each graveyard-cast keyword means "you may cast
 /// this card from your graveyard", and "you" is the player attempting the cast,
 /// whose graveyard is the container that player reads (the shared pile when the
 /// format shares graveyards). A card outside it (castable only through an
@@ -4305,7 +4407,8 @@ pub(crate) fn castable_from_current_zone(
                         .keywords
                         .iter()
                         .any(|k| matches!(k, crate::types::keywords::Keyword::Madness(_))))))
-        // CR 109.5 + CR 702.34 / CR 702.81 / CR 702.138 / CR 702.180: graveyard-cast
+        // CR 109.5 + CR 702.34 / CR 702.81 / CR 702.138 / CR 702.180 (and beam me
+        // up, rule number needs manual verification): graveyard-cast
         // keywords and timed graveyard grants read "your graveyard" as the
         // container the caster reads, so this sits outside the owner block above.
         || (state.object_in_players_zone(obj, Zone::Graveyard, player)
@@ -6489,6 +6592,7 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
         StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::FirstCombatPhaseOfTurn
+        | StaticCondition::CurrentPhaseIs { .. }
         | StaticCondition::IsPresent { .. } => true,
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
             conditions.iter().all(holder_bound_condition_is_modeled)
@@ -6878,8 +6982,8 @@ impl From<GraveyardAuthorityError> for EngineError {
 ///   `Ambiguous`, and the cast goes through the announcement menu.
 ///
 /// Never called for a graveyard route that is its own authority (Escape,
-/// Flashback, Retrace, Harmonize, Mayhem, Aftermath, Jump-start, Disturb, a
-/// timed alternative cost).
+/// Flashback, Retrace, Harmonize, Mayhem, Aftermath, Jump-start, Beam me up,
+/// Disturb, a timed alternative cost).
 fn resolve_graveyard_authority(
     state: &GameState,
     player: PlayerId,
@@ -8707,6 +8811,7 @@ fn prepare_casting_variant(
         | CastingVariant::Freerunning
         | CastingVariant::Prowl
         | CastingVariant::JumpStart
+        | CastingVariant::BeamMeUp { .. }
         | CastingVariant::Surge => {}
         CastingVariant::Fuse => {
             if let Some(object) = transformed_state.objects.get_mut(&object_id) {
@@ -9192,6 +9297,17 @@ fn casting_candidates(
         }
         if jumpstart_castable_from_graveyard(state, object_id) {
             candidates.push(CastingVariant::JumpStart);
+        }
+        // CR 118.9 + CR 601.2b: one beam me up option per distinct cost, so a
+        // printed beam me up and Scotty's mana-cost grant are both offered.
+        if beam_me_up_castable_from_graveyard(state, object_id) {
+            candidates.extend(
+                super::keywords::beam_me_up_cast_options(state, object_id)
+                    .into_iter()
+                    .map(|option| CastingVariant::BeamMeUp {
+                        granted_by: option.granted_by,
+                    }),
+            );
         }
         if super::keywords::effective_disturb_cost(state, object_id).is_some() {
             candidates.push(CastingVariant::Disturb);
@@ -10020,6 +10136,14 @@ fn prepare_spell_cast_announced(
         None
     };
 
+    // CR 118.9 + CR 601.3: beam me up — use the beam me up cost when casting
+    // from your graveyard (rule number needs manual verification).
+    let beam_me_up_cost = if graveyard_keywords_open {
+        super::keywords::effective_beam_me_up_cost(state, object_id)
+    } else {
+        None
+    };
+
     // CR 702.187b: Mayhem — use the mayhem mana cost when casting from graveyard,
     // but only while the card was discarded this turn. The cost may be granted to
     // graveyard cards by a static (Green Goblin), so use the off-zone-aware lookup.
@@ -10060,7 +10184,7 @@ fn prepare_spell_cast_announced(
         split_flashback_cost_components(flashback_cost.as_ref());
 
     // Precedence: Escape > Retrace > Harmonize > Mayhem > Flashback > Aftermath >
-    // Disturb > Jump-start > GraveyardPermission > Warp > Normal.
+    // Jump-start > Beam me up > Disturb > GraveyardPermission > Warp > Normal.
     // No standard card has multiple graveyard-cast keywords; if one did, the card's own
     // keyword overrides an external source's grant (GraveyardPermission).
     //
@@ -10135,6 +10259,11 @@ fn prepare_spell_cast_announced(
             CastingVariant::Aftermath
         } else if graveyard_keywords_open && jumpstart_castable_from_graveyard(state, object_id) {
             CastingVariant::JumpStart
+        } else if beam_me_up_cost.is_some() && beam_me_up_castable_from_graveyard(state, object_id)
+        {
+            CastingVariant::BeamMeUp {
+                granted_by: super::keywords::beam_me_up_granted_by(state, object_id),
+            }
         } else if disturb_cost.is_some() {
             CastingVariant::Disturb
         } else if let Some(resolution) = graveyard_permission_route
@@ -10631,6 +10760,15 @@ fn prepare_spell_cast_announced(
     } else {
         None
     };
+    // CR 601.2b + CR 601.2f: the cost of the beam me up instance announced,
+    // not the first one listed, so Scotty's grant on a card with a printed
+    // beam me up pays its own cost.
+    let effective_beam_me_up_cost_for_path = match casting_variant {
+        CastingVariant::BeamMeUp { granted_by } if beam_me_up_cost.is_some() => {
+            super::keywords::beam_me_up_cost_for(state, object_id, granted_by)
+        }
+        _ => None,
+    };
     let mut mana_cost = if energy_cost_from_exile
         || hand_cast_free
         || next_spell_without_paying
@@ -10662,6 +10800,7 @@ fn prepare_spell_cast_announced(
             .or(effective_mayhem_cost_for_path)
             .or(effective_flashback_mana_cost_for_path)
             .or(effective_disturb_cost_for_path)
+            .or(effective_beam_me_up_cost_for_path)
             .or(effective_sneak_cost_for_path)
             .or(effective_web_slinging_cost_for_path)
             .or(alt_cost_from_exile)
@@ -21630,6 +21769,19 @@ fn can_cast_prepared_now_with_probe(
         && !casting_costs::can_pay_jumpstart_additional_cost(state, player, prepared.object_id)
     {
         return false;
+    }
+
+    // CR 118.3 + CR 601.2h: beam me up requires a creature you control that
+    // can be beamed up, to return as its additional cost.
+    if let CastingVariant::BeamMeUp { granted_by } = prepared.casting_variant {
+        if !casting_costs::can_pay_beam_me_up_additional_cost(
+            state,
+            player,
+            prepared.object_id,
+            granted_by,
+        ) {
+            return false;
+        }
     }
 
     // CR 702.187b: Mayhem requires that you discarded this card this turn.
@@ -33094,6 +33246,7 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InTrackedSet { .. }

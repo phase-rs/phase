@@ -2248,6 +2248,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::FirstCombatPhaseOfTurn
+        | StaticCondition::CurrentPhaseIs { .. }
         | StaticCondition::None => false,
     }
 }
@@ -2723,6 +2724,8 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         // CR 701.15b/c: goad is a candidate-local designation, not a legacy
         // event-context or per-source member-bound referent.
         | FilterProp::Goaded
+        // CR 101.2 + CR 611.3a: CanBeBeamedUp is a live read of other permanents' statics, not a legacy event-context or per-source member-bound referent.
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InAnyZone { .. }
@@ -3054,6 +3057,8 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         // CR 701.15b/c: goad is a candidate-local designation, not a legacy
         // event-context or per-source member-bound referent.
         | FilterProp::Goaded
+        // CR 101.2 + CR 611.3a: CanBeBeamedUp is a live read of other permanents' statics, not a legacy event-context or per-source member-bound referent.
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InAnyZone { .. }
@@ -7487,6 +7492,8 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         // phase changes the answer), so the profile records the `TurnStructure`
         // kind rather than staying empty.
         StaticCondition::FirstCombatPhaseOfTurn => reads_player_of(StateKind::TurnStructure),
+        // CR 500.1: the current-phase gate reads the same turn-structure channel.
+        StaticCondition::CurrentPhaseIs { phases: _ } => reads_player_of(StateKind::TurnStructure),
         StaticCondition::SourceMatchesFilter { filter: _ } => {
             let mut p = reads_src_of(StateKind::ObjectPt);
             p.current_pt_reads.add(PtReadScope::Source);

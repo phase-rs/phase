@@ -841,6 +841,11 @@ pub(crate) enum GrantedCastKeywordKind {
     /// concretizes `Keyword::Embalm(EmbalmCost::Mana(SelfManaCost))`; this was
     /// a pure parser-recognition gap.
     Embalm,
+    /// Beam me up (TRK): Scotty, Miracle Worker ("During your main phase, each
+    /// card in your graveyard has beam me up. The beam me up cost is equal to
+    /// that spell's mana cost."). Cast route: `CastingVariant::BeamMeUp`. The
+    /// keyword's rule number needs manual verification.
+    BeamMeUp,
 }
 
 impl GrantedCastKeywordKind {
@@ -862,6 +867,9 @@ impl GrantedCastKeywordKind {
             GrantedCastKeywordKind::Scavenge => matches!(keyword, Keyword::Scavenge(_)),
             GrantedCastKeywordKind::Encore => matches!(keyword, Keyword::Encore(_)),
             GrantedCastKeywordKind::Embalm => matches!(keyword, Keyword::Embalm(_)),
+            GrantedCastKeywordKind::BeamMeUp => {
+                keyword.kind() == crate::types::keywords::KeywordKind::BeamMeUp
+            }
             // CR 702.143a / CR 702.94a: hand-zone cast keywords.
             GrantedCastKeywordKind::Foretell => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Foretell
@@ -882,7 +890,8 @@ impl GrantedCastKeywordKind {
             | GrantedCastKeywordKind::Mayhem
             | GrantedCastKeywordKind::Scavenge
             | GrantedCastKeywordKind::Encore
-            | GrantedCastKeywordKind::Embalm => Zone::Graveyard,
+            | GrantedCastKeywordKind::Embalm
+            | GrantedCastKeywordKind::BeamMeUp => Zone::Graveyard,
             GrantedCastKeywordKind::Foretell | GrantedCastKeywordKind::Miracle => Zone::Hand,
         }
     }
@@ -1229,6 +1238,7 @@ impl<'a> ZoneConditionNode<'a> {
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
             | StaticCondition::FirstCombatPhaseOfTurn
+            | StaticCondition::CurrentPhaseIs { .. }
             | StaticCondition::DuringOpponentsTurn
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
@@ -1393,6 +1403,7 @@ fn prop_zone_truth(prop: &FilterProp, zone: Zone) -> SourceZoneTruth {
         | FilterProp::Suspected
         | FilterProp::Renowned
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::Prepared
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
@@ -3552,10 +3563,12 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         return defs;
     }
 
-    // CR 701.21: "<grant or restriction> and can't be sacrificed" pairs a first
-    // clause with a sacrifice prohibition under one subject (Assault Suit). Split
-    // so the CantBeSacrificed clause is not dropped.
-    if let Some(defs) = try_split_and_cant_be_sacrificed(&stripped) {
+    // CR 701.21: "<grant or restriction> and can't be sacrificed" (Assault Suit)
+    // + CR 101.2 / CR 604.1: "<restriction> and can't be beamed up" (Marooned;
+    // beam me up rule number needs manual verification) pair a first clause with
+    // a terminal object prohibition under one subject. Split so the
+    // prohibition clause is not dropped.
+    if let Some(defs) = try_split_and_terminal_object_prohibition(&stripped) {
         return defs;
     }
 

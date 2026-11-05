@@ -9647,6 +9647,7 @@ fn static_condition_reads_filter_population(
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::FirstCombatPhaseOfTurn
+        | StaticCondition::CurrentPhaseIs { .. }
         | StaticCondition::None => false,
     }
 }
@@ -10359,6 +10360,7 @@ fn static_mode_reads_filter_population(
         | StaticMode::MayLookAtTopOfLibrary
         | StaticMode::MayLookAtFaceDown
         | StaticMode::CantBeTurnedFaceUp
+        | StaticMode::CantBeBeamedUp { .. }
         | StaticMode::MayChooseNotToUntap
         | StaticMode::AdditionalLandDrop { .. }
         | StaticMode::EmblemStatic
@@ -10694,6 +10696,7 @@ fn keyword_reads_filter_population(
         | Keyword::Warp(..)
         | Keyword::Sneak(..)
         | Keyword::WebSlinging(..)
+        | Keyword::BeamMeUp(..)
         | Keyword::Gift(..)
         | Keyword::Discover(..)
         | Keyword::Spree

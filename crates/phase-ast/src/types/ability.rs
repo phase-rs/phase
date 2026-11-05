@@ -7187,6 +7187,20 @@ pub enum FilterProp {
     /// CR 701.15b/c: Matches creatures with the goaded designation (at least one
     /// player has goaded it).
     Goaded,
+    /// CR 101.2 + CR 611.3a: Matches objects no functioning
+    /// `StaticMode::CantBeBeamedUp` applies to. Live, board-reading (reads
+    /// other permanents' statics); evaluated per query, never snapshotted.
+    /// Carried by the beam me up return cost (needs manual verification).
+    /// `granted_by` is the exact object whose static granted the beam me up
+    /// being cast (CR 400.7: that incarnation only); its
+    /// `BeamMeUpProhibitionScope::GrantedBySource` prohibitions ("can't be
+    /// beamed up to cast a spell this way") bind this cast too. `None` for a
+    /// printed beam me up. Never produced by the parser — bound by the
+    /// engine's beam me up cost constructor.
+    CanBeBeamedUp {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        granted_by: Option<ObjectIncarnationRef>,
+    },
     /// CR 722.3a: Matches permanents with the prepared designation. A permanent
     /// can only gain this designation if it has a prepare spell, and only while
     /// it does not already have it.
@@ -7624,6 +7638,7 @@ impl FilterProp {
             | FilterProp::Suspected
             | FilterProp::Renowned
             | FilterProp::Goaded
+            | FilterProp::CanBeBeamedUp { .. }
             | FilterProp::Prepared
             | FilterProp::ToughnessGTPower
             | FilterProp::PowerExceedsBase
@@ -8913,6 +8928,7 @@ pub fn filter_prop_contains(prop: &FilterProp, leaf: &dyn Fn(&TargetFilter) -> b
         | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InTrackedSet { .. }
@@ -9204,6 +9220,7 @@ pub fn filter_prop_grammar_any(
             | FilterProp::Suspected
             | FilterProp::Renowned
             | FilterProp::Goaded
+            | FilterProp::CanBeBeamedUp { .. }
             | FilterProp::Prepared
             | FilterProp::ToughnessGTPower
             | FilterProp::PowerExceedsBase
@@ -9861,6 +9878,7 @@ pub fn rewrite_filter_prop<C>(
         | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InTrackedSet { .. }
@@ -12103,6 +12121,7 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
         | FilterProp::Suspected
         | FilterProp::Renowned
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::Prepared
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
@@ -17036,6 +17055,15 @@ pub enum StaticCondition {
     /// `And([DuringYourTurn, FirstCombatPhaseOfTurn])` at the parse layer
     /// (CR 109.5: "your" = the ability's controller).
     FirstCombatPhaseOfTurn,
+    /// CR 500.1 + CR 505.1: the current phase/step is one of `phases` — the
+    /// live turn-structure gate a static reads while it applies ("during your
+    /// main phase" composes `And([DuringYourTurn, CurrentPhaseIs { phases:
+    /// [PreCombatMain, PostCombatMain] }])`, CR 109.5: "your" = the static's
+    /// controller). The static-layer twin of `AbilityCondition::CurrentPhaseIs`
+    /// and `TriggerCondition::CurrentPhaseIs`.
+    CurrentPhaseIs {
+        phases: Vec<Phase>,
+    },
     /// CR 102.3 + CR 805.4a: The active player is an opponent of this static
     /// ability's controller. This is deliberately distinct from
     /// `Not(DuringYourTurn)`: in team games, a teammate may be the active
@@ -17310,6 +17338,7 @@ impl StaticCondition {
             | StaticCondition::AdditionalCostPaid
             | StaticCondition::CastingAsVariant { .. }
             | StaticCondition::FirstCombatPhaseOfTurn
+            | StaticCondition::CurrentPhaseIs { .. }
             | StaticCondition::None => None,
         }
     }
@@ -17422,6 +17451,7 @@ impl StaticCondition {
             | StaticCondition::SourceInZone { .. }
             | StaticCondition::EnchantedIsFaceDown
             | StaticCondition::FirstCombatPhaseOfTurn
+            | StaticCondition::CurrentPhaseIs { .. }
             | StaticCondition::None => None,
         }
     }
@@ -17661,6 +17691,7 @@ impl StaticCondition {
             | StaticCondition::AdditionalCostPaid
             | StaticCondition::CastingAsVariant { .. }
             | StaticCondition::FirstCombatPhaseOfTurn
+            | StaticCondition::CurrentPhaseIs { .. }
             | StaticCondition::None => None,
         }
     }
@@ -17783,6 +17814,7 @@ impl StaticCondition {
             | StaticCondition::AdditionalCostPaid
             | StaticCondition::CastingAsVariant { .. }
             | StaticCondition::FirstCombatPhaseOfTurn
+            | StaticCondition::CurrentPhaseIs { .. }
             | StaticCondition::None => visit(self),
         }
     }
@@ -27930,6 +27962,7 @@ fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
         | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
+        | FilterProp::CanBeBeamedUp { .. }
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InTrackedSet { .. }

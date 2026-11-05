@@ -8,6 +8,7 @@ use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
 use crate::parser::oracle_nom::target::{controller_phrase_among_mixed_case, ControllerPhrase};
 #[allow(unused_imports)]
 use crate::types::ability::AttachmentReferent;
+use crate::types::statics::BeamMeUpProhibitionScope;
 
 /// CR 509.1b / CR 702.111b: "<N> or more creatures" minimum-blocker phrase.
 /// Composed from `parse_number` + `tag(" or more creatures")`.
@@ -1692,32 +1693,53 @@ pub(crate) fn try_split_and_cant_activate_abilities(text: &str) -> Option<Vec<St
     Some(defs)
 }
 
-/// CR 701.21: Decompose `"<grant or restriction> and can't be sacrificed"` into
-/// the first conjunct's static(s) plus an `Other("CantBeSacrificed")` static
-/// sharing the same `affected` set.
+/// CR 701.21 (Assault Suit, Garland, Royal Kidnapper: "… and can't be
+/// sacrificed.") + CR 101.2 / CR 604.1 (Marooned: "… and can't be beamed
+/// up."; beam me up rule number needs manual verification): decompose
+/// "<grant or restriction> and can't be <terminal object prohibition>" into the
+/// first conjunct's static(s) plus one prohibition static sharing the same
+/// `affected` set. A qualified tail declines.
 ///
-/// Without this split the trailing sacrifice prohibition was dropped: Assault
-/// Suit ("Equipped creature gets +2/+2, has haste, can't attack you or
+/// Without this split the trailing prohibition was dropped: Assault Suit
+/// ("Equipped creature gets +2/+2, has haste, can't attack you or
 /// planeswalkers you control, and can't be sacrificed.") parsed without the
-/// `CantBeSacrificed` static, so the equipped creature could still be
-/// sacrificed — defeating the Equipment's political lock. Mirrors
-/// `try_split_and_cant_block`; `CantBeSacrificed` is a `StaticMode::Other(..)`
-/// host-prohibition (runtime-enforced in `game::sacrifice`), not a
+/// `CantBeSacrificed` static, and Marooned parsed without `CantBeBeamedUp`.
+/// Mirrors `try_split_and_cant_block`; each prohibition is a host-prohibition
+/// `StaticMode` (runtime-enforced by its own reader), not a
 /// `ContinuousModification`, so the continuous-grant default drops it.
-pub(crate) fn try_split_and_cant_be_sacrificed(text: &str) -> Option<Vec<StaticDefinition>> {
+pub(crate) fn try_split_and_terminal_object_prohibition(
+    text: &str,
+) -> Option<Vec<StaticDefinition>> {
     type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
 
-    let (before, _matched, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
-        // Match both the ASCII and typographic U+2019 apostrophe.
-        alt((
-            tag::<_, _, VE>("and can't be sacrificed"),
-            tag::<_, _, VE>("and can\u{2019}t be sacrificed"),
-        ))
+    let (before, mode, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        preceded(
+            // Match both the ASCII and typographic U+2019 apostrophe.
+            alt((
+                tag::<_, _, VE>("and can't be "),
+                tag::<_, _, VE>("and can\u{2019}t be "),
+            )),
+            alt((
+                // CR 701.21: Assault Suit, Garland, Royal Kidnapper.
+                value(
+                    StaticMode::Other("CantBeSacrificed".to_string()),
+                    tag::<_, _, VE>("sacrificed"),
+                ),
+                // CR 101.2 + CR 604.1: Marooned (beam me up rule number needs
+                // manual verification).
+                value(
+                    StaticMode::CantBeBeamedUp {
+                        scope: BeamMeUpProhibitionScope::AnyCast,
+                    },
+                    tag::<_, _, VE>("beamed up"),
+                ),
+            )),
+        )
         .parse(i)
     })?;
 
-    // Only the bare, terminal "can't be sacrificed" is a plain prohibition. A
+    // Only the bare, terminal "can't be <prohibition>" is a plain prohibition. A
     // remaining tail ("unless …", "to …") is a qualified restriction owned by
     // another branch — decline so we don't mis-split it.
     if !rest.trim_start().trim_end_matches('.').trim().is_empty() {
@@ -1738,7 +1760,7 @@ pub(crate) fn try_split_and_cant_be_sacrificed(text: &str) -> Option<Vec<StaticD
 
     let affected = defs[0].affected.clone()?;
     defs.push(
-        StaticDefinition::new(StaticMode::Other("CantBeSacrificed".to_string()))
+        StaticDefinition::new(mode)
             .affected(affected)
             .description(text.to_string()),
     );

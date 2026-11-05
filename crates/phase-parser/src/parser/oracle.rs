@@ -139,8 +139,9 @@ use super::oracle_static::{
     find_refused_loyalty_grant_sentence, is_graveyard_cast_permission_lead,
     is_speed_unlock_sentence, lower_static_ir, parse_alternative_keyword_cost,
     parse_cast_spells_alternative_cost_multi, parse_collect_evidence_alt_cost,
-    parse_flashback_trailing_self_spell_cost_reduction, parse_spells_alternative_cost,
-    parse_static_line, parse_static_line_multi, try_parse_exclusive_own_cast_permission,
+    parse_flashback_trailing_self_spell_cost_reduction, parse_graveyard_grant_route_rider,
+    parse_graveyard_grant_timing_prefix, parse_spells_alternative_cost, parse_static_line,
+    parse_static_line_multi, try_parse_exclusive_own_cast_permission,
     try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
     try_parse_top_of_library_cast_permission, GrantedCastKeywordKind,
 };
@@ -868,7 +869,14 @@ pub(crate) fn parse_graveyard_keyword_continuation(
     fn parse_self_mana_cost_suffix(text: &str) -> Option<&str> {
         let lower = text.to_lowercase();
         let (_, rest) = nom_on_lower(text, &lower, |i| {
-            let (i, _) = alt((tag("that card's"), tag("the card's"), tag("its"))).parse(i)?;
+            let (i, _) = alt((
+                tag("that card's"),
+                tag("the card's"),
+                // Scotty, Miracle Worker: "equal to that spell's mana cost".
+                tag("that spell's"),
+                tag("its"),
+            ))
+            .parse(i)?;
             let (i, _) = tag(" mana cost").parse(i)?;
             Ok((i, ()))
         })?;
@@ -1058,6 +1066,28 @@ pub(crate) fn parse_graveyard_keyword_continuation(
                 ManaCost::SelfManaCostReduced { reduction }
             }))
         }
+        GrantedCastKeywordKind::BeamMeUp => {
+            // Beam me up (TRK; rule number needs manual verification) + CR
+            // 118.9: "The beam me up cost is equal to that spell's mana cost."
+            // (Scotty, Miracle Worker). Mirrors the Mayhem continuation; the
+            // cost resolves to the card's own mana cost via
+            // `ManaCost::SelfManaCost` (`effective_beam_me_up_cost`).
+            let (_, rest) = nom_on_lower(text, &lower, |i| {
+                value(
+                    (),
+                    alt((
+                        tag("the beam me up cost is equal to "),
+                        tag("its beam me up cost is equal to "),
+                    )),
+                )
+                .parse(i)
+            })?;
+            let rest = parse_self_mana_cost_suffix(rest)?;
+            if !continuation_fully_consumed(rest) {
+                return None;
+            }
+            Some(Keyword::BeamMeUp(ManaCost::SelfManaCost))
+        }
         GrantedCastKeywordKind::Miracle => {
             // CR 702.94a + CR 601.2f: "Its miracle cost is equal to its mana cost
             // reduced by {N}." (Aminatou, Veil Piercer, reduced by {4}). Same
@@ -1086,16 +1116,34 @@ pub(crate) fn parse_graveyard_keyword_continuation(
     }
 }
 
-fn try_parse_graveyard_keyword_static_with_continuation(line: &str) -> Option<StaticDefinition> {
+/// A graveyard keyword grant whose cost arrives in a continuation sentence
+/// ("Each … has <keyword>. The <keyword> cost is equal to …"), optionally
+/// followed by one rider sentence scoping the grant's own route (Scotty,
+/// Miracle Worker: "~ can't be beamed up to cast a spell this way."). Returns
+/// the grant static first, then the rider's static when present. A
+/// continuation that the cost parser and the rider parser don't both consume
+/// fully declines the whole line.
+fn try_parse_graveyard_keyword_static_with_continuation(
+    line: &str,
+) -> Option<Vec<StaticDefinition>> {
     let lower = line.to_lowercase();
     let (prefix, continuation) = split_once_on_lower(line, &lower, ". ")?;
     let prefix_lower = prefix.to_lowercase();
-    let (turn_condition, grant_prefix) = nom_on_lower(prefix, &prefix_lower, |input| {
-        value(StaticCondition::DuringYourTurn, tag("during your turn, ")).parse(input)
-    })
-    .map_or((None, prefix), |(condition, rest)| (Some(condition), rest));
+    let (turn_condition, grant_prefix) =
+        nom_on_lower(prefix, &prefix_lower, parse_graveyard_grant_timing_prefix)
+            .map_or((None, prefix), |(condition, rest)| (Some(condition), rest));
     let (affected, kind, _) = try_parse_graveyard_keyword_grant_clause(grant_prefix)?;
-    let keyword = parse_graveyard_keyword_continuation(continuation, kind)?;
+    let (keyword, rider) = match parse_graveyard_keyword_continuation(continuation, kind) {
+        Some(keyword) => (keyword, None),
+        None => {
+            let continuation_lower = continuation.to_lowercase();
+            let (cost_sentence, rider_sentence) =
+                split_once_on_lower(continuation, &continuation_lower, ". ")?;
+            let keyword = parse_graveyard_keyword_continuation(cost_sentence, kind)?;
+            let rider = parse_graveyard_grant_route_rider(rider_sentence, kind)?;
+            (keyword, Some(rider))
+        }
+    };
     if !kind.matches_keyword(&keyword) {
         return None;
     }
@@ -1106,7 +1154,7 @@ fn try_parse_graveyard_keyword_static_with_continuation(line: &str) -> Option<St
     if let Some(condition) = turn_condition {
         def = def.condition(condition);
     }
-    Some(def)
+    Some(std::iter::once(def).chain(rider).collect())
 }
 
 /// Returns every `StaticDefinition` produced by `line`, with the
@@ -1139,8 +1187,8 @@ fn parse_static_line_with_graveyard_keyword_continuation(
         });
     let mut defs = if let Some(def) = raw_conditional_type_grant {
         vec![def]
-    } else if let Some(def) = try_parse_graveyard_keyword_static_with_continuation(line) {
-        vec![def]
+    } else if let Some(defs) = try_parse_graveyard_keyword_static_with_continuation(line) {
+        defs
     } else if let Some(def) = try_parse_graveyard_keyword_grant_static(line) {
         vec![def]
     } else if let Some(def) = crate::parser::oracle_static::try_parse_counts_as_named_static(line) {
@@ -6584,13 +6632,15 @@ fn parse_normalized_oracle_ir(
                 if !next_line.is_empty() {
                     let next_static_line = normalize_self_refs_for_static(&next_line, card_name);
                     let combined_static_line = format!("{static_line} {next_static_line}");
-                    if let Some(static_def) =
+                    if let Some(static_defs) =
                         try_parse_graveyard_keyword_static_with_continuation(&combined_static_line)
                     {
-                        emitter.static_ir_at(
-                            item_line,
-                            StaticIr::from_definition(&combined_static_line, static_def),
-                        );
+                        for static_def in static_defs {
+                            emitter.static_ir_at(
+                                item_line,
+                                StaticIr::from_definition(&combined_static_line, static_def),
+                            );
+                        }
                         i += 2;
                         continue;
                     }
