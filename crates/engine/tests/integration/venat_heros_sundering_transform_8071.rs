@@ -58,16 +58,15 @@ fn heros_sundering_exiles_the_target_and_transforms_venat() {
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("Hero's Sundering activates");
-    if matches!(
+    assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::TargetSelection { .. }
-    ) {
-        runner
-            .act(GameAction::SelectTargets {
-                targets: vec![TargetRef::Object(victim)],
-            })
-            .expect("the target is legal");
-    }
+    ));
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(victim)],
+        })
+        .expect("the target is legal");
     assert!(
         !runner.state().stack.is_empty(),
         "the ability is on the stack (positive reach guard)"
