@@ -21,10 +21,10 @@ use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermi
 use crate::types::ability::{
     AbilityUseTally, ActivationRestriction, AttachSelection, AttachmentKind, AttachmentReferent,
     CardSelectionMode, CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
-    CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, ExcessRecipient,
-    ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource,
-    PossessionAxis, RepeatContinuation, RuntimeHandler, SeatDirection, TurnJournalKind, VoteTally,
-    VoteVisibility, VoterScope,
+    CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, DigSource,
+    ExcessRecipient, ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice,
+    PerpetualModification, PileSource, PossessionAxis, RepeatContinuation, RuntimeHandler,
+    SeatDirection, TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
 };
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -12666,6 +12666,66 @@ fn return_each_card_they_exiled_this_way_uses_exiled_tracked_set() {
 /// `ExiledBySource` (resolved at runtime via `exile_links`), not the chain-local
 /// `TrackedSet(0)` sentinel that is empty at LTB time. Third emission site of the
 /// #5571 cross-resolution fix (after the Copy verb and `try_parse_cast_effect`).
+/// CR 603.7 + CR 608.2c: the plural-recall rebind is itself the act of making
+/// the delayed payload read the chain's published set, so it must also mark the
+/// wrapper as a tracked-set consumer. The generic "those cards" / battlefield
+/// gates do not recognize "Put them into their owners' hands", and an unbound
+/// `TrackedSet` sentinel would resolve against whatever set happens to be
+/// latest when the trigger fires instead of the set this chain published.
+#[test]
+fn plural_recall_rebind_marks_the_delayed_payload_as_a_tracked_set_consumer() {
+    let mut effect = Effect::CreateDelayedTrigger {
+        condition: crate::types::ability::DelayedTriggerCondition::AtNextPhase {
+            phase: crate::types::phase::Phase::End,
+        },
+        effect: Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )),
+        uses_tracked_set: false,
+    };
+
+    rebind_plural_recall_delayed_payload_to_tracked_set(&mut effect);
+
+    let Effect::CreateDelayedTrigger {
+        effect: payload,
+        uses_tracked_set,
+        ..
+    } = &effect
+    else {
+        panic!("expected the delayed wrapper to survive the rebind");
+    };
+    assert!(
+        *uses_tracked_set,
+        "the rebind must mark the delayed trigger as reading the published set"
+    );
+    assert!(
+        matches!(
+            &*payload.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::TrackedSet { id },
+                ..
+            } if *id == crate::types::identifiers::TrackedSetId(0)
+        ),
+        "the plural recall must bind the tracked-set sentinel: {:?}",
+        payload.effect
+    );
+}
+
 #[test]
 fn hideaway_ltb_put_exiled_card_binds_exiled_by_source() {
     let parsed = parse_oracle_text(
@@ -55525,6 +55585,59 @@ fn cast_from_among_the_cards_exiled_this_way_binds_to_exiled_by_source() {
     assert_eq!(target, TargetFilter::ExiledBySource);
 }
 
+/// CR 712.8a + CR 712.11c: a type printed on BOTH sides of the anchor ("cast
+/// enchantment spells from among the creature cards exiled this way") gates
+/// two different things at two different stages — the suffix the card pool,
+/// judged on the card where it is (CR 712.8a), the prefix the spell, judged on
+/// the face being cast (CR 712.11c). One cast filter cannot carry both, so the
+/// clause is refused: it lowers to the `from_among_pool_and_spell_gate` gap,
+/// never to a cast grant, for both the "exiled this way" anchor and the
+/// "those nonland cards" anchor, with counted ("up to two") and uncounted
+/// wording. (The "up to two artifact spells" row reaches the generic anchor
+/// arm, not the counted free-cast helper, which needs the bare "spells" noun
+/// right after the count.)
+///
+/// Shape-only hardening, not a card test: no printed card carries a type gate
+/// on both sides of the anchor. The nearest printed cards each carry one side —
+/// Wand of Wonder the prefix gate ("instant and/or sorcery spells from among
+/// cards exiled this way"), Etali, Primal Conqueror the suffix gate ("from
+/// among the nonland cards exiled this way"). Positive controls: Etali's
+/// printed one-sided clause, and the "those nonland cards" clause without a
+/// prefix type (Fevered Suspicion's shape), still lower to cast grants.
+#[test]
+fn cast_from_among_exiled_this_way_refuses_a_prefix_and_a_suffix_type_gate() {
+    let lowered: Vec<_> = [
+        "cast any number of enchantment spells from among the creature cards exiled this way without paying their mana costs",
+        "cast up to two artifact spells from among the instant or sorcery cards exiled this way without paying their mana costs",
+        "cast any number of enchantment spells from among those nonland cards exiled this way without paying their mana costs",
+        "cast up to two enchantment spells from among those nonland cards exiled this way without paying their mana costs",
+    ]
+    .into_iter()
+    .map(|combined| (combined, parse_effect(combined)))
+    .filter(|(_, e)| {
+        !matches!(e, Effect::Unimplemented { name, .. } if name == FROM_AMONG_POOL_AND_SPELL_GATE_GAP)
+    })
+    .collect();
+    assert!(
+        lowered.is_empty(),
+        "a type on both sides of the anchor is refused, not lowered: {lowered:#?}"
+    );
+
+    for one_sided in [
+        "cast any number of spells from among the nonland cards exiled this way without paying their mana costs",
+        "cast any number of spells from among those nonland cards exiled this way without paying their mana costs",
+    ] {
+        let e = parse_effect(one_sided);
+        let Effect::CastFromZone { target, .. } = &e else {
+            panic!("positive control: a one-sided clause lowers to CastFromZone: {one_sided:?} -> {e:?}");
+        };
+        assert!(
+            target.references_exiled_by_source(),
+            "positive control: the grant binds the exile anaphor: {one_sided:?} -> {target:?}"
+        );
+    }
+}
+
 /// CR 610.3 + CR 608.2c: Disjunctive typed leg via
 /// `parse_cast_type_list` — "from among the instant or sorcery
 /// cards exiled this way" must bind to `And { ExiledBySource, Typed(...) }`
@@ -57834,6 +57947,32 @@ fn cast_this_way_enters_with_counter_rider_is_counter_generic() {
         clause.sub_ability.is_none(),
         "bare counter rider has no sub-ability"
     );
+}
+
+/// CR 205.2b: the anaphoric subject is "that" + the permission's printed type
+/// noun phrase, which may stack card types ("that artifact creature": Overflow
+/// Submatrix) or name "permanent". A non-type word after "that" is refused.
+#[test]
+fn cast_this_way_enters_with_counter_accepts_stacked_type_anaphor() {
+    for subject in [
+        "that creature",
+        "that artifact",
+        "that permanent",
+        "that artifact creature",
+        "that enchantment creature",
+    ] {
+        let text = format!(
+            "if you cast a spell this way, {subject} enters with a finality counter on it."
+        );
+        let (counter, rest) = parse_cast_this_way_enters_with_counter(&text)
+            .unwrap_or_else(|| panic!("{subject:?} anaphor should parse"));
+        assert_eq!(counter, CounterType::Finality, "{subject:?}");
+        assert_eq!(rest, ".", "{subject:?}");
+    }
+    assert!(parse_cast_this_way_enters_with_counter(
+        "if you cast a spell this way, that card enters with a finality counter on it."
+    )
+    .is_none());
 }
 
 /// Whole-card production-path parse: Osteomancer Adept's residual rider
@@ -76241,6 +76380,137 @@ fn peel_library_placement_cardinality_recognizes_untargeted_any_number() {
             LibraryPlacementCardinality::AnyNumber | LibraryPlacementCardinality::TargetSet(_)
         ),
         "an untargeted \"up to two\" is neither an any-number choice nor a target set, got {got:?}"
+    );
+}
+
+/// CR 608.2c + CR 701.20e: whole-set admission for the private-look bottom
+/// placement. "Put those cards …" places everything the look showed; "put one
+/// of those cards …" places a chosen subset and states its own cardinality, so
+/// it must never be admitted to the whole-ledger rewrite.
+#[test]
+fn library_placement_whole_set_admission_requires_whole_set_grammar() {
+    for whole in [
+        "you may put those cards on the bottom of your library in any order",
+        "put those cards on the bottom of your library in a random order.",
+        "if you don't, put those cards on the bottom of your library",
+    ] {
+        assert!(
+            library_placement_puts_whole_noun_phrase_set(whole),
+            "whole-set grammar must be admitted: {whole}"
+        );
+    }
+    for subset in [
+        "put one of those cards on the bottom of your library",
+        "put two of those cards on the bottom of your library",
+        "put x of those cards on the bottom of your library",
+        "put any number of those cards on the bottom of your library",
+        "put up to two of those cards on the bottom of your library",
+        "put those cards on top of your library",
+    ] {
+        assert!(
+            !library_placement_puts_whole_noun_phrase_set(subset),
+            "an explicit subset must keep its declarative cardinality: {subset}"
+        );
+    }
+}
+
+/// Preferred Selection's decline instruction selects ONE of the two looked-at
+/// cards. CR 608.2c + CR 608.2d: the printed cardinality is part of the
+/// instruction, and the whole-set private-look rewrite must not erase it; only
+/// whole-set grammar (Petals of Insight's "put those cards …") may be rebound.
+/// The conditional one-card placement therefore survives in declarative form
+/// until its real selection semantics are implemented.
+#[test]
+fn preferred_selection_keeps_its_conditional_one_card_bottom_placement() {
+    const ORACLE: &str = "At the beginning of your upkeep, look at the top two cards of your library. You may sacrifice this enchantment and pay {2}{G}{G}. If you do, put one of those cards into your hand. If you don't, put one of those cards on the bottom of your library.";
+    let parsed = parse_oracle_text(
+        ORACLE,
+        "Preferred Selection",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let execute = parsed
+        .triggers
+        .first()
+        .and_then(|trigger| trigger.execute.as_deref())
+        .expect("Preferred Selection's upkeep trigger must produce an executable chain");
+
+    fn collect<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a AbilityDefinition>) {
+        out.push(def);
+        if let Some(sub) = def.sub_ability.as_deref() {
+            collect(sub, out);
+        }
+        if let Some(other) = def.else_ability.as_deref() {
+            collect(other, out);
+        }
+    }
+    let mut nodes = Vec::new();
+    collect(execute, &mut nodes);
+
+    // REACH GUARD: the full text reached the private-look restructure — the
+    // "put one of those cards into your hand" accept branch is a PriorLook Dig.
+    assert!(
+        nodes.iter().any(|def| matches!(
+            &*def.effect,
+            Effect::Dig {
+                source: DigSource::PriorLook,
+                keep_count: Some(1),
+                ..
+            }
+        )),
+        "reach guard: the accept branch must be a one-card PriorLook Dig, got {:?}",
+        nodes.iter().map(|def| &*def.effect).collect::<Vec<_>>()
+    );
+
+    let placements: Vec<&AbilityDefinition> = nodes
+        .iter()
+        .copied()
+        .filter(|def| {
+            matches!(
+                &*def.effect,
+                Effect::PutAtLibraryPosition {
+                    position: LibraryPosition::Bottom,
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(
+        placements.len(),
+        1,
+        "the decline instruction must keep its declarative one-card placement, got {:?}",
+        nodes.iter().map(|def| &*def.effect).collect::<Vec<_>>()
+    );
+    let placement = placements[0];
+    let Effect::PutAtLibraryPosition {
+        target,
+        count,
+        position,
+        ..
+    } = &*placement.effect
+    else {
+        unreachable!("filtered to PutAtLibraryPosition")
+    };
+    assert_eq!(*position, LibraryPosition::Bottom);
+    assert_eq!(
+        *count,
+        QuantityExpr::Fixed { value: 1 },
+        "\"one of those cards\" states its own cardinality — the whole-set rewrite \
+         must not replace it with a zero-keep PriorLook Dig"
+    );
+    assert!(
+        matches!(target, TargetFilter::TrackedSet { .. }),
+        "the placement still reads the looked-at set, got {target:?}"
+    );
+    assert!(
+        matches!(
+            &placement.condition,
+            Some(AbilityCondition::Not { condition })
+                if **condition == AbilityCondition::effect_performed()
+        ),
+        "the placement is the \"If you don't\" branch, got {:?}",
+        placement.condition
     );
 }
 

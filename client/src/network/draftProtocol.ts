@@ -16,6 +16,7 @@
  */
 
 import { DRAFT_PROTOCOL_VERSION } from "../generated/protocol-versions";
+import { classifyDraft27Compatibility } from "../adapter/draft-compatibility";
 import type {
   DraftPlayerView,
   DraftRarityGroupKind,
@@ -1761,6 +1762,10 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
     if (typeof acknowledgement.view !== "object" || acknowledgement.view === null) {
       throw new Error("Invalid draft deck acknowledgement");
     }
+    // A view the compatibility check refuses passes through unnormalized, so
+    // it reaches the guest's typed refusal instead of failing as a decode
+    // error; the guest refuses it before using any of its fields.
+    if (!classifyDraft27Compatibility(acknowledgement.view).ok) return acknowledgement as DraftP2PMessage;
     return {
       ...acknowledgement,
       view: normalizeDraftPlayerView(acknowledgement.view),
@@ -1808,6 +1813,10 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   }
   const viewMessage = raw as { type: string; view?: unknown; seats?: unknown };
   if (["draft_welcome", "draft_reconnect_ack", "draft_state_update", "draft_pick_ack"].includes(msg.type)) {
+    // A view the compatibility check refuses passes through unnormalized, so
+    // it reaches the guest's typed refusal instead of failing as a decode
+    // error; the guest refuses it before using any of its fields.
+    if (!classifyDraft27Compatibility(viewMessage.view).ok) return viewMessage as DraftP2PMessage;
     const workspaceState = msg.type === "draft_welcome" || msg.type === "draft_reconnect_ack"
       ? requireWorkspaceState(raw as Record<string, unknown>, true)
       : undefined;

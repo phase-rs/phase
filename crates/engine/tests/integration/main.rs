@@ -4,6 +4,7 @@
 // `--test`), so one implementation serves both without shipping guard code in a release build.
 // MEASURED, not assumed — the alternative already in this tree is `test_support.rs` / `support.rs`,
 // twin files kept equal by a comment asking a human to remember.
+#![recursion_limit = "512"]
 #[path = "../../src/source_census.rs"]
 mod source_census;
 
@@ -13,6 +14,7 @@ mod active_damage_trigger_recipient_anaphor;
 mod adapter_contract_fixtures;
 mod additional_cost_declaration_tail;
 mod agent_frank_horrigan_attacked_this_turn_indestructible;
+mod all_good_things_shared_card_type;
 mod ancient_brass_dragon_roll_d20;
 mod ancient_bronze_dragon_roll_d20;
 mod ancient_copper_dragon_roll_d20;
@@ -26,6 +28,7 @@ mod banding_combat;
 mod batched_trigger_subject_count;
 mod battlefield_entry_authority_census;
 mod bbfu7_attacks_if_able_not_goad;
+mod beckett_mariner_promotion_counters;
 mod betor_lifelink_counters_repro;
 mod bishop_of_binding_where_x_exiled_card_power;
 mod blitz_em_dash_graveyard_cast;
@@ -169,6 +172,7 @@ mod mana_burn;
 mod master_of_the_wild_hunt;
 mod maze_of_ith_untap_bidirectional_prevent;
 mod mbaku_attacked_monarch_intervening_if;
+mod miles_obrien_returned_to_hand;
 mod min_blocker_floor_block_candidates_7183;
 mod mindblade_render_warrior_intervening_if_2867;
 mod mjolnir_hammer_double_damage;
@@ -198,6 +202,7 @@ mod pass_priority_structural_legality;
 mod period_confirm_rows;
 mod perpetual_gains;
 mod perrie_the_pulverizer_attack_trigger_6219;
+mod petals_of_insight;
 mod play_trace;
 mod power_fist_combat_damage_regression;
 mod preacher_of_the_schism_life_gates;
@@ -296,5 +301,7 @@ mod controller_anaphor_binds_through_context;
 mod resolution_progress_contract;
 
 mod ignite_memories_random_reveal;
+mod niambi_granted_trigger_once_each_turn;
+mod q_stacking_the_deck;
 mod risky_move_gain_control_trigger;
 mod token_attack_destination;

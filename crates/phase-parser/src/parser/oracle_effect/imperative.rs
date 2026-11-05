@@ -22,7 +22,7 @@ use super::counter::{
 use super::lower::{
     parse_multi_target_count_expr, parse_where_x_quantity_expression,
     parse_where_x_quantity_expression_with_owner, rebind_cost_paid_object_pt_to_target,
-    strip_leading_quantifier, strip_terminal_where_x, strip_trailing_where_x,
+    strip_leading_quantifier, strip_terminal_where_x, strip_trailing_where_x, WhereXBinding,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
 use super::token::try_parse_token;
@@ -3313,6 +3313,48 @@ type MultiZonePlayerExileParse<'a> = (&'a str, (Vec<TypeFilter>, ControllerRef, 
 /// whose span comes from an enclosing clause instead.
 type DefenderBoundAttackParse<'a> =
     Result<(&'a str, (TargetFilter, Option<Duration>)), nom::Err<OracleError<'a>>>;
+
+/// CR 400.1 + CR 608.2c: true when a mass-exile operand names an anaphoric
+/// player's zone as its source ("… from that player's hand", "… from that
+/// opponent's graveyard") but the parsed `target` binds no player on any leg —
+/// so the lowered instruction would reach every player's zone. Structural on the
+/// filter (owner/controller axes), grammatical on the text: a nom scan for the
+/// `from <anaphoric possessive> <zone>` source at a word boundary.
+fn operand_dropped_player_possessive_source(rest_lower: &str, target: &TargetFilter) -> bool {
+    fn binds_a_player(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::Typed(tf) => {
+                tf.controller.is_some()
+                    || tf
+                        .properties
+                        .iter()
+                        .any(|prop| matches!(prop, FilterProp::Owned { .. }))
+            }
+            TargetFilter::And { filters } => filters.iter().any(binds_a_player),
+            TargetFilter::Or { filters } => filters.iter().all(binds_a_player),
+            // Any other shape is not a population sweep over typed zone cards.
+            _ => true,
+        }
+    }
+    let names_anaphoric_zone = nom_primitives::scan_at_word_boundaries(rest_lower, |input| {
+        value(
+            (),
+            (
+                tag::<_, _, OracleError<'_>>("from "),
+                alt((
+                    tag("that player's "),
+                    tag("that player\u{2019}s "),
+                    tag("that opponent's "),
+                    tag("that opponent\u{2019}s "),
+                )),
+                alt((tag("hand"), tag("graveyard"), tag("library"))),
+            ),
+        )
+        .parse(input)
+    })
+    .is_some();
+    names_anaphoric_zone && !binds_a_player(target)
+}
 
 /// CR 400.3 + CR 404.1 + CR 406.2 + CR 108.2 + CR 205.2a: "exile all `[<types>]`
 /// cards from `<possessive>` `<zone>` and `<zone>`" — mass exile of the cards a
@@ -11873,6 +11915,13 @@ pub(super) fn parse_exile_ast(
             ctx,
             EffectScope::All,
         );
+        // CR 400.1 + CR 608.2c: "… from that player's hand" names ONE player's
+        // zone. A filter that bound no owner/controller would sweep every
+        // player's zone (Elder Brain: "exile all cards from that player's hand"),
+        // so refuse rather than lower the wider instruction.
+        if operand_dropped_player_possessive_source(rest_lower, &target) {
+            return None;
+        }
         return Some(ZoneCounterImperativeAst::Exile {
             origin,
             target,
@@ -12484,7 +12533,10 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     // the spell phrase to the stack through the shared target parser. Keep this
     // path on that building block and only apply the trailing X definition.
     // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-    let target = super::apply_where_x_to_filter(target, where_x_expression.as_deref())?;
+    // `parse_counter_ast` takes no `ParseContext`, so there is no antecedent to
+    // supply here; the filter bound keeps the legacy seeds.
+    let target =
+        super::apply_where_x_to_filter(target, WhereXBinding::bare(where_x_expression.as_deref()))?;
     // CR 118.12: Parse "unless its controller pays {X}" for conditional counters
     let unless_pay = parse_counter_unless_pay(rest)?;
     Some(ZoneCounterImperativeAst::Counter {
