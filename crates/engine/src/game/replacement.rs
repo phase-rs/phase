@@ -10889,7 +10889,7 @@ fn apply_single_replacement(
                     } = new_event
                     {
                         *to = redirect.zone;
-                        *library_placement = redirect.library_placement.clone();
+                        *library_placement = redirect.library_placement.clone().map(Box::new);
                         // CR 607.2b: the redirecting replacement's own source is
                         // the "exiled with [this object]" linked-ability
                         // authority for whatever this event ultimately

@@ -504,7 +504,7 @@ pub enum ProposedEvent {
         /// `deliver_replaced_zone_change` honours it over a caller's placement.
         /// A placement is not a shuffle. `None` = the caller's (or zone default).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        library_placement: Option<crate::types::ability::LibraryPosition>,
+        library_placement: Option<Box<crate::types::ability::LibraryPosition>>,
         /// CR 608.2c: the player performing the instruction that moves this
         /// object ("that player exiles that card" names the drawer; a
         /// controller-worded instruction names the controller). Rides the
@@ -2002,9 +2002,9 @@ mod tests {
         assert!(matches!(
             &placed,
             ProposedEvent::ZoneChange {
-                library_placement: Some(LibraryPosition::Top),
+                library_placement: Some(position),
                 ..
-            }
+            } if **position == LibraryPosition::Top
         ));
         let round = serde_json::to_value(&placed).expect("serializes");
         assert!(round["ZoneChange"].get("library_placement").is_some());

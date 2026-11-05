@@ -3767,7 +3767,9 @@ pub(crate) fn deliver_replaced_zone_change(
     {
         // CR 614.6: a redirecting replacement's placement (the modified event)
         // wins over the caller's.
-        let library_placement = event_placement.or(library_placement);
+        let library_placement = event_placement
+            .map(|position| *position)
+            .or(library_placement);
         if let Some(entry) = state.liminal_entries.get_mut(&object_id) {
             entry.replacement_applied = applied.clone();
         }
@@ -5658,7 +5660,7 @@ mod w3_library_placement_tests {
             library_placement, ..
         } = &mut event
         {
-            *library_placement = event_placement;
+            *library_placement = event_placement.map(Box::new);
         }
         let mut events = Vec::new();
         let result = deliver_replaced_zone_change(
