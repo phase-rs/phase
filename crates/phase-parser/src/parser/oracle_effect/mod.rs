@@ -199,7 +199,8 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::BodyScope;
 pub(crate) use crate::parser::oracle_ir::context::{
     BareCardAggregateBinding, ChosenColorQualifierScope, DeclaredSlotEntry, DeclaredSlotRegistry,
-    ParseContext, PriorZoneChoicePartition, TokenPtFollowup, TriggerConditionScope,
+    HeadWindowProbe, ParseContext, PriorZoneChoicePartition, TokenPtFollowup,
+    TriggerConditionScope,
 };
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseId,
@@ -8950,10 +8951,14 @@ fn try_parse_have_base_pt_become(tp: TextPair<'_>) -> Option<ParsedEffectClause>
     };
 
     // CR 611.2 + CR 514.2: this set is a continuous effect from the resolution of
-    // a (triggered) ability. The card's "until end of turn" suffix is normally
-    // stripped onto the ability frame before this body parses; default to end of
-    // turn when no explicit suffix reaches here, an explicit suffix wins.
-    let duration = duration.or(Some(Duration::UntilEndOfTurn));
+    // a (triggered) ability, and its window is whatever the clause printed.
+    // Emitted VERBATIM: `None` is the only value that says "this recognizer saw no
+    // window", so an enclosing printed window (a leading "Until your next turn,")
+    // can distribute onto it through `with_clause_duration` /
+    // `with_clause_chain_duration`. An injected `UntilEndOfTurn` is byte-identical
+    // to a printed one and silently blocked that distribution (#7962). The
+    // end-of-turn fallback for a genuinely windowless set already exists in the
+    // resolver (`game/effects/animate.rs`'s `.unwrap_or`).
     let mut clause = parsed_clause(effect);
     clause.duration = duration;
     Some(clause)
@@ -9484,6 +9489,14 @@ fn parse_effect_clause_with_damage_context(
     ctx: &mut ParseContext,
     damage_context: DamageTargetContext,
 ) -> ParsedEffectClause {
+    // CR 611.2a: the recognizers below that own their duration return before the
+    // clause shell runs, so a window heading the unpeeled clause is recorded here;
+    // any other clause leaves the probe armed for the post-peel reading.
+    if ctx.head_window.is_armed() {
+        if let Some((window, _)) = strip_leading_duration(text.trim()) {
+            ctx.head_window.settle(Some(window));
+        }
+    }
     // CR 612.1: "Change the text of <target> by replacing all instances of ..." owns its
     // own duration, so it must run before the clause shell peels a trailing one.
     {
@@ -9593,6 +9606,10 @@ fn parse_effect_clause_with_damage_context(
     }
     let (peeled_text, peel_ctx) =
         super::clause_shell::peel_clause_with_anchor(text, ctx.chain_prior_targeted_player);
+    // CR 611.2a: the shell peels only head slots and a TRAILING window, so a window
+    // printed at the head of this clause now heads `peeled_text` — the exact text
+    // the leading-duration arm of `parse_effect_clause_inner` reads.
+    settle_head_window(ctx, &peeled_text);
     // CR 608.2c + CR 109.5: a peeled player subject ("target opponent may",
     // "that creature's controller may", "each opponent …") names who acts, and
     // this clause has no slot to carry it — the chunk loop is where those
@@ -11423,6 +11440,17 @@ mod swap_chosen_labels_parser_tests {
     #[test]
     fn rejects_non_swap_clause() {
         assert_eq!(parse_swap_chosen_labels("each player draws a card"), None);
+    }
+}
+
+/// CR 611.2a + CR 608.2c: settle an armed `ParseContext::head_window` probe with the
+/// window heading `body`, read with the same normalization and combinator the
+/// leading-duration arm of [`parse_effect_clause_inner`] applies to it.
+fn settle_head_window(ctx: &mut ParseContext, body: &str) {
+    if ctx.head_window.is_armed() {
+        let body = strip_leading_sequence_connector(body).trim();
+        ctx.head_window
+            .settle(strip_leading_duration(body).map(|(window, _)| window));
     }
 }
 
@@ -48736,6 +48764,11 @@ fn parse_effect_chain_ir_body(
             let prior = builder.clauses().last().map(|c| &c.parsed.effect);
             entry_counter_rider_clause(&text_no_qty, condition.as_ref(), prior)
         };
+        // CR 611.2a + CR 608.2c: arm the head-window probe for THIS clause's main
+        // parse only, after every leading guard above has been lifted, so the clause
+        // parser reports the window it actually lowers at the clause's head (see
+        // `ParseContext::head_window`). Lifted onto the clause's `ClauseIr` below.
+        ctx.head_window = HeadWindowProbe::Armed;
         let (clause, repeat_for) = if let Some(retained_type_clause) = retained_type_clause {
             let duration_binding = retained_type_duration_binding(builder.clauses());
             (retained_type_clause.lower(duration_binding), repeat_for)
@@ -48816,6 +48849,7 @@ fn parse_effect_chain_ir_body(
             &text_no_qty.to_ascii_lowercase(),
         );
         let (clause, repeat_for) = lower_copy_each_tracked_spell(&text_no_qty, clause, repeat_for);
+        let head_window = ctx.head_window.take_window();
 
         // CR 608.2c: a clause that STATED its subject ("target opponent loses
         // life equal to the difference" — Ancient Cellarspawn) has it peeled
@@ -49668,6 +49702,7 @@ fn parse_effect_chain_ir_body(
                 // too, but that predates this change and is left as-is rather
                 // than folded into an unrelated fix.)
                 .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
+                .head_window(head_window.clone())
                 .push();
             continue;
         }
@@ -49734,6 +49769,7 @@ fn parse_effect_chain_ir_body(
                     // clause is a real chunk parse, so its declared provenance
                     // must be threaded rather than defaulted to `None`.
                     .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
+                    .head_window(head_window.clone())
                     .push();
                 continue;
             }
@@ -50364,6 +50400,7 @@ fn parse_effect_chain_ir_body(
                             chunk_ctx.declared_target_choice_timing.take(),
                         )
                         .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
+                        .head_window(head_window.clone())
                         .push();
                 }
                 continue 'chunks;
@@ -50500,6 +50537,7 @@ fn parse_effect_chain_ir_body(
                 .target_chooser(chunk_ctx.target_chooser.clone())
                 .declared_target_choice_timing(chunk_ctx.declared_target_choice_timing.take())
                 .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
+                .head_window(head_window.clone())
                 .declared_player_group(clause_declared_group)
                 .push();
 
