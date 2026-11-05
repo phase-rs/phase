@@ -1500,11 +1500,8 @@ fn crystalline_giant_random_counter_kind_lowers_to_a_real_choice() {
 #[test]
 fn palantir_life_loss_uses_milled_chain_set_and_targeted_opponent() {
     let parsed = parse_oracle_text(
-        "At the beginning of your end step, put an influence counter on Palantir of Orthanc and \
-         scry 2. Then target opponent may have you draw a card. If that player doesn't, you mill \
-         X cards, where X is the number of influence counters on Palantir of Orthanc, and that \
-         player loses life equal to the total mana value of those cards.",
-        "Palantir of Orthanc",
+        "At the beginning of your end step, put an influence counter on Palantír of Orthanc and scry 2. Then target opponent may have you draw a card. If that player doesn't, you mill X cards, where X is the number of influence counters on Palantír of Orthanc, and that player loses life equal to the total mana value of those cards.",
+        "Palantír of Orthanc",
         &[],
         &["Legendary".to_string(), "Artifact".to_string()],
         &[],
@@ -1517,15 +1514,24 @@ fn palantir_life_loss_uses_milled_chain_set_and_targeted_opponent() {
     assert!(matches!(put.effect.as_ref(), Effect::PutCounter { .. }));
     let scry = put.sub_ability.as_deref().expect("scry continuation");
     assert!(matches!(scry.effect.as_ref(), Effect::Scry { .. }));
-    let draw = scry.sub_ability.as_deref().expect("opponent draw choice");
-    assert!(draw.optional);
-    assert_eq!(draw.player_scope, Some(PlayerFilter::Opponent));
+    // CR 115.1 + CR 608.2d: the targeted opponent is declared by a `TargetOnly`
+    // head that is optional for that declared player, with no seat fan-out.
+    let head = scry.sub_ability.as_deref().expect("opponent draw choice");
+    assert!(matches!(head.effect.as_ref(), Effect::TargetOnly { .. }));
+    assert!(head.optional);
+    assert_eq!(head.player_scope, None);
+    let group = head.declares_chosen_group.expect("the head declares G");
+    assert_eq!(
+        head.optional_player,
+        Some(TargetFilter::DeclaredPlayer { group })
+    );
+    let draw = head.sub_ability.as_deref().expect("the controller's draw");
     assert!(matches!(draw.effect.as_ref(), Effect::Draw { .. }));
     let mill = draw.sub_ability.as_deref().expect("decline mill branch");
     assert!(matches!(
         mill.effect.as_ref(),
         Effect::Mill {
-            target: TargetFilter::OriginalController,
+            target: TargetFilter::Controller,
             ..
         }
     ));
@@ -1533,7 +1539,11 @@ fn palantir_life_loss_uses_milled_chain_set_and_targeted_opponent() {
     let Effect::LoseLife { amount, target } = lose.effect.as_ref() else {
         panic!("expected LoseLife, got {:?}", lose.effect);
     };
-    assert_eq!(target.as_ref(), Some(&TargetFilter::ScopedPlayer));
+    // CR 608.2c: "that player" is the declared target opponent.
+    assert_eq!(
+        target.as_ref(),
+        Some(&TargetFilter::DeclaredPlayer { group })
+    );
     assert_eq!(
         *amount,
         QuantityExpr::Ref {
@@ -1906,7 +1916,7 @@ fn teferis_veil_delayed_trigger_keeps_non_event_target_binding() {
 #[test]
 fn combustible_gearhulk_damage_uses_milled_chain_set() {
     let parsed = parse_oracle_text(
-        "First strike\nWhen Combustible Gearhulk enters, target opponent may have you draw three cards. If the player doesn't, you mill three cards, then Combustible Gearhulk deals damage to that player equal to the total mana value of those cards.",
+        "First strike\nWhen this creature enters, target opponent may have you draw three cards. If the player doesn't, you mill three cards, then this creature deals damage to that player equal to the total mana value of those cards.",
         "Combustible Gearhulk",
         &["First strike".to_string()],
         &["Artifact".to_string(), "Creature".to_string()],
@@ -1917,7 +1927,13 @@ fn combustible_gearhulk_damage_uses_milled_chain_set() {
         .iter()
         .find(|trigger| trigger.mode == TriggerMode::ChangesZone)
         .expect("Gearhulk enters trigger");
-    let draw = trigger.execute.as_deref().expect("draw choice");
+    let head = trigger
+        .execute
+        .as_deref()
+        .expect("the target opponent's choice");
+    assert!(matches!(head.effect.as_ref(), Effect::TargetOnly { .. }));
+    let group = head.declares_chosen_group.expect("the head declares G");
+    let draw = head.sub_ability.as_deref().expect("the controller's draw");
     let mill = draw.sub_ability.as_deref().expect("decline mill");
     let damage = mill.sub_ability.as_deref().expect("damage continuation");
     let Effect::DealDamage { amount, target, .. } = damage.effect.as_ref() else {
@@ -1942,7 +1958,8 @@ fn combustible_gearhulk_damage_uses_milled_chain_set() {
             filter: None
         }
     ));
-    assert!(matches!(target, TargetFilter::ScopedPlayer));
+    // CR 608.2c + CR 120.3a: "that player" is the declared target opponent.
+    assert_eq!(*target, TargetFilter::DeclaredPlayer { group });
 }
 
 #[test]
@@ -17205,6 +17222,146 @@ fn trigger_you_proliferate() {
         def.player_actions,
         Some(vec![PlayerActionKind::Proliferate])
     );
+}
+
+/// CR 700.2a + CR 700.2b: "Whenever you face a dilemma" (TRK; you face a
+/// dilemma as you choose one or more modes — needs manual verification) is the
+/// generic player-action trigger for `PlayerActionKind::FaceDilemma`.
+#[test]
+fn trigger_you_face_a_dilemma_uses_generic_player_action_path() {
+    let def = parse_trigger_line(
+        "Whenever you face a dilemma, draw a card. (You face a dilemma as you choose one or more modes for a spell or ability.)",
+        "Seven of Nine",
+    );
+    assert_eq!(def.mode, TriggerMode::PlayerPerformedAction);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    assert_eq!(
+        def.player_actions,
+        Some(vec![PlayerActionKind::FaceDilemma])
+    );
+    let execute = def.execute.as_deref().expect("REACH: the body parses");
+    assert!(matches!(execute.effect.as_ref(), Effect::Draw { .. }));
+
+    // Gabriel Lorca, Mirror Menace: the graveyard trigger keeps its zone and
+    // its optional pay-{B} body.
+    let parsed = parse_oracle_text(
+        "Menace\nWhenever you face a dilemma, you may pay {B}. If you do, return this card from your graveyard to your hand. (You face a dilemma as you choose one or more modes for a spell or ability.)",
+        "Gabriel Lorca, Mirror Menace",
+        &["Menace".to_string()],
+        &["Creature".to_string()],
+        &[],
+    );
+    let lorca = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::PlayerPerformedAction)
+        .expect("Lorca's dilemma trigger");
+    assert_eq!(
+        lorca.player_actions,
+        Some(vec![PlayerActionKind::FaceDilemma])
+    );
+    assert_eq!(lorca.trigger_zones, vec![Zone::Graveyard]);
+    let body = lorca.execute.as_deref().expect("REACH: the body parses");
+    assert!(
+        !format!("{body:?}").contains("Unimplemented"),
+        "Lorca's body fully parses: {body:?}"
+    );
+}
+
+/// CR 603.4: The Caretaker's "if you faced a dilemma this turn" is an
+/// intervening-if over the controller's per-turn `FaceDilemma` history.
+#[test]
+fn caretaker_intervening_if_reads_the_dilemma_history() {
+    let parsed = parse_oracle_text(
+        "Vigilance, ward {2}\nAt the beginning of each end step, if you faced a dilemma this turn, target opponent exiles cards from the top of their library until they exile a nonland card. You may cast that card without paying its mana cost. (You face a dilemma as you choose one or more modes for a spell or ability.)",
+        "The Caretaker",
+        &["Vigilance".to_string()],
+        &["Creature".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::Phase)
+        .expect("end-step trigger");
+    let condition = format!("{:?}", trigger.condition);
+    assert!(
+        condition.contains("PlayerActionsThisTurn") && condition.contains("FaceDilemma"),
+        "{condition}"
+    );
+    let body = trigger.execute.as_deref().expect("REACH: the body parses");
+    assert!(
+        !format!("{body:?}").contains("Unimplemented"),
+        "the exile-and-cast body parses: {body:?}"
+    );
+}
+
+/// "for each dilemma you've faced this turn" (Captain Benjamin Sisko) counts
+/// the controller's `FaceDilemma` history; "this turn" is consumed by the count.
+#[test]
+fn sisko_officer_count_reads_the_dilemma_history() {
+    let parsed = parse_oracle_text(
+        "At the beginning of your end step, create a 1/1 red Officer creature token for each dilemma you've faced this turn.\n{2}{W}{U}{B}{R}{G}, {T}: Exile the top five cards of your library. You may cast any number of spells with mana value less than or equal to the number of Officers you control from among those cards without paying their mana costs.",
+        "Captain Benjamin Sisko",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let trigger = parsed.triggers.first().expect("end-step trigger");
+    let token = trigger.execute.as_deref().expect("token effect");
+    let Effect::Token { count, .. } = token.effect.as_ref() else {
+        panic!("expected Token, got {:?}", token.effect);
+    };
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::PlayerActionsThisTurn {
+                player: crate::types::ability::PlayerScope::Controller,
+                action: PlayerActionKind::FaceDilemma,
+            }
+        }
+    );
+    assert_eq!(token.duration, None, "no stray duration from \"this turn\"");
+}
+
+/// The "face(s) a dilemma" phrase is all-consuming: a trailing qualifier is not
+/// this action.
+#[test]
+fn player_action_list_reads_face_a_dilemma_exactly() {
+    for phrase in ["face a dilemma", "faces a dilemma"] {
+        assert_eq!(
+            super::parse_player_action_list(phrase),
+            Some(vec![PlayerActionKind::FaceDilemma]),
+            "{phrase}"
+        );
+    }
+    for phrase in [
+        "face a dilemmas",
+        "face dilemma",
+        "face a dilemma this turn",
+    ] {
+        assert_eq!(super::parse_player_action_list(phrase), None, "{phrase}");
+    }
+}
+
+/// Council's dilemma (CR 207.2c ability word, a vote, CR 701.38a) is not
+/// "face a dilemma": Tivit, Seller of Secrets keeps its enters and damage
+/// triggers and gains no player-action trigger.
+#[test]
+fn councils_dilemma_is_not_a_faced_dilemma() {
+    let parsed = parse_oracle_text(
+        "Flying, ward {3}\nCouncil's dilemma — Whenever Tivit enters or deals combat damage to a player, starting with you, each player votes for evidence or bribery. For each evidence vote, investigate. For each bribery vote, create a Treasure token.\nWhile voting, you may vote an additional time. (The votes can be for different choices or for the same choice.)",
+        "Tivit, Seller of Secrets",
+        &["Flying".to_string()],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(!parsed.triggers.is_empty(), "REACH: Tivit's triggers parse");
+    assert!(parsed
+        .triggers
+        .iter()
+        .all(|trigger| trigger.mode != TriggerMode::PlayerPerformedAction
+            && trigger.player_actions.is_none()));
 }
 
 #[test]

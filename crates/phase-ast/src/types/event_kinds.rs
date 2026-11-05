@@ -91,6 +91,33 @@ pub enum PlayerActionKind {
     /// drawing player once; a draw that delivered no card (empty library, or every
     /// unit replaced away) emits nothing because that player did not draw.
     Draw,
+    /// CR 700.2a + CR 700.2b + CR 700.2e + CR 601.2b + CR 602.2b + CR 603.3c: a
+    /// player chose one or more modes for a spell or ability ("face a dilemma" —
+    /// TRK reminder text; needs manual verification, no CR rule names it). One
+    /// action per mode-choice announcement, not per mode.
+    FaceDilemma,
+}
+
+impl PlayerActionKind {
+    /// Whether the resolution chain's action scan
+    /// (`effects::record_player_actions_performed`) appends this action to the
+    /// per-turn history when it sees the event. `Draw` records at its emission
+    /// site; `FaceDilemma` records at stack placement (CR 601.2i / CR 602.2b +
+    /// CR 733.1), so neither may be appended twice.
+    pub fn turn_history_recorded_by_chain_scan(self) -> bool {
+        match self {
+            Self::Draw | Self::FaceDilemma => false,
+            Self::AcceptedOptionalEffect
+            | Self::SearchedLibrary
+            | Self::Scry
+            | Self::Surveil
+            | Self::CollectEvidence
+            | Self::ShuffledLibrary
+            | Self::Proliferate
+            | Self::Investigate
+            | Self::Forage => true,
+        }
+    }
 }
 
 /// CR 701.30d: Result of a clash — whether the controller won, lost, or tied.
@@ -127,6 +154,38 @@ impl ClashResult {
             })
         } else {
             None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PlayerActionKind;
+
+    /// Draw and FaceDilemma record their per-turn history at their own sites
+    /// (draw completion; stack placement), so the chain scan skips them; every
+    /// other action is recorded by the scan.
+    #[test]
+    fn chain_scan_records_every_action_but_draw_and_face_dilemma() {
+        use PlayerActionKind::*;
+        for (action, recorded) in [
+            (AcceptedOptionalEffect, true),
+            (SearchedLibrary, true),
+            (Scry, true),
+            (Surveil, true),
+            (CollectEvidence, true),
+            (ShuffledLibrary, true),
+            (Proliferate, true),
+            (Investigate, true),
+            (Forage, true),
+            (Draw, false),
+            (FaceDilemma, false),
+        ] {
+            assert_eq!(
+                action.turn_history_recorded_by_chain_scan(),
+                recorded,
+                "{action:?}"
+            );
         }
     }
 }

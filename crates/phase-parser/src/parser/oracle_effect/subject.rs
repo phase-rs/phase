@@ -122,30 +122,71 @@ fn subject_phrase_ast(application: Option<SubjectApplication>) -> SubjectPhraseA
 /// may <verb>` clause whose actor is the announced target opponent. Pinned to the
 /// corpus-proven `draw` (five cards: Tataru Taru, Kuroki, Thief of Talents,
 /// Phelddagrif, Questing Phelddagrif, Soldevi Heretic). The axis is deliberately
-/// draw-only. The other corpus `target opponent may <verb>` shapes (`may have you …`,
-/// `may sacrifice …`, `may choose …`, `may pay …`, `may exile …`, …) keep the base
-/// `player_scope: Opponent` fan-out (they are the same announced-actor class but are
-/// NOT part of this change; two of them, Gravestorm and Rakdos, Patron of Chaos, still
-/// fan the "may" out to every opponent). Widening the axis requires a real card AND a
-/// verified subject-path lowering for its actor.
+/// draw-only. The causative `may have <you | ~> …` is routed by the classifier's
+/// causative arm (`parse_causative_head`), not by this axis. The remaining corpus
+/// `target opponent may <verb>` shapes (`may sacrifice …`, `may choose …`, `may
+/// pay …`, `may exile …`, …) keep the base `player_scope: Opponent` fan-out (two of
+/// them, Gravestorm and Rakdos, Patron of Chaos, still fan the "may" out to every
+/// opponent). Widening the axis requires a real card AND a verified subject-path
+/// lowering for its actor. Its other reader, the bare-`and` splitter in
+/// `sequence.rs`, relies on it staying draw-only.
 pub(crate) fn parse_player_action_verb(input: &str) -> OracleResult<'_, ()> {
     value((), tag("draw")).parse(input)
 }
 
-/// CR 608.2d + CR 115.1: true when `lower` begins with the
-/// `"target opponent may <player-action verb>"` shape whose actor is the announced
-/// target opponent. The single authority for the clause-shell peel discriminator
-/// (`clause_shell::try_peel_opponent_may_prefix`), the subject witness in
-/// `try_parse_subject_predicate_ast`, and the
-/// `optional_player = TargetFilter::DeclaredPlayer { group }` stamp in
-/// `assembly::assemble_effect_chain` — so the three cannot drift.
-pub(crate) fn targeted_opponent_may_player_action(lower: &str) -> bool {
+/// CR 608.2d + CR 115.1: the two "target opponent may …" forms whose decider is
+/// the announced target opponent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TargetedOpponentMay {
+    /// "target opponent may draw …": the targeted opponent decides and acts.
+    AnnouncedActor,
+    /// "target opponent may have <you | ~> <predicate>": the targeted opponent
+    /// decides; the causee (the controller or the source) acts.
+    Causative,
+}
+
+/// CR 608.2d + CR 109.5: the causative head "have <causee> ": the causee is the
+/// controller ("you", CR 109.5) or the source's self-reference. The bare "it" is
+/// excluded: in "may have it …" it can name another object.
+pub(crate) fn parse_causative_head(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("have "),
+            alt((
+                value((), tag("you")),
+                crate::parser::oracle_nom::duration::parse_self_reference_subject,
+            )),
+            tag(" "),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 608.2d + CR 115.1: classify a lowercase clause that begins with a
+/// "target opponent may …" form whose decider is the announced target opponent,
+/// or `None` for every other clause (including shape 3, "target opponent may
+/// sacrifice / exile / pay …", which keeps its `player_scope` fan-out). The
+/// single authority for its four readers, so they cannot drift:
+/// - the clause-shell peel (`clause_shell::try_peel_opponent_may_prefix`),
+/// - the subject witness in `try_parse_subject_predicate_ast`,
+/// - the causative lowering in `lower_subject_predicate_ast_body`,
+/// - the `optional_player = TargetFilter::DeclaredPlayer { group }` stamp in
+///   `assembly::assemble_effect_chain`.
+pub(crate) fn classify_targeted_opponent_may(lower: &str) -> Option<TargetedOpponentMay> {
     preceded(
         tag::<_, _, OracleError<'_>>("target opponent may "),
-        parse_player_action_verb,
+        alt((
+            value(
+                TargetedOpponentMay::AnnouncedActor,
+                parse_player_action_verb,
+            ),
+            value(TargetedOpponentMay::Causative, parse_causative_head),
+        )),
     )
     .parse(lower)
-    .is_ok()
+    .ok()
+    .map(|(_, form)| form)
 }
 
 pub(super) fn try_parse_subject_predicate_ast(
@@ -380,16 +421,16 @@ pub(super) fn try_parse_subject_predicate_ast(
         // matters — `ImperativeFallback` is the only predicate kind that applies
         // the subject filter, so it is the one that fails closed on `None`.
         let mut application = parse_subject_application(&subject_text, ctx);
-        // CR 608.2d + CR 115.1: "target opponent may <action>" names the
-        // announced target opponent as the actor, so this clause is optional for
-        // THAT player (CR 608.2d). The subject text alone cannot separate it from
-        // the causative "target opponent may have you …" (both present the
-        // identical subject `"target opponent may"` to `parse_subject_application`),
-        // so the witness reads the WHOLE printed clause through the shared
-        // `targeted_opponent_may_player_action` authority. `is_optional` is only
-        // ever raised here, never cleared, so a pre-existing optional subject
-        // stays optional.
-        if targeted_opponent_may_player_action(&text.to_lowercase()) {
+        // CR 608.2d + CR 115.1: "target opponent may <action>" and the causative
+        // "target opponent may have <you | ~> …" both make this clause optional
+        // for the announced target opponent (CR 608.2d). The subject text alone
+        // cannot tell either from shape 3 ("target opponent may sacrifice …"),
+        // since all present the identical subject `"target opponent may"` to
+        // `parse_subject_application`, so the witness reads the WHOLE printed
+        // clause through the shared `classify_targeted_opponent_may` authority.
+        // `is_optional` is only ever raised here, never cleared, so a
+        // pre-existing optional subject stays optional.
+        if classify_targeted_opponent_may(&text.to_lowercase()).is_some() {
             if let Some(application) = application.as_mut() {
                 application.is_optional = true;
             }

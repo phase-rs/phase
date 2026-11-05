@@ -1484,6 +1484,54 @@ fn modal_indices_have_legal_target_assignment(
     }
 }
 
+/// CR 700.2a + CR 700.2b + CR 700.2e: the player who faces a dilemma for this
+/// mode choice — the mode chooser — or `None` when zero modes are chosen ("as
+/// you choose one or more modes"; CR 603.3c removes a zero-mode trigger).
+///
+/// The selection procedure does not change the chooser: a "choose one at
+/// random" trigger (Cult of Skaro) is still the controller's mode choice under
+/// CR 700.2b — "at random" fixes how the mode is picked, not who chooses it —
+/// so a nonempty random draw faces a dilemma exactly like a prompted one. Face
+/// a dilemma: needs manual verification (TRK rulings unpublished).
+pub(crate) fn mode_choice_dilemma_chooser(
+    chooser: PlayerId,
+    indices: &[usize],
+) -> Option<PlayerId> {
+    (!indices.is_empty()).then_some(chooser)
+}
+
+/// CR 603.2: the dilemma is a game event as the modes are announced; abilities
+/// that trigger on it ("whenever you face a dilemma") trigger now. Face a
+/// dilemma: needs manual verification.
+pub(crate) fn emit_face_dilemma_event(
+    chooser: PlayerId,
+    events: &mut Vec<crate::types::events::GameEvent>,
+) {
+    events.push(crate::types::events::GameEvent::PlayerPerformedAction {
+        player_id: chooser,
+        action: crate::types::events::PlayerActionKind::FaceDilemma,
+        look_count: None,
+        scry_bottom_count: None,
+        scry_top_count: None,
+    });
+}
+
+/// CR 601.2i + CR 602.2b + CR 733.1: record the dilemma in the per-turn history
+/// once the announcement that faced it has reached the stack, so an undone
+/// announcement records nothing. Face a dilemma: needs manual verification.
+pub(crate) fn record_face_dilemma_after_stack_placement(
+    state: &mut GameState,
+    chooser: Option<PlayerId>,
+) {
+    if let Some(player) = chooser {
+        super::effects::record_player_action_this_turn(
+            state,
+            player,
+            crate::types::events::PlayerActionKind::FaceDilemma,
+        );
+    }
+}
+
 /// Records chosen mode indices for NoRepeat constraint enforcement.
 /// CR 700.2: Inserts into per-turn and/or per-game tracking maps.
 /// CR 400.7: `source` must be the same incarnation key the matching
@@ -2014,10 +2062,10 @@ pub fn random_select_targets_for_ability(
     Ok(chosen)
 }
 
-/// CR 700.2b (override) + CR 701.9b (analogous): Resolve a modal ability whose
-/// `selection` is `Random` (Cult of Skaro "choose one at random") by uniformly
-/// drawing mode index/indices from the legal set using the engine's seeded RNG
-/// (`state.rng`). The game — not `modal.chooser` — makes the selection, so no
+/// CR 700.2b: the controller chooses the mode; "at random" fixes how it is
+/// picked. Resolve a modal ability whose `selection` is `Random` (Cult of Skaro
+/// "choose one at random") by uniformly drawing mode index/indices from the
+/// legal set using the engine's seeded RNG (`state.rng`), so no
 /// `WaitingFor::AbilityModeChoice` is emitted. Mirrors
 /// `random_select_targets_for_ability` for the mode-selection axis.
 ///

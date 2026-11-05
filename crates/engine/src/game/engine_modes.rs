@@ -71,12 +71,22 @@ pub(super) fn handle_ability_mode_choice(
         None => pending_trigger_modal_history_source(state)?,
     };
     record_modal_mode_choices(state, history_source, &modal, &indices);
+    // CR 700.2a + CR 700.2b + CR 700.2e: the prompted player faces one dilemma
+    // for this mode choice (face a dilemma: needs manual verification).
+    let dilemma_chooser = super::ability_utils::mode_choice_dilemma_chooser(player, &indices);
 
     let mut resolved =
         build_chained_resolved(&mode_abilities, indices.as_slice(), source_id, player)?;
     resolved.selected_mode_labels = selected_mode_labels(&modal.mode_descriptions, &indices);
 
     let waiting_for = if let Some(ability_index) = activated_ability_index {
+        // CR 602.2b + CR 700.2a: modes are chosen as part of activating, before
+        // costs (CR 601.2h). The event is collected by the activation's
+        // `end_action` custody; the history is recorded at stack placement.
+        resolved.context.mode_chooser = dilemma_chooser;
+        if let Some(chooser) = dilemma_chooser {
+            super::ability_utils::emit_face_dilemma_event(chooser, events);
+        }
         handle_activated_mode_choice(
             state,
             ActivatedModeChoice {
@@ -112,6 +122,14 @@ pub(super) fn handle_ability_mode_choice(
             },
             events,
         )?;
+        // CR 603.3c + CR 700.2b: a triggered ability's modes are chosen as it is
+        // put on the stack; the choice cannot be undone (no CancelCast for a
+        // triggered mode prompt), so the event and the history are written
+        // together.
+        if let Some(chooser) = dilemma_chooser {
+            super::ability_utils::emit_face_dilemma_event(chooser, events);
+        }
+        super::ability_utils::record_face_dilemma_after_stack_placement(state, dilemma_chooser);
         Ok(triggers::finish_trigger_construction_action(
             state, events, produced,
         ))
@@ -559,13 +577,15 @@ struct TriggeredModeChoice {
     indices: Vec<usize>,
 }
 
-/// CR 700.2b (override) + CR 701.9b (analogous): Complete a modal *triggered*
-/// ability whose `selection` is `Random` (Cult of Skaro "choose one at random")
-/// without prompting `modal.chooser`. The game draws the mode index/indices via
+/// CR 700.2b: the controller chooses the mode; "at random" fixes how it is
+/// picked. Complete a modal *triggered* ability whose `selection` is `Random`
+/// (Cult of Skaro "choose one at random") without prompting `modal.chooser`. The game draws the mode index/indices via
 /// `random_select_modal_indices` (seeded `state.rng`), then routes through the
 /// SAME finalization path the interactive controller-choice flow uses
 /// (`handle_triggered_mode_choice`) so target legality, per-mode labels, and
-/// stack-entry mutation stay identical.
+/// stack-entry mutation stay identical. The controller remains the mode chooser
+/// (CR 700.2b), so a nonempty draw faces one dilemma, emitted and recorded here
+/// exactly as the prompted path does.
 ///
 /// Preconditions (the "push first, choose second" contract — see
 /// `dispatch_pending_trigger_context`): `state.pending_trigger` is set and its
@@ -601,6 +621,10 @@ pub(super) fn resolve_random_modal_trigger(
         &modal,
         &indices,
     );
+    // CR 700.2b: the controller is still the mode chooser of a random draw, so
+    // the nonempty draw faces one dilemma (face a dilemma: needs manual
+    // verification).
+    let dilemma_chooser = super::ability_utils::mode_choice_dilemma_chooser(player, &indices);
     let mut resolved =
         build_chained_resolved(&mode_abilities, indices.as_slice(), source_id, player)?;
     resolved.selected_mode_labels = selected_mode_labels(&modal.mode_descriptions, &indices);
@@ -617,6 +641,14 @@ pub(super) fn resolve_random_modal_trigger(
         },
         events,
     )?;
+    // CR 603.3c + CR 700.2b: as on the prompted `SelectModes` path, a triggered
+    // mode choice cannot be undone once construction succeeds, so the event
+    // and the history are written together. A failed construction returned
+    // above and records nothing.
+    if let Some(chooser) = dilemma_chooser {
+        super::ability_utils::emit_face_dilemma_event(chooser, events);
+    }
+    super::ability_utils::record_face_dilemma_after_stack_placement(state, dilemma_chooser);
     Ok(Some(waiting_for))
 }
 

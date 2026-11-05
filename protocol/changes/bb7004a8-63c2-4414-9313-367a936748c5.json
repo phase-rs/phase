@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "PlayerActionKind gains FaceDilemma (a player chose one or more modes for a spell or ability; TRK face a dilemma), carried in GameEvent::PlayerPerformedAction, GameState player_actions_this_turn / player_actions_this_way and card-data TriggerDefinition.player_actions, so an older full-game or P2P peer cannot decode the tag. SpellContext gains the optional mode_chooser latch; an older peer drops it on re-encode and the cast then records no dilemma."
+}

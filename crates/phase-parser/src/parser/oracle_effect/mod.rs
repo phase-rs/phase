@@ -51,7 +51,7 @@ use lower::{
     consolidate_die_and_coin_defs, extract_deal_damage_multi_target,
     extract_double_counter_multi_target, extract_put_counter_multi_target,
     extract_remove_counter_multi_target, extract_switch_pt_multi_target,
-    instruction_spine_is_continuation, is_token_creating_effect,
+    for_each_continuation_step_mut, instruction_spine_is_continuation, is_token_creating_effect,
     parse_contextual_bare_card_aggregate, parse_damage_player_scope,
     parse_for_each_opponent_target_fanout_clause, rebind_clause_recipients_with,
     rebind_decline_body_recipient, rebind_subject_only_body_recipient,
@@ -8838,9 +8838,21 @@ fn try_parse_have_causative(
                     }
                 }
                 if recipient.eq("them") {
+                    // CR 608.2c + CR 115.1: "them" after a declared target player
+                    // names that player ("Target opponent may have ~ deal 4
+                    // damage to them" — Risk Factor). With no declared antecedent
+                    // (`None`) or any other antecedent kind the reading is
+                    // unchanged (Browbeat: "Any player may have ~ deal 5 damage
+                    // to them").
+                    let target = match ctx.player_antecedents().declared_they {
+                        Some(ControllerRef::DeclaredPlayer { group }) => {
+                            TargetFilter::DeclaredPlayer { group }
+                        }
+                        _ => TargetFilter::Player,
+                    };
                     return Some(parsed_clause(Effect::DealDamage {
                         amount,
-                        target: TargetFilter::Player,
+                        target,
                         damage_source: None,
                         excess: None,
                     }));
@@ -30078,6 +30090,65 @@ fn lower_subject_predicate_ast_player_seeded(
 /// The body of [`lower_subject_predicate_ast`]. `seeded` is the subject
 /// antecedent the entry wrote into the context (whichever field carries it), or
 /// `None` when the entry seeded nothing.
+/// CR 115.1 + CR 608.2d + CR 118.12: "target opponent may have <causee>
+/// <predicate>" — the subject declares the targeted opponent (a `TargetOnly`
+/// root) who decides; the causee performs the predicate as a continuation step
+/// of that one instruction (CR 608.2c). "You" in the predicate is the
+/// controller (CR 109.5), and "them" / "that player" name the declared target.
+fn lower_targeted_opponent_causative(
+    subject: &SubjectPhraseAst,
+    declared: &TargetFilter,
+    pred_text: &str,
+    ctx: &mut ParseContext,
+    damage_context: DamageTargetContext,
+) -> ParsedEffectClause {
+    // CR 608.2c + CR 115.1: the same group protocol as
+    // `lower_subject_exile_objects`, except that `ctx.clause_declared_group` is
+    // written only after the predicate parses: the predicate parse can reach the
+    // damage chain, which records its own announced player there.
+    let group = ChosenGroupId::declared_player(ctx.next_declared_player_group);
+    ctx.next_declared_player_group += 1;
+    // CR 608.2c: inside the predicate, "them" / "that player" read the declared
+    // target opponent.
+    let outer_player_scope = ctx
+        .declared_player_scope
+        .replace(ControllerRef::DeclaredPlayer { group });
+    let outer_prior_declaration = std::mem::replace(&mut ctx.prior_player_declaration, true);
+    let pred_lower = pred_text.to_lowercase();
+    let parsed =
+        try_parse_have_causative(TextPair::new(pred_text, &pred_lower), ctx, damage_context);
+    ctx.declared_player_scope = outer_player_scope;
+    ctx.prior_player_declaration = outer_prior_declaration;
+    // Fail closed: an unparsed predicate is the gap, and no group is recorded.
+    let Some(parsed) =
+        parsed.filter(|clause| !matches!(clause.effect, Effect::Unimplemented { .. }))
+    else {
+        return parsed_clause(Effect::unimplemented(
+            "target_opponent_causative",
+            pred_text,
+        ));
+    };
+    // The last ctx write before return, so it wins over any value the predicate
+    // parse left: the class predicates mint no player group of their own.
+    ctx.clause_declared_group = Some(group);
+    let inner = ability_definition_from_clause(AbilityKind::Spell, parsed);
+    ParsedEffectClause {
+        optional_targeting: false,
+        unlowered_guard: None,
+        effect: Effect::TargetOnly {
+            target: declared.clone(),
+        },
+        duration: None,
+        sub_ability: Some(Box::new(inner)),
+        distribute: None,
+        multi_target: subject.multi_target.clone(),
+        condition: None,
+        optional: subject.is_optional,
+        unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
+    }
+}
+
 fn lower_subject_predicate_ast_body(
     subject: SubjectPhraseAst,
     predicate: PredicateAst,
@@ -30165,6 +30236,21 @@ fn lower_subject_predicate_ast_body(
             let Some(affected) = subject.affected.clone() else {
                 return parsed_clause(Effect::unimplemented(subject::UNBOUND_SUBJECT_GAP, text));
             };
+            // CR 115.1 + CR 608.2d: "target opponent may have <causee> …" — the
+            // subject is the declared decider, not the actor; never inject it
+            // into the predicate.
+            if let (Some(declared), Some(subject::TargetedOpponentMay::Causative)) = (
+                subject.target.as_ref(),
+                subject::classify_targeted_opponent_may(&original_clause.to_lowercase()),
+            ) {
+                return lower_targeted_opponent_causative(
+                    &subject,
+                    declared,
+                    &text,
+                    ctx,
+                    damage_context,
+                );
+            }
             let pred_lower = text.to_lowercase();
             // CR 120.1 + CR 601.2c: Native IR has already separated an explicit
             // target damage source from its predicate here ("Target creature …
@@ -40807,6 +40893,13 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
             .is_some_and(AbilityCondition::is_not_optional_effect_performed)
     {
         rebind_decline_body_recipient(&mut def.effect);
+        // CR 109.5 + CR 608.2c: a decline body's continuation steps ("they lose
+        // 2 life and you draw a card" — Braids's Frightful Return chapter III) are part of the same
+        // gated instruction, so their "you" is the printed controller, not the
+        // per-opponent seat.
+        for_each_continuation_step_mut(def.sub_ability.as_deref_mut(), |node| {
+            rebind_decline_body_recipient(&mut node.effect)
+        });
     }
     // CR 608.2 + CR 109.5: Rebind actor-default `You` controllers to
     // `ScopedPlayer` for each-*player* iterations only. Each-opponent scopes
@@ -49590,7 +49683,15 @@ fn parse_effect_chain_ir_body(
         }
         let player_anaphor = has_player_anaphoric_reference(&text_lower)
             || (ctx.prior_player_declaration && has_they_pronoun(&text_lower));
-        if chain_has_prior_player_target_referent(builder.clauses()) && player_anaphor {
+        // CR 608.2c: the same antecedent rule as `declared_player_scope` above — a
+        // chain nested in another one (a gated decline body: "If the player
+        // doesn't, you mill three cards, then this creature deals damage to that
+        // player" — Combustible Gearhulk) reads the enclosing chain's declared
+        // player when it declares none of its own.
+        if (chain_has_prior_player_target_referent(builder.clauses())
+            || enclosing_declared_player.is_some())
+            && player_anaphor
+        {
             replace_player_anaphor(&mut clause.effect, || {
                 declared_player_reference(
                     builder.clauses(),
@@ -51156,6 +51257,65 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
         .map(|(effect, _, _)| effect)
 }
 
+/// CR 109.5 + CR 400.1: a possessive origin phrase inside a put target span
+/// ("a creature card with … from your hand") names the owner of the origin
+/// zone. When the type phrase stopped before that phrase (an interior property
+/// suffix — Bane, Lord of Darkness; Arni Metalbrow), bind the zone and its
+/// possessor from the same span `infer_origin_zone` already read, exactly as a
+/// contiguous "creature card from your hand" would have (Elvish Piper).
+///
+/// Acts only on a single-zone phrase with a direct possessor that agrees with
+/// `origin`, and only on a `Typed` target that carries no zone yet; every other
+/// shape is left unchanged (an `Or` / `And` target has a zone per branch, and a
+/// disjunctive phrase is `InAnyZone`).
+fn bind_put_origin_possessor(
+    target: &mut TargetFilter,
+    target_span_lower: &str,
+    origin: Option<Zone>,
+) {
+    let Some(origin) = origin else {
+        return;
+    };
+    let Some((zone, ctrl, props)) = super::oracle_target::scan_zone_phrase(target_span_lower)
+    else {
+        return;
+    };
+    let single_zone = props
+        .iter()
+        .any(|prop| matches!(prop, FilterProp::InZone { zone: z } if *z == origin))
+        && !props
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::InAnyZone { .. }));
+    // Only a direct possessor ("your" → `You`) binds here. An anaphoric one
+    // ("from their graveyard" → `Owned { ScopedPlayer }`) names whoever "they"
+    // is in its own chain, which this span alone cannot tell (Visions of
+    // Dread's "their" is the target opponent, not a scoped seat), so it is
+    // left unbound.
+    let Some(ctrl) = ctrl else {
+        return;
+    };
+    if zone != origin || !single_zone {
+        return;
+    }
+    let TargetFilter::Typed(tf) = target else {
+        return;
+    };
+    if tf.properties.iter().any(|prop| {
+        matches!(
+            prop,
+            FilterProp::InZone { .. } | FilterProp::InAnyZone { .. }
+        )
+    }) {
+        return;
+    }
+    for prop in props {
+        if !tf.properties.contains(&prop) {
+            tf.properties.push(prop);
+        }
+    }
+    attach_controller_if_absent(target, ctrl);
+}
+
 /// The third tuple element is the CR 110.2a battlefield-entry control spec. It
 /// is returned ALONGSIDE the `Effect` rather than folded into
 /// `Effect::ChangeZone.enters_under` because the `Effect` field is a collapsed
@@ -51359,7 +51519,7 @@ fn try_parse_put_zone_change_parts(
             // "this way" tracked anaphor keeps its `TrackedSetFiltered` path
             // (guarded by `!is_tracked_anaphor`); an exile-cost zone context is
             // excluded exactly as the cast-path caller does.
-            let target = if !is_tracked_anaphor
+            let mut target = if !is_tracked_anaphor
                 && ctx.current_ability_exile_cost_zone.is_none()
                 && target_text.trim().eq_ignore_ascii_case("the exiled card")
             {
@@ -51399,7 +51559,9 @@ fn try_parse_put_zone_change_parts(
                 None
             } else {
                 let origin_text = format!("{}{}", before.lower, after.lower);
-                infer_origin_zone(&origin_text)
+                let origin = infer_origin_zone(&origin_text);
+                bind_put_origin_possessor(&mut target, before.lower, origin);
+                origin
             };
             // CR 110.2a: the SAME span as the single-literal
             // `scan_contains_phrase(after_put_tp.lower, "under your control")`

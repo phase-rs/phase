@@ -18705,8 +18705,9 @@ pub(super) fn begin_pending_trigger_target_selection(
                 return Ok(None);
             };
 
-            // CR 700.2b (override) + CR 701.9b (analogous): "choose ... at
-            // random" modal triggers (Cult of Skaro) are resolved inline by
+            // CR 700.2b: the controller chooses the mode; "at random" fixes how
+            // it is picked. "Choose ... at random" modal triggers (Cult of
+            // Skaro) are resolved inline by
             // `dispatch_pending_trigger_context` via `state.rng` — they clear
             // `modal` before this re-entry surfaces a `WaitingFor`, so reaching
             // here with a `Random` selection means the dispatcher was bypassed.
@@ -25342,7 +25343,7 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test,
-            59,
+            60,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
@@ -25350,11 +25351,11 @@ mod stage2_injector_tests {
         );
         assert_eq!(
             (producers.len(), readers.len(), in_test),
-            (4, 11, 44),
+            (4, 11, 45),
             "the partition, not just the total: four PRODUCTION producers, eleven PRODUCTION \
-             readers (including the two new optional-subject projection reads), and 44 \
+             readers (including the two new optional-subject projection reads), and 45 \
              `#[cfg(test)]` lines, including the ChooseOneOf, retained optional/outer, \
-             and retained repeat/choice restore fixtures.\nproducers={producers:#?}\n\
+             retained repeat/choice restore, and per-seat gated-step (U5) fixtures.\nproducers={producers:#?}\n\
              readers={readers:#?}"
         );
         assert_eq!(

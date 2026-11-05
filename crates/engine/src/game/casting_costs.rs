@@ -8378,6 +8378,7 @@ pub(super) fn push_ability_entry(
 
     // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking.
     resolved.ability_index = Some(ability_index);
+    let mode_chooser = resolved.context.mode_chooser;
     stack::push_to_stack(
         state,
         StackEntry {
@@ -8392,6 +8393,9 @@ pub(super) fn push_ability_entry(
         events,
     );
     super::casting::commit_crime_after_stack_placement(state, crime_candidate, player, events);
+    // CR 602.2b + CR 733.1: the activation's mode choice faced a dilemma; it is on
+    // the stack now, so record it (face a dilemma: needs manual verification).
+    super::ability_utils::record_face_dilemma_after_stack_placement(state, mode_chooser);
     if let Some(activation_player) = pending_loyalty_activation_player {
         super::planeswalker::record_loyalty_activation(state, source_id, activation_player);
     }
@@ -13956,6 +13960,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
     let kickers_paid = ability.context.kickers_paid.clone();
     let gift_recipient = ability.context.gift_recipient;
     let chosen_modes = ability.context.chosen_modes.clone();
+    let mode_chooser = ability.context.mode_chooser;
     let additional_cost_paid = ability.context.additional_cost_paid;
     let additional_cost_payment_count = ability.context.additional_cost_payment_count;
     let additional_cost_payments = ability.context.additional_cost_payments.clone();
@@ -14420,6 +14425,9 @@ fn finalize_cast_with_phyrexian_choices_inner(
         .is_some_and(|pending| pending.crime_candidate)
         || super::casting::targets_commit_crime(state, &announced_targets, player);
     super::casting::commit_crime_after_stack_placement(state, crime_candidate, player, events);
+    // CR 601.2i + CR 733.1: the spell's mode choice faced a dilemma; it is on the
+    // stack now, so record it (face a dilemma: needs manual verification).
+    super::ability_utils::record_face_dilemma_after_stack_placement(state, mode_chooser);
 
     // Track commander cast count for tax calculation
     if was_in_command_zone {

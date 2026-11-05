@@ -460,10 +460,10 @@ fn push_first_no_legal_modes_modal_trigger_dropped_silently() {
     );
 }
 
-/// CR 700.2b (override) + CR 701.9b (analogous): a modal triggered ability
-/// declared "choose one at random" (Cult of Skaro) must NOT prompt the
-/// controller with `AbilityModeChoice` — the game picks the mode via
-/// `state.rng` and the ability reaches the stack with a resolved,
+/// CR 700.2b: the controller chooses the mode; "at random" fixes how it is
+/// picked. A modal triggered ability declared "choose one at random" (Cult of
+/// Skaro) must NOT prompt the controller with `AbilityModeChoice` — the mode is
+/// drawn via `state.rng` and the ability reaches the stack with a resolved,
 /// non-modal mode. Regression test for the unconsumed-random-axis defect.
 #[test]
 fn random_modal_trigger_resolves_without_prompting() {
@@ -579,6 +579,39 @@ fn random_modal_trigger_resolves_without_prompting() {
         matches!(labels.as_slice(), [label] if label == "A" || label == "B"),
         "the random modal trigger must retain the label of the engine-selected mode, got {labels:?}",
     );
+    // CR 700.2b: the controller still chooses the randomly drawn mode, so it
+    // faces one dilemma — the event in the dispatch's event custody, and one
+    // history entry (face a dilemma: needs manual verification).
+    assert_eq!(face_dilemma_events(&events, PlayerId(0)), 1);
+    assert_eq!(face_dilemma_history(&state, PlayerId(0)), 1);
+}
+
+/// `player`'s face-a-dilemma events in `events`.
+fn face_dilemma_events(events: &[GameEvent], player: PlayerId) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: crate::types::events::PlayerActionKind::FaceDilemma,
+                    ..
+                } if *player_id == player
+            )
+        })
+        .count()
+}
+
+/// `player`'s faced dilemmas in the per-turn history.
+fn face_dilemma_history(state: &GameState, player: PlayerId) -> usize {
+    state
+        .player_actions_this_turn
+        .iter()
+        .filter(|(actor, kind)| {
+            *actor == player && *kind == crate::types::events::PlayerActionKind::FaceDilemma
+        })
+        .count()
 }
 
 /// CR 603.3c + CR 700.2b: a random modal trigger whose "up to" draw chooses no
@@ -670,6 +703,9 @@ fn random_up_to_modal_trigger_choosing_no_mode_is_removed() {
         state.pending_trigger.is_none() && state.pending_trigger_entry.is_none(),
         "no construction cursor survives the removal",
     );
+    // "As you choose one or more modes": a zero-mode draw faces no dilemma.
+    assert_eq!(face_dilemma_events(&events, PlayerId(0)), 0);
+    assert_eq!(face_dilemma_history(&state, PlayerId(0)), 0);
 }
 
 /// SHAPE-level regression (manual surgery): drives the real dispatch pipeline to

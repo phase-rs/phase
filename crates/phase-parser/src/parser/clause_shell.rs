@@ -348,19 +348,22 @@ fn try_peel_opponent_may_prefix(
 ) -> Option<(Option<OpponentMayScope>, Option<PlayerFilter>, String)> {
     let lower = text.to_lowercase();
     // CR 608.2d + CR 115.1: "target opponent may draw …" names the ANNOUNCED
-    // target opponent as the actor, not a controller-held optional that fans out
-    // to every opponent. Declining the peel lets the whole clause parse through
-    // the subject-predicate path, where `subject.rs` marks the clause optional and
-    // `assembly.rs` stamps `optional_player = TargetFilter::DeclaredPlayer { group }`
-    // from this same clause provenance — deliberately NOT a `player_scope`, which
-    // would rebind the whole chain's controller to the opponent's seat.
-    // Mirrors `is_specialized_you_may_phrase`: a dedicated body path needs the
-    // full surface form. The discriminator is evaluated on the WHOLE clause
-    // (the shared `targeted_opponent_may_player_action`), matching the subject
-    // witness and the assembly stamp so the three cannot drift; every other
-    // `target opponent may <verb>` shape (`may have you …`, `may sacrifice …`,
-    // …) fails it and peels exactly as before (M2, `draw`-only axis).
-    if super::oracle_effect::subject::targeted_opponent_may_player_action(&lower) {
+    // target opponent as the actor, and the causative "target opponent may have
+    // <you | ~> …" names that same announced opponent as the decider. Neither is
+    // a controller-held optional that fans out to every opponent. Declining the
+    // peel lets the whole clause parse through the subject-predicate path, where
+    // `subject.rs` marks the clause optional and `assembly.rs` stamps
+    // `optional_player = TargetFilter::DeclaredPlayer { group }` from this same
+    // clause provenance — deliberately NOT a `player_scope`, which would rebind
+    // the whole chain's controller to the opponent's seat. Mirrors
+    // `is_specialized_you_may_phrase`: a dedicated body path needs the full
+    // surface form. The discriminator is evaluated on the WHOLE clause (the
+    // shared `classify_targeted_opponent_may`), matching the subject witness,
+    // the causative lowering and the assembly stamp so they cannot drift. Shape 3
+    // (`may sacrifice …`, `may pay …`, `may exile …`, `may choose …`) fails it
+    // and still peels to `player_scope: Opponent` through the
+    // `"target opponent may "` arm below.
+    if super::oracle_effect::subject::classify_targeted_opponent_may(&lower).is_some() {
         return None;
     }
     if let Some((_, rest)) = nom_on_lower(text, &lower, |i| {
