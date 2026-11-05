@@ -19,7 +19,7 @@ use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastOfferKind, CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -27,7 +27,24 @@ use engine::types::zones::Zone;
 const SISKO: &str = "At the beginning of your end step, create a 1/1 red Officer creature token for each dilemma you've faced this turn.\n{2}{W}{U}{B}{R}{G}, {T}: Exile the top five cards of your library. You may cast any number of spells with mana value less than or equal to the number of Officers you control from among those cards without paying their mana costs.";
 const CARETAKER: &str = "Vigilance, ward {2}\nAt the beginning of each end step, if you faced a dilemma this turn, target opponent exiles cards from the top of their library until they exile a nonland card. You may cast that card without paying its mana cost. (You face a dilemma as you choose one or more modes for a spell or ability.)";
 const ABZAN_CHARM: &str = "Choose one —\n• Exile target creature with power 3 or greater.\n• You draw two cards and you lose 2 life.\n• Distribute two +1/+1 counters among one or two target creatures.";
-const LIFE_SPELL: &str = "You gain 3 life.";
+const SACRED_NECTAR: &str = "You gain 4 life.";
+const ANGELS_MERCY: &str = "You gain 7 life.";
+
+/// Sacred Nectar's printed cost, {1}{W} (mana value 2).
+fn sacred_nectar_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::White],
+        generic: 1,
+    }
+}
+
+/// Angel's Mercy's printed cost, {2}{W}{W} (mana value 4).
+fn angels_mercy_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::White, ManaCostShard::White],
+        generic: 2,
+    }
+}
 
 #[derive(Default)]
 struct Plan {
@@ -222,10 +239,11 @@ fn caretaker_board() -> (GameRunner, ObjectId) {
     for index in 0..5 {
         scenario.add_spell_to_library_top(P0, &format!("P0 Library {index}"), false);
     }
-    // P1's library top reads: land, land, a sorcery that gains 3 life.
+    // P1's library top reads: land, land, Sacred Nectar (a sorcery).
     scenario
-        .add_spell_to_library_top(P1, "P1 Life Spell", false)
-        .from_oracle_text(LIFE_SPELL);
+        .add_spell_to_library_top(P1, "Sacred Nectar", false)
+        .with_mana_cost(sacred_nectar_cost())
+        .from_oracle_text(SACRED_NECTAR);
     scenario.add_land_to_library_top(P1, "P1 Land A");
     scenario.add_land_to_library_top(P1, "P1 Land B");
     scenario
@@ -247,7 +265,8 @@ fn exiled(runner: &GameRunner, name: &str) -> bool {
 }
 
 /// C1 — CR 603.4 + CR 608.2g: after a dilemma, at the end step P1 exiles
-/// until a nonland card, and P0 may cast that card free (P0 gains 3).
+/// until a nonland card, and P0 may cast that card free (Sacred Nectar: P0
+/// gains 4).
 #[test]
 fn caretaker_exiles_until_nonland_and_offers_the_free_cast() {
     let (mut runner, charm) = caretaker_board();
@@ -264,7 +283,7 @@ fn caretaker_exiles_until_nonland_and_offers_the_free_cast() {
     );
     assert_eq!(record.optional_actors, vec![P0]);
     assert!(exiled(&runner, "P1 Land A") && exiled(&runner, "P1 Land B"));
-    assert_eq!(runner.life(P0), life + 3, "the free cast resolved");
+    assert_eq!(runner.life(P0), life + 4, "the free cast resolved");
 }
 
 /// C2 — CR 603.4: with no dilemma this turn the ability does not trigger.
@@ -282,8 +301,8 @@ fn caretaker_does_not_trigger_without_a_dilemma() {
 
 /// S4 — Sisko's activated ability: exile the top five; P0 may cast spells
 /// among them with mana value ≤ the number of Officers P0 controls (two here)
-/// without paying their mana costs (CR 608.2g). The mana value 2 spell is
-/// castable; the mana value 3 spell is not.
+/// without paying their mana costs (CR 608.2g). Sacred Nectar (mana value 2,
+/// CR 202.3) is castable; Angel's Mercy (mana value 4) is not.
 #[test]
 fn sisko_casts_only_spells_within_the_officer_count() {
     let mut scenario = GameScenario::new();
@@ -292,13 +311,13 @@ fn sisko_casts_only_spells_within_the_officer_count() {
         scenario.add_spell_to_library_top(P0, &format!("P0 Filler {index}"), false);
     }
     scenario
-        .add_spell_to_library_top(P0, "Three Drop", false)
-        .with_mana_cost(ManaCost::generic(3))
-        .from_oracle_text("You gain 5 life.");
+        .add_spell_to_library_top(P0, "Angel's Mercy", true)
+        .with_mana_cost(angels_mercy_cost())
+        .from_oracle_text(ANGELS_MERCY);
     scenario
-        .add_spell_to_library_top(P0, "Two Drop", false)
-        .with_mana_cost(ManaCost::generic(2))
-        .from_oracle_text("You gain 2 life.");
+        .add_spell_to_library_top(P0, "Sacred Nectar", false)
+        .with_mana_cost(sacred_nectar_cost())
+        .from_oracle_text(SACRED_NECTAR);
     let sisko = scenario
         .add_creature_from_oracle(P0, "Captain Benjamin Sisko", 2, 2, SISKO)
         .id();
@@ -331,14 +350,14 @@ fn sisko_casts_only_spells_within_the_officer_count() {
         .expect("activate Sisko");
     let record = drive_casting_from_among(&mut runner);
     assert!(
-        record.offered.iter().any(|name| name == "Two Drop"),
+        record.offered.iter().any(|name| name == "Sacred Nectar"),
         "REACH: the mana value 2 spell is offered: {record:?}"
     );
     assert!(
-        !record.offered.iter().any(|name| name == "Three Drop"),
-        "the mana value 3 spell exceeds the Officer count: {record:?}"
+        !record.offered.iter().any(|name| name == "Angel's Mercy"),
+        "the mana value 4 spell exceeds the Officer count: {record:?}"
     );
-    assert_eq!(runner.life(P0), life + 2);
+    assert_eq!(runner.life(P0), life + 4, "Sacred Nectar resolved");
 }
 
 /// The names each free-cast window offered, in order.
@@ -348,10 +367,10 @@ struct FromAmong {
 }
 
 /// Resolve Sisko's ability: at each free-cast window record every offered
-/// card, cast "Two Drop" once if offered, and otherwise stop casting.
+/// card, cast Sacred Nectar once if offered, and otherwise stop casting.
 fn drive_casting_from_among(runner: &mut GameRunner) -> FromAmong {
     let mut record = FromAmong::default();
-    let mut cast_two_drop = false;
+    let mut cast_nectar = false;
     for _ in 0..64 {
         match runner.state().waiting_for.clone() {
             WaitingFor::CastOffer {
@@ -363,16 +382,16 @@ fn drive_casting_from_among(runner: &mut GameRunner) -> FromAmong {
                     .map(|id| runner.state().objects[id].name.clone())
                     .collect();
                 record.offered.extend(names.iter().cloned());
-                let selection = (!cast_two_drop)
+                let selection = (!cast_nectar)
                     .then(|| {
                         candidates
                             .iter()
                             .zip(&names)
-                            .find(|(_, name)| *name == "Two Drop")
+                            .find(|(_, name)| *name == "Sacred Nectar")
                             .map(|(id, _)| *id)
                     })
                     .flatten();
-                cast_two_drop |= selection.is_some();
+                cast_nectar |= selection.is_some();
                 runner
                     .act(GameAction::FreeCastWindowChoice { selection })
                     .expect("answer the free-cast window");
@@ -425,5 +444,5 @@ fn caretaker_triggers_at_an_opponents_end_step() {
         },
     );
     assert_eq!(record.optional_actors, vec![P0]);
-    assert_eq!(runner.life(P0), life + 3, "the free cast resolved");
+    assert_eq!(runner.life(P0), life + 4, "the free cast resolved");
 }
