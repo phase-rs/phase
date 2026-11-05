@@ -17,6 +17,9 @@
 //!   Library of Leng: "You have no maximum hand size. / If an effect causes you
 //!     to discard a card, discard it, but you may put it on top of your library
 //!     instead of into your graveyard."
+//!   Telepathy: "Your opponents play with their hands revealed."
+//!   Macabre Waltz: "Return up to two target creature cards from your graveyard
+//!     to your hand, then discard a card."
 //!   Violent Eruption: "Violent Eruption deals 4 damage divided as you choose
 //!     among any number of targets. / Madness {1}{R}{R} (If you discard this
 //!     card, discard it into exile. When you do, cast it for its madness cost or
@@ -31,11 +34,13 @@ use engine::database::card_db::CardDatabase;
 use engine::game::engine::apply;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::actions::{DebugAction, GameAction};
-use engine::types::events::GameEvent;
+use engine::types::ability::EffectKind;
+use engine::types::actions::{DebugAction, GameAction, ReplacementAutoChoice};
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{ActionResult, CastOfferKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::log::LogSegment;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -373,6 +378,12 @@ fn r7_parked_choice_refuses_second_debug_discard() {
         .expect("choosing the graveyard option succeeds");
     assert_eq!(zone_of(&runner, first), Zone::Graveyard);
     assert_eq!(discarded_events(&result.events), vec![(P0, first)]);
+    // CR 400.2: the graveyard is a public destination, so the log names the card.
+    assert_eq!(
+        named_discard_lines(&[&result], first),
+        1,
+        "a declined (graveyard) discard is named in the log"
+    );
     assert_eq!(
         runner
             .state()
@@ -598,11 +609,133 @@ fn r11_parked_discard_description_does_not_name_the_hand_card() {
     assert_no_card_identity(&runner, &[&parked]);
 }
 
-/// R12 (CR 400.2): after the Leng answer puts the card on the library
-/// unrevealed, the `DebugActionUsed` events and their public log entries still
-/// do not name it. The whole-stream check of R11 is not asserted after the
-/// library answer because the Leng replacement currently routes the card
-/// through the graveyard before the library (pre-existing; reported separately).
+/// Number of public log lines, across `results`, that match `pick`.
+fn count_log_lines(results: &[&ActionResult], pick: impl Fn(&[LogSegment]) -> bool) -> usize {
+    results
+        .iter()
+        .flat_map(|result| result.log_entries.iter())
+        .filter(|entry| pick(entry.segments.as_slice()))
+        .count()
+}
+
+/// CR 701.9c: lines that say P0 discarded a card without naming it.
+fn concealed_discard_lines(results: &[&ActionResult]) -> usize {
+    count_log_lines(results, |segments| {
+        matches!(
+            segments,
+            [LogSegment::PlayerName { player_id, .. }, LogSegment::Text(text)]
+                if *player_id == P0 && text == " discards a card"
+        )
+    })
+}
+
+/// Lines that say a player discarded `card`, naming it.
+fn named_discard_lines(results: &[&ActionResult], card: ObjectId) -> usize {
+    count_log_lines(results, |segments| {
+        segments
+            .iter()
+            .any(|s| matches!(s, LogSegment::Text(text) if text == " discards "))
+            && segments
+                .iter()
+                .any(|s| matches!(s, LogSegment::CardName { object_id, .. } if *object_id == card))
+    })
+}
+
+fn all_events<'a>(results: &[&'a ActionResult]) -> Vec<&'a GameEvent> {
+    results
+        .iter()
+        .flat_map(|result| result.events.iter())
+        .collect()
+}
+
+/// CR 614.6 + CR 701.9c: Library of Leng's accepted branch is one direct
+/// hand -> library move. The graveyard move never happens and no follow-up
+/// `PutAtLibraryPosition` effect resolves.
+fn assert_direct_library_move(results: &[&ActionResult], card: ObjectId) {
+    let events = all_events(results);
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, to: Zone::Graveyard, .. } if *object_id == card
+        )),
+        "the card must never pass through the graveyard"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::PutAtLibraryPosition,
+                ..
+            }
+        )),
+        "no follow-up library placement effect resolves"
+    );
+    let direct = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Hand),
+                    to: Zone::Library,
+                    ..
+                } if *object_id == card
+            )
+        })
+        .count();
+    assert_eq!(direct, 1, "exactly one hand -> library move for the card");
+}
+
+/// The owner keeps the identity: the filtered stream P0 receives carries the
+/// hand -> library `ZoneChanged` record naming the card.
+fn assert_owner_sees_the_card(runner: &GameRunner, results: &[&ActionResult], card: ObjectId) {
+    let events: Vec<GameEvent> = all_events(results).into_iter().cloned().collect();
+    let owner = engine::game::visibility::filter_events_for_viewer(&events, runner.state(), P0);
+    assert!(
+        owner.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Hand),
+                to: Zone::Library,
+                record,
+            } if *object_id == card && record.name == SECRET_NAME
+        )),
+        "the owner's filtered stream must keep the named hand -> library record"
+    );
+}
+
+fn library_top(runner: &GameRunner, count: usize) -> Vec<ObjectId> {
+    runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .expect("P0 exists")
+        .library
+        .iter()
+        .take(count)
+        .copied()
+        .collect()
+}
+
+fn leng_prompt_remembers(runner: &GameRunner) -> bool {
+    matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice {
+            player: P0,
+            remember_identity: Some(_),
+            ..
+        }
+    )
+}
+
+/// R12 (CR 614.6 + CR 701.9c + CR 400.2): Library of Leng's library answer
+/// moves the card hand -> library directly, so the whole filtered stream of
+/// the discard (events and public log) never identifies it, and the log reads
+/// "discards a card". The prompt is also rememberable (D6), because the
+/// accepted branch is a pure redirect with no prompting continuation.
 #[test]
 fn r12_library_answer_discard_description_does_not_name_the_hand_card() {
     let Some(db) = load_db() else { return };
@@ -614,50 +747,237 @@ fn r12_library_answer_discard_description_does_not_name_the_hand_card() {
     let card = card.unwrap();
 
     let parked = runner.act(discard(card)).expect("discard parks a choice");
+    assert!(
+        leng_prompt_remembers(&runner),
+        "Leng's accept is a pure redirect, so the prompt offers `remember`: {:?}",
+        runner.state().waiting_for
+    );
+    let p1_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P1);
+    assert!(
+        matches!(
+            p1_view.waiting_for,
+            WaitingFor::ReplacementChoice {
+                remember_identity: None,
+                ..
+            }
+        ),
+        "an unauthorized viewer never gets the remember key"
+    );
+
     let accept = choice_index(&runner, P0, "Library of Leng prompt", |d| d != "Decline");
     let answered = runner
         .act(GameAction::ChooseReplacement { index: accept })
         .expect("choosing the library option succeeds");
     assert_eq!(zone_of(&runner, card), Zone::Library);
 
-    let events: Vec<GameEvent> = [&parked, &answered]
+    assert_direct_library_move(&[&parked, &answered], card);
+    assert_eq!(discarded_events(&answered.events), vec![(P0, card)]);
+    assert_eq!(
+        runner
+            .state()
+            .cards_discarded_this_turn_by_player
+            .get(&P0)
+            .copied()
+            .unwrap_or(0),
+        1
+    );
+    assert_eq!(library_top(&runner, 1), vec![card]);
+    assert_owner_sees_the_card(&runner, &[&parked, &answered], card);
+    assert_no_card_identity(&runner, &[&parked, &answered]);
+    assert_eq!(
+        concealed_discard_lines(&[&parked, &answered]),
+        1,
+        "the discard reads `discards a card`"
+    );
+}
+
+/// R13 (CR 701.9c + CR 400.2): the card was revealed to P1 by Telepathy when
+/// it was discarded into the library. The discard still identifies nothing:
+/// the global log carries no per-viewer knowledge.
+#[test]
+fn r13_currently_revealed_card_discarded_into_the_library_is_not_named() {
+    let Some(db) = load_db() else { return };
+    let mut card = None;
+    let mut runner = table(db, |s, db| {
+        s.add_real_card(P0, "Library of Leng", Zone::Battlefield, db);
+        s.add_real_card(P1, "Telepathy", Zone::Battlefield, db);
+        card = Some(s.add_real_card(P0, SECRET_NAME, Zone::Hand, db));
+    });
+    let card = card.unwrap();
+
+    // Reach guard: Telepathy's reveal is live, so P1 really sees the card.
+    engine::game::derived::sync_continuous_reveals(runner.state_mut());
+    let p1_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P1);
+    assert_eq!(
+        p1_view.objects[&card].name, SECRET_NAME,
+        "fixture: Telepathy reveals P0's hand to P1"
+    );
+
+    let parked = runner.act(discard(card)).expect("discard parks a choice");
+    let accept = choice_index(&runner, P0, "Library of Leng prompt", |d| d != "Decline");
+    let answered = runner
+        .act(GameAction::ChooseReplacement { index: accept })
+        .expect("choosing the library option succeeds");
+
+    assert_eq!(zone_of(&runner, card), Zone::Library);
+    assert_direct_library_move(&[&parked, &answered], card);
+    assert_eq!(discarded_events(&answered.events), vec![(P0, card)]);
+    assert_eq!(library_top(&runner, 1), vec![card]);
+    assert_owner_sees_the_card(&runner, &[&parked, &answered], card);
+    assert_no_card_identity(&runner, &[&parked, &answered]);
+    assert_eq!(concealed_discard_lines(&[&parked, &answered]), 1);
+}
+
+fn floating_mana(n: usize, ty: ManaType) -> Vec<ManaUnit> {
+    (0..n)
+        .map(|_| ManaUnit::new(ty, ObjectId(0), false, vec![]))
+        .collect()
+}
+
+/// R15 (CR 701.9c): the card was public (in the graveyard, then returned to
+/// hand by Macabre Waltz in an earlier action) and sits unrevealed in hand when
+/// it is discarded into the library. The discard step does not name it.
+///
+/// Residual, not covered (D5): P1 learned the card's ObjectId while it was
+/// public, so `Discarded { object_id }` reaching P1 is the model-wide stable-id
+/// property shared by every hand -> library move. The whole check here is
+/// name-based.
+#[test]
+fn r15_previously_public_card_discarded_into_the_library_is_not_named() {
+    let Some(db) = load_db() else { return };
+    let mut ids = None;
+    let mut runner = table(db, |s, db| {
+        s.add_real_card(P0, "Library of Leng", Zone::Battlefield, db);
+        let waltz = s.add_real_card(P0, "Macabre Waltz", Zone::Hand, db);
+        let swamp = s.add_real_card(P0, "Swamp", Zone::Hand, db);
+        let bears = s.add_real_card(P0, SECRET_NAME, Zone::Graveyard, db);
+        s.with_mana_pool(
+            P0,
+            floating_mana(1, ManaType::Colorless)
+                .into_iter()
+                .chain(floating_mana(1, ManaType::Black))
+                .collect(),
+        );
+        ids = Some((waltz, swamp, bears));
+    });
+    let (waltz, swamp, bears) = ids.unwrap();
+
+    // Step 1: Macabre Waltz returns Bears (public move), then P0 discards the
+    // Swamp and declines Leng.
+    runner.cast(waltz).target_object(bears).commit();
+    let mut step_one: Vec<ActionResult> = Vec::new();
+    for _ in 0..4 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        step_one.push(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority resolves Macabre Waltz"),
+        );
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::DiscardChoice { .. }),
+        "Waltz's discard has two cards to choose from: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone_of(&runner, bears), Zone::Hand);
+    step_one.push(
+        runner
+            .act(GameAction::SelectCards { cards: vec![swamp] })
+            .expect("discard choice"),
+    );
+    let decline = choice_index(&runner, P0, "Library of Leng prompt", |d| d == "Decline");
+    step_one.push(
+        runner
+            .act(GameAction::ChooseReplacement { index: decline })
+            .expect("declining Leng sends the Swamp to the graveyard"),
+    );
+    assert_eq!(zone_of(&runner, swamp), Zone::Graveyard);
+    assert!(is_priority(&runner) && runner.state().stack.is_empty());
+
+    // Guard: Bears was public to P1 when it came back to hand.
+    let step_one_events: Vec<GameEvent> = step_one
         .iter()
         .flat_map(|result| result.events.iter().cloned())
         .collect();
-    for viewer in [P1, SPECTATOR] {
-        let debug_events: Vec<GameEvent> =
-            engine::game::visibility::filter_events_for_viewer(&events, runner.state(), viewer)
-                .into_iter()
-                .filter(|event| matches!(event, GameEvent::DebugActionUsed { .. }))
-                .collect();
-        assert!(
-            !debug_events.is_empty(),
-            "viewer {viewer:?} must receive the DebugActionUsed event"
-        );
-        let wire = serde_json::to_string(&debug_events).expect("serialize debug events");
-        assert!(
-            !wire.contains(SECRET_NAME),
-            "viewer {viewer:?}: DebugActionUsed names the hand card: {wire}"
-        );
-    }
+    let p1_events =
+        engine::game::visibility::filter_events_for_viewer(&step_one_events, runner.state(), P1);
+    assert!(
+        p1_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Graveyard),
+                to: Zone::Hand,
+                record,
+            } if *object_id == bears && record.name == SECRET_NAME
+        )),
+        "fixture: P1 saw Bears return from the graveyard"
+    );
 
-    let debug_entries: Vec<_> = [&parked, &answered]
-        .iter()
-        .flat_map(|result| result.log_entries.iter())
-        .filter(|entry| {
-            entry
-                .segments
-                .iter()
-                .any(|segment| matches!(segment, LogSegment::Text(t) if t.contains("used debug")))
+    // Step 2: discard it into the library.
+    let parked = runner.act(discard(bears)).expect("discard parks a choice");
+    let accept = choice_index(&runner, P0, "Library of Leng prompt", |d| d != "Decline");
+    let answered = runner
+        .act(GameAction::ChooseReplacement { index: accept })
+        .expect("choosing the library option succeeds");
+
+    assert_eq!(zone_of(&runner, bears), Zone::Library);
+    assert_direct_library_move(&[&parked, &answered], bears);
+    assert_eq!(discarded_events(&answered.events), vec![(P0, bears)]);
+    assert_eq!(library_top(&runner, 1), vec![bears]);
+    assert_owner_sees_the_card(&runner, &[&parked, &answered], bears);
+    assert_no_card_identity(&runner, &[&parked, &answered]);
+    assert_eq!(concealed_discard_lines(&[&parked, &answered]), 1);
+}
+
+/// R16 (CR 616.1f + CR 614.6 + CR 701.9c + CR 723.5b): a remembered Library of
+/// Leng accept never parks. The replayed redirect carries its library-top
+/// placement on the event, so the card goes hand -> library once, in order,
+/// with no graveyard stop and no shuffle, and the log line stays concealed.
+#[test]
+fn r16_remembered_leng_accept_discards_directly_to_the_library_top() {
+    let Some(db) = load_db() else { return };
+    let mut ids = None;
+    let mut runner = table(db, |s, db| {
+        s.add_real_card(P0, "Library of Leng", Zone::Battlefield, db);
+        let shock = s.add_real_card(P0, "Shock", Zone::Hand, db);
+        let bears = s.add_real_card(P0, SECRET_NAME, Zone::Hand, db);
+        ids = Some((shock, bears));
+    });
+    let (shock, bears) = ids.unwrap();
+
+    // Step 1: discard Shock and remember the accept.
+    runner.act(discard(shock)).expect("discard parks a choice");
+    let accept = choice_index(&runner, P0, "Library of Leng prompt", |d| d != "Decline");
+    runner
+        .act(GameAction::ChooseReplacementAndRemember {
+            choice: ReplacementAutoChoice::Optional { index: accept },
         })
-        .collect();
+        .expect("Leng's accept is rememberable");
+    assert_eq!(library_top(&runner, 1), vec![shock]);
+
+    // Step 2: the remembered decision applies without a prompt.
+    let second = runner.act(discard(bears)).expect("discard succeeds");
     assert!(
-        !debug_entries.is_empty(),
-        "the debug action must be logged publicly"
+        is_priority(&runner),
+        "a remembered accept never parks: {:?}",
+        runner.state().waiting_for
     );
-    let rendered = serde_json::to_string(&debug_entries).expect("serialize log entries");
+    assert_eq!(discarded_events(&second.events), vec![(P0, bears)]);
+    assert_direct_library_move(&[&second], bears);
     assert!(
-        !rendered.contains(SECRET_NAME),
-        "public debug log entry names the hand card: {rendered}"
+        !all_events(&[&second]).iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            }
+        )),
+        "the placement is not a shuffle"
     );
+    assert_eq!(library_top(&runner, 2), vec![bears, shock]);
+    assert_no_card_identity(&runner, &[&second]);
+    assert_eq!(concealed_discard_lines(&[&second]), 1);
 }

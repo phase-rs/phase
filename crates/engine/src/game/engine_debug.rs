@@ -1212,6 +1212,7 @@ fn enter_battlefield_with_etb(
         enter_as_copy: None,
         enter_with_choices: None,
         discard_frame: None,
+        library_placement: None,
         performed_by: None,
         applied: HashSet::new(),
     };

@@ -404,8 +404,8 @@ fn forced_discard_under_rest_in_peace_fires_the_reflexive() {
 }
 
 /// The replacement-paused path: Library of Leng asks whether the chosen discard
-/// goes on top of the library instead (modelled as hand → graveyard →
-/// library). Applied or declined, the card is discarded and the reflexive
+/// goes on top of the library instead (a direct hand → library move: CR 614.6,
+/// the graveyard move never happens). Applied or declined, the card is discarded and the reflexive
 /// triggers. No instruction precedes the discard, so only this discard can
 /// satisfy the gate.
 fn library_of_leng_discard(apply: bool) {
