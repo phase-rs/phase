@@ -7795,8 +7795,14 @@ pub(crate) fn other_hand_play_permission_source(
         .map(|tce| tce.source_id)
 }
 
-/// CR 601.2a + CR 611.2c: spells `player` may cast from other players' hands
-/// under a `HandPlayPermission` (see [`other_hand_play_permission_source`]).
+/// CR 601.2a + CR 611.2c: cards `player` may try to cast from other players'
+/// hands under a `HandPlayPermission` (see [`other_hand_play_permission_source`]).
+///
+/// CR 305.9 + CR 702.37a/c: like the caster's own hand, printed lands are NOT
+/// dropped here. A land with morph, megamorph or disguise (Zoetic Cavern) can be
+/// cast face down from any zone it could be played from, and the face-down cast
+/// is judged on the 2/2 characteristics; the castability verdict owns that
+/// projection, so the plain land falls out there instead.
 fn other_hand_spell_objects_castable_by_permission(
     state: &GameState,
     player: PlayerId,
@@ -7808,9 +7814,7 @@ fn other_hand_spell_objects_castable_by_permission(
         .flat_map(|other| other.hand.iter().copied())
         .filter(|obj_id| {
             state.objects.get(obj_id).is_some_and(|obj| {
-                object_may_enter_cast_path(obj)
-                    && other_hand_play_permission_source(state, player, obj, CardPlayMode::Cast)
-                        .is_some()
+                other_hand_play_permission_source(state, player, obj, CardPlayMode::Cast).is_some()
             })
         })
         .collect()

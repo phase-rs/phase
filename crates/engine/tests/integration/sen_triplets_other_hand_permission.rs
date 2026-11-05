@@ -19,10 +19,11 @@
 use engine::ai_support::legal_actions;
 use engine::game::casting::spell_objects_available_to_cast;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, CastingVariant, CastingVariantFace, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
@@ -282,5 +283,111 @@ fn sen_triplets_locks_reveals_and_lends_the_opponents_hand_this_turn() {
     assert!(
         !spell_objects_available_to_cast(runner.state(), P0).contains(&shock),
         "P0 can no longer cast from P1's hand"
+    );
+}
+
+/// Real printed cards for the borrowed-hand casting-method boundaries, reparsed
+/// from a small MTGJSON fixture:
+///   - Zoetic Cavern — "{T}: Add {C}. Morph {2}" (a Land with morph).
+fn borrowed_hand_db() -> &'static engine::database::card_db::CardDatabase {
+    static DB: std::sync::OnceLock<engine::database::card_db::CardDatabase> =
+        std::sync::OnceLock::new();
+    DB.get_or_init(|| {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sen_triplets_borrowed_hand_atomic.json");
+        engine::database::card_db::CardDatabase::from_mtgjson(&path)
+            .expect("parse the borrowed-hand fixture cards")
+    })
+}
+
+/// Sen Triplets on P0's battlefield at the start of P0's turn, with `setup`
+/// adding the rest of the board; the card database is installed on the state.
+fn borrowed_hand_board<T>(setup: impl FnOnce(&mut GameScenario) -> T) -> (GameRunner, T) {
+    let mut scenario = GameScenario::new();
+    scenario.add_creature_from_oracle(P0, "Sen Triplets", 3, 3, SEN_TRIPLETS);
+    for _ in 0..3 {
+        scenario.add_card_to_library_top(P0, "Library Card");
+        scenario.add_card_to_library_top(P1, "Library Card");
+    }
+    let ids = setup(&mut scenario);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), borrowed_hand_db());
+    let state = runner.state_mut();
+    state.turn_number = 2;
+    state.phase = Phase::Untap;
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    (runner, ids)
+}
+
+fn cast_spell(runner: &mut GameRunner, object_id: ObjectId) -> Result<(), String> {
+    let card_id = runner.state().objects[&object_id].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .map(|_| ())
+        .map_err(|error| format!("{error:?}"))
+}
+
+/// CR 702.37a + CR 702.37c + CR 305.9: a land with morph in the borrowed hand is
+/// offered both as P0's land play and as a {3} face-down creature spell, and the
+/// face-down cast resolves into a 2/2 under P0's control.
+#[test]
+fn sen_triplets_offers_and_casts_a_borrowed_morph_land_face_down() {
+    let (mut runner, cavern) = borrowed_hand_board(|scenario| {
+        for _ in 0..3 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        scenario.add_real_card(P1, "Zoetic Cavern", Zone::Hand, borrowed_hand_db())
+    });
+    assert!(runner.state().objects[&cavern]
+        .card_types
+        .core_types
+        .contains(&engine::types::card_type::CoreType::Land));
+    resolve_upkeep_trigger(&mut runner);
+
+    let offered = legal_actions(runner.state());
+    assert!(
+        offered.iter().any(|action| matches!(
+            action,
+            GameAction::CastSpell { object_id, .. } if *object_id == cavern
+        )),
+        "P0 must be offered the face-down cast of P1's Zoetic Cavern: {offered:?}"
+    );
+    assert!(
+        offered.iter().any(|action| matches!(
+            action,
+            GameAction::PlayLand { object_id, .. } if *object_id == cavern
+        )),
+        "P0 must still be offered P1's Zoetic Cavern as a land play: {offered:?}"
+    );
+
+    cast_spell(&mut runner, cavern).expect("P0 casts P1's Zoetic Cavern face down");
+    if let WaitingFor::AlternativeCastChoice { .. } = runner.state().waiting_for {
+        runner
+            .act(GameAction::ChooseAlternativeCast {
+                choice: engine::types::actions::AlternativeCastDecision::Alternative,
+            })
+            .expect("choose the face-down cast");
+    }
+    assert_eq!(runner.state().objects[&cavern].zone, Zone::Stack);
+    assert_eq!(runner.state().objects[&cavern].controller, P0);
+    runner.advance_until_stack_empty();
+
+    let cast = &runner.state().objects[&cavern];
+    assert_eq!(cast.zone, Zone::Battlefield);
+    assert!(cast.face_down, "Zoetic Cavern enters face down");
+    assert_eq!((cast.power, cast.toughness), (Some(2), Some(2)));
+    assert_eq!(cast.controller, P0, "the face-down creature is P0's");
+    assert_eq!(cast.owner, P1);
+    assert_eq!(
+        runner.state().lands_played_this_turn,
+        0,
+        "casting the morph face down is not a land play"
     );
 }
