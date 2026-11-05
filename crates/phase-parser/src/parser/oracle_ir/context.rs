@@ -694,12 +694,15 @@ pub struct ParseContext {
     /// outranks the scan. `None` (the default) leaves the ladder in charge, so
     /// every incumbent clause is unaffected.
     ///
-    /// The legacy bare-choose producer declares `Resolution` only at a chain
-    /// head for a singular "a/an <object> you control" phrase fully consumed by
+    /// The legacy bare-choose producer declares `Resolution` at a chain head
+    /// for a singular "a/an <object> you control" phrase fully consumed by
     /// the target parser, with chosen selection and no peeled actor scope,
     /// printed target, context reference, or player target. The chunk loop strips
     /// optional quantifiers; those chunks and exact counts fail the a/an gate.
-    /// Later chain chunks keep `Stack`. A compound continuation's or a modal mode's
+    /// The head restriction is a deliberate scope limit, not a rules contract:
+    /// the choice is not a target at any chain position. Later chain chunks
+    /// keep `Stack` as before this producer existed, a known gap that is not
+    /// certified as correct behavior. A compound continuation's or a modal mode's
     /// bare choice may still be `Resolution` mid-chain; the engine's `TargetOnly`
     /// exemption keeps later announced targets.
     /// Partial and quantified choices leave this unset.

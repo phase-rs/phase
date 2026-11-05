@@ -5158,12 +5158,15 @@ pub(super) fn parse_choose_ast(
             let (target, remainder) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
             // CR 115.10a + CR 608.2d: a fully parsed, untargeted singular
-            // "a/an <object> you control" may declare Resolution only at a chain head.
+            // "a/an <object> you control" declares Resolution here, at a chain head.
             // Stripped optional quantifiers and exact counts fail the a/an gate.
             // Peeled actor scopes and random selections are not controller choices.
-            // Later chain chunks keep Stack. A compound continuation's or a modal mode's
-            // bare choice may still be Resolution mid-chain; the engine's TargetOnly
-            // exemption keeps later announced targets.
+            // The head restriction is a deliberate scope limit, not a rules
+            // contract: the choice is not a target at any chain position. Later
+            // chain chunks keep Stack as before this producer existed, a known gap
+            // that is not certified as correct behavior. A compound continuation's
+            // or a modal mode's bare choice may still be Resolution mid-chain; the
+            // engine's TargetOnly exemption keeps later announced targets.
             if ctx.clause_opponent_may_scope.is_some() {
                 // The accepting-player timing fallback also retimes described
                 // objects. TargetOnly cannot prompt that chooser, so override

@@ -30432,10 +30432,10 @@ fn lower_subject_predicate_ast_body(
             // CR 608.2d + CR 115.10a: this untargeted choice belongs to the
             // printed subject, but TargetOnly's resolution chooser only prompts
             // the controller. Keep stack timing until it can represent that chooser.
+            // `SelfRef` is exempt because a source object is never a player chooser.
             if matches!(clause.effect, Effect::TargetOnly { .. })
                 && !matches!(affected, TargetFilter::Controller | TargetFilter::SelfRef)
-                && ctx.declared_target_choice_timing
-                    == Some(crate::types::ability::TargetChoiceTiming::Resolution)
+                && ctx.declared_target_choice_timing == Some(TargetChoiceTiming::Resolution)
             {
                 ctx.declared_target_choice_timing = None;
             }

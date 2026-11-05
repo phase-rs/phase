@@ -78859,15 +78859,22 @@ fn bare_choose_printed_cards_use_resolution_timing() {
     assert_eq!(copy.target_choice_timing, TargetChoiceTiming::Stack);
 }
 
-/// SHAPE: only a chain-head bare choice may defer its object selection.
+/// SHAPE: the bare-choice producer's chain-head restriction is a deliberate scope
+/// limit, not a rules contract (CR 115.10a + CR 608.2d: the choice is not a target
+/// at any chain position). A later bare choose keeps `Stack` exactly as before
+/// this producer existed; that is a known gap and is not certified as correct
+/// behavior. The head row proves the printed target on a later clause stays
+/// stack-time either way.
 #[test]
-fn bare_choose_mid_chain_keeps_stack_timing_and_later_printed_target() {
+fn bare_choose_chain_head_scope_limit_keeps_later_choice_and_printed_target_at_stack() {
     for (text, choice_index, timing) in [
         (
             "Choose a creature you control. It deals damage equal to its power to target creature you don't control.",
             0,
             TargetChoiceTiming::Resolution,
         ),
+        // Known gap: a later bare choose keeps `Stack` as on main; this pins the
+        // current scope limit, not a rules-correct timing.
         (
             "Draw a card. Choose a creature you control. It deals damage equal to its power to target creature you don't control.",
             1,
@@ -79024,6 +79031,24 @@ fn bare_choose_non_controller_subject_keeps_stack_timing() {
         "the controller-choice control must use resolution timing"
     );
 
+    // Subject-path control: the controller as the printed subject takes the same
+    // seam as the third-party rows below, so only a non-controller subject may
+    // withdraw the Resolution declaration. Synthetic: no printed card words this.
+    let text = "You choose a permanent you control other than this creature.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        matches!(def.effect.as_ref(), Effect::TargetOnly { .. }),
+        "the controller-subject control must reach TargetOnly: {def:#?}"
+    );
+    assert_eq!(
+        def.target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "a controller subject must keep resolution timing"
+    );
+
+    // Synthetic discriminators: no printed card has these third-party subject-led
+    // bare-choice shapes. The nearest printed cards are Wormfang Crab (extra tail,
+    // below) and Divine Reckoning (distributive "they control", below).
     for text in [
         "An opponent chooses a permanent you control other than this creature.",
         "Target opponent chooses a permanent you control other than this creature.",
@@ -79058,10 +79083,13 @@ fn bare_choose_non_controller_subject_keeps_stack_timing() {
         .filter_map(|trigger| trigger.execute.as_deref())
         .find(|head| matches!(head.effect.as_ref(), Effect::TargetOnly { .. }))
         .expect("Wormfang Crab must retain its subject-led TargetOnly trigger head");
+    // Regression pin on the printed card's timing only: the trailing "and exiles
+    // it" already fails the producer's whole-remainder gate, so this passes
+    // without the subject-layer withdrawal; the synthetic rows above guard that.
     assert_eq!(
         head.target_choice_timing,
         TargetChoiceTiming::Stack,
-        "Wormfang Crab's controller must not choose for the opponent: {head:#?}"
+        "Wormfang Crab's trigger head must keep stack timing: {head:#?}"
     );
 
     // "They control" is not a controller-You filter, so the producer never
