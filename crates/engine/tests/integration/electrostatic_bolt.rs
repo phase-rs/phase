@@ -8,11 +8,16 @@
 //! wrapping `TargetMatchesFilter`. At runtime, `apply_instead_swap` checks the
 //! target's characteristics: artifact creatures take 4 damage, non-artifact creatures take 2.
 
-use engine::game::scenario::GameScenario;
+use engine::game::scenario::{GameRunner, GameScenario};
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{AbilityCondition, Effect, EffectKind, TargetFilter, TypeFilter};
+use engine::types::ability::{
+    AbilityCondition, Effect, EffectKind, MassLibraryShuffleMode, PlayerFilter, PlayerRelation,
+    PossessionAxis, TargetFilter, ThisWayCause, TypeFilter,
+};
+use engine::types::actions::GameAction;
 use engine::types::events::PlayerActionKind;
 use engine::types::game_state::WaitingFor;
+use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -246,17 +251,18 @@ fn target_plus_revealed_preserves_revealed_card_type() {
         &[],
     );
     assert_eq!(swap_parsed.abilities.len(), 1);
-    let shuffle_into_lib = &swap_parsed.abilities[0];
-    let Effect::ChangeZone {
-        destination: Zone::Library,
-        owner_library: true,
+    // CR 108.3 + CR 400.3 + CR 608.2c: the declared target is announced by the
+    // root, the selected object moves into its owner's library, and the owner
+    // population that move publishes (one member) shuffles and then exiles the
+    // top card of ITS library, inside that owner's iteration.
+    let target_only = &swap_parsed.abilities[0];
+    let Effect::TargetOnly {
         target: ref target_filter,
-        ..
-    } = *shuffle_into_lib.effect
+    } = *target_only.effect
     else {
         panic!(
-            "expected ChangeZone to owner library, got {:?}",
-            shuffle_into_lib.effect
+            "expected the declared-target root, got {:?}",
+            target_only.effect
         );
     };
     assert!(
@@ -264,15 +270,38 @@ fn target_plus_revealed_preserves_revealed_card_type() {
             && tf.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Enchantment))))
     );
 
-    let shuffle = shuffle_into_lib
+    let move_all = target_only
         .sub_ability
         .as_deref()
-        .expect("change zone chains to shuffle");
+        .expect("target root chains to the owner-library move");
+    assert!(matches!(
+        *move_all.effect,
+        Effect::ChangeZoneAll {
+            destination: Zone::Library,
+            target: TargetFilter::ParentTarget,
+            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            ..
+        }
+    ));
+
+    let shuffle = move_all
+        .sub_ability
+        .as_deref()
+        .expect("move chains to the terminal shuffle");
     assert!(matches!(
         *shuffle.effect,
         Effect::Shuffle {
-            target: TargetFilter::ParentTargetOwner
+            target: TargetFilter::ScopedPlayer
         }
+    ));
+    assert!(matches!(
+        shuffle.player_scope,
+        Some(PlayerFilter::TrackedSetPossessor {
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+        })
     ));
 
     let exile_top = shuffle
@@ -282,7 +311,7 @@ fn target_plus_revealed_preserves_revealed_card_type() {
     assert!(matches!(
         *exile_top.effect,
         Effect::ExileTop {
-            player: TargetFilter::ParentTargetOwner,
+            player: TargetFilter::ScopedPlayer,
             ..
         }
     ));
@@ -324,8 +353,48 @@ fn target_plus_revealed_preserves_revealed_card_type() {
     );
 }
 
+/// Finish a cast that stopped at its optional prompt: answer it, then pass
+/// priority until the stack empties, returning every event the answers emitted.
+fn answer_optional_and_settle(runner: &mut GameRunner, accept: bool) -> Vec<GameEvent> {
+    let mut events = runner
+        .act(GameAction::DecideOptionalEffect { accept })
+        .expect("the optional decision is accepted")
+        .events;
+    for _ in 0..6 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("priority passes while the cast spell resolves")
+                .events,
+        );
+    }
+    events
+}
+
+/// The `object_id` of every spell cast in `events`.
+fn cast_spells(events: &[GameEvent]) -> Vec<(ObjectId, PlayerId)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::SpellCast {
+                object_id,
+                controller,
+                ..
+            } => Some((*object_id, *controller)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// End-to-end runtime test for Audacious Swap using verified Oracle text:
-/// "Casualty 2
+/// "Casualty 2 (As you cast this spell, you may sacrifice a creature with power
+/// 2 or greater. When you do, copy this spell and you may choose a new target
+/// for the copy.)
 /// The owner of target nonenchantment permanent shuffles it into their library, \
 /// then exiles the top card of their library. If it's a land card, they put it \
 /// onto the battlefield. Otherwise, they may cast it without paying its mana cost."
@@ -337,9 +406,16 @@ fn target_plus_revealed_preserves_revealed_card_type() {
 /// 2. Land card (Dryad Arbor): Target nonenchantment permanent is shuffled into
 ///    owner's library; top card is exiled; land satisfies the land gate and is put onto
 ///    the battlefield directly without offering a cast.
+/// 3. Staged library (P1's library holds lands besides the shuffled target): the
+///    exiled card is a land that is NOT the declared target, and the land branch
+///    puts THAT card onto the battlefield.
+///
+/// CR 108.3 + CR 608.2c + CR 601.2a + CR 110.2: the owner (P1), not the caster
+/// (P0), is the player who "may cast it", and the card enters under the owner's
+/// control.
 #[test]
 fn audacious_swap_runtime_distinguishes_nonland_from_land() {
-    const AUDACIOUS_SWAP: &str = "Casualty 2\n\
+    const AUDACIOUS_SWAP: &str = "Casualty 2 (As you cast this spell, you may sacrifice a creature with power 2 or greater. When you do, copy this spell and you may choose a new target for the copy.)\n\
         The owner of target nonenchantment permanent shuffles it into their library, \
         then exiles the top card of their library. If it's a land card, they put it \
         onto the battlefield. Otherwise, they may cast it without paying its mana cost.";
@@ -357,16 +433,34 @@ fn audacious_swap_runtime_distinguishes_nonland_from_land() {
             .with_mana_cost(ManaCost::generic(0))
             .id();
         let mut runner = scenario.build();
-        let outcome = runner
+        let stopped = runner
             .cast(swap)
             .target_object(target)
             .commit()
-            .accept_optional()
+            .stop_at_optional()
             .resolve();
+
+        // CR 608.2d + CR 108.3: the "they may cast it" decision belongs to the
+        // card's owner (P1), not to Audacious Swap's caster (P0).
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "the optional cast prompt is reached: {:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(
+            runner.state().waiting_for.acting_player(),
+            Some(P1),
+            "the owner (P1) decides whether to cast the exiled card"
+        );
+        let mut events = stopped.events().to_vec();
+        events.extend(answer_optional_and_settle(&mut runner, true));
 
         // 1. Target nonenchantment permanent shuffled into owner's library.
         assert!(
-            outcome.events().iter().any(|e| matches!(
+            events.iter().any(|e| matches!(
                 e,
                 GameEvent::PlayerPerformedAction {
                     player_id,
@@ -379,7 +473,7 @@ fn audacious_swap_runtime_distinguishes_nonland_from_land() {
 
         // 2. Nonland card (Target Bear) is exiled from library and cast via Otherwise branch.
         assert!(
-            outcome.events().iter().any(|e| matches!(
+            events.iter().any(|e| matches!(
                 e,
                 GameEvent::EffectResolved {
                     kind: EffectKind::ExileTop,
@@ -389,7 +483,7 @@ fn audacious_swap_runtime_distinguishes_nonland_from_land() {
             "ExileTop effect must resolve"
         );
         assert!(
-            outcome.events().iter().any(|e| matches!(
+            events.iter().any(|e| matches!(
                 e,
                 GameEvent::EffectResolved {
                     kind: EffectKind::CastFromZone,
@@ -399,18 +493,22 @@ fn audacious_swap_runtime_distinguishes_nonland_from_land() {
             "CastFromZone effect must resolve for nonland card"
         );
         assert!(
-            outcome.events().iter().any(
-                |e| matches!(e, GameEvent::SpellCast { object_id, .. } if *object_id == target)
-            ),
-            "Target Bear must be cast from exile"
+            cast_spells(&events).contains(&(target, P1)),
+            "Target Bear must be cast from exile, by its owner P1: {:?}",
+            cast_spells(&events)
         );
         assert_eq!(
-            outcome.zone_of(target),
+            runner.state().objects[&target].zone,
             Zone::Battlefield,
             "Target Bear resolves from the stack and enters the battlefield"
         );
         assert_eq!(
-            outcome.final_waiting_for(),
+            runner.state().objects[&target].controller,
+            P1,
+            "the spell the owner cast enters under the owner's control"
+        );
+        assert_eq!(
+            &runner.state().waiting_for,
             &WaitingFor::Priority { player: P0 },
             "priority returns to active player after resolution"
         );
@@ -460,6 +558,11 @@ fn audacious_swap_runtime_distinguishes_nonland_from_land() {
             Zone::Battlefield,
             "land card satisfies 'If it\\'s a land card' and enters the battlefield"
         );
+        assert_eq!(
+            outcome.state().objects[&land_target].controller,
+            P1,
+            "CR 108.3 + CR 110.2: the owner puts the land onto the battlefield under their control"
+        );
         assert!(
             !outcome.events().iter().any(|e| matches!(
                 e,
@@ -483,4 +586,89 @@ fn audacious_swap_runtime_distinguishes_nonland_from_land() {
             "resolution finishes and priority returns to active player"
         );
     }
+
+    // Case 3: staged library. P1's library holds lands besides the shuffled
+    // nonland target, so the exiled top card is a land that is not the
+    // declared target (CR 701.13a: "it" is the exiled card, CR 608.2c).
+    // - The land branch must put the EXILED land onto the battlefield under P1.
+    // - The declared target stays in P1's library.
+    // - Nothing is cast: the land satisfies "If it's a land card".
+    //
+    // Staged-land count: `STAGED_LANDS` (five). With four lands the
+    // deterministic seed-42 shuffle left the target on top and the reach guard
+    // `exiled != target` below failed; the count was raised one at a time and
+    // five is the first that holds. The guard is never weakened.
+    {
+        let mut scenario = GameScenario::new();
+        let target = scenario.add_creature(P1, "Target Bear", 2, 2).id();
+        for _ in 0..STAGED_LANDS {
+            scenario.add_land_to_library_top(P1, "Forest");
+        }
+        let swap = scenario
+            .add_spell_to_hand_from_oracle(P0, "Audacious Swap", true, AUDACIOUS_SWAP)
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        let mut runner = scenario.build();
+        let outcome = runner
+            .cast(swap)
+            .target_object(target)
+            .commit()
+            .accept_optional()
+            .resolve();
+
+        let exiled_from_library: Vec<ObjectId> = outcome
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Library),
+                    to: Zone::Exile,
+                    ..
+                } if outcome.state().objects[object_id].owner == P1 => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            exiled_from_library.len(),
+            1,
+            "exactly one card leaves P1's library for exile: {exiled_from_library:?}"
+        );
+        let exiled = exiled_from_library[0];
+
+        // Reach guard: the exiled card is a staged land, not the declared target.
+        assert_ne!(
+            exiled, target,
+            "the staged library leaves a land on top after the shuffle"
+        );
+        assert!(outcome.state().objects[&exiled]
+            .card_types
+            .core_types
+            .contains(&CoreType::Land));
+
+        // CR 701.13a + CR 608.2c + CR 110.2: the exiled land enters under its
+        // owner's control; the declared target is untouched in P1's library.
+        assert_eq!(outcome.zone_of(exiled), Zone::Battlefield);
+        assert_eq!(outcome.state().objects[&exiled].controller, P1);
+        assert_eq!(outcome.zone_of(target), Zone::Library);
+        assert!(outcome.state().players[1].library.contains(&target));
+
+        // Paired with the positive battlefield arrival above: neither the exiled
+        // land nor the target is cast (Audacious Swap's own cast is expected).
+        let cast = cast_spells(outcome.events());
+        assert!(
+            cast.iter()
+                .all(|(object_id, _)| *object_id != exiled && *object_id != target),
+            "neither the exiled land nor the declared target is cast: {cast:?}"
+        );
+        assert_eq!(
+            outcome.final_waiting_for(),
+            &WaitingFor::Priority { player: P0 }
+        );
+        assert!(outcome.state().stack.is_empty());
+    }
 }
+
+/// Staged lands in P1's library for Case 3 of the Audacious Swap runtime test
+/// (see the count record there).
+const STAGED_LANDS: usize = 5;

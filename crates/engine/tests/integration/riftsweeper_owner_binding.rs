@@ -6,10 +6,10 @@
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
-use engine::types::actions::GameAction;
+use engine::types::actions::{CastChoice, GameAction};
 use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastOfferKind, CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -25,6 +25,10 @@ const ALABASTER_DRAGON: &str =
 const MURDER: &str = "Destroy target creature.";
 const WATERY_GRASP: &str = "Enchant creature\nEnchanted creature doesn't untap during its controller's untap step.\nWaterbend {5}: Enchanted creature's owner shuffles it into their library. (While paying a waterbend cost, you can tap your artifacts and creatures to help. Each one pays for {1}.)";
 const FORGE_OF_HEROES: &str = "{T}: Add {C}.\n{T}: Choose target commander that entered this turn. Put a +1/+1 counter on it if it's a creature and a loyalty counter on it if it's a planeswalker.";
+const OBLATION: &str =
+    "The owner of target nonland permanent shuffles it into their library, then draws two cards.";
+const ZOYOWAS_JUSTICE: &str = "The owner of target artifact or creature with mana value 1 or greater shuffles it into their library. Then that player discovers X, where X is its mana value. (They exile cards from the top of their library until they exile a nonland card with that mana value or less. They cast it without paying its mana cost or put it into their hand. They put the rest on the bottom in a random order.)";
+const THIS_IS_HOW_IT_ENDS: &str = "Target creature's owner shuffles it into their library, then faces a villainous choice \u{2014} They lose 5 life, or they shuffle another creature they own into their library.";
 const TURN_THE_EARTH: &str = "Choose up to three target cards in graveyards. The owners of those cards shuffle them into their libraries. You gain 2 life.\nFlashback {1}{G} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
 
 fn finished(runner: &GameRunner) {
@@ -605,6 +609,232 @@ fn etrata_source_owner_shuffle_moves_etrata_to_its_owners_library() {
     // CR 701.24a: P2's library is shuffled; neither the controller's (P0) nor
     // the damaged player's (P1) is.
     assert_eq!(distinct_shuffles(&events), vec![P2]);
+    finished(&runner);
+}
+
+/// Pass priority until the stack is empty, returning every emitted event.
+fn pass_until_stack_empty(runner: &mut GameRunner) -> Vec<GameEvent> {
+    let mut events = vec![];
+    for _ in 0..6 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("priority passes while the spell resolves")
+                .events,
+        );
+    }
+    events
+}
+
+// CR 608.2c + CR 108.3: "The owner of target nonland permanent shuffles it into
+// their library, then draws two cards." The permanent is owned by P1 and
+// controlled by P0, so the OWNER (P1) shuffles and draws; the caster draws
+// nothing. P1's library holds enough cards that two draws never meet an empty
+// library (CR 121.4).
+#[test]
+fn oblation_owner_shuffles_then_draws_two_cards() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let target = scenario
+        .add_creature(P1, "Grizzly Bears", 2, 2)
+        .controlled_by(P0)
+        .id();
+    scenario.with_library_top(P0, &["P0 Card A", "P0 Card B", "P0 Card C"]);
+    scenario.with_library_top(P1, &["P1 Card A", "P1 Card B", "P1 Card C", "P1 Card D"]);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Oblation", true, OBLATION)
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{W}"))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().objects[&target].owner, P1);
+    assert_eq!(runner.state().objects[&target].controller, P0);
+
+    let outcome = runner.cast(spell).target_object(target).resolve();
+
+    // Reach guard: the target went into its owner's library (it may then be one
+    // of the two cards the owner draws) and that library was shuffled.
+    assert!(outcome.events().iter().any(|event| matches!(event,
+        GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Library, .. }
+        if *object_id == target)));
+    assert_eq!(distinct_shuffles(outcome.events()), vec![P1]);
+    // The OWNER draws two cards; the caster draws none.
+    assert_eq!(outcome.hand_drawn(P1), 2);
+    assert_eq!(outcome.hand_drawn(P0), 0);
+    finished(&runner);
+}
+
+// CR 608.2c + CR 108.3 + CR 701.57a + CR 601.2a: "The owner of target artifact or
+// creature with mana value 1 or greater shuffles it into their library. Then
+// that player discovers X, where X is its mana value." Grizzly Bears (mana value
+// 2) is owned by P1, so P1 discovers 2 from P1's library: the offer is addressed
+// to P1, the Bears (the only nonland card there) are cast by P1 and enter under
+// P1's control, and P0's library is untouched. P1's library is staged with typed
+// lands, so every card passed over on the way to the hit is a land.
+#[test]
+fn zoyowas_justice_owner_discovers_from_their_own_library() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let target = scenario
+        .add_creature(P1, "Grizzly Bears", 2, 2)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+        .id();
+    scenario.add_land_to_library_top(P1, "Forest");
+    scenario.add_land_to_library_top(P1, "Forest");
+    let p0_top = scenario
+        .add_spell_to_library_top(P0, "P0 Hit", false)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}"))
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Zoyowa's Justice", true, ZOYOWAS_JUSTICE)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{R}"))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().objects[&target].owner, P1);
+
+    let mut events = runner
+        .cast(spell)
+        .target_object(target)
+        .commit()
+        .events()
+        .to_vec();
+    for _ in 0..2 {
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+
+    // The cast-or-hand offer is the owner's, for the Bears discovered from P1's
+    // library (reach guard: the discover hit the target card).
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Discover { hit_card, discover_value: 2, .. },
+                ..
+            } if hit_card == target
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().waiting_for.acting_player(),
+        Some(P1),
+        "the discovering owner (P1) decides whether to cast the hit"
+    );
+    assert!(events.iter().any(|event| matches!(event,
+        GameEvent::ZoneChanged { object_id, from: Some(Zone::Library), to: Zone::Exile, .. }
+        if *object_id == target)));
+
+    events.extend(
+        runner
+            .act(GameAction::DiscoverChoice {
+                choice: CastChoice::Cast,
+            })
+            .expect("the owner casts the discovered card")
+            .events,
+    );
+    events.extend(pass_until_stack_empty(&mut runner));
+
+    assert!(
+        events.iter().any(|event| matches!(event,
+            GameEvent::SpellCast { object_id, controller: P1, .. } if *object_id == target)),
+        "the Bears are cast by their owner P1"
+    );
+    assert_eq!(runner.state().objects[&target].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&target].controller, P1);
+    // Reach guard + negative: P1's library was shuffled (twice at most, never
+    // P0's), and P0's library top was not exiled by P0's discover.
+    assert!(distinct_shuffles(&events).contains(&P1));
+    assert!(!distinct_shuffles(&events).contains(&P0));
+    assert_eq!(runner.state().objects[&p0_top].zone, Zone::Library);
+    assert!(runner.state().players[0].library.contains(&p0_top));
+    finished(&runner);
+}
+
+// CR 108.3 + CR 701.55a + CR 608.2c: "Target creature's owner shuffles it into
+// their library, then faces a villainous choice". The creature is owned by P1
+// and controlled by P0 (the caster), so the OWNER (P1) faces the choice and, on
+// the lose-5-life branch, is the player who loses the life.
+#[test]
+fn this_is_how_it_ends_owner_not_controller_faces_the_villainous_choice() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["P0 Card A", "P0 Card B", "P0 Card C"]);
+    scenario.with_library_top(P1, &["P1 Card A", "P1 Card B", "P1 Card C"]);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 20);
+    let target = scenario
+        .add_creature(P1, "Grizzly Bears", 2, 2)
+        .controlled_by(P0)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "This Is How It Ends", true, THIS_IS_HOW_IT_ENDS)
+        .with_mana_cost(parse_mtgjson_mana_cost("{3}{B}"))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().objects[&target].owner, P1);
+    assert_eq!(runner.state().objects[&target].controller, P0);
+
+    let mut events = runner
+        .cast(spell)
+        .target_object(target)
+        .commit()
+        .events()
+        .to_vec();
+    for _ in 0..2 {
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+
+    // Reach guard: the shuffle resolved before the choice was offered.
+    assert_eq!(distinct_shuffles(&events), vec![P1]);
+    assert_eq!(runner.state().objects[&target].zone, Zone::Library);
+    let WaitingFor::ChooseOneOfBranch {
+        player, branches, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected the villainous ChooseOneOfBranch: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P1, "the target's owner faces the choice");
+    assert_eq!(runner.state().waiting_for.acting_player(), Some(P1));
+    let lose_life = branches
+        .iter()
+        .position(|branch| {
+            matches!(
+                &*branch.effect,
+                engine::types::ability::Effect::LoseLife { .. }
+            )
+        })
+        .expect("a 'They lose 5 life' branch exists");
+
+    runner
+        .act(GameAction::ChooseBranch { index: lose_life })
+        .expect("the lose-life branch resolves");
+    assert_eq!(runner.life(P1), 15, "the owner loses 5 life");
+    assert_eq!(runner.life(P0), 20, "the caster loses no life");
     finished(&runner);
 }
 

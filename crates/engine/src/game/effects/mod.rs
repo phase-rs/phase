@@ -11462,25 +11462,6 @@ fn is_player_scope_local_continuation(
     child: &Effect,
     scope: &PlayerFilter,
 ) -> bool {
-    // CR 608.2c + CR 701.20a: an owner-relative top-card instruction follows
-    // that owner's terminal shuffle inside the published owner iteration.
-    // Other player populations do not acquire this continuation authority.
-    if is_owner_library_shuffle_scope(scope)
-        && matches!(
-            (parent, child),
-            (
-                Effect::Shuffle {
-                    target: TargetFilter::ScopedPlayer,
-                },
-                Effect::RevealTop {
-                    player: TargetFilter::ScopedPlayer,
-                    ..
-                }
-            )
-        )
-    {
-        return true;
-    }
     // CR 109.5 + CR 608.2c: Compound-subject distribution — when the parent
     // and child effects of a player_scope-tagged ability both reference an
     // iteration-bound recipient (`OriginalController` or `ScopedPlayer`), the
@@ -11818,6 +11799,31 @@ fn effect_consumes_parent_object_referent(effect: &Effect) -> bool {
     amount_is_anaphoric || target_is_anaphoric
 }
 
+/// CR 608.2c + CR 108.3: under the owner-library-shuffle population the
+/// shuffling owner is the parent target's owner; a clause whose acting player
+/// names that owner continues the owner's instruction. CR 601.2a: a cast it
+/// performs is that owner's.
+///
+/// `RevealTop` and `ChooseOneOf` get explicit arms because `Effect::target_filter`
+/// returns `None` for them; every other acting-player slot (`Draw.target`,
+/// `Mill.target`, and the `Dig` / `ExileTop` / `GainLife` / `Discover` player)
+/// is surfaced by that accessor.
+fn effect_acts_for_shuffled_owner(effect: &Effect) -> bool {
+    match effect {
+        Effect::ChooseOneOf { chooser, .. } => {
+            matches!(chooser, PlayerFilter::ParentObjectTargetOwner)
+        }
+        Effect::RevealTop { player, .. } => matches!(
+            player,
+            TargetFilter::ScopedPlayer | TargetFilter::ParentTargetOwner
+        ),
+        other => matches!(
+            other.target_filter(),
+            Some(TargetFilter::ScopedPlayer | TargetFilter::ParentTargetOwner)
+        ),
+    }
+}
+
 fn quantity_expr_references_demonstrative(qty: &QuantityExpr) -> bool {
     match qty {
         QuantityExpr::Fixed { .. } => false,
@@ -11982,11 +11988,24 @@ fn detach_after_player_scope_local_chain(
     let next_is_local_continuation = next.sub_link == SubAbilityLink::ContinuationStep
         && is_player_scope_local_continuation(&node.effect, &next.effect, scope)
         && !next_is_scoped_search_shuffle_tail;
+    // CR 608.2c + CR 108.3: under the owner-library-shuffle population a clause
+    // that carries no scope of its own and whose acting player names the
+    // shuffled owner ("then draws two cards", "Then that player discovers X",
+    // "then faces a villainous choice", "then exiles the top card of their
+    // library") continues that owner's instruction, so it resolves inside the
+    // owner's iteration with the owner as the acting controller (CR 601.2a).
+    // The keep does not depend on the sub-link: "Then that player ..." is a
+    // sequential sibling. A clause naming the caster (`Controller`) or another
+    // population detaches as the unscoped tail.
+    let next_is_owner_continuation = is_owner_library_shuffle_scope(scope)
+        && next.player_scope.is_none()
+        && effect_acts_for_shuffled_owner(&next.effect);
     if next_is_performed_gated
         || next_is_zone_change_this_way_gated
         || next_is_co_scoped_anaphoric_consumer
         || next_is_optional_clause_continuation
         || next_is_local_continuation
+        || next_is_owner_continuation
     {
         // CR 608.2c: co-scoped continuations kept inside the scoped template
         // inherit the outer iteration — redundant `player_scope` on the child
@@ -11995,7 +12014,16 @@ fn detach_after_player_scope_local_chain(
         if next_is_local_continuation {
             next.player_scope = None;
         }
-        let tail = detach_after_player_scope_local_chain(&mut next, scope, referent_in_scope);
+        // CR 608.2c + CR 701.13a: the owner's exiled top card is the "it" of that
+        // owner's following instructions; the global per-player introducer stays
+        // RevealTop-only (`effect_introduces_per_iteration_referent`).
+        let introduces_owner_referent =
+            next_is_owner_continuation && matches!(next.effect, Effect::ExileTop { .. });
+        let tail = detach_after_player_scope_local_chain(
+            &mut next,
+            scope,
+            referent_in_scope || introduces_owner_referent,
+        );
         node.sub_ability = Some(next);
         tail
     } else {
@@ -52836,6 +52864,183 @@ mod tests {
                 player: TargetFilter::Controller,
                 ..
             }
+        ));
+    }
+
+    /// The owner-scope `Shuffle` node of a parsed owner-shuffle chain, with its
+    /// whole continuation attached, plus the published owner scope.
+    ///
+    /// Parsed through the card-level entry so reminder text is stripped exactly
+    /// as it is for the printed card (Zoyowa's Justice prints a Discover reminder).
+    fn owner_shuffle_chain(text: &str, keywords: &[&str]) -> (ResolvedAbility, PlayerFilter) {
+        let keywords: Vec<String> = keywords.iter().map(|k| (*k).to_string()).collect();
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            text,
+            "Owner Shuffle Spell",
+            &keywords,
+            &["Instant".to_string()],
+            &[],
+        );
+        let definition = parsed.abilities.first().expect("spell ability");
+        let root = build_resolved_from_def(definition, ObjectId(100), PlayerId(0));
+        let mut node = &root;
+        loop {
+            if matches!(node.effect, Effect::Shuffle { .. })
+                && node
+                    .player_scope
+                    .as_ref()
+                    .is_some_and(is_owner_library_shuffle_scope)
+            {
+                let scope = node.player_scope.clone().expect("owner scope");
+                return (node.clone(), scope);
+            }
+            node = node
+                .sub_ability
+                .as_deref()
+                .unwrap_or_else(|| panic!("no owner-scope shuffle in {text:?}"));
+        }
+    }
+
+    // SHAPE supplement to the public Oblation / Zoyowa's Justice / This Is How It
+    // Ends / Audacious Swap casts: every continuation whose acting player names
+    // the shuffled owner stays in the owner's iteration, and nothing else does.
+    #[test]
+    fn owner_shuffle_scope_keeps_owner_continuations_only() {
+        // Oblation: Draw { ParentTargetOwner } + the kept scope-less clause.
+        let (oblation, scope) = owner_shuffle_chain(
+            "The owner of target nonland permanent shuffles it into their library, then draws two cards.",
+            &[],
+        );
+        let draw = oblation.sub_ability.as_deref().expect("draw");
+        assert!(matches!(draw.effect, Effect::Draw { .. }));
+        assert_eq!(
+            draw.effect.target_filter(),
+            Some(&TargetFilter::ParentTargetOwner)
+        );
+        let (scoped, tail) = split_player_scope_chain(&oblation, &scope);
+        assert!(matches!(
+            scoped.sub_ability.as_deref().map(|n| &n.effect),
+            Some(Effect::Draw { .. })
+        ));
+        assert!(tail.is_none(), "the owner's draw stays in the iteration");
+
+        // Negative: the same Oblation chain under another population detaches
+        // the Draw (reach guard: the draw is the same node as above).
+        let (unrelated, tail) = split_player_scope_chain(&oblation, &PlayerFilter::All);
+        assert!(unrelated.sub_ability.is_none());
+        assert!(matches!(
+            tail.expect("an unrelated scope detaches the draw").effect,
+            Effect::Draw { .. }
+        ));
+
+        // Negative: a caster-addressed sequential sibling after a kept owner
+        // continuation detaches.
+        let mut chain = oblation.clone();
+        let mut independent = ResolvedAbility::new(
+            Effect::Draw {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        independent.sub_link = SubAbilityLink::SequentialSibling;
+        chain.sub_ability.as_deref_mut().unwrap().sub_ability = Some(Box::new(independent));
+        let (scoped, tail) = split_player_scope_chain(&chain, &scope);
+        let kept = scoped.sub_ability.as_deref().expect("owner draw stays");
+        assert!(matches!(kept.effect, Effect::Draw { .. }));
+        assert!(kept.sub_ability.is_none());
+        let tail = tail.expect("the Controller draw detaches");
+        assert_eq!(tail.effect.target_filter(), Some(&TargetFilter::Controller));
+
+        // Zoyowa's Justice: "Then that player discovers X" is a sequential
+        // sibling whose actor is the shuffled owner.
+        let (zoyowa, scope) = owner_shuffle_chain(
+            "The owner of target artifact or creature with mana value 1 or greater shuffles it into their library. Then that player discovers X, where X is its mana value. (They exile cards from the top of their library until they exile a nonland card with that mana value or less. They cast it without paying its mana cost or put it into their hand. They put the rest on the bottom in a random order.)",
+            &["Discover"],
+        );
+        let discover = zoyowa.sub_ability.as_deref().expect("discover");
+        assert!(matches!(discover.effect, Effect::Discover { .. }));
+        assert_eq!(
+            discover.effect.target_filter(),
+            Some(&TargetFilter::ParentTargetOwner)
+        );
+        let (scoped, tail) = split_player_scope_chain(&zoyowa, &scope);
+        assert!(matches!(
+            scoped.sub_ability.as_deref().map(|n| &n.effect),
+            Some(Effect::Discover { .. })
+        ));
+        assert!(
+            tail.is_none(),
+            "unexpected tail: {:?}",
+            tail.as_ref().map(|t| &t.effect)
+        );
+
+        // This Is How It Ends: the villainous chooser is the target's owner.
+        let (ends, scope) = owner_shuffle_chain(
+            "Target creature's owner shuffles it into their library, then faces a villainous choice \u{2014} They lose 5 life, or they shuffle another creature they own into their library.",
+            &[],
+        );
+        let choice = ends.sub_ability.as_deref().expect("villainous choice");
+        assert!(matches!(
+            &choice.effect,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::ParentObjectTargetOwner,
+                ..
+            }
+        ));
+        let (scoped, tail) = split_player_scope_chain(&ends, &scope);
+        assert!(matches!(
+            scoped.sub_ability.as_deref().map(|n| &n.effect),
+            Some(Effect::ChooseOneOf { .. })
+        ));
+        assert!(
+            tail.is_none(),
+            "unexpected tail: {:?}",
+            tail.as_ref().map(|t| &t.effect)
+        );
+
+        // Audacious Swap: the owner's exiled top card is the "it" of the land
+        // deployment (and its else-branch cast), all inside the iteration.
+        let (swap, scope) = owner_shuffle_chain(
+            "The owner of target nonenchantment permanent shuffles it into their library, then exiles the top card of their library. If it's a land card, they put it onto the battlefield. Otherwise, they may cast it without paying its mana cost.",
+            &[],
+        );
+        let exile = swap.sub_ability.as_deref().expect("exile top");
+        assert!(matches!(exile.effect, Effect::ExileTop { .. }));
+        assert_eq!(
+            exile.effect.target_filter(),
+            Some(&TargetFilter::ScopedPlayer)
+        );
+        let deploy = exile.sub_ability.as_deref().expect("land deployment");
+        assert!(matches!(deploy.effect, Effect::ChangeZone { .. }));
+        assert!(deploy.condition.is_some());
+        assert!(deploy.else_ability.is_some());
+        let (scoped, tail) = split_player_scope_chain(&swap, &scope);
+        let kept_exile = scoped.sub_ability.as_deref().expect("exile stays local");
+        assert!(matches!(kept_exile.effect, Effect::ExileTop { .. }));
+        let kept_deploy = kept_exile
+            .sub_ability
+            .as_deref()
+            .expect("deployment stays local");
+        assert!(matches!(kept_deploy.effect, Effect::ChangeZone { .. }));
+        assert!(kept_deploy.else_ability.is_some());
+        assert!(tail.is_none(), "the whole owner continuation stays local");
+
+        // Negative: Cathartic Parting's second sentence acts for the caster
+        // ("your graveyard into your library"), so it is the tail.
+        let (parting, scope) = owner_shuffle_chain(
+            "The owner of target artifact or enchantment an opponent controls shuffles it into their library. You may shuffle up to four target cards from your graveyard into your library.",
+            &[],
+        );
+        let caster_clause = parting.sub_ability.as_deref().expect("caster clause");
+        assert!(matches!(caster_clause.effect, Effect::ChangeZone { .. }));
+        let (scoped, tail) = split_player_scope_chain(&parting, &scope);
+        assert!(scoped.sub_ability.is_none());
+        assert!(matches!(
+            tail.expect("the caster's clause detaches").effect,
+            Effect::ChangeZone { .. }
         ));
     }
 

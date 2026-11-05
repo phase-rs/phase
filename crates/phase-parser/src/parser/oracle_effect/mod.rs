@@ -44406,12 +44406,16 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
                     *player = anchor.clone();
                 }
             }
+            // CR 108.3 + CR 608.2c: the exiled top card comes from the same
+            // owner the terminal shuffle iterated, so it carries the recorded
+            // anchor exactly as the reveal above does (`ScopedPlayer` under the
+            // published owner scope, `ParentTargetOwner` under the legacy scalar).
             Effect::ExileTop { player, .. }
-                if owner_anchor.is_some()
-                    && repair_exile
-                    && is_repairable_library_owner(player) =>
+                if repair_exile && is_repairable_library_owner(player) =>
             {
-                *player = TargetFilter::ParentTargetOwner;
+                if let Some(anchor) = &owner_anchor {
+                    *player = anchor.clone();
+                }
             }
             _ => {}
         }
@@ -54545,6 +54549,65 @@ fn owner_anchor_preserves_legacy_scalar_and_rejects_unrelated_scope() {
             .unwrap();
         assert!(
             matches!(reveal.effect.as_ref(), Effect::RevealTop { player, count: 1 } if *player == expected)
+        );
+    }
+
+    // CR 108.3 + CR 608.2c: the owner's exiled top card carries the recorded
+    // anchor the way the reveal does: the legacy scalar keeps
+    // `ParentTargetOwner`, the published owner scope supplies `ScopedPlayer`,
+    // and an unrelated population supplies nothing.
+    let exile_text = "The owner of target permanent shuffles it into their library, then exiles the top card of their library.";
+    for (target, scope, expected) in [
+        (
+            TargetFilter::ParentTargetOwner,
+            None,
+            TargetFilter::ParentTargetOwner,
+        ),
+        (
+            TargetFilter::ScopedPlayer,
+            Some(imperative::owner_library_shuffle_scope()),
+            TargetFilter::ScopedPlayer,
+        ),
+        (
+            TargetFilter::ScopedPlayer,
+            Some(PlayerFilter::All),
+            TargetFilter::Controller,
+        ),
+    ] {
+        let mut def = parse_effect_chain(exile_text, AbilityKind::Spell);
+        let shuffle = def
+            .sub_ability
+            .as_deref_mut()
+            .unwrap()
+            .sub_ability
+            .as_deref_mut()
+            .unwrap();
+        assert!(matches!(*shuffle.effect, Effect::Shuffle { .. }));
+        *shuffle.effect = Effect::Shuffle { target };
+        shuffle.player_scope = scope;
+        let exile = shuffle
+            .sub_ability
+            .as_deref_mut()
+            .expect("positive exile reach guard");
+        let Effect::ExileTop { player, .. } = exile.effect.as_mut() else {
+            panic!("positive exile reach guard: expected ExileTop, got {exile:?}");
+        };
+        *player = TargetFilter::Controller;
+        apply_owner_library_reveal_anchor_from_text(&mut def, exile_text);
+        let exile = def
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .sub_ability
+            .as_ref()
+            .unwrap();
+        assert!(
+            matches!(exile.effect.as_ref(), Effect::ExileTop { player, .. } if *player == expected),
+            "got {:?}",
+            exile.effect
         );
     }
 }
