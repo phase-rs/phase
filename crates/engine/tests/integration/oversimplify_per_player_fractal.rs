@@ -1192,10 +1192,12 @@ mod constructed {
     ];
 
     /// The trailing instruction's link after a gated rider ("if they do" /
-    /// "each player who doesn't"). A separate sentence is a `SequentialSibling`
-    /// (the parser stamps sentence boundaries so); a `ContinuationStep` is a
-    /// step of the gated instruction itself, which runs per seat behind its
-    /// gate (`gated_rider_step_runs_per_accepting_seat`).
+    /// "each player who doesn't"). A separate sentence is ordinarily a
+    /// `SequentialSibling` (the parser stamps sentence boundaries so), though
+    /// `relink_gated_token_referent_consumers` may retag a separate sentence
+    /// as a `ContinuationStep`; a retagged consumer correctly runs per seat.
+    /// A `ContinuationStep` is a step of the gated instruction itself, which
+    /// runs per seat behind its gate (`gated_rider_step_runs_per_accepting_seat`).
     const GATED_TAIL_LINKS: [SubAbilityLink; 1] = [SubAbilityLink::SequentialSibling];
 
     // --- N5: the partition needs the matching co-scoped producer ------------
@@ -1492,6 +1494,14 @@ mod constructed {
     /// trailing gain is a `ContinuationStep` of the gated instruction, not a
     /// later sentence, so it resolves inside each seat behind that seat's gate:
     /// +3 for every accepting seat, +0 for a declining or empty seat.
+    ///
+    /// The text is synthetic: no printed card has this exact shape. The nearest
+    /// printed cards with a gated node followed by a continuation step are Tell
+    /// Me What You See ("target opponent may have you draw a card. If they
+    /// don't, they lose 4 life and you surveil 1") and Exit Through the Grift
+    /// Shop (a bid-gated copy followed by "If you didn't win the bid, you gain
+    /// life ... and create that many Treasure tokens"); neither is a per-seat
+    /// fan-out, so this test pins the per-seat form of the shape.
     #[test]
     fn gated_rider_step_runs_per_accepting_seat() {
         let row = Row::new(3, Board::Empty)
