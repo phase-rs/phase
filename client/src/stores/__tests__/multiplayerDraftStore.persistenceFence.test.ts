@@ -102,7 +102,12 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => {
   };
 });
 
-import { DRAFT_OFFLINE_ERROR, useMultiplayerDraftStore } from "../multiplayerDraftStore";
+import {
+  DRAFT_OFFLINE_ERROR,
+  DRAFT_RECOVERY_CONNECTION_ERROR,
+  DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
+  useMultiplayerDraftStore,
+} from "../multiplayerDraftStore";
 import { isHostedPodRecoveryFailureCurrent, useDraftPodStore } from "../draftPodStore";
 import { useConnectivityStore } from "../connectivityStore";
 import { DraftPodHostAdapter } from "../../adapter/draftPodHostAdapter";
@@ -349,7 +354,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
           podPolicy: recovered.podPolicy,
           persistenceId: recovered.persistenceId,
           preferredRoomCode: recovered.roomCode,
-          recovery: { session: recovered, raw: recovered },
+          recovery: { session: recovered },
         },
         isCurrent: () => true,
       });
@@ -409,7 +414,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
           persistenceId: recoveredHost.persistenceId,
           preferredRoomCode: recoveredHost.roomCode,
           signal: options.signal,
-          recovery: { session: recoveredHost, raw: recoveredHost },
+          recovery: { session: recoveredHost },
         },
         isCurrent: options.isCurrent ?? (() => true),
         routeSignal: new AbortController().signal,
@@ -560,7 +565,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       checkRestorableSession.mockResolvedValue({ type: "Admitted" });
       loadDraftHostSession.mockImplementation(async (...args: unknown[]) => (
         args[0] === recoveredHost.persistenceId
-          ? { type: "admitted", session: recoveredHost, raw: recoveredHost }
+          ? { type: "admitted", session: recoveredHost }
           : { type: "absent" }
       ));
       hostRoom.mockImplementation(async (_signal: AbortSignal | undefined, options: { preferredRoomCode?: string } = {}) => {
@@ -607,13 +612,17 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       localStorage.clear();
     });
 
-    /** What the pod page reads after a recovery on one route. */
+    /** What a recovery failure records: its kind and the attempt that showed it. */
+    const failureKeys = ["capture", "kind", "orchestrationGeneration", "routeToken"];
+
+    /** What the pod page reads after a recovery on one route, and what the failure records. */
     function afterRecovery(routeToken: number) {
       const pod = useDraftPodStore.getState();
       const record = inspectActiveDraftPod();
       return {
         failureKind: pod.hostRecoveryFailure?.kind ?? null,
         failureCurrent: isHostedPodRecoveryFailureCurrent(pod.hostRecoveryFailure, routeToken),
+        failureKeys: pod.hostRecoveryFailure ? Object.keys(pod.hostRecoveryFailure).sort() : null,
         configError: pod.configError,
         recordNames: record.type === "present" ? record.capture.id : record.type,
       };
@@ -626,7 +635,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
           engine.importFailure = new Error("Invalid draft snapshot: restore refused");
         },
         "initializationFailure",
-        "podError.connection",
+        DRAFT_RECOVERY_CONNECTION_ERROR,
       ],
       [
         "the import rejects as incompatible",
@@ -634,7 +643,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
           engine.importFailure = incompatibleRestore();
         },
         "incompatible",
-        "podError.incompatible",
+        DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
       ],
       [
         "the host start fails after the restore",
@@ -642,7 +651,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
           startFailure = new Error("Host start failed");
         },
         "initializationFailure",
-        "podError.connection",
+        DRAFT_RECOVERY_CONNECTION_ERROR,
       ],
     ] as const)("reports a failure after the handover, with its retry, when %s", async (_label, arrange, kind, configError) => {
       arrange();
@@ -653,7 +662,13 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       expect(engine.imports).toEqual([recoveredSession]);
       expect(outcome).toBe(kind);
       expect(lifecycleOutcomes).toEqual([kind]);
-      expect(afterRecovery(1)).toEqual({ failureKind: kind, failureCurrent: true, configError, recordNames: "recovered-b" });
+      expect(afterRecovery(1)).toEqual({
+        failureKind: kind,
+        failureCurrent: true,
+        failureKeys,
+        configError,
+        recordNames: "recovered-b",
+      });
       expect(useMultiplayerDraftStore.getState().hostPersistenceId).not.toBe("recovered-b");
       expect(clearDraftHostSession).not.toHaveBeenCalled();
     });
@@ -671,6 +686,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       expect(afterRecovery(2)).toEqual({
         failureKind: null,
         failureCurrent: false,
+        failureKeys: null,
         configError: DRAFT_OFFLINE_ERROR,
         recordNames: "recovered-b",
       });
@@ -704,7 +720,8 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       expect(afterRecovery(3)).toEqual({
         failureKind: "initializationFailure",
         failureCurrent: true,
-        configError: "podError.connection",
+        failureKeys,
+        configError: DRAFT_RECOVERY_CONNECTION_ERROR,
         recordNames: "recovered-b",
       });
       expect(useMultiplayerDraftStore.getState().hostPersistenceId).not.toBe("recovered-b");

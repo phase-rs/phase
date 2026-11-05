@@ -5,6 +5,10 @@
  * adapters are mocked — this layer tests the Zustand projection.
  */
 
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -12,8 +16,10 @@ import {
   isMultiplayerDraftPodLive,
   useMultiplayerDraftStore,
   type DraftPodScreen,
+  type HostedDraftRecoveryOutcome,
   type MultiplayerDraftPhase,
 } from "../multiplayerDraftStore";
+import type { PersistedDraftHostSession } from "../../services/draftPersistence";
 import {
   createDefaultDraftWorkspacePreferences,
   setArrivingCardBoardPreferences,
@@ -560,7 +566,57 @@ describe("multiplayerDraftStore", () => {
     }
   });
 
+  describe("resumeHostedDraft", () => {
+    it("lists exactly the outcomes a hosted recovery returns", () => {
+      const outcomes: HostedDraftRecoveryOutcome[] = [
+        "resumed",
+        "incompatible",
+        "initializationFailure",
+        "aborted",
+        "offline",
+        "superseded",
+      ];
+      // The two directives surface only under `tsc`: the pod store reads and
+      // classifies the saved pod itself, so a hosted recovery never answers
+      // with either.
+      // @ts-expect-error a hosted recovery never reports a read failure
+      const readFailure: HostedDraftRecoveryOutcome = "readFailure";
+      // @ts-expect-error a hosted recovery never reports an invalid saved pod
+      const invalid: HostedDraftRecoveryOutcome = "invalid";
+
+      expect(new Set(outcomes).size).toBe(6);
+      expect([readFailure, invalid]).toEqual(["readFailure", "invalid"]);
+    });
+  });
+
   describe("hostDraft", () => {
+    it("takes a new host's configuration only", () => {
+      type HostDraftConfig = Parameters<ReturnType<typeof useMultiplayerDraftStore.getState>["hostDraft"]>[0];
+      const newHost: HostDraftConfig = {
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      };
+      // The directive surfaces only under `tsc`; the value is a complete
+      // recovery input, so only the new-host fence rejects it.
+      const recovering: HostDraftConfig = {
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+        // @ts-expect-error a recovery goes through resumeHostedDraft
+        recovery: { session: {} as PersistedDraftHostSession },
+      };
+
+      expect(newHost.recovery).toBeUndefined();
+      expect(recovering.recovery).toBeDefined();
+    });
+
     it("does not replace the active adapter when effective offline already blocks hosting", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
@@ -1147,6 +1203,67 @@ describe("multiplayerDraftStore", () => {
       expect(mockHostAdapter.submitMatchSettlement).toHaveBeenCalledWith(expect.objectContaining({
         winnerSeat: 5,
       }));
+    });
+  });
+
+  describe("the draft owner install", () => {
+    /** The module slots that name the tab's installed draft owner. */
+    const ownerSlots = [
+      "activeHostAdapter",
+      "activeGuestAdapter",
+      "activeHostAbort",
+      "activeGuestAbort",
+      "activeHostEventUnsub",
+      "activeGuestEventUnsub",
+      "activeHostPersistenceId",
+      "activeHostRouteAbortListener",
+      "activeGuestRouteAbortListener",
+    ];
+
+    it("installs every draft owner through one step", () => {
+      const sourcePath = resolve(dirname(fileURLToPath(import.meta.url)), "../multiplayerDraftStore.ts");
+      const source = ts.createSourceFile(
+        sourcePath,
+        readFileSync(sourcePath, "utf8"),
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.TS,
+      );
+      const assignments: { slot: string; owner: string }[] = [];
+      const installCalls: string[] = [];
+      let installDeclared = false;
+      // `owner` is the enclosing function declaration or store action.
+      const visit = (node: ts.Node, owner: string): void => {
+        let next = owner;
+        if (ts.isFunctionDeclaration(node) && node.name) {
+          next = node.name.text;
+          if (next === "installDraftOwner") installDeclared = true;
+        }
+        if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name)
+          && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
+          next = node.name.text;
+        }
+        if (ts.isBinaryExpression(node)
+          && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+          && ts.isIdentifier(node.left)
+          && ownerSlots.includes(node.left.text)
+          && node.right.kind !== ts.SyntaxKind.NullKeyword) {
+          assignments.push({ slot: node.left.text, owner: next });
+        }
+        if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "installDraftOwner") {
+          installCalls.push(next);
+        }
+        ts.forEachChild(node, (child) => visit(child, next));
+      };
+      visit(source, "");
+
+      // Reach: the census found the install step and owner-slot assignments,
+      // and the install step takes every owner slot.
+      expect(installDeclared).toBe(true);
+      expect(assignments.length).toBeGreaterThan(0);
+      expect(new Set(assignments.map(({ slot }) => slot))).toEqual(new Set(ownerSlots));
+      expect(assignments.filter(({ owner }) => owner !== "installDraftOwner")).toEqual([]);
+      expect([...installCalls].sort()).toEqual(["hostDraft", "joinDraft", "resumeHostedDraft"]);
     });
   });
 

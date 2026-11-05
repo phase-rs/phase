@@ -20,6 +20,7 @@ import type { CommanderSeatDecks, DraftCommanderLaunch, DraftDeckPayload, DraftM
 import type { BrokerClient, RegisterHostRequest } from "../services/brokerClient";
 import {
   loadDraftHostSession,
+  type DraftHostSessionLoadResult,
   type PersistedDraftHostSession,
 } from "../services/draftPersistence";
 import type { DraftIntergameCommand, DraftIntergameCommandAck } from "../services/intergameCommandLedger";
@@ -162,8 +163,8 @@ export interface DraftPodHostConfig {
 }
 
 export interface DraftPodHostRecoveryInput {
+  /** The parsed saved host session, which is all the restore reads. */
   session: PersistedDraftHostSession;
-  raw: unknown;
   /**
    * The lifecycle-owned attempt fence. It is deliberately optional so normal
    * host construction and legacy wrapper test doubles retain their shape.
@@ -413,8 +414,8 @@ export class DraftPodHostAdapter {
 
       // 5. Check for persisted session to restore
       if (config.persistenceId) {
-        const persisted = config.recovery
-          ? { type: "admitted" as const, session: config.recovery.session, raw: config.recovery.raw }
+        const persisted: DraftHostSessionLoadResult = config.recovery
+          ? { type: "admitted", session: config.recovery.session }
           : await loadDraftHostSession(config.persistenceId);
         abortIfRequested();
         if (persisted.type === "readFailure") {

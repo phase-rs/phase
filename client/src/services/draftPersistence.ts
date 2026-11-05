@@ -203,13 +203,14 @@ export type PersistedDraftHostSessionState = "live" | "terminal" | "invalid";
  * IndexedDB failure distinct.  In particular, a read failure keeps the saved
  * record for a source-bound retry and does not authorize locator cleanup.
  * The loader reads a saved draft session only for its status; whether the
- * draft engine can restore it is the engine's own check.
+ * draft engine can restore it is the engine's own check. The loader returns
+ * the parsed session and keeps no unparsed copy.
  */
 export type DraftHostSessionLoadResult =
   | { type: "absent" }
-  | { type: "invalid"; raw: unknown }
-  | { type: "terminal"; session: PersistedDraftHostSession; raw: unknown }
-  | { type: "admitted"; session: PersistedDraftHostSession; raw: unknown }
+  | { type: "invalid" }
+  | { type: "terminal"; session: PersistedDraftHostSession }
+  | { type: "admitted"; session: PersistedDraftHostSession }
   | { type: "readFailure"; error: unknown };
 
 const PERSISTED_DRAFT_STATUS: Record<DraftStatus, PersistedDraftHostSessionState> = {
@@ -272,24 +273,24 @@ export async function loadDraftHostSession(
     // corrupt `false`, `0`, or empty string cannot take the absent/guest
     // fallback route by truthiness.
     if (raw === undefined || raw === null) return { type: "absent" };
-    if (!isPersistedDraftHostSession(raw)) return { type: "invalid", raw };
+    if (!isPersistedDraftHostSession(raw)) return { type: "invalid" };
     const s = raw;
 
     const snapshots: Record<number, DraftWorkspaceState> = {};
     if (s.perSeatWorkspaceSnapshots !== undefined) {
-      if (!isPlainRecord(s.perSeatWorkspaceSnapshots)) return { type: "invalid", raw };
+      if (!isPlainRecord(s.perSeatWorkspaceSnapshots)) return { type: "invalid" };
       const rawSnapshots = s.perSeatWorkspaceSnapshots as unknown as Record<PropertyKey, unknown>;
       for (const key of Reflect.ownKeys(rawSnapshots)) {
         if (
           typeof key !== "string"
           || !Object.prototype.propertyIsEnumerable.call(rawSnapshots, key)
         ) {
-          return { type: "invalid", raw };
+          return { type: "invalid" };
         }
         const seat = Number(key);
-        if (!Number.isSafeInteger(seat) || seat < 0 || String(seat) !== key) return { type: "invalid", raw };
+        if (!Number.isSafeInteger(seat) || seat < 0 || String(seat) !== key) return { type: "invalid" };
         const snapshot = validateWorkspaceState(rawSnapshots[key]);
-        if ("error" in snapshot) return { type: "invalid", raw };
+        if ("error" in snapshot) return { type: "invalid" };
         snapshots[seat] = snapshot;
       }
     }
@@ -297,9 +298,9 @@ export async function loadDraftHostSession(
     const session = { ...s, perSeatWorkspaceSnapshots: snapshots };
 
     const state = persistedDraftHostSessionState(session);
-    if (state === "invalid") return { type: "invalid", raw };
-    if (state === "terminal") return { type: "terminal", session, raw };
-    return { type: "admitted", session, raw };
+    if (state === "invalid") return { type: "invalid" };
+    if (state === "terminal") return { type: "terminal", session };
+    return { type: "admitted", session };
   } catch (error) {
     return { type: "readFailure", error };
   }

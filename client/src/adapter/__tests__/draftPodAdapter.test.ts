@@ -184,7 +184,7 @@ function mockView(status: string): DraftPlayerView {
 }
 
 function admittedHostSession(session: PersistedDraftHostSession): DraftHostSessionLoadResult {
-  return { type: "admitted", session, raw: session };
+  return { type: "admitted", session };
 }
 
 /**
@@ -306,7 +306,7 @@ describe("DraftPodHostAdapter", () => {
       tournamentFormat: session.tournamentFormat,
       podPolicy: session.podPolicy,
       persistenceId: session.persistenceId,
-      recovery: { session, raw: session },
+      recovery: { session },
     })).rejects.toMatchObject({ name: "Draft27IncompatibilityError" });
 
     expect(hostRoom).not.toHaveBeenCalled();
@@ -341,7 +341,7 @@ describe("DraftPodHostAdapter", () => {
       tournamentFormat: session.tournamentFormat,
       podPolicy: session.podPolicy,
       persistenceId: session.persistenceId,
-      recovery: { session, raw: session, isCurrent: () => false },
+      recovery: { session, isCurrent: () => false },
     })).rejects.toThrow("initialization aborted");
 
     expect(hostRoom).not.toHaveBeenCalled();
@@ -374,7 +374,7 @@ describe("DraftPodHostAdapter", () => {
       tournamentFormat: session.tournamentFormat,
       podPolicy: session.podPolicy,
       persistenceId: session.persistenceId,
-      recovery: { session, raw: session },
+      recovery: { session },
       signal,
     });
 

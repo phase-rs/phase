@@ -92,6 +92,7 @@ import {
   type ActiveDraftPodPhase,
 } from "../services/draftPersistence";
 import { getEffectiveOffline } from "./connectivityStore";
+import { assertNever } from "../utils/assertNever";
 import {
   commandAcknowledgement,
   consumeIntergamePermit,
@@ -116,6 +117,10 @@ import { FORMAT_DEFAULTS } from "./multiplayerStore";
 export type DraftRole = "host" | "guest";
 
 export const DRAFT_OFFLINE_ERROR = "offline.startUnavailable";
+/** The pod store's error key for a saved pod the draft engine refuses. */
+export const DRAFT_RECOVERY_INCOMPATIBLE_ERROR = "podError.incompatible";
+/** The pod store's error key for a recovery that could not connect or start. */
+export const DRAFT_RECOVERY_CONNECTION_ERROR = "podError.connection";
 
 export type GuestDraftResumeOutcome = "resumed" | "absent" | "invalid" | "failed" | "offline" | "superseded";
 
@@ -135,15 +140,20 @@ export interface HostedDraftRecoveryAttempt {
   onCommitted?: () => void;
 }
 
+/** Every value `resumeHostedDraft` returns, and nothing else. */
 export type HostedDraftRecoveryOutcome =
   | "resumed"
   | "incompatible"
-  | "readFailure"
   | "initializationFailure"
   | "aborted"
-  | "invalid"
   | "offline"
   | "superseded";
+
+/**
+ * A new host's configuration. It carries no recovery: a saved host recovers
+ * through `resumeHostedDraft`.
+ */
+export type NewDraftPodHostConfig = DraftPodHostConfig & { readonly recovery?: never };
 
 /**
  * How a `hostDraft` / `joinDraft` attempt settled. `"superseded"`: the attempt
@@ -400,7 +410,7 @@ interface MultiplayerDraftActions {
   clearError: () => void;
   /** Host: create a new draft pod and start accepting guests. */
   /** `"opened"` only after the current adapter initialized and remains owned. */
-  hostDraft: (config: DraftPodHostConfig) => Promise<DraftSessionOpenOutcome>;
+  hostDraft: (config: NewDraftPodHostConfig) => Promise<DraftSessionOpenOutcome>;
   /**
    * Typed host-recovery handoff. It verifies the carried source before the
    * ordinary host lifecycle can detach an installed adapter.
@@ -1677,6 +1687,98 @@ function replaceDraftSession(set: SetFn, next: Partial<MultiplayerDraftState>): 
   set({ ...initialState, ...next });
 }
 
+/** The adapter a host start, a recovery's commit or a guest join installs. */
+type DraftOwnerInstall =
+  | { readonly role: "host"; readonly adapter: DraftPodHostAdapter; readonly persistenceId: string | null }
+  | { readonly role: "guest"; readonly adapter: DraftPodGuestAdapter };
+
+interface InstalledDraftOwner {
+  readonly controller: AbortController;
+  readonly generation: number;
+  /** The route-abort listener, for a caller that removes it once superseded. */
+  readonly abortOwner: () => void;
+}
+
+/** Whether `owner` still holds its role's adapter slot in the epoch that installed it. */
+function isInstalledDraftOwner(owner: DraftOwnerInstall, epoch: number): boolean {
+  if (epoch !== draftAdapterEpoch) return false;
+  switch (owner.role) {
+    case "host":
+      return activeHostAdapter === owner.adapter;
+    case "guest":
+      return activeGuestAdapter === owner.adapter;
+    default:
+      return assertNever(owner);
+  }
+}
+
+/**
+ * The one step that installs the tab's draft owner, for a host start, a
+ * recovery's commit and a guest join alike. The caller has already advanced
+ * `draftAdapterEpoch` to `epoch` and detached the previous owner. It begins
+ * the owner's lifecycle, takes the owner slots, delivers the adapter's events
+ * only while this owner is installed, ends the owner when `routeSignal`
+ * aborts, and publishes its connecting session. It contains no await.
+ */
+function installDraftOwner(
+  set: SetFn,
+  owner: DraftOwnerInstall,
+  epoch: number,
+  routeSignal: AbortSignal | undefined,
+): InstalledDraftOwner {
+  const generation = beginDraftLifecycle();
+  const controller = new AbortController();
+
+  const abortOwner = () => {
+    controller.abort();
+    if (!isInstalledDraftOwner(owner, epoch)) return;
+    ++draftAdapterEpoch;
+    const detached = detachDraftAdapters();
+    const teardown = disposeDetachedDraftAdapters(detached, true);
+    retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
+    void teardown;
+    set(initialState);
+  };
+
+  switch (owner.role) {
+    case "host":
+      activeHostAdapter = owner.adapter;
+      activeHostAbort = controller;
+      activeHostPersistenceId = owner.persistenceId;
+      activeHostEventUnsub = owner.adapter.onEvent((event) => {
+        if (generation === lifecycleGeneration && isInstalledDraftOwner(owner, epoch)) {
+          handleHostEvent(event, set);
+        }
+      });
+      routeSignal?.addEventListener("abort", abortOwner, { once: true });
+      if (routeSignal) activeHostRouteAbortListener = { signal: routeSignal, listener: abortOwner };
+      replaceDraftSession(set, {
+        role: "host",
+        phase: "connecting",
+        hostPersistenceId: owner.persistenceId,
+        seatIndex: 0,
+        interactionGeneration: generation,
+      });
+      break;
+    case "guest":
+      activeGuestAdapter = owner.adapter;
+      activeGuestAbort = controller;
+      activeGuestEventUnsub = owner.adapter.onEvent((event) => {
+        if (generation === lifecycleGeneration && isInstalledDraftOwner(owner, epoch)) {
+          handleGuestEvent(event, set);
+        }
+      });
+      routeSignal?.addEventListener("abort", abortOwner, { once: true });
+      if (routeSignal) activeGuestRouteAbortListener = { signal: routeSignal, listener: abortOwner };
+      replaceDraftSession(set, { role: "guest", phase: "connecting", interactionGeneration: generation });
+      break;
+    default:
+      assertNever(owner);
+  }
+
+  return { controller, generation, abortOwner };
+}
+
 /**
  * Single authority for how long a pod error lives.
  *
@@ -1761,9 +1863,8 @@ export const useMultiplayerDraftStore = create<
     if (attempt.config.signal?.aborted) return "aborted";
     if (getEffectiveOffline()) return "offline";
 
-    // This is intentionally before `hostDraft`: its first lifecycle action is
-    // detachment, so a typed refusal, or a check that cannot answer, must
-    // leave an installed owner untouched.
+    // The check runs before anything is detached, so a typed refusal, or a
+    // check that cannot answer, leaves an installed owner untouched.
     let preflight: Awaited<ReturnType<typeof preflightDraftPodHostRecovery>>;
     try {
       preflight = await preflightDraftPodHostRecovery(attempt.config.recovery);
@@ -1802,9 +1903,9 @@ export const useMultiplayerDraftStore = create<
     };
     attempt.config.signal?.addEventListener("abort", abandonProvisional, { once: true });
 
-    // The fenced commit: detach the installed owner, install B, bind B to the
-    // route signal, publish its session and deliver its buffered events. It
-    // contains no await.
+    // The fenced commit: detach the installed owner, install B through the
+    // shared install step (which binds B to the route signal and publishes its
+    // session), then deliver its buffered events. It contains no await.
     let committedEpoch: number | null = null;
     const commit = (): { owner: AbortController; previousTeardown: Promise<void> } => {
       attempt.config.signal?.removeEventListener("abort", abandonProvisional);
@@ -1812,39 +1913,12 @@ export const useMultiplayerDraftStore = create<
       const epoch = ++draftAdapterEpoch;
       committedEpoch = epoch;
       const previous = detachDraftAdapters();
-      const generation = beginDraftLifecycle();
-      const controller = new AbortController();
-      activeHostAdapter = provisional;
-      activeHostAbort = controller;
-      activeHostPersistenceId = attempt.config.persistenceId ?? null;
-      activeHostEventUnsub = provisional.onEvent((event) => {
-        if (generation === lifecycleGeneration && activeHostAdapter === provisional && epoch === draftAdapterEpoch) {
-          handleHostEvent(event, set);
-        }
-      });
-
-      const abortOwner = () => {
-        controller.abort();
-        if (activeHostAdapter !== provisional || epoch !== draftAdapterEpoch) return;
-        ++draftAdapterEpoch;
-        const detached = detachDraftAdapters();
-        const teardown = disposeDetachedDraftAdapters(detached, true);
-        retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
-        void teardown;
-        set(initialState);
-      };
-      attempt.routeSignal?.addEventListener("abort", abortOwner, { once: true });
-      if (attempt.routeSignal) {
-        activeHostRouteAbortListener = { signal: attempt.routeSignal, listener: abortOwner };
-      }
-
-      replaceDraftSession(set, {
-        role: "host",
-        phase: "connecting",
-        hostPersistenceId: attempt.config.persistenceId ?? null,
-        seatIndex: 0,
-        interactionGeneration: generation,
-      });
+      const { controller } = installDraftOwner(
+        set,
+        { role: "host", adapter: provisional, persistenceId: attempt.config.persistenceId ?? null },
+        epoch,
+        attempt.routeSignal,
+      );
       attempt.onCommitted?.();
       // The wrapper emitted only into the private buffer while B was
       // provisional. Deliver those events only after the fenced install.
@@ -1967,39 +2041,13 @@ export const useMultiplayerDraftStore = create<
       return { status: "failed", error: DRAFT_OFFLINE_ERROR };
     }
 
-    const generation = beginDraftLifecycle();
     const adapter = new DraftPodHostAdapter();
-    const controller = new AbortController();
-    activeHostAdapter = adapter;
-    activeHostAbort = controller;
-    activeHostPersistenceId = config.persistenceId ?? null;
-
-    activeHostEventUnsub = adapter.onEvent((event) => {
-      if (generation === lifecycleGeneration && activeHostAdapter === adapter && epoch === draftAdapterEpoch) {
-        handleHostEvent(event, set);
-      }
-    });
-
-    const abortOwner = () => {
-      controller.abort();
-      if (activeHostAdapter !== adapter || epoch !== draftAdapterEpoch) return;
-      ++draftAdapterEpoch;
-      const detached = detachDraftAdapters();
-      const teardown = disposeDetachedDraftAdapters(detached, true);
-      retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
-      void teardown;
-      set(initialState);
-    };
-    config.signal?.addEventListener("abort", abortOwner, { once: true });
-    if (config.signal) activeHostRouteAbortListener = { signal: config.signal, listener: abortOwner };
-
-    replaceDraftSession(set, {
-      role: "host",
-      phase: "connecting",
-      hostPersistenceId: config.persistenceId ?? null,
-      seatIndex: 0,
-      interactionGeneration: generation,
-    });
+    const { controller, generation, abortOwner } = installDraftOwner(
+      set,
+      { role: "host", adapter, persistenceId: config.persistenceId ?? null },
+      epoch,
+      config.signal,
+    );
 
     let initialized = false;
     try {
@@ -2023,14 +2071,9 @@ export const useMultiplayerDraftStore = create<
         });
       }
       return { status: "opened" };
-    } catch (error) {
+    } catch {
       // The adapter reports the error while it is current. A late failure is
       // deliberately silent: its event gate was detached by the new owner.
-      // The typed recovery caller must preserve this discriminator instead of
-      // collapsing it to the legacy boolean outcome.
-      if (config.recovery && error instanceof Draft27IncompatibilityError) {
-        throw error;
-      }
     } finally {
       if (activeHostAdapter !== adapter || epoch !== draftAdapterEpoch) {
         config.signal?.removeEventListener("abort", abortOwner);
@@ -2082,32 +2125,13 @@ export const useMultiplayerDraftStore = create<
       return ownFailure();
     }
 
-    const generation = beginDraftLifecycle();
     const adapter = new DraftPodGuestAdapter();
-    const controller = new AbortController();
-    activeGuestAdapter = adapter;
-    activeGuestAbort = controller;
-
-    activeGuestEventUnsub = adapter.onEvent((event) => {
-      if (generation === lifecycleGeneration && activeGuestAdapter === adapter && epoch === draftAdapterEpoch) {
-        handleGuestEvent(event, set);
-      }
-    });
-
-    const abortOwner = () => {
-      controller.abort();
-      if (activeGuestAdapter !== adapter || epoch !== draftAdapterEpoch) return;
-      ++draftAdapterEpoch;
-      const detached = detachDraftAdapters();
-      const teardown = disposeDetachedDraftAdapters(detached, true);
-      retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
-      void teardown;
-      set(initialState);
-    };
-    config.signal?.addEventListener("abort", abortOwner, { once: true });
-    if (config.signal) activeGuestRouteAbortListener = { signal: config.signal, listener: abortOwner };
-
-    replaceDraftSession(set, { role: "guest", phase: "connecting", interactionGeneration: generation });
+    const { controller, generation, abortOwner } = installDraftOwner(
+      set,
+      { role: "guest", adapter },
+      epoch,
+      config.signal,
+    );
 
     let initialized = false;
     try {
