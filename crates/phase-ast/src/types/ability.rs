@@ -5563,6 +5563,12 @@ pub enum PermissionGrantee {
     /// of Hospitality), read through `TargetFilter::TriggeringSourceController`
     /// with its last-known-information fallback (CR 608.2h).
     TriggeringSourceController,
+    /// CR 406.3a + CR 608.2c — each object's recorded exiling player (the
+    /// player who performed the exile that put it there, which need not be
+    /// its owner or the ability's controller): "For each card exiled this way,
+    /// the player who exiled it may play it" (Vulcan Mind-Meld). A card whose
+    /// exile was not attributed to a player is granted to nobody.
+    ObjectExiler,
 }
 
 /// Returns true when `grantee` is the default (`AbilityController`). Used as a
@@ -10603,8 +10609,8 @@ pub fn names_resolution_chosen_recipient(target: &TargetFilter) -> bool {
     }
 }
 
-/// Recurse into compound filters so a wrapped `ParentTargetController` is
-/// detected wherever it appears (`Or { filters: [..., ParentTargetController, ...] }`).
+/// Recurse into compound filters so parent-object, controller, and owner
+/// dependencies remain visible to inheritance and delayed snapshotting.
 pub fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
     match filter {
         // CR 603.7c + CR 608.2c: a `ParentTargetSlot { index }` delayed effect
@@ -10616,7 +10622,10 @@ pub fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. } => true,
         TargetFilter::Typed(typed) => {
-            matches!(typed.controller, Some(ControllerRef::ParentTargetController))
+            matches!(
+                typed.controller,
+                Some(ControllerRef::ParentTargetController | ControllerRef::ParentTargetOwner)
+            )
                 // CR 608.2c + CR 109.1: a `DistinctFrom { reference: ParentTarget }`
                 // property (Jodah's "put the rest ..." exclusion of the declined
                 // hit, Radiance's "each OTHER creature that shares a color with it")
@@ -11079,7 +11088,7 @@ pub fn effect_requires_parent_target_object(effect: &Effect) -> bool {
 
 /// CR 608.2c + CR 608.2h: Recursively identify the filter forms that require
 /// the parent's object referent rather than its last-known identity metadata.
-fn filter_requires_parent_target_object(filter: &TargetFilter) -> bool {
+pub fn filter_requires_parent_target_object(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => true,
         TargetFilter::Typed(typed) => typed.properties.iter().any(|property| {
@@ -20449,7 +20458,7 @@ impl LegacyPaymentCost {
 /// The controller of the spell or ability follows its instructions, unless the
 /// instruction names its subject — and a subject acting on "their library" is
 /// the player whose library it is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum LibraryInstructionActor {
     /// "Exile the top card of target player's library" — the controller acts.
     #[default]
@@ -20457,12 +20466,37 @@ pub enum LibraryInstructionActor {
     /// "That player exiles the top card of their library" — the player whose
     /// library it is acts (Uba Mask, Ingest, Crumbling Sanctuary).
     LibraryPlayer,
+    /// CR 608.2c: the instruction's named subject is a player other than the
+    /// library's owner — "Target opponent looks at the top card of your
+    /// library, then exiles it face down" (Vulcan Mind-Meld). CR 115.1: a
+    /// targeting subject (`player` not a context ref) is the instruction's
+    /// declared player target, surfaced by [`Effect::target_filter`] when the
+    /// library owner is itself a context ref.
+    Player { player: TargetFilter },
 }
 
 impl LibraryInstructionActor {
     /// Serde skip-helper: `Controller` is the default and is omitted from JSON.
     pub fn is_controller(&self) -> bool {
         matches!(self, Self::Controller)
+    }
+
+    /// CR 115.1: the subject's player filter when it names a target, so the
+    /// instruction can declare it. `None` for the controller, the library
+    /// owner, and context-ref subjects ("its controller").
+    pub fn declared_target(&self) -> Option<&TargetFilter> {
+        match self {
+            Self::Player { player } if !player.is_context_ref() => Some(player),
+            Self::Controller | Self::LibraryPlayer | Self::Player { .. } => None,
+        }
+    }
+
+    /// Mutable form of [`Self::declared_target`].
+    pub fn declared_target_mut(&mut self) -> Option<&mut TargetFilter> {
+        match self {
+            Self::Player { player } if !player.is_context_ref() => Some(player),
+            Self::Controller | Self::LibraryPlayer | Self::Player { .. } => None,
+        }
     }
 }
 
@@ -29398,6 +29432,18 @@ impl TargetFilter {
         if self.chosen_player_index().is_some() {
             return true;
         }
+        // CR 603.2 + CR 701.23a: a contentless player-scoped filter controlled by the
+        // triggering player ("search that player's library") reads the player from the
+        // trigger event at resolution; it is never announced as a target.
+        if matches!(
+            self,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.is_empty()
+                    && tf.properties.is_empty()
+                    && matches!(tf.controller, Some(ControllerRef::TriggeringPlayer))
+        ) {
+            return true;
+        }
         matches!(
             self,
             TargetFilter::None
@@ -30665,6 +30711,12 @@ impl Effect {
                 }
             }
 
+            // CR 115.1 + CR 608.2c: "Target opponent looks at the top card of
+            // your library, then exiles it face down" — the library owner is a
+            // context ref, so the targeting subject is the declared player.
+            Effect::ExileTop { player, actor, .. } if player.is_context_ref() => {
+                Some(actor.declared_target().unwrap_or(player))
+            }
             Effect::Dig { player, .. }
             | Effect::ExileTop { player, .. }
             | Effect::ExileFaceDownPile { player, .. }
@@ -31256,6 +31308,13 @@ impl Effect {
                 }
             }
 
+            // CR 115.1 + CR 608.2c: mirrors `target_filter` — a targeting
+            // subject of a context-ref library owner is the declared player.
+            Effect::ExileTop { player, actor, .. }
+                if player.is_context_ref() && actor.declared_target().is_some() =>
+            {
+                actor.declared_target_mut()
+            }
             Effect::Dig { player, .. }
             | Effect::ExileTop { player, .. }
             | Effect::ExileFaceDownPile { player, .. }

@@ -7241,9 +7241,20 @@ fn parse_normalized_oracle_ir(
                 );
                 // B7: Attach ability-word condition as fallback when extract_if_condition
                 // doesn't recognize the intervening-if pattern.
+                //
+                // CR 207.2c + CR 608.2c: the fallback is a POSITIVE trigger gate. An
+                // "unless" in the text spells the ability word's condition as a
+                // NEGATIVE gate on its own instruction (Shoreline Looter: "draw a
+                // card. Then discard a card unless there are seven or more cards in
+                // your graveyard"), so the positive fallback would invert the card.
+                let printed_unless_gate = scan_at_word_boundaries(&effect_lower, |i| {
+                    tag::<_, _, OracleError<'_>>("unless ").parse(i)
+                })
+                .is_some();
                 for trigger in &mut triggers {
                     if trigger.partial_def.condition.is_none()
                         && trigger.modifiers.intervening_if.is_none()
+                        && !printed_unless_gate
                     {
                         trigger.partial_def.condition = ability_word_to_trigger_condition(&aw_name);
                     }
