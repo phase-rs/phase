@@ -267,7 +267,10 @@ const ASSIMILATION_ASSESSOR: &str =
 
 /// Assimilation Assessor: the entry exile links the opponent's graveyard to
 /// the Assessor (CR 607.2a), and its attack assimilates a creature card from
-/// that pool — never a noncreature card exiled with it.
+/// that pile. With two linked creature cards the controller chooses one while
+/// the effect is applied (CR 608.2d) — a choice, not a target (CR 115.10a) —
+/// from the linked creature cards only: never a noncreature card exiled with
+/// it, nor a creature card exiled by something else.
 #[test]
 fn assimilation_assessor_assimilates_a_creature_card_from_its_linked_pile() {
     let mut scenario = GameScenario::new();
@@ -276,22 +279,40 @@ fn assimilation_assessor_assimilates_a_creature_card_from_its_linked_pile() {
         .add_creature_to_graveyard(P1, "Graveyard Soldier", 3, 3)
         .with_subtypes(vec!["Human", "Soldier"])
         .id();
+    let dead_knight = scenario
+        .add_creature_to_graveyard(P1, "Graveyard Knight", 4, 4)
+        .with_subtypes(vec!["Human", "Knight"])
+        .id();
+    let dead_sorcery = scenario
+        .add_spell_to_graveyard(P1, "Graveyard Sorcery", false)
+        .id();
+    let unrelated = scenario
+        .add_creature_to_exile(P1, "Unrelated Exile", 5, 5)
+        .with_subtypes(vec!["Human"])
+        .id();
     let assessor = scenario
-        .add_creature_to_hand_from_oracle(P0, "Assimilation Assessor", 2, 2, ASSIMILATION_ASSESSOR)
+        .add_creature_to_hand_from_oracle(P0, "Assimilation Assessor", 5, 5, ASSIMILATION_ASSESSOR)
         .as_artifact_creature()
         .with_subtypes(vec!["Borg"])
         .with_mana_cost(ManaCost::zero())
         .id();
     let mut runner = scenario.build();
     seed_creature_types(&mut runner);
+    {
+        let types = &mut runner.state_mut().all_creature_types;
+        types.push("Knight".to_string());
+    }
 
     runner.cast(assessor).target_player(P1).resolve();
-    assert_eq!(runner.state().objects[&dead_soldier].zone, Zone::Exile);
-    assert!(
-        is_linked_to(&runner, dead_soldier, assessor),
-        "the exiled graveyard card is linked to the Assessor: {:?}",
-        runner.state().exile_links
-    );
+    for card in [dead_soldier, dead_knight, dead_sorcery] {
+        assert_eq!(runner.state().objects[&card].zone, Zone::Exile);
+        assert!(
+            is_linked_to(&runner, card, assessor),
+            "the exiled graveyard card is linked to the Assessor: {:?}",
+            runner.state().exile_links
+        );
+    }
+    assert!(!is_linked_to(&runner, unrelated, assessor));
 
     runner
         .state_mut()
@@ -303,21 +324,82 @@ fn assimilation_assessor_assimilates_a_creature_card_from_its_linked_pile() {
     runner
         .declare_attackers(&[(assessor, AttackTarget::Player(P1))])
         .expect("declare the Assessor as attacker");
-    resolve_with_trigger_target(&mut runner, None);
+    for _ in 0..10 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            || runner.state().stack.is_empty()
+        {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass priority");
+    }
 
-    let obj = &runner.state().objects[&dead_soldier];
+    // CR 608.2d: the Assessor's controller chooses among exactly the linked
+    // creature cards.
+    let WaitingFor::EffectZoneChoice {
+        player,
+        cards,
+        count,
+        zone,
+        destination,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "two linked creature cards must prompt a choice: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0);
+    assert_eq!(count, 1);
+    assert_eq!(zone, Zone::Exile);
+    assert_eq!(destination, Some(Zone::Battlefield));
+    let mut offered = cards.clone();
+    offered.sort();
+    let mut expected = vec![dead_soldier, dead_knight];
+    expected.sort();
+    assert_eq!(
+        offered, expected,
+        "only the linked creature cards are offered"
+    );
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![dead_knight],
+        })
+        .expect("choose the card to assimilate");
+    assert_resolution_completed(&runner);
+
+    let obj = &runner.state().objects[&dead_knight];
     assert_eq!(
         obj.zone,
         Zone::Battlefield,
-        "the linked creature card is assimilated"
+        "the chosen linked creature card is assimilated"
     );
     assert_eq!(obj.controller, P0);
+    assert_eq!(obj.owner, P1);
     assert_eq!(obj.counters.get(&CounterType::Plus1Plus1).copied(), Some(1));
+
+    // The unchosen linked card stays exiled with the Assessor; the noncreature
+    // and the unrelated exile are untouched.
+    assert_eq!(runner.state().objects[&dead_soldier].zone, Zone::Exile);
+    assert!(is_linked_to(&runner, dead_soldier, assessor));
+    assert!(runner.state().objects[&dead_soldier].counters.is_empty());
+    assert_eq!(runner.state().objects[&dead_sorcery].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&unrelated].zone, Zone::Exile);
+
     relayer(&mut runner);
-    let obj = &runner.state().objects[&dead_soldier];
+    let obj = &runner.state().objects[&dead_knight];
     assert!(obj.card_types.core_types.contains(&CoreType::Artifact));
+    assert!(obj.card_types.core_types.contains(&CoreType::Creature));
     assert!(obj.card_types.subtypes.iter().any(|s| s == "Borg"));
-    assert!(!obj.card_types.subtypes.iter().any(|s| s == "Human"));
+    assert!(
+        !obj.card_types
+            .subtypes
+            .iter()
+            .any(|s| s == "Human" || s == "Knight"),
+        "CR 205.1b: all other creature types are lost: {:?}",
+        obj.card_types.subtypes
+    );
 }
 
 const PANHARMONICON: &str = "If an artifact or creature entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.";
