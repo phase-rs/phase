@@ -12260,7 +12260,14 @@ pub(crate) fn resume_replacement_pipeline(state: &mut GameState, events: &mut Ve
         ReplacementResult::Execute(_) => {
             unreachable!("only turn-up delivery parks this pipeline owner")
         }
-        ReplacementResult::NeedsChoice(_) | ReplacementResult::Prevented => {}
+        ReplacementResult::NeedsChoice(player) => {
+            if state.pending_replacement.is_some()
+                && matches!(state.waiting_for, WaitingFor::Priority { .. })
+            {
+                state.waiting_for = replacement_choice_waiting_for(player, state);
+            }
+        }
+        ReplacementResult::Prevented => {}
     }
 }
 
@@ -13785,7 +13792,13 @@ mod tests {
             let second = ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
                 .mode(ReplacementMode::Optional { decline: None })
                 .execute(AbilityDefinition::new(AbilityKind::Spell, gain(4)));
-            let mut state = test_state_with_object(source, Zone::Battlefield, vec![first, second]);
+            let definitions = vec![first, second];
+            let mut state = test_state_with_object(source, Zone::Battlefield, definitions.clone());
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .base_replacement_definitions = std::sync::Arc::new(definitions);
             let mut events = Vec::new();
             let result = replace_event(
                 &mut state,

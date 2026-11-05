@@ -777,11 +777,19 @@ pub fn turn_face_up(
         object_id,
         applied: std::collections::HashSet::new(),
     };
-    if matches!(
-        crate::game::replacement::replace_event(state, proposed, events),
-        crate::game::replacement::ReplacementResult::Execute(_)
-    ) {
-        events.push(GameEvent::TurnedFaceUp { object_id });
+    match crate::game::replacement::replace_event(state, proposed, events) {
+        crate::game::replacement::ReplacementResult::Execute(_) => {
+            events.push(GameEvent::TurnedFaceUp { object_id });
+        }
+        crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
+            if state.pending_replacement.is_some()
+                && matches!(state.waiting_for, WaitingFor::Priority { .. })
+            {
+                state.waiting_for =
+                    crate::game::replacement::replacement_choice_waiting_for(player, state);
+            }
+        }
+        crate::game::replacement::ReplacementResult::Prevented => {}
     }
 
     Ok(())
