@@ -2290,6 +2290,23 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         if nom_primitives::scan_contains(&current_lower, "from among") && put_kept_card_tail {
             return None;
         }
+        // CR 608.2c + CR 406.3: "<player> looks at the top card of your library,
+        // then exiles it face down" (Vulcan Mind-Meld) — the conjugated "exiles"
+        // continues the SAME named subject's look, so the look and the exile are
+        // one subject-predicate instruction. Splitting would hand the exile to
+        // the ability's controller and drop the subject.
+        let subject_exiles_looked_at_card = (
+            tag::<_, _, OracleError<'_>>("exiles "),
+            alt((tag("it"), tag("them"))),
+            tag(" face down"),
+        )
+            .parse(after_then_lower)
+            .is_ok();
+        if subject_exiles_looked_at_card
+            && nom_primitives::scan_contains(&current_lower, "looks at the top ")
+        {
+            return None;
+        }
         // CR 701.55a + CR 608.2c: "[subject] does X, then faces a villainous
         // choice — …" continues a previously-named subject (the target's owner)
         // into a villainous-choice clause. The bare "faces a villainous choice"

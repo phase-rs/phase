@@ -3770,16 +3770,30 @@ pub(super) fn parse_search_and_creation_ast(
         if let Some(player) = parse_dig_library_owner(rest_lower, ctx, DigOwnerPhrase::WithHeadNoun)
         {
             // CR 701.20e + CR 701.13a + CR 406.3: "look at the top card ... and
-            // exiles it face down" (Gonti, Night Minister) — fuse into ExileTop so
-            // the card leaves the library and the trailing play grant can bind to
-            // the tracked set.
-            if preceded(
-                take_until::<_, _, OracleError<'_>>("and exiles it face down"),
-                tag::<_, _, OracleError<'_>>("and exiles it face down"),
-            )
-            .parse(rest_lower)
-            .is_ok()
-            {
+            // exiles it face down" (Gonti, Night Minister) / "..., then exiles it
+            // face down" (Vulcan Mind-Meld) — the subject's own continuation —
+            // fuse into ExileTop so the card leaves the library and the trailing
+            // play grant can bind to the tracked set.
+            if let Some(tail) = nom_primitives::scan_at_word_boundaries(rest_lower, |i| {
+                preceded(
+                    (
+                        alt((tag::<_, _, OracleError<'_>>("and "), tag("then "))),
+                        tag("exiles "),
+                        alt((tag("it"), tag("them"))),
+                        tag(" face down"),
+                    ),
+                    nom::combinator::rest,
+                )
+                .parse(i)
+            }) {
+                // CR 608.2c: a fused instruction cannot discard a later rider.
+                // Claim the gap here so it cannot fall through to generic Dig.
+                if !terminal_punctuation_only(tail) {
+                    return Some(SearchCreationImperativeAst::Unimplemented {
+                        gap: "look_exile_tail",
+                        fragment: text.to_string(),
+                    });
+                }
                 return Some(SearchCreationImperativeAst::ExileTopLookedAt {
                     player,
                     count,
@@ -6056,6 +6070,47 @@ fn parse_controlled_battlefield_body(
     Some((up_to, filter))
 }
 
+/// CR 406.2 + CR 608.2c + CR 608.2d: Parse the per-player exile-pool body
+/// "[up to one|a|an|one] `<type-phrase>` that player owns exiled this way" —
+/// everything after "choose " (Ensign Pavel Chekov: "For each opponent, choose
+/// a land card that player owns exiled this way"). The pool is the cards the
+/// preceding instruction exiled (the chain's tracked set), split by owner: each
+/// iterated player's share is the part of that set they own. Returns
+/// `(up_to, filter)`; the whole clause must be consumed.
+fn parse_owned_exiled_this_way_body(
+    after_verb: &str,
+    ctx: &mut ParseContext,
+) -> Option<(bool, TargetFilter)> {
+    type E<'a> = OracleError<'a>;
+
+    let (after_qty, up_to) = alt((
+        value(true, tag::<_, _, E>("up to one ")),
+        value(false, tag("a ")),
+        value(false, tag("an ")),
+        value(false, tag("one ")),
+    ))
+    .parse(after_verb)
+    .ok()?;
+    let (type_phrase, owner_clause) = nom_primitives::scan_split_at_phrase(after_qty, |i| {
+        tag::<_, _, E>("that player owns exiled this way").parse(i)
+    })?;
+    let (after_clause, _) = tag::<_, _, E>("that player owns exiled this way")
+        .parse(owner_clause)
+        .ok()?;
+    if !terminal_punctuation_only(after_clause) {
+        return None;
+    }
+    let type_phrase = type_phrase.trim_end();
+    if type_phrase.is_empty() {
+        return None;
+    }
+    let filter = super::search::parse_search_filter(type_phrase, ctx);
+    if matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    Some((up_to, filter))
+}
+
 /// CR 101.4 + CR 102.2 + CR 608.2c: "For each [other] player, exile [up to one]
 /// [target] `<type-phrase>` that player controls" — Kaya, Spirits' Justice's −2.
 /// The combined choose+exile per-iterated-player form: each iterated player's
@@ -6446,24 +6501,42 @@ pub(super) fn parse_for_each_opponent_choose_controlled(
     )
         .parse(lower)
         .ok()?;
-    let (up_to, filter) = parse_controlled_battlefield_body(after_verb, ctx)?;
-    // Nothing may follow "that player controls": a trailing instruction on the
-    // same clause would otherwise be dropped silently.
-    let (_, (), after_clause) = nom_primitives::scan_preceded(after_verb, |i| {
-        controller_phrase_among(&[ControllerPhrase::THAT_PLAYER_CONTROLS]).parse(i)
-    })?;
-    if !terminal_punctuation_only(after_clause) {
-        return None;
-    }
+    let (zone, candidate_source, up_to, filter) =
+        match parse_owned_exiled_this_way_body(after_verb, ctx) {
+            Some((up_to, filter)) => (
+                Zone::Exile,
+                crate::types::ability::ZoneChoiceCandidateSource::Tracked,
+                up_to,
+                filter,
+            ),
+            None => {
+                let (up_to, filter) = parse_controlled_battlefield_body(after_verb, ctx)?;
+                // Nothing may follow "that player controls": a trailing
+                // instruction on the same clause would otherwise be dropped
+                // silently.
+                let (_, (), after_clause) = nom_primitives::scan_preceded(after_verb, |i| {
+                    controller_phrase_among(&[ControllerPhrase::THAT_PLAYER_CONTROLS]).parse(i)
+                })?;
+                if !terminal_punctuation_only(after_clause) {
+                    return None;
+                }
+                (
+                    Zone::Battlefield,
+                    crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                    up_to,
+                    filter,
+                )
+            }
+        };
 
     Some(parsed_clause(Effect::ChooseFromZone {
         count: 1,
-        zone: Zone::Battlefield,
+        zone,
         additional_zones: Vec::new(),
         zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
         filter: Some(filter),
         chooser: Chooser::Controller.into(),
-        candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+        candidate_source,
         reciprocal_role: None,
         gather_role: None,
         up_to,
@@ -19372,6 +19445,55 @@ mod tests {
             }
         ));
         for declined in NOT_THAT_PLAYER_CONTROLS {
+            assert!(parse(declined).is_none(), "{declined:?}");
+        }
+    }
+
+    /// CR 608.2c + CR 608.2d: "for each opponent, choose <type> that player owns
+    /// exiled this way" reads each opponent's share of the chain's exiled set
+    /// (`Tracked`, in exile); a trailing instruction is refused, not dropped.
+    #[test]
+    fn for_each_opponent_choose_owned_exiled_this_way() {
+        let parse = |text: &str| {
+            parse_for_each_opponent_choose_controlled(text, &mut ParseContext::default())
+        };
+        for (text, expected_up_to) in [
+            (
+                "for each opponent, choose a land card that player owns exiled this way.",
+                false,
+            ),
+            (
+                "for each opponent, choose up to one creature card that player owns exiled this way",
+                true,
+            ),
+        ] {
+            let clause = parse(text).unwrap_or_else(|| panic!("{text:?} parses"));
+            let Effect::ChooseFromZone {
+                zone,
+                zone_owner,
+                filter,
+                candidate_source,
+                up_to,
+                count,
+                ..
+            } = clause.effect
+            else {
+                panic!("{text:?}: expected ChooseFromZone, got {:?}", clause.effect);
+            };
+            assert_eq!(zone, Zone::Exile, "{text:?}");
+            assert_eq!(zone_owner, ZoneOwner::Each(PerPlayerScope::Opponents));
+            assert_eq!(
+                candidate_source,
+                crate::types::ability::ZoneChoiceCandidateSource::Tracked
+            );
+            assert_eq!(up_to, expected_up_to, "{text:?}");
+            assert_eq!(count, 1);
+            assert!(filter.is_some(), "{text:?}");
+        }
+        for declined in [
+            "for each opponent, choose a land card that player owns exiled this way and sacrifice it.",
+            "for each opponent, choose that player owns exiled this way.",
+        ] {
             assert!(parse(declined).is_none(), "{declined:?}");
         }
     }

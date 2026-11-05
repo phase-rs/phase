@@ -1103,6 +1103,55 @@ fn each_target_filter_mut_does_not_visit_shuffle() {
     );
 }
 
+/// CR 608.2c: the player who performs an `ExileTop` is a player slot like the
+/// library owner, so an anaphor rewrite reaches a named subject; the fieldless
+/// controller and library-owner roles stay fieldless.
+#[test]
+fn each_target_filter_mut_visits_exile_top_named_actor() {
+    use crate::types::ability::{LibraryInstructionActor, LibraryPosition};
+
+    let exile_top = |actor| Effect::ExileTop {
+        player: TargetFilter::TriggeringPlayer,
+        count: QuantityExpr::Fixed { value: 1 },
+        position: LibraryPosition::Top,
+        face_down: true,
+        actor,
+    };
+    let rewrite = |mut effect: Effect| {
+        each_target_filter_mut(&mut effect, &mut |f| {
+            if matches!(f, TargetFilter::TriggeringPlayer) {
+                *f = TargetFilter::SelfRef;
+            }
+        });
+        effect
+    };
+
+    assert_eq!(
+        rewrite(exile_top(LibraryInstructionActor::Player {
+            player: TargetFilter::TriggeringPlayer,
+        })),
+        Effect::ExileTop {
+            player: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Top,
+            face_down: true,
+            actor: LibraryInstructionActor::Player {
+                player: TargetFilter::SelfRef,
+            },
+        }
+    );
+    for fieldless in [
+        LibraryInstructionActor::Controller,
+        LibraryInstructionActor::LibraryPlayer,
+    ] {
+        let Effect::ExileTop { player, actor, .. } = rewrite(exile_top(fieldless.clone())) else {
+            unreachable!("the walker keeps the effect variant");
+        };
+        assert_eq!(player, TargetFilter::SelfRef);
+        assert_eq!(actor, fieldless);
+    }
+}
+
 #[test]
 fn player_scope_rewrite_reaches_modal_mode_abilities() {
     let mode = AbilityDefinition::new(
@@ -96300,4 +96349,134 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
             "reveal-choice return keeps its pre-routing outcome, got {parsed:?} for {line:?}"
         );
     }
+}
+
+/// SHAPE (Vulcan Mind-Meld, verbatim): CR 608.2c + CR 115.1 — the targeted
+/// subject performs the exile from the caster's library; "their library" binds
+/// to that declared player; CR 406.3a — each exiled card's grant binds to its
+/// exiling player; CR 609.4b — the standalone "this way" concession folds onto
+/// that grant.
+#[test]
+fn vulcan_mind_meld_parses_subject_exiles_and_exiler_grant() {
+    let chain = parse_effect_chain(
+        "Target opponent looks at the top card of your library, then exiles it face down. You \
+         look at the top two cards of their library, then exile them face down. For each card \
+         exiled this way, the player who exiled it may play it for as long as it remains exiled. \
+         Mana of any type can be spent to cast spells this way.",
+        AbilityKind::Spell,
+    );
+    let effects = collect_chain_effects(&chain);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+        "{effects:?}"
+    );
+    assert_eq!(effects.len(), 3, "{effects:?}");
+    assert!(
+        matches!(
+            effects[0],
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Player { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        effects[0]
+    );
+    assert!(
+        effects[0]
+            .target_filter()
+            .is_some_and(|filter| !filter.is_context_ref()),
+        "the targeted subject is the declared player target: {:?}",
+        effects[0]
+    );
+    assert!(
+        matches!(
+            effects[1],
+            Effect::ExileTop {
+                player: TargetFilter::DeclaredPlayer { .. },
+                count: QuantityExpr::Fixed { value: 2 },
+                face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                ..
+            }
+        ),
+        "{:?}",
+        effects[1]
+    );
+    assert!(
+        matches!(
+            effects[2],
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    mode: Play,
+                    duration: Duration::Permanent,
+                    mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                    ..
+                },
+                target: TargetFilter::TrackedSet { .. },
+                grantee: PermissionGrantee::ObjectExiler,
+            }
+        ),
+        "{:?}",
+        effects[2]
+    );
+    assert!(chain.repeat_for.is_none());
+    assert!(chain
+        .sub_ability
+        .as_deref()
+        .and_then(|sub| sub.sub_ability.as_deref())
+        .is_some_and(|grant| grant.repeat_for.is_none()));
+}
+
+/// SHAPE: CR 608.2c requires the whole fused look/exile instruction to be
+/// represented. Mind-Meld supplies the printed suffix-free sentence. No verified
+/// printed card combines that exact grammar with the synthetic hatching rider;
+/// the nearest printed forms are Mind-Meld and The Dragon-Kami Reborn's different
+/// "Exile one of them face down with a hatching counter on it" instruction.
+#[test]
+fn fused_subject_look_exile_preserves_or_rejects_the_complete_instruction() {
+    let printed = parse_effect_chain(
+        "Target opponent looks at the top card of your library, then exiles it face down.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        printed.effect.as_ref(),
+        Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+            face_down: true,
+            actor: crate::types::ability::LibraryInstructionActor::Player {
+                player: TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::Opponent),
+                    ..
+                })
+            },
+            ..
+        }
+    ));
+    assert!(printed.sub_ability.is_none());
+
+    // Structural synthetic fixture, not a claimed printed card or counter feature.
+    let fragment = "looks at the top card of your library, then exiles it face down with a hatching counter on it";
+    let ast = super::imperative::parse_search_and_creation_ast(
+        fragment,
+        fragment,
+        &mut ParseContext::default(),
+    )
+    .expect("the fused recognizer must claim even an unsupported tail");
+    let gap = super::imperative::lower_search_and_creation_ast(ast);
+    assert_eq!(gap.unimplemented_description(), Some(fragment));
+
+    let unsupported =
+        parse_effect_chain(&format!("Target opponent {fragment}."), AbilityKind::Spell);
+    assert!(
+        collect_chain_effects(&unsupported).iter().any(|effect| {
+            matches!(effect, Effect::Unimplemented { name, .. } if name == "look_exile_tail")
+        }),
+        "the public chain must retain the honest gap, not fall back to Dig: {unsupported:?}"
+    );
 }
