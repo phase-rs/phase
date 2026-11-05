@@ -2064,8 +2064,14 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // the condition introduced, not a transient nested-clause value.
     let relative_player_scope = effect_ctx.relative_player_scope.clone();
 
-    // Constraint from full text (parsed during IR production so lowering has it)
-    let constraint = parse_trigger_constraint(&lower);
+    // Constraint from full text (parsed during IR production so lowering has it).
+    // CR 603.2 + CR 602.5c: a quoted ability the trigger GRANTS carries its own
+    // restrictions ("Activate only during your turn" on Q, Stacking the Deck's
+    // granted ability); they restrict that ability, never this trigger, so the
+    // quoted spans are masked before the constraint scan.
+    let constraint = parse_trigger_constraint(
+        &super::oracle_nom::primitives::strip_double_quoted_spans(&lower),
+    );
 
     // Parse the effect body
     let effect_for_parse_lower = effect_for_parse.to_lowercase();
@@ -4961,50 +4967,22 @@ fn has_single_indicated_action_instruction(def: &AbilityDefinition) -> bool {
 
 /// Strip constraint sentences from effect text so they don't produce spurious sub-abilities.
 /// The constraint itself is already extracted by `parse_trigger_constraint` from the full text.
+///
+/// CR 113.1a + CR 603.1: a quoted ability the effect GRANTS ("It perpetually
+/// gains \"Whenever this creature becomes the target …, draw a card. This ability
+/// triggers only once each turn.\"" on Niambi, Beloved Protector) carries its own
+/// restriction as part of its own text. Only an unquoted sentence restricts this
+/// trigger; a quoted one is left in place so the granted ability's own parser
+/// reads it.
 fn strip_constraint_sentences(text: &str) -> String {
-    let patterns = [
-        "this ability triggers only once each turn.",
-        "this ability triggers only once each turn",
-        "triggers only once each turn.",
-        "triggers only once each turn",
-        "this ability triggers only once.",
-        "this ability triggers only once",
-        "this ability triggers only during your turn.",
-        "this ability triggers only during your turn",
-        "do this only once each turn.",
-        "do this only once each turn",
-    ];
     let mut result = text.to_string();
-    // Case-insensitive match: Oracle text is mixed-case ("This ability triggers...")
-    // but patterns are lowercase, so find on lowered text and remove from original.
-    let lower_for_static = result.to_lowercase();
-    for pattern in &patterns {
-        if let Some(pos) = lower_for_static.find(pattern) {
-            result.replace_range(pos..pos + pattern.len(), "");
-            break; // At most one constraint sentence per trigger
-        }
+    // At most one fixed-form constraint sentence per trigger.
+    if let Some(span) = unquoted_phrase_span(&result, parse_fixed_constraint_sentence) {
+        result.replace_range(span, "");
     }
-    // Dynamic pattern: "this ability triggers only the first N time(s) each turn."
-    // Uses scan_split_at_phrase + split_once_on instead of raw .find() for dispatch.
-    let lower = result.to_lowercase();
-    if let Some((prefix_text, matched_start)) = scan_split_at_phrase(&lower, |i| {
-        tag::<_, _, OracleError<'_>>("this ability triggers only the first ").parse(i)
-    }) {
-        let start = prefix_text.len();
-        if let Ok((_, (_, after_each_turn))) =
-            nom_primitives::split_once_on(matched_start, "each turn")
-        {
-            let end_pos = lower.len() - after_each_turn.len();
-            let end_pos = if tag::<_, _, OracleError<'_>>(".")
-                .parse(after_each_turn)
-                .is_ok()
-            {
-                end_pos + 1
-            } else {
-                end_pos
-            };
-            result = format!("{}{}", &result[..start], &result[end_pos..]);
-        }
+    // Dynamic form: "this ability triggers only the first N time(s) each turn."
+    if let Some(span) = unquoted_phrase_span(&result, parse_first_n_times_constraint_sentence) {
+        result.replace_range(span, "");
     }
     let result = result.trim().to_string();
     if result.ends_with('.') {
@@ -5012,6 +4990,56 @@ fn strip_constraint_sentences(text: &str) -> String {
     } else {
         result
     }
+}
+
+/// Byte range in `text` of the first word-boundary match of `combinator` that
+/// lies outside every double-quoted span. Matching runs on a lowercased,
+/// length-preserving quote mask, so the range indexes the original text.
+fn unquoted_phrase_span<O>(
+    text: &str,
+    mut combinator: impl for<'a> FnMut(&'a str) -> OracleResult<'a, O>,
+) -> Option<std::ops::Range<usize>> {
+    // ASCII lowercasing preserves byte length (the matched phrases are ASCII),
+    // so offsets in the mask index `text` directly.
+    let masked_lower =
+        nom_primitives::mask_double_quoted_spans_preserving_len(text).to_ascii_lowercase();
+    let (before, _, rest) = scan_preceded(&masked_lower, &mut combinator)?;
+    Some(before.len()..masked_lower.len() - rest.len())
+}
+
+/// A fixed-form trigger frequency sentence, with its terminal period if present.
+fn parse_fixed_constraint_sentence(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        terminated(
+            alt((
+                preceded(
+                    tag("this ability triggers only "),
+                    alt((tag("once each turn"), tag("once"), tag("during your turn"))),
+                ),
+                tag("triggers only once each turn"),
+                // CR 603.2h: "Do this only once each turn."
+                tag("do this only once each turn"),
+            )),
+            opt(tag(".")),
+        ),
+    )
+    .parse(input)
+}
+
+/// "this ability triggers only the first N time(s) each turn", with its
+/// terminal period if present.
+fn parse_first_n_times_constraint_sentence(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("this ability triggers only the first "),
+            take_until("each turn"),
+            tag("each turn"),
+            opt(tag(".")),
+        ),
+    )
+    .parse(input)
 }
 
 /// CR 118.12a + CR 107.4: Parse mana / energy unless-payment tails after
@@ -25138,6 +25166,45 @@ mod grenzo_bullet_modal_tests {
             TargetFilter::TriggeringPlayer,
             "BULLET ExileTop player must be TriggeringPlayer (damaged player), got {exile_player:?}",
         );
+    }
+
+    /// Thada Adel, Acquisitor: the controller searches the DAMAGED player's library
+    /// (not their own), and that same player shuffles.
+    #[test]
+    fn thada_adel_searches_damaged_players_library() {
+        let parsed = parse_oracle_text(
+            "Islandwalk (This creature can't be blocked as long as defending player controls an Island.)\nWhenever Thada Adel deals combat damage to a player, search that player's library for an artifact card and exile it. Then that player shuffles. Until end of turn, you may play that card.",
+            "Thada Adel, Acquisitor",
+            &[],
+            &["Creature".into()],
+            &["Merfolk".into()],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::DamageDone))
+            .expect("DamageDone trigger must parse");
+        let execute = trigger.execute.as_ref().expect("execute must be Some");
+        let effects = flatten_effects(execute);
+        let target_player = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::SearchLibrary { target_player, .. } => Some(target_player.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("must contain SearchLibrary, got {effects:?}"));
+        let Some(TargetFilter::Typed(tf)) = target_player else {
+            panic!(
+                "SearchLibrary must name the triggering player's library, got {target_player:?}"
+            );
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::TriggeringPlayer));
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::Shuffle {
+                target: TargetFilter::TriggeringPlayer
+            }
+        )));
     }
 }
 
