@@ -2006,7 +2006,18 @@ fn try_parse_target_and_same_name_pump_clause(
             toughness,
             target: mass_target,
         },
-        duration: duration.clone().or(Some(Duration::UntilEndOfTurn)),
+        // CR 611.2a: emit the parsed window VERBATIM. This link states no window
+        // of its own unless its own predicate printed one, and `None` is the only
+        // value that says so: an injected `UntilEndOfTurn` is byte-identical to a
+        // printed one, so neither the sentence-window distribution
+        // (`oracle_ir::ast::with_clause_chain_duration`,
+        // `oracle_effect::assembly`'s sentence-scoped stamp) nor the resolver would
+        // be able to tell that this link printed nothing. The end-of-turn fallback
+        // for a windowless link already exists downstream and is the single
+        // authority for it (`game/effects/pump.rs`'s `.unwrap_or`). Measured
+        // corpus-neutral: no card reaching this recognizer prints a window that
+        // this site had been overriding — see issue #7962.
+        duration: duration.clone(),
         sub_ability: None,
         distribute: None,
         multi_target: None,
@@ -2028,7 +2039,8 @@ fn try_parse_target_and_same_name_pump_clause(
         }),
         predicate: Box::new(PredicateAst::Continuous {
             effect: primary_effect,
-            duration: duration.or(Some(Duration::UntilEndOfTurn)),
+            // CR 611.2a: verbatim, for the reason stated on the mass link above.
+            duration,
             sub_ability: Some(Box::new(mass_def)),
             // CR 608.2c: "get -N/-M" is not an "is/has" statement.
             onset: ContinuousEffectOnset::WhenFollowed,
@@ -2725,11 +2737,11 @@ fn try_parse_can_block_additional(
     ))
     .parse(predicate_lower)
     .ok()?;
-    let duration = if subject_text.trim().is_empty() {
-        duration.or(Some(Duration::UntilEndOfTurn))
-    } else {
-        duration
-    };
+    // CR 611.2a: the parsed window stands alone — a suffix-free grant (the
+    // subjectless, inherited-subject form) states NO window and must stay `None`
+    // so an enclosing printed window can distribute onto it. The end-of-turn
+    // fallback for a genuinely windowless grant lives in the resolver
+    // (`game/effects/effect.rs`), which already applies `.unwrap_or`.
     let mode = StaticMode::ExtraBlockers { count };
     let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
