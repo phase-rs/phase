@@ -8,79 +8,91 @@
 //! `zone_pipeline.rs` ("resumed batch delivery records its exact terminal
 //! completion"). The fix records the classification before either terminal.
 //!
+//! Fixture provenance. Every card with rules text is a real printed card with its
+//! verbatim Oracle text, parsed through `*_from_oracle`: Proteus Staff (the
+//! activated reveal-until `BatchDelivery` producer), Archelos, Lagoon Mystic and
+//! Authority of the Consuls (the CR 616.1 entry tap-state ordering prompt),
+//! Deanna Troi, Psychic Counsel, Hardened Scales and Branching Evolution (the
+//! CR 616.1 counter ordering prompt). The victim and the revealed entrant are
+//! textless filler creatures, which carry no Oracle text to paraphrase. No
+//! synthetic card or hand-built replacement definition is used.
+//!
+//! The ordering prompt that parks the batch (pause 1) needs no controller choice:
+//! Authority's "enter tapped" and Archelos's "enter untapped" are both applicable
+//! writers of the same entry tap state and do not commute, so the entrant's
+//! controller P0 gets a free CR 616.1e choice. This was probed through the public
+//! activation before being adopted (it replaced an earlier synthetic
+//! `enters_under` pair): the activation reaches pause 1 (Authority vs Archelos),
+//! then pause 2 (Hardened Scales vs Branching Evolution), then retires the batch.
+//!
 //! Rows:
-//!  1. `resumed_batch_member_settles_after_moved_then_counter_ordering` — a
-//!     reveal-until kept creature enters through a CR 616.1 controller-ordering
-//!     choice and then a CR 616.1 +1/+1-counter ordering choice; the batch must
-//!     settle exactly once with the entrant classified `Moved`.
-//!  2. `resumed_batch_member_without_tail_park_settles_synchronously` — control:
-//!     the Done path is unchanged (no counter prompt, entrant gets 3 counters).
+//!  1. `proteus_staff_activation_batch_settles_through_tap_then_counter_ordering` —
+//!     the production proof. `GameAction::ActivateAbility` -> stack ->
+//!     `reveal_until` -> two `ChooseReplacement` answers -> the batch retires with
+//!     no further priority pass.
+//!  2. `resumed_batch_member_settles_after_tap_state_then_counter_ordering` — seam
+//!     row calling `reveal_until::resolve` directly on the same printed board.
+//!  3. `resumed_batch_member_without_tail_park_settles_synchronously` — seam
+//!     control: the Done path is unchanged (no counter prompt).
 //!
 //! A planned entering-attacker tail-park row was dropped after measuring that a
-//! reveal-until entry with `enters_attacking` reaches `Priority` after the
-//! controller-ordering answer (no `EntryAttackTargetChoice`), so it could not
-//! discriminate the seam; the counter tail park above covers the class.
+//! reveal-until entry with `enters_attacking` reaches `Priority` after the first
+//! ordering answer (no `EntryAttackTargetChoice`), so it could not discriminate
+//! the seam; the counter tail park above covers the class.
 
 use engine::game::effects::reveal_until;
-use engine::game::scenario::{GameScenario, P0};
-use engine::types::ability::{
-    AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp, QuantityExpr,
-    ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TypedFilter,
-};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter, TypedFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{WaitingFor, ZoneMoveCompletion};
+use engine::types::game_state::{GameState, WaitingFor, ZoneMoveCompletion};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
-use engine::types::replacements::ReplacementEvent;
-use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
+const PROTEUS_STAFF: &str = "{2}{U}, {T}: Put target creature on the bottom of its owner's \
+     library. That creature's controller reveals cards from the top of their library until they \
+     reveal a creature card. The player puts that card onto the battlefield and the rest on the \
+     bottom of their library in any order. Activate only as a sorcery.";
+const ARCHELOS_LAGOON_MYSTIC: &str = "As long as Archelos is tapped, other permanents enter \
+     tapped.\nAs long as Archelos is untapped, other permanents enter untapped.";
+const AUTHORITY_OF_THE_CONSULS: &str = "Creatures your opponents control enter tapped.\nWhenever \
+     a creature an opponent controls enters, you gain 1 life.";
+const DEANNA_TROI: &str = "Other creatures you control enter with an additional +1/+1 counter on \
+     them.";
 const HARDENED_SCALES: &str =
     "If one or more +1/+1 counters would be put on a creature you control, \
      that many plus one +1/+1 counters are put on it instead.";
 const BRANCHING_EVOLUTION: &str = "If one or more +1/+1 counters would be put on a creature you \
      control, twice that many +1/+1 counters are put on that creature instead.";
 
-/// CR 614.12a: "enters under [controller]" as a `Moved` replacement candidate.
-fn enters_under_replacement(controller: ControllerRef, label: &str) -> ReplacementDefinition {
-    ReplacementDefinition::new(ReplacementEvent::Moved)
-        .valid_card(TargetFilter::SelfRef)
-        .destination_zone(Zone::Battlefield)
-        .enters_under(controller)
-        .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp))
-        .description(label.to_string())
+/// P0 controls Archelos and Deanna Troi (plus Hardened Scales, and Branching
+/// Evolution when `branching_evolution`); P1 controls Authority of the Consuls,
+/// which taps creatures P0 puts onto the battlefield. Returns Authority's id.
+fn add_printed_board(scenario: &mut GameScenario, branching_evolution: bool) -> ObjectId {
+    scenario.add_creature_from_oracle(P0, "Archelos, Lagoon Mystic", 2, 4, ARCHELOS_LAGOON_MYSTIC);
+    scenario.add_creature_from_oracle(P0, "Deanna Troi, Psychic Counsel", 2, 2, DEANNA_TROI);
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES);
+    if branching_evolution {
+        scenario.add_enchantment_from_oracle(P0, "Branching Evolution", BRANCHING_EVOLUTION);
+    }
+    scenario
+        .add_enchantment_from_oracle(P1, "Authority of the Consuls", AUTHORITY_OF_THE_CONSULS)
+        .id()
 }
 
-/// CR 614.1c: "Other creatures you control enter with an additional +1/+1 counter."
-fn other_creatures_enter_with_two_counters() -> StaticDefinition {
-    StaticDefinition::new(StaticMode::EntersWithAdditionalCounters {
-        counter_type: CounterType::Plus1Plus1,
-        count: 2,
-    })
-    .affected(TargetFilter::Typed(
-        TypedFilter::creature()
-            .controller(ControllerRef::You)
-            .properties(vec![FilterProp::Another]),
-    ))
-}
-
-/// Put a creature card on top of P0's library with the two controller-ordering
-/// replacements attached, and two non-creature cards beneath it.
+/// Put a textless filler creature card on top of P0's library, with two
+/// non-creature cards beneath it.
 fn stage_library(scenario: &mut GameScenario) -> ObjectId {
     scenario.add_card_to_library_top(P0, "Below A");
     scenario.add_card_to_library_top(P0, "Below B");
-    scenario.add_card_to_library_top(P0, "Revealed Beast")
+    scenario.add_card_to_library_top(P0, "Textless Filler Creature")
 }
 
-/// Apply the library card's core type and the two controller-ordering
-/// replacements once the runner owns the state.
-fn configure_kept_creature(
-    state: &mut engine::types::game_state::GameState,
-    kept: ObjectId,
-    two_controller_choices: bool,
-) {
+/// Give the staged library card its creature type once the runner owns the state.
+fn configure_kept_creature(state: &mut GameState, kept: ObjectId) {
     let obj = state.objects.get_mut(&kept).unwrap();
     obj.card_types.core_types = vec![CoreType::Creature];
     obj.base_card_types = obj.card_types.clone();
@@ -88,19 +100,9 @@ fn configure_kept_creature(
     obj.toughness = Some(2);
     obj.base_power = Some(2);
     obj.base_toughness = Some(2);
-    if two_controller_choices {
-        obj.replacement_definitions.push(enters_under_replacement(
-            ControllerRef::You,
-            "Enters under you",
-        ));
-        obj.replacement_definitions.push(enters_under_replacement(
-            ControllerRef::Opponent,
-            "Enters under an opponent",
-        ));
-    }
 }
 
-fn reveal_until_ability(source: ObjectId, enters_attacking: bool) -> ResolvedAbility {
+fn reveal_until_ability(source: ObjectId) -> ResolvedAbility {
     ResolvedAbility::new(
         Effect::RevealUntil {
             player: TargetFilter::Controller,
@@ -111,7 +113,7 @@ fn reveal_until_ability(source: ObjectId, enters_attacking: bool) -> ResolvedAbi
             rest_destination: Zone::Library,
             rest_order: Default::default(),
             enter_tapped: Default::default(),
-            enters_attacking,
+            enters_attacking: false,
             kept_optional_to: None,
             enters_under: None,
             kept_destination_if: None,
@@ -124,9 +126,7 @@ fn reveal_until_ability(source: ObjectId, enters_attacking: bool) -> ResolvedAbi
 
 /// Read the parked batch's paused member classification through the same path
 /// the resume capture uses (the batch may sit below a PostReplacement child).
-fn parked_terminal_completion(
-    runner: &mut engine::game::scenario::GameRunner,
-) -> Option<Option<ZoneMoveCompletion>> {
+fn parked_terminal_completion(runner: &mut GameRunner) -> Option<Option<ZoneMoveCompletion>> {
     runner
         .state_mut()
         .resolution_stack
@@ -135,7 +135,7 @@ fn parked_terminal_completion(
         .map(|paused| paused.terminal_completion)
 }
 
-fn describe_waiting(state: &engine::types::game_state::GameState) -> String {
+fn describe_waiting(state: &GameState) -> String {
     match &state.waiting_for {
         WaitingFor::ReplacementChoice {
             candidate_count,
@@ -145,7 +145,7 @@ fn describe_waiting(state: &engine::types::game_state::GameState) -> String {
             "ReplacementChoice({candidate_count}: {})",
             candidates
                 .iter()
-                .map(|candidate| candidate.description.clone())
+                .map(|candidate| format!("{}: {}", candidate.source_name, candidate.description))
                 .collect::<Vec<_>>()
                 .join(" | ")
         ),
@@ -153,40 +153,200 @@ fn describe_waiting(state: &engine::types::game_state::GameState) -> String {
     }
 }
 
+/// Assert the current prompt is a two-way CR 616.1 ordering offered to P0 whose
+/// candidates come from `sources`, and return the index of the `answer` source.
+fn two_way_ordering_index(state: &GameState, sources: [&str; 2], answer: &str) -> usize {
+    match &state.waiting_for {
+        WaitingFor::ReplacementChoice {
+            player,
+            candidate_count: 2,
+            candidates,
+            ..
+        } => {
+            assert_eq!(*player, P0, "the entrant's controller orders (CR 616.1)");
+            for source in sources {
+                assert!(
+                    candidates
+                        .iter()
+                        .any(|candidate| candidate.source_name == source),
+                    "{source} must be an offered candidate, got {}",
+                    describe_waiting(state)
+                );
+            }
+            candidates
+                .iter()
+                .position(|candidate| candidate.source_name == answer)
+                .unwrap_or_else(|| panic!("{answer} must be offered"))
+        }
+        other => panic!(
+            "expected a two-way ordering of {sources:?}, got {other:?} ({})",
+            describe_waiting(state)
+        ),
+    }
+}
+
+/// CR 616.1e + CR 616.1f: answer the entry tap-state ordering with Authority first
+/// so Archelos's "untapped" write is applied last and wins.
+fn answer_tap_state_ordering(runner: &mut GameRunner) {
+    let index = two_way_ordering_index(
+        runner.state(),
+        ["Authority of the Consuls", "Archelos, Lagoon Mystic"],
+        "Authority of the Consuls",
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("answer the tap-state ordering");
+}
+
+/// CR 616.1e + CR 122.6: answer the counter ordering with Hardened Scales first.
+fn answer_counter_ordering(runner: &mut GameRunner) {
+    let index = two_way_ordering_index(
+        runner.state(),
+        ["Hardened Scales", "Branching Evolution"],
+        "Hardened Scales",
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("answer the counter ordering");
+}
+
+fn plus_one_counters(state: &GameState, object: ObjectId) -> u32 {
+    state
+        .objects
+        .get(&object)
+        .expect("the object is live")
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Production proof. A real activation creates the `BatchDelivery`, the entrant
+/// pauses twice (tap-state ordering, then counter ordering), and the resumed
+/// member is classified before the batch owner drains.
 #[test]
-fn resumed_batch_member_settles_after_moved_then_counter_ordering() {
+fn proteus_staff_activation_batch_settles_through_tap_then_counter_ordering() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-
-    // CR 614.1c + CR 616.1: a static 2-counter grant plus two non-commuting
-    // counter replacements (additive Hardened Scales vs multiplicative Branching
-    // Evolution) force the counter-ordering choice.
-    scenario
-        .add_creature(P0, "Counter Lord", 1, 1)
-        .with_static_definition(other_creatures_enter_with_two_counters());
-    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES);
-    scenario.add_enchantment_from_oracle(P0, "Branching Evolution", BRANCHING_EVOLUTION);
-
+    // CR 602.2: {2}{U} for the activation (the {T} is paid by tapping the Staff).
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let staff = scenario
+        .add_artifact_from_oracle(P0, "Proteus Staff", PROTEUS_STAFF)
+        .id();
+    let authority = add_printed_board(&mut scenario, true);
+    let victim = scenario.add_vanilla(P0, 2, 2);
     let kept = stage_library(&mut scenario);
     let mut runner = scenario.build();
-    configure_kept_creature(runner.state_mut(), kept, true);
-    let source = kept;
+    configure_kept_creature(runner.state_mut(), kept);
 
-    let ability = reveal_until_ability(source, false);
+    // CR 602.2 + CR 602.5d (sorcery timing, P0's main phase with an empty stack):
+    // activate, target the victim, pay, and resolve until the first prompt.
+    let outcome = runner.activate(staff, 0).target_object(victim).resolve();
+
+    // Reach guard (CR 616.1): pause 1 is the two-way tap-state ordering, owned by
+    // a batch parked by the activation's own resolution.
+    two_way_ordering_index(
+        outcome.state(),
+        ["Authority of the Consuls", "Archelos, Lagoon Mystic"],
+        "Authority of the Consuls",
+    );
+    let state = runner.state();
+    assert!(
+        state.active_batch_delivery().is_some(),
+        "the activation parked a BatchDelivery across pause 1, got {}",
+        describe_waiting(state)
+    );
+    assert!(
+        state.objects[&staff].tapped,
+        "the Staff's {{T}} cost was paid"
+    );
+    assert_eq!(
+        state.players[0].library.back().copied(),
+        Some(victim),
+        "the victim went to the bottom of its owner's library"
+    );
+    assert_eq!(state.objects[&kept].zone, Zone::Library);
+    assert_eq!(
+        parked_terminal_completion(&mut runner),
+        Some(None),
+        "nothing is classified before the resumed delivery runs"
+    );
+
+    // CR 616.1e + CR 616.1f: Authority first, so Archelos's untap write wins.
+    answer_tap_state_ordering(&mut runner);
+    // Pause 2: the counter ordering. The resumed segment is already classified
+    // (this is the fix) even though its delivery parked again.
+    answer_counter_ordering(&mut runner);
+
+    // CR 608.2n + CR 117.3b: with no priority pass in between, the activation's
+    // resolution is complete and its controller receives priority with the batch
+    // and every resolution carrier retired.
+    let state = runner.state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+        "settled back to P0's priority, got {}",
+        describe_waiting(state)
+    );
+    assert!(
+        state.active_batch_delivery().is_none() && state.resolution_stack.is_empty(),
+        "the batch settled exactly once and no resolution frame survives"
+    );
+    assert!(state.pending_replacement.is_none());
+    // CR 603.2 + CR 603.3b: the only stack object is Authority's "whenever a
+    // creature an opponent controls enters" trigger for the entrant, controlled by
+    // Authority's controller P1 and placed before P0 received priority.
+    assert_eq!(
+        state
+            .stack
+            .iter()
+            .map(|entry| (entry.source_id, entry.controller))
+            .collect::<Vec<_>>(),
+        vec![(authority, P1)],
+        "Authority's lifegain trigger is the only stack object"
+    );
+    let entrant = &state.objects[&kept];
+    assert_eq!(entrant.zone, Zone::Battlefield, "the kept creature entered");
+    assert_eq!(entrant.controller, P0, "the entrant is controlled by P0");
+    assert!(
+        !entrant.tapped,
+        "Archelos's untapped write was applied last (CR 616.1f)"
+    );
+    // CR 614.1d + CR 122.6: Deanna Troi's one counter, then Hardened Scales first
+    // ((1 + 1) x 2 = 4); Branching Evolution first would give 1 x 2 + 1 = 3.
+    assert_eq!(
+        plus_one_counters(state, kept),
+        4,
+        "the non-commuting counter replacements apply in the answered order"
+    );
+}
+
+/// Seam row: the same printed board driven through `reveal_until::resolve`
+/// directly. The public activation row above is the production proof.
+#[test]
+fn resumed_batch_member_settles_after_tap_state_then_counter_ordering() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_printed_board(&mut scenario, true);
+    let kept = stage_library(&mut scenario);
+    let mut runner = scenario.build();
+    configure_kept_creature(runner.state_mut(), kept);
+
+    let ability = reveal_until_ability(kept);
     let mut events = Vec::new();
     reveal_until::resolve(runner.state_mut(), &ability, &mut events).unwrap();
 
-    // Pause 1: the two `enters_under` candidates (CR 616.1b).
-    assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::ReplacementChoice {
-                candidate_count: 2,
-                ..
-            }
-        ),
-        "pause 1 must be the two-way controller ordering, got {}",
-        describe_waiting(runner.state())
+    // Pause 1: Authority vs Archelos (CR 616.1e).
+    two_way_ordering_index(
+        runner.state(),
+        ["Authority of the Consuls", "Archelos, Lagoon Mystic"],
+        "Authority of the Consuls",
     );
     assert!(
         runner.state().active_batch_delivery().is_some(),
@@ -197,140 +357,58 @@ fn resumed_batch_member_settles_after_moved_then_counter_ordering() {
         Some(None),
         "nothing is classified before the resumed delivery runs"
     );
+    answer_tap_state_ordering(&mut runner);
+    answer_counter_ordering(&mut runner);
 
-    // Answer pause 1 with the `Opponent` candidate so `You` is applied last and
-    // the entrant is controlled by P0 (the only order where the counter
-    // replacements apply at all).
-    let opponent_index = match &runner.state().waiting_for {
-        WaitingFor::ReplacementChoice { candidates, .. } => candidates
-            .iter()
-            .position(|candidate| candidate.description.contains("opponent"))
-            .expect("the Opponent candidate is offered"),
-        other => panic!("expected the controller ordering, got {other:?}"),
-    };
-    runner
-        .act(GameAction::ChooseReplacement {
-            index: opponent_index,
-        })
-        .expect("answer the controller ordering");
-
-    // Pause 2: the counter-ordering choice. The resumed segment has already been
-    // classified `Moved` (this is the fix), even though the delivery parked again.
+    let state = runner.state();
     assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::ReplacementChoice {
-                candidate_count: 2,
-                ..
-            }
-        ),
-        "pause 2 must be the two-way counter ordering, got {}",
-        describe_waiting(runner.state())
-    );
-    // Answer the counter ordering with Hardened Scales first: (2 + 1) * 2 = 6.
-    let scales_index = match &runner.state().waiting_for {
-        WaitingFor::ReplacementChoice { candidates, .. } => candidates
-            .iter()
-            .position(|candidate| candidate.description.contains("plus one"))
-            .unwrap_or(0),
-        other => panic!("expected the counter ordering, got {other:?}"),
-    };
-    runner
-        .act(GameAction::ChooseReplacement {
-            index: scales_index,
-        })
-        .expect("answer the counter ordering");
-
-    // The tail continuation drains at the next priority window; the batch
-    // settles exactly once (pre-fix this drain panics at `zone_pipeline.rs`).
-    for _ in 0..8 {
-        if runner.state().active_batch_delivery().is_none() {
-            break;
-        }
-        assert!(
-            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-            "the drained batch must return to priority, got {}",
-            describe_waiting(runner.state())
-        );
-        runner
-            .act(GameAction::PassPriority)
-            .expect("pass priority to drain the batch tail");
-    }
-    assert!(
-        runner.state().active_batch_delivery().is_none(),
+        state.active_batch_delivery().is_none() && state.resolution_stack.is_empty(),
         "the batch must settle exactly once, got {}",
-        describe_waiting(runner.state())
+        describe_waiting(state)
     );
     assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
         "settled back to priority, got {}",
-        describe_waiting(runner.state())
+        describe_waiting(state)
     );
-    let entrant = runner
-        .state()
-        .objects
-        .get(&kept)
-        .expect("the kept creature is live");
+    let entrant = &state.objects[&kept];
     assert_eq!(entrant.zone, Zone::Battlefield, "the kept creature entered");
     assert_eq!(entrant.controller, P0, "the entrant is controlled by P0");
-    assert_eq!(
-        entrant
-            .counters
-            .get(&CounterType::Plus1Plus1)
-            .copied()
-            .unwrap_or(0),
-        6,
-        "the non-commuting counter replacements apply in the answered order"
-    );
+    // CR 614.1d + CR 122.6: (1 from Deanna Troi + 1) x 2 with Hardened Scales first.
+    assert_eq!(plus_one_counters(state, kept), 4);
 }
 
+/// Seam control: with no second counter replacement the delivery does not park
+/// again, so the pre-existing capture path classifies it.
 #[test]
 fn resumed_batch_member_without_tail_park_settles_synchronously() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    scenario
-        .add_creature(P0, "Counter Lord", 1, 1)
-        .with_static_definition(other_creatures_enter_with_two_counters());
-    // Only one counter replacement: additive alone is a single candidate, so the
-    // delivery returns Done and the pre-existing capture path classifies it.
-    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES);
-
+    // Hardened Scales alone is a single counter candidate (no counter ordering).
+    add_printed_board(&mut scenario, false);
     let kept = stage_library(&mut scenario);
     let mut runner = scenario.build();
-    configure_kept_creature(runner.state_mut(), kept, true);
-    let source = kept;
+    configure_kept_creature(runner.state_mut(), kept);
 
-    let ability = reveal_until_ability(source, false);
+    let ability = reveal_until_ability(kept);
     let mut events = Vec::new();
     reveal_until::resolve(runner.state_mut(), &ability, &mut events).unwrap();
+    answer_tap_state_ordering(&mut runner);
 
-    let opponent_index = match &runner.state().waiting_for {
-        WaitingFor::ReplacementChoice { candidates, .. } => candidates
-            .iter()
-            .position(|candidate| candidate.description.contains("opponent"))
-            .expect("the Opponent candidate is offered"),
-        other => panic!("expected the controller ordering, got {other:?}"),
-    };
-    runner
-        .act(GameAction::ChooseReplacement {
-            index: opponent_index,
-        })
-        .expect("answer the controller ordering");
-
+    let state = runner.state();
     assert!(
-        runner.state().active_batch_delivery().is_none(),
-        "no tail park: the batch settles synchronously"
+        state.active_batch_delivery().is_none(),
+        "no tail park: the batch settles synchronously, got {}",
+        describe_waiting(state)
     );
-    let entrant = &runner.state().objects[&kept];
+    let entrant = &state.objects[&kept];
     assert_eq!(entrant.zone, Zone::Battlefield);
     assert_eq!(entrant.controller, P0);
+    // Positive reach guard: Deanna Troi's static applied at runtime (1) plus
+    // Hardened Scales (1).
     assert_eq!(
-        entrant
-            .counters
-            .get(&CounterType::Plus1Plus1)
-            .copied()
-            .unwrap_or(0),
-        3,
-        "2 from the static plus 1 from Hardened Scales"
+        plus_one_counters(state, kept),
+        2,
+        "1 from Deanna Troi plus 1 from Hardened Scales"
     );
 }

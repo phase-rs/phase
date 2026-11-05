@@ -4653,13 +4653,15 @@ impl PendingZoneChangeDelivery {
     ///
     /// The approved resume event is the SAME occurrence as the parked boundary
     /// event but carries the chosen replacement's modifications
-    /// (`controller_override`, `enter_with_taps/counters`, `applied`, …), so
-    /// exact `ProposedEvent` equality (what [`Self::captures`] checks for the
+    /// (`controller_override`, `enter_with_taps/counters`, `to`, `applied`, …),
+    /// so exact `ProposedEvent` equality (what [`Self::captures`] checks for the
     /// pre-choice boundary) rejects it. The paused key's job at the resume seam
-    /// is to prove *which* member is being delivered; the incarnation-bearing
-    /// `member` already makes that unique, and the occurrence (object, from, to)
-    /// must agree. A later, different zone change of the same object is a new
-    /// incarnation and therefore a different member.
+    /// is to prove *which* member is being delivered. It matches the pre-move
+    /// occurrence (member incarnation, object, origin zone); the destination,
+    /// controller and entry modifiers are replacement-controlled (CR 614.6,
+    /// CR 614.1c / CR 614.1d, CR 616.1) and never part of the key. A later,
+    /// different zone change of the same object is a new incarnation and
+    /// therefore a different member.
     pub fn captures_resumed(
         &self,
         member: ObjectIncarnationRef,
@@ -4671,7 +4673,6 @@ impl PendingZoneChangeDelivery {
         let ProposedEvent::ZoneChange {
             object_id: expected_object,
             from: expected_from,
-            to: expected_to,
             ..
         } = &self.expected_event
         else {
@@ -4679,8 +4680,8 @@ impl PendingZoneChangeDelivery {
         };
         matches!(
             approved_event,
-            ProposedEvent::ZoneChange { object_id, from, to, .. }
-                if object_id == expected_object && from == expected_from && to == expected_to
+            ProposedEvent::ZoneChange { object_id, from, .. }
+                if object_id == expected_object && from == expected_from
         )
     }
 
@@ -31983,7 +31984,7 @@ impl GameState {
     /// owners and single-authority classification as
     /// [`Self::capture_paused_zone_change_delivery`], but matched by
     /// [`PendingZoneChangeDelivery::captures_resumed`] so a controller/counter
-    /// override does not defeat the key comparison.
+    /// override or a CR 614.6 zone redirect does not defeat the key comparison.
     pub fn capture_resumed_paused_zone_change_delivery(
         &mut self,
         member: ObjectIncarnationRef,

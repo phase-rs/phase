@@ -548,7 +548,8 @@ fn handle_replacement_choice_inner(
                         // Exact boundary match first (the historical path every
                         // shipped park uses), then the occurrence-level match for a
                         // resume whose approved event carries the chosen
-                        // replacement's modifications (controller/counter override).
+                        // replacement's modifications (controller/counter override
+                        // or a CR 614.6 zone redirect).
                         let matched = state.capture_paused_zone_change_delivery(
                             paused.member,
                             &paused.expected_event,
