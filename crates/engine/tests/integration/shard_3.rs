@@ -11,6 +11,7 @@ pub mod support;
 mod dark_confidant_upkeep;
 mod dark_depths_thespian_stage;
 mod darkness_crystal_exiled_with_activation_8164;
+mod dathon_his_heart_open_counter_kind;
 mod dawnbreak_reclaimer;
 mod dazzling_beauty_become_blocked;
 mod death_priest_myrkul_oxford_anthem;
