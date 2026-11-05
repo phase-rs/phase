@@ -165,11 +165,10 @@ fn r1_soulherder_fires_when_a_token_is_exiled_from_the_battlefield() {
 }
 
 /// R1-simultaneous: Soulherder counts every creature exiled from the battlefield
-/// by a single effect. CR 603.6c + CR 603.10a: each creature that moves from the
-/// battlefield to exile is its own leaves-the-battlefield event that the
-/// ability looks back in time to see, and Soulherder is still on the
-/// battlefield when they happen, so it triggers once per creature. Declaration
-/// in Stone exiles both Bears at once.
+/// by a single effect. CR 603.2c + CR 603.10a: Declaration in Stone exiles both
+/// Bears in one event that contains two occurrences of a creature being exiled
+/// from the battlefield; Soulherder, on the battlefield throughout, looks back
+/// at that event and triggers once per occurrence.
 #[test]
 fn r1_soulherder_counts_every_creature_exiled_at_once_while_it_survives() {
     let mut scenario = board();
@@ -210,10 +209,12 @@ fn r1_soulherder_counts_every_creature_exiled_at_once_while_it_survives() {
 }
 
 /// R1-last-known-power: Captain Marvel, Shooting Star gains life equal to the
-/// exiled creature's power as it last existed on the battlefield. CR 603.10a:
-/// a leaves-the-battlefield trigger looks back in time, so the +1/+1 counters
-/// that were on the Bears count even though the card in exile has none
-/// (power 4 on the battlefield, 2 in exile).
+/// exiled creature's power as it last existed on the battlefield. CR 603.10a +
+/// CR 608.2h: a leaves-the-battlefield trigger looks back in time to trigger,
+/// and at resolution the exiled creature is no longer on the battlefield where
+/// the effect expects it, so "its power" uses its last known information: the
+/// +1/+1 counters that were on the Bears count even though the card in exile
+/// has none (power 4 on the battlefield, 2 in exile).
 #[test]
 fn r1_captain_marvel_gains_the_exiled_creatures_last_known_power() {
     let mut scenario = board();
