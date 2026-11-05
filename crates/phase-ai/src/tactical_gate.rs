@@ -6302,11 +6302,11 @@ mod tests {
                 filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
             },
         };
-        Arc::make_mut(&mut state.objects.get_mut(&congregate).unwrap().abilities)[0].effect =
-            Box::new(Effect::GainLife {
+        *Arc::make_mut(&mut state.objects.get_mut(&congregate).unwrap().abilities)[0].effect =
+            Effect::GainLife {
                 amount: amount.clone(),
                 player: TargetFilter::Player,
-            });
+            };
         assert!(!zero_cast_is_retained(&state, congregate));
         let witness = create_object(
             &mut state,
