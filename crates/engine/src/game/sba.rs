@@ -1073,7 +1073,16 @@ fn perform_creature_deaths(
                     }
                     *any_performed = true;
                 }
-                ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
+                ReplacementResult::Prevented => {
+                    *any_performed = true;
+                    // A replacing continuation that needs a choice falls back
+                    // to the sequential path, which surfaces the prompt.
+                    if run_prevented_destruction_continuation(state, events).is_some() {
+                        paused = true;
+                        break;
+                    }
+                }
+                ReplacementResult::Execute(_) => {
                     *any_performed = true;
                 }
                 ReplacementResult::NeedsChoice(_) => {
@@ -1252,6 +1261,10 @@ fn perform_creature_deaths(
             ReplacementResult::Prevented => {
                 // CR 701.19b: Regeneration prevented destruction — still counts as SBA performed.
                 *any_performed = true;
+                if let Some(waiting_for) = run_prevented_destruction_continuation(state, events) {
+                    state.waiting_for = waiting_for;
+                    return;
+                }
             }
             ReplacementResult::NeedsChoice(player) => {
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
@@ -1265,6 +1278,25 @@ fn perform_creature_deaths(
     // CR 701.19a/b: a creature whose destruction was Prevented (regeneration)
     // stays on the battlefield, so `departed_subset` excludes it from the group.
     zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
+}
+
+/// CR 614.6 + CR 704.3: a destruction replaced by "instead <effect>" (Dr.
+/// McCoy's "remove all +1/+1 counters from it and all damage already dealt to
+/// it is healed") has its replacing instructions carried out in place of the
+/// destruction, before state-based actions are checked again. Left stashed, the
+/// lethal damage that triggered the destruction would still be marked and the
+/// next check would destroy the creature again. Returns the prompt when the
+/// continuation needs a player's choice.
+fn run_prevented_destruction_continuation(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    if !state.has_post_replacement_drain() {
+        return None;
+    }
+    crate::game::engine_replacement::apply_pending_post_replacement_effect(
+        state, None, None, None, events,
+    )
 }
 
 /// CR 704.5j: A legendary permanent is exempt from the legend rule while an
