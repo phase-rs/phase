@@ -1638,6 +1638,12 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
         }
     }
 
+    // CR 601.2a + CR 611.2c: cards in another player's hand under a
+    // resolution-created `HandPlayPermission` (Sen Triplets).
+    objects.extend(other_hand_spell_objects_castable_by_permission(
+        state, player,
+    ));
+
     objects
         .into_iter()
         .filter(|obj_id| {
@@ -2184,6 +2190,15 @@ pub(in crate::game) fn priority_play_land_announcements(
         }
     }
     for (object_id, _) in exile_lands_playable_by_permission(state, land_resource_owner) {
+        if let Some(object) = state.objects.get(&object_id) {
+            if land_play_is_permitted_by_restrictions(state, land_resource_owner, object) {
+                announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
+            }
+        }
+    }
+    // CR 116.2a + CR 305.1: lands in another player's hand under a `Play`-mode
+    // `HandPlayPermission` (Sen Triplets).
+    for (object_id, _) in other_hand_lands_playable_by_permission(state, land_resource_owner) {
         if let Some(object) = state.objects.get(&object_id) {
             if land_play_is_permitted_by_restrictions(state, land_resource_owner, object) {
                 announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
@@ -4282,6 +4297,10 @@ pub(crate) fn castable_from_current_zone(
         // entitled to it.) `hand_alt_cost_permission_names_caster` resolves the entitlement:
         // a named grantee must be this player, and an unnamed one falls back to the owner.
         || (has_hand_alt_cost_permission(state, obj, player) && normal_cost_route())
+        // CR 601.2a + CR 611.2c: a resolution-created permission to cast spells
+        // from another player's hand (Sen Triplets). The caster pays the card's
+        // normal costs and becomes the spell's controller (CR 601.2a).
+        || other_hand_play_permission_source(state, player, obj, CardPlayMode::Cast).is_some()
         // CR 601.2a + CR 601.3: Graveyard cast via static permission (Lurrus,
         // etc.). Whose turn it must be is the permission's own condition, not a
         // blanket gate here. Outside the owner block below because the
@@ -7729,6 +7748,114 @@ pub(super) fn exile_land_play_authorization(
 /// a battlefield `StaticMode::ExileCastPermission { play_mode: Play }` static
 /// (The Matrix of Time). Returns `(land_id, source_id)` for once-per-turn
 /// tracking by the play-land path.
+/// CR 601.2a + CR 116.2a + CR 611.2c: the source of a resolution-created
+/// `StaticMode::HandPlayPermission` (Sen Triplets: "You may play lands and cast
+/// spells from that player's hand this turn") that lets `player` take `obj` from
+/// ANOTHER player's hand in `mode`.
+///
+/// The single authority every surface asks — cast discovery, cast admission,
+/// land discovery and the land-play gate — so offering and accepting can never
+/// disagree. Read directly off the player-scoped transient effect: its
+/// `controller` is the permission's holder and its `affected` filter (frozen at
+/// resolution to the named player's hand) is re-evaluated at each attempt, so a
+/// card that reaches that hand later in the duration is covered (CR 611.2c).
+/// A card in `player`'s own hand needs no permission and is never admitted here.
+pub(crate) fn other_hand_play_permission_source(
+    state: &GameState,
+    player: PlayerId,
+    obj: &GameObject,
+    mode: CardPlayMode,
+) -> Option<ObjectId> {
+    if obj.zone != Zone::Hand || obj.owner == player {
+        return None;
+    }
+    state
+        .transient_continuous_effects
+        .iter()
+        .filter(|tce| tce.controller == player)
+        .filter(|tce| {
+            tce.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::HandPlayPermission { play_mode },
+                    } if graveyard_permission_play_mode_matches(*play_mode, Some(mode))
+                )
+            })
+        })
+        // CR 611.2b: every gate of a resolution-created effect must hold.
+        .filter(|tce| {
+            super::layers::transient_gate_conditions(tce).all(|condition| {
+                super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id)
+            })
+        })
+        .find(|tce| {
+            super::filter::matches_target_filter(
+                state,
+                obj.id,
+                &tce.affected,
+                &super::filter::FilterContext::from_source_with_controller(tce.source_id, player),
+            )
+        })
+        .map(|tce| tce.source_id)
+}
+
+/// CR 601.2a + CR 611.2c: spells `player` may cast from other players' hands
+/// under a `HandPlayPermission` (see [`other_hand_play_permission_source`]).
+fn other_hand_spell_objects_castable_by_permission(
+    state: &GameState,
+    player: PlayerId,
+) -> Vec<ObjectId> {
+    state
+        .players
+        .iter()
+        .filter(|other| other.id != player)
+        .flat_map(|other| other.hand.iter().copied())
+        .filter(|obj_id| {
+            state.objects.get(obj_id).is_some_and(|obj| {
+                object_may_enter_cast_path(obj)
+                    && other_hand_play_permission_source(state, player, obj, CardPlayMode::Cast)
+                        .is_some()
+            })
+        })
+        .collect()
+}
+
+/// CR 116.2a + CR 305.1: land cards `player` may play from other players' hands
+/// under a `Play`-mode `HandPlayPermission`, paired with the granting source.
+/// The play is `player`'s own land play (CR 305.2), so the caller's land-drop
+/// and restriction gates apply unchanged.
+pub fn other_hand_lands_playable_by_permission(
+    state: &GameState,
+    player: PlayerId,
+) -> Vec<(ObjectId, ObjectId)> {
+    state
+        .players
+        .iter()
+        .filter(|other| other.id != player)
+        .flat_map(|other| other.hand.iter().copied())
+        .filter_map(|obj_id| {
+            let obj = state.objects.get(&obj_id)?;
+            let is_playable_land = obj
+                .card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+                || obj.back_face.as_ref().is_some_and(|back_face| {
+                    back_face.layout_kind == Some(LayoutKind::Modal)
+                        && back_face
+                            .card_types
+                            .core_types
+                            .contains(&crate::types::card_type::CoreType::Land)
+                });
+            if !is_playable_land {
+                return None;
+            }
+            other_hand_play_permission_source(state, player, obj, CardPlayMode::Play)
+                .map(|source| (obj_id, source))
+        })
+        .collect()
+}
+
 pub fn exile_lands_playable_by_permission(
     state: &GameState,
     player: PlayerId,

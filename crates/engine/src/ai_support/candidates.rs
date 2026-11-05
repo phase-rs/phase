@@ -4631,6 +4631,22 @@ pub(crate) fn priority_actions_with_probe(
                 }
             }
         }
+        // CR 116.2a + CR 305.1: lands in another player's hand under a
+        // `Play`-mode `HandPlayPermission` (Sen Triplets).
+        for (obj_id, _source) in casting::other_hand_lands_playable_by_permission(state, player) {
+            if let Some(obj) = state.objects.get(&obj_id) {
+                if !casting::is_blocked_by_cant_play_lands(state, player, obj) {
+                    actions.push(candidate(
+                        GameAction::PlayLand {
+                            object_id: obj_id,
+                            card_id: obj.card_id,
+                        },
+                        TacticalClass::Land,
+                        Some(player),
+                    ));
+                }
+            }
+        }
         for (obj_id, _source) in casting::exile_lands_playable_by_permission(state, player) {
             if let Some(obj) = state.objects.get(&obj_id) {
                 if !casting::is_blocked_by_cant_play_lands(state, player, obj) {

@@ -19426,11 +19426,24 @@ fn handle_play_land(
         None
     };
     let in_exile_with_permission = exile_play_authorization.is_some();
+    // CR 116.2a + CR 305.1: a land in ANOTHER player's hand under a `Play`-mode
+    // `HandPlayPermission` (Sen Triplets). It is `player`'s land play (CR 305.2,
+    // checked above) and enters under `player`'s control (CR 110.2).
+    let in_other_hand_with_permission = state.objects.get(&object_id).is_some_and(|obj| {
+        super::casting::other_hand_play_permission_source(
+            state,
+            player,
+            obj,
+            crate::types::ability::CardPlayMode::Play,
+        )
+        .is_some()
+    });
 
     if !in_hand
         && !in_graveyard_with_permission
         && !in_library_with_permission
         && !in_exile_with_permission
+        && !in_other_hand_with_permission
     {
         return Err(EngineError::InvalidAction(
             "Card not found in hand, graveyard, exile, or library with play permission".to_string(),
@@ -19505,7 +19518,7 @@ fn handle_play_land(
     }
 
     // Determine origin zone for the zone change event
-    let origin_zone = if in_hand {
+    let origin_zone = if in_hand || in_other_hand_with_permission {
         Zone::Hand
     } else if in_graveyard_with_permission {
         Zone::Graveyard

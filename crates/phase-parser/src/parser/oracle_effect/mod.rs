@@ -166,7 +166,8 @@ use crate::types::replacements::ReplacementEvent;
 #[cfg(test)]
 use crate::types::statics::CastFreeOrigin;
 use crate::types::statics::{
-    ActivationExemption, CastFrequency, GraveyardPermissionPool, PermissionCastLimit, StaticMode,
+    ActivationExemption, CastFrequency, GraveyardPermissionPool, PermissionCastLimit,
+    ProhibitionScope, StaticMode,
 };
 use crate::types::triggers::{ControlChangeSide, TriggerMode};
 use crate::types::zones::Zone;
@@ -6092,6 +6093,45 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
         return None;
     }
 
+    // CR 602.5 + CR 605.1a: a disjoined "or activate abilities" verb shares the
+    // subject and duration ("that player can't cast spells or activate
+    // abilities" — Sen Triplets). A bare "activate abilities" names every
+    // activated ability, mana abilities included, so it carries no exemption.
+    // Only the blanket cast ban composes this way; a filtered spell ban
+    // ("can't cast creature spells or activate …") is left to fall through.
+    let (also_activate, remaining) = match nom_on_lower(remaining, remaining_lower, |input| {
+        value((), tag(" or activate abilities")).parse(input)
+    }) {
+        Some(((), rest)) if spell_filter_text.is_none() => (true, rest),
+        Some(_) => return None,
+        None => (false, remaining),
+    };
+    let remaining_lower = &rest_lower[rest_lower.len() - remaining.len()..];
+
+    // CR 400.2 + CR 701.20b: a conjoined "and plays with their hand revealed"
+    // predicate shares the restriction's subject and duration. It is a
+    // player-bound continuous effect on the same player, so it is only composed
+    // for the anaphoric "that player" subject, whose player is the parent
+    // target the reveal binds to.
+    let (reveal_hand, remaining) = match nom_on_lower(remaining, remaining_lower, |input| {
+        value(
+            (),
+            (
+                tag(" and "),
+                alt((tag("plays"), tag("play"))),
+                tag(" with their hand revealed"),
+            ),
+        )
+        .parse(input)
+    }) {
+        Some(((), rest)) if affected_players == RestrictionPlayerScope::ParentTargetedPlayer => {
+            (true, rest)
+        }
+        Some(_) => return None,
+        None => (false, remaining),
+    };
+    let remaining_lower = &rest_lower[rest_lower.len() - remaining.len()..];
+
     // CR 514.2 + CR 500.7 + CR 109.5: a TRAILING "during their next turn" /
     // "during that player's next turn" clause (Sphinx's Decree, Azor) makes the
     // prohibition expire at the affected player's next turn — the cast-branch
@@ -6136,11 +6176,52 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
         .trim_start()
         .trim_start_matches([',', ' '])
         .trim_start();
-    let sub_ability = if tail.is_empty() {
+    let mut sub_ability = if tail.is_empty() {
         None
     } else {
         Some(Box::new(parse_effect_chain(tail, AbilityKind::Spell)))
     };
+    // CR 400.2 + CR 611.2a: the reveal conjunct lasts as long as the
+    // restriction ("this turn" unless a leading duration says otherwise).
+    if reveal_hand {
+        let reveal_duration = duration.clone().unwrap_or(Duration::UntilEndOfTurn);
+        let mut reveal = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::RevealHand {
+                            who: ProhibitionScope::Controller,
+                        },
+                    }])],
+                duration: Some(reveal_duration.clone()),
+                target: None,
+                end_cost: None,
+            },
+        )
+        .duration(reveal_duration);
+        reveal.sub_ability = sub_ability.take();
+        sub_ability = Some(Box::new(reveal));
+    }
+    if also_activate {
+        let mut activate = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    source: ObjectId(0),
+                    affected_players: affected_players.clone(),
+                    expiry: expiry.clone(),
+                    activity: ProhibitedActivity::ActivateAbilities {
+                        exemption: ActivationExemption::None,
+                        only_tag: None,
+                    },
+                },
+            },
+        );
+        activate.sub_ability = sub_ability.take();
+        sub_ability = Some(Box::new(activate));
+    }
 
     let clause = ParsedEffectClause {
         optional_targeting: false,
@@ -26496,6 +26577,97 @@ fn try_parse_class_wide_graveyard_cast_grant(lower: &str, ctx: &ParseContext) ->
     Some(graveyard_permission_grant(permission, duration))
 }
 
+/// CR 601.2a + CR 116.2a + CR 611.2c: "[you may] play lands and cast spells |
+/// play cards | cast spells from that player's hand [this turn]" (Sen
+/// Triplets) — a resolution-created permission letting the resolving ability's
+/// controller play or cast cards from ANOTHER player's hand.
+///
+/// "that player" is the player the enclosing ability targeted; the hand pool
+/// rides on the permission's `affected` filter as `Owned {
+/// ParentTargetController }`, frozen to that player when the effect is
+/// installed. The "may" is the
+/// permission itself (exercised later, each time the player casts or plays a
+/// land), not a resolution-time choice, so this builds no optional gate.
+fn try_parse_other_hand_play_permission(lower: &str, ctx: &ParseContext) -> Option<Effect> {
+    type E<'a> = OracleError<'a>;
+    let (rest, _) = opt(tag::<_, _, E>("you may ")).parse(lower).ok()?;
+    // CR 305.1: "play" a card = cast it if a spell, play it if a land.
+    // Plural objects only: the permission is unlimited for its duration. The
+    // article forms ("a spell", "a land") grant one use (CR 601.3), which this
+    // permission does not carry, so they decline rather than over-grant.
+    let (rest, play_mode) = alt((
+        value(
+            CardPlayMode::Play,
+            tag::<_, _, E>("play lands and cast spells"),
+        ),
+        value(CardPlayMode::Play, tag("play cards")),
+        value(CardPlayMode::Cast, tag("cast spells")),
+    ))
+    .parse(rest)
+    .ok()?;
+    // CR 608.2c: "that player" must name the enclosing ability's chosen
+    // player target. Under a trigger-event or per-player scope it names a
+    // different player, which the parent-target anaphor below cannot read.
+    if ctx.relative_player_scope.is_some() {
+        return None;
+    }
+    let (rest, _) = (tag::<_, _, E>(" from "), tag("that player's"), tag(" hand"))
+        .parse(rest)
+        .ok()?;
+    let (_, duration) = terminated(
+        opt(preceded(
+            tag::<_, _, E>(" "),
+            super::oracle_nom::duration::parse_duration,
+        )),
+        (opt(tag(".")), multispace0, eof),
+    )
+    .parse(rest)
+    .ok()?;
+    // CR 611.2a: a permission with no stated window would last the whole game;
+    // every printed member of this class states one (trailing or peeled).
+    let duration = duration.or_else(|| ctx.stated_clause_duration.clone())?;
+    let filter = TargetFilter::Typed(TypedFilter::card().properties(vec![
+        FilterProp::InZone { zone: Zone::Hand },
+        // CR 400.3: a hand holds only its owner's cards. CR 608.2c: "that
+        // player" is the enclosing ability's already-chosen player target, read
+        // through the parent-target anaphor — NOT `TargetPlayer`, which would
+        // declare a second, independent target slot.
+        FilterProp::Owned {
+            controller: ControllerRef::ParentTargetController,
+        },
+    ]));
+    Some(Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::continuous()
+            .affected(filter)
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::HandPlayPermission { play_mode },
+            }])],
+        duration: Some(duration),
+        target: None,
+        end_cost: None,
+    })
+}
+
+/// CR 601.2a + CR 116.2a: whether `effect` is the resolution-created
+/// other-hand play permission [`try_parse_other_hand_play_permission`] builds.
+fn is_other_hand_play_permission_grant(effect: &Effect) -> bool {
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = effect
+    else {
+        return false;
+    };
+    matches!(
+        static_abilities.as_slice(),
+        [grant] if matches!(
+            grant.modifications.as_slice(),
+            [ContinuousModification::AddStaticMode {
+                mode: StaticMode::HandPlayPermission { .. },
+            }]
+        )
+    )
+}
+
 /// CR 611.2c: a resolution-created graveyard cast permission, bound to the
 /// resolving ability's controller for `window`. `casting::graveyard_permission_sources`
 /// reads it off the resulting transient effect (`SpecificPlayer`) and evaluates
@@ -35016,6 +35188,10 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     }
 
     if let Some(effect) = try_parse_class_wide_graveyard_cast_grant(lower, ctx) {
+        return Some(effect);
+    }
+
+    if let Some(effect) = try_parse_other_hand_play_permission(lower, ctx) {
         return Some(effect);
     }
 
@@ -49513,8 +49689,11 @@ fn parse_effect_chain_ir_body(
         // grant ("you may activate ~'s loyalty ability two more times this turn"):
         // the "may" is the later activation, and the grant itself is mandatory
         // (`clause_is_extra_loyalty_activation_grant`).
+        // CR 601.2a + CR 116.2a: so is an other-hand play permission ("you may
+        // play lands and cast spells from that player's hand this turn").
         let is_optional = if matches!(&clause.effect, Effect::FreeCastFromZones { .. })
             || crate::parser::oracle_ir::ast::is_graveyard_permission_grant(&clause.effect)
+            || is_other_hand_play_permission_grant(&clause.effect)
             || matches!(
                 &clause.effect,
                 Effect::CastFromZone {

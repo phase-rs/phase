@@ -35361,3 +35361,101 @@ fn corpus_oracle_text(name: &str) -> String {
     }
     .to_string()
 }
+
+/// CR 101.2 + CR 602.5 + CR 400.2 + CR 601.2a + CR 116.2a: Sen Triplets lowers
+/// every clause — the "This turn," prefixed cast-and-activate ban, the conjoined
+/// hand reveal bound to the targeted player, and the coordinated permission to
+/// play lands and cast spells from that player's hand — with nothing left
+/// unimplemented and the permission's "may" not lowered as a resolution choice.
+#[test]
+fn sen_triplets_lowers_restrictions_reveal_and_other_hand_permission() {
+    use crate::types::ability::{
+        GameRestriction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
+    };
+    use crate::types::statics::{ActivationExemption, ProhibitionScope};
+    let parsed = parse(
+        "At the beginning of your upkeep, choose target opponent. This turn, that player can't cast spells or activate abilities and plays with their hand revealed. You may play lands and cast spells from that player's hand this turn.",
+        "Sen Triplets",
+        &[],
+        &["Artifact", "Creature"],
+        &["Human", "Wizard"],
+    );
+    assert!(
+        diagnostic_parse_time(&parsed).is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("expected one trigger, got {:?}", parsed.triggers);
+    };
+    let mut effects = Vec::new();
+    let mut link = trigger.execute.as_deref();
+    while let Some(def) = link {
+        assert!(
+            !def.optional,
+            "no link is a resolution-time choice: {def:?}"
+        );
+        effects.push((*def.effect).clone());
+        link = def.sub_ability.as_deref();
+    }
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+        "{effects:?}"
+    );
+    let prohibits = |wanted: &ProhibitedActivity| {
+        effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::AddRestriction {
+                    restriction: GameRestriction::ProhibitActivity {
+                        affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
+                        expiry: RestrictionExpiry::EndOfTurn,
+                        activity,
+                        ..
+                    },
+                } if activity == wanted
+            )
+        })
+    };
+    assert!(prohibits(&ProhibitedActivity::CastSpells {
+        spell_filter: None
+    }));
+    assert!(prohibits(&ProhibitedActivity::ActivateAbilities {
+        exemption: ActivationExemption::None,
+        only_tag: None,
+    }));
+    let grants = |wanted: &StaticMode| {
+        effects.iter().find_map(|effect| match effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration: Some(Duration::UntilEndOfTurn),
+                ..
+            } => static_abilities.iter().find(|def| {
+                def.modifications.iter().any(|m| {
+                    matches!(m, ContinuousModification::AddStaticMode { mode } if mode == wanted)
+                })
+            }),
+            _ => None,
+        })
+    };
+    let reveal = grants(&StaticMode::RevealHand {
+        who: ProhibitionScope::Controller,
+    })
+    .expect("reveal-hand grant");
+    assert_eq!(reveal.affected, Some(TargetFilter::ParentTarget));
+    let permission = grants(&StaticMode::HandPlayPermission {
+        play_mode: CardPlayMode::Play,
+    })
+    .expect("other-hand play permission");
+    let Some(TargetFilter::Typed(pool)) = &permission.affected else {
+        panic!("permission pool must be a typed card filter: {permission:?}");
+    };
+    assert!(pool
+        .properties
+        .contains(&FilterProp::InZone { zone: Zone::Hand }));
+    assert!(pool.properties.contains(&FilterProp::Owned {
+        controller: ControllerRef::ParentTargetController,
+    }));
+}

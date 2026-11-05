@@ -8,7 +8,9 @@ use crate::game::functioning_abilities::game_active_statics;
 use crate::game::mana_abilities;
 use crate::game::mana_sources::display_land_mana_pips;
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
-use crate::types::ability::{AbilityBlockEntry, AbilityKind, StaticCondition};
+use crate::types::ability::{
+    AbilityBlockEntry, AbilityKind, ContinuousModification, StaticCondition, TargetFilter,
+};
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -354,6 +356,56 @@ pub fn sync_continuous_reveals(state: &mut GameState) {
                 ProhibitionScope::EnchantedCreatureController => {}
             },
             _ => {}
+        }
+    }
+
+    // CR 400.2 + CR 611.2a: a resolution-created "that player plays with their
+    // hand revealed this turn" (Sen Triplets) is a player-bound transient effect:
+    // its `affected` filter is the `SpecificPlayer` it was bound to at resolution,
+    // and that player's hand is revealed for the effect's duration. `who` is read
+    // from the bound player's own perspective — the TCE's `controller` is the
+    // effect's creator, not the player whose hand is public.
+    for tce in &state.transient_continuous_effects {
+        let TargetFilter::SpecificPlayer { id: bound } = tce.affected else {
+            continue;
+        };
+        let reveals = tce.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::RevealHand { .. }
+                }
+            )
+        });
+        if !reveals
+            || !crate::game::layers::transient_gate_conditions(tce).all(|condition| {
+                crate::game::layers::evaluate_condition(
+                    state,
+                    condition,
+                    tce.controller,
+                    tce.source_id,
+                )
+            })
+        {
+            continue;
+        }
+        for modification in &tce.modifications {
+            let ContinuousModification::AddStaticMode {
+                mode: StaticMode::RevealHand { who },
+            } = modification
+            else {
+                continue;
+            };
+            match who {
+                ProhibitionScope::AllPlayers => reveal_hand_all = true,
+                ProhibitionScope::Controller => {
+                    reveal_hand_controllers.insert(bound);
+                }
+                ProhibitionScope::Opponents => {
+                    reveal_hand_opponents_of.insert(bound);
+                }
+                ProhibitionScope::EnchantedCreatureController => {}
+            }
         }
     }
 

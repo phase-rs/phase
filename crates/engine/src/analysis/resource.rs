@@ -6904,6 +6904,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::TopOfLibraryHasPlot
         | StaticMode::TopOfLibraryPlotPermission
         | StaticMode::CastFromHandFree { .. }
+        | StaticMode::HandPlayPermission { .. }
         | StaticMode::LinkedCollectionCounterPlayPermission
         | StaticMode::CountersPersistAcrossZones { .. }
         // CountersCantBeRemoved (Fear of Sleep Paralysis) is a counter-removal

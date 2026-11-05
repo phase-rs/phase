@@ -425,6 +425,41 @@ fn bind_transient_effect(
         }
     }
 
+    // CR 601.2a + CR 116.2a + CR 611.2c: A duration-bound "you may play lands
+    // and cast spells from that player's hand" permission (Sen Triplets) is a
+    // PLAYER-scoped rules modification, like Chandra's free-cast grant above: the
+    // cards it covers are re-read at every cast or land-play attempt, so the
+    // affected filter rides on ONE TCE whose `controller` is the holder. Only the
+    // filter's PLAYER references are frozen now (CR 608.2h) — "that player's
+    // hand" is the player targeted as this ability resolved, which
+    // `ability.targets` stops carrying after resolution — while the card set
+    // stays dynamic. Read by `casting::other_hand_play_permission_source`;
+    // `layers.rs` never grafts it onto an object.
+    if modifications.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: crate::types::statics::StaticMode::HandPlayPermission { .. },
+            }
+        )
+    }) {
+        if let Some(affected) = static_def.affected.clone() {
+            let affected = crate::game::effects::cast_from_zone::freeze_resolution_cast_filter(
+                state, ability, affected, None,
+            );
+            install_transient(
+                state,
+                end_permission,
+                ability,
+                duration.clone(),
+                affected,
+                modifications,
+                static_def.condition.clone(),
+            );
+            return;
+        }
+    }
+
     // CR 118.7 + CR 611.2c: A transient "activated abilities of <X> cost {N} less
     // this turn" reduction (The Dining Car's chaos ability) rides as an
     // `AddStaticMode { ReduceAbilityCost }` whose `affected` names the SOURCE

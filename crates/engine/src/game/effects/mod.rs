@@ -10322,6 +10322,7 @@ fn static_mode_reads_filter_population(
         | StaticMode::TopOfLibraryHasPlot
         | StaticMode::TopOfLibraryPlotPermission
         | StaticMode::CastFromHandFree { .. }
+        | StaticMode::HandPlayPermission { .. }
         | StaticMode::LinkedCollectionCounterPlayPermission
         | StaticMode::CountersPersistAcrossZones { .. }
         | StaticMode::CantBeCountered
