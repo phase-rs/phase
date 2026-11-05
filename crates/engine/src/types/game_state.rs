@@ -4579,7 +4579,9 @@ pub struct PendingZoneChangeDelivery {
     pub delivery_events: Vec<GameEvent>,
     /// Exact terminal classification of the paused delivery once it has
     /// completed. It remains absent only while the original replacement or
-    /// as-enters prompt is unresolved.
+    /// as-enters prompt is unresolved; the resume seam records it before either
+    /// delivery terminal (issue #10431), so every resumed member the seam can
+    /// match is classified before `drain_pending_batch_deliveries` reads it.
     pub terminal_completion: Option<ZoneMoveCompletion>,
     pub count: PausedZoneChangeDeliveryCount,
     /// CR 406.3: A batch delivery requested concealment on an Exile landing.
@@ -4647,6 +4649,42 @@ impl PendingZoneChangeDelivery {
         self.member == member && self.expected_event == *expected_event
     }
 
+    /// CR 400.7 + CR 616.1: Match a resumed delivery against this paused key.
+    ///
+    /// The approved resume event is the SAME occurrence as the parked boundary
+    /// event but carries the chosen replacement's modifications
+    /// (`controller_override`, `enter_with_taps/counters`, `to`, `applied`, …),
+    /// so exact `ProposedEvent` equality (what [`Self::captures`] checks for the
+    /// pre-choice boundary) rejects it. The paused key's job at the resume seam
+    /// is to prove *which* member is being delivered. It matches the pre-move
+    /// occurrence (member incarnation, object, origin zone); the destination,
+    /// controller and entry modifiers are replacement-controlled (CR 614.6,
+    /// CR 614.1c / CR 614.1d, CR 616.1) and never part of the key. A later,
+    /// different zone change of the same object is a new incarnation and
+    /// therefore a different member.
+    pub fn captures_resumed(
+        &self,
+        member: ObjectIncarnationRef,
+        approved_event: &ProposedEvent,
+    ) -> bool {
+        if self.member != member {
+            return false;
+        }
+        let ProposedEvent::ZoneChange {
+            object_id: expected_object,
+            from: expected_from,
+            ..
+        } = &self.expected_event
+        else {
+            return false;
+        };
+        matches!(
+            approved_event,
+            ProposedEvent::ZoneChange { object_id, from, .. }
+                if object_id == expected_object && from == expected_from
+        )
+    }
+
     pub fn append_delivery_events(&mut self, events: &[GameEvent]) {
         self.delivery_events.extend_from_slice(events);
         if self.terminal_completion.is_none()
@@ -4679,6 +4717,24 @@ impl PendingZoneChangeDelivery {
         }
         self.terminal_completion = Some(completion);
         Ok(())
+    }
+
+    /// CR 400.7 + CR 406.3: Retain one matched delivery's completion and
+    /// face-down Exile event annotation. The caller applies live concealment
+    /// only after releasing this paused-owner borrow.
+    fn settle_delivery(
+        &mut self,
+        delivery_events: &[GameEvent],
+        terminal_completion: ZoneMoveCompletion,
+    ) -> Option<PausedExileOccurrence> {
+        self.append_delivery_events(delivery_events);
+        self.record_terminal_completion(terminal_completion)
+            .expect("one paused zone-change delivery has one terminal completion");
+        if self.face_down_in_exile.is_face_down() {
+            annotate_paused_exile_event(&mut self.delivery_events, self.member)
+        } else {
+            None
+        }
     }
 
     /// CR 400.7: A zone change creates a new object, so the retained delivery
@@ -31891,13 +31947,7 @@ impl GameState {
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
-            paused.append_delivery_events(delivery_events);
-            paused
-                .record_terminal_completion(terminal_completion)
-                .expect("one paused zone-change delivery has one terminal completion");
-            if paused.face_down_in_exile.is_face_down() {
-                occurrence = annotate_paused_exile_event(&mut paused.delivery_events, member);
-            }
+            occurrence = paused.settle_delivery(delivery_events, terminal_completion);
             true
         } else {
             false
@@ -31916,13 +31966,80 @@ impl GameState {
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
-            paused.append_delivery_events(delivery_events);
-            paused
-                .record_terminal_completion(terminal_completion)
-                .expect("one paused zone-change delivery has one terminal completion");
-            if paused.face_down_in_exile.is_face_down() {
-                occurrence = annotate_paused_exile_event(&mut paused.delivery_events, member);
+            occurrence = paused.settle_delivery(delivery_events, terminal_completion);
+            true
+        } else {
+            false
+        };
+        if matched {
+            if let Some(exile_occurrence) = occurrence {
+                self.apply_exact_paused_exile_concealment(member, exile_occurrence);
             }
+            return true;
+        }
+        false
+    }
+
+    /// CR 616.1 + CR 400.7: Record the classification of a resumed delivery whose
+    /// approved event carries the chosen replacement's modifications. Same
+    /// owners and single-authority classification as
+    /// [`Self::capture_paused_zone_change_delivery`], but matched by
+    /// [`PendingZoneChangeDelivery::captures_resumed`] so a controller/counter
+    /// override or a CR 614.6 zone redirect does not defeat the key comparison.
+    pub fn capture_resumed_paused_zone_change_delivery(
+        &mut self,
+        member: ObjectIncarnationRef,
+        approved_event: &ProposedEvent,
+        delivery_events: &[GameEvent],
+        terminal_completion: ZoneMoveCompletion,
+    ) -> bool {
+        let mut occurrence = None;
+        let matched = if let Some(paused) = self
+            .active_change_zone_frame_mut()
+            .and_then(|frame| frame.pending.as_mut())
+            .and_then(|owner| owner.paused_current.as_mut())
+            .filter(|paused| paused.captures_resumed(member, approved_event))
+        {
+            occurrence = paused.settle_delivery(delivery_events, terminal_completion);
+            true
+        } else {
+            false
+        };
+        if matched {
+            if let Some(exile_occurrence) = occurrence {
+                self.apply_exact_paused_exile_concealment(member, exile_occurrence);
+            }
+            return true;
+        }
+
+        occurrence = None;
+        let matched = if let Some(paused) = self
+            .resolution_stack
+            .active_batch_delivery_or_post_replacement_child_mut()
+            .and_then(|owner| owner.paused_current.as_mut())
+            .filter(|paused| paused.captures_resumed(member, approved_event))
+        {
+            occurrence = paused.settle_delivery(delivery_events, terminal_completion);
+            true
+        } else {
+            false
+        };
+        if matched {
+            if let Some(exile_occurrence) = occurrence {
+                self.apply_exact_paused_exile_concealment(member, exile_occurrence);
+            }
+            return true;
+        }
+
+        // A tail park can push more than one frame above the batch, so the fixed
+        // parent/child relation is not enough; the unique-member search is.
+        occurrence = None;
+        let matched = if let Some(paused) = self
+            .resolution_stack
+            .paused_batch_delivery_mut_for_member(member, approved_event)
+            .and_then(|owner| owner.paused_current.as_mut())
+        {
+            occurrence = paused.settle_delivery(delivery_events, terminal_completion);
             true
         } else {
             false
