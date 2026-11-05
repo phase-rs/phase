@@ -303,8 +303,11 @@ fn empty_pool_prompt_max(runner: &mut GameRunner) -> u32 {
     max
 }
 
-/// Adds Nyx Lotus (and, when `red_devotion` is true, a creature with {R}{R} in
-/// its mana cost) to the Leyline scenario with an otherwise empty pool.
+/// Adds Nyx Lotus (and, when `red_devotion` is true, Hellrider, printed
+/// {2}{R}{R} 3/3) to the Leyline scenario with an otherwise empty pool.
+/// Hellrider is only a devotion source on the battlefield: it is a plain body
+/// with its printed cost, and none of its Oracle abilities (haste, attack
+/// trigger) are exercised.
 fn lotus_scenario(red_devotion: bool) -> (GameScenario, ObjectId, ObjectId, ObjectId) {
     let (mut scenario, tyrant, vendetta) = leyline_scenario(&[ManaType::Black]);
     let lotus = scenario
@@ -312,10 +315,10 @@ fn lotus_scenario(red_devotion: bool) -> (GameScenario, ObjectId, ObjectId, Obje
         .id();
     if red_devotion {
         scenario
-            .add_creature(P0, "Red Devotee", 1, 1)
+            .add_creature(P0, "Hellrider", 3, 3)
             .with_mana_cost(ManaCost::Cost {
                 shards: vec![ManaCostShard::Red, ManaCostShard::Red],
-                generic: 0,
+                generic: 2,
             });
     }
     (scenario, tyrant, vendetta, lotus)
@@ -350,7 +353,7 @@ fn mountain_scenario(with_fertile_ground: bool) -> (GameRunner, ObjectId) {
 
 /// CR 118.1 + CR 605.3a: Nyx Lotus is a mana ability source that makes red
 /// equal to the controller's devotion to red (Leyline Tyrant is in the
-/// graveyard, so only the Devotee's {R}{R} counts). With an empty pool the
+/// graveyard, so only Hellrider's {R}{R} counts). With an empty pool the
 /// offered maximum is therefore 2, and paying 2 taps the Lotus for 2 damage.
 #[test]
 fn leyline_tyrant_offers_nyx_lotus_devotion_with_empty_pool() {
