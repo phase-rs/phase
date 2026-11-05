@@ -28449,6 +28449,143 @@ fn cant_be_activated_effect_typographic_apostrophe_preserves_mana_exemption() {
     );
 }
 
+/// CR 611.2a + CR 608.2c: a window printed as a clause's TRAILING suffix belongs to
+/// that clause alone; only a window that heads the sentence is distributed over its
+/// coordinated predicates (#7962).
+#[test]
+fn trailing_clause_window_is_not_distributed_to_later_clause() {
+    let def = parse_effect_chain(
+        "target creature gains flying until your next turn, then it gains reach",
+        AbilityKind::Spell,
+    );
+    let own = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    assert_eq!(def.duration, Some(own), "the clause keeps its own window");
+    let later = def.sub_ability.as_deref().expect("later clause");
+    assert_eq!(
+        later.duration, None,
+        "a trailing window must not scope the coordinated later clause"
+    );
+}
+
+/// CR 611.2a + CR 608.2c: the review's counterexample — a TRAILING window on the
+/// head clause must not be distributed onto a following type-change clause just
+/// because the boundary is `then`. The later clause states no window of its own,
+/// so the printed window stays with the clause that printed it (#7962 review).
+#[test]
+fn trailing_clause_window_does_not_reach_a_following_type_change() {
+    let def = parse_effect_chain(
+        "Target creature gains flying until end of turn, then it becomes a Dragon",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        def.duration,
+        Some(Duration::UntilEndOfTurn),
+        "the head clause keeps its own printed window: {def:#?}"
+    );
+    let later = def
+        .sub_ability
+        .as_deref()
+        .expect("the type-change clause must be built as the coordinated sibling");
+    assert_ne!(
+        later.duration,
+        Some(Duration::UntilEndOfTurn),
+        "a trailing window belongs to its own clause and must not be distributed: {later:#?}"
+    );
+}
+
+/// CR 611.2a + CR 608.2c: a leading window still heads its sentence when a leading
+/// guard precedes it — Mythos of Vadrok's "If {W}{U} was spent to cast this spell,
+/// until your next turn, …" scopes both coordinated predicates (#7962).
+#[test]
+fn guarded_leading_window_is_distributed_to_coordinated_clause() {
+    let def = parse_effect_chain(
+        "Mythos of Vadrok deals 5 damage divided as you choose among any number of target creatures and/or planeswalkers. If {W}{U} was spent to cast this spell, until your next turn, those permanents can't attack or block and their activated abilities can't be activated.",
+        AbilityKind::Spell,
+    );
+    let printed = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    assert_eq!(def.duration, None, "the damage sentence states no window");
+    let mut guarded = Vec::new();
+    let mut link = def.sub_ability.as_deref();
+    while let Some(d) = link {
+        guarded.push(d);
+        link = d.sub_ability.as_deref();
+    }
+    assert!(
+        guarded.len() >= 2,
+        "both coordinated predicates must be built: {guarded:#?}"
+    );
+    for d in &guarded {
+        assert_eq!(
+            d.duration.as_ref(),
+            Some(&printed),
+            "every predicate of the guarded sentence carries its window: {d:#?}"
+        );
+    }
+}
+
+/// CR 611.2a + CR 608.2c: a leading window behind a reflexive "If you do," head
+/// still scopes both coordinated predicates of its sentence (#7962). Building-block
+/// shape: no printed card pairs a reflexive head with this coordinated predicate.
+#[test]
+fn reflexive_guarded_leading_window_is_distributed_to_coordinated_clause() {
+    let def = parse_effect_chain(
+        "Tap target creature. If you do, until your next turn, that creature can't attack or block and its activated abilities can't be activated.",
+        AbilityKind::Spell,
+    );
+    let printed = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    let mut windowed = 0;
+    let mut link = def.sub_ability.as_deref();
+    while let Some(d) = link {
+        if d.duration.as_ref() == Some(&printed) {
+            windowed += 1;
+        }
+        link = d.sub_ability.as_deref();
+    }
+    assert!(windowed >= 2, "both predicates carry the window: {def:#?}");
+}
+
+/// CR 611.2a + CR 608.2c: the clause parser, not a re-peel of the printed
+/// fragment, declares which window heads a clause (`ClauseIr::head_window`). A
+/// window behind a lifted guard — general or reflexive — is still the head
+/// window; a trailing window is not, so it is never distributed (#7962).
+#[test]
+fn clause_ir_declares_head_window_past_lifted_guards_only() {
+    let next_turn = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    for (text, expected) in [
+        (
+            "Tap target creature. If you do, until your next turn, that creature can't attack or block.",
+            Some(next_turn.clone()),
+        ),
+        (
+            "Tap target creature. If you control an artifact, until your next turn, that creature can't attack or block.",
+            Some(next_turn.clone()),
+        ),
+        (
+            "Tap target creature. If you do, that creature can't attack or block until your next turn.",
+            None,
+        ),
+    ] {
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        assert!(
+            ir.clauses.first().is_some_and(|c| c.head_window.is_none()),
+            "the unwindowed head sentence declares no head window: {text}"
+        );
+        let guarded = ir
+            .clauses
+            .get(1)
+            .unwrap_or_else(|| panic!("the guarded sentence must lower to a clause: {text}"));
+        assert_eq!(guarded.head_window, expected, "{text}");
+    }
+}
+
 /// CR 602.5 + CR 603.2a + CR 608.2c: Dovin Baan's +1 — "up to one target
 /// creature gets -3/-0 and its activated abilities can't be activated."
 /// The compound splits into a Pump primary and a CantBeActivated conjunct
