@@ -16,6 +16,7 @@
  * it exactly once, on any terminal path.
  */
 import type { StateCodecDecodeResult, StateCodecSession } from "../adapter/state-codec-runtime";
+import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import type { PhaseSocketTransport } from "./openPhaseSocket";
 
 /** The only codec this client advertises. */
@@ -44,6 +45,117 @@ export const STATE_CODEC_RECOVERY_INTERRUPTED_MESSAGE = "State delivery interrup
 /** Rejection message for a submission refused while codec recovery is in progress. */
 export const STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE =
   "State delivery is being recovered; this submission was not sent.";
+
+/**
+ * Adapter-side authority for the codec attachments of one owning adapter.
+ *
+ * Both server adapters (normal play and draft) need the same three things from
+ * the wrapper's callbacks: which attachment's bootstrap is current, whether a
+ * recovery is in progress, and the refusal of submissions while it is. This
+ * class owns that state; each adapter keeps only what differs, namely how its
+ * pending submission slot is dropped and rejected (passed to
+ * {@link handleRecovery}) and which socket it currently treats as live.
+ *
+ * Every method takes the socket and disposal state from the caller instead of
+ * capturing them, so a retired attachment's callbacks are fenced by identity at
+ * the moment they run.
+ */
+export class StateCodecAttachment {
+  /** Bootstrap authority for the adopted socket; `null` before the first adoption. */
+  private current: StateCodecBootstrapBinding | null = null;
+  /** `null` while delivery is healthy; never holds `"ready"`. */
+  private recovery: StateCodecRecoveryState | null = null;
+
+  /**
+   * Fresh, still-pending authority for one attach. It is not current until
+   * {@link adopt}: until then a still-live older socket keeps its own binding
+   * and recovery gate.
+   */
+  begin(): StateCodecBootstrapBinding {
+    return { socket: null, status: "pending" };
+  }
+
+  /** The attachment's socket is adopted: retire the previous binding and its recovery gate. */
+  adopt(binding: StateCodecBootstrapBinding, socket: PhaseSocketTransport): void {
+    binding.socket = socket;
+    this.current = binding;
+    this.recovery = null;
+  }
+
+  /** Bootstrap status reported to the codec transport for `binding`. */
+  status(
+    binding: StateCodecBootstrapBinding,
+    currentSocket: PhaseSocketTransport | null,
+    disposed: boolean,
+  ): StateCodecBootstrap {
+    // A retired socket's binding never authorizes a replacement.
+    if (disposed || this.current !== binding) return "pending";
+    if (binding.socket !== null && currentSocket !== binding.socket) return "pending";
+    return binding.status;
+  }
+
+  /** A genuine GameStarted was accepted on `socket`, the current binding's socket. */
+  accept(socket: PhaseSocketTransport | null): void {
+    if (this.current === null || this.current.socket !== socket) return;
+    this.current.status = "accepted";
+  }
+
+  /** A new bootstrap (e.g. a new draft match) began on `socket`: only a fresh GameStarted completes it. */
+  reset(socket: PhaseSocketTransport | null): void {
+    if (this.current === null || this.current.socket !== socket) return;
+    this.current.status = "pending";
+  }
+
+  /**
+   * Codec recovery notification for `binding`. On `"recovering"` the gate is
+   * set and the pending command is interrupted BEFORE any listener can run:
+   * the interruption emits synchronously and a listener may submit, which must
+   * already be refused. `interruptPending` drops the adapter's submission slot
+   * and, if it held a command, rejects it with the supplied retryable error.
+   */
+  handleRecovery(
+    binding: StateCodecBootstrapBinding,
+    state: StateCodecRecoveryState,
+    currentSocket: PhaseSocketTransport | null,
+    disposed: boolean,
+    interruptPending: (error: AdapterError) => void,
+  ): void {
+    if (disposed) return;
+    if (this.current !== binding) return;
+    if (binding.socket === null || currentSocket !== binding.socket) return;
+    if (state === "recovering") {
+      this.recovery = state;
+      interruptPending(new AdapterError("WS_CLOSED", STATE_CODEC_RECOVERY_INTERRUPTED_MESSAGE, true));
+      return;
+    }
+    this.recovery = null;
+  }
+
+  /**
+   * While codec state is being resynced, a new command would be sent into a
+   * stream whose completions are suppressed. Refuse it before it is stamped.
+   */
+  assertNotRecovering(): void {
+    if (this.recovery !== null) {
+      throw new AdapterError(
+        AdapterErrorCode.ACTION_NOT_SENT,
+        STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE,
+        true,
+      );
+    }
+  }
+
+  /** The current attachment's socket is gone: a retired transport can no longer gate submissions. */
+  clearRecovery(): void {
+    this.recovery = null;
+  }
+
+  /** The owning adapter is disposed: no binding or recovery state survives. */
+  release(): void {
+    this.recovery = null;
+    this.current = null;
+  }
+}
 
 /** Bounded optional preparation budget (event-loop time, not network). */
 export const STATE_CODEC_PREPARATION_TIMEOUT_MS = 5_000;

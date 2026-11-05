@@ -3037,7 +3037,7 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       type: "StateUpdate",
       data: { state: matchState("resync"), events: [], full_key: FULL_KEY },
     }));
-    await vi.waitFor(() => expect((adapter as unknown as { stateCodecRecovering: boolean }).stateCodecRecovering).toBe(false));
+    await vi.waitFor(() => expect(() => (adapter as unknown as { stateCodec: { assertNotRecovering(): void } }).stateCodec.assertNotRecovering()).not.toThrow());
     expect(await Promise.all(reentrant)).toEqual([
       expect.objectContaining({ code: "ACTION_NOT_SENT" }),
       expect.objectContaining({ code: "ACTION_NOT_SENT" }),
@@ -3109,7 +3109,7 @@ describe("ServerDraftAdapter — retired codec transport", () => {
     }));
     await vi.waitFor(() => expect(ws.send).toHaveBeenCalledWith('{"type":"ResyncState"}'));
     expect(events).not.toContainEqual({ type: "actionPendingChanged", pending: false });
-    expect((adapter as unknown as { stateCodecRecovering: boolean }).stateCodecRecovering).toBe(false);
+    expect(() => (adapter as unknown as { stateCodec: { assertNotRecovering(): void } }).stateCodec.assertNotRecovering()).not.toThrow();
 
     // The live command still settles on its own correlated completion,
     // delivered on the transport that now owns the slot.

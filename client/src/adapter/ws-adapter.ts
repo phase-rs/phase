@@ -54,11 +54,7 @@ import {
   StateCodecSocket,
   StateCodecPreparationAbortError,
   prepareStateCodecSession as prepareBoundedStateCodecSession,
-  STATE_CODEC_RECOVERY_INTERRUPTED_MESSAGE,
-  STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE,
-  type StateCodecBootstrap,
-  type StateCodecBootstrapBinding,
-  type StateCodecRecoveryState,
+  StateCodecAttachment,
   type StateCodecSessionProvider,
 } from "../services/stateCodecSocket";
 import type { StateCodecName } from "../services/stateCodecSocket";
@@ -1698,14 +1694,13 @@ export class WebSocketAdapter implements EngineAdapter {
   private readonly stateCodecProvider: StateCodecSessionProvider | null;
   /** Identifies the newest attachment; aborting it supersedes the older one. */
   private stateCodecPreparation: AbortController | null = null;
-  /** True while the current attachment is recovering codec-delivered state. */
-  private stateCodecRecovering = false;
   /**
-   * Application-bootstrap authority for the current socket. Created fresh per
-   * attach and published when that attachment's socket is adopted: a surviving
-   * snapshot, token or codec baseline never authorizes a new bootstrap.
+   * Application-bootstrap authority and recovery state for the current socket.
+   * A fresh binding is created per attach and published when that attachment's
+   * socket is adopted: a surviving snapshot, token or codec baseline never
+   * authorizes a new bootstrap.
    */
-  private attachmentBootstrap: StateCodecBootstrapBinding | null = null;
+  private readonly stateCodec = new StateCodecAttachment();
   /** A rejected Full identity is terminal for this socket. */
   private sessionIdentityRejected = false;
   /** Set by AiDriverFault: the server permanently rejects every later submission for this game code. */
@@ -1904,47 +1899,13 @@ export class WebSocketAdapter implements EngineAdapter {
     }
   }
 
-  /** Bootstrap status reported to the codec transport for one attachment. */
-  private bootstrapStatus(bootstrap: StateCodecBootstrapBinding): StateCodecBootstrap {
-    // Before the socket is adopted this attachment is the only authority; a
-    // retired socket's binding never authorizes a replacement.
-    if (this.attachmentBootstrap !== bootstrap || this.disposed) return "pending";
-    if (bootstrap.socket !== null && this.ws !== bootstrap.socket) return "pending";
-    return bootstrap.status;
-  }
-
-  /** Genuine GameStarted accepted, after the identity guards and snapshot cache. */
-  private markBootstrapAccepted(): void {
-    const bootstrap = this.attachmentBootstrap;
-    if (!bootstrap) return;
-    if (bootstrap.socket !== null && this.ws !== bootstrap.socket) return;
-    bootstrap.status = "accepted";
-  }
-
-  /**
-   * Codec recovery notification. The command slot is dropped before any
-   * listener can observe the state: `emit` runs synchronously and a listener
-   * may submit, which must be refused while recovery is in progress.
-   */
-  private handleStateCodecRecovery(
-    bootstrap: StateCodecBootstrapBinding,
-    state: StateCodecRecoveryState,
-  ): void {
-    if (this.disposed) return;
-    if (this.attachmentBootstrap !== bootstrap) return;
-    if (bootstrap.socket === null || this.ws !== bootstrap.socket) return;
-    if (state === "recovering") {
-      this.stateCodecRecovering = true;
-      const dropped = this.submission.drop();
-      if (dropped) {
-        dropped.reject(
-          new AdapterError("WS_CLOSED", STATE_CODEC_RECOVERY_INTERRUPTED_MESSAGE, true),
-        );
-        this.emit({ type: "actionPendingChanged", pending: false });
-      }
-      return;
+  /** Drops the pending command slot for a codec recovery and rejects it with `error`. */
+  private interruptPendingSubmission(error: AdapterError): void {
+    const dropped = this.submission.drop();
+    if (dropped) {
+      dropped.reject(error);
+      this.emit({ type: "actionPendingChanged", pending: false });
     }
-    this.stateCodecRecovering = false;
   }
 
   /** Connect to a local native full server and stop once this socket has a
@@ -2030,10 +1991,7 @@ export class WebSocketAdapter implements EngineAdapter {
     // the adapter's current binding only when its socket is adopted: until
     // then the previous socket (if still current) keeps its own binding, and
     // this attachment's supersession is tracked by `preparation` alone.
-    const bootstrap: StateCodecBootstrapBinding = {
-      socket: null,
-      status: "pending",
-    };
+    const bootstrap = this.stateCodec.begin();
     try {
       // Null/native opt-out must not introduce even a microtask before opening.
       const prepared = this.stateCodecProvider
@@ -2048,8 +2006,11 @@ export class WebSocketAdapter implements EngineAdapter {
         socketFactory: this.nativeSocketOptions()?.socketFactory,
         signal: this.disposeAbort.signal,
         stateCodecSession: prepared.session,
-        stateCodecBootstrap: () => this.bootstrapStatus(bootstrap),
-        onStateCodecRecovery: (state) => this.handleStateCodecRecovery(bootstrap, state),
+        stateCodecBootstrap: () => this.stateCodec.status(bootstrap, this.ws, this.disposed),
+        onStateCodecRecovery: (state) => this.stateCodec.handleRecovery(
+          bootstrap, state, this.ws, this.disposed,
+          (error) => this.interruptPendingSubmission(error),
+        ),
         onSocketCreated: (raw) => {
           // Diagnostics are best-effort: a failure here must never abort the handshake.
           try {
@@ -2121,10 +2082,8 @@ export class WebSocketAdapter implements EngineAdapter {
     }
 
     this.ws = socket.ws;
-    bootstrap.socket = socket.ws;
     // Adoption retires the previous binding and its recovery gate.
-    this.attachmentBootstrap = bootstrap;
-    this.stateCodecRecovering = false;
+    this.stateCodec.adopt(bootstrap, socket.ws);
     this._serverInfo = socket.serverInfo;
     this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
     this.startPing();
@@ -2172,7 +2131,7 @@ export class WebSocketAdapter implements EngineAdapter {
       this.ws = null;
       // The attachment is gone; a retired transport can never keep gating
       // submissions or report recovered state for its replacement.
-      this.stateCodecRecovering = false;
+      this.stateCodec.clearRecovery();
       if (this.pingInterval) {
         clearInterval(this.pingInterval);
         this.pingInterval = null;
@@ -2283,15 +2242,7 @@ export class WebSocketAdapter implements EngineAdapter {
     if (this.aiDriverFault !== null && this.aiDriverFault.gameCode === this._gameCode) {
       throw new AdapterError("WS_ERROR", this.aiDriverFault.message, false);
     }
-    // While codec state is being resynced, a new command would be sent into a
-    // stream whose completions are suppressed. Refuse it before it is stamped.
-    if (this.stateCodecRecovering) {
-      throw new AdapterError(
-        AdapterErrorCode.ACTION_NOT_SENT,
-        STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE,
-        true,
-      );
-    }
+    this.stateCodec.assertNotRecovering();
     if (this.submission.occupied) {
       throw new AdapterError(
         AdapterErrorCode.ACTION_NOT_SENT,
@@ -2559,8 +2510,7 @@ export class WebSocketAdapter implements EngineAdapter {
     this.reconnectInFlight = false;
     this._serverInfo = null;
     this.receivedGameStarted = false;
-    this.stateCodecRecovering = false;
-    this.attachmentBootstrap = null;
+    this.stateCodec.release();
     this.emit({ type: "actionPendingChanged", pending: false });
     this.emit({ type: "latencyChanged", latencyMs: null });
     if (this.gameEnded && !this.terminalCleanupPending) {
@@ -3134,7 +3084,7 @@ export class WebSocketAdapter implements EngineAdapter {
         // The attachment is bootstrapped now: every identity guard above
         // passed and the snapshot is cached. Recorded before the final emit so
         // a throwing listener cannot leave a bootstrapped socket pending.
-        this.markBootstrapAccepted();
+        this.stateCodec.accept(this.ws);
         // Always an array, never `undefined`: on this transport `undefined`
         // would mean "this transport does not publish", which is false here —
         // an omitted field means the server published none.

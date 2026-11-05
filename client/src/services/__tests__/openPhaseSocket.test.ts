@@ -18,6 +18,7 @@ import {
   HandshakeError,
   openPhaseSocket,
   withReconnect,
+  type PhaseSocketTransport,
 } from "../openPhaseSocket";
 import {
   LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL,
@@ -1027,7 +1028,7 @@ import type {
   StateCodecDecodeResult,
   StateCodecSession,
 } from "../../adapter/state-codec-runtime";
-import { STATE_CODEC_SOCKET_TIMEOUT_MS } from "../stateCodecSocket";
+import { STATE_CODEC_SOCKET_TIMEOUT_MS, StateCodecAttachment } from "../stateCodecSocket";
 
 const DECODED_PONG = '{"type":"Pong","data":{"timestamp":11}}';
 
@@ -1779,4 +1780,94 @@ describe("codec attachment and deadline boundaries", () => {
     expect(fake.close).toHaveBeenCalledOnce();
     expect(recovery.mock.calls).toEqual([["recovering"]]);
   });
+});
+
+describe("StateCodecAttachment", () => {
+  const socketA = { id: "a" } as unknown as PhaseSocketTransport;
+  const socketB = { id: "b" } as unknown as PhaseSocketTransport;
+
+  function adopted() {
+    const attachment = new StateCodecAttachment();
+    const binding = attachment.begin();
+    attachment.adopt(binding, socketA);
+    return { attachment, binding };
+  }
+
+  it("reports pending until a genuine GameStarted is accepted on the current socket", () => {
+    const { attachment, binding } = adopted();
+    expect(attachment.status(binding, socketA, false)).toBe("pending");
+    attachment.accept(socketB);
+    expect(attachment.status(binding, socketA, false)).toBe("pending");
+    attachment.accept(socketA);
+    expect(attachment.status(binding, socketA, false)).toBe("accepted");
+    attachment.reset(socketA);
+    expect(attachment.status(binding, socketA, false)).toBe("pending");
+  });
+
+  it("never lets a superseded, retired or disposed binding report accepted", () => {
+    const { attachment, binding } = adopted();
+    attachment.accept(socketA);
+    expect(attachment.status(binding, socketA, false)).toBe("accepted");
+    expect(attachment.status(binding, socketB, false)).toBe("pending");
+    expect(attachment.status(binding, socketA, true)).toBe("pending");
+    attachment.adopt(attachment.begin(), socketB);
+    expect(attachment.status(binding, socketA, false)).toBe("pending");
+  });
+
+  it("marks recovery before interrupting the pending command and gates submissions until ready", () => {
+    const { attachment, binding } = adopted();
+    const interrupted: string[] = [];
+    const blockedDuringInterrupt: boolean[] = [];
+    attachment.handleRecovery(binding, "recovering", socketA, false, (error) => {
+      interrupted.push(`${error.code}:${error.message}:${error.recoverable}`);
+      blockedDuringInterrupt.push(blocked(attachment));
+    });
+    expect(interrupted).toEqual(["WS_CLOSED:State delivery interrupted during action:true"]);
+    expect(blockedDuringInterrupt).toEqual([true]);
+    expect(blocked(attachment)).toBe(true);
+    attachment.handleRecovery(binding, "ready", socketA, false, () => undefined);
+    expect(blocked(attachment)).toBe(false);
+  });
+
+  it("ignores recovery notifications from a retired binding, a retired socket or a disposed adapter", () => {
+    const { attachment, binding } = adopted();
+    const interrupt = vi.fn();
+    attachment.handleRecovery(binding, "recovering", socketB, false, interrupt);
+    attachment.handleRecovery(binding, "recovering", socketA, true, interrupt);
+    attachment.handleRecovery(attachment.begin(), "recovering", socketA, false, interrupt);
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(blocked(attachment)).toBe(false);
+    // Reach guard: the same call on the live binding is honoured.
+    attachment.handleRecovery(binding, "recovering", socketA, false, interrupt);
+    expect(interrupt).toHaveBeenCalledOnce();
+    expect(blocked(attachment)).toBe(true);
+  });
+
+  it("clears the recovery gate on adoption of a replacement, on clearRecovery and on release", () => {
+    const { attachment, binding } = adopted();
+    attachment.handleRecovery(binding, "recovering", socketA, false, () => undefined);
+    attachment.adopt(attachment.begin(), socketB);
+    expect(blocked(attachment)).toBe(false);
+
+    const second = adopted();
+    second.attachment.handleRecovery(second.binding, "recovering", socketA, false, () => undefined);
+    second.attachment.clearRecovery();
+    expect(blocked(second.attachment)).toBe(false);
+
+    const third = adopted();
+    third.attachment.handleRecovery(third.binding, "recovering", socketA, false, () => undefined);
+    third.attachment.release();
+    expect(blocked(third.attachment)).toBe(false);
+    expect(third.attachment.status(third.binding, socketA, false)).toBe("pending");
+  });
+
+  function blocked(attachment: StateCodecAttachment): boolean {
+    try {
+      attachment.assertNotRecovering();
+      return false;
+    } catch (error) {
+      expect((error as { code?: string }).code).toBe("ACTION_NOT_SENT");
+      return true;
+    }
+  }
 });
