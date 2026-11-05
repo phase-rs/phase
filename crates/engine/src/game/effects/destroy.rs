@@ -628,7 +628,7 @@ pub(crate) fn resume_parked_departure_consult(
     parked: ParkedDepartureConsult,
     result: ReplacementResult,
     events: &mut Vec<GameEvent>,
-) -> Result<(), ReplacementResult> {
+) -> Result<(), Box<ReplacementResult>> {
     // Applying the answer may have stashed the chosen replacement's
     // instructions in a drain frame above the batch. They belong to this
     // member; lift them off so the batch is reachable, then reinstall them for
@@ -643,7 +643,7 @@ pub(crate) fn resume_parked_departure_consult(
         state.install_post_replacement_drain(rider, ResidentDrainPolicy::KeepResident);
     }
     let Ok(Some(mut pending)) = taken else {
-        return Err(result);
+        return Err(Box::new(result));
     };
     let Some(SimultaneousDepartureStage::Consulting {
         member,

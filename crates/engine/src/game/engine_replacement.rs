@@ -477,7 +477,7 @@ fn handle_replacement_choice_inner(
                     super::engine::resume_pending_continuation_if_priority(state, events)?;
                     return Ok(state.waiting_for.clone());
                 }
-                Err(result) => result,
+                Err(result) => *result,
             }
         }
         _ => result,

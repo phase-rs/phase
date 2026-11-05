@@ -5603,11 +5603,27 @@ fn batch_completion_may_apply_with_entry(
     }
 }
 
+/// Whether a post-replacement drain's not-yet-run continuation may apply with
+/// an entry (see [`frame_may_apply_with_entry`]).
+fn post_replacement_drain_may_apply_with_entry(
+    drain: &crate::types::game_state::PostReplacementDrain,
+) -> bool {
+    use crate::types::ability::PostReplacementContinuation;
+    match drain.ready_continuation() {
+        Some(PostReplacementContinuation::Template(definition)) => {
+            definition_chain_may_apply_with_entry(definition)
+        }
+        Some(PostReplacementContinuation::Resolved(resolved)) => {
+            resolved_chain_may_apply_with_entry(resolved)
+        }
+        None => false,
+    }
+}
+
 /// CR 611.2e: does a frame-held later instruction of this resolution (an outer continuation, a
 /// paused iteration's remainder, or any other parked chain) carry an instruction stamped to
 /// apply with the entry? Exhaustive over `ResolutionFrame` so a new frame kind forces a decision.
 fn frame_may_apply_with_entry(frame: &ResolutionFrame) -> bool {
-    use crate::types::ability::PostReplacementContinuation;
     match frame {
         ResolutionFrame::AbilityContinuation(frame) => {
             let pending = &frame.pending;
@@ -5679,34 +5695,16 @@ fn frame_may_apply_with_entry(frame: &ResolutionFrame) -> bool {
             .results_table
             .iter()
             .any(|branch| definition_chain_may_apply_with_entry(&branch.effect)),
-        ResolutionFrame::PostReplacement(stack) => {
-            stack
-                .drains()
-                .any(|drain| match drain.ready_continuation() {
-                    Some(PostReplacementContinuation::Template(definition)) => {
-                        definition_chain_may_apply_with_entry(definition)
-                    }
-                    Some(PostReplacementContinuation::Resolved(resolved)) => {
-                        resolved_chain_may_apply_with_entry(resolved)
-                    }
-                    None => false,
-                })
-        }
+        ResolutionFrame::PostReplacement(stack) => stack
+            .drains()
+            .any(post_replacement_drain_may_apply_with_entry),
         // A queued member's replacing instructions are later instructions of
         // the same departure, exactly like a resident post-replacement drain.
         ResolutionFrame::SimultaneousDeparture(pending) => pending
             .queued
             .iter()
             .filter_map(|queued| queued.rider.as_ref())
-            .any(|drain| match drain.ready_continuation() {
-                Some(PostReplacementContinuation::Template(definition)) => {
-                    definition_chain_may_apply_with_entry(definition)
-                }
-                Some(PostReplacementContinuation::Resolved(resolved)) => {
-                    resolved_chain_may_apply_with_entry(resolved)
-                }
-                None => false,
-            }),
+            .any(post_replacement_drain_may_apply_with_entry),
         ResolutionFrame::ChangeZone(_)
         | ResolutionFrame::CounterMoves(_)
         | ResolutionFrame::CounterRemovals(_)
