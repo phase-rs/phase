@@ -3374,6 +3374,20 @@ fn destroy_applier(
         });
 
     if !is_regen {
+        // CR 614.1a + CR 614.6: a mandatory "would be destroyed, instead <effect>"
+        // replacement replaces the destruction wholesale — the event never
+        // happens and the `execute` chain runs in its place (Dr. McCoy). A
+        // `Regenerate` execute (Mossbridge Troll) instead installs a shield that
+        // the destruction then meets, so it keeps the event.
+        let substitutes_destruction = state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|repl| repl.execute.as_deref())
+            .is_some_and(|execute| !matches!(execute.effect.as_ref(), Effect::Regenerate { .. }));
+        if substitutes_destruction {
+            return ApplyResult::Prevented;
+        }
         return ApplyResult::Modified(event);
     }
 
@@ -10710,6 +10724,13 @@ fn apply_single_replacement(
         ProposedEvent::Damage { source_id, .. } => Some(*source_id),
         _ => None,
     };
+    // CR 614.6 + CR 109.5: a prevented Destroy is replaced by the execute chain,
+    // whose "it" is the creature that would have been destroyed (Dr. McCoy), not
+    // the replacing permanent. Snapshot it before the applier consumes `proposed`.
+    let prevented_destroy_object = match &proposed {
+        ProposedEvent::Destroy { object_id, .. } => Some(*object_id),
+        _ => None,
+    };
     let proposed_event_target = match &proposed {
         ProposedEvent::Damage { target, .. } => Some(target.clone()),
         ProposedEvent::LifeGain { player_id, .. } => Some(TargetRef::Player(*player_id)),
@@ -11016,7 +11037,7 @@ fn apply_single_replacement(
                     stash_post_replacement_continuation(
                         state,
                         post,
-                        rid.source,
+                        prevented_destroy_object.unwrap_or(rid.source),
                         // CR 109.5: same authority as the Modified arm — the
                         // prevention rider's "you" is the shield's controller.
                         // Here `source` is already the shield, so this agrees
