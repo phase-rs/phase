@@ -8760,11 +8760,11 @@ pub fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter) -> bo
         // rechecks, so it is a real nested filter. The `None` case ("a source of
         // your choice", unqualified) is a leaf.
         TargetFilter::ChosenDamageSource { filter } => filter.as_deref().is_some_and(recurse),
-        // `Typed` is NOT a leaf: six of its `FilterProp`s box a `TargetFilter`
+        // `Typed` is NOT a leaf: seven of its `FilterProp`s box a `TargetFilter`
         // (`CanEnchant`, `DifferentNameFrom`, `DistinctFrom`, `SharesQuality`,
-        // `Targets`, `TargetsOnly`), `Not`/`AnyOf` recurse through more props, and
-        // `ControllerMatches` crosses into `PlayerFilter`, which boxes filters of
-        // its own.
+        // `Targets`, `TargetsOnly`, `ManaSpentFromSource`), `Not`/`AnyOf` recurse
+        // through more props, and `ControllerMatches` crosses into `PlayerFilter`,
+        // which boxes filters of its own.
         TargetFilter::Typed(typed) => typed
             .properties
             .iter()

@@ -4925,7 +4925,7 @@ pub(crate) fn mark_layers_full_if_top_of_library_static_live(state: &mut GameSta
 //      must break the build, not fall silently into a `false` wildcard.
 //   2. Universal payload-routing. Any variant carrying a nested `TargetFilter`,
 //      `PlayerFilter`, `QuantityRef`, or `QuantityExpr` routes that payload
-//      through the corresponding walk (the six TargetFilter-bearing
+//      through the corresponding walk (the seven TargetFilter-bearing
 //      `FilterProp`s, `CardTypeSetSource::Objects`, `PlayerFilter` recursion,
 //      etc.) — all of which the zone template drops into its wildcard. Only
 //      payload-free leaves are classified `false` directly.
@@ -5209,8 +5209,10 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         FilterProp::DealtDamageThisTurn { recipient, .. } => {
             recipient.as_ref().is_some_and(player_filter_reads_life)
         }
-        // The seven TargetFilter-bearing props all route their nested filter
-        // (deref coercion → &TargetFilter). Field names differ; unified here.
+        // The six props that share a plain `Box<TargetFilter>` field all route
+        // their nested filter (deref coercion → &TargetFilter). Field names
+        // differ; unified here. `SharesQuality` (Option-wrapped) and
+        // `AttachedTo::Host` (nested in `AttachmentReferent`) route below.
         FilterProp::CanEnchant { target: f }
         | FilterProp::DifferentNameFrom { filter: f }
         | FilterProp::DistinctFrom { reference: f }
@@ -32064,7 +32066,7 @@ mod tests {
             comparator: Comparator::GE,
             count: Box::new(QuantityExpr::Fixed { value: 1 }),
         }));
-        // A TargetFilter-bearing FilterProp routes (one of the six the zone
+        // A TargetFilter-bearing FilterProp routes (one of the seven the zone
         // template's wildcard drops).
         assert!(target_filter_reads_life_total(&TargetFilter::Typed(
             TypedFilter::creature().properties(vec![FilterProp::Targets {

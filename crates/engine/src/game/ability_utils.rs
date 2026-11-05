@@ -5327,8 +5327,9 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
         // Every remaining prop enumerated explicitly (no `_ =>`): none carries a
         // `QuantityExpr` threshold. Props that box a nested `TargetFilter`
         // (`CanEnchant`, `DifferentNameFrom`, `DistinctFrom`, `SharesQuality`,
-        // `Targets`, `TargetsOnly`, `ControllerMatches`) are handled by the
-        // OUTER `filter_contains` traversal, which independently visits every
+        // `Targets`, `TargetsOnly`, `ManaSpentFromSource`, `AttachedTo::Host`,
+        // `ControllerMatches`) are handled by the OUTER `filter_contains`
+        // traversal, which independently visits every
         // nested `TargetFilter` and re-invokes the leaf closure there — this
         // classifier only answers for props attached directly to the `Typed`
         // node it is called on.
