@@ -595,7 +595,7 @@ pub(crate) struct OutcomeCertificate {
 #[derive(Default)]
 struct Lifetime {
     second_cycle: bool,
-    /// Each object the first cycle's outcomes wrote, and the zone it was written in.
+    /// Each object the first cycle's outcomes wrote or could have written, and its zone then.
     first: Vec<(ObjectId, crate::types::zones::Zone)>,
     /// Those that have since left that zone.
     left: BTreeSet<ObjectId>,
@@ -630,6 +630,54 @@ struct BeforeStep {
     players: Vec<PlayerMarks>,
     /// The triggered ability resolving, or on top of the stack.
     resolving: Option<crate::types::ability::TriggerDefinitionRef>,
+    /// What any outcome of the ability resolving, or on top of the stack, can write.
+    can_write: Option<OutcomeWrites>,
+}
+
+/// CR 705.1 + CR 706.1: what any outcome of a coin flip or die roll can write, read from its
+/// definition: counters on its source, and whether an outcome creates objects.
+#[derive(Default)]
+struct OutcomeWrites {
+    objects: BTreeSet<ObjectId>,
+    creates: bool,
+}
+
+impl OutcomeWrites {
+    /// Every outcome branch of `effect`, whose source is `source`; `None` when `effect` draws no
+    /// branched outcome or a branch does anything else.
+    fn of(effect: &crate::types::ability::Effect, source: ObjectId) -> Option<Self> {
+        use crate::types::ability::{Effect, TargetFilter};
+        let branches: Vec<&crate::types::ability::AbilityDefinition> = match effect {
+            Effect::FlipCoins {
+                win_effect,
+                lose_effect,
+                ..
+            } => win_effect.iter().chain(lose_effect).map(|b| &**b).collect(),
+            Effect::RollDie { results, .. } => results.iter().map(|b| &*b.effect).collect(),
+            _ => return None,
+        };
+        if branches.is_empty() {
+            return None;
+        }
+        let mut writes = OutcomeWrites::default();
+        for branch in branches {
+            let mut next = Some(branch);
+            while let Some(def) = next {
+                match &*def.effect {
+                    Effect::PutCounter {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    } => {
+                        writes.objects.insert(source);
+                    }
+                    Effect::Token { .. } => writes.creates = true,
+                    _ => return None,
+                }
+                next = def.sub_ability.as_deref();
+            }
+        }
+        Some(writes)
+    }
 }
 
 /// CR 119 + CR 122.1 + CR 400.1: what of a player a random outcome could feed.
@@ -659,16 +707,17 @@ fn player_marks(state: &GameState) -> Vec<PlayerMarks> {
 
 impl BeforeStep {
     fn of(state: &GameState) -> Self {
-        let resolving = state
+        let ability = state
             .resolving_stack_entry
             .as_ref()
             .or_else(|| state.stack.back())
-            .and_then(|entry| entry.ability())
-            .and_then(|ability| ability.trigger_definition_ref.clone());
+            .and_then(|entry| entry.ability());
         BeforeStep {
             objects: state.objects.clone(),
             players: player_marks(state),
-            resolving,
+            resolving: ability.and_then(|ability| ability.trigger_definition_ref.clone()),
+            can_write: ability
+                .and_then(|ability| OutcomeWrites::of(&ability.effect, ability.source_id)),
         }
     }
 }
@@ -681,16 +730,30 @@ impl OutcomeRecord {
             self.kept += drawn;
             let wrote = Written::of_step(&before.objects, after);
             if let Some(lifetime) = &mut self.lifetime {
-                lifetime.escaped |=
-                    fed_a_player || !matches!(after.waiting_for, WaitingFor::Priority { .. });
+                // A sampled outcome is one of many: the subject is what any outcome can write,
+                // and a trigger keyed on the outcome itself reads every one (CR 603.2).
+                lifetime.escaped |= fed_a_player
+                    || !matches!(after.waiting_for, WaitingFor::Priority { .. })
+                    || before
+                        .can_write
+                        .as_ref()
+                        .is_none_or(|can| can.creates && wrote.created.is_empty())
+                    || outcome_keyed(after);
                 lifetime.authors.extend(before.resolving.clone());
                 if !lifetime.second_cycle {
-                    lifetime.first.extend(
-                        wrote
-                            .objects()
-                            .into_iter()
-                            .filter_map(|id| Some((id, after.objects.get(&id)?.zone))),
-                    );
+                    let derived = before.can_write.iter().flat_map(|can| can.objects.iter());
+                    let ids: BTreeSet<ObjectId> = wrote
+                        .objects()
+                        .into_iter()
+                        .chain(derived.copied())
+                        .collect();
+                    for id in ids {
+                        if let Some(object) = after.objects.get(&id) {
+                            if !lifetime.first.contains(&(id, object.zone)) {
+                                lifetime.first.push((id, object.zone));
+                            }
+                        }
+                    }
                 }
             }
             self.written.extend(&wrote);
@@ -756,6 +819,23 @@ impl OutcomeRecord {
             }
         })
     }
+}
+
+/// CR 603.2 + CR 705.1 + CR 706.1: whether a trigger functioning at `state` is keyed on a coin
+/// flip or die roll itself.
+fn outcome_keyed(state: &GameState) -> bool {
+    use crate::types::TriggerMode;
+    state.objects.values().any(|obj| {
+        crate::game::functioning_abilities::active_trigger_definitions(state, obj).any(|active| {
+            matches!(
+                active.definition.mode,
+                TriggerMode::RolledDie | TriggerMode::RolledDieOnce | TriggerMode::FlippedCoin
+            ) && crate::game::triggers::trigger_definition_functions_in_zone(
+                active.definition,
+                obj.zone,
+            )
+        })
+    })
 }
 
 thread_local! {
@@ -2094,13 +2174,13 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         {
             Ok(PeriodSign::Spend)
         }
-        // CR 704.5b + CR 800.4a + CR 732.2a: so was a second cycle its holder left the game in, a
-        // repetition the counting replay counts but does not offer; that cycle's pair compares a
-        // frame with itself, so the cover is read on the first pair alone.
+        // CR 732.2a: so was a second cycle stopped where the count ends, a repetition the counting
+        // replay counts but does not offer; that cycle's pair compares a frame with itself, so the
+        // cover is read on the first pair alone.
         (
             Err(OfferRefusal::Cover(_)) | Ok(PeriodSign::Unbounded(_) | PeriodSign::LossAxis(_)),
             Err(_),
-        ) if !crate::game::players::is_alive(&replay, holder) && first_pair_certifies(&verdict) => {
+        ) if count_ends_at(&replay, holder) && first_pair_certifies(&verdict) => {
             period_sign_check(&s_n, &s_n1, holder, library_cost).map(|_| PeriodSign::Spend)
         }
         (sign, _) => sign,
@@ -2269,6 +2349,14 @@ fn first_pair_certifies(verdict: &ObjectGrowthVerdict) -> bool {
         ObjectGrowthVerdict::FodderGrowth([first, _]) => first.is_empty(),
         verdict => verdict.certifies(),
     }
+}
+
+/// CR 800.4a + CR 514.1 + CR 401.2 + CR 732.2a: whether the count ends where a refused second
+/// cycle stopped at `replay`: its holder left the game, or its cleanup must discard a card the
+/// holder has not yet drawn, which no shortcut can name.
+fn count_ends_at(replay: &GameState, holder: PlayerId) -> bool {
+    !crate::game::players::is_alive(replay, holder)
+        || matches!(replay.waiting_for, WaitingFor::DiscardToHandSize { player, .. } if player == holder)
 }
 
 /// CR 104.4b + CR 732.4: whether the mandatory span `span`, replayed twice from `frame`, recurs
@@ -3102,6 +3190,16 @@ pub fn confirm_for_tests(state: &GameState) -> Vec<(NamedSpan, Result<Vec<String
         .collect()
 }
 
+/// The authoritative reading of the mandatory span `span` at `state`: whether the outcome
+/// certificate covers it, and its decision profile.
+#[cfg(any(test, feature = "test-support"))]
+pub fn mandatory_reading_for_tests(
+    state: &GameState,
+    span: NamedSpan,
+) -> Option<(bool, crate::types::game_state::LoopDecisionProfile)> {
+    mandatory_reading(state, span).map(|reading| (reading.certificate.is_some(), reading.profile))
+}
+
 /// CR 608.1: one cycle of the span `state`'s trace last offered, replayed from `state` as its
 /// acting player's priority frame; the printed identity of each triggered ability it resolved, in
 /// order. `None` when nothing was offered.
@@ -3746,5 +3844,143 @@ mod tests {
                 seats: vec![p0, p1]
             })
         );
+    }
+
+    /// CR 400.7 + CR 111.7 + CR 603.2: at each priority frame of Swarming Goblins, Worldgorger
+    /// Dragon and Animate Dead while a Goblin token the d20 made is on the battlefield, the
+    /// Dragon's "exile all other permanents you control" reads the token; with it excluded as the
+    /// token's confiner and the d20's trigger as its writer, nothing reads the token, the Dragon's
+    /// "return the exiled cards to the battlefield under their owner's control" included.
+    #[test]
+    fn the_confiner_is_the_only_reader_of_a_goblin_token_beside_worldgorger() {
+        use crate::analysis::resource::written_member_read;
+        use crate::game::functioning_abilities::active_trigger_definitions;
+        use crate::game::scenario::GameScenario;
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::types::game_state::LoopDetectionMode;
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
+        let db = crate::test_support::shared_card_db();
+        let p0 = PlayerId(0);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let dragon = scenario.add_real_card(p0, "Worldgorger Dragon", Zone::Graveyard, db);
+        let animate = scenario.add_real_card(p0, "Animate Dead", Zone::Hand, db);
+        let goblins = scenario.add_real_card(p0, "Swarming Goblins", Zone::Battlefield, db);
+        scenario.with_mana_pool(
+            p0,
+            vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]); 2],
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = LoopDetectionMode::Off;
+        drop(runner.cast(animate).target_object(dragon).commit());
+        let triggers = |state: &GameState, id: ObjectId| {
+            active_trigger_definitions(state, &state.objects[&id])
+                .map(|active| (active.definition_ref, active.definition.destination))
+                .collect::<Vec<_>>()
+        };
+        let mut frames = Vec::new();
+        for _ in 0..200 {
+            let state = runner.state();
+            let tokens: Vec<ObjectId> = state
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|id| state.objects[id].is_token)
+                .collect();
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) && !tokens.is_empty() {
+                frames.push((state.clone(), tokens));
+            }
+            if frames
+                .iter()
+                .any(|(frame, _)| frame.objects[&dragon].zone == Zone::Battlefield)
+            {
+                break;
+            }
+            // Animate Dead's trigger goes on the stack first and resolves last.
+            let action = match &state.waiting_for {
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let mut order: Vec<usize> = (0..triggers.len()).collect();
+                    order.sort_by_key(|&index| triggers[index].source_id != animate);
+                    GameAction::OrderTriggers { order }
+                }
+                _ => GameAction::PassPriority,
+            };
+            runner
+                .act(action)
+                .expect("the loop's every action is legal");
+        }
+        let (on_battlefield, _) = frames
+            .iter()
+            .find(|(frame, _)| frame.objects[&dragon].zone == Zone::Battlefield)
+            .expect("reach: the Dragon returns while the tokens are on the battlefield");
+        let dragon_triggers = triggers(on_battlefield, dragon);
+        let confiner = dragon_triggers
+            .iter()
+            .find(|(_, destination)| *destination == Some(Zone::Battlefield))
+            .map(|(id, _)| id.clone())
+            .expect("reach: the Dragon's enters trigger functions");
+        assert_eq!(
+            dragon_triggers.len(),
+            2,
+            "reach: its leaves trigger functions too"
+        );
+        let writer = triggers(on_battlefield, goblins)
+            .first()
+            .map(|(id, _)| id.clone())
+            .expect("reach: the d20's trigger functions");
+        for (frame, tokens) in &frames {
+            for &token in tokens {
+                assert!(!written_member_read(
+                    frame,
+                    token,
+                    &[writer.clone(), confiner.clone()]
+                ));
+                assert_eq!(
+                    written_member_read(frame, token, std::slice::from_ref(&writer)),
+                    frame.objects[&dragon].zone == Zone::Battlefield
+                );
+            }
+        }
+    }
+
+    /// CR 514.1 + CR 401.2 + CR 732.2a: P0 holding eight Islands at its cleanup must discard one
+    /// it has drawn, and a second cycle stopped there ends P0's count; it ends no other player's,
+    /// and neither does P0's own main phase before it.
+    #[test]
+    fn a_count_ends_at_its_holders_own_cleanup_discard() {
+        use crate::game::scenario::GameScenario;
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
+        let db = crate::test_support::shared_card_db();
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for _ in 0..8 {
+            scenario.add_real_card(p0, "Island", Zone::Hand, db);
+        }
+        let mut runner = scenario.build();
+        assert!(!count_ends_at(runner.state(), p0));
+        for _ in 0..40 {
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::DiscardToHandSize { .. }
+            ) {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("each player may pass priority");
+        }
+        let cleanup = runner.state();
+        assert!(
+            matches!(cleanup.waiting_for, WaitingFor::DiscardToHandSize { player, count: 1, .. } if player == p0),
+            "reach: {:?}",
+            cleanup.waiting_for
+        );
+        assert!(count_ends_at(cleanup, p0));
+        assert!(!count_ends_at(cleanup, p1));
     }
 }

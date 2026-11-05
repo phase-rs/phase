@@ -7491,12 +7491,27 @@ impl<'a> FireTimeSurface<'a> {
 
     /// What this surface reads of the board's objects.
     fn sibling_reads(self) -> crate::game::ability_scan::SiblingReads<'a> {
-        use crate::game::ability_scan::{self as scan, SiblingReads};
+        use crate::game::ability_scan::{self as scan, ScanMode, SiblingReads};
+        // A body the veto scans `Conservative` records no filter, so it reads all or nothing.
+        let conservative = |reads: bool| {
+            if reads {
+                SiblingReads::Any
+            } else {
+                SiblingReads::None
+            }
+        };
         match self {
             Self::TriggerCondition(c) => scan::trigger_condition_sibling_reads(c),
-            Self::Definition(def, _) => scan::ability_definition_sibling_reads(def),
+            Self::Definition(def, ScanMode::LoopFirewall) => {
+                scan::ability_definition_sibling_reads(def)
+            }
+            Self::Definition(def, ScanMode::Conservative) => {
+                conservative(scan::ability_definition_reads_sibling_mutable(def))
+            }
             Self::ReplacementCondition(c) => scan::replacement_condition_sibling_reads(c),
-            Self::ReplacementRider(rider) => scan::resolved_ability_sibling_reads(rider),
+            Self::ReplacementRider(rider) => {
+                conservative(scan::ability_reads_sibling_mutable(rider))
+            }
             Self::StaticCondition(c) => scan::static_condition_sibling_reads(c),
             Self::Modification(m) => scan::continuous_modification_sibling_reads(m),
             Self::Duration(d) => scan::duration_sibling_reads(d),
@@ -16473,6 +16488,37 @@ mod tests {
             !refusals(&crusader).contains(&FodderCoverRefusal::GrownNotInert),
             "{:?}",
             refusals(&crusader)
+        );
+    }
+
+    /// CR 732.2a: a body reads what the mode its veto scans it in reads; a fixed self pump reads
+    /// nothing only where the loop firewall descends into it, so a replacement's body and a
+    /// `Conservative` definition read every object.
+    #[test]
+    fn a_surface_reads_in_the_mode_its_veto_scans_it_in() {
+        use crate::game::ability_scan::{ScanMode, SiblingReads};
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, PtValue};
+        let pump = Effect::Pump {
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            target: TargetFilter::SelfRef,
+        };
+        let def = AbilityDefinition::new(AbilityKind::Spell, pump.clone());
+        let rider = ResolvedAbility::new(pump, vec![], ObjectId(1), PlayerId(0));
+        fn reads(surface: FireTimeSurface<'_>) -> (bool, SiblingReads<'_>) {
+            (surface.vetoes(), surface.sibling_reads())
+        }
+        assert_eq!(
+            reads(FireTimeSurface::Definition(&def, ScanMode::LoopFirewall)),
+            (false, SiblingReads::None)
+        );
+        assert_eq!(
+            reads(FireTimeSurface::Definition(&def, ScanMode::Conservative)),
+            (true, SiblingReads::Any)
+        );
+        assert_eq!(
+            reads(FireTimeSurface::ReplacementRider(&rider)),
+            (true, SiblingReads::Any)
         );
     }
 

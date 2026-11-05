@@ -4110,9 +4110,8 @@ fn in_hand(state: &GameState, name: &str) -> u32 {
 }
 
 /// CR 514.1 + CR 704.5b + CR 732.2a: at every window of both libraries' drives an offer suggests
-/// the lesser of the hand and library terms, and stands exactly where the two periods the
-/// confirmer replays both end before a discard and a draw from an empty library, or the first
-/// does and the second draws from an empty library, a repetition its caster leaves the game in.
+/// the lesser of the hand and library terms, and stands wherever that is at least one: the first
+/// period the confirmer replays ends before a discard and a draw from an empty library.
 /// Once the span records a cleanup discard the hand term is the Islands in hand, since a further
 /// discard would name a card still face down in the library (CR 401.2).
 #[test]
@@ -4136,10 +4135,9 @@ fn every_archaeomancer_window_is_offered_the_lesser_of_its_hand_and_library_term
                 hand_term(state)
             };
             let replayable = known.min(library_term(state));
-            let last_card = replayable == 1 && library_term(state) == 1;
             assert_eq!(
                 *count,
-                (replayable >= 2 || last_card).then_some(replayable),
+                (replayable >= 1).then_some(replayable),
                 "{library} cards, turn {}",
                 state.turn_number
             );
@@ -7835,7 +7833,7 @@ fn window_of(windows: &[GameState], turn: u32) -> &GameState {
 /// main, counted to the first cleanup that would discard (CR 401.2: what that discard names is
 /// not yet drawn). The first window holds two Islands and the Assembly; its turn ends holding two
 /// cards and each repetition adds one, so the sixth would end holding eight: 6. Each declined
-/// window is one repetition nearer: 5, 4, 3, 2, then none.
+/// window is one repetition nearer: 5, 4, 3, 2, 1.
 #[test]
 fn a_time_sieve_thopter_assembly_period_is_offered_to_its_first_cleanup_discard() {
     let Some(db) = shared_card_db() else { return };
@@ -7845,7 +7843,7 @@ fn a_time_sieve_thopter_assembly_period_is_offered_to_its_first_cleanup_discard(
     assert_eq!(in_hand(window_of(&windows, start + 3), "Island"), 2);
     assert_eq!(
         offers,
-        (3..8)
+        (3..9)
             .map(|turn| (start + turn, 9 - turn))
             .collect::<Vec<_>>()
     );

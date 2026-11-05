@@ -16,17 +16,19 @@ use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
 };
 use engine::game::perf_counters::play_trace_counters;
+use engine::game::period_confirm::mandatory_reading_for_tests;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
+use engine::game::NamingCause;
 use engine::types::ability::{ChosenAttribute, TargetRef};
 use engine::types::actions::{GameAction, PriorityYieldOp, ReplacementAutoChoice};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    AutoMayChoice, AutoPassRequest, CastPaymentMode, GameEnd, GameState, LoopDetectionMode,
-    MayTriggerAutoChoiceScope, PersistedGameState, RandomDraw, StackEntryKind, WaitingFor,
-    YieldScope,
+    AutoMayChoice, AutoPassRequest, CastPaymentMode, GameEnd, GameRng, GameState, LoopDecision,
+    LoopDetectionMode, MayTriggerAutoChoiceScope, PersistedGameState, RandomDraw, StackEntryKind,
+    WaitingFor, YieldScope,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{
@@ -153,6 +155,10 @@ struct Board {
     tremors: bool,
     /// The affected player remembers the first replacement order asked, in prompt order.
     remember_order: bool,
+    /// Dee Kay, Finder of the Lost on P0's battlefield.
+    dee_kay: bool,
+    /// The game's random seed, in place of the scenario's.
+    seed: Option<u64>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -306,6 +312,9 @@ fn build(board: Board, mode: LoopDetectionMode) -> Option<Built> {
     if let Some(seat) = board.soul_warden {
         scenario.add_real_card(seat, "Soul Warden", Zone::Battlefield, db);
     }
+    if board.dee_kay {
+        scenario.add_creature_from_oracle(P0, "Dee Kay, Finder of the Lost", 1, 4, DEE_KAY);
+    }
     let opponents_turn = board.opponents_turn.then(|| {
         let dragon = scenario.add_real_card(P0, "Worldgorger Dragon", Zone::Hand, db);
         let murder = scenario.add_real_card(P1, "Murder", Zone::Hand, db);
@@ -353,6 +362,9 @@ fn build(board: Board, mode: LoopDetectionMode) -> Option<Built> {
     }
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;
+    if let Some(seed) = board.seed {
+        runner.state_mut().rng = GameRng::seed_from_u64(seed);
+    }
     // CR 111.7: a token that dies ceases to exist, leaving no card for Animate Dead to enchant.
     if let Some(token) = token {
         runner
@@ -716,6 +728,8 @@ const PLAIN: Board = Board {
     wood_elves: None,
     tremors: false,
     remember_order: false,
+    dee_kay: false,
+    seed: None,
 };
 
 const ANCHOR: Board = Board {
@@ -3700,6 +3714,12 @@ const GOBLINS: Board = Board {
     ..PLAIN
 };
 
+/// Dee Kay, Finder of the Lost's Oracle text; the curated card fixture lacks the card.
+const DEE_KAY: &str = "When Dee Kay enters, open an Attraction.\nWhenever you roll a 2, each \
+                       opponent loses 1 life and you gain 1 life.\nWhenever you roll a 4, you may \
+                       tap or untap target artifact or creature.\nWhenever you roll a 6, return \
+                       target creature card from your graveyard to your hand.";
+
 /// Asserts every drive at `board`, whose loop flips a coin or rolls a die each cycle, is a draw
 /// after the trigger drew an outcome, and that Off runs on.
 fn a_random_outcome_is_drawn(board: Board) {
@@ -3789,6 +3809,99 @@ fn a_die_roll_another_players_trigger_reads_is_offered() {
         );
         assert!(run.life(P1) > 20, "{drive:?}: reach: P1's life rose");
     }
+}
+
+/// CR 603.2 + CR 706.1: Dee Kay, Finder of the Lost ("Whenever you roll a 2, each opponent loses 1
+/// life and you gain 1 life.") triggers on the d20 Swarming Goblins rolls, whatever tokens that
+/// roll makes, so the reading of each mandatory span keeps the roll as randomness: no certificate
+/// covers it and the loop is never drawn.
+#[test]
+fn a_die_roll_a_trigger_keyed_on_the_roll_reads_is_not_certified() {
+    let board = Board {
+        dee_kay: true,
+        seed: Some(1),
+        ..GOBLINS
+    };
+    let mut named = 0;
+    let mut readings = Vec::new();
+    let Some(run) = run_observed(
+        board,
+        LoopDetectionMode::Interactive,
+        Drive::Pass,
+        40,
+        |state| {
+            let Some(view) = engine::game::play_trace_view(state) else {
+                return;
+            };
+            for &span in &view.named[named..] {
+                if span.cause == NamingCause::MandatoryRecurrence {
+                    readings.extend(mandatory_reading_for_tests(state, span));
+                }
+            }
+            named = view.named.len();
+        },
+    ) else {
+        return;
+    };
+    assert!(!readings.is_empty(), "reach: a mandatory span was read");
+    for (certified, profile) in &readings {
+        assert!(!certified, "{profile:?}");
+        assert!(
+            profile.members.contains(&LoopDecision::Random),
+            "{profile:?}"
+        );
+    }
+    assert_ne!(run.terminal, Terminal::GameOver(None));
+}
+
+/// CR 104.4b + CR 705.1 + CR 400.7: the coin-flip loop with no out is a draw on every seed in
+/// `seeds`, whatever the flips: the Firecat may win flips or lose its first, which writes nothing,
+/// and either way what any flip can write leaves with it.
+fn a_coin_flip_no_player_can_stop_is_drawn_on(seeds: std::ops::RangeInclusive<u64>) {
+    for seed in seeds {
+        let board = Board {
+            seed: Some(seed),
+            ..FIRECAT
+        };
+        let Some(run) = run(board, LoopDetectionMode::Interactive, Drive::Pass, 60) else {
+            return;
+        };
+        assert_eq!(run.terminal, Terminal::GameOver(None), "seed {seed}");
+        assert!(
+            run.state().rng.outcome_draws() > 0,
+            "seed {seed}: reach: a coin was flipped"
+        );
+    }
+}
+
+#[test]
+fn a_coin_flip_no_player_can_stop_is_a_draw_on_seeds_1_and_2() {
+    a_coin_flip_no_player_can_stop_is_drawn_on(1..=2);
+}
+
+#[test]
+fn a_coin_flip_no_player_can_stop_is_a_draw_on_seeds_3_and_4() {
+    a_coin_flip_no_player_can_stop_is_drawn_on(3..=4);
+}
+
+#[test]
+fn a_coin_flip_no_player_can_stop_is_a_draw_on_seeds_5_and_6() {
+    a_coin_flip_no_player_can_stop_is_drawn_on(5..=6);
+}
+
+#[test]
+fn a_coin_flip_no_player_can_stop_is_a_draw_on_seeds_7_and_8() {
+    a_coin_flip_no_player_can_stop_is_drawn_on(7..=8);
+}
+
+#[test]
+fn a_coin_flip_no_player_can_stop_is_a_draw_on_seeds_9_and_10() {
+    a_coin_flip_no_player_can_stop_is_drawn_on(9..=10);
+}
+
+#[test]
+fn a_coin_flip_no_player_can_stop_is_a_draw_on_seeds_11_and_12() {
+    a_coin_flip_no_player_can_stop_is_drawn_on(11..=12);
 }
 
 /// CR 706.1 + CR 732.5 + CR 732.2a: beside P1's Lightning Bolt and untapped Mountain the die-roll
