@@ -283,6 +283,7 @@ mod living_death_sacrificed_this_way_lifegain_2932;
 mod living_death_same_destination_disambiguation_2932;
 mod llanowar_greenwidow_quoted_grant_cost_reduction_9514;
 mod locke_milled_single_use_cast;
+mod locke_mug_single_treasure_multiplayer;
 mod locus_once_per_turn_cap;
 mod loki_becomes_target_ability;
 mod loop_only_dependency_fallback;
