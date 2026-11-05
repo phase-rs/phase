@@ -4428,9 +4428,6 @@ fn etrata_granted_turn_face_up_ability_parses() {
 /// sentence and `then` boundaries.
 #[test]
 fn generic_cant_rider_after_zone_ledger_invisible_antecedents_is_a_strict_failure() {
-    use crate::types::ability::AbilityCondition;
-    use crate::types::phase::Phase;
-
     const COCOON: &str = "Enchant creature you control\nWhen this Aura enters, tap enchanted creature and put three pupa counters on this Aura.\nEnchanted creature doesn't untap during your untap step if this Aura has a pupa counter on it.\nAt the beginning of your upkeep, remove a pupa counter from this Aura. If you can't, sacrifice it, put a +1/+1 counter on enchanted creature, and that creature gains flying.";
     const ELDRAZI_MONUMENT: &str = "Creatures you control get +1/+1 and have flying and indestructible.\nAt the beginning of your upkeep, sacrifice a creature. If you can't, sacrifice this artifact.";
     const GREENBELT_RAMPAGER: &str = "When this creature enters, pay {E}{E} (two energy counters). If you can't, return this creature to its owner's hand and you get {E}.";
@@ -35692,7 +35689,7 @@ fn die_roll_trigger_effects(oracle: &str, name: &str, effect_type: &str) -> Vec<
     found.into_iter().cloned().collect()
 }
 
-/// R11. CR 608.2k + CR 706.1: a die-roll trigger condition names a player's
+/// R11. CR 608.2c + CR 706.1: a die-roll trigger condition names a player's
 /// roll and no object, so a bare "it" in the body is the ability's own source
 /// (`SelfRef`), never `TriggeringSource` (which resolves to no object for a
 /// `DieRolled` event). Explicit referents and other condition shapes are

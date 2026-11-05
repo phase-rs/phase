@@ -753,21 +753,64 @@ pub(crate) enum ZoneDeliveryResult {
 }
 
 /// CR 508.4: who seats an entrant put onto the battlefield attacking once its
-/// entry has completed, when its as-enters continuation pauses. The value is
-/// fixed before the delivery, by the move's caller, and names the authority
-/// that will read the owed seat.
+/// entry has completed, when its delivery pauses before that. The value is fixed
+/// before the delivery, by the move's caller, and names the authority that will
+/// read the owed seat.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PausedEntryAttackSeat {
-    /// No logical owner resumes the move. When the chain drains in the delivery
-    /// tail (`PostReplacementDrainOwner::DeliveryTail`), the entry keeps its
-    /// delivery-tail counter step, whose `ContinueZoneDeliveryTail` seats an
-    /// attacking entrant on `Done`, so the as-enters hand-on is refused for it.
-    /// Nothing is stamped. Under `CallerEpilogue` the chain runs after the
-    /// delivery's own seat, and this value decides nothing.
-    DeliveryCounterStep,
     /// A `PendingChangeZoneIteration` or `PendingBatchDeliveries` resumes the
     /// paused member and takes its stamp.
     ResumingOwner,
+    /// No logical owner resumes the move. The move's child stack begins at
+    /// `child_stack_start`, and when the entry pauses, a seat frame is parked
+    /// there.
+    SeatFrame {
+        child_stack_start: crate::types::resolution::ChildStackDepth,
+    },
+    /// The delivery's own seat runs before its continuation
+    /// (`PostReplacementDrainOwner::CallerEpilogue`), or the caller never puts an
+    /// attacking entrant. Nothing is owed after a pause.
+    DeliverySeat,
+}
+
+impl PausedEntryAttackSeat {
+    /// No logical owner resumes this move. The boundary is captured before the
+    /// move's operation pushes its first frame, so a seat frame parked there lies
+    /// beneath that operation's whole child stack, a Devour snapshot included.
+    pub(crate) fn seat_frame(state: &GameState) -> Self {
+        Self::SeatFrame {
+            child_stack_start: state.resolution_stack.capture_child_boundary(),
+        }
+    }
+
+    /// CR 508.4: is an attacking battlefield entrant's seat owed, after a pause,
+    /// to an authority that resumes after its entry?
+    fn owed(self, enters_attacking: bool) -> crate::game::engine_replacement::OwedEntrySeat {
+        use crate::game::engine_replacement::OwedEntrySeat;
+        match self {
+            Self::ResumingOwner | Self::SeatFrame { .. } if enters_attacking => OwedEntrySeat::Owed,
+            Self::ResumingOwner | Self::SeatFrame { .. } | Self::DeliverySeat => {
+                OwedEntrySeat::NotOwed
+            }
+        }
+    }
+
+    /// CR 508.4: an owed seat was stamped on `object_id`'s parked entry; with no
+    /// logical owner to take it, park the seat frame at the move's boundary.
+    fn park_seat_frame_for_stamp(self, state: &mut GameState, object_id: ObjectId) {
+        match self {
+            Self::SeatFrame { child_stack_start } => {
+                if let Some(entrant) = state
+                    .objects
+                    .get(&object_id)
+                    .map(ObjectIncarnationRef::from_object)
+                {
+                    state.park_entry_attack_seat_after_child(entrant, child_stack_start);
+                }
+            }
+            Self::ResumingOwner | Self::DeliverySeat => {}
+        }
+    }
 }
 
 /// THE single zone-change entry point. Reads `from` from the object's current
@@ -832,12 +875,10 @@ pub(crate) fn move_object_with_terminal(
     req: ZoneMoveRequest,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveTerminalResult {
-    move_object_with_attack_seat(
-        state,
-        req,
-        PausedEntryAttackSeat::DeliveryCounterStep,
-        events,
-    )
+    // CR 508.4: no logical owner resumes this move; its seat frame's boundary is
+    // captured before its replacement consult.
+    let attack_seat = PausedEntryAttackSeat::seat_frame(state);
+    move_object_with_attack_seat(state, req, attack_seat, events)
 }
 
 /// [`move_object_with_terminal`], with the caller naming who seats an attacking
@@ -1278,7 +1319,8 @@ pub(crate) enum BatchMoveResult {
 /// `PendingBatchDeliveries`, rather than reconstructing a tail-only group.
 enum BatchDeliveryResult {
     Done(Box<LogicalZoneChangeGroup>),
-    NeedsChoice,
+    /// The owner was parked where the named placement says.
+    NeedsChoice(crate::types::game_state::ParkedBatchOwner),
 }
 
 /// Whether a delivery loop began a new child batch or resumed its active owner.
@@ -1367,12 +1409,24 @@ pub(crate) fn move_objects_simultaneously_then(
                 run_batch_completion(state, completion, events)
             })
         }
-        BatchDeliveryResult::NeedsChoice => {
+        BatchDeliveryResult::NeedsChoice(parked) => {
             // `deliver_batch` always stashes the exact owner, including when the
             // paused object was the last member and the undelivered tail is empty.
             // Attach the completion to that same owner so its drain can run it
-            // once, after logical settlement.
-            let pending = ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard));
+            // once, after logical settlement. CR 706.6 + CR 614.12a: an owner
+            // parked beneath its member's prompt-owning child stack is addressed
+            // at that member's boundary.
+            let pending = match parked {
+                crate::types::game_state::ParkedBatchOwner::Active => {
+                    ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard))
+                }
+                crate::types::game_state::ParkedBatchOwner::AtChildBoundary(member_stack_start) => {
+                    state
+                        .resolution_stack
+                        .batch_delivery_at_child_boundary_mut(member_stack_start)
+                        .expect("a paused batch owner sits at its member's child boundary")
+                }
+            };
             pending.completion = completion;
             pending.attempted = ids;
             pending.zone_change_record_start = zone_change_record_start;
@@ -1460,6 +1514,9 @@ fn deliver_batch(
         let face_down_in_exile = req.face_down_in_exile;
         let anticipated_pause = anticipated_zone_change_delivery(state, &req);
         let delivery_start = events.len();
+        // CR 706.6 + CR 614.12a: where this member's child stack begins, so a
+        // pause on a prompt one of its frames owns parks the batch beneath it.
+        let member_stack_start = state.resolution_stack.capture_child_boundary();
         let object_id = req.object_id;
         // CR 508.4: the batch owner resumes a paused member and takes its stamp.
         match move_object_with_attack_seat(state, req, PausedEntryAttackSeat::ResumingOwner, events)
@@ -1491,15 +1548,16 @@ fn deliver_batch(
                     &events[segment_start..delivery_start],
                 )
                 .expect("paused batch retains its exact delivered segment");
-                stash_batch_tail(
+                let parked = stash_batch_tail(
                     state,
                     logical_zone_change_group,
                     queue.collect(),
                     destination,
                     Some(paused_current),
                     parking,
+                    member_stack_start,
                 );
-                return BatchDeliveryResult::NeedsChoice;
+                return BatchDeliveryResult::NeedsChoice(parked);
             }
             ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
                 // CR 303.4f: an aura-host choice flows through
@@ -1531,15 +1589,16 @@ fn deliver_batch(
                     &events[segment_start..delivery_start],
                 )
                 .expect("paused Aura batch retains its exact delivered segment");
-                stash_batch_tail(
+                let parked = stash_batch_tail(
                     state,
                     logical_zone_change_group,
                     queue.collect(),
                     destination,
                     paused_current,
                     parking,
+                    member_stack_start,
                 );
-                return BatchDeliveryResult::NeedsChoice;
+                return BatchDeliveryResult::NeedsChoice(parked);
             }
         }
     }
@@ -1550,6 +1609,7 @@ fn deliver_batch(
 /// can finish it. New saves serialize every request's complete heterogeneous
 /// context. The legacy uniform projection remains populated for old-save wire
 /// compatibility but is not authoritative for newly parked actions.
+/// `member_stack_start` is where the paused member's child stack begins.
 fn stash_batch_tail(
     state: &mut GameState,
     logical_zone_change_group: LogicalZoneChangeGroup,
@@ -1557,7 +1617,8 @@ fn stash_batch_tail(
     destination: Zone,
     paused_current: Option<PendingZoneChangeDelivery>,
     parking: BatchDeliveryParking,
-) {
+    member_stack_start: crate::types::resolution::ChildStackDepth,
+) -> crate::types::game_state::ParkedBatchOwner {
     let source_id = tail
         .first()
         .and_then(|first| first.source().filter(|&source| source != first.object_id));
@@ -1598,10 +1659,15 @@ fn stash_batch_tail(
         deferred_events: Vec::new(),
     };
     match parking {
-        BatchDeliveryParking::NewChild => state.push_batch_delivery(pending),
-        BatchDeliveryParking::ReparkActive => state
-            .replace_active_batch_delivery(pending)
-            .expect("re-paused batch delivery must own the active frame"),
+        BatchDeliveryParking::NewChild => {
+            state.park_batch_delivery_for_paused_member(pending, member_stack_start)
+        }
+        BatchDeliveryParking::ReparkActive => {
+            state
+                .replace_active_batch_delivery(pending)
+                .expect("re-paused batch delivery must own the active frame");
+            crate::types::game_state::ParkedBatchOwner::Active
+        }
     }
 }
 
@@ -1826,7 +1892,9 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                     let _ = run_batch_completion(state, completion, events);
                 }
             }
-            BatchDeliveryResult::NeedsChoice => {
+            // A resumed batch re-parks its active owner in place
+            // (`BatchDeliveryParking::ReparkActive`).
+            BatchDeliveryResult::NeedsChoice(_) => {
                 // `deliver_batch` already re-parked the exact same owner,
                 // including a pause on its final member. Re-attach only the
                 // completion and external output; never replace that owner.
@@ -3801,6 +3869,17 @@ pub(crate) fn deliver_replaced_zone_change(
     library_placement: Option<LibraryPosition>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
+    debug_assert!(
+        !matches!(
+            &event,
+            ProposedEvent::ZoneChange {
+                to: Zone::Battlefield,
+                enters_attacking: true,
+                ..
+            }
+        ) || !matches!(drain, PostReplacementDrainOwner::DeliveryTail),
+        "an attacking entry whose chain drains in its tail names its seat's authority"
+    );
     deliver_replaced_zone_change_with_attack_seat(
         state,
         event,
@@ -3810,7 +3889,7 @@ pub(crate) fn deliver_replaced_zone_change(
         track_exiled_by_source,
         drain,
         library_placement,
-        PausedEntryAttackSeat::DeliveryCounterStep,
+        PausedEntryAttackSeat::DeliverySeat,
         events,
     )
 }
@@ -3852,6 +3931,9 @@ pub(crate) fn deliver_replaced_zone_change_with_attack_seat(
         ..
     } = event
     {
+        // CR 614.12a + CR 603.6d: the slice this delivery appends, whose entry a
+        // pause before the as-enters continuation holds.
+        let delivery_start = events.len();
         if let Some(entry) = state.liminal_entries.get_mut(&object_id) {
             entry.replacement_applied = applied.clone();
         }
@@ -4408,24 +4490,18 @@ pub(crate) fn deliver_replaced_zone_change_with_attack_seat(
                 Some(object_id)
             };
             counters_to_apply.extend(pending);
-            // CR 603.6d + CR 614.1c + CR 122.6: an as-enters roll is part of this entry,
-            // so counters of the kind it places are one placement with the roll's, and
-            // no counter choice comes before the roll. Counters of any other kind stay here.
-            // CR 508.4: under `CallerEpilogue` the chain runs after the seat, so the
-            // seat cannot be lost. CR 508.4: an attacking entry whose chain drains in
-            // this tail and that no logical owner resumes keeps its counter step,
-            // because only that pause's `ContinueZoneDeliveryTail` seats it.
-            if !enters_attacking
-                || matches!(drain, PostReplacementDrainOwner::CallerEpilogue)
-                || attack_seat == PausedEntryAttackSeat::ResumingOwner
-            {
-                counters_to_apply =
-                    crate::game::engine_replacement::hand_entry_counters_to_as_enters_roll(
-                        state,
-                        object_id,
-                        counters_to_apply,
-                    );
-            }
+            // CR 603.6d + CR 614.1c + CR 122.6 + CR 614.5: counters of the roll's
+            // kind given as the entrant enters are one placement with the roll's,
+            // whatever put it onto the battlefield, so no counter choice of that kind
+            // comes before the roll. Counters of any other kind stay here. CR 508.4:
+            // an attacking entrant whose continuation pauses is seated by the
+            // authority that resumes after it (`PausedEntryAttackSeat`).
+            counters_to_apply =
+                crate::game::engine_replacement::hand_entry_counters_to_as_enters_roll(
+                    state,
+                    object_id,
+                    counters_to_apply,
+                );
             if !counters_to_apply.is_empty()
                 && !crate::game::engine_replacement::apply_etb_counters(
                     state,
@@ -4434,6 +4510,18 @@ pub(crate) fn deliver_replaced_zone_change_with_attack_seat(
                     events,
                 )
             {
+                // CR 614.12a + CR 603.6d: the counter step of another kind paused
+                // before the entrant's as-enters roll, so its entry is held from
+                // here. CR 508.4: an owed seat now lives on that record, read by the
+                // owner or the seat frame once the continuation completes, so the
+                // counter step's own tail must not seat it as well.
+                let seat_on_record = hold_entry_at_counter_pause(
+                    state,
+                    object_id,
+                    &events[delivery_start..],
+                    attack_seat,
+                    enters_attacking,
+                );
                 return append_zone_delivery_tail_after_counter_pause(
                     state,
                     object_id,
@@ -4445,7 +4533,7 @@ pub(crate) fn deliver_replaced_zone_change_with_attack_seat(
                     exile_controller,
                     exile_tracking,
                     drain,
-                    enters_attacking,
+                    enters_attacking && !seat_on_record,
                     pending_etb_cleanup,
                 );
             }
@@ -4511,22 +4599,64 @@ pub(crate) fn deliver_replaced_zone_change_with_attack_seat(
             if let Some(player) = crate::game::combat::choose_entry_attack_target_or_enter(
                 state, object_id, controller,
             ) {
+                // CR 614.12a + CR 603.6d: under `CallerEpilogue` the as-enters roll
+                // runs after this answer, so the entry is held from this prompt.
+                if crate::game::engine_replacement::entrant_awaits_as_enters_roll(state, object_id)
+                {
+                    let _ = crate::game::engine_replacement::park_entry_before_its_continuation(
+                        state,
+                        object_id,
+                        &events[delivery_start..],
+                        crate::game::engine_replacement::OwedEntrySeat::NotOwed,
+                    );
+                }
                 return ZoneDeliveryResult::NeedsChoice(player);
             }
         }
         // CR 508.4: the as-enters continuation paused, so the entry has not
         // completed and the entrant cannot be seated yet. Its parked entry records
-        // the owed seat for the logical owner that resumes it.
+        // the owed seat for the authority that resumes after it: the logical owner,
+        // or the seat frame parked beneath the entry's child stack.
         if matches!(result, ZoneDeliveryResult::NeedsChoice(_))
-            && enters_attacking
             && entered_battlefield
-            && attack_seat == PausedEntryAttackSeat::ResumingOwner
+            && matches!(
+                attack_seat.owed(enters_attacking),
+                crate::game::engine_replacement::OwedEntrySeat::Owed
+            )
+            && crate::game::engine_replacement::owe_entry_attack_seat(state, object_id)
         {
-            let _ = crate::game::engine_replacement::owe_entry_attack_seat(state, object_id);
+            attack_seat.park_seat_frame_for_stamp(state, object_id);
         }
         return result;
     }
     ZoneDeliveryResult::Done
+}
+
+/// CR 614.12a + CR 603.6d: a battlefield entry's counter step of another kind
+/// paused before the entrant's as-enters roll, so the entry is held from here
+/// (`delivery_events` is the delivery's own slice). CR 508.4: an owed seat is
+/// stamped on that record, with the seat frame parked when no logical owner will
+/// take it. Returns whether the seat now lives on the record.
+fn hold_entry_at_counter_pause(
+    state: &mut GameState,
+    object_id: ObjectId,
+    delivery_events: &[GameEvent],
+    attack_seat: PausedEntryAttackSeat,
+    enters_attacking: bool,
+) -> bool {
+    if !crate::game::engine_replacement::entrant_awaits_as_enters_roll(state, object_id) {
+        return false;
+    }
+    let stamped = crate::game::engine_replacement::park_entry_before_its_continuation(
+        state,
+        object_id,
+        delivery_events,
+        attack_seat.owed(enters_attacking),
+    );
+    if stamped {
+        attack_seat.park_seat_frame_for_stamp(state, object_id);
+    }
+    stamped
 }
 
 /// CR 508.4: an entrant whose as-enters continuation paused is seated by the owner
@@ -4551,6 +4681,26 @@ pub(crate) fn seat_owed_entry_attacker(
         .filter(|object| object.zone == Zone::Battlefield)?
         .controller;
     crate::game::combat::choose_entry_attack_target_or_enter(state, entrant.object_id, controller)
+}
+
+/// CR 508.4: an entrant put onto the battlefield attacking joins combat once its
+/// entry has completed; the seat frame wakes after the entry's whole child stack.
+///
+/// The frame leaves the stack before its seat asks anything, so the answer's
+/// continuation resumes only what lies below it, and the seat happens once.
+pub(crate) fn resume_entry_attack_seat(state: &mut GameState) {
+    let Some(seat) = state
+        .resolution_stack
+        .take_active_entry_attack_seat()
+        .expect("the seat resume consumes only the active seat frame")
+    else {
+        return;
+    };
+    let owed = crate::game::engine_replacement::take_owed_entry_attack_seat_of(state, seat.entrant);
+    if let Some(player) = seat_owed_entry_attacker(state, owed) {
+        // The seat raised `EntryAttackTargetChoice`; keep that prompt.
+        replacement::park_waiting_for(state, player);
+    }
 }
 
 fn replacement_pause_delivery_result(state: &GameState) -> ZoneDeliveryResult {
@@ -4617,7 +4767,8 @@ pub(crate) fn execute_zone_move(
 }
 
 /// Its callers are the single-pick branches of `change_zone::resolve`, which park
-/// no logical owner, so an attacking entrant keeps its counter step (CR 508.4).
+/// no logical owner. The caller fixes `attack_seat` (CR 508.4): it captures the
+/// seat frame's boundary before the entry's Devour snapshot.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_zone_move_with_controller(
     state: &mut GameState,
@@ -4629,6 +4780,7 @@ pub(crate) fn execute_zone_move_with_controller(
     enter_transformed: bool,
     enter_tapped: EtbTapState,
     enters_attacking: bool,
+    attack_seat: PausedEntryAttackSeat,
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
@@ -4650,7 +4802,7 @@ pub(crate) fn execute_zone_move_with_controller(
         enter_transformed,
         enter_tapped,
         enters_attacking,
-        PausedEntryAttackSeat::DeliveryCounterStep,
+        attack_seat,
         controller_override,
         effect_enter_with_counters,
         face_down_profile,
@@ -4684,6 +4836,9 @@ pub(crate) fn execute_zone_move_with_terminal(
     enter_attached_to: Option<AttachTarget>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveTerminalResult {
+    // CR 508.4: a raw mover parks no logical owner; its seat frame's boundary is
+    // captured before its replacement consult.
+    let attack_seat = PausedEntryAttackSeat::seat_frame(state);
     execute_zone_move_with_terminal_and_controller(
         state,
         obj_id,
@@ -4694,7 +4849,7 @@ pub(crate) fn execute_zone_move_with_terminal(
         enter_transformed,
         enter_tapped,
         enters_attacking,
-        PausedEntryAttackSeat::DeliveryCounterStep,
+        attack_seat,
         controller_override,
         effect_enter_with_counters,
         face_down_profile,
@@ -7947,5 +8102,139 @@ mod hand_entry_receiver_tests {
         assert!(state.players[1].hand.contains(&first));
         assert!(state.players[1].hand.contains(&second));
         assert_eq!(rebound_owners(&state), vec![Some(P0), Some(P0)]);
+    }
+}
+
+#[cfg(test)]
+mod entry_attack_seat_frame_tests {
+    //! R16. CR 508.4 + CR 614.12a + CR 603.6d: an attacking put that no logical
+    //! owner resumes, whose counter step of another kind pauses before the
+    //! entrant's as-enters roll. The owed seat lives on the entry's custody
+    //! record, the seat frame parked beneath the move's child stack takes it once
+    //! the entry has completed, and the counter step's own tail does not seat it
+    //! a second time. No printed no-owner put carries an off-kind counter with no
+    //! pre-move prompt, so this synthetic put stands in for that route; Grim
+    //! Reaper, Lethal Legionnaire is the nearest printed card (an owner's route).
+    use super::*;
+    use crate::game::combat::AttackTarget;
+    use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use crate::types::actions::GameAction;
+    use crate::types::phase::Phase;
+    use crate::types::resolution::{FrameKind, ResolutionFrame};
+
+    const DOUBLING_SEASON: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.";
+    const WINDING_CONSTRICTOR: &str = "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.\nIf you would get one or more counters, you get that many plus one of each of those kinds of counters instead.";
+    const HAMMER_JAMMER: &str = "As this creature enters, roll a six-sided die. This creature enters with a number of +1/+1 counters on it equal to the result.\nWhenever you roll a die, remove all +1/+1 counters from this creature, then put a number of +1/+1 counters on it equal to the result.";
+    const HYDRADOODLE: &str = "As this creature enters, roll X six-sided dice. This creature enters with a number of +1/+1 counters on it equal to the total of those results.\nReach, trample";
+    const GLORIOUS_ANTHEM: &str = "Creatures you control get +1/+1.";
+
+    /// P0's vanilla attacker has attacked P1, with Doubling Season, Winding
+    /// Constrictor, Glorious Anthem (so a printed 0/0 entrant with no +1/+1
+    /// counters survives to be seated, CR 704.5f), and `entrant` in P0's
+    /// graveyard.
+    fn declared_board(name: &str, oracle: &str) -> (GameRunner, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new_n_player(2, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON);
+        scenario.add_creature_from_oracle(P0, "Winding Constrictor", 2, 3, WINDING_CONSTRICTOR);
+        scenario.add_enchantment_from_oracle(P0, "Glorious Anthem", GLORIOUS_ANTHEM);
+        let attacker = scenario.add_vanilla(P0, 2, 2);
+        let entrant = scenario
+            .add_creature_to_graveyard(P0, name, 0, 0)
+            .from_oracle_text(oracle)
+            .id();
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+            .expect("the attack is declared");
+        (runner, attacker, entrant)
+    }
+
+    fn attack_records(state: &GameState, id: ObjectId) -> usize {
+        state.combat.as_ref().map_or(0, |combat| {
+            combat
+                .attackers
+                .iter()
+                .filter(|attacker| attacker.object_id == id)
+                .count()
+        })
+    }
+
+    /// Put `entrant` onto the battlefield tapped and attacking with a finality
+    /// counter, seated by a seat frame, then answer every counter prompt.
+    fn put_attacking_and_settle(name: &str, oracle: &str) {
+        let (mut runner, attacker, entrant) = declared_board(name, oracle);
+        let state = runner.state_mut();
+        let attack_seat = PausedEntryAttackSeat::seat_frame(state);
+        let mut request = ZoneMoveRequest::effect(entrant, Zone::Battlefield, attacker);
+        request.mods.enter_tapped = EtbTapState::Tapped;
+        request.mods.enters_attacking = true;
+        request.mods.enter_with_counters = vec![(CounterType::Finality, 1)];
+        let mut events = Vec::new();
+        let result = move_object_with_attack_seat(state, request, attack_seat, &mut events);
+        assert!(
+            matches!(result, ZoneMoveTerminalResult::NeedsChoice(_)),
+            "{name}: the finality counter's placement pauses"
+        );
+        // Reach: the seat frame is parked beneath the counter pause's child
+        // stack, and the custody record carries the owed seat.
+        let frames: Vec<FrameKind> = state
+            .resolution_stack
+            .iter()
+            .map(ResolutionFrame::kind)
+            .collect();
+        assert_eq!(
+            frames.first(),
+            Some(&FrameKind::EntryAttackSeat),
+            "{name}: {frames:?}"
+        );
+        assert!(
+            state
+                .deferred_entry_events
+                .iter()
+                .any(|parked| parked.entry_attack.is_some()),
+            "{name}: the seat is owed on the record"
+        );
+        assert_eq!(attack_records(state, entrant), 0, "{name}");
+        // Answer each counter prompt; the parked frames resume at the next
+        // priority pass, as a paused owner's do.
+        for _ in 0..12 {
+            let action = match &runner.state().waiting_for {
+                WaitingFor::ReplacementChoice { .. } => GameAction::ChooseReplacement { index: 0 },
+                WaitingFor::Priority { .. } if !runner.state().resolution_stack.is_empty() => {
+                    GameAction::PassPriority
+                }
+                _ => break,
+            };
+            runner.act(action).expect("the action is accepted");
+        }
+        let state = runner.state();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "{name}: {:?}",
+            state.waiting_for
+        );
+        assert_eq!(state.objects[&entrant].zone, Zone::Battlefield, "{name}");
+        assert_eq!(
+            attack_records(state, entrant),
+            1,
+            "{name}: seated exactly once"
+        );
+        assert!(
+            !state
+                .resolution_stack
+                .iter()
+                .any(|frame| frame.kind() == FrameKind::EntryAttackSeat),
+            "{name}: the seat frame retired"
+        );
+    }
+
+    #[test]
+    fn an_owed_seat_at_a_counter_pause_is_seated_once() {
+        // The roll's chain pauses again on its own +1/+1 placement.
+        put_attacking_and_settle("Hammer Jammer", HAMMER_JAMMER);
+        // X is 0 off the stack: the chain rolls no dice and completes inline.
+        put_attacking_and_settle("Hydradoodle", HYDRADOODLE);
     }
 }

@@ -1890,11 +1890,9 @@ pub enum GameEvent {
         /// CR 614.1c + CR 614.12 + CR 113.6 + CR 603.10: the entrant whose as-enters
         /// replacement made this roll before its entry happened. Its abilities do not
         /// function yet, so it alone is not an observer of this event. `None` for
-        /// every other roll, and for the as-enters roll of an entry that paused before
-        /// its roll: an entry put onto the battlefield attacking, inline, that no
-        /// logical owner resumes; an attacking entry delivered behind a pre-move
-        /// replacement prompt whose attack target is asked before its chain runs; or
-        /// one whose counter step for counters of another kind paused (filed residuals).
+        /// every other roll. CR 603.2 + CR 603.10: the roll's observers are collected
+        /// when it is rolled, with the battlefield as it is then, and placed with its
+        /// entry; every other scan refuses a stamped roll.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pre_entry_source: Option<ObjectId>,
     },

@@ -3666,13 +3666,60 @@ fn owner_held_delivery_events(state: &mut GameState) -> Vec<GameEvent> {
 /// through `replay_deferred_entry_events`, so the two are disjoint. Moves only
 /// `entrant`'s own entries: this runs on every battlefield zone-change resume,
 /// and another entrant's parked entry waits for its own collector.
+///
+/// CR 603.6d + CR 603.2: an entry whose collector is still live (a paused
+/// as-enters continuation it is bound to, a logical owner holding its delivery,
+/// or an owed attacking seat, CR 508.4) is collected by that collector, once;
+/// this flush takes only entries no collector owns.
 pub(crate) fn flush_deferred_entry_events_into_priority_scan(
     state: &mut GameState,
     entrant: ObjectId,
     events: &mut Vec<GameEvent>,
 ) {
-    let deferred = take_parked_entries_of(state, entrant);
+    let owner_held = state.resolution_stack.paused_owner_delivery_events();
+    let bound: Vec<GameEvent> = state
+        .parked_entry_events()
+        .filter(|event| entry_is_bound_to_a_live_drain(state, event, entrant))
+        .cloned()
+        .collect();
+    let deferred = take_parked_entries_of_where(state, entrant, |parked| {
+        bound
+            .iter()
+            .chain(&owner_held)
+            .any(|event| parked_event_holds(&parked.event, event))
+            || parked.entry_attack.is_some()
+    });
     events.extend(deferred);
+}
+
+/// CR 603.6d + CR 614.12a + CR 400.7: is `event` a battlefield entry of
+/// `entrant` whose incarnation is bound to a live drain anywhere on the
+/// resolution stack? That drain's retirement records its completion. An entry
+/// recorded with no incarnation is read as the entrant's current one.
+fn entry_is_bound_to_a_live_drain(state: &GameState, event: &GameEvent, entrant: ObjectId) -> bool {
+    let GameEvent::ZoneChanged {
+        object_id,
+        to: Zone::Battlefield,
+        record,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    if *object_id != entrant {
+        return false;
+    }
+    record
+        .entered_incarnation
+        .or_else(|| state.objects.get(&entrant).map(|object| object.incarnation))
+        .is_some_and(|incarnation| {
+            state
+                .resolution_stack
+                .binds_parked_entrant(ObjectIncarnationRef {
+                    object_id: entrant,
+                    incarnation,
+                })
+        })
 }
 
 /// The three entry shapes a park holds for `source_id`: its battlefield
@@ -3755,14 +3802,36 @@ pub(crate) fn is_as_enters_roll(event: &GameEvent) -> bool {
 }
 
 /// CR 614.1c + CR 603.2 + CR 113.6: park an entrant's own as-enters roll beside
-/// its entry. The roll happened, so it is parked completed; it is collected with
-/// its entry by the settled release, never by the action that made it, so a
-/// prompt that ends that action cannot lose it.
-pub(crate) fn park_as_enters_roll(state: &mut GameState, event: GameEvent) {
+/// its entry, holding `held_triggers`, the contexts its instruction triggered.
+/// The roll happened, so it is parked completed; the settled release places
+/// what it triggered with its entry, never the action that made it, so a prompt
+/// that ends that action cannot lose it.
+pub(crate) fn park_as_enters_roll(
+    state: &mut GameState,
+    event: GameEvent,
+    held_triggers: Vec<super::triggers::DeferredTrigger>,
+) {
     debug_assert!(is_as_enters_roll(&event));
-    state
-        .deferred_entry_events
-        .push(ParkedEntry::occurred(event));
+    let mut parked = ParkedEntry::occurred(event);
+    parked.held_triggers = held_triggers;
+    state.deferred_entry_events.push(parked);
+}
+
+/// CR 603.2 + CR 603.10 + CR 603.2c: an as-enters roll triggers what is on the
+/// battlefield when it is rolled, once per instruction for a "one or more dice"
+/// ability; its triggers wait with its entry and are put on the stack with it
+/// (CR 603.3).
+///
+/// `rolls` are one instruction's stamped rolls. Their observers are collected
+/// now and held on the first; every roll joins the park.
+pub(crate) fn hold_as_enters_roll_occurrence(state: &mut GameState, rolls: Vec<GameEvent>) {
+    let mut observers = Some(super::triggers::collect_as_enters_roll_observers(
+        state, &rolls,
+    ));
+    for roll in rolls {
+        let held = observers.take().unwrap_or_default();
+        park_as_enters_roll(state, roll, held);
+    }
 }
 
 /// CR 508.4: the entrant's as-enters continuation paused, so its attacking seat is
@@ -3837,6 +3906,65 @@ pub(crate) fn take_owed_entry_attack_seat(
         .flatten()
 }
 
+/// CR 508.4 + CR 400.7: take the attacking seat `entrant`'s parked battlefield
+/// entry owes, once, for the seat frame that no logical owner's delivery keys.
+/// Returns the seat only while `entrant` is still that incarnation.
+pub(crate) fn take_owed_entry_attack_seat_of(
+    state: &mut GameState,
+    entrant: ObjectIncarnationRef,
+) -> Option<(
+    ObjectIncarnationRef,
+    crate::types::ability::EntryAttackDestination,
+)> {
+    let destination = state
+        .deferred_entry_events
+        .iter_mut()
+        .filter(|parked| {
+            matches!(
+                parked.event,
+                GameEvent::ZoneChanged {
+                    to: Zone::Battlefield,
+                    ..
+                }
+            ) && parked_entry_is_of_incarnation(&parked.event, entrant)
+        })
+        .find_map(|parked| parked.entry_attack.take())?;
+    entrant.is_current(state).then_some((entrant, destination))
+}
+
+/// CR 508.4: whether an attacking entrant's seat is owed to an authority that
+/// resumes after its delivery's pause (a logical owner or the seat frame).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwedEntrySeat {
+    Owed,
+    NotOwed,
+}
+
+/// CR 614.12a + CR 603.6d: the entry's as-enters continuation has not run, so
+/// the entry is not over; it is held from every collector until that
+/// continuation completes.
+///
+/// Parks every entry event of `entrant` in `delivery_events` (the delivery's own
+/// slice) that the park does not already hold. The chain's dispatch then adopts
+/// that custody by identity. With `OwedEntrySeat::Owed` it stamps the attacking
+/// seat on the record and returns whether one was stamped.
+pub(crate) fn park_entry_before_its_continuation(
+    state: &mut GameState,
+    entrant: ObjectId,
+    delivery_events: &[GameEvent],
+    owed_seat: OwedEntrySeat,
+) -> bool {
+    for event in delivery_events {
+        if is_entry_event_of(event, entrant) && !entry_event_is_parked(state, event) {
+            park_pending_entry(state, event.clone());
+        }
+    }
+    match owed_seat {
+        OwedEntrySeat::Owed => owe_entry_attack_seat(state, entrant),
+        OwedEntrySeat::NotOwed => false,
+    }
+}
+
 /// Take `entrant`'s own parked entries, in either state, and leave every other
 /// entry parked for its own collector. Every removal that answers one entrant
 /// goes through here.
@@ -3851,15 +3979,24 @@ fn take_parked_entries_of_except(
     entrant: ObjectId,
     owner_held: &[GameEvent],
 ) -> Vec<GameEvent> {
+    take_parked_entries_of_where(state, entrant, |parked| {
+        owner_held
+            .iter()
+            .any(|event| parked_event_holds(&parked.event, event))
+    })
+}
+
+/// Take `entrant`'s own parked entries except those `keep` names, which stay
+/// parked for the collector that owns them.
+fn take_parked_entries_of_where(
+    state: &mut GameState,
+    entrant: ObjectId,
+    keep: impl Fn(&ParkedEntry) -> bool,
+) -> Vec<GameEvent> {
     let (own, others): (Vec<ParkedEntry>, Vec<ParkedEntry>) =
         std::mem::take(&mut state.deferred_entry_events)
             .into_iter()
-            .partition(|parked| {
-                is_entry_event_of(&parked.event, entrant)
-                    && !owner_held
-                        .iter()
-                        .any(|event| parked_event_holds(&parked.event, event))
-            });
+            .partition(|parked| is_entry_event_of(&parked.event, entrant) && !keep(parked));
     state.deferred_entry_events = others;
     own.into_iter().map(|parked| parked.event).collect()
 }
@@ -4082,11 +4219,26 @@ fn as_enters_continuation_entrant(
 
 /// The bracket that makes an as-enters continuation part of its entrant's entry
 /// (CR 603.6d + CR 614.1c). `open` parks the entrant's entry events as pending
-/// before the continuation runs; `close` unparks them when it completed inline
-/// and keeps them, bound to the paused dispatch, when it paused.
+/// before the continuation runs, or adopts the custody its delivery already
+/// parked; `close` completes or unparks them when it completed inline and keeps
+/// them, bound to the paused dispatch, when it paused.
 struct EntryContinuationParking {
-    parked: Vec<GameEvent>,
-    entrant: Option<ObjectId>,
+    custody: EntryCustody,
+}
+
+/// Who holds the entry of the continuation's entrant while it runs.
+enum EntryCustody {
+    /// The continuation is no entrant's as-enters continuation.
+    None,
+    /// `open` parked these entry events of `entrant` from the dispatch's events.
+    Opened {
+        entrant: ObjectId,
+        parked: Vec<GameEvent>,
+    },
+    /// The entrant's delivery parked its entry at a pause before this
+    /// continuation ran (`park_entry_before_its_continuation`); the dispatch
+    /// adopts that custody by identity.
+    Adopted(ObjectIncarnationRef),
 }
 
 impl EntryContinuationParking {
@@ -4095,26 +4247,43 @@ impl EntryContinuationParking {
     /// skip in `zones::settle_battlefield_entry_observations` then refuses to
     /// observe this entrant at every instruction boundary inside the
     /// continuation; other entries of the same buffer still settle.
+    ///
+    /// `adopts`: the entrant's entry is already held pending and this dispatch
+    /// is its as-enters roll, so the custody is adopted, whatever `event` the
+    /// dispatch carries.
     fn open(
         state: &mut GameState,
+        adopts: bool,
         event: Option<&ReplacementEvent>,
         source: Option<ObjectId>,
         events: &[GameEvent],
     ) -> Self {
-        let entrant = as_enters_continuation_entrant(state, event, source, events);
-        let parked: Vec<GameEvent> = entrant
-            .map(|entrant| {
-                events
-                    .iter()
-                    .filter(|entry| is_entry_event_of(entry, entrant))
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
+        if adopts {
+            if let Some(reference) = source
+                .and_then(|source| state.objects.get(&source))
+                .map(ObjectIncarnationRef::from_object)
+            {
+                return Self {
+                    custody: EntryCustody::Adopted(reference),
+                };
+            }
+        }
+        let Some(entrant) = as_enters_continuation_entrant(state, event, source, events) else {
+            return Self {
+                custody: EntryCustody::None,
+            };
+        };
+        let parked: Vec<GameEvent> = events
+            .iter()
+            .filter(|entry| is_entry_event_of(entry, entrant))
+            .cloned()
+            .collect();
         for entry in &parked {
             park_pending_entry(state, entry.clone());
         }
-        Self { parked, entrant }
+        Self {
+            custody: EntryCustody::Opened { entrant, parked },
+        }
     }
 
     /// CR 614.12a + CR 603.6d: a continuation that completed inline leaves its
@@ -4123,6 +4292,11 @@ impl EntryContinuationParking {
     /// paused continuation keeps the park for its release or owner custody, and
     /// the dispatch that owns the prompt carries the binding to the completion
     /// authority.
+    ///
+    /// CR 603.6d + CR 603.2: an adopted entry completes with its continuation
+    /// and waits for its collector. Its `ZoneChanged` belongs to an earlier
+    /// action's buffer, scanned while it was parked, so it is recorded completed
+    /// rather than unparked.
     ///
     /// An as-enters roll of this entrant stays parked in either arm. The settled
     /// release takes it when the action settles, so an action that ends on a later
@@ -4133,23 +4307,32 @@ impl EntryContinuationParking {
         dispatch: crate::types::resolution::IdentifiedPostReplacementDispatch,
         waiting_for: Option<&WaitingFor>,
     ) {
-        let Some(entrant) = self.entrant.filter(|_| !self.parked.is_empty()) else {
-            return;
-        };
-        match waiting_for {
-            None => state
-                .deferred_entry_events
-                .retain(|parked| !self.parked.contains(&parked.event)),
-            // CR 614.12a + CR 707.9: the entry of an object entering as a copy is
-            // not over at the copy answer. Counters and any copied as-enters
-            // choice or payment still follow, and the replay collects it.
-            Some(WaitingFor::CopyTargetChoice { source_id, .. }) if *source_id == entrant => {}
-            Some(_) => {
-                if let Some(object) = state.objects.get(&entrant) {
-                    let reference = ObjectIncarnationRef::from_object(object);
+        match self.custody {
+            EntryCustody::None => {}
+            EntryCustody::Opened { entrant, parked } => match waiting_for {
+                None => state
+                    .deferred_entry_events
+                    .retain(|entry| !parked.contains(&entry.event)),
+                // CR 614.12a + CR 707.9: the entry of an object entering as a copy
+                // is not over at the copy answer. Counters and any copied
+                // as-enters choice or payment still follow, and the replay
+                // collects it.
+                Some(WaitingFor::CopyTargetChoice { source_id, .. }) if *source_id == entrant => {}
+                Some(_) => {
+                    if let Some(object) = state.objects.get(&entrant) {
+                        let reference = ObjectIncarnationRef::from_object(object);
+                        let _ = state.bind_parked_entrant(dispatch, reference);
+                    }
+                }
+            },
+            EntryCustody::Adopted(reference) => match waiting_for {
+                None => record_parked_entry_completion(state, &[reference]),
+                Some(WaitingFor::CopyTargetChoice { source_id, .. })
+                    if *source_id == reference.object_id => {}
+                Some(_) => {
                     let _ = state.bind_parked_entrant(dispatch, reference);
                 }
-            }
+            },
         }
     }
 }
@@ -4162,9 +4345,9 @@ impl EntryContinuationParking {
 /// CR 603.2 + CR 603.7: a delayed triggered ability whose trigger event is the
 /// entry triggers on the realized entry, once, like a printed one.
 ///
-/// An as-enters roll is left for the settled release, which collects both its
-/// halves: custody runs only the delayed half, and the owner's segment collects
-/// only zone changes, so a roll taken here would lose its ordinary observers.
+/// An as-enters roll is left for the settled release, which places the contexts
+/// its instruction triggered as it was rolled (CR 603.2 + CR 603.10), so a roll
+/// taken here would lose them.
 pub(crate) fn take_entry_continuation_custody(
     state: &mut GameState,
     delivery_events: &[GameEvent],
@@ -4232,6 +4415,11 @@ fn parked_entrant_left_the_game(state: &GameState, event: &GameEvent) -> bool {
 /// replacement pause, payment or trigger construction). A take therefore means
 /// the entrant's continuation, and every frame above it, is no longer live.
 ///
+/// CR 603.2 + CR 603.3: an as-enters roll is not returned. Its observers were
+/// collected when it was rolled, so the contexts it holds join
+/// `deferred_triggers` here, for the caller's placement beside its entry's;
+/// CR 800.4d: a context whose controller has left the game is retired.
+///
 /// The recorded state decides collection, not presence. The gate means no
 /// continuation is live, so a pending entry can only have been abandoned, and it
 /// is dropped. That is a design decision, not derived from a rule: the rules do
@@ -4253,13 +4441,19 @@ fn take_settled_entry_continuation_events(state: &mut GameState) -> Vec<GameEven
     // CR 603.2c: a paused logical owner is a live frame, so it always fails the
     // gate above and its member stays parked for its custody.
     debug_assert!(super::engine_priority::retained_logical_zone_events(state).is_empty());
-    let completed: Vec<GameEvent> = std::mem::take(&mut state.deferred_entry_events)
-        .into_iter()
-        .filter_map(|parked| match parked.state {
-            ParkedEntryState::Completed => Some(parked.event),
-            ParkedEntryState::Pending { .. } => None,
-        })
-        .collect();
+    let mut completed: Vec<GameEvent> = Vec::new();
+    let mut held: Vec<super::triggers::DeferredTrigger> = Vec::new();
+    for parked in std::mem::take(&mut state.deferred_entry_events) {
+        match parked.state {
+            ParkedEntryState::Completed if is_as_enters_roll(&parked.event) => {
+                held.extend(parked.held_triggers);
+            }
+            ParkedEntryState::Completed => completed.push(parked.event),
+            ParkedEntryState::Pending { .. } => {}
+        }
+    }
+    let live = super::triggers::retire_departed_controller_contexts(state, held);
+    state.deferred_triggers.extend(live);
     super::triggers::filter_already_collected_trigger_events_from(
         state,
         &completed,
@@ -4284,12 +4478,15 @@ pub(crate) fn release_settled_entry_continuation(state: &mut GameState) -> Vec<G
 }
 
 /// CR 603.3 + CR 603.3b: the release for a point that queues — the settled
-/// entry's ordinary half joins `deferred_triggers` beside its delayed half, and
-/// the caller's drain places them. Returns whether anything was released.
+/// entry's ordinary half joins `deferred_triggers` beside its delayed half and
+/// the contexts its as-enters rolls hold, and the caller's drain places them.
+/// Returns whether anything was released or queued.
 pub(crate) fn collect_settled_entry_continuation_triggers(state: &mut GameState) -> bool {
+    let queued_before = state.deferred_triggers.len();
     let released = release_settled_entry_continuation(state);
+    let queued_held = state.deferred_triggers.len() != queued_before;
     if released.is_empty() {
-        return false;
+        return queued_held;
     }
     super::triggers::collect_triggers_into_deferred(state, &released);
     true
@@ -4739,6 +4936,11 @@ pub(crate) fn apply_pending_post_replacement_effect(
         .map(|drain| std::mem::take(&mut drain.applied))
         .unwrap_or_default();
 
+    // CR 614.12a + CR 603.6d: the entrant's delivery already holds its entry
+    // when a pause came before this as-enters roll; read before the dispatch
+    // takes the continuation.
+    let adopts = source.is_some_and(|entrant| entrant_entry_is_pending(state, entrant))
+        && as_enters_roll_chain_mut(state).is_some();
     let (continuation, dispatch) = state.begin_post_replacement_dispatch()?;
     // CR 603.3b + CR 608.2c: this dispatch is now live on this thread's call
     // stack. Constructed AFTER the mint so the `?` early-return path never
@@ -4749,7 +4951,8 @@ pub(crate) fn apply_pending_post_replacement_effect(
     let _live_dispatch = LiveDispatchGuard::enter();
     // CR 603.6d + CR 614.1c: an as-enters continuation is part of its entrant's
     // entry; park that entry while the continuation runs.
-    let entry_parking = EntryContinuationParking::open(state, event.as_ref(), source, events);
+    let entry_parking =
+        EntryContinuationParking::open(state, adopts, event.as_ref(), source, events);
     let waiting_for = match continuation {
         PostReplacementContinuation::Resolved(resolved) => {
             apply_post_replacement_resolved_effect(state, &resolved, replacement_applied, events)
@@ -5146,20 +5349,18 @@ pub(crate) fn apply_pending_spell_resolution(
 /// Contributions of another kind stay on delivery's own counter step, because each
 /// kind is its own placement and a prompt of another kind stays ahead of the roll.
 ///
-/// CR 508.4: an attacking entrant is seated after this continuation completes.
-/// Inline, the delivery seats it. When the continuation paused under a logical
-/// owner, that owner seats it on resume (`owe_entry_attack_seat`). Under
-/// `PostReplacementDrainOwner::CallerEpilogue` the chain runs after the
-/// delivery's own seat, so the entry is handed on. An attacking delivery whose
-/// chain drains in its tail and that no owner resumes keeps its counter step and
-/// is not handed on (`PausedEntryAttackSeat::DeliveryCounterStep`).
+/// CR 603.6d + CR 614.1c + CR 122.6 + CR 614.5: counters of the roll's kind given
+/// as the entrant enters are one placement with the roll's, whatever put it onto
+/// the battlefield. CR 508.4: an attacking entrant whose continuation pauses is
+/// seated by the authority that resumes after it (`PausedEntryAttackSeat`).
 pub(crate) fn hand_entry_counters_to_as_enters_roll(
     state: &mut GameState,
     entrant: ObjectId,
     counters: Vec<(CounterType, u32)>,
 ) -> Vec<(CounterType, u32)> {
-    let Some((kind, placed)) =
-        as_enters_roll_chain_mut(state, entrant).and_then(unconditional_self_placement_mut)
+    let Some((kind, placed)) = as_enters_roll_chain_mut(state)
+        .filter(|(source, _)| *source == Some(entrant))
+        .and_then(|(_, chain)| unconditional_self_placement_mut(chain))
     else {
         return counters;
     };
@@ -5180,24 +5381,28 @@ pub(crate) fn hand_entry_counters_to_as_enters_roll(
         .collect()
 }
 
-/// The not-yet-run as-enters roll of `entrant`: the resident drain the dispatch
-/// will run, when it is that entrant's and has `RollDie` at its head.
+/// The not-yet-run as-enters roll the active drain will dispatch: its resident
+/// `Ready` template when that chain has `RollDie` at its head, with the drain's
+/// source.
 fn as_enters_roll_chain_mut(
     state: &mut GameState,
-    entrant: ObjectId,
-) -> Option<&mut AbilityDefinition> {
+) -> Option<(Option<ObjectId>, &mut AbilityDefinition)> {
     let drain = state.active_post_replacement_drains_mut()?.resident_mut()?;
-    if drain.source != Some(entrant) {
-        return None;
-    }
+    let source = drain.source;
     match &mut drain.status {
         DrainStatus::Ready(PostReplacementContinuation::Template(chain)) => {
-            matches!(*chain.effect, Effect::RollDie { .. }).then_some(&mut **chain)
+            matches!(*chain.effect, Effect::RollDie { .. }).then_some((source, &mut **chain))
         }
         DrainStatus::Ready(PostReplacementContinuation::Resolved(_))
         | DrainStatus::Dispatching
         | DrainStatus::Paused => None,
     }
+}
+
+/// CR 614.12a + CR 603.6d: is `entrant`'s as-enters roll still to run? True while
+/// the active drain's resident is that entrant's not-yet-run `RollDie` chain.
+pub(crate) fn entrant_awaits_as_enters_roll(state: &mut GameState, entrant: ObjectId) -> bool {
+    as_enters_roll_chain_mut(state).is_some_and(|(source, _)| source == Some(entrant))
 }
 
 /// The chain's first unconditional `PutCounter` on the entrant itself: the
@@ -10812,6 +11017,7 @@ mod entry_continuation_release_tests {
             event,
             state,
             entry_attack: None,
+            held_triggers: Vec::new(),
         }
     }
 
@@ -11584,8 +11790,10 @@ mod entry_continuation_release_tests {
             ("inline close", |state, entrant, own| {
                 let dispatch = dispatch_on_a_fresh_frame(state);
                 EntryContinuationParking {
-                    parked: own.to_vec(),
-                    entrant: Some(entrant),
+                    custody: EntryCustody::Opened {
+                        entrant,
+                        parked: own.to_vec(),
+                    },
                 }
                 .close(state, dispatch, None);
             }),
@@ -11879,7 +12087,9 @@ mod entry_continuation_release_tests {
     /// U-1. CR 614.1c + CR 603.2 + CR 706.2: an entrant's own as-enters roll is
     /// parked completed beside its entry. Closing A's inline continuation unparks
     /// only A's entry, custody over the rolls takes nothing, an abandonment keeps
-    /// them because they happened, and the settled release takes each once.
+    /// them because they happened, and the settled release takes each once. It
+    /// returns no roll: what a roll triggered was collected when it was rolled,
+    /// and the release queues those held contexts instead (none here).
     #[test]
     fn an_as_enters_roll_waits_in_the_park_for_the_settled_release() {
         let mut state = settled_state(2);
@@ -11895,13 +12105,15 @@ mod entry_continuation_release_tests {
         state.deferred_entry_events.clear();
         park_pending_entry(&mut state, entry_a.clone());
         park_pending_entry(&mut state, entry_b.clone());
-        park_as_enters_roll(&mut state, roll_a.clone());
-        park_as_enters_roll(&mut state, roll_b.clone());
+        park_as_enters_roll(&mut state, roll_a.clone(), Vec::new());
+        park_as_enters_roll(&mut state, roll_b.clone(), Vec::new());
 
         let dispatch = dispatch_on_a_fresh_frame(&mut state);
         EntryContinuationParking {
-            parked: vec![entry_a],
-            entrant: Some(a),
+            custody: EntryCustody::Opened {
+                entrant: a,
+                parked: vec![entry_a],
+            },
         }
         .close(&mut state, dispatch, None);
         let after_close = vec![
@@ -11928,11 +12140,12 @@ mod entry_continuation_release_tests {
         );
 
         *state.resolution_stack = Default::default();
-        assert_eq!(
-            take_settled_entry_continuation_events(&mut state),
-            vec![roll_a, roll_b]
+        assert!(take_settled_entry_continuation_events(&mut state).is_empty());
+        assert!(
+            state.deferred_entry_events.is_empty(),
+            "each roll is taken once"
         );
-        assert!(state.deferred_entry_events.is_empty());
+        assert!(state.deferred_triggers.is_empty());
         assert!(take_settled_entry_continuation_events(&mut state).is_empty());
     }
 
@@ -12011,5 +12224,242 @@ mod entry_continuation_release_tests {
         );
         assert_eq!(stamps(&state), vec![None; 3], "the stamp is still taken");
         assert!(owe_entry_attack_seat(&mut state, b), "B's own entry");
+    }
+
+    const BRAZEN_DWARF: &str =
+        "Whenever you roll one or more dice, this creature deals 1 damage to each opponent.";
+
+    /// Install `entrant`'s not-yet-run as-enters roll: a ready `RollDie` chain
+    /// sourced at it, on a fresh frame.
+    fn install_roll_chain(state: &mut GameState, entrant: ObjectId) {
+        let chain = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RollDie {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                sides: 6,
+                results: Vec::new(),
+                modifier: None,
+            },
+        );
+        state.install_post_replacement_drain(
+            PostReplacementDrain {
+                source: Some(entrant),
+                ..PostReplacementDrain::ready(PostReplacementContinuation::Template(Box::new(
+                    chain,
+                )))
+            },
+            ResidentDrainPolicy::Replace,
+        );
+    }
+
+    /// `id`'s parked battlefield entry, if any.
+    fn parked_entry_state(state: &GameState, entry: &GameEvent) -> Option<ParkedEntryState> {
+        state
+            .deferred_entry_events
+            .iter()
+            .find(|parked| parked.event == *entry)
+            .map(|parked| parked.state)
+    }
+
+    /// Move `id` out and back, returning its new battlefield entry (CR 400.7).
+    fn reenter(state: &mut GameState, id: ObjectId) -> GameEvent {
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(state, id, Zone::Graveyard, &mut events);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(state, id, Zone::Battlefield, &mut events);
+        events
+            .into_iter()
+            .find(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        to: Zone::Battlefield,
+                        ..
+                    }
+                )
+            })
+            .expect("the new entry")
+    }
+
+    /// R11. CR 614.12a + CR 603.6d + CR 400.7: an as-enters roll's dispatch adopts
+    /// the entry its delivery already parked, by identity, whatever event it
+    /// carries, and completes it with the continuation: recorded completed and
+    /// still parked for its collector, because its `ZoneChanged` belongs to an
+    /// earlier action's buffer. With nothing parked there is nothing to adopt,
+    /// and another incarnation's parked entry is not adopted.
+    #[test]
+    fn an_as_enters_roll_adopts_the_entry_its_delivery_parked() {
+        let mut state = settled_state(2);
+        let (x, entry) = parked_entry(&mut state, 900, P0, P0, PENDING);
+        install_roll_chain(&mut state, x);
+        let mut events = Vec::new();
+        let waiting_for =
+            apply_pending_post_replacement_effect(&mut state, None, None, None, &mut events);
+        assert!(waiting_for.is_none(), "{waiting_for:?}");
+        // Reach: the roll was made while the entry was held pending.
+        let stamped: Vec<_> = events
+            .iter()
+            .filter(|event| is_as_enters_roll(event))
+            .collect();
+        assert_eq!(stamped.len(), 1, "{events:?}");
+        assert_eq!(parked_entry_state(&state, &entry), Some(COMPLETED));
+
+        // Nothing parked: no custody is adopted or opened (the dispatch carries
+        // no `Moved` event), so nothing is parked and the roll is unstamped.
+        let mut state = settled_state(2);
+        let (y, entry) = entered(&mut state, 901, P0, P0);
+        state.deferred_entry_events.clear();
+        install_roll_chain(&mut state, y);
+        let mut events = Vec::new();
+        let _ = apply_pending_post_replacement_effect(&mut state, None, None, None, &mut events);
+        assert_eq!(parked_entry_state(&state, &entry), None);
+        assert!(
+            !events.iter().any(is_as_enters_roll),
+            "an entry not held is not mid-entry"
+        );
+
+        // Another incarnation's parked entry is not adopted (CR 400.7).
+        let mut state = settled_state(2);
+        let (z, stale) = parked_entry(&mut state, 902, P0, P0, PENDING);
+        let _ = reenter(&mut state, z);
+        install_roll_chain(&mut state, z);
+        let mut events = Vec::new();
+        let _ = apply_pending_post_replacement_effect(&mut state, None, None, None, &mut events);
+        assert_eq!(parked_entry_state(&state, &stale), Some(PENDING));
+    }
+
+    /// R12. CR 603.2 + CR 603.3 + CR 800.4d: a held roll context round-trips with
+    /// its parked roll, a legacy bare event still decodes completed with nothing
+    /// held, and the settled release queues a held context only while its
+    /// controller is in the game.
+    #[test]
+    fn a_held_roll_context_round_trips_and_is_placed_for_live_controllers() {
+        let board = || {
+            let mut scenario = scenario(3);
+            scenario.add_creature_from_oracle(P1, "Brazen Dwarf", 1, 3, BRAZEN_DWARF);
+            scenario.build().state().clone()
+        };
+        let roll = GameEvent::DieRolled {
+            player_id: P1,
+            sides: 6,
+            result: Some(4),
+            pre_entry_source: Some(ObjectId(900)),
+        };
+        let mut state = board();
+        let held = crate::game::triggers::collect_as_enters_roll_observers(
+            &mut state,
+            std::slice::from_ref(&roll),
+        );
+        assert_eq!(held.len(), 1, "reach: the Dwarf is held");
+        let mut parked = ParkedEntry::occurred(roll.clone());
+        parked.held_triggers = held;
+        let wire = serde_json::to_value(&parked).expect("serializes");
+        let decoded: ParkedEntry = serde_json::from_value(wire).expect("decodes");
+        assert_eq!(decoded, parked);
+        let legacy: ParkedEntry =
+            serde_json::from_value(serde_json::to_value(&roll).expect("event")).expect("legacy");
+        assert_eq!(legacy, ParkedEntry::occurred(roll.clone()));
+
+        let mut state = board();
+        state.deferred_entry_events = vec![parked.clone()];
+        assert!(take_settled_entry_continuation_events(&mut state).is_empty());
+        assert_eq!(
+            state.deferred_triggers.len(),
+            1,
+            "a live controller's context"
+        );
+
+        let mut state = board();
+        state.players[1].is_eliminated = true;
+        state.deferred_entry_events = vec![parked];
+        assert!(take_settled_entry_continuation_events(&mut state).is_empty());
+        assert!(
+            state.deferred_triggers.is_empty(),
+            "a departed controller's context is retired"
+        );
+        assert!(state.deferred_entry_events.is_empty());
+    }
+
+    /// R15. CR 603.6d + CR 603.2 + CR 508.4 + CR 400.7: the delivery-tail flush
+    /// leaves every entry a live collector owns: one bound to a paused drain
+    /// beneath the top, one a logical owner's paused delivery holds deeper down,
+    /// and one that owes its attacking seat. It takes the entry no collector owns.
+    /// No printed board separates the bound entry from the owner-held one.
+    #[test]
+    fn the_delivery_tail_flush_takes_only_unowned_entries() {
+        let mut state = settled_state(2);
+        let (x, bound) = entered(&mut state, 900, P0, P0);
+        let bound_ref = reference(&state, x);
+        let held = reenter(&mut state, x);
+        let stamped = reenter(&mut state, x);
+        let land_played = GameEvent::LandPlayed {
+            object_id: x,
+            player_id: P0,
+            from_zone: Zone::Hand,
+        };
+        let mut owed = seeded(stamped.clone(), PENDING);
+        owed.entry_attack = Some(EntryAttackDestination::AnyDefender);
+        state.deferred_entry_events = vec![
+            seeded(bound.clone(), PENDING),
+            seeded(held.clone(), PENDING),
+            owed.clone(),
+            seeded(land_played.clone(), PENDING),
+        ];
+        let mut paused = PendingZoneChangeDelivery::new(
+            reference(&state, x),
+            ProposedEvent::zone_change(x, Zone::Graveyard, Zone::Battlefield, None),
+        );
+        paused.delivery_events = vec![held.clone()];
+        let logical_zone_change_group = state.allocate_logical_zone_change_group(&[]);
+        state
+            .resolution_stack
+            .push_inner(ResolutionFrame::BatchDelivery(Box::new(
+                PendingBatchDeliveries {
+                    logical_zone_change_group,
+                    paused_current: Some(paused),
+                    remaining: Vec::new(),
+                    destination: Zone::Battlefield,
+                    source_id: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    exile_tracking: ZoneDeliveryExileTracking::None,
+                    library_placement: None,
+                    completion: None,
+                    replacement_applied: HashSet::new(),
+                    requests: Vec::new(),
+                    attempted: Vec::new(),
+                    zone_change_record_start: 0,
+                    deferred_events: Vec::new(),
+                },
+            )));
+        paused_owner(&mut state, bound_ref);
+        for _ in 0..2 {
+            state.push_counter_additions(PendingCounterAdditionQueue {
+                remaining: Vec::new(),
+                completion: None,
+            });
+        }
+        let mut events = Vec::new();
+        flush_deferred_entry_events_into_priority_scan(&mut state, x, &mut events);
+        assert_eq!(
+            events,
+            vec![land_played],
+            "only the unowned entry is flushed"
+        );
+        assert_eq!(
+            state.deferred_entry_events,
+            vec![seeded(bound.clone(), PENDING), seeded(held, PENDING), owed],
+            "the three owned entries stay parked"
+        );
+
+        // CR 400.7: a drain bound to another incarnation of X does not own this one.
+        let mut state = settled_state(2);
+        let (x, bound) = entered(&mut state, 900, P0, P0);
+        let _ = reenter(&mut state, x);
+        state.deferred_entry_events = vec![seeded(bound.clone(), PENDING)];
+        let current = reference(&state, x);
+        paused_owner(&mut state, current);
+        let mut events = Vec::new();
+        flush_deferred_entry_events_into_priority_scan(&mut state, x, &mut events);
+        assert_eq!(events, vec![bound]);
     }
 }

@@ -710,6 +710,9 @@ pub(crate) fn resume_after_ignore(
     let pre_entry_source =
         crate::game::engine_replacement::entrant_entry_is_pending(state, source_id)
             .then_some(source_id);
+    // CR 603.2 + CR 603.10 + CR 603.2c: this pass's stamped rolls, whose
+    // observers are collected together, as rolled, at either exit below.
+    let mut as_enters_rolls: Vec<GameEvent> = Vec::new();
 
     // CR 706.3a: resume at the first die that has not yet run its branch. A
     // fresh instruction starts at 0; a resume after an interactive branch starts
@@ -771,10 +774,10 @@ pub(crate) fn resume_after_ignore(
             pre_entry_source,
         };
         // CR 603.2 + CR 113.6 + CR 614.1c: an entrant's own as-enters roll is part
-        // of its entry, so it is parked with that entry and collected with it by
-        // the settled release, not by whichever action made it.
+        // of its entry, so it is held with that entry, and what it triggered is
+        // placed with it by the settled release, not by whichever action made it.
         if pre_entry_source.is_some() {
-            crate::game::engine_replacement::park_as_enters_roll(state, rolled.clone());
+            as_enters_rolls.push(rolled.clone());
         }
         events.push(rolled);
 
@@ -871,6 +874,7 @@ pub(crate) fn resume_after_ignore(
                 } else {
                     state.push_die_roll_frame(resumed);
                 }
+                hold_as_enters_rolls(state, &mut as_enters_rolls);
                 return Ok(progress);
             }
         }
@@ -887,6 +891,7 @@ pub(crate) fn resume_after_ignore(
         state.die_result_this_resolution = None;
     }
 
+    hold_as_enters_rolls(state, &mut as_enters_rolls);
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::RollDie,
         source_id,
@@ -894,6 +899,17 @@ pub(crate) fn resume_after_ignore(
     });
 
     Ok(ResolutionProgress::Complete)
+}
+
+/// CR 603.2 + CR 603.10 + CR 603.2c: hold this pass's as-enters rolls, with what
+/// they triggered as they were rolled, beside their entry.
+fn hold_as_enters_rolls(state: &mut GameState, as_enters_rolls: &mut Vec<GameEvent>) {
+    if !as_enters_rolls.is_empty() {
+        crate::game::engine_replacement::hold_as_enters_roll_occurrence(
+            state,
+            std::mem::take(as_enters_rolls),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -983,6 +999,7 @@ mod tests {
             event: entry,
             state: ParkedEntryState::Completed,
             entry_attack: None,
+            held_triggers: Vec::new(),
         }];
         assert_eq!(stamps_of_two_dice(&mut state, entrant), vec![None, None]);
     }

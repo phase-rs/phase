@@ -622,6 +622,20 @@ pub struct PendingCipherEncode {
     pub creatures: Vec<ObjectId>,
 }
 
+/// CR 508.4: an entrant put onto the battlefield attacking joins combat once its
+/// entry has completed; this frame wakes after the entry's whole child stack.
+///
+/// Parked only when no logical owner resumes the move and the entrant's
+/// as-enters continuation paused, at the child boundary the move captured before
+/// its operation pushed its first frame. It owns no prompt: when it resumes it
+/// leaves the stack, takes the seat the entrant's parked entry owes and seats it,
+/// which may raise `WaitingFor::EntryAttackTargetChoice`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingEntryAttackSeat {
+    /// The incarnation that entered (CR 400.7): a later one is not seated.
+    pub entrant: ObjectIncarnationRef,
+}
+
 /// The ChangeZone owner plus the only sidecar that is not already embedded in
 /// `PendingChangeZoneIteration`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -688,6 +702,7 @@ pub enum ResolutionFrame {
     SpellResolution(PendingSpellResolution),
     MutateMerge(PendingMutateMerge),
     CipherEncode(PendingCipherEncode),
+    EntryAttackSeat(PendingEntryAttackSeat),
     PostReplacement(PostReplacementDrainStack),
 }
 
@@ -722,6 +737,7 @@ pub enum FrameKind {
     SpellResolution,
     MutateMerge,
     CipherEncode,
+    EntryAttackSeat,
     PostReplacement,
 }
 
@@ -755,6 +771,7 @@ impl ResolutionFrame {
             Self::SpellResolution(_) => FrameKind::SpellResolution,
             Self::MutateMerge(_) => FrameKind::MutateMerge,
             Self::CipherEncode(_) => FrameKind::CipherEncode,
+            Self::EntryAttackSeat(_) => FrameKind::EntryAttackSeat,
             Self::PostReplacement(_) => FrameKind::PostReplacement,
         }
     }
@@ -793,6 +810,7 @@ impl ResolutionFrame {
             | Self::LifeTotalAssignment(_)
             | Self::SpellResolution(_)
             | Self::CipherEncode(_)
+            | Self::EntryAttackSeat(_)
             | Self::PostReplacement(_) => true,
         }
     }
@@ -863,6 +881,8 @@ impl ResolutionFrame {
             | Self::ConniveReentry(_)
             | Self::LifeTotalAssignment(_)
             | Self::SpellResolution(_)
+            // CR 508.4: the seat waits for the entry's whole child stack.
+            | Self::EntryAttackSeat(_)
             | Self::PostReplacement(_) => FrameGate::AfterChild,
         }
     }
@@ -1098,6 +1118,20 @@ impl ResolutionStack {
     /// to [`frame_vec`] and this module is its parent, not its descendant.
     pub fn capture_child_boundary(&self) -> ChildStackDepth {
         self.frames.capture_depth()
+    }
+
+    /// CR 706.6 + CR 614.12a: the batch owner parked at the captured
+    /// `child_stack_start`, beneath a paused member's prompt-owning child stack.
+    /// Positional at a captured depth, like the other child-boundary owners.
+    pub(crate) fn batch_delivery_at_child_boundary_mut(
+        &mut self,
+        child_stack_start: ChildStackDepth,
+    ) -> Option<&mut PendingBatchDeliveries> {
+        let slot = self.frames.slot_at_captured_depth(child_stack_start)?;
+        match self.frames.get_mut(slot) {
+            Some(ResolutionFrame::BatchDelivery(pending)) => Some(pending),
+            Some(_) | None => None,
+        }
     }
 
     /// Whether the frame at the captured `child_stack_start` is a `CopyToken` owner.
@@ -2678,6 +2712,89 @@ impl ResolutionStack {
         self.push_inner(ResolutionFrame::CipherEncode(frame));
     }
 
+    /// CR 508.4: Consumes exactly the active entry attack seat, once the entry's
+    /// whole child stack has retired.
+    pub fn take_active_entry_attack_seat(
+        &mut self,
+    ) -> Result<Option<PendingEntryAttackSeat>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::EntryAttackSeat(_)) => {
+                let ResolutionFrame::EntryAttackSeat(frame) =
+                    self.pop_expected(FrameKind::EntryAttackSeat)?
+                else {
+                    unreachable!("checked entry-attack-seat frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::EntryAttackSeat,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Reads the active entry attack seat without consuming it.
+    pub fn active_entry_attack_seat(&self) -> Option<&PendingEntryAttackSeat> {
+        match self.last() {
+            Some(ResolutionFrame::EntryAttackSeat(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Parks one entry attack seat on the stack top. A seat owed beneath a live
+    /// child goes through `GameState::park_entry_attack_seat_after_child`.
+    pub fn push_entry_attack_seat(&mut self, frame: PendingEntryAttackSeat) {
+        self.push_inner(ResolutionFrame::EntryAttackSeat(frame));
+    }
+
+    /// CR 603.2 + CR 603.6d: every paused delivery a live logical owner anywhere
+    /// on the stack will resume and collect: each `ChangeZone` owner's when its
+    /// drain counts the member (the branch that runs custody), and each batch
+    /// owner's. A whole-stack reader: the owner can sit beneath the paused
+    /// member's `PostReplacement` frame and the frames that frame raised.
+    pub(crate) fn paused_owner_delivery_events(&self) -> Vec<GameEvent> {
+        let mut held = Vec::new();
+        for frame in self.frames.iter() {
+            if let ResolutionFrame::ChangeZone(frame) = frame {
+                if let Some(paused) = frame
+                    .pending
+                    .as_ref()
+                    .and_then(|pending| pending.paused_current.as_ref())
+                    .filter(|paused| {
+                        matches!(
+                            paused.count,
+                            crate::types::game_state::PausedZoneChangeDeliveryCount::NeedsCount
+                        )
+                    })
+                {
+                    held.extend(paused.delivery_events.iter().cloned());
+                }
+            } else if let ResolutionFrame::BatchDelivery(pending) = frame {
+                if let Some(paused) = pending.paused_current.as_ref() {
+                    held.extend(paused.delivery_events.iter().cloned());
+                }
+            }
+        }
+        held
+    }
+
+    /// CR 603.6d + CR 614.12a: is `entrant` bound to the resident of any
+    /// `PostReplacement` frame on the stack, whose dispatch's retirement then
+    /// records its entry's completion? A whole-stack reader, matched by
+    /// incarnation (CR 400.7).
+    pub(crate) fn binds_parked_entrant(&self, entrant: ObjectIncarnationRef) -> bool {
+        self.frames.iter().any(|frame| {
+            if let ResolutionFrame::PostReplacement(drains) = frame {
+                drains
+                    .drains()
+                    .any(|drain| drain.parked_entrants.contains(&entrant))
+            } else {
+                false
+            }
+        })
+    }
+
     /// Re-parks the active mutate-merge owner without exposing an empty-stack
     /// interval.
     pub fn replace_active_mutate_merge(
@@ -3650,6 +3767,7 @@ impl ResolutionStack {
             | ResolutionFrame::SpellResolution(_)
             | ResolutionFrame::MutateMerge(_)
             | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::EntryAttackSeat(_)
             | ResolutionFrame::PostReplacement(_) => false,
         })
     }
@@ -3728,6 +3846,7 @@ impl ResolutionStack {
                 | ResolutionFrame::SpellResolution(_)
                 | ResolutionFrame::MutateMerge(_)
                 | ResolutionFrame::CipherEncode(_)
+                | ResolutionFrame::EntryAttackSeat(_)
                 | ResolutionFrame::PostReplacement(_) => {}
             }
         }
@@ -6293,6 +6412,9 @@ fn project_frames_into_legacy_state(
             ResolutionFrame::CipherEncode(pending) => {
                 projected.push_cipher_encode_frame(pending.clone())
             }
+            ResolutionFrame::EntryAttackSeat(pending) => projected
+                .resolution_stack
+                .push_entry_attack_seat(pending.clone()),
             ResolutionFrame::MultiDraw(frame) => {
                 projected.resolution_stack.push_multi_draw(frame.clone())
             }

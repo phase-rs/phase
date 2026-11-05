@@ -2027,6 +2027,12 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         ResolutionFrame::CipherEncode(_) => {
             crate::game::cipher::arm_parked_encode_offer(state, events);
         }
+        // CR 508.4: an entrant put onto the battlefield attacking whose
+        // as-enters continuation paused, with no logical owner to seat it, joins
+        // combat here, once the entry's whole child stack has retired.
+        ResolutionFrame::EntryAttackSeat(_) => {
+            crate::game::zone_pipeline::resume_entry_attack_seat(state);
+        }
         ResolutionFrame::RepeatFor(_) => drain_active_repeat_for(state, events),
         ResolutionFrame::RepeatUntil(_) => drain_active_repeat_until(state, events),
         ResolutionFrame::RepeatedOptionalPayment(_) => {
@@ -5716,7 +5722,8 @@ fn frame_may_apply_with_entry(frame: &ResolutionFrame) -> bool {
         | ResolutionFrame::LifeTotalAssignment(_)
         | ResolutionFrame::SpellResolution(_)
         | ResolutionFrame::MutateMerge(_)
-        | ResolutionFrame::CipherEncode(_) => false,
+        | ResolutionFrame::CipherEncode(_)
+        | ResolutionFrame::EntryAttackSeat(_) => false,
     }
 }
 

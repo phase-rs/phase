@@ -7405,6 +7405,7 @@ mod tests {
                 },
                 state,
                 entry_attack: None,
+                held_triggers: Vec::new(),
             }
         }
         let pending = |carrier| ParkedEntryState::Pending { carrier };

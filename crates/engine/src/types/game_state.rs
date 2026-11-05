@@ -7756,6 +7756,18 @@ pub struct PendingTokenBattlefieldEntry {
     pub source_id: ObjectId,
 }
 
+/// Where a newly paused batch owner was parked
+/// (`GameState::park_batch_delivery_for_paused_member`), so the caller that
+/// attaches its completion addresses that exact owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParkedBatchOwner {
+    /// The active top frame.
+    Active,
+    /// CR 706.6 + CR 614.12a: at the paused member's child boundary, beneath
+    /// the member's child stack whose top frame owns the live choice.
+    AtChildBoundary(crate::types::resolution::ChildStackDepth),
+}
+
 /// CR 603.2 + CR 614.12a: whether a parked entry happened. Each producer records
 /// this; the settled take, the whole-carrier abandonment and
 /// `entrant_entry_is_pending` read it, and every other reader of the park keeps
@@ -7781,6 +7793,11 @@ pub struct ParkedEntry {
     /// paused member seats it. `None` for every other entry and for a roll.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry_attack: Option<crate::types::ability::EntryAttackDestination>,
+    /// CR 603.2 + CR 603.3: the trigger contexts an as-enters roll produced when
+    /// it was rolled; the settled release places them. Held on the first roll of
+    /// the instruction, empty for every other entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_triggers: Vec<crate::game::triggers::DeferredTrigger>,
 }
 
 impl ParkedEntry {
@@ -7790,6 +7807,7 @@ impl ParkedEntry {
             event,
             state: ParkedEntryState::Pending { carrier },
             entry_attack: None,
+            held_triggers: Vec::new(),
         }
     }
 
@@ -7800,6 +7818,7 @@ impl ParkedEntry {
             event,
             state: ParkedEntryState::Completed,
             entry_attack: None,
+            held_triggers: Vec::new(),
         }
     }
 }
@@ -7816,6 +7835,8 @@ impl<'de> Deserialize<'de> for ParkedEntry {
             state: ParkedEntryState,
             #[serde(default)]
             entry_attack: Option<crate::types::ability::EntryAttackDestination>,
+            #[serde(default)]
+            held_triggers: Vec<crate::game::triggers::DeferredTrigger>,
         }
 
         let value = serde_json::Value::deserialize(deserializer)?;
@@ -7824,11 +7845,13 @@ impl<'de> Deserialize<'de> for ParkedEntry {
                 event,
                 state,
                 entry_attack,
+                held_triggers,
             } = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
             return Ok(Self {
                 event,
                 state,
                 entry_attack,
+                held_triggers,
             });
         }
         let event = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
@@ -7836,6 +7859,7 @@ impl<'de> Deserialize<'de> for ParkedEntry {
             event,
             state: ParkedEntryState::Completed,
             entry_attack: None,
+            held_triggers: Vec::new(),
         })
     }
 }
@@ -14187,6 +14211,7 @@ pub(crate) fn live_return_result_occurrences(
             | ResolutionFrame::SpellResolution(_)
             | ResolutionFrame::MutateMerge(_)
             | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::EntryAttackSeat(_)
             | ResolutionFrame::PostReplacement(_) => {}
         }
     }
@@ -14357,6 +14382,7 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             | ResolutionFrame::SpellResolution(_)
             | ResolutionFrame::MutateMerge(_)
             | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::EntryAttackSeat(_)
             | ResolutionFrame::PostReplacement(_) => {}
         }
     }
@@ -16875,7 +16901,8 @@ impl PersistedGameState {
             | ResolutionFrame::LifeTotalAssignment(_)
             | ResolutionFrame::SpellResolution(_)
             | ResolutionFrame::MutateMerge(_)
-            | ResolutionFrame::CipherEncode(_) => false,
+            | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::EntryAttackSeat(_) => false,
         }) {
             return Err(PersistedRestoreError::OwnerlessPostReplacementDispatch);
         }
@@ -27682,6 +27709,7 @@ fn validate_restored_attack_authority(
             | ResolutionFrame::SpellResolution(_)
             | ResolutionFrame::MutateMerge(_)
             | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::EntryAttackSeat(_)
             | ResolutionFrame::PostReplacement(_) => {}
         }
     }
@@ -30214,6 +30242,84 @@ impl GameState {
     /// Park a complete BatchDelivery owner as the active inner frame.
     pub fn push_batch_delivery(&mut self, pending: PendingBatchDeliveries) {
         self.resolution_stack.push_batch_delivery(pending);
+    }
+
+    /// CR 706.6 + CR 614.12a: a batch member's as-enters choice (a tied roll's
+    /// ignore choice, CR 706.6) is made before that member enters, so the rest of
+    /// the batch waits beneath that member's whole child stack; the frame that
+    /// owns the live choice stays on top.
+    ///
+    /// A prompt owned outside the stack (`pending_replacement`'s
+    /// `ReplacementChoice`, `ReturnAsAuraTarget`) leaves the batch on top, where
+    /// the replacement-choice epilogue's and the Aura handlers' top-only readers
+    /// find it.
+    pub(crate) fn park_batch_delivery_for_paused_member(
+        &mut self,
+        pending: PendingBatchDeliveries,
+        member_stack_start: ChildStackDepth,
+    ) -> ParkedBatchOwner {
+        match self.resolution_stack.last().map(ResolutionFrame::gate) {
+            Some(super::resolution::FrameGate::DirectChoice(_)) => {
+                match self
+                    .resolution_stack
+                    .capture_child_boundary()
+                    .cmp(&member_stack_start)
+                {
+                    std::cmp::Ordering::Less => {
+                        panic!("a paused batch member removed a parent before its batch was parked")
+                    }
+                    // The prompt's frame predates the member, so the member raised
+                    // no child of its own: park on top, as before.
+                    std::cmp::Ordering::Equal => {
+                        self.push_batch_delivery(pending);
+                        ParkedBatchOwner::Active
+                    }
+                    std::cmp::Ordering::Greater => {
+                        self.resolution_stack
+                            .insert_parent_at_child_boundary(
+                                ResolutionFrame::BatchDelivery(Box::new(pending)),
+                                member_stack_start,
+                            )
+                            .expect(
+                                "a paused batch must be inserted below its member's child stack",
+                            );
+                        ParkedBatchOwner::AtChildBoundary(member_stack_start)
+                    }
+                }
+            }
+            Some(super::resolution::FrameGate::AfterChild) | None => {
+                self.push_batch_delivery(pending);
+                ParkedBatchOwner::Active
+            }
+        }
+    }
+
+    /// CR 508.4: an entrant put onto the battlefield attacking joins combat once
+    /// its entry has completed. Park its seat beneath the complete child stack
+    /// the move raised, at the boundary captured before the move's operation
+    /// pushed its first frame, so the seat wakes only after the entry's paused
+    /// continuation and every frame it raised have retired.
+    pub(crate) fn park_entry_attack_seat_after_child(
+        &mut self,
+        entrant: crate::types::identifiers::ObjectIncarnationRef,
+        child_stack_start: ChildStackDepth,
+    ) {
+        let frame =
+            ResolutionFrame::EntryAttackSeat(super::resolution::PendingEntryAttackSeat { entrant });
+        match self
+            .resolution_stack
+            .capture_child_boundary()
+            .cmp(&child_stack_start)
+        {
+            std::cmp::Ordering::Less => {
+                panic!("an attacking entry removed a parent before its seat could be parked")
+            }
+            std::cmp::Ordering::Equal => self.resolution_stack.push_inner(frame),
+            std::cmp::Ordering::Greater => self
+                .resolution_stack
+                .insert_parent_at_child_boundary(frame, child_stack_start)
+                .expect("an entry's seat must be inserted below its complete child stack"),
+        }
     }
 
     /// Re-park the active BatchDelivery owner after another replacement pause.
@@ -38806,6 +38912,7 @@ mod drain_stack_reentrancy_tests {
                     event: event.clone(),
                     state,
                     entry_attack: entry_attack.clone(),
+                    held_triggers: Vec::new(),
                 };
                 let wire = serde_json::to_value(&entry).expect("serializes");
                 assert_eq!(wire.get("entry_attack").is_some(), entry_attack.is_some());

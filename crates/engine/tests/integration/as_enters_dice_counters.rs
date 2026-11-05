@@ -16,7 +16,8 @@
 //! of Class carry only the line under test (the Class level-1 line; First Day of
 //! Class's first sentence, without its Learn rider). Beck carries Beck's half.
 //! Monoxa, Pixie Guide, Tayam, Rhythm of the Wild, Stolen Identity, Fathom Mage and
-//! Storm the Festival carry only the lines under test.
+//! Storm the Festival carry only the lines under test, and Rite of the Moth its
+//! first line, without its flashback.
 //! Dice-dependent rows choose their RNG seed by search and assert against the
 //! emitted `DieRolled` results, never a hard-coded total.
 
@@ -102,6 +103,10 @@ const YORE_TILLER_NEPHILIM: &str = "Whenever this creature attacks, return targe
 const ILHARG_THE_RAZE_BOAR: &str = "Trample\nWhenever Ilharg attacks, you may put a creature card from your hand onto the battlefield tapped and attacking. Return that creature to your hand at the beginning of the next end step.\nWhen Ilharg dies or is put into exile from the battlefield, you may put it into its owner's library third from the top.";
 const ARTHUR_MARIGOLD_KNIGHT: &str = "Haste\nWhenever Arthur and at least one other creature attack, look at the top six cards of your library. You may put a creature card from among them onto the battlefield tapped and attacking. Put the rest on the bottom of your library in a random order. Return that creature to its owner's hand at end of combat.";
 const CHORD_OF_CALLING: &str = "Convoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's color.)\nSearch your library for a creature card with mana value X or less, put it onto the battlefield, then shuffle.";
+const DOUBLING_SEASON: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.";
+const WINDING_CONSTRICTOR: &str = "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.\nIf you would get one or more counters, you get that many plus one of each of those kinds of counters instead.";
+const RITE_OF_THE_MOTH: &str = "Return target creature card from your graveyard to the battlefield with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)";
+const GRIM_REAPER_LETHAL_LEGIONNAIRE: &str = "Whenever Grim Reaper attacks, you may pay {3}{B}. When you do, return target creature card from your graveyard to the battlefield tapped and attacking with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)";
 
 /// The scenario module exports only `P0` and `P1`.
 const P2: PlayerId = PlayerId(2);
@@ -4100,6 +4105,9 @@ fn a_fold_of_another_kind_keeps_its_counter_step() {
         order_entry(&mut runner, "Temp of the Damned", &mut events);
         assert_counter_prompt(runner.state());
         let rolled_at_prompt = die_results(&events).len();
+        // CR 614.12a + CR 603.6d: the entry is held from this pause, before its
+        // continuation runs.
+        let pending_at_prompt = is_pending(runner.state(), temp);
         let settled = settle_picking(&mut runner, &mut events, pick);
         let rolls = die_results(&events);
         assert_eq!(rolls.len(), 1, "{pick:?}");
@@ -4109,6 +4117,10 @@ fn a_fold_of_another_kind_keeps_its_counter_step() {
         assert_eq!(plus_counters(runner.state(), temp), pick.counters(1));
         assert_eq!(before - life(runner.state(), P1), 1, "Dwarf {pick:?}");
         assert_eq!(rolled_at_prompt, 0, "the counter step comes first");
+        assert!(
+            pending_at_prompt,
+            "{pick:?}: the entry is held at the pause"
+        );
     }
 
     // (b) Hammer Jammer with Tayam's vigilance, and nothing to pick.
@@ -4277,6 +4289,9 @@ enum Putter {
     Ilharg,
     /// Arthur, Marigold Knight puts it from among the top six (the batch owner).
     Arthur,
+    /// Grim Reaper, Lethal Legionnaire returns it from the graveyard with a
+    /// finality counter, once {3}{B} is paid (the targeted loop, reflexively).
+    GrimReaper,
 }
 
 /// An attacking-entry board: the putter, Hammer Jammer where the putter takes it
@@ -4331,6 +4346,19 @@ fn attack_board(
             let co_attacker = scenario.add_vanilla(P0, 2, 2);
             (vec![arthur, co_attacker], jammer_card(&mut scenario), true)
         }
+        Putter::GrimReaper => {
+            let reaper = scenario
+                .add_creature_from_oracle(
+                    P0,
+                    "Grim Reaper, Lethal Legionnaire",
+                    3,
+                    4,
+                    GRIM_REAPER_LETHAL_LEGIONNAIRE,
+                )
+                .id();
+            let jammer = graveyard_creature(&mut scenario, "Hammer Jammer", HAMMER_JAMMER);
+            (vec![reaper], jammer, false)
+        }
     };
     let mut runner = scenario.build();
     if on_library_top {
@@ -4354,6 +4382,12 @@ fn fold_and_counter_replacements(scenario: &mut GameScenario) {
 /// "you may" and its look-at choice with Hammer Jammer, until a prompt the driver
 /// does not answer or a settled Priority.
 fn attack_to_entry_prompt(board: &mut AttackBoard, events: &mut Vec<GameEvent>) {
+    declare_board_attack(board, events);
+    drive_attack_trigger_to_entry_prompt(board, events);
+}
+
+/// `board.attackers` attack P1.
+fn declare_board_attack(board: &mut AttackBoard, events: &mut Vec<GameEvent>) {
     let runner = &mut board.runner;
     runner.advance_to_combat();
     let attacks: Vec<_> = board
@@ -4365,6 +4399,13 @@ fn attack_to_entry_prompt(board: &mut AttackBoard, events: &mut Vec<GameEvent>) 
         .declare_attackers(&attacks)
         .expect("the attack is declared");
     events.extend(attacked.events);
+}
+
+/// Drive the declared attack's trigger, answering its target, its "you may" and
+/// its look-at choice with Hammer Jammer, until a prompt the driver does not
+/// answer or a settled Priority.
+fn drive_attack_trigger_to_entry_prompt(board: &mut AttackBoard, events: &mut Vec<GameEvent>) {
+    let runner = &mut board.runner;
     for _ in 0..40 {
         record_stack(runner.state());
         let action = match &runner.state().waiting_for {
@@ -4824,21 +4865,76 @@ fn an_inline_attacking_entry_attacks_with_its_fold() {
     assert_finished(state, &[board.dwarf, board.warden], "inline");
 }
 
-/// M-7. Ilharg, the Raze-Boar + CR 603.2: with one creature card in hand the put
-/// is an inline single pick, which parks no logical owner, so the attacking entry
-/// keeps base's counter step. Soul Warden sees Hammer Jammer once, Ilharg's
-/// instruction resolves once, and its return names Hammer Jammer.
-///
-/// Preservation only: on this route the fold still lands ahead of the roll, and a
-/// paused roll placement leaves Hammer Jammer unseated, as before this change. Both
-/// are filed, so the row asserts neither the attack, the counts, Brazen Dwarf nor
-/// Hammer Jammer's own trigger.
+/// R1 (F1). Ilharg, the Raze-Boar + Thunderous Velocipede + Hardened Scales +
+/// CR 603.6d + CR 614.1c + CR 122.6 + CR 614.5: Ilharg's single pick puts Hammer
+/// Jammer onto the battlefield "tapped and attacking". Velocipede's counter is
+/// given as it enters, so it is one placement with the roll's r: Hardened Scales
+/// modifies r + 1 once, giving r + 2. Nothing pauses, so the delivery seats it
+/// (CR 508.4). Hammer Jammer does not see its roll (CR 113.6), Brazen Dwarf does
+/// (CR 603.2), and Soul Warden sees the entry once.
 #[test]
-fn a_single_pick_attacking_entry_keeps_base_route() {
+fn a_single_pick_attacking_entry_is_one_placement() {
+    reset_triggers_seen();
+    let mut board = attack_board(7, 2, Putter::Ilharg, |scenario| {
+        add_velocipede(scenario);
+        scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES);
+    });
+    let p1_before = life(board.runner.state(), P1);
+    let p0_before = life(board.runner.state(), P0);
+    let mut events = Vec::new();
+    attack_to_entry_prompt(&mut board, &mut events);
+    let AttackBoard {
+        runner,
+        attackers,
+        jammer,
+        dwarf,
+        warden,
+    } = board;
+    let ilharg = attackers[0];
+    let state = runner.state();
+    // Reach: no counter prompt, and the put settled.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }) && resolution_is_settled(state),
+        "{:?} on {:?}",
+        state.waiting_for,
+        stack_frames(state)
+    );
+    let rolls = die_results(&events);
+    assert_eq!(rolls.len(), 1, "{rolls:?}");
+    let r = rolls[0];
+    assert_eq!(plus_counters(state, jammer), r + 2, "r = {r}");
+    assert_eq!(
+        attacks_of(state, jammer),
+        vec![(P1, AttackTarget::Player(P1))]
+    );
+    assert_eq!(triggers_seen_from(jammer), 0);
+    assert_eq!(p1_before - life(state, P1), 1, "Dwarf once");
+    assert_eq!(life(state, P0), p0_before + 1, "Warden once");
+    assert_eq!(change_zone_resolved_for(&events, ilharg), 1);
+    assert_eq!(
+        returns_installed_by(state, ilharg),
+        vec![vec![TargetRef::Object(jammer)]],
+        "the return is bound to Hammer Jammer"
+    );
+    assert_finished(state, &[dwarf, warden], "R1");
+}
+
+/// R2 (F1, the paused sibling; M-7 rewritten). Ilharg, the Raze-Boar + Thunderous
+/// Velocipede + Hardened Scales + Branching Evolution + CR 614.1c + CR 122.6 +
+/// CR 614.5 + CR 616.1 + CR 508.4: Velocipede's counter joins the roll's
+/// placement, so the one counter prompt comes after the roll and each replacement
+/// modifies r + 1 once. No logical owner resumes the put, so a seat frame parked
+/// beneath the entry's whole child stack seats Hammer Jammer once its entry has
+/// completed. Hammer Jammer does not see its roll (CR 113.6), Brazen Dwarf does
+/// (CR 603.2), Soul Warden sees the entry once, and Ilharg's return names Hammer
+/// Jammer (CR 608.2c).
+#[test]
+fn a_paused_single_pick_attacking_entry_is_seated_after_its_chain() {
     for pick in FirstPick::BOTH {
         let what = format!("{pick:?}");
         reset_triggers_seen();
         let mut board = attack_board(7, 2, Putter::Ilharg, fold_and_counter_replacements);
+        let p1_before = life(board.runner.state(), P1);
         let p0_before = life(board.runner.state(), P0);
         let mut events = Vec::new();
         attack_to_entry_prompt(&mut board, &mut events);
@@ -4850,24 +4946,112 @@ fn a_single_pick_attacking_entry_keeps_base_route() {
             warden,
         } = board;
         let ilharg = attackers[0];
-        // Reach: the first counter prompt, with no zone choice surfaced and no
-        // logical owner parked.
         assert_counter_prompt(runner.state());
-        assert!(
-            !has_change_zone_owner(runner.state()),
-            "{what}: {:?}",
-            stack_frames(runner.state())
-        );
-        settle_picking(&mut runner, &mut events, pick);
+        let rolled_at_prompt = die_results(&events).len();
+        let frames_at_prompt = stack_frames(runner.state());
+        let attacking_at_prompt = attacks_of(runner.state(), jammer);
+
+        let settled = settle_picking(&mut runner, &mut events, pick);
+        let r = die_results(&events)[0];
         let state = runner.state();
-        assert_eq!(zone(state, jammer), Zone::Battlefield, "{what}");
+        assert_eq!(settled.counter_prompts, 1, "{what}: one prompt");
+        assert_eq!(
+            plus_counters(state, jammer),
+            pick.counters(r + 1),
+            "{what}, r = {r}"
+        );
+        assert_eq!(
+            attacks_of(state, jammer),
+            vec![(P1, AttackTarget::Player(P1))],
+            "{what}"
+        );
+        assert_eq!(p1_before - life(state, P1), 1, "{what}: Dwarf once");
+        // Reach: the roll came before the one prompt, beneath which the seat
+        // frame waits, with no logical owner and Hammer Jammer not yet seated.
+        assert_eq!(rolled_at_prompt, 1, "{what}: the roll comes first");
+        assert_eq!(
+            frames_at_prompt,
+            vec![
+                FrameKind::EntryAttackSeat,
+                FrameKind::PostReplacement,
+                FrameKind::AbilityContinuation,
+                FrameKind::CounterAdditions,
+            ],
+            "{what}"
+        );
+        assert!(attacking_at_prompt.is_empty(), "{what}");
+        assert_eq!(triggers_seen_from(jammer), 0, "{what}");
         assert_eq!(life(state, P0), p0_before + 1, "{what}: Warden once");
-        assert_eq!(change_zone_resolved_for(&events, ilharg), 1, "{what}");
         assert_eq!(
             returns_installed_by(state, ilharg),
             vec![vec![TargetRef::Object(jammer)]],
             "{what}: the return is bound to Hammer Jammer"
         );
+        assert_finished(state, &[dwarf, warden], &what);
+    }
+}
+
+/// R3 (F1, two defenders). CR 508.4 + CR 508.4a: on R2's board with three seats,
+/// the seat frame asks what Hammer Jammer attacks once the counter answer has
+/// completed its entry, having left the stack before it asks. The entry is
+/// observed after the answer.
+#[test]
+fn a_seat_frame_asks_the_attack_target_after_the_entry() {
+    for pick in FirstPick::BOTH {
+        let what = format!("{pick:?}");
+        reset_triggers_seen();
+        let mut board = attack_board(7, 3, Putter::Ilharg, fold_and_counter_replacements);
+        let p0_before = life(board.runner.state(), P0);
+        let mut events = Vec::new();
+        attack_to_entry_prompt(&mut board, &mut events);
+        let AttackBoard {
+            mut runner,
+            jammer,
+            dwarf,
+            warden,
+            ..
+        } = board;
+        answer_counter_prompt(&mut runner, pick, &mut events);
+        pass_to_attack_target_choice(&mut runner, &mut events);
+        let r = die_results(&events)[0];
+        let state = runner.state();
+        let WaitingFor::EntryAttackTargetChoice {
+            player,
+            object_id,
+            valid_targets,
+        } = &state.waiting_for
+        else {
+            unreachable!("checked by the driver");
+        };
+        assert_eq!((*player, *object_id), (P0, jammer), "{what}");
+        assert!(
+            valid_targets.contains(&AttackTarget::Player(P2)),
+            "{what}: {valid_targets:?}"
+        );
+        assert!(
+            !stack_frames(state).contains(&FrameKind::EntryAttackSeat),
+            "{what}: the seat frame left before it asked: {:?}",
+            stack_frames(state)
+        );
+        assert_eq!(plus_counters(state, jammer), pick.counters(r + 1), "{what}");
+        assert_eq!(life(state, P0), p0_before, "{what}: the release waits");
+        act(
+            &mut runner,
+            GameAction::ChooseEntryAttackTarget {
+                target: AttackTarget::Player(P2),
+            },
+            &mut events,
+        );
+        settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+        let state = runner.state();
+        assert_eq!(
+            attacks_of(state, jammer),
+            vec![(P2, AttackTarget::Player(P2))],
+            "{what}"
+        );
+        assert_eq!(triggers_seen_from(dwarf), 1, "{what}: Dwarf once");
+        assert_eq!(triggers_seen_from(jammer), 0, "{what}");
+        assert_eq!(life(state, P0), p0_before + 1, "{what}: Warden once");
         assert_finished(state, &[dwarf, warden], &what);
     }
 }
@@ -4988,12 +5172,13 @@ fn a_single_pick_replayed_entry_choice_is_collected_once() {
     assert!(state.deferred_entry_events.is_empty());
 }
 
-/// M-7g. Ilharg, the Raze-Boar + Hydradoodle + CR 508.4 + CR 107.3m + CR 706.1:
-/// put from the hand, not cast, Hydradoodle's X is 0 and it rolls no dice. Its
-/// Velocipede counter keeps the inline single pick's counter step, which pauses
-/// once on the counter prompt and seats it attacking when its tail completes.
+/// R4 (M-7g rewritten). Ilharg, the Raze-Boar + Hydradoodle + CR 508.4 +
+/// CR 107.3m + CR 706.1 + CR 614.1c + CR 122.6: put from the hand, not cast,
+/// Hydradoodle's X is 0 and it rolls no dice. Its Velocipede counter joins the
+/// zero-dice roll's placement, so the roll resolves before the one counter
+/// prompt, and the seat frame seats it attacking once that placement completes.
 #[test]
-fn a_single_pick_attacking_entry_keeps_its_counter_steps_seat() {
+fn a_zero_dice_single_pick_attacking_entry_is_seated_after_its_chain() {
     for pick in FirstPick::BOTH {
         let what = format!("{pick:?}");
         let (mut runner, ilharg, doodle, _warden) =
@@ -5001,10 +5186,15 @@ fn a_single_pick_attacking_entry_keeps_its_counter_steps_seat() {
         let p0_before = life(runner.state(), P0);
         let mut events = Vec::new();
         ilharg_attacks_to_entry_prompt(&mut runner, ilharg, &mut events);
-        // Reach: the refused fold's counter step comes before the roll, with no
-        // logical owner parked.
+        // Reach: the zero-dice roll resolved before the one counter prompt, with
+        // the seat frame and no logical owner parked.
         assert_counter_prompt(runner.state());
-        assert_eq!(roll_resolved_for(&events, doodle), 0, "{what}");
+        assert_eq!(roll_resolved_for(&events, doodle), 1, "{what}");
+        assert!(
+            stack_frames(runner.state()).contains(&FrameKind::EntryAttackSeat),
+            "{what}: {:?}",
+            stack_frames(runner.state())
+        );
         assert!(
             !has_change_zone_owner(runner.state()),
             "{what}: {:?}",
@@ -5565,4 +5755,972 @@ fn a_searched_entrants_roll_is_seen_once() {
     assert_eq!(triggers_seen_from(jammer), 0);
     assert_eq!(plus_counters(state, jammer), rolls[0]);
     assert_finished(state, &[dwarf, warden], "Chord");
+}
+
+// ---------------------------------------------------------------------------
+// The entry's custody from its delivery boundary, the seat frame, and the
+// roll's observers collected when it is rolled
+// ---------------------------------------------------------------------------
+
+/// Which of Doubling Season and Winding Constrictor a counter prompt applies
+/// first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DoublerPick {
+    DoublingSeason,
+    WindingConstrictor,
+}
+
+impl DoublerPick {
+    const BOTH: [DoublerPick; 2] = [DoublerPick::DoublingSeason, DoublerPick::WindingConstrictor];
+
+    fn source_name(self) -> &'static str {
+        match self {
+            DoublerPick::DoublingSeason => "Doubling Season",
+            DoublerPick::WindingConstrictor => "Winding Constrictor",
+        }
+    }
+
+    /// CR 614.5 + CR 616.1: `n` counters of one kind are one number, which each
+    /// replacement modifies once, in the order chosen. Doubling Season first
+    /// doubles, then Winding Constrictor adds one; the other order adds one, then
+    /// doubles.
+    fn counters(self, n: u32) -> u32 {
+        match self {
+            DoublerPick::DoublingSeason => n * 2 + 1,
+            DoublerPick::WindingConstrictor => (n + 1) * 2,
+        }
+    }
+}
+
+/// Is this `ReplacementChoice` the Doubling Season / Winding Constrictor counter
+/// ordering?
+fn is_doubler_prompt(state: &GameState) -> bool {
+    matches!(
+        &state.waiting_for,
+        WaitingFor::ReplacementChoice { candidates, .. }
+            if candidates.iter().any(|c| c.source_name == "Doubling Season")
+    )
+}
+
+/// Answer one Doubling Season / Winding Constrictor counter prompt, applying
+/// `pick` first.
+fn answer_doubler_prompt(runner: &mut GameRunner, pick: DoublerPick, events: &mut Vec<GameEvent>) {
+    assert!(
+        is_doubler_prompt(runner.state()),
+        "expected the doubler prompt, got {:?} on {:?}",
+        runner.state().waiting_for,
+        stack_frames(runner.state())
+    );
+    let index = replacement_index(runner.state(), pick.source_name());
+    act(runner, GameAction::ChooseReplacement { index }, events);
+}
+
+fn add_doublers(scenario: &mut GameScenario) {
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON);
+    scenario.add_creature_from_oracle(P0, "Winding Constrictor", 2, 3, WINDING_CONSTRICTOR);
+}
+
+fn tayam_and_doublers(scenario: &mut GameScenario) {
+    scenario.add_creature_from_oracle(P0, "Tayam, Luminous Enigma", 3, 3, TAYAM);
+    add_doublers(scenario);
+}
+
+fn finality_counters(state: &GameState, id: ObjectId) -> u32 {
+    counters_of(state, id, &CounterType::Finality)
+}
+
+/// Does the park record an owed attacking seat on `id`'s battlefield entry?
+fn owes_seat(state: &GameState, id: ObjectId) -> bool {
+    state.deferred_entry_events.iter().any(|parked| {
+        matches!(
+            parked.event,
+            GameEvent::ZoneChanged { object_id, to: Zone::Battlefield, .. } if object_id == id
+        ) && parked.entry_attack.is_some()
+    })
+}
+
+/// The battlefield `ZoneChanged` of `id` in `events`, by position.
+fn battlefield_entry_index(events: &[GameEvent], id: ObjectId) -> Option<usize> {
+    events.iter().position(|event| {
+        matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, to: Zone::Battlefield, .. } if *object_id == id
+        )
+    })
+}
+
+/// R5 (F2-a, no owner, `CallerEpilogue`). Hammer Jammer cast with Tayam,
+/// Doubling Season and Winding Constrictor + CR 614.12a + CR 616.1 + CR 603.6d:
+/// the entry's ordering prompt comes first, then the vigilance placement's
+/// prompt before the roll, then the roll's +1/+1 placement's. The entry is held
+/// from that first counter pause, so the roll is made before Hammer Jammer
+/// enters (CR 113.6): Brazen Dwarf sees it once (CR 603.2) and Soul Warden sees
+/// the entry once (CR 603.6a).
+#[test]
+fn a_cast_entry_held_across_its_counter_pause_is_seen_once() {
+    for first in DoublerPick::BOTH {
+        for second in DoublerPick::BOTH {
+            let what = format!("{first:?}, {second:?}");
+            reset_triggers_seen();
+            let mut scenario = board(7);
+            tayam_and_doublers(&mut scenario);
+            let dwarf = add_dwarf(&mut scenario);
+            let warden = add_warden_p0(&mut scenario);
+            let jammer = free_jammer(&mut scenario);
+            let mut runner = scenario.build();
+            let p1_before = life(runner.state(), P1);
+            let p0_before = life(runner.state(), P0);
+            let mut events = Vec::new();
+            cast_and_pass(&mut runner, jammer, None, None, &mut events);
+            order_entry(&mut runner, "Hammer Jammer", &mut events);
+            let rolled_at_first = die_results(&events).len();
+            let parked_at_first = parked_state_of(runner.state(), jammer);
+            let warden_queued_at_first = queued_or_stacked_from(runner.state(), warden);
+            answer_doubler_prompt(&mut runner, first, &mut events);
+            answer_doubler_prompt(&mut runner, second, &mut events);
+            settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+            let r = die_results(&events)[0];
+            let state = runner.state();
+            assert_eq!(p1_before - life(state, P1), 1, "{what}: Dwarf once");
+            assert_eq!(life(state, P0), p0_before + 1, "{what}: Warden once");
+            // Reach: the first counter prompt precedes the roll, with the entry
+            // held pending and Soul Warden not yet queued.
+            assert_eq!(rolled_at_first, 0, "{what}");
+            assert!(
+                matches!(parked_at_first, Some(ParkedEntryState::Pending { .. })),
+                "{what}: {parked_at_first:?}"
+            );
+            assert_eq!(warden_queued_at_first, 0, "{what}");
+            assert_eq!(triggers_seen_from(jammer), 0, "{what}");
+            assert_eq!(
+                counters_of(state, jammer, &vigilance_counter()),
+                first.counters(1),
+                "{what}"
+            );
+            assert_eq!(plus_counters(state, jammer), second.counters(r), "{what}");
+            assert_finished(state, &[dwarf, warden], &what);
+        }
+    }
+}
+
+/// Rite of the Moth's board: Doubling Season, Winding Constrictor, Soul Warden,
+/// `entrant` in P0's graveyard, and Brazen Dwarf when `with_dwarf`.
+fn rite_board(
+    entrant: (&str, &str),
+    with_dwarf: bool,
+) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>, ObjectId) {
+    let mut scenario = board(7);
+    add_doublers(&mut scenario);
+    let dwarf = with_dwarf.then(|| add_dwarf(&mut scenario));
+    let warden = add_warden_p0(&mut scenario);
+    let entrant = graveyard_creature(&mut scenario, entrant.0, entrant.1);
+    let rite = free_spell(&mut scenario, "Rite of the Moth", false, RITE_OF_THE_MOTH);
+    (scenario.build(), rite, entrant, dwarf, warden)
+}
+
+/// R5b (F2-a under the targeted owner, `DeliveryTail`). Rite of the Moth returns
+/// Hammer Jammer with a finality counter under Doubling Season and Winding
+/// Constrictor + CR 614.1c + CR 616.1 + CR 603.6d: the finality placement's
+/// prompt comes before the roll, and the roll's +1/+1 placement prompts again.
+/// The entry is held from the first pause, so Brazen Dwarf sees the roll once
+/// and Soul Warden sees the entry once, collected by its owner (CR 603.2).
+#[test]
+fn a_returned_entry_held_across_its_counter_pause_is_seen_once() {
+    for first in DoublerPick::BOTH {
+        for second in DoublerPick::BOTH {
+            let what = format!("{first:?}, {second:?}");
+            reset_triggers_seen();
+            let (mut runner, rite, jammer, dwarf, warden) =
+                rite_board(("Hammer Jammer", HAMMER_JAMMER), true);
+            let dwarf = dwarf.expect("Brazen Dwarf");
+            let p1_before = life(runner.state(), P1);
+            let p0_before = life(runner.state(), P0);
+            let mut events = Vec::new();
+            cast_and_pass(&mut runner, rite, None, Some(jammer), &mut events);
+            let rolled_at_first = die_results(&events).len();
+            let parked_at_first = parked_state_of(runner.state(), jammer);
+            let frames_at_first = stack_frames(runner.state());
+            answer_doubler_prompt(&mut runner, first, &mut events);
+            answer_doubler_prompt(&mut runner, second, &mut events);
+            settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+            let r = die_results(&events)[0];
+            let state = runner.state();
+            assert_eq!(p1_before - life(state, P1), 1, "{what}: Dwarf once");
+            assert_eq!(life(state, P0), p0_before + 1, "{what}: Warden once");
+            assert_eq!(rolled_at_first, 0, "{what}");
+            assert!(
+                matches!(parked_at_first, Some(ParkedEntryState::Pending { .. })),
+                "{what}: {parked_at_first:?}"
+            );
+            assert_eq!(
+                frames_at_first,
+                vec![
+                    FrameKind::ChangeZone,
+                    FrameKind::PostReplacement,
+                    FrameKind::CounterAdditions,
+                ],
+                "{what}"
+            );
+            assert_eq!(triggers_seen_from(jammer), 0, "{what}");
+            assert_eq!(
+                finality_counters(state, jammer),
+                first.counters(1),
+                "{what}"
+            );
+            assert_eq!(plus_counters(state, jammer), second.counters(r), "{what}");
+            assert_finished(state, &[dwarf, warden], &what);
+        }
+    }
+}
+
+/// R5c (F2-a, an inline continuation under an owner). Rite of the Moth returns
+/// Hydradoodle + CR 107.3m + CR 706.1: off the stack X is 0, so the continuation
+/// rolls no dice and completes inline once the finality placement's prompt is
+/// answered. Hydradoodle is a 0/0, so it is put into the graveyard (CR 704.5f)
+/// and its finality counter exiles it instead. Soul Warden saw the entry once
+/// (CR 603.6a + CR 603.10).
+#[test]
+fn an_inline_continuation_under_an_owner_is_collected_once() {
+    for pick in DoublerPick::BOTH {
+        let what = format!("{pick:?}");
+        let (mut runner, rite, doodle, _, warden) = rite_board(("Hydradoodle", HYDRADOODLE), false);
+        let p0_before = life(runner.state(), P0);
+        let mut events = Vec::new();
+        cast_and_pass(&mut runner, rite, None, Some(doodle), &mut events);
+        let parked_at_prompt = parked_state_of(runner.state(), doodle);
+        answer_doubler_prompt(&mut runner, pick, &mut events);
+        let rolled_after_answer = roll_resolved_for(&events, doodle);
+        settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+        let state = runner.state();
+        assert_eq!(life(state, P0), p0_before + 1, "{what}: Warden once");
+        assert!(
+            matches!(parked_at_prompt, Some(ParkedEntryState::Pending { .. })),
+            "{what}: {parked_at_prompt:?}"
+        );
+        assert_eq!(rolled_after_answer, 1, "{what}");
+        assert!(die_results(&events).is_empty(), "{what}");
+        assert_eq!(zone(state, doodle), Zone::Exile, "{what}");
+        assert_finished(state, &[warden], &what);
+    }
+}
+
+/// R6 (F2-b). Yore-Tiller Nephilim + Grumgully, the Generous on three seats +
+/// CR 508.4 + CR 614.12a + CR 614.1c: the entry's ordering answer delivers under
+/// `CallerEpilogue`, whose seat asks the attack target before the chain rolls.
+/// The entry is held from that prompt, so the roll is made before Hammer Jammer
+/// enters (CR 113.6) and Grumgully's counter joins its placement (r + 1). Brazen
+/// Dwarf sees the roll once and Soul Warden sees the entry once.
+#[test]
+fn an_entry_held_across_its_attack_target_prompt_is_seen_once() {
+    reset_triggers_seen();
+    let mut board = attack_board(7, 3, Putter::Nephilim, add_grumgully);
+    let p0_before = life(board.runner.state(), P0);
+    let mut events = Vec::new();
+    attack_to_entry_prompt(&mut board, &mut events);
+    let AttackBoard {
+        mut runner,
+        jammer,
+        dwarf,
+        warden,
+        ..
+    } = board;
+    order_entry(&mut runner, "Hammer Jammer", &mut events);
+    pass_to_attack_target_choice(&mut runner, &mut events);
+    let rolled_at_prompt = die_results(&events).len();
+    let parked_at_prompt = parked_state_of(runner.state(), jammer);
+    let frames_at_prompt = stack_frames(runner.state());
+    act(
+        &mut runner,
+        GameAction::ChooseEntryAttackTarget {
+            target: AttackTarget::Player(P2),
+        },
+        &mut events,
+    );
+    settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+    let r = die_results(&events)[0];
+    let state = runner.state();
+    assert_eq!(
+        triggers_seen_from(jammer),
+        0,
+        "Hammer Jammer does not see its roll"
+    );
+    assert_eq!(plus_counters(state, jammer), r + 1, "r = {r}");
+    assert_eq!(life(state, P0), p0_before + 1, "Warden once");
+    assert_eq!(rolled_at_prompt, 0);
+    assert!(
+        matches!(parked_at_prompt, Some(ParkedEntryState::Pending { .. })),
+        "{parked_at_prompt:?}"
+    );
+    assert_eq!(
+        frames_at_prompt,
+        vec![FrameKind::ChangeZone, FrameKind::PostReplacement]
+    );
+    assert_eq!(
+        attacks_of(state, jammer),
+        vec![(P2, AttackTarget::Player(P2))]
+    );
+    assert_eq!(triggers_seen_from(dwarf), 1, "Dwarf once");
+    assert_finished(state, &[dwarf, warden], "R6");
+}
+
+/// R6b / R6c. An attacking entry delivered by its ordering answer under
+/// `CallerEpilogue`, with Tayam, Doubling Season and Winding Constrictor: the
+/// entry is held from the vigilance placement's prompt, the roll's placement
+/// prompts again, and the delivery's own counter step seats Hammer Jammer after
+/// the second answer (CR 508.4), asking its target on three seats.
+fn run_ordered_attacking_doubler_entry(
+    putter: Putter,
+    players: u8,
+    first: DoublerPick,
+    second: DoublerPick,
+) {
+    let what = format!("{putter:?}, {players} seats, {first:?}, {second:?}");
+    reset_triggers_seen();
+    let mut board = attack_board(7, players, putter, tayam_and_doublers);
+    let p0_before = life(board.runner.state(), P0);
+    let mut events = Vec::new();
+    attack_to_entry_prompt(&mut board, &mut events);
+    let AttackBoard {
+        mut runner,
+        jammer,
+        dwarf,
+        warden,
+        ..
+    } = board;
+    order_entry(&mut runner, "Hammer Jammer", &mut events);
+    let parked_at_first = parked_state_of(runner.state(), jammer);
+    let frames_at_first = stack_frames(runner.state());
+    answer_doubler_prompt(&mut runner, first, &mut events);
+    let attacking_at_second = attacks_of(runner.state(), jammer);
+    answer_doubler_prompt(&mut runner, second, &mut events);
+    let defender = if players == 3 {
+        pass_to_attack_target_choice(&mut runner, &mut events);
+        act(
+            &mut runner,
+            GameAction::ChooseEntryAttackTarget {
+                target: AttackTarget::Player(P2),
+            },
+            &mut events,
+        );
+        P2
+    } else {
+        P1
+    };
+    settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+    let r = die_results(&events)[0];
+    let state = runner.state();
+    assert_eq!(triggers_seen_from(dwarf), 1, "{what}: Dwarf once");
+    assert_eq!(life(state, P0), p0_before + 1, "{what}: Warden once");
+    assert!(
+        matches!(parked_at_first, Some(ParkedEntryState::Pending { .. })),
+        "{what}: {parked_at_first:?}"
+    );
+    assert_eq!(
+        frames_at_first.last(),
+        Some(&FrameKind::CounterAdditions),
+        "{what}: {frames_at_first:?}"
+    );
+    assert!(attacking_at_second.is_empty(), "{what}");
+    assert_eq!(triggers_seen_from(jammer), 0, "{what}");
+    assert_eq!(
+        attacks_of(state, jammer),
+        vec![(defender, AttackTarget::Player(defender))],
+        "{what}"
+    );
+    assert_eq!(
+        counters_of(state, jammer, &vigilance_counter()),
+        first.counters(1),
+        "{what}"
+    );
+    assert_eq!(plus_counters(state, jammer), second.counters(r), "{what}");
+    assert_finished(state, &[dwarf, warden], &what);
+}
+
+/// R6b. Yore-Tiller Nephilim (the targeted owner) + CR 508.4 + CR 603.2: the
+/// held entry is seen once by Brazen Dwarf's roll observer and Soul Warden.
+#[test]
+fn an_owned_ordered_attacking_entry_held_across_its_counter_pause_is_seen_once() {
+    for first in DoublerPick::BOTH {
+        for second in DoublerPick::BOTH {
+            run_ordered_attacking_doubler_entry(Putter::Nephilim, 2, first, second);
+        }
+        run_ordered_attacking_doubler_entry(Putter::Nephilim, 3, first, first);
+    }
+}
+
+/// R6c. Ilharg, the Raze-Boar (no owner) + CR 508.4 + CR 603.2: the same, with the
+/// settled release collecting the entry. Ilharg's instruction count and its
+/// "Return that creature" rider on this route are not asserted (filed
+/// separately).
+#[test]
+fn an_unowned_ordered_attacking_entry_held_across_its_counter_pause_is_seen_once() {
+    for first in DoublerPick::BOTH {
+        for second in DoublerPick::BOTH {
+            run_ordered_attacking_doubler_entry(Putter::Ilharg, 2, first, second);
+        }
+        run_ordered_attacking_doubler_entry(Putter::Ilharg, 3, first, first);
+    }
+}
+
+/// Storm the Festival over `cards` (seated so the first is on top), with Soul
+/// Warden, Brazen Dwarf when `resident_dwarf`, plus `extras`, and a free Box of
+/// Free-Range Goblins in hand.
+struct NewcomerFestival {
+    runner: GameRunner,
+    warden: ObjectId,
+    resident_dwarf: Option<ObjectId>,
+    festival: ObjectId,
+    box_of_goblins: ObjectId,
+}
+
+fn newcomer_festival(
+    mut scenario: GameScenario,
+    extras: fn(&mut GameScenario),
+    resident_dwarf: bool,
+    cards: &[ObjectId],
+) -> NewcomerFestival {
+    extras(&mut scenario);
+    let resident_dwarf = resident_dwarf.then(|| add_dwarf(&mut scenario));
+    let warden = add_warden_p0(&mut scenario);
+    let festival = free_spell(
+        &mut scenario,
+        "Storm the Festival",
+        false,
+        STORM_THE_FESTIVAL,
+    );
+    let box_of_goblins = free_spell(
+        &mut scenario,
+        "Box of Free-Range Goblins",
+        false,
+        BOX_OF_FREE_RANGE_GOBLINS,
+    );
+    let mut runner = scenario.build();
+    for card in cards.iter().rev() {
+        seat_on_library_top(&mut runner, *card);
+    }
+    NewcomerFestival {
+        runner,
+        warden,
+        resident_dwarf,
+        festival,
+        box_of_goblins,
+    }
+}
+
+/// A {1}{R} Brazen Dwarf in P0's hand, for `seat_on_library_top`.
+fn dwarf_card(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_to_hand_from_oracle(P0, "Brazen Dwarf", 1, 3, BRAZEN_DWARF)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id()
+}
+
+/// Storm the Festival's look-at choice: keep `cards`.
+fn festival_keeps(
+    runner: &mut GameRunner,
+    festival: ObjectId,
+    cards: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) {
+    cast_and_pass(runner, festival, None, None, events);
+    assert_dig_choice(runner.state());
+    act(runner, GameAction::SelectCards { cards }, events);
+}
+
+/// Cast Box of Free-Range Goblins and settle, answering any counter prompt with
+/// `pick`: its roll is P0's, made with the newcomer on the battlefield.
+fn cast_box_and_settle(runner: &mut GameRunner, box_of_goblins: ObjectId, pick: Option<FirstPick>) {
+    let mut events = Vec::new();
+    cast_and_pass(runner, box_of_goblins, None, None, &mut events);
+    match pick {
+        Some(pick) => {
+            settle_picking(runner, &mut events, pick);
+        }
+        None => {
+            settle(runner, &mut events, DEFAULT_ANSWERS);
+        }
+    }
+}
+
+/// A Storm the Festival row's counter pick and the replacements it adds.
+type FestivalCase = (Option<FirstPick>, fn(&mut GameScenario));
+
+/// R7 (F3). Storm the Festival puts Hammer Jammer, then Brazen Dwarf, onto the
+/// battlefield + CR 603.2 + CR 603.10: Brazen Dwarf is not on the battlefield
+/// when Hammer Jammer's as-enters roll is made, so it does not trigger on it. A
+/// roll P0 makes once Brazen Dwarf is on the battlefield triggers it, and
+/// Hammer Jammer once (CR 603.2). (a) No counter replacements; (b) Hardened
+/// Scales and Branching Evolution, so Hammer Jammer's roll placement pauses
+/// before Brazen Dwarf is delivered.
+#[test]
+fn a_newcomer_does_not_see_an_earlier_members_roll() {
+    let cases: [FestivalCase; 3] = [
+        (None, no_extras),
+        (Some(FirstPick::Scales), add_counter_replacements),
+        (Some(FirstPick::Evolution), add_counter_replacements),
+    ];
+    for (pick, extras) in cases {
+        let what = format!("{pick:?}");
+        reset_triggers_seen();
+        let mut scenario = board(7);
+        let jammer = jammer_card(&mut scenario);
+        let dwarf = dwarf_card(&mut scenario);
+        let NewcomerFestival {
+            mut runner,
+            warden,
+            festival,
+            box_of_goblins,
+            ..
+        } = newcomer_festival(scenario, extras, false, &[jammer, dwarf]);
+        let p1_before = life(runner.state(), P1);
+        let p0_before = life(runner.state(), P0);
+        let mut events = Vec::new();
+        festival_keeps(&mut runner, festival, vec![jammer, dwarf], &mut events);
+        let frames_at_prompt = pick.map(|pick| {
+            assert_counter_prompt(runner.state());
+            let frames = stack_frames(runner.state());
+            answer_counter_prompt(&mut runner, pick, &mut events);
+            frames
+        });
+        settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+        let r = die_results(&events)[0];
+        let state = runner.state();
+        assert_eq!(
+            life(state, P1),
+            p1_before,
+            "{what}: the newcomer does not see it"
+        );
+        let roll_at = events
+            .iter()
+            .position(|event| matches!(event, GameEvent::DieRolled { .. }))
+            .expect("Hammer Jammer rolled");
+        let dwarf_entry = battlefield_entry_index(&events, dwarf).expect("Brazen Dwarf entered");
+        assert!(
+            roll_at < dwarf_entry,
+            "{what}: the roll precedes the newcomer"
+        );
+        assert_eq!(zone(state, dwarf), Zone::Battlefield, "{what}");
+        if let Some(frames) = frames_at_prompt {
+            assert_eq!(
+                frames,
+                vec![
+                    FrameKind::PostReplacement,
+                    FrameKind::CounterAdditions,
+                    FrameKind::BatchDelivery,
+                ],
+                "{what}"
+            );
+        }
+        assert_eq!(triggers_seen_from(jammer), 0, "{what}");
+        assert_eq!(life(state, P0), p0_before + 2, "{what}: Warden twice");
+        let expected = pick.map_or(r, |pick| pick.counters(r));
+        assert_eq!(plus_counters(state, jammer), expected, "{what}, r = {r}");
+
+        let p1_before_box = life(state, P1);
+        let _ = take_triggers_seen_from(jammer);
+        cast_box_and_settle(&mut runner, box_of_goblins, pick);
+        let state = runner.state();
+        assert_eq!(
+            p1_before_box - life(state, P1),
+            1,
+            "{what}: the newcomer sees a later roll"
+        );
+        assert_eq!(
+            triggers_seen_from(jammer),
+            1,
+            "{what}: Hammer Jammer sees the Box's roll"
+        );
+        assert_finished(state, &[dwarf, warden], &what);
+    }
+}
+
+/// R9 (F3, two rollers). Storm the Festival puts two Hammer Jammers onto the
+/// battlefield with Brazen Dwarf resident + CR 603.2 + CR 603.2c + CR 113.6: each
+/// as-enters roll is its own instruction, so the resident Dwarf triggers twice.
+/// The later Hammer Jammer is not on the battlefield at the earlier roll, and its
+/// own roll is made before it enters, so it sees neither. Whether the earlier
+/// Hammer Jammer sees the later roll is the sequential-batch presence, not
+/// asserted (filed: co-entry simultaneity).
+#[test]
+fn each_as_enters_roll_of_a_batch_is_its_own_instruction() {
+    reset_triggers_seen();
+    let mut scenario = board(7);
+    let first = jammer_card(&mut scenario);
+    let second = jammer_card(&mut scenario);
+    let NewcomerFestival {
+        mut runner,
+        warden,
+        resident_dwarf,
+        festival,
+        ..
+    } = newcomer_festival(scenario, no_extras, true, &[first, second]);
+    let dwarf = resident_dwarf.expect("the resident Dwarf");
+    let p0_before = life(runner.state(), P0);
+    let mut events = Vec::new();
+    festival_keeps(&mut runner, festival, vec![first, second], &mut events);
+    settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+    let state = runner.state();
+    assert_eq!(
+        triggers_seen_from(second),
+        0,
+        "the later entrant sees no roll"
+    );
+    assert_eq!(
+        triggers_seen_from(dwarf),
+        2,
+        "one trigger per roll instruction"
+    );
+    let rollers: Vec<Option<ObjectId>> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                pre_entry_source, ..
+            } => Some(*pre_entry_source),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rollers, vec![Some(first), Some(second)]);
+    let rolls = die_results(&events);
+    assert_eq!(plus_counters(state, second), rolls[1]);
+    assert_eq!(life(state, P0), p0_before + 2, "Warden twice");
+    assert_finished(state, &[dwarf, warden], "R9");
+}
+
+/// R13 (F1-b, Devour, no owner). Ilharg, the Raze-Boar puts Thunder-Thrash Elder
+/// onto the battlefield "tapped and attacking" + CR 702.82a + CR 614.12a +
+/// CR 508.4: the Devour sacrifice is chosen as it enters, and the seat frame,
+/// parked beneath the entry's Devour snapshot, seats it once its entry has
+/// completed. It enters with three +1/+1 counters, and Soul Warden sees it once.
+#[test]
+fn a_single_pick_devour_entry_is_seated_after_its_sacrifice() {
+    let mut scenario = board(7);
+    let warden = add_warden_p0(&mut scenario);
+    let victim = scenario.add_vanilla(P0, 2, 2);
+    let ilharg = scenario
+        .add_creature_from_oracle(P0, "Ilharg, the Raze-Boar", 6, 6, ILHARG_THE_RAZE_BOAR)
+        .id();
+    let elder = thunder_thrash_elder(&mut scenario);
+    let mut runner = scenario.build();
+    let p0_before = life(runner.state(), P0);
+    let mut events = Vec::new();
+    ilharg_attacks_to_entry_prompt(&mut runner, ilharg, &mut events);
+    assert!(
+        effect_zone_choice(runner.state()),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    let frames_at_prompt = stack_frames(runner.state());
+    let parked_at_prompt = parked_state_of(runner.state(), elder);
+    act(
+        &mut runner,
+        GameAction::SelectCards {
+            cards: vec![victim],
+        },
+        &mut events,
+    );
+    settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+    let state = runner.state();
+    assert_eq!(
+        attacks_of(state, elder),
+        vec![(P1, AttackTarget::Player(P1))]
+    );
+    assert_eq!(
+        frames_at_prompt,
+        vec![
+            FrameKind::EntryAttackSeat,
+            FrameKind::ChangeZone,
+            FrameKind::PostReplacement,
+            FrameKind::AbilityContinuation,
+        ]
+    );
+    assert!(
+        matches!(parked_at_prompt, Some(ParkedEntryState::Pending { .. })),
+        "{parked_at_prompt:?}"
+    );
+    assert_eq!(plus_counters(state, elder), 3);
+    assert_eq!(life(state, P0), p0_before + 1, "Warden once");
+    assert_eq!(
+        returns_installed_by(state, ilharg),
+        vec![vec![TargetRef::Object(elder)]],
+        "the return is bound to the Elder"
+    );
+    assert_eq!(zone(state, victim), Zone::Graveyard);
+    assert!(!stack_frames(state).contains(&FrameKind::ChangeZone));
+    assert_finished(state, &[warden], "R13");
+}
+
+/// R14 (F2-c). Grim Reaper, Lethal Legionnaire pays {3}{B} and returns Hammer
+/// Jammer "tapped and attacking with a finality counter on it", under Doubling
+/// Season and Winding Constrictor + CR 508.4 + CR 616.1 + CR 603.6d: the finality
+/// placement's prompt comes before the roll and the roll's placement prompts
+/// again. The targeted owner seats Hammer Jammer once, after both, asking its
+/// target on three seats. Brazen Dwarf sees the roll once and Soul Warden the
+/// entry once.
+#[test]
+fn an_owed_seat_at_an_owners_counter_pause_is_seated_once() {
+    for players in [2u8, 3] {
+        for first in DoublerPick::BOTH {
+            for second in DoublerPick::BOTH {
+                if players == 3 && second != first {
+                    continue;
+                }
+                let what = format!("{players} seats, {first:?}, {second:?}");
+                reset_triggers_seen();
+                let mut board = attack_board(7, players, Putter::GrimReaper, add_doublers);
+                let p0_before = life(board.runner.state(), P0);
+                let mut events = Vec::new();
+                declare_board_attack(&mut board, &mut events);
+                // The pool empties between steps, so the {3}{B} is added once the
+                // attack is declared.
+                {
+                    let state = board.runner.state_mut();
+                    let _ = state.add_mana_to_pool(
+                        P0,
+                        ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+                    );
+                    for unit in green(3) {
+                        let _ = state.add_mana_to_pool(P0, unit);
+                    }
+                }
+                drive_attack_trigger_to_entry_prompt(&mut board, &mut events);
+                let AttackBoard {
+                    mut runner,
+                    jammer,
+                    dwarf,
+                    warden,
+                    ..
+                } = board;
+                let frames_at_first = stack_frames(runner.state());
+                answer_doubler_prompt(&mut runner, first, &mut events);
+                let attacking_at_second = attacks_of(runner.state(), jammer);
+                let owed_at_second = owes_seat(runner.state(), jammer);
+                answer_doubler_prompt(&mut runner, second, &mut events);
+                let mut attack_prompts = 0;
+                let mut owner_at_attack_prompt = Vec::new();
+                for _ in 0..20 {
+                    record_stack(runner.state());
+                    match &runner.state().waiting_for {
+                        WaitingFor::EntryAttackTargetChoice { .. } => {
+                            attack_prompts += 1;
+                            owner_at_attack_prompt.push(has_change_zone_owner(runner.state()));
+                            act(
+                                &mut runner,
+                                GameAction::ChooseEntryAttackTarget {
+                                    target: AttackTarget::Player(P2),
+                                },
+                                &mut events,
+                            );
+                        }
+                        WaitingFor::Priority { .. } if !resolution_is_settled(runner.state()) => {
+                            act(&mut runner, GameAction::PassPriority, &mut events);
+                        }
+                        _ => break,
+                    }
+                }
+                settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+                let r = die_results(&events)[0];
+                let state = runner.state();
+                assert_eq!(triggers_seen_from(dwarf), 1, "{what}: Dwarf once");
+                assert_eq!(life(state, P0), p0_before + 1, "{what}: Warden once");
+                assert_eq!(
+                    frames_at_first,
+                    vec![
+                        FrameKind::ChangeZone,
+                        FrameKind::PostReplacement,
+                        FrameKind::CounterAdditions,
+                    ],
+                    "{what}"
+                );
+                assert!(attacking_at_second.is_empty(), "{what}");
+                let defender = if players == 3 { P2 } else { P1 };
+                if players == 3 {
+                    assert_eq!(attack_prompts, 1, "{what}: the target is asked once");
+                    assert_eq!(owner_at_attack_prompt, vec![true], "{what}: the owner asks");
+                } else {
+                    assert_eq!(attack_prompts, 0, "{what}");
+                    assert!(
+                        owed_at_second,
+                        "{what}: the seat is owed at the second prompt"
+                    );
+                }
+                assert_eq!(
+                    attacks_of(state, jammer),
+                    vec![(defender, AttackTarget::Player(defender))],
+                    "{what}: attacks once"
+                );
+                assert_eq!(triggers_seen_from(jammer), 0, "{what}");
+                assert_eq!(
+                    finality_counters(state, jammer),
+                    first.counters(1),
+                    "{what}"
+                );
+                assert_eq!(plus_counters(state, jammer), second.counters(r), "{what}");
+                assert_finished(state, &[dwarf, warden], &what);
+            }
+        }
+    }
+}
+
+/// R17 / R17b's board: Storm the Festival over `cards` with Barbarian Class and
+/// Soul Warden, and Brazen Dwarf resident when `resident_dwarf`.
+fn barbarian_festival(
+    seed: u64,
+    resident_dwarf: bool,
+    with_newcomer: bool,
+) -> (NewcomerFestival, ObjectId, Option<ObjectId>) {
+    let mut scenario = board(seed);
+    let jammer = jammer_card(&mut scenario);
+    let newcomer = with_newcomer.then(|| dwarf_card(&mut scenario));
+    let cards: Vec<ObjectId> = std::iter::once(jammer).chain(newcomer).collect();
+    let festival = newcomer_festival(scenario, add_barbarian_class, resident_dwarf, &cards);
+    (festival, jammer, newcomer)
+}
+
+fn barbarian_festival_ties(seed: u64, resident_dwarf: bool, with_newcomer: bool) -> bool {
+    let (mut board, jammer, newcomer) = barbarian_festival(seed, resident_dwarf, with_newcomer);
+    let cards = std::iter::once(jammer).chain(newcomer).collect();
+    festival_keeps(&mut board.runner, board.festival, cards, &mut Vec::new());
+    tie_prompt_results(board.runner.state()).is_some()
+}
+
+/// R17 (a batch member's keep choice). Storm the Festival over Hammer Jammer and
+/// a Brazen Dwarf card, with Barbarian Class + CR 706.6 + CR 614.12a: Hammer
+/// Jammer's tied roll asks which die to ignore before it enters, so the rest of
+/// the batch waits beneath its whole child stack, and the frame that owns the
+/// choice stays on top. Hammer Jammer enters with the kept result, before Brazen
+/// Dwarf is delivered, so the newcomer does not see the roll (CR 603.10). A later
+/// roll by P0 triggers it.
+#[test]
+fn a_batch_members_keep_choice_owns_the_top_of_the_stack() {
+    let seed = find_seed("a batch member's tie", |seed| {
+        barbarian_festival_ties(seed, false, true)
+    });
+    reset_triggers_seen();
+    let (board, jammer, newcomer) = barbarian_festival(seed, false, true);
+    let dwarf = newcomer.expect("the Brazen Dwarf card");
+    let NewcomerFestival {
+        mut runner,
+        warden,
+        festival,
+        box_of_goblins,
+        ..
+    } = board;
+    let p1_before = life(runner.state(), P1);
+    let p0_before = life(runner.state(), P0);
+    let mut events = Vec::new();
+    festival_keeps(&mut runner, festival, vec![jammer, dwarf], &mut events);
+    let frames_at_tie = stack_frames(runner.state());
+    let parked_at_tie = parked_state_of(runner.state(), jammer);
+    let naturals = answer_tie(&mut runner, &mut events);
+    settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+    let state = runner.state();
+    assert_eq!(
+        frames_at_tie,
+        vec![
+            FrameKind::BatchDelivery,
+            FrameKind::PostReplacement,
+            FrameKind::AbilityContinuation,
+            FrameKind::DieRoll,
+        ]
+    );
+    assert!(
+        matches!(parked_at_tie, Some(ParkedEntryState::Pending { .. })),
+        "{parked_at_tie:?}"
+    );
+    let counters_at = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                GameEvent::CounterAdded { object_id, .. } if *object_id == jammer
+            )
+        })
+        .expect("Hammer Jammer's counters");
+    let dwarf_entry = battlefield_entry_index(&events, dwarf).expect("Brazen Dwarf entered");
+    assert!(
+        counters_at < dwarf_entry,
+        "the batch resumes only after Hammer Jammer's entry"
+    );
+    assert_eq!(
+        plus_counters(state, jammer),
+        survivors_total(&naturals),
+        "{naturals:?}"
+    );
+    assert_eq!(
+        triggers_seen_from(dwarf),
+        0,
+        "the newcomer does not see the roll"
+    );
+    assert_eq!(life(state, P1), p1_before);
+    assert_eq!(triggers_seen_from(jammer), 0);
+    assert_eq!(life(state, P0), p0_before + 2, "Warden twice");
+
+    let p1_before_box = life(state, P1);
+    let _ = take_triggers_seen_from(jammer);
+    cast_box_and_settle(&mut runner, box_of_goblins, None);
+    let state = runner.state();
+    assert_eq!(
+        p1_before_box - life(state, P1),
+        1,
+        "the newcomer sees a later roll"
+    );
+    assert_eq!(
+        triggers_seen_from(jammer),
+        1,
+        "Hammer Jammer sees the Box's roll"
+    );
+    assert_finished(state, &[dwarf, warden], "R17");
+}
+
+/// R17b (control: no newcomer). Storm the Festival over Hammer Jammer alone,
+/// with Barbarian Class and a resident Brazen Dwarf + CR 706.6 + CR 603.2: the
+/// same keep choice owns the top of the stack, and the resident Dwarf sees the
+/// roll once.
+#[test]
+fn a_lone_batch_members_keep_choice_is_seen_by_a_resident_once() {
+    let seed = find_seed("a lone batch member's tie", |seed| {
+        barbarian_festival_ties(seed, true, false)
+    });
+    reset_triggers_seen();
+    let (board, jammer, _) = barbarian_festival(seed, true, false);
+    let NewcomerFestival {
+        mut runner,
+        warden,
+        resident_dwarf,
+        festival,
+        ..
+    } = board;
+    let dwarf = resident_dwarf.expect("the resident Dwarf");
+    let p0_before = life(runner.state(), P0);
+    let mut events = Vec::new();
+    festival_keeps(&mut runner, festival, vec![jammer], &mut events);
+    let frames_at_tie = stack_frames(runner.state());
+    let naturals = answer_tie(&mut runner, &mut events);
+    settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+    let state = runner.state();
+    assert_eq!(
+        frames_at_tie,
+        vec![
+            FrameKind::BatchDelivery,
+            FrameKind::PostReplacement,
+            FrameKind::AbilityContinuation,
+            FrameKind::DieRoll,
+        ]
+    );
+    assert_eq!(
+        triggers_seen_from(dwarf),
+        1,
+        "the resident sees the roll once"
+    );
+    assert_eq!(triggers_seen_from(jammer), 0);
+    assert_eq!(
+        plus_counters(state, jammer),
+        survivors_total(&naturals),
+        "{naturals:?}"
+    );
+    assert_eq!(life(state, P0), p0_before + 1, "Warden once");
+    assert_finished(state, &[dwarf, warden], "R17b");
 }
