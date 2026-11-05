@@ -1665,26 +1665,36 @@ fn parse_commander_zone_disjunction(input: &str) -> OracleResult<'_, TargetFilte
 ///
 /// The read does the widening, not the phrase: the shared type-phrase grammar
 /// leaves "your commanders" unzoned because it also names a trigger subject
-/// ("your commander enters or attacks"). A filter the rules pin elsewhere stays
-/// as written: a controller clause is CR 903.3d "controlling a commander" (a
-/// permanent on the battlefield), a named zone is CR 903.3d "a commander in a
-/// specific zone", and a card type is CR 109.2 (a permanent of that type on the
-/// battlefield).
+/// ("your commander enters or attacks"). Only the population that "your
+/// commanders" and "commanders you own" parse to is widened: a typed filter with
+/// no controller, no type filters, and exactly the properties
+/// `FilterProp::Owned { controller: ControllerRef::You }` and
+/// `FilterProp::IsCommander`, in either order. That is the population of
+/// Tangleweave Armor and Cactus Preserve ("where X is the greatest mana value
+/// among your commanders"). Every other filter stays as written, among them a
+/// controller clause (CR 903.3d: controlling a commander means a permanent on the
+/// battlefield), a named zone (CR 903.3d: a commander in a specific zone), a
+/// tapped or untapped requirement (CR 110.5d: cards not on the battlefield are
+/// neither tapped nor untapped) and any type filter.
 fn your_commanders_in_every_zone(filter: TargetFilter) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut typed)
             if typed.controller.is_none()
                 && typed.type_filters.is_empty()
-                && typed.properties.contains(&FilterProp::IsCommander)
-                && typed.properties.contains(&FilterProp::Owned {
-                    controller: ControllerRef::You,
-                })
-                && !typed.properties.iter().any(|prop| {
-                    matches!(
-                        prop,
-                        FilterProp::InZone { .. } | FilterProp::InAnyZone { .. }
-                    )
-                }) =>
+                && matches!(
+                    typed.properties.as_slice(),
+                    [
+                        FilterProp::Owned {
+                            controller: ControllerRef::You
+                        },
+                        FilterProp::IsCommander
+                    ] | [
+                        FilterProp::IsCommander,
+                        FilterProp::Owned {
+                            controller: ControllerRef::You
+                        }
+                    ]
+                ) =>
         {
             typed.properties.push(FilterProp::InAnyZone {
                 zones: Zone::ALL.to_vec(),
@@ -14744,8 +14754,9 @@ mod tests {
         );
     }
 
-    /// CR 903.3d + CR 109.2: every other commander population stays as written,
-    /// and CR 903.3e's "your commander" does not reach another player's commander.
+    /// CR 903.3d + CR 109.2 + CR 110.5d: every other commander population stays as
+    /// written, and CR 903.3e's "your commander" does not reach another player's
+    /// commander.
     #[test]
     fn other_commander_readings_keep_their_population() {
         let owned_by = |controller| FilterProp::Owned { controller };
@@ -14816,6 +14827,21 @@ mod tests {
                     controller: None,
                     properties: vec![FilterProp::IsCommander, owned_by(ControllerRef::You)],
                 }),
+            ),
+            // CR 110.5d: only permanents have status; cards not on the battlefield are
+            // neither tapped nor untapped. The population stays as written, and with
+            // no zone it reads the battlefield. No printed card exhibits this shape;
+            // the nearest printed card is Tangleweave Armor.
+            (
+                "the greatest mana value among untapped commanders you own",
+                typed_population(
+                    None,
+                    vec![
+                        FilterProp::Untapped,
+                        FilterProp::IsCommander,
+                        owned_by(ControllerRef::You),
+                    ],
+                ),
             ),
             // Not "your commander" (CR 903.3e). No printed card exhibits this shape; the
             // nearest printed card is Imposing Grandeur ("Each player may discard their

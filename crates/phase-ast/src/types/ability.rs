@@ -11707,8 +11707,10 @@ pub enum CardTypeSetSource {
     /// CR 607.2a + CR 406.6: Cards exiled by the source's linked ability.
     ExiledBySource,
     /// Objects matching `filter`. A typed filter that names no zone reads the
-    /// battlefield (CR 109.2); `FilterProp::InZone` / `FilterProp::InAnyZone`
-    /// name the zones it reads otherwise.
+    /// battlefield; `FilterProp::InZone` / `FilterProp::InAnyZone` name the zones
+    /// it reads otherwise. When the Oracle description has a card type or subtype,
+    /// names no zone and doesn't say "card", "spell", "source" or "scheme", that
+    /// default is CR 109.2's reading: a permanent of that type on the battlefield.
     Objects { filter: TargetFilter },
     /// CR 608.2c + CR 205.2a: distinct card types among the current chain
     /// tracked set, optionally restricted to members produced by `caused_by`.

@@ -61,8 +61,9 @@ struct CommanderMove {
     zone: Zone,
 }
 
-/// One move to each zone away from the battlefield and the command zone, with the
-/// owner keeping the commander out of the command zone.
+/// One move each to exile, the graveyard, the hand and the library, with the owner
+/// keeping the commander out of the command zone. The rows that cast a commander
+/// cover the stack.
 const MOVES_OFF_THE_BATTLEFIELD: [CommanderMove; 4] = [
     CommanderMove {
         spell: "Path to Exile",
@@ -424,26 +425,41 @@ fn x_stops_counting_when_the_commander_spell_is_countered() {
     assert_germ(runner.state(), armor, 2);
 }
 
-/// Activates Cactus Preserve's {3} ability for P0, then asserts the land resolved with
-/// `expected` power and toughness and is still on the battlefield.
+/// Puts a P0-owned Cactus Preserve on the battlefield under `activator`'s control,
+/// has `activator` activate its {3} ability during P0's main phase, then asserts
+/// that once the ability resolves the land has `expected` power and toughness and
+/// is still on the battlefield.
 #[track_caller]
 fn assert_cactus_preserve_becomes(
     mut scenario: GameScenario,
+    activator: PlayerId,
     designated: Option<ObjectId>,
     expected: i32,
 ) {
     let land = scenario
         .add_land_from_oracle(P0, "Cactus Preserve", CACTUS_PRESERVE)
+        .controlled_by(activator)
         .id();
-    scenario.with_mana_pool(P0, pool(&[ManaType::Colorless; 3]));
+    scenario.with_mana_pool(activator, pool(&[ManaType::Colorless; 3]));
     let mut runner = scenario.build();
     if let Some(commander) = designated {
         designate(&mut runner, commander);
     }
+    if activator != P0 {
+        // CR 117.3d: P0, the active player, passes, and the next player in turn
+        // order receives priority.
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == activator),
+        "{:?}",
+        runner.state().waiting_for
+    );
 
     runner.activate(land, 1).resolve();
 
     let object = &runner.state().objects[&land];
+    assert_eq!((object.owner, object.controller), (P0, activator));
     assert_eq!(object.zone, Zone::Battlefield);
     assert_eq!(
         (object.power, object.toughness),
@@ -453,25 +469,28 @@ fn assert_cactus_preserve_becomes(
 }
 
 /// CR 903.3e + CR 109.5: "your" on an activated ability is the player who activated
-/// it, and that player's commander counts wherever it is. With both players' commanders
-/// in the command zone, P0's Krenko (4) sets X and P1's Ghalta (12) doesn't.
+/// it, and that player's commander counts wherever it is. With P0's Krenko (4) and
+/// P1's Ghalta (12) in the command zone, X is 4 when P0 activates the land and 12 when
+/// P1 controls and activates the land P0 owns.
 #[test]
 fn cactus_preserve_reads_the_activators_commander() {
     let mut scenario = commander_game();
     let ghalta = scenario.add_real_card(P0, GHALTA, Zone::Hand, db());
     scenario.with_commander(ghalta);
-    assert_cactus_preserve_becomes(scenario, None, 12);
+    assert_cactus_preserve_becomes(scenario, P0, None, 12);
 
     let mut scenario = commander_game();
     let ghalta = scenario.add_real_card(P0, GHALTA, Zone::Battlefield, db());
-    assert_cactus_preserve_becomes(scenario, Some(ghalta), 12);
+    assert_cactus_preserve_becomes(scenario, P0, Some(ghalta), 12);
 
-    let mut scenario = commander_game();
-    let krenko = scenario.add_real_card(P0, KRENKO, Zone::Hand, db());
-    scenario.with_commander(krenko);
-    let ghalta = scenario.add_real_card(P1, GHALTA, Zone::Hand, db());
-    scenario.with_commander(ghalta);
-    assert_cactus_preserve_becomes(scenario, None, 4);
+    for (activator, expected) in [(P0, 4), (P1, 12)] {
+        let mut scenario = commander_game();
+        let krenko = scenario.add_real_card(P0, KRENKO, Zone::Hand, db());
+        scenario.with_commander(krenko);
+        let ghalta = scenario.add_real_card(P1, GHALTA, Zone::Hand, db());
+        scenario.with_commander(ghalta);
+        assert_cactus_preserve_becomes(scenario, activator, None, expected);
+    }
 }
 
 /// CR 903.3e: both partners are read, each in its own zone, and "greatest" takes the
