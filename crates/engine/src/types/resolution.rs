@@ -410,6 +410,14 @@ pub struct AbilityContinuationFrame {
     pub choose_zone_trigger_context: Option<ResolvingTriggerContext>,
 }
 
+/// CR 616.1f: a replacement's interactive body must finish before the
+/// remaining replacements are reconsidered for the same event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingReplacementPipeline {
+    pub event: crate::types::proposed_event::ProposedEvent,
+    pub depth: u16,
+}
+
 /// The per-category zone-choice owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PerCategoryZoneChoiceFrame {
@@ -450,6 +458,7 @@ pub enum ResolutionFrame {
     MutateMerge(PendingMutateMerge),
     CipherEncode(PendingCipherEncode),
     PostReplacement(PostReplacementDrainStack),
+    ReplacementPipeline(Box<PendingReplacementPipeline>),
 }
 
 /// The discriminant of a [`ResolutionFrame`], used by checked stack
@@ -484,6 +493,7 @@ pub enum FrameKind {
     MutateMerge,
     CipherEncode,
     PostReplacement,
+    ReplacementPipeline,
 }
 
 impl ResolutionFrame {
@@ -517,6 +527,7 @@ impl ResolutionFrame {
             Self::MutateMerge(_) => FrameKind::MutateMerge,
             Self::CipherEncode(_) => FrameKind::CipherEncode,
             Self::PostReplacement(_) => FrameKind::PostReplacement,
+            Self::ReplacementPipeline(_) => FrameKind::ReplacementPipeline,
         }
     }
 
@@ -554,7 +565,8 @@ impl ResolutionFrame {
             | Self::LifeTotalAssignment(_)
             | Self::SpellResolution(_)
             | Self::CipherEncode(_)
-            | Self::PostReplacement(_) => true,
+            | Self::PostReplacement(_)
+            | Self::ReplacementPipeline(_) => true,
         }
     }
 
@@ -624,7 +636,8 @@ impl ResolutionFrame {
             | Self::ConniveReentry(_)
             | Self::LifeTotalAssignment(_)
             | Self::SpellResolution(_)
-            | Self::PostReplacement(_) => FrameGate::AfterChild,
+            | Self::PostReplacement(_)
+            | Self::ReplacementPipeline(_) => FrameGate::AfterChild,
         }
     }
 }
@@ -3334,7 +3347,9 @@ impl ResolutionStack {
     /// it is a settled, visited carrier or an unsettled one.
     pub(crate) fn holds_unsettled_delivery_frame(&self) -> bool {
         self.frames.iter().any(|frame| match frame {
-            ResolutionFrame::ChangeZone(_) | ResolutionFrame::BatchDelivery(_) => true,
+            ResolutionFrame::ChangeZone(_)
+            | ResolutionFrame::BatchDelivery(_)
+            | ResolutionFrame::ReplacementPipeline(_) => true,
             ResolutionFrame::AbilityContinuation(_)
             | ResolutionFrame::RepeatFor(_)
             | ResolutionFrame::RepeatUntil(_)
@@ -3424,7 +3439,8 @@ impl ResolutionStack {
                 | ResolutionFrame::SpellResolution(_)
                 | ResolutionFrame::MutateMerge(_)
                 | ResolutionFrame::CipherEncode(_)
-                | ResolutionFrame::PostReplacement(_) => {}
+                | ResolutionFrame::PostReplacement(_)
+                | ResolutionFrame::ReplacementPipeline(_) => {}
             }
         }
     }
@@ -5563,6 +5579,9 @@ fn project_frames_into_legacy_state(
                     .resolution_stack
                     .push_post_replacement(drains.clone());
             }
+            ResolutionFrame::ReplacementPipeline(pending) => projected
+                .resolution_stack
+                .push_inner(ResolutionFrame::ReplacementPipeline(pending.clone())),
         }
     }
     Ok(projected)

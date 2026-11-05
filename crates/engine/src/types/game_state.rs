@@ -12219,7 +12219,8 @@ pub(crate) fn live_return_result_occurrences(
             | ResolutionFrame::SpellResolution(_)
             | ResolutionFrame::MutateMerge(_)
             | ResolutionFrame::CipherEncode(_)
-            | ResolutionFrame::PostReplacement(_) => {}
+            | ResolutionFrame::PostReplacement(_)
+            | ResolutionFrame::ReplacementPipeline(_) => {}
         }
     }
     if let Some(PendingCostMoveResume::SacrificeForCost {
@@ -12389,7 +12390,8 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             | ResolutionFrame::SpellResolution(_)
             | ResolutionFrame::MutateMerge(_)
             | ResolutionFrame::CipherEncode(_)
-            | ResolutionFrame::PostReplacement(_) => {}
+            | ResolutionFrame::PostReplacement(_)
+            | ResolutionFrame::ReplacementPipeline(_) => {}
         }
     }
     if let Some(PendingCostMoveResume::SacrificeForCost {
@@ -14641,7 +14643,8 @@ impl PersistedGameState {
             | ResolutionFrame::LifeTotalAssignment(_)
             | ResolutionFrame::SpellResolution(_)
             | ResolutionFrame::MutateMerge(_)
-            | ResolutionFrame::CipherEncode(_) => false,
+            | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::ReplacementPipeline(_) => false,
         }) {
             return Err(PersistedRestoreError::OwnerlessPostReplacementDispatch);
         }

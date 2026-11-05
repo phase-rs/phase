@@ -777,9 +777,12 @@ pub fn turn_face_up(
         object_id,
         applied: std::collections::HashSet::new(),
     };
-    let _ = crate::game::replacement::replace_event(state, proposed, events);
-
-    events.push(GameEvent::TurnedFaceUp { object_id });
+    if matches!(
+        crate::game::replacement::replace_event(state, proposed, events),
+        crate::game::replacement::ReplacementResult::Execute(_)
+    ) {
+        events.push(GameEvent::TurnedFaceUp { object_id });
+    }
 
     Ok(())
 }
@@ -1588,6 +1591,93 @@ mod tests {
             3,
             "each self-resolving step must apply exactly once (2 + 1), not double the sub-ability"
         );
+    }
+
+    #[test]
+    fn turn_face_up_event_waits_for_interactive_replacement_and_remaining_choice() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ChooseOneOfKind, Effect, PlayerFilter,
+            ReplacementDefinition, ReplacementMode, TargetFilter,
+        };
+        use crate::types::actions::GameAction;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+        let gain = |amount| Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: amount },
+            player: TargetFilter::Controller,
+        };
+        let choose = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![
+                    AbilityDefinition::new(AbilityKind::Spell, gain(1)),
+                    AbilityDefinition::new(AbilityKind::Spell, gain(2)),
+                ],
+                kind: ChooseOneOfKind::Ordinary,
+            },
+        );
+        let first = ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(choose);
+        let second = ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
+            .valid_card(TargetFilter::SelfRef)
+            .mode(ReplacementMode::Optional { decline: None })
+            .execute(AbilityDefinition::new(AbilityKind::Spell, gain(4)));
+        {
+            let object = state.objects.get_mut(&id).unwrap();
+            object.replacement_definitions.push(first.clone());
+            object.replacement_definitions.push(second.clone());
+            Arc::make_mut(&mut object.base_replacement_definitions).extend([first, second]);
+        }
+        let mut events = Vec::new();
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+        events.clear();
+        turn_face_up(&mut state, player, id, &mut events).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::TurnedFaceUp { .. })));
+
+        let ordered = crate::game::engine::apply(
+            &mut state,
+            player,
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("choose the first replacement");
+        assert!(matches!(
+            ordered.waiting_for,
+            WaitingFor::ChooseOneOfBranch { .. }
+        ));
+        assert!(!ordered
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::TurnedFaceUp { .. })));
+        let branch =
+            crate::game::engine::apply(&mut state, player, GameAction::ChooseBranch { index: 0 })
+                .expect("choose the replacement body");
+        assert!(matches!(
+            branch.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert!(!branch
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::TurnedFaceUp { .. })));
+        let completed = crate::game::engine::apply(
+            &mut state,
+            player,
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("accept the remaining replacement");
+        assert_eq!(state.players[0].life, 25);
+        assert_eq!(completed.events.iter().filter(|event| matches!(event, GameEvent::TurnedFaceUp { object_id } if *object_id == id)).count(), 1);
     }
 
     #[test]

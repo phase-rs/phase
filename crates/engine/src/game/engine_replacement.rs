@@ -628,11 +628,11 @@ fn handle_replacement_choice_inner(
                         events.push(GameEvent::PermanentUntapped { object_id });
                     }
                 }
-                // CR 614.1e + CR 708.11: TurnFaceUp is performed inline in
-                // `morph::turn_face_up` (the replacement only adds its actions and
-                // does not prevent the turn-up), so there is nothing to apply on
-                // the post-replacement Execute path here.
-                ProposedEvent::TurnFaceUp { .. } => {}
+                // CR 614.1e + CR 708.11: the turn-up event occurs only after
+                // every replacement and its interactive body has completed.
+                ProposedEvent::TurnFaceUp { object_id, .. } => {
+                    events.push(GameEvent::TurnedFaceUp { object_id });
+                }
                 // CR 701.3a + CR 616.1: Attach accepted after a replacement
                 // ordering choice (2+ "as it becomes attached, choose …"
                 // definitions on the same attachment). Unreachable today — the
@@ -1429,6 +1429,16 @@ fn handle_replacement_choice_inner(
             Ok(waiting_for)
         }
         super::replacement::ReplacementResult::NeedsChoice(player) => {
+            if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. })
+                && state.resolution_stack.iter().any(|frame| {
+                    matches!(
+                        frame,
+                        crate::types::resolution::ResolutionFrame::ReplacementPipeline(_)
+                    )
+                })
+            {
+                return Ok(state.waiting_for.clone());
+            }
             // CR 616.1 + CR 701.24a: a SECOND ordering choice on the same
             // library-placement event re-parked a fresh `PendingReplacement`
             // inside `pipeline_loop` with `library_placement: None`. Reapply the

@@ -1834,6 +1834,9 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
                 drain_pending_continuation(state, events);
             }
         }
+        ResolutionFrame::ReplacementPipeline(_) => {
+            crate::game::replacement::resume_replacement_pipeline(state, events);
+        }
     }
 
     clear_post_replacement_token_choice_seed_if_resolution_drained(state);

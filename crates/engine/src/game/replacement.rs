@@ -10545,11 +10545,38 @@ fn apply_single_replacement_and_dirty(
     proposed: ProposedEvent,
     rid: ReplacementId,
     branch: ReplacementBranch,
+    depth: u16,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
-) -> Result<ProposedEvent, ApplyResult> {
+) -> (Result<ProposedEvent, ApplyResult>, bool) {
     let before = proposed.clone();
+    let owns_pipeline = matches!(proposed, ProposedEvent::TurnFaceUp { .. })
+        && matches!(branch, ReplacementBranch::Execute);
+    let caller_wait = owns_pipeline.then(|| {
+        state.resolution_stack.push_inner(
+            crate::types::resolution::ResolutionFrame::ReplacementPipeline(Box::new(
+                crate::types::resolution::PendingReplacementPipeline {
+                    event: proposed.clone(),
+                    depth,
+                },
+            )),
+        );
+        std::mem::replace(
+            &mut state.waiting_for,
+            WaitingFor::Priority {
+                player: state.priority_player,
+            },
+        )
+    });
     let mut result = apply_single_replacement(state, proposed, rid, branch, registry, events);
+    let paused = owns_pipeline && !matches!(state.waiting_for, WaitingFor::Priority { .. });
+    if owns_pipeline && !paused {
+        state
+            .resolution_stack
+            .pop_expected(crate::types::resolution::FrameKind::ReplacementPipeline)
+            .expect("a completed replacement body leaves its pipeline owner active");
+        state.waiting_for = caller_wait.expect("the pipeline owner captured the caller wait");
+    }
     // CR 614.5 normally records a replacement once per event. CR 903.9b is the
     // express exception: after ANOTHER replacement actually modifies the event
     // back into a commander hand/library move, re-arm its virtual key for the
@@ -10577,7 +10604,7 @@ fn apply_single_replacement_and_dirty(
         align_transformed_entry_projection_controller(state, after);
     }
     dirty_replacement_index(state);
-    result
+    (result, paused)
 }
 
 /// CR 616.1: When two or more replacement and/or prevention effects apply to the
@@ -12112,14 +12139,24 @@ fn pipeline_loop(
             }
 
             proposed.mark_applied(rid);
-            match apply_single_replacement_and_dirty(
+            let (result, paused) = apply_single_replacement_and_dirty(
                 state,
                 proposed,
                 rid,
                 ReplacementBranch::Execute,
+                depth,
                 registry,
                 events,
-            ) {
+            );
+            if paused {
+                return ReplacementResult::NeedsChoice(
+                    state
+                        .waiting_for
+                        .acting_player()
+                        .unwrap_or(state.active_player),
+                );
+            }
+            match result {
                 Ok(new_event) => proposed = new_event,
                 Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
                 Err(ApplyResult::Modified(_)) => unreachable!(),
@@ -12169,14 +12206,24 @@ fn pipeline_loop(
                 return park_as_enters_named_choice(state, proposed, depth, rid, choice, events);
             }
             proposed.mark_applied(rid);
-            match apply_single_replacement_and_dirty(
+            let (result, paused) = apply_single_replacement_and_dirty(
                 state,
                 proposed,
                 rid,
                 ReplacementBranch::Execute,
+                depth,
                 registry,
                 events,
-            ) {
+            );
+            if paused {
+                return ReplacementResult::NeedsChoice(
+                    state
+                        .waiting_for
+                        .acting_player()
+                        .unwrap_or(state.active_player),
+                );
+            }
+            match result {
                 Ok(new_event) => proposed = new_event,
                 Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
                 Err(ApplyResult::Modified(_)) => unreachable!(),
@@ -12188,6 +12235,33 @@ fn pipeline_loop(
 
     state.replacement_auto_choice_tail = None;
     ReplacementResult::Execute(proposed)
+}
+
+/// CR 616.1f: after an interactive replacement body completes, reconsider
+/// the remaining replacements on its original event before delivering it.
+pub(crate) fn resume_replacement_pipeline(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    use crate::types::resolution::{FrameKind, ResolutionFrame};
+    let Ok(ResolutionFrame::ReplacementPipeline(pending)) = state
+        .resolution_stack
+        .pop_expected(FrameKind::ReplacementPipeline)
+    else {
+        return;
+    };
+    match pipeline_loop(
+        state,
+        pending.event,
+        pending.depth + 1,
+        replacement_registry(),
+        events,
+    ) {
+        ReplacementResult::Execute(ProposedEvent::TurnFaceUp { object_id, .. }) => {
+            events.push(GameEvent::TurnedFaceUp { object_id });
+        }
+        ReplacementResult::Execute(_) => {
+            unreachable!("only turn-up delivery parks this pipeline owner")
+        }
+        ReplacementResult::NeedsChoice(_) | ReplacementResult::Prevented => {}
+    }
 }
 
 pub fn replace_event(
@@ -12735,7 +12809,24 @@ fn continue_replacement_impl(
             (ReplacementBranch::Execute, None) => state.abandon_active_post_replacement_drains(),
         }
 
-        match apply_single_replacement_and_dirty(state, proposed, rid, branch, registry, events) {
+        let (result, paused) = apply_single_replacement_and_dirty(
+            state,
+            proposed,
+            rid,
+            branch,
+            pending.depth,
+            registry,
+            events,
+        );
+        if paused {
+            return ReplacementResult::NeedsChoice(
+                state
+                    .waiting_for
+                    .acting_player()
+                    .unwrap_or(state.active_player),
+            );
+        }
+        match result {
             Ok(new_event) => proposed = new_event,
             Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
             Err(ApplyResult::Modified(_)) => unreachable!(),
@@ -12842,14 +12933,24 @@ fn continue_replacement_impl(
     // CR 614.1a: per-player "first time each turn" window is consumed by
     // `record_token_created` on the created tokens; no per-source bookkeeping here.
 
-    match apply_single_replacement_and_dirty(
+    let (result, paused) = apply_single_replacement_and_dirty(
         state,
         proposed,
         rid,
         ReplacementBranch::Execute,
+        pending.depth,
         registry,
         events,
-    ) {
+    );
+    if paused {
+        return ReplacementResult::NeedsChoice(
+            state
+                .waiting_for
+                .acting_player()
+                .unwrap_or(state.active_player),
+        );
+    }
+    match result {
         Ok(new_event) => proposed = new_event,
         Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
         Err(ApplyResult::Modified(_)) => unreachable!(),
@@ -13654,6 +13755,90 @@ mod tests {
         assert_eq!(state.players[0].life, 20);
         assert_eq!(state.players[1].life, 23);
         assert!(!state.has_post_replacement_drain());
+    }
+
+    #[test]
+    fn interactive_turn_face_up_body_finishes_before_next_replacement() {
+        let source = ObjectId(10);
+        let gain = |amount| Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: amount },
+            player: TargetFilter::Controller,
+        };
+        let choose = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![
+                    AbilityDefinition::new(AbilityKind::Spell, gain(1)),
+                    AbilityDefinition::new(AbilityKind::Spell, gain(2)),
+                ],
+                kind: ChooseOneOfKind::Ordinary,
+            },
+        );
+        let runtime = build_resolved_from_def(&choose, source, PlayerId(0));
+        for captured in [false, true] {
+            let mut first =
+                ReplacementDefinition::new(ReplacementEvent::TurnFaceUp).execute(choose.clone());
+            if captured {
+                first.runtime_execute = Some(Box::new(runtime.clone()));
+            }
+            let second = ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
+                .mode(ReplacementMode::Optional { decline: None })
+                .execute(AbilityDefinition::new(AbilityKind::Spell, gain(4)));
+            let mut state = test_state_with_object(source, Zone::Battlefield, vec![first, second]);
+            let mut events = Vec::new();
+            let result = replace_event(
+                &mut state,
+                ProposedEvent::TurnFaceUp {
+                    object_id: source,
+                    applied: HashSet::new(),
+                },
+                &mut events,
+            );
+            assert!(matches!(
+                result,
+                ReplacementResult::NeedsChoice(PlayerId(0))
+            ));
+            assert_eq!(
+                state.pending_replacement.as_ref().unwrap().candidates[0].index,
+                0
+            );
+
+            // Choosing the first replacement must expose its own choice before
+            // the still-unapplied optional replacement can ask its question.
+            continue_replacement(&mut state, 0, &mut events);
+            assert!(
+                matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { player: PlayerId(0), .. }),
+                "captured={captured}: the next replacement must not overwrite the body's choice: {:?}",
+                state.waiting_for
+            );
+            assert_eq!(state.players[0].life, 20);
+
+            // The pending event and its already-applied set must survive a save
+            // while its replacement body owns the player's branch choice.
+            let saved = serde_json::to_string(&state).expect("serialize the suspended turn-up");
+            state = serde_json::from_str(&saved).expect("restore the suspended turn-up");
+
+            crate::game::engine::apply(
+                &mut state,
+                PlayerId(0),
+                GameAction::ChooseBranch { index: 0 },
+            )
+            .expect("resolve the replacement body's branch");
+            assert_eq!(state.players[0].life, 21);
+            assert!(
+                matches!(state.waiting_for, WaitingFor::ReplacementChoice { player: PlayerId(0), .. }),
+                "the still-applicable optional replacement must be offered after the body completes"
+            );
+            crate::game::engine::apply(
+                &mut state,
+                PlayerId(0),
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .expect("accept the remaining replacement");
+            assert_eq!(state.players[0].life, 25);
+            assert!(state.pending_replacement.is_none());
+        }
     }
 
     fn reset_indexed_replacement_consults() {
