@@ -310,3 +310,4 @@ mod niambi_granted_trigger_once_each_turn;
 mod q_stacking_the_deck;
 mod risky_move_gain_control_trigger;
 mod token_attack_destination;
+mod venat_heros_sundering_transform_8071;
