@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use engine::ai_support::legal_actions;
 use engine::game::casting::current_casting_variant_choice_options;
 use engine::game::filter::{matches_target_filter, FilterContext};
-use engine::game::game_object::AttachTarget;
+use engine::game::game_object::{AttachTarget, ObjectIncarnationRefExt};
 use engine::game::keywords::{beam_me_up_granted_by, can_be_beamed_up, effective_beam_me_up_cost};
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -1758,4 +1758,203 @@ fn scotty_and_marooned_prohibitions_compose() {
     let lions = lions.unwrap();
     let record = cast_with(&mut runner, sorcery, CastIntent::returning(lions));
     assert_eq!(record.return_choices, Some(vec![lions]));
+}
+
+/// Remove `id` from the battlefield to its owner's graveyard the way a
+/// destroy effect would (CR 400.7: it becomes a new object), then recompute
+/// layers so the off-zone grant is re-derived.
+fn send_to_graveyard(runner: &mut GameRunner, id: ObjectId) {
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), id, Zone::Graveyard, &mut events);
+    runner.state_mut().layers_dirty.mark_full();
+    evaluate_layers(runner.state_mut());
+}
+
+/// S7 (CR 400.7 + CR 601.2a-b + CR 608.2n): the grant is latched at
+/// announcement. Scotty leaving the battlefield after Divination is announced
+/// via its grant but before the return is paid does not undo the cast: the
+/// return is still paid with a creature you control, the spell resolves, and
+/// then "exile that spell" applies. The latched incarnation is
+/// stale, so it binds nothing, and a new Scotty incarnation is not the granter.
+#[test]
+fn scotty_leaving_before_the_return_is_paid_leaves_the_cast_intact() {
+    let ScottyBoard {
+        mut runner,
+        scotty,
+        bears,
+        sorcery,
+        ..
+    } = scotty_board(Phase::PreCombatMain, true, 3);
+    let bears = bears.unwrap();
+    let scotty_ref = ObjectIncarnationRef::of(scotty, runner.state().objects[&scotty].incarnation);
+    let card_id = runner.state().objects[&sorcery].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: sorcery,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("announce the granted beam me up");
+    // Drive to the return prompt (CR 601.2h), then Scotty dies before answering.
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::PayCost {
+                kind: PayCostKind::ReturnToHand,
+                ..
+            } => break,
+            WaitingFor::ManaPayment { .. } => {
+                runner.act(GameAction::PassPriority).expect("pay mana");
+            }
+            other => panic!("unexpected prompt before the return: {other:?}"),
+        }
+    }
+    let WaitingFor::PayCost {
+        kind: PayCostKind::ReturnToHand,
+        choices,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "never reached the return prompt: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(choices, vec![bears], "Scotty is never a return choice");
+    send_to_graveyard(&mut runner, scotty);
+    assert!(
+        !scotty_ref.is_current(runner.state()),
+        "the latched granter incarnation is stale"
+    );
+
+    select(&mut runner, vec![bears]);
+    for _ in 0..4 {
+        if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+            runner.act(GameAction::PassPriority).expect("pay mana");
+        }
+    }
+    assert_eq!(zone(&runner, bears), Zone::Hand, "Bears returned");
+    pass_until_prompt(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(hand(&runner, P0).len(), 3, "Bears plus two drawn cards");
+    assert_eq!(zone(&runner, sorcery), Zone::Exile, "then exile that spell");
+
+    // With Scotty gone, no other card in the graveyard keeps a beam me up.
+    let other = runner
+        .state()
+        .objects
+        .values()
+        .find(|o| o.zone == Zone::Graveyard && o.name == "Quick Study")
+        .map(|o| o.id)
+        .expect("Quick Study still in the graveyard");
+    assert!(
+        effective_beam_me_up_cost(runner.state(), other).is_none(),
+        "the grant ended with its source"
+    );
+}
+
+/// S8 (CR 400.7 + CR 608.2n): Scotty leaving after the cast is complete (the
+/// spell is on the stack, return paid) does not stop the spell resolving, and
+/// it is still exiled afterward.
+#[test]
+fn scotty_leaving_with_the_spell_on_the_stack_still_exiles_it() {
+    let ScottyBoard {
+        mut runner,
+        scotty,
+        bears,
+        sorcery,
+        ..
+    } = scotty_board(Phase::PreCombatMain, true, 3);
+    cast_with(&mut runner, sorcery, CastIntent::returning(bears.unwrap()));
+    send_to_graveyard(&mut runner, scotty);
+    pass_until_prompt(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(hand(&runner, P0).len(), 3, "Bears plus two drawn cards");
+    assert_eq!(zone(&runner, sorcery), Zone::Exile, "then exile that spell");
+}
+
+/// S9 (CR 613.1f + CR 113.6b): two Scottys. Each grants beam me up, but a card
+/// still has one beam me up cost and is offered exactly once; the cast raises no
+/// variant choice; each Scotty is barred from being returned only through its
+/// own grant (so the other Scotty is a legal return); and when one leaves, the
+/// other's grant keeps the card castable.
+#[test]
+fn two_scottys_grant_once_and_one_leaving_keeps_the_other_grant() {
+    fn stage() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+        let mut sc = GameScenario::new();
+        sc.at_phase(Phase::PreCombatMain);
+        let first = sc
+            .add_creature_from_oracle(P0, "Scotty, Miracle Worker", 2, 3, SCOTTY)
+            .as_legendary()
+            .id();
+        // A non-legendary second source avoids the legend rule (CR 704.5j)
+        // while carrying the identical Oracle text.
+        let second = sc
+            .add_creature_from_oracle(P0, "Scotty, Miracle Worker Copy", 2, 3, SCOTTY)
+            .id();
+        let sorcery = sorcery_in_graveyard(
+            &mut sc,
+            P0,
+            "Divination",
+            cost(2, &[ManaCostShard::Blue]),
+            DIVINATION,
+        );
+        sc.add_card_to_library_top(P0, "Library Card A");
+        sc.add_card_to_library_top(P0, "Library Card B");
+        sc.with_mana_pool(P0, mana(ManaType::Blue, 6));
+        let mut runner = sc.build();
+        runner.state_mut().layers_dirty.mark_full();
+        evaluate_layers(runner.state_mut());
+        (runner, first, second, sorcery)
+    }
+
+    let (mut runner, first, second, sorcery) = stage();
+    assert_eq!(
+        effective_beam_me_up_cost(runner.state(), sorcery),
+        Some(cost(2, &[ManaCostShard::Blue])),
+        "one beam me up cost, not two"
+    );
+    let casts = legal_actions(runner.state())
+        .iter()
+        .filter(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == sorcery))
+        .count();
+    assert_eq!(casts, 1, "the cast is offered exactly once");
+
+    // Whichever Scotty is latched, the other is a legal return.
+    let latched = beam_me_up_granted_by(runner.state(), sorcery).expect("a Scotty grants it");
+    let latched_id = latched.object_id;
+    let other = if latched_id == first { second } else { first };
+    assert!(latched_id == first || latched_id == second);
+    let record = cast_with(&mut runner, sorcery, CastIntent::returning(other));
+    assert_eq!(
+        record.return_choices,
+        Some(vec![other]),
+        "only the non-granting Scotty is returnable; no variant choice raised"
+    );
+    assert!(record.variant_options.is_none());
+    pass_until_prompt(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(zone(&runner, sorcery), Zone::Exile);
+    assert_eq!(zone(&runner, other), Zone::Hand);
+
+    // One granter leaves: the other's grant stays in place.
+    for leaving in [first, second] {
+        let (mut runner, first, second, sorcery) = stage();
+        let remaining = if leaving == first { second } else { first };
+        let leaving = if leaving == first { first } else { second };
+        send_to_graveyard(&mut runner, leaving);
+        let granter = beam_me_up_granted_by(runner.state(), sorcery)
+            .expect("the remaining Scotty still grants beam me up");
+        assert_eq!(granter.object_id, remaining);
+        assert_eq!(
+            effective_beam_me_up_cost(runner.state(), sorcery),
+            Some(cost(2, &[ManaCostShard::Blue]))
+        );
+        // The remaining Scotty is its own grant's only creature, so nothing is
+        // returnable and the cast is not offered.
+        assert!(
+            !offers_cast_of(&runner, sorcery),
+            "the sole remaining Scotty cannot be returned through its own grant"
+        );
+    }
 }
