@@ -2287,7 +2287,8 @@ pub fn fallback_action(
         // revealed order (any permutation is legal; order at the bottom of the
         // library carries no tactical weight).
         WaitingFor::RippleBottomOrder { cards, .. }
-        | WaitingFor::RevealUntilBottomOrder { cards, .. } => Some(GameAction::SelectCards {
+        | WaitingFor::RevealUntilBottomOrder { cards, .. }
+        | WaitingFor::DigBottomOrder { cards, .. } => Some(GameAction::SelectCards {
             cards: cards.clone(),
         }),
         // CR 608.2g + CR 601.2: Invoke Calamity's free-cast window — finish the
@@ -2679,6 +2680,11 @@ pub fn fallback_action(
         )
         .into_iter()
         .next(),
+
+        // CR 702.106a: the agenda names are a required answer, offered as one action.
+        WaitingFor::SecretAgendaChoice { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .next(),
 
         // Companion reveal: decline.
         WaitingFor::CompanionReveal { .. } => Some(GameAction::DeclareCompanion {
