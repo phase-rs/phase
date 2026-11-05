@@ -55525,6 +55525,59 @@ fn cast_from_among_the_cards_exiled_this_way_binds_to_exiled_by_source() {
     assert_eq!(target, TargetFilter::ExiledBySource);
 }
 
+/// CR 712.8a + CR 712.11c: a type printed on BOTH sides of the anchor ("cast
+/// enchantment spells from among the creature cards exiled this way") gates
+/// two different things at two different stages — the suffix the card pool,
+/// judged on the card where it is (CR 712.8a), the prefix the spell, judged on
+/// the face being cast (CR 712.11c). One cast filter cannot carry both, so the
+/// clause is refused: it lowers to the `from_among_pool_and_spell_gate` gap,
+/// never to a cast grant, for both the "exiled this way" anchor and the
+/// "those nonland cards" anchor, with counted ("up to two") and uncounted
+/// wording. (The "up to two artifact spells" row reaches the generic anchor
+/// arm, not the counted free-cast helper, which needs the bare "spells" noun
+/// right after the count.)
+///
+/// Shape-only hardening, not a card test: no printed card carries a type gate
+/// on both sides of the anchor. The nearest printed cards each carry one side —
+/// Wand of Wonder the prefix gate ("instant and/or sorcery spells from among
+/// cards exiled this way"), Etali, Primal Conqueror the suffix gate ("from
+/// among the nonland cards exiled this way"). Positive controls: Etali's
+/// printed one-sided clause, and the "those nonland cards" clause without a
+/// prefix type (Fevered Suspicion's shape), still lower to cast grants.
+#[test]
+fn cast_from_among_exiled_this_way_refuses_a_prefix_and_a_suffix_type_gate() {
+    let lowered: Vec<_> = [
+        "cast any number of enchantment spells from among the creature cards exiled this way without paying their mana costs",
+        "cast up to two artifact spells from among the instant or sorcery cards exiled this way without paying their mana costs",
+        "cast any number of enchantment spells from among those nonland cards exiled this way without paying their mana costs",
+        "cast up to two enchantment spells from among those nonland cards exiled this way without paying their mana costs",
+    ]
+    .into_iter()
+    .map(|combined| (combined, parse_effect(combined)))
+    .filter(|(_, e)| {
+        !matches!(e, Effect::Unimplemented { name, .. } if name == FROM_AMONG_POOL_AND_SPELL_GATE_GAP)
+    })
+    .collect();
+    assert!(
+        lowered.is_empty(),
+        "a type on both sides of the anchor is refused, not lowered: {lowered:#?}"
+    );
+
+    for one_sided in [
+        "cast any number of spells from among the nonland cards exiled this way without paying their mana costs",
+        "cast any number of spells from among those nonland cards exiled this way without paying their mana costs",
+    ] {
+        let e = parse_effect(one_sided);
+        let Effect::CastFromZone { target, .. } = &e else {
+            panic!("positive control: a one-sided clause lowers to CastFromZone: {one_sided:?} -> {e:?}");
+        };
+        assert!(
+            target.references_exiled_by_source(),
+            "positive control: the grant binds the exile anaphor: {one_sided:?} -> {target:?}"
+        );
+    }
+}
+
 /// CR 610.3 + CR 608.2c: Disjunctive typed leg via
 /// `parse_cast_type_list` — "from among the instant or sorcery
 /// cards exiled this way" must bind to `And { ExiledBySource, Typed(...) }`
