@@ -8,7 +8,9 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
 use nom::character::complete::satisfy;
-use nom::combinator::{all_consuming, eof, map, map_opt, map_res, not, opt, peek, value, verify};
+use nom::combinator::{
+    all_consuming, consumed, eof, map, map_opt, map_res, not, opt, peek, value, verify,
+};
 use nom::multi::{many0, many1, separated_list1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -18,7 +20,7 @@ use super::duration::parse_cast_snapshot_suffix;
 use super::error::{oracle_err, OracleResult};
 use super::primitives::{
     parse_article, parse_color, parse_core_type, parse_counter_type_typed, parse_keyword_name,
-    parse_number, scan_preceded,
+    parse_number, scan_at_word_boundaries, scan_preceded,
 };
 use super::target::{
     parse_controller_phrase, parse_type_filter_word, ControllerForm, ControllerSubject,
@@ -5808,6 +5810,21 @@ fn parse_card_with_relative_clause(input: &str) -> OracleResult<'_, TargetFilter
     ))
 }
 
+/// CR 608.2c: whether `text` names a controller through a player anaphor
+/// ("they control", "that player controls", "its controller controls") rather
+/// than a direct player ("you control"). Lets a reader whose population grammar
+/// cannot bind an anaphor to its antecedent decline the phrase instead of
+/// accepting the grammar's context-free default.
+fn names_anaphoric_controller(text: &str) -> bool {
+    scan_at_word_boundaries(text, |i| {
+        verify(parse_controller_phrase, |phrase| {
+            matches!(phrase.subject, ControllerSubject::Anaphoric(_))
+        })
+        .parse(i)
+    })
+    .is_some()
+}
+
 fn parse_for_each_clause_ref_with_they_controller<'a>(
     input: &'a str,
     antecedents: &PlayerAntecedents,
@@ -5863,15 +5880,28 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
                 parse_shared_card_types_with,
                 // This for-each extension is creature-only; other categories
                 // retain their existing number-of quantity-reader support.
-                verify(parse_distinct_category_subtypes_among, |qty| {
-                    matches!(
-                        qty,
-                        QuantityRef::DistinctSubtypes {
-                            restrict: Some(SubtypeSet::Creature),
-                            ..
-                        }
-                    )
-                }),
+                //
+                // CR 608.2c + CR 109.5: the shared population grammar reads its
+                // controller without this reader's player antecedents, so an
+                // anaphoric "they control" / "that player controls" would bind
+                // to `You` instead of the iterating or scoped player. No printed
+                // card uses that framing here (Sarek names "you control"), so
+                // the arm declines it rather than bind the wrong player.
+                map(
+                    verify(
+                        consumed(parse_distinct_category_subtypes_among),
+                        |(population, qty): &(&str, QuantityRef)| {
+                            matches!(
+                                qty,
+                                QuantityRef::DistinctSubtypes {
+                                    restrict: Some(SubtypeSet::Creature),
+                                    ..
+                                }
+                            ) && !names_anaphoric_controller(population)
+                        },
+                    ),
+                    |(_, qty)| qty,
+                ),
             )),
             // CR 108.3: owned-card populations; nested to keep the outer `alt`
             // within nom's tuple arity (21 items).
@@ -13641,6 +13671,54 @@ mod tests {
                 })
             }
         ));
+    }
+
+    /// CR 608.2c + CR 109.5: the creature-type for-each arm keeps a literal
+    /// "you control" population as `You` under a supplied player antecedent,
+    /// and declines the anaphoric "they control" / "that player controls"
+    /// framing its population grammar cannot bind to that antecedent.
+    #[test]
+    fn for_each_creature_types_among_discriminates_controller_from_antecedent() {
+        let ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..Default::default()
+        };
+        let (rest, q) = parse_for_each_clause_ref_with_context(
+            "creature types among non-borg creatures you control",
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::DistinctSubtypes {
+                source: CardTypeSetSource::Objects {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        controller: Some(ControllerRef::You),
+                        ..
+                    })
+                },
+                restrict: Some(SubtypeSet::Creature),
+                ..
+            }
+        ));
+        for anaphoric in [
+            "creature types among non-borg creatures they control",
+            "creature types among creatures that player controls",
+        ] {
+            let parsed = parse_for_each_clause_ref_with_context(anaphoric, &ctx);
+            assert!(
+                !matches!(parsed, Ok((_, QuantityRef::DistinctSubtypes { .. }))),
+                "{anaphoric}: must not bind a subtype count, got {parsed:?}"
+            );
+            assert!(
+                !matches!(
+                    parse_for_each_clause_ref(anaphoric),
+                    Ok((_, QuantityRef::DistinctSubtypes { .. }))
+                ),
+                "{anaphoric}: unscoped reader must decline too"
+            );
+        }
     }
 
     #[test]
