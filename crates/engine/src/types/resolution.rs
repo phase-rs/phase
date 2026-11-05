@@ -8688,6 +8688,7 @@ mod tests {
                 accumulated: false,
                 current: None,
                 nominee: None,
+                tracked_pool: None,
             },
         );
         crate::game::effects::choose_from_zone::drain_active_per_player_zone_choice(

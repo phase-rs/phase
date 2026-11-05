@@ -74,6 +74,7 @@ mod dreadhorde_arcanist_ceiling_4943;
 mod dyadrine_counter_selection;
 mod emissary_green;
 mod emissary_of_despair_and_hope;
+mod ensign_pavel_chekov_exiled_lands;
 mod etali_primal_sickness_poison;
 mod etrata_cloak_enters_under_cloaker_5944;
 mod exiled_card_power_linked_pile;

@@ -17321,6 +17321,9 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
             tag::<_, _, OracleError<'_>>("that card"),
             tag("that spell"),
             tag("those cards"),
+            // CR 608.2c: "the chosen cards" names the cards a preceding choice
+            // selected from the exiled set (Ensign Pavel Chekov).
+            tag("the chosen cards"),
             tag("the cards exiled this way"),
             tag("cards exiled this way"),
             tag("it "),
@@ -17382,12 +17385,12 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         ))
         .parse(tp.lower)
         .is_ok();
-        let mass_anaphor_form = alt((
-            tag::<_, _, OracleError<'_>>("play those cards"),
-            tag("cast those cards"),
-        ))
-        .parse(tp.lower)
-        .is_ok();
+        let mass_anaphor_form = (
+            alt((tag::<_, _, OracleError<'_>>("play "), tag("cast "))),
+            alt((tag("those cards"), tag("the chosen cards"))),
+        )
+            .parse(tp.lower)
+            .is_ok();
         if look_at_play_anaphor_form || mass_anaphor_form {
             // fall through to the grant builder.
         } else {

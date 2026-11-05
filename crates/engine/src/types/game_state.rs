@@ -5407,6 +5407,14 @@ pub struct PendingPerPlayerZoneChoice {
     /// cleared when it completes or is skipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nominee: Option<PlayerId>,
+    /// CR 608.2c + CR 608.2d: the chain tracked set a `Tracked` pool reads,
+    /// pinned when the iteration begins ("choose a land card that player owns
+    /// exiled this way" — Ensign Pavel Chekov). Each pick rebinds the chain's
+    /// tracked set to the chosen cards, so a later player's pool must read the
+    /// set the instruction named, never the previous player's picks. `None` for
+    /// every zone-backed (`Direct` / `Legacy`) or other source-bound pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracked_pool: Option<TrackedSetId>,
 }
 
 /// CR 401.4 + CR 101.4 + CR 608.2c: Per-owner library-order prompts for one
@@ -57744,6 +57752,7 @@ mod restored_exact_attack_authority_tests {
                     accumulated: false,
                     current: None,
                     nominee: None,
+                    tracked_pool: None,
                 }),
                 3 => ResolutionFrame::PerCategoryZoneChoice(PerCategoryZoneChoiceFrame {
                     pending: PendingPerCategoryZoneChoice {
