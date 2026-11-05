@@ -27567,7 +27567,9 @@ fn may_sacrifice_for_cost(
     // the filter carries.
     // CR 701.21a: A permanent with "can't be sacrificed" cannot be sacrificed
     // for any cost regardless of payment scope (e.g. Assault Suit).
-    if super::static_abilities::object_has_static_other(state, id, "CantBeSacrificed") {
+    if super::static_abilities::object_has_static_other(state, id, "CantBeSacrificed")
+        || super::static_abilities::player_cant_sacrifice(state, player, id)
+    {
         return false;
     }
     matches!(scope, Some(super::costs::PaymentScope::TurnFaceUp { .. }))

@@ -10239,6 +10239,7 @@ fn static_mode_reads_filter_population(
             CostPaymentProhibition::Sacrifice { filter } => has_filter(filter),
             CostPaymentProhibition::PayLife => false,
         },
+        StaticMode::CantSacrifice { filter, .. } => has_filter(filter),
         StaticMode::PlayerProtection(inner0) => has_protection(inner0),
         StaticMode::MustAttackDefender { defender } => match defender {
             RequiredDefender::Matching { filter } => has_player(filter),

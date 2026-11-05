@@ -180,6 +180,7 @@ pub(crate) fn can_sacrifice_for_ability(
     player: PlayerId,
 ) -> bool {
     !sacrifice_cause_muzzled(state, ability, object_id, player)
+        && !crate::game::static_abilities::player_cant_sacrifice(state, player, object_id)
         && !crate::game::static_abilities::object_has_static_other(
             state,
             object_id,

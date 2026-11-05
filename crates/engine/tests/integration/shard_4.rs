@@ -540,6 +540,7 @@ mod purged_source_matches_filter_lki;
 mod put_sticker_class;
 mod put_target_count_entry_counters;
 mod pyromancy_random_discard_cost;
+mod quark_humble_proprietor_cant_sacrifice;
 mod queen_velocity_skip_turns;
 mod queen_velocity_upkeep;
 mod quick_draw_target_opponent;
