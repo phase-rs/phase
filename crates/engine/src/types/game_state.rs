@@ -8462,14 +8462,22 @@ impl ActivationResidual {
     }
 }
 
-/// CR 601.2g + CR 601.2h: a spell sacrifice cost whose zone move waits for the
-/// payment commit, after mana abilities.
+/// CR 601.2g + CR 601.2h: a spell cost that removes a permanent from the
+/// battlefield (a sacrifice, or a return to its owner's hand) whose zone move
+/// waits for the payment commit, after mana abilities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DeferredSpellSacrifice {
     Selected {
         object_id: ObjectId,
         filter: TargetFilter,
+        /// What the commit does to the selected permanent. Absent on the wire
+        /// for a sacrifice, the original and default action.
+        #[serde(
+            default,
+            skip_serializing_if = "DeferredPermanentCostAction::is_sacrifice"
+        )]
+        action: DeferredPermanentCostAction,
     },
     /// CR 701.21a: "sacrifice all <filter>"; membership is read at the commit.
     All { filter: TargetFilter },
@@ -8481,6 +8489,42 @@ impl DeferredSpellSacrifice {
             Self::Selected { object_id, .. } => Some(*object_id),
             Self::All { .. } => None,
         }
+    }
+
+    /// The selected permanent this entry returns to its owner's hand at the
+    /// commit, if it is a return.
+    pub fn selected_return(&self) -> Option<ObjectId> {
+        match self {
+            Self::Selected {
+                object_id,
+                action: DeferredPermanentCostAction::ReturnToHand,
+                ..
+            } => Some(*object_id),
+            Self::Selected {
+                action: DeferredPermanentCostAction::Sacrifice,
+                ..
+            }
+            | Self::All { .. } => None,
+        }
+    }
+}
+
+/// CR 601.2h: the action a deferred spell cost performs on the permanent
+/// selected for it, when the total cost is paid.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeferredPermanentCostAction {
+    /// CR 701.21a: sacrifice it.
+    #[default]
+    Sacrifice,
+    /// CR 118.8 + CR 400.3: return it to its owner's hand ("return a creature
+    /// you control to its owner's hand").
+    ReturnToHand,
+}
+
+impl DeferredPermanentCostAction {
+    /// `true` for the default action; the serde `skip_serializing_if` predicate.
+    pub fn is_sacrifice(&self) -> bool {
+        matches!(self, Self::Sacrifice)
     }
 }
 
@@ -8856,9 +8900,11 @@ pub struct PendingCast {
     /// They stay in the graveyard until the total cost is paid at commit.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delved_cards: Vec<ObjectId>,
-    /// CR 601.2g + CR 601.2h: Non-mana spell additional-cost permanents selected
-    /// for sacrifice, but whose actual zone move is deferred until the final
-    /// payment commit so mana abilities can be activated first.
+    /// CR 601.2g + CR 601.2h: Non-mana spell cost permanents selected for
+    /// sacrifice or for a return to their owner's hand, but whose actual zone
+    /// move is deferred until the final payment commit so mana abilities can be
+    /// activated first and the total cost is locked in (CR 601.2f) while they
+    /// are still on the battlefield.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_sacrificed_permanents: Vec<DeferredSpellSacrifice>,
     /// CR 118.3a: Player-directed pin hints recorded during
@@ -9058,13 +9104,39 @@ pub enum PendingCostMoveCompletion {
         prepaid_actual_mana_spent: Option<u32>,
     },
     /// CR 601.2h + CR 702.66a: The cast's mana is already paid and `pending`
-    /// carries that payment; once the Delve exiles settle, re-enter the inner
-    /// finalizer with what the first pass already decided.
+    /// carries that payment; once this commit-time cost move settles (the Delve
+    /// exiles, or the deferred returns of a spell cost), continue the commit at
+    /// `stage` with what the first pass already decided.
     FinalizeDelvedCast {
         phyrexian_choices: Option<Vec<ShardChoice>>,
         /// `None` when the first pass had not reached the pre-payment checks.
         pre_payment_checks: Option<Box<FinalizePrePaymentChecks>>,
+        /// Which commit-time move settled. Absent on the wire for Delve, the
+        /// original and default stage.
+        #[serde(default, skip_serializing_if = "PrepaidCostMoveStage::is_delve")]
+        stage: PrepaidCostMoveStage,
     },
+}
+
+/// CR 601.2h: which commit-time cost move of an already-paid spell a
+/// `PendingCostMoveCompletion::FinalizeDelvedCast` root settles, and so where
+/// the commit continues once it has.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrepaidCostMoveStage {
+    /// CR 702.66a: the Delve exiles; the spell's finalization resumes.
+    #[default]
+    Delve,
+    /// CR 601.2g + CR 601.2h: the permanents a spell cost returns to their
+    /// owners' hands, kept through the mana-ability window; the commit resumes
+    /// with the remaining deferred sacrifices.
+    DeferredReturns,
+}
+
+impl PrepaidCostMoveStage {
+    /// `true` for the default stage; the serde `skip_serializing_if` predicate.
+    pub fn is_delve(&self) -> bool {
+        matches!(self, Self::Delve)
+    }
 }
 
 /// CR 601.2h: What a spell's payment commit decided before its mana was spent.
@@ -58333,6 +58405,7 @@ mod restored_exact_attack_authority_tests {
                         completion: PendingCostMoveCompletion::FinalizeDelvedCast {
                             phyrexian_choices: None,
                             pre_payment_checks: Some(Box::new(pre_payment_checks())),
+                            stage: PrepaidCostMoveStage::Delve,
                         },
                         deferred_cost_events: vec![],
                         departure_record_indices: vec![],

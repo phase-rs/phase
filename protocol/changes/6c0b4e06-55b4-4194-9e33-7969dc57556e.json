@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "StaticMode::CantBeBeamedUp, FilterProp::CanBeBeamedUp, Keyword::BeamMeUp, KeywordKind::BeamMeUp and CastingVariant::BeamMeUp are new serialized tags in card data, GameState and pending-cast payloads (TRK beam me up); a previous-version full-game or P2P peer cannot decode them."
+  "reason": "StaticMode::CantBeBeamedUp, FilterProp::CanBeBeamedUp, Keyword::BeamMeUp, KeywordKind::BeamMeUp and CastingVariant::BeamMeUp are new serialized tags in card data, GameState and pending-cast payloads (TRK beam me up); a spell's return-to-hand cost now stays selected until the payment commit, adding DeferredSpellSacrifice::Selected.action (ReturnToHand) and PendingCostMoveCompletion::FinalizeDelvedCast.stage (DeferredReturns) to pending-cast and cost-move payloads; a previous-version full-game or P2P peer cannot decode them, or would read a kept return as a sacrifice."
 }

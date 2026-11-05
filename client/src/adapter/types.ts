@@ -2316,8 +2316,17 @@ export interface StackEntryDisplay {
 
 // ── Pending Cast (for target selection) ──────────────────────────────────
 
+// CR 601.2g + CR 601.2h: a sacrifice or return kept until the payment commit.
+// `action` is absent for a sacrifice (the default).
+export type DeferredPermanentCostAction = "Sacrifice" | "ReturnToHand";
+
 export type DeferredSpellSacrifice =
-  | { type: "Selected"; object_id: ObjectId; filter: TargetFilter }
+  | {
+      type: "Selected";
+      object_id: ObjectId;
+      filter: TargetFilter;
+      action?: DeferredPermanentCostAction;
+    }
   | { type: "All"; filter: TargetFilter };
 
 export interface PendingCast {

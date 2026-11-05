@@ -12406,6 +12406,7 @@ mod tests {
                 completion: PendingCostMoveCompletion::FinalizeDelvedCast {
                     phyrexian_choices: None,
                     pre_payment_checks: None,
+                    stage: Default::default(),
                 },
                 deferred_cost_events: Vec::new(),
                 departure_record_indices: Vec::new(),

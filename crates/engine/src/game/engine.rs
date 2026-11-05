@@ -14021,6 +14021,7 @@ fn apply_non_priority_pass_action(
                         state,
                         *player,
                         *pending_cast.clone(),
+                        paid_cost,
                         *count,
                         choices,
                         &chosen,

@@ -20,12 +20,13 @@ use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, AssistState, CastOccurrence, CastPaymentMode,
     CastingPermissionIndex, CastingVariant, ConvokeMode, CostResume, CounterCostChoice,
-    CounterRemoveChoice, DeferredHandDiscardCost, DeferredSpellSacrifice, DistributionUnit,
-    FinalizePrePaymentChecks, GameState, ManaAbilityCostParent, ManaAbilityResume,
-    PausedCounterCostRemoval, PayCostKind, PendingCast, PendingCostMoveCompletion,
-    PendingCostMoveResume, PendingCounterRemoval, PendingDiscardForCostResume,
-    PendingSacrificeCostCompletion, PrepaidSpellFinalization, SpellCostSource, StackEntry,
-    StackEntryKind, StackPaidSnapshot, WaitingFor,
+    CounterRemoveChoice, DeferredHandDiscardCost, DeferredPermanentCostAction,
+    DeferredSpellSacrifice, DistributionUnit, FinalizePrePaymentChecks, GameState,
+    ManaAbilityCostParent, ManaAbilityResume, PausedCounterCostRemoval, PayCostKind, PendingCast,
+    PendingCostMoveCompletion, PendingCostMoveResume, PendingCounterRemoval,
+    PendingDiscardForCostResume, PendingSacrificeCostCompletion, PrepaidCostMoveStage,
+    PrepaidSpellFinalization, SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot,
+    WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{GiftKind, Keyword};
@@ -1943,31 +1944,31 @@ pub(crate) fn finish_pending_cost_or_cast(
         );
     }
     if !pending.deferred_sacrificed_permanents.is_empty() {
-        // CR 601.2f: the total is locked once, with the reduction the kept
-        // Emerge or Offering sacrifice earned applied in the caster's order
-        // (asking for that order when it is observable), never below {0}.
-        if !pending.accepted_cost_reductions.is_empty() {
-            match lock_in_total_cost_for_pending(
-                state,
-                player,
-                &pending,
-                &pending.accepted_cost_reductions,
-                pending.cost_reduction_election.as_ref(),
-            ) {
-                super::casting::CostLockOutcome::Locked(locked) => pending.cost = locked,
-                super::casting::CostLockOutcome::Election {
+        // CR 601.2f: the total is locked once, while the kept sacrifice and
+        // return selections are still on the battlefield (a cost reducer among
+        // them still reduces it), with any reduction a kept Emerge or Offering
+        // sacrifice earned applied in the caster's order (asking for that order
+        // when it is observable), never below {0}.
+        match lock_in_total_cost_for_pending(
+            state,
+            player,
+            &pending,
+            &pending.accepted_cost_reductions,
+            pending.cost_reduction_election.as_ref(),
+        ) {
+            super::casting::CostLockOutcome::Locked(locked) => pending.cost = locked,
+            super::casting::CostLockOutcome::Election {
+                reductions,
+                hybrid_symbols,
+                outcomes,
+            } => {
+                return Ok(WaitingFor::OrderCostReductions {
+                    player,
                     reductions,
                     hybrid_symbols,
                     outcomes,
-                } => {
-                    return Ok(WaitingFor::OrderCostReductions {
-                        player,
-                        reductions,
-                        hybrid_symbols,
-                        outcomes,
-                        pending_cast: Box::new(pending),
-                    });
-                }
+                    pending_cast: Box::new(pending),
+                });
             }
         }
         state.pending_cast = Some(Box::new(pending));
@@ -3220,10 +3221,13 @@ fn move_cost_objects(
     for (index, &object_id) in chosen.iter().enumerate().skip(start_at_index) {
         let mut request = ZoneMoveRequest::cost(object_id, destination, pending.object_id);
         // CR 406.6: the delve exile is the casting spell's own cost, so a delivered
-        // card is linked to that spell.
+        // card is linked to that spell. A deferred return is not an exile.
         if matches!(
             completion,
-            PendingCostMoveCompletion::FinalizeDelvedCast { .. }
+            PendingCostMoveCompletion::FinalizeDelvedCast {
+                stage: PrepaidCostMoveStage::Delve,
+                ..
+            }
         ) {
             request = request.track_exiled_by_source();
         }
@@ -3435,6 +3439,7 @@ fn finish_cost_object_moves(
         PendingCostMoveCompletion::FinalizeDelvedCast {
             phyrexian_choices,
             pre_payment_checks,
+            stage: PrepaidCostMoveStage::Delve,
         } => resume_prepaid_spell_finalization(
             state,
             player,
@@ -3443,6 +3448,30 @@ fn finish_cost_object_moves(
             pre_payment_checks.map(|checks| *checks),
             events,
         )?,
+        // CR 601.2h: the deferred returns are paid; the commit continues with
+        // the remaining deferred sacrifices, discard and finalization.
+        PendingCostMoveCompletion::FinalizeDelvedCast {
+            phyrexian_choices,
+            pre_payment_checks,
+            stage: PrepaidCostMoveStage::DeferredReturns,
+        } => {
+            let pre_payment_checks = pre_payment_checks.ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "deferred returns lost their pre-payment checks".to_string(),
+                )
+            })?;
+            pay_deferred_spell_sacrifices_at_commit(
+                state,
+                player,
+                pending,
+                PendingSacrificeCostCompletion::FinalizeSpell {
+                    phyrexian_choices,
+                    pre_payment_checks,
+                },
+                None,
+                events,
+            )?
+        }
     };
     if park_events_after_completion {
         park_cost_payment_triggers_if_paused(
@@ -3917,10 +3946,15 @@ fn validate_deferred_spell_sacrifices_at_commit(
     pending: &PendingCast,
 ) -> Result<(), EngineError> {
     // CR 601.2h: Costs are paid only if they remain payable; a deferred
-    // sacrifice selection must still satisfy the original cost at commit.
+    // sacrifice or return selection must still satisfy the original cost at
+    // commit.
     for selection in &pending.deferred_sacrificed_permanents {
-        let (id, filter) = match selection {
-            DeferredSpellSacrifice::Selected { object_id, filter } => (*object_id, filter),
+        let (id, filter, action) = match selection {
+            DeferredSpellSacrifice::Selected {
+                object_id,
+                filter,
+                action,
+            } => (*object_id, filter, *action),
             DeferredSpellSacrifice::All { filter } => {
                 if super::casting::find_determined_sacrifice_set(
                     state,
@@ -3948,18 +3982,24 @@ fn validate_deferred_spell_sacrifices_at_commit(
                     .to_string(),
             ));
         }
-        if super::static_abilities::player_cant_sacrifice_as_cost(state, player, id) {
-            return Err(EngineError::ActionNotAllowed(
-                "Deferred sacrifice permanent cannot be sacrificed as a cost".to_string(),
-            ));
+        match action {
+            DeferredPermanentCostAction::Sacrifice => {
+                if super::static_abilities::player_cant_sacrifice_as_cost(state, player, id) {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Deferred sacrifice permanent cannot be sacrificed as a cost".to_string(),
+                    ));
+                }
+            }
+            DeferredPermanentCostAction::ReturnToHand => {}
         }
         if !super::filter::matches_target_filter(
             state,
             id,
             filter,
             // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
-            // activated ability).
-            &super::filter::FilterContext::from_source_with_controller(pending.object_id, player),
+            // activated ability). Same context the selection's eligibility read.
+            &super::filter::FilterContext::from_source_with_controller(pending.object_id, player)
+                .with_granting_object(pending.ability.context.granting_object),
         ) {
             return Err(EngineError::ActionNotAllowed(
                 "Deferred sacrifice permanent no longer matches the sacrifice cost".to_string(),
@@ -4026,11 +4066,69 @@ fn pay_deferred_spell_sacrifices_at_commit(
     arrangement: Option<&[ObjectId]>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 601.2h: the total cost's components are paid in any order. The
+    // deferred returns move first, through the cost-move authority; once they
+    // settle (at once, or after a replacement choice) the commit re-enters here
+    // for the remaining sacrifices, discard and finalization.
+    let returns: Vec<ObjectId> = pending
+        .deferred_sacrificed_permanents
+        .iter()
+        .filter_map(DeferredSpellSacrifice::selected_return)
+        .collect();
+    if !returns.is_empty() {
+        let PendingSacrificeCostCompletion::FinalizeSpell {
+            phyrexian_choices,
+            pre_payment_checks,
+        } = completion
+        else {
+            return Err(EngineError::InvalidAction(
+                "a deferred return at the commit needs its spell finalization".into(),
+            ));
+        };
+        if arrangement.is_some() {
+            return Err(EngineError::InvalidAction(
+                "a sacrifice arrangement cannot precede the deferred returns".into(),
+            ));
+        }
+        pending
+            .deferred_sacrificed_permanents
+            .retain(|entry| entry.selected_return().is_none());
+        let cost_event_start = events.len();
+        return finish_cost_object_moves(
+            state,
+            player,
+            pending,
+            returns,
+            0,
+            Zone::Hand,
+            PendingCostMoveCompletion::FinalizeDelvedCast {
+                phyrexian_choices,
+                pre_payment_checks: Some(pre_payment_checks),
+                stage: PrepaidCostMoveStage::DeferredReturns,
+            },
+            cost_event_start,
+            false,
+            CostMoveLedger::default(),
+            events,
+        );
+    }
     let mut chosen: Vec<ObjectId> = Vec::new();
     let mut determined: Vec<ObjectId> = Vec::new();
     for entry in &pending.deferred_sacrificed_permanents {
         match entry {
-            DeferredSpellSacrifice::Selected { object_id, .. } => chosen.push(*object_id),
+            DeferredSpellSacrifice::Selected {
+                object_id,
+                action: DeferredPermanentCostAction::Sacrifice,
+                ..
+            } => chosen.push(*object_id),
+            DeferredSpellSacrifice::Selected {
+                action: DeferredPermanentCostAction::ReturnToHand,
+                ..
+            } => {
+                return Err(EngineError::InvalidAction(
+                    "a deferred return outlived its commit".into(),
+                ))
+            }
             DeferredSpellSacrifice::All { filter } => {
                 let set = super::casting::find_determined_sacrifice_set(
                     state,
@@ -4193,6 +4291,7 @@ pub(super) fn pay_delve_after_distribution(
     let completion = PendingCostMoveCompletion::FinalizeDelvedCast {
         phyrexian_choices: None,
         pre_payment_checks: None,
+        stage: PrepaidCostMoveStage::Delve,
     };
     pay_delve_at_commit(state, player, pending, spent, completion, events)
 }
@@ -5038,6 +5137,7 @@ pub(crate) fn handle_sacrifice_for_cost(
                         .map(|object_id| DeferredSpellSacrifice::Selected {
                             object_id,
                             filter: filter.clone(),
+                            action: DeferredPermanentCostAction::Sacrifice,
                         }),
                 );
             return finish_pending_cost_or_cast(state, player, pending, events);
@@ -5383,11 +5483,35 @@ pub(crate) fn handle_unattach_for_cost(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+/// CR 601.2f + CR 601.2g + CR 601.2h: the filter a spell's battlefield return
+/// cost keeps its selection under until the payment commit. `None` for an
+/// activation (its own payment ordering owns the move) and for a resume that
+/// does not carry the cost (an in-flight state saved before the cost rode on
+/// the resume), which pays the return at once as before.
+fn deferred_spell_return_filter(
+    pending: &PendingCast,
+    paid_cost: Option<SpellCostPayment<'_>>,
+) -> Option<TargetFilter> {
+    if pending.activation_ability_index.is_some() {
+        return None;
+    }
+    match paid_cost?.cost {
+        AbilityCost::ReturnToHand {
+            filter,
+            from_zone: None | Some(Zone::Battlefield),
+            ..
+        } => Some(filter.clone().unwrap_or(TargetFilter::Any)),
+        _ => None,
+    }
+}
+
 /// CR 118.3 + CR 601.2b: Complete return-to-hand-as-cost after player selection.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_return_to_hand_for_cost(
     state: &mut GameState,
     player: PlayerId,
     mut pending: PendingCast,
+    paid_cost: Option<SpellCostPayment<'_>>,
     count: usize,
     legal_permanents: &[ObjectId],
     chosen: &[ObjectId],
@@ -5418,6 +5542,26 @@ pub(crate) fn handle_return_to_hand_for_cost(
                 "Selected permanent not eligible to return".to_string(),
             ));
         }
+    }
+
+    // CR 601.2f + CR 601.2g + CR 601.2h: a spell's return cost is part of its
+    // total cost. The selected permanents stay on the battlefield while the
+    // total is locked in (a returned cost reducer still reduces it) and while
+    // mana abilities are activated (a returned mana creature can tap first);
+    // they move when the total is paid, with the deferred sacrifices.
+    if let Some(filter) = deferred_spell_return_filter(&pending, paid_cost) {
+        pending
+            .deferred_sacrificed_permanents
+            .extend(
+                chosen
+                    .iter()
+                    .map(|&object_id| DeferredSpellSacrifice::Selected {
+                        object_id,
+                        filter: filter.clone(),
+                        action: DeferredPermanentCostAction::ReturnToHand,
+                    }),
+            );
+        return finish_pending_cost_or_cast(state, player, pending, events);
     }
 
     if let Some(ability_index) = pending.activation_ability_index {
@@ -10637,10 +10781,12 @@ pub(crate) fn defiler_reduction_entry_if_affordable(
 /// CR 601.2f + CR 601.2h: whether a paused cast still owes committed non-mana
 /// costs that only `finish_pending_cost_or_cast` pays: a required (imposed)
 /// cost on `additional_cost_flow`, a deferred required cost (a compound
-/// alternative cost's residual), or (CR 702.48b + CR 702.119c) an Emerge or
-/// Offering sacrifice chosen before a deferred target declaration, whose kept
-/// reduction the lock then applies once. A continuation that rebuilt the cast
-/// with `pay_and_push_with_lock` instead would drop them.
+/// alternative cost's residual), or (CR 601.2g + CR 601.2h) a sacrifice or
+/// return selection kept on the battlefield until the payment commit, such as
+/// an Emerge or Offering sacrifice chosen before a deferred target declaration
+/// (CR 702.48b + CR 702.119c), whose kept reduction the lock then applies
+/// once. A continuation that rebuilt the cast with `pay_and_push_with_lock`
+/// instead would drop them.
 pub(crate) fn pending_carries_unpaid_committed_costs(pending: &PendingCast) -> bool {
     matches!(
         pending.additional_cost_flow,
@@ -10871,9 +11017,10 @@ pub(crate) fn handle_order_cost_reductions(
         hybrid_announcement: hybrid_announcement.to_vec(),
     };
 
-    // CR 601.2f: a cast whose Emerge or Offering sacrifice was chosen before a
-    // deferred target declaration resumes through the payment step that makes
-    // that sacrifice, and the lock there honours this election.
+    // CR 601.2f: a cast that keeps a sacrifice or return selection until the
+    // payment commit (an Emerge or Offering sacrifice chosen before a deferred
+    // target declaration, a returned creature) resumes through the payment step
+    // that makes that move, and the lock there honours this election.
     if !pending.deferred_sacrificed_permanents.is_empty() {
         let mut pending = pending;
         pending.cost_reduction_election = Some(election);
@@ -11436,28 +11583,46 @@ fn pay_additional_cost_with_source(
         AbilityCost::ReturnToHand {
             count,
             ref filter,
-            from_zone: _,
+            from_zone,
         } => {
-            let eligible = super::casting::find_eligible_return_to_hand_targets(
+            let mut eligible = super::casting::find_eligible_return_to_hand_targets(
                 state,
                 player,
                 pending.object_id,
                 pending.ability.context.granting_object,
                 filter.as_ref(),
             );
+            // CR 601.2h: each permanent of the total cost pays one cost, so one
+            // already chosen for another cost of this spell (kept on the
+            // battlefield until the payment commit) is not offered again.
+            eligible.retain(|id| {
+                !pending
+                    .deferred_sacrificed_permanents
+                    .iter()
+                    .any(|kept| kept.selected_object() == Some(*id))
+            });
             if eligible.len() < count as usize {
                 return Err(EngineError::ActionNotAllowed(
                     "Not enough eligible permanents to return".into(),
                 ));
             }
+            // The resume carries the cost so a spell's selection can be kept,
+            // with the filter it must still match, until the payment commit.
+            let resume_cost = Box::new(AbilityCost::ReturnToHand {
+                count,
+                filter: filter.clone(),
+                from_zone,
+            });
             return Ok(WaitingFor::PayCost {
                 player,
                 kind: PayCostKind::ReturnToHand,
                 choices: eligible,
                 count: count as usize,
                 min_count: count as usize,
-                resume: CostResume::Spell {
+                resume: CostResume::SpellCost {
                     spell: Box::new(pending),
+                    cost: resume_cost,
+                    source: cost_source,
                 },
             });
         }
@@ -13883,6 +14048,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 cast_this_way_etb_counter: cast_this_way_etb_counter.clone(),
                 cast_this_way_enters_mods: cast_this_way_enters_mods.clone(),
             })),
+            stage: PrepaidCostMoveStage::Delve,
         };
         if let Some(waiting_for) = pay_delve_at_commit(
             state,

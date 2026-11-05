@@ -1731,10 +1731,12 @@ pub(super) fn handle_sacrifice_for_cost(
     casting::handle_sacrifice_for_cost(state, player, pending_cast, paid_cost, selection, events)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_return_to_hand_for_cost(
     state: &mut GameState,
     player: PlayerId,
     pending_cast: PendingCast,
+    paid_cost: Option<SpellCostPayment<'_>>,
     count: usize,
     permanents: &[ObjectId],
     chosen: &[ObjectId],
@@ -1744,6 +1746,7 @@ pub(super) fn handle_return_to_hand_for_cost(
         state,
         player,
         pending_cast,
+        paid_cost,
         count,
         permanents,
         chosen,

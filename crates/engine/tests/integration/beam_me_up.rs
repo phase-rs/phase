@@ -25,7 +25,8 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{
-    CastPaymentMode, CastingVariant, CastingVariantChoiceOption, PayCostKind, WaitingFor,
+    CastPaymentMode, CastingVariant, CastingVariantChoiceOption, PayCostKind, StackEntryKind,
+    WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -251,6 +252,9 @@ const TRANSPORTER_MALFUNCTION: &str = "Transporter Malfunction deals 3 damage to
 const KESS: &str = "Flying\nOnce during each of your turns, you may cast an instant or sorcery spell from your graveyard. If a spell cast this way would be put into your graveyard, exile it instead.";
 const FAMILIARS_RUSE: &str = "As an additional cost to cast this spell, return a creature you control to its owner's hand.\nCounter target spell.";
 const COUNTERSPELL: &str = "Counter target spell.";
+const LLANOWAR_ELVES: &str = "{T}: Add {G}.";
+const GOBLIN_ELECTROMANCER: &str = "Instant and sorcery spells you cast cost {1} less to cast.";
+const BIRDS_OF_PARADISE: &str = "Flying\n{T}: Add one mana of any color.";
 
 fn cost(generic: u32, shards: &[ManaCostShard]) -> ManaCost {
     ManaCost::Cost {
@@ -1476,4 +1480,411 @@ fn marooned_host_is_not_a_beam_me_up_choice() {
         "Familiar's Ruse may return Marooned's host"
     );
     assert_eq!(zone(&runner, a), Zone::Hand);
+}
+
+/// The mana actually spent on `spell` while it is on the stack (CR 601.2h).
+fn mana_spent_on(runner: &GameRunner, spell: ObjectId) -> u32 {
+    runner
+        .state()
+        .stack
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            StackEntryKind::Spell {
+                actual_mana_spent, ..
+            } if entry.id == spell => Some(*actual_mana_spent),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{spell:?} is not a spell on the stack"))
+}
+
+fn activate_for_mana(runner: &mut GameRunner, source: ObjectId) {
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap_or_else(|err| panic!("activate {source:?} for mana: {err:?}"));
+}
+
+/// Final Frontier in P0's graveyard with Llanowar Elves and one Forest: the
+/// Elf's {G} and the Forest's mana pay {1}{G} only if the Elf can tap for mana
+/// before it is returned.
+fn final_frontier_with_elf_and_forest() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let card = sorcery_in_graveyard(
+        &mut sc,
+        P0,
+        "Final Frontier",
+        cost(2, &[ManaCostShard::Green]),
+        FINAL_FRONTIER,
+    );
+    let elf = sc
+        .add_creature_from_oracle(P0, "Llanowar Elves", 1, 1, LLANOWAR_ELVES)
+        .id();
+    let forest = sc.add_basic_land(P0, ManaColor::Green);
+    sc.add_card_to_library_top(P0, "Library Card");
+    (sc.build(), card, elf, forest)
+}
+
+/// R9 (CR 601.2g + CR 601.2h): mana abilities are activated before costs are
+/// paid, so the creature returned for beam me up can first tap for mana. The
+/// automatic payment taps the Elf and the Forest, then returns the Elf.
+#[test]
+fn beam_me_up_returned_elf_taps_for_mana_first_on_auto_payment() {
+    let (mut runner, card, elf, forest) = final_frontier_with_elf_and_forest();
+    assert!(
+        offers_cast_of(&runner, card),
+        "REACH: the Elf and the Forest can pay {{1}}{{G}}"
+    );
+
+    let record = cast_with(&mut runner, card, CastIntent::returning(elf));
+    assert_eq!(record.return_choices, Some(vec![elf]));
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the cast completes: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(mana_spent_on(&runner, card), 2, "{{1}}{{G}} was paid");
+    assert_eq!(zone(&runner, elf), Zone::Hand, "then the Elf is returned");
+    assert!(runner.state().objects[&forest].tapped, "the Forest paid");
+    assert_eq!(pool_total(&runner, P0), 0);
+}
+
+/// R9 (CR 601.2g + CR 601.2h): with manual payment the selected Elf stays on
+/// the battlefield through the mana-ability window, taps for {G} through the
+/// public action, and is returned only when the payment commits.
+#[test]
+fn beam_me_up_returned_elf_stays_through_the_mana_window() {
+    let (mut runner, card, elf, forest) = final_frontier_with_elf_and_forest();
+    let card_id = runner.state().objects[&card].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: card,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("cast Final Frontier with beam me up");
+    let WaitingFor::PayCost {
+        kind: PayCostKind::ReturnToHand,
+        choices,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected the return prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(choices, vec![elf]);
+    select(&mut runner, vec![elf]);
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "the mana window follows the selection: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        zone(&runner, elf),
+        Zone::Battlefield,
+        "the selected Elf stays on the battlefield during the mana window"
+    );
+    activate_for_mana(&mut runner, elf);
+    activate_for_mana(&mut runner, forest);
+    assert_eq!(
+        pool_total(&runner, P0),
+        2,
+        "{{G}} from the Elf, one from the Forest"
+    );
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the payment commits");
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the cast completes: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(mana_spent_on(&runner, card), 2);
+    assert_eq!(
+        zone(&runner, elf),
+        Zone::Hand,
+        "returned at the payment commit"
+    );
+    assert_eq!(pool_total(&runner, P0), 0);
+}
+
+/// R10 (CR 601.2f + CR 601.2g + CR 601.2h): the total cost is locked in with
+/// Goblin Electromancer's reduction while the Electromancer chosen for the
+/// return is still on the battlefield; it leaves only when the locked {1}{U}
+/// is paid, so two Islands pay {2}{U} minus {1}.
+#[test]
+fn beam_me_up_returned_electromancer_keeps_its_cost_reduction() {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let card = sorcery_in_graveyard(
+        &mut sc,
+        P0,
+        "Open Communications",
+        cost(0, &[ManaCostShard::Blue]),
+        OPEN_COMMUNICATIONS,
+    );
+    let electromancer = sc
+        .add_creature_from_oracle(P0, "Goblin Electromancer", 2, 2, GOBLIN_ELECTROMANCER)
+        .id();
+    let islands = [
+        sc.add_basic_land(P0, ManaColor::Blue),
+        sc.add_basic_land(P0, ManaColor::Blue),
+    ];
+    let top = sc.add_card_to_library_top(P0, "Library Card");
+    let mut runner = sc.build();
+    assert!(
+        offers_cast_of(&runner, card),
+        "REACH: the reduced {{1}}{{U}} is payable with two Islands"
+    );
+
+    let card_id = runner.state().objects[&card].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: card,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("cast Open Communications with beam me up");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ReturnToHand,
+                ..
+            }
+        ),
+        "expected the return prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    select(&mut runner, vec![electromancer]);
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "the mana window follows the selection: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        zone(&runner, electromancer),
+        Zone::Battlefield,
+        "the Electromancer stays until the locked total is paid"
+    );
+    assert_eq!(
+        runner.state().pending_cast.as_ref().map(|p| p.cost.clone()),
+        Some(cost(1, &[ManaCostShard::Blue])),
+        "the locked total keeps the Electromancer's {{1}} reduction"
+    );
+    for island in islands {
+        activate_for_mana(&mut runner, island);
+    }
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the payment commits");
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the cast completes: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(mana_spent_on(&runner, card), 2, "{{2}}{{U}} minus {{1}}");
+    assert_eq!(
+        zone(&runner, electromancer),
+        Zone::Hand,
+        "returned at the commit"
+    );
+
+    pass_until_prompt(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(
+        set(&hand(&runner, P0)),
+        set(&[electromancer, top]),
+        "the Electromancer returned, one card drawn"
+    );
+    assert_eq!(zone(&runner, card), Zone::Exile);
+}
+
+/// R11 (CR 601.2g + CR 601.2h): the class — Familiar's Ruse's printed
+/// "return a creature you control" additional cost also waits for the mana
+/// window, so Birds of Paradise taps for {U} before it is returned.
+#[test]
+fn familiars_ruse_returned_birds_taps_for_mana_first() {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let open_communications = sc
+        .add_spell_to_hand_from_oracle(P0, "Open Communications", false, OPEN_COMMUNICATIONS)
+        .with_mana_cost(cost(0, &[ManaCostShard::Blue]))
+        .id();
+    let ruse = sc
+        .add_spell_to_hand_from_oracle(P0, "Familiar's Ruse", true, FAMILIARS_RUSE)
+        .with_mana_cost(cost(0, &[ManaCostShard::Blue, ManaCostShard::Blue]))
+        .id();
+    let birds = sc
+        .add_creature_from_oracle(P0, "Birds of Paradise", 0, 1, BIRDS_OF_PARADISE)
+        .id();
+    let island = sc.add_basic_land(P0, ManaColor::Blue);
+    let bears = sc.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    sc.add_card_to_library_top(P0, "Library Card");
+    sc.with_mana_pool(P0, mana(ManaType::Blue, 1));
+    let mut runner = sc.build();
+
+    cast_with(
+        &mut runner,
+        open_communications,
+        CastIntent {
+            targets: &[],
+            returned: None,
+            distribution: None,
+            variant: None,
+        },
+    );
+    assert_eq!(pool_total(&runner, P0), 0, "REACH: the pool paid the {{U}}");
+
+    let spell_target = [TargetRef::Object(open_communications)];
+    let record = cast_with(
+        &mut runner,
+        ruse,
+        CastIntent::returning(birds).targeting(&spell_target),
+    );
+    assert_eq!(
+        record.return_choices.as_deref().map(set),
+        Some(set(&[birds, bears]))
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the cast completes: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(mana_spent_on(&runner, ruse), 2, "{{U}}{{U}} was paid");
+    assert!(runner.state().objects[&island].tapped, "the Island paid");
+    assert_eq!(zone(&runner, birds), Zone::Hand, "then the Birds returned");
+    assert_eq!(zone(&runner, bears), Zone::Battlefield);
+
+    pass_until_prompt(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(
+        zone(&runner, open_communications),
+        Zone::Graveyard,
+        "countered"
+    );
+}
+
+/// R12 (CR 601.2g + CR 601.2h): cancelling the cast in the mana window,
+/// before the total is paid, leaves the selected Elf on the battlefield and
+/// the card in the graveyard; nothing was returned.
+#[test]
+fn beam_me_up_cancelled_in_the_mana_window_returns_nothing() {
+    let (mut runner, card, elf, _forest) = final_frontier_with_elf_and_forest();
+    let card_id = runner.state().objects[&card].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: card,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("cast Final Frontier with beam me up");
+    select(&mut runner, vec![elf]);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "REACH: the mana window is open: {:?}",
+        runner.state().waiting_for
+    );
+    activate_for_mana(&mut runner, elf);
+
+    runner
+        .act(GameAction::CancelCast)
+        .expect("the cast can be cancelled before payment");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        zone(&runner, elf),
+        Zone::Battlefield,
+        "nothing was returned"
+    );
+    assert_eq!(zone(&runner, card), Zone::Graveyard);
+}
+
+/// R13 (CR 601.2h + CR 903.9b + CR 616.1): the deferred return still meets
+/// replacement effects when it is paid. A commander returned for beam me up
+/// offers its owner the command zone; the cast completes after the choice.
+#[test]
+fn beam_me_up_returned_commander_offers_the_command_zone_at_the_commit() {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let card = sorcery_in_graveyard(
+        &mut sc,
+        P0,
+        "Final Frontier",
+        cost(2, &[ManaCostShard::Green]),
+        FINAL_FRONTIER,
+    );
+    let commander = sc.add_creature(P0, "Commander Bear", 2, 2).id();
+    sc.with_commander(commander);
+    sc.add_card_to_library_top(P0, "Library Card");
+    sc.with_mana_pool(P0, mana(ManaType::Green, 2));
+    let mut runner = sc.build();
+    runner.state_mut().format_config.command_zone = true;
+    // Fixture: the commander starts on the battlefield (it was cast earlier).
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        commander,
+        Zone::Battlefield,
+        &mut Vec::new(),
+    );
+    let commander = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| runner.state().objects[id].is_commander)
+        .expect("REACH: the commander is on the battlefield");
+
+    let card_id = runner.state().objects[&card].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: card,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Final Frontier with beam me up");
+    select(&mut runner, vec![commander]);
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the commander's return offers CR 903.9b: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(pool_total(&runner, P0), 0, "the mana was paid first");
+    assert_eq!(
+        zone(&runner, commander),
+        Zone::Battlefield,
+        "the return stays proposed until the choice"
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept the command zone");
+
+    assert_eq!(zone(&runner, commander), Zone::Command);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the cast completes after the choice: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(mana_spent_on(&runner, card), 2);
 }

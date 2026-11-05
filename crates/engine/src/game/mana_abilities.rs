@@ -10222,6 +10222,7 @@ mod tests {
             .push(DeferredSpellSacrifice::Selected {
                 object_id: reserved,
                 filter: TargetFilter::Typed(TypedFilter::permanent()),
+                action: Default::default(),
             });
         state.pending_cast = Some(Box::new(pending));
 
