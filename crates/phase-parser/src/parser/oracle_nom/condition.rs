@@ -24,8 +24,9 @@ use super::quantity as nom_quantity;
 use super::target as nom_target;
 use super::target::{controller_phrase_among, ControllerPhrase};
 use crate::parser::oracle_target::{
-    cast_capable_zones_except, parse_shared_quality, parse_type_phrase_folding, parse_zone_suffix,
-    parse_zone_word, peek_zone_boundary, superlative_property_filter_prop,
+    cast_capable_zones_except, parse_shared_quality, parse_source_anaphoric_pronoun,
+    parse_type_phrase_folding, parse_zone_suffix, parse_zone_word, peek_zone_boundary,
+    superlative_property_filter_prop,
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
@@ -628,6 +629,10 @@ fn parse_remaining_state_presence_conditions_tail(
         parse_no_cards_in_your_zone,
         parse_no_cards_in_that_graveyard,
         parse_card_exiled_with_source_condition,
+        // CR 205.2a + CR 607.2a: "all cards exiled with ~ share a <quality>" —
+        // anchored on the literal "all cards exiled with " head, disjoint from
+        // every other arm in this group.
+        parse_all_cards_exiled_with_source_share_quality,
         parse_there_are_conditions,
         parse_there_exists_compound_zone_condition,
         parse_there_exists_condition,
@@ -7390,13 +7395,20 @@ fn parse_subtype_cards_in_your_graveyard(input: &str) -> OracleResult<'_, Quanti
     ))
 }
 
+/// CR 400.7 + CR 400.3 + CR 603.4: "a[n] <type> was put into | returned to your
+/// hand from the battlefield this turn" — a per-turn battlefield-to-hand
+/// zone-change count over objects you OWN (a card can only go to its owner's
+/// hand, CR 400.3), so "your hand" binds the owner, not the controller.
+/// "Returned to" (Miles O'Brien, Transporter Ops) and "put into" (Barrin,
+/// Tolarian Archmage) are the same zone change; only the verb differs.
 fn parse_permanent_put_into_your_hand_from_battlefield_this_turn(
     input: &str,
 ) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_article(input)?;
-    let (rest, type_text) =
-        take_until(" was put into your hand from the battlefield this turn").parse(rest)?;
-    let (rest, _) = tag(" was put into your hand from the battlefield this turn").parse(rest)?;
+    let (rest, type_text) = take_until(" was ").parse(rest)?;
+    let (rest, _) = tag(" was ").parse(rest)?;
+    let (rest, _) = alt((tag("put into"), tag("returned to"))).parse(rest)?;
+    let (rest, _) = tag(" your hand from the battlefield this turn").parse(rest)?;
     let (filter, leftover) = parse_type_phrase_folding(type_text.trim());
     if !leftover.trim().is_empty() || filter == TargetFilter::Any {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -10608,6 +10620,58 @@ fn parse_card_exiled_with_source_condition(input: &str) -> OracleResult<'_, Stat
     ))
 }
 
+/// CR 205.2a + CR 607.2a + CR 603.4: "all cards exiled with [source] share a
+/// <quality>" — a universal shared-characteristic gate over the source's
+/// linked-exile pool (All Good Things...: "If all cards exiled with this Saga
+/// share a card type, you gain 10 life").
+///
+/// The pool shares a quality exactly when one quality value is held by EVERY
+/// card in it, i.e. when the largest same-value bucket
+/// (`ObjectCountBySharedQuality { aggregate: Max }`) is as large as the pool
+/// itself (`CardsExiledBySource`). The bucket can never exceed the pool, so the
+/// GE comparison is the equality test. The pool must also be non-empty: an
+/// empty set of cards has no card type to share, so "all cards exiled with ~
+/// share a card type" is false when nothing was exiled with it (the vacuous
+/// reading would award the life for exiling nothing).
+///
+/// The quality axis reuses `parse_shared_quality` (card type, color, creature
+/// type, mana value, name, ...), so every "share a <quality>" wording over the
+/// linked pool lowers through this one production.
+fn parse_all_cards_exiled_with_source_share_quality(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("all cards exiled with ").parse(input)?;
+    let (rest, _) = parse_exiled_with_source_self_ref(rest)?;
+    let (rest, _) = tag(" share a ").parse(rest)?;
+    let (rest, quality) = parse_shared_quality(rest)?;
+    let pool = || QuantityExpr::Ref {
+        qty: QuantityRef::CardsExiledBySource,
+    };
+    Ok((
+        rest,
+        StaticCondition::And {
+            conditions: vec![
+                StaticCondition::QuantityComparison {
+                    lhs: pool(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                },
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCountBySharedQuality {
+                            filter: TargetFilter::ExiledBySource,
+                            quality,
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: pool(),
+                },
+            ],
+        },
+    ))
+}
+
 /// CR 202.3 + CR 607.2a: Parse
 /// "cards with N or more different <quality> are exiled with [source]" →
 /// `QuantityComparison { ObjectCountDistinct[quality](ExiledBySource) >= N }`.
@@ -10845,9 +10909,14 @@ fn parse_there_are_counters_on_source(input: &str) -> OracleResult<'_, StaticCon
 /// SELF_REF normalization set: `~` plus the long-form noun phrases that survive
 /// normalization in some Oracle prints. Bare `"it"` is included for the
 /// continuation form ("Then if there are N or more counters on it") used by
-/// Brass's Tunnel-Grinder and similar.
+/// Brass's Tunnel-Grinder and similar. CR 201.5: a gendered pronoun ("him" /
+/// "her") on a personified card is that card's printed-name self-reference
+/// (Beckett Mariner, Impetuous Ensign: "if there are three or more promotion
+/// counters on her"), so it names the source exactly as "~" does — routed
+/// through the shared `parse_source_anaphoric_pronoun` authority.
 fn parse_counter_on_source_subject(input: &str) -> OracleResult<'_, &str> {
     alt((
+        recognize(parse_source_anaphoric_pronoun),
         tag("~"),
         tag("this creature"),
         tag("this permanent"),
@@ -22302,11 +22371,18 @@ mod tests {
 
     #[test]
     fn test_permanent_put_into_your_hand_from_battlefield_this_turn() {
-        let (rest, c) = parse_inner_condition(
+        // "put into" (Barrin) and "returned to" (Miles O'Brien) are one verb axis.
+        for text in [
             "a permanent was put into your hand from the battlefield this turn",
-        )
-        .unwrap();
-        assert_eq!(rest, "");
+            "a permanent was returned to your hand from the battlefield this turn",
+        ] {
+            assert_owned_permanent_battlefield_to_hand_count(text);
+        }
+    }
+
+    fn assert_owned_permanent_battlefield_to_hand_count(text: &str) {
+        let (rest, c) = parse_inner_condition(text).unwrap();
+        assert_eq!(rest, "", "{text}");
         match c {
             StaticCondition::QuantityComparison {
                 lhs:
@@ -22330,6 +22406,61 @@ mod tests {
                 )));
             }
             other => panic!("expected owned permanent battlefield-to-hand count, got {other:?}"),
+        }
+    }
+
+    /// CR 205.2a + CR 607.2a: "all cards exiled with ~ share a <quality>" is a
+    /// non-empty linked pool whose largest same-quality bucket covers the whole
+    /// pool, across every `parse_shared_quality` axis.
+    #[test]
+    fn all_cards_exiled_with_source_share_quality() {
+        for (text, expected) in [
+            (
+                "all cards exiled with ~ share a card type",
+                SharedQuality::CardType,
+            ),
+            (
+                "all cards exiled with ~ share a color",
+                SharedQuality::Color,
+            ),
+            (
+                "all cards exiled with it share a creature type",
+                SharedQuality::CreatureType,
+            ),
+            (
+                "all cards exiled with ~ share a mana value",
+                SharedQuality::ManaValue,
+            ),
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "{text}");
+            let pool = QuantityExpr::Ref {
+                qty: QuantityRef::CardsExiledBySource,
+            };
+            assert_eq!(
+                c,
+                StaticCondition::And {
+                    conditions: vec![
+                        StaticCondition::QuantityComparison {
+                            lhs: pool.clone(),
+                            comparator: Comparator::GE,
+                            rhs: QuantityExpr::Fixed { value: 1 },
+                        },
+                        StaticCondition::QuantityComparison {
+                            lhs: QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCountBySharedQuality {
+                                    filter: TargetFilter::ExiledBySource,
+                                    quality: expected,
+                                    aggregate: AggregateFunction::Max,
+                                },
+                            },
+                            comparator: Comparator::GE,
+                            rhs: pool,
+                        },
+                    ],
+                },
+                "{text}"
+            );
         }
     }
 

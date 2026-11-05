@@ -9,6 +9,7 @@
 use serde::Serialize;
 
 use super::ast::{with_clause_chain_duration, ClauseBoundary, ContinuationAst, ParsedEffectClause};
+use super::context::PlayerAntecedents;
 use super::doc::{OracleDocBuilder, OracleSourceSpan, OracleUnitSource};
 use crate::parser::oracle_effect::lower::strip_trailing_duration;
 use crate::parser::oracle_nom::filter::ChosenColorGrantReference;
@@ -948,6 +949,19 @@ pub(crate) struct ClauseIr {
     pub(crate) multi_target: Option<MultiTargetSpec>,
     /// CR 107.3i: "where X is <expr>" binding.
     pub(crate) where_x_expression: Option<String>,
+    /// CR 608.2c + CR 115.1a: the players a controller anaphor inside
+    /// [`Self::where_x_expression`]'s count ("they control", "that player
+    /// controls") may bind to, captured from the live context at the chunk that
+    /// set the expression. Travels with the expression because it is read with
+    /// it: the text says what to count, this says whose. Empty (the default)
+    /// means no antecedent was in scope, which fails closed to `oracle_target`'s
+    /// documented legacy seeds — the behavior before this field existed.
+    ///
+    /// Skipped from `ClauseIr`'s `Serialize` (the parser trace surface) rather
+    /// than given a `Serialize` impl of its own: this is a lowering-time
+    /// binding, and keeping it out leaves the existing trace schema untouched.
+    #[serde(skip)]
+    pub(crate) where_x_player_antecedents: PlayerAntecedents,
     /// CR 118.12: Resolution-time "unless [player] pays" modifier carried by
     /// this clause.
     pub(crate) unless_pay: Option<UnlessPayModifier>,
@@ -1030,6 +1044,17 @@ pub(crate) struct ClauseIr {
 }
 
 impl ClauseIr {
+    /// CR 107.3i + CR 608.2c: this clause's where-X clause paired with the
+    /// antecedents its count's controller anaphor binds to. The single spelling
+    /// assembly uses, so the expression and its antecedents cannot drift apart
+    /// at a call site.
+    pub(crate) fn where_x_binding(&self) -> crate::parser::oracle_effect::lower::WhereXBinding<'_> {
+        crate::parser::oracle_effect::lower::WhereXBinding::new(
+            self.where_x_expression.as_deref(),
+            &self.where_x_player_antecedents,
+        )
+    }
+
     /// Turn this clause, in place, into an honest parser gap
     /// (`Effect::unimplemented(name, <printed fragment>)`) that carries NO
     /// executable metadata — exactly what [`ClauseIrBuilder::clause`] +
@@ -1066,6 +1091,7 @@ impl ClauseIr {
             prefix_delayed_condition,
             multi_target,
             where_x_expression,
+            where_x_player_antecedents,
             unless_pay,
             target_selection_mode,
             target_chooser,
@@ -1099,6 +1125,9 @@ impl ClauseIr {
         *prefix_delayed_condition = None;
         *multi_target = None;
         *where_x_expression = None;
+        // The antecedents only ever qualify `where_x_expression`; with the
+        // expression cleared they have nothing to bind and are reset with it.
+        *where_x_player_antecedents = PlayerAntecedents::default();
         *unless_pay = None;
         *target_selection_mode = TargetSelectionMode::Chosen;
         *target_chooser = None;
@@ -1276,6 +1305,7 @@ impl ClauseIrBuilder {
             prefix_delayed_condition: None,
             multi_target: None,
             where_x_expression: None,
+            where_x_player_antecedents: PlayerAntecedents::default(),
             unless_pay: None,
             target_selection_mode: TargetSelectionMode::Chosen,
             target_chooser: None,
@@ -1363,6 +1393,7 @@ impl ClauseIrBuilder {
         .prefix_delayed_condition(c.prefix_delayed_condition)
         .multi_target(c.multi_target)
         .where_x_expression(c.where_x_expression)
+        .where_x_player_antecedents(c.where_x_player_antecedents)
         .unless_pay(c.unless_pay)
         .target_selection_mode(c.target_selection_mode)
         .target_chooser(c.target_chooser)
@@ -1404,6 +1435,7 @@ pub(crate) struct ClauseDraft<'a> {
     prefix_delayed_condition: Option<DelayedTriggerCondition>,
     multi_target: Option<MultiTargetSpec>,
     where_x_expression: Option<String>,
+    where_x_player_antecedents: PlayerAntecedents,
     unless_pay: Option<UnlessPayModifier>,
     target_selection_mode: TargetSelectionMode,
     target_chooser: Option<TargetFilter>,
@@ -1460,6 +1492,12 @@ impl ClauseDraft<'_> {
     }
     pub(crate) fn where_x_expression(mut self, v: Option<String>) -> Self {
         self.where_x_expression = v;
+        self
+    }
+    /// The antecedents a controller anaphor in the where-X count binds to. Set
+    /// alongside [`Self::where_x_expression`] from `ctx.player_antecedents()`.
+    pub(crate) fn where_x_player_antecedents(mut self, v: PlayerAntecedents) -> Self {
+        self.where_x_player_antecedents = v;
         self
     }
     pub(crate) fn unless_pay(mut self, v: Option<UnlessPayModifier>) -> Self {
@@ -1750,6 +1788,7 @@ impl ClauseDraft<'_> {
             prefix_delayed_condition: self.prefix_delayed_condition,
             multi_target: self.multi_target,
             where_x_expression: self.where_x_expression,
+            where_x_player_antecedents: self.where_x_player_antecedents,
             unless_pay: self.unless_pay,
             target_selection_mode: self.target_selection_mode,
             target_chooser: self.target_chooser,
