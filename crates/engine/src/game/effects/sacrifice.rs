@@ -506,7 +506,7 @@ pub fn resolve(
                         obj.controller == chooser
                             && !obj.is_emblem
                             && crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
-                            && !sacrifice_cause_muzzled(state, ability, *id, chooser)
+                            && can_sacrifice_for_ability(state, ability, *id, chooser)
                     })
             })
             .collect();
@@ -673,7 +673,10 @@ pub fn resolve(
 
         let player_id = obj.controller;
 
-        if sacrifice_cause_muzzled(state, ability, obj_id, player_id) {
+        // CR 701.21a: a permanent the player can't sacrifice (Quark's player-scoped
+        // static, "can't be sacrificed", or a muzzled cause) is skipped rather
+        // than handed to `sacrifice_permanent`, which would silently refuse it.
+        if !can_sacrifice_for_ability(state, ability, obj_id, player_id) {
             continue;
         }
 

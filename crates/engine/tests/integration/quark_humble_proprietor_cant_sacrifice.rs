@@ -100,3 +100,65 @@ fn nontoken_treasure_can_still_be_sacrificed() {
         .expect("a nontoken Treasure is outside the 'Treasure tokens' filter");
     assert!(!on_battlefield(&runner, treasure), "it was sacrificed");
 }
+
+const SOL_RING: &str = "{T}: Add {C}{C}.";
+const ANGRATHS_RAMPAGE: &str = "Choose one —\n• Target player sacrifices an artifact of their choice.\n• Target player sacrifices a creature of their choice.\n• Target player sacrifices a planeswalker of their choice.";
+
+/// Quark plus a Treasure token and (optionally) a nontoken Sol Ring; P0 then
+/// casts Angrath's Rampage's artifact mode targeting themselves.
+fn rampage_on_self(with_sol_ring: bool) -> (GameRunner, ObjectId, Option<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Quark, Humble Proprietor", 2, 3, QUARK);
+    let treasure = {
+        let mut b = scenario.add_artifact_from_oracle(P0, "Treasure", TREASURE);
+        b.with_subtypes(vec!["Treasure"]);
+        b.id()
+    };
+    let sol_ring = with_sol_ring.then(|| {
+        scenario
+            .add_artifact_from_oracle(P0, "Sol Ring", SOL_RING)
+            .id()
+    });
+    let rampage = scenario
+        .add_spell_to_hand_from_oracle(P0, "Angrath's Rampage", false, ANGRATHS_RAMPAGE)
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&treasure)
+        .expect("treasure")
+        .is_token = true;
+    runner.cast(rampage).modes(&[0]).target_player(P0).resolve();
+    (runner, treasure, sol_ring)
+}
+
+/// CR 701.21a + CR 609.3: "sacrifice an artifact" offers only artifacts the
+/// player can sacrifice. The Treasure token is not a legal choice, so the Sol
+/// Ring is the one sacrificed and no prompt can pick the Treasure.
+#[test]
+fn sacrifice_an_artifact_effect_skips_treasure_token() {
+    let (runner, treasure, sol_ring) = rampage_on_self(true);
+    let sol_ring = sol_ring.expect("sol ring");
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            engine::types::game_state::WaitingFor::EffectZoneChoice { .. }
+        ),
+        "only one artifact is a legal choice, so there is nothing to choose between"
+    );
+    assert!(!on_battlefield(&runner, sol_ring), "Sol Ring is sacrificed");
+    assert!(
+        on_battlefield(&runner, treasure),
+        "the Treasure token is kept"
+    );
+}
+
+/// CR 609.3: with only a Treasure token, the effect does as much as possible —
+/// nothing — rather than "sacrificing" the token.
+#[test]
+fn sacrifice_an_artifact_effect_with_only_treasure_does_nothing() {
+    let (runner, treasure, _) = rampage_on_self(false);
+    assert!(on_battlefield(&runner, treasure));
+}
