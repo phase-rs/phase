@@ -1,7 +1,8 @@
 //! Issue #10195 (origin half): "is exiled from [zone]" must restrict the
 //! trigger to that source zone.
 //!
-//! CR 603.6c: a "leaves the battlefield" trigger looks back at the event; when
+//! CR 603.10a: a "leaves the battlefield" trigger looks back at the event (CR
+//! 603.6c defines leaves-the-battlefield abilities); when
 //! the text names the source zone ("is exiled from the battlefield"), an exile
 //! from any other zone is not the trigger event. The parser arm used to drop
 //! the whole ` from <zone>` tail, so Soulherder, Market Gnome and Captain

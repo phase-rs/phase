@@ -28670,18 +28670,26 @@ fn trigger_is_exiled_from_battlefield_carries_its_origin() {
     }
 }
 
-/// CR 603.6c: an "exiled from <zone>" tail the shared vocabulary cannot read
-/// fails the arm closed rather than widening the trigger to every origin.
+/// CR 603.6c + CR 108.4a: an "exiled from <zone>" tail the arm's vocabulary
+/// cannot read fails the arm closed rather than widening the trigger to every
+/// origin. That includes the possessive zones ("your graveyard", ...):
+/// `TriggerMode::Exiled` carries no owner scope, so reading them would also
+/// fire on an opponent's card leaving that opponent's zone.
 ///
-/// Synthetic text: no printed card carries an unreadable exile origin (the
-/// corpus's three `is/are exiled from` triggers all say "the battlefield").
+/// Synthetic text: no printed card carries these tails; the nearest printed
+/// cards are the three "exiled from the battlefield" triggers.
 #[test]
 fn trigger_is_exiled_with_an_unreadable_origin_fails_closed() {
-    let def = parse_trigger_line(
+    for text in [
         "Whenever a creature is exiled from an opponent's library, draw a card.",
-        "Test Card",
-    );
-    assert_ne!(def.mode, TriggerMode::Exiled);
+        "Whenever a creature is exiled from your graveyard, draw a card.",
+        "Whenever a creature is exiled from your hand, draw a card.",
+        "Whenever a creature is exiled from your library, draw a card.",
+        "Whenever a creature is exiled from anywhere other than your graveyard, draw a card.",
+    ] {
+        let def = parse_trigger_line(text, "Test Card");
+        assert_ne!(def.mode, TriggerMode::Exiled, "{text}");
+    }
 }
 
 /// CR 603.6c: an unconsumed zone-list or exclusion remainder fails the arm
