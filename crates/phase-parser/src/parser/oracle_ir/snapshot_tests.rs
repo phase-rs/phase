@@ -666,7 +666,7 @@ fn ability_word_trigger_table_is_ir_native_and_preserves_condition_fallback() {
     ));
 
     let (shoreline_ir, shoreline_lowered) = parse_two_layer(
-        "Delirium — Whenever this creature deals combat damage to a player, draw a card. Then discard a card unless there are seven or more cards in your graveyard.",
+        "Threshold — Whenever this creature deals combat damage to a player, draw a card. Then discard a card unless there are seven or more cards in your graveyard.",
         "Shoreline Looter",
         &["Creature"],
         &["Rat", "Rogue"],
