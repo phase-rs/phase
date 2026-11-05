@@ -271,6 +271,14 @@ pub fn petals_of_insight_bottom_order_prompt_hides_looked_at_ids_from_opponent()
         &own.waiting_for,
         WaitingFor::DigBottomOrder { cards, .. } if *cards == looked.to_vec()
     ));
+    // CR 701.20e: redaction is scoped to viewers without private access — the
+    // wire projection the looker's own client receives must keep the ledger.
+    let own_wire = serde_json::to_value(&own).expect("own projection serializes");
+    assert_eq!(
+        own_wire.get("private_look_ids"),
+        Some(&serde_json::json!(looked.to_vec())),
+        "serialized own projection must keep the looked-at ids"
+    );
 
     let opponent = filter_state_for_viewer(runner.state(), P1);
     assert!(
