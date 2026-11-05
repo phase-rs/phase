@@ -15385,7 +15385,6 @@ mod tests {
     /// anaphor having been rejected upstream.
     #[test]
     fn bidirectional_prevent_unconsumed_quantity_fails_closed() {
-        use crate::types::ability::{QuantityExpr, QuantityRef, TargetFilter};
         let announced_x = Some(QuantityExpr::Ref {
             qty: QuantityRef::Variable {
                 name: "X".to_string(),
