@@ -42566,3 +42566,50 @@ fn peel_trailing_cast_mana_source_splits_only_a_trailing_self_reference() {
         ("spell using mana produced by a treasure", None)
     );
 }
+
+/// Q, Stacking the Deck (verbatim Scryfall Oracle text). Three trigger-level
+/// readings the granted quoted ability must not disturb:
+/// - CR 201.5c: the one-letter short name "Q" is a self-reference, so the
+///   trigger is a self-ETB (`SelfRef`), not "whenever a Q creature enters";
+/// - CR 603.2 + CR 602.5b: the quoted "Activate only during your turn"
+///   restricts the GRANTED ability, never this trigger;
+/// - CR 608.2c: "That nonland card" names the card the exile-until loop found,
+///   so the grant does not bind the trigger source (`TriggeringSource`).
+#[test]
+fn q_stacking_the_deck_trigger_reads_self_etb_and_grants_to_the_found_card() {
+    let text = "When Q enters, shuffle your library, then exile cards from the top of your library until you exile a nonland card. That nonland card gains \"Exile a card from your hand: Create a copy of this card. You may cast the copy. Activate only during your turn and only if this card is exiled.\"";
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let parsed = parse_oracle_text(
+        text,
+        "Q, Stacking the Deck",
+        &[],
+        &owned(&["Legendary", "Creature"]),
+        &owned(&["Q"]),
+    );
+    assert_eq!(parsed.triggers.len(), 1, "{:?}", parsed.triggers);
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(trigger.constraint, None);
+
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    let exile_until = execute.sub_ability.as_deref().expect("exile-until link");
+    assert!(
+        matches!(*exile_until.effect, Effect::ExileFromTopUntil { .. }),
+        "{:?}",
+        exile_until.effect
+    );
+    let grant = exile_until.sub_ability.as_deref().expect("grant link");
+    let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = &*grant.effect
+    else {
+        panic!("expected the grant, got {:?}", grant.effect);
+    };
+    assert_eq!(*target, None, "the grant inherits the found card");
+    assert_eq!(
+        static_abilities[0].affected,
+        Some(TargetFilter::ParentTarget)
+    );
+}
