@@ -491,7 +491,11 @@ fn scenario_multiplayer_attacks_to_finish_exposed_player() {
         };
     }
 
-    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+    // Measurement mode: this assertion is about the attack a deterministic search
+    // finds, not about how much of that search fits in the wall-clock budget. A
+    // loaded CI shard can expire `AI_SEARCH_TIME_BUDGET_MS` mid-search, which
+    // degrades the action to "declined to attack" and fakes a regression.
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native).into_measurement(14);
     let mut rng = SmallRng::seed_from_u64(14);
     let action = choose_action(runner.state(), P0, &config, &mut rng);
 

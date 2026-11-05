@@ -1003,6 +1003,7 @@ fn classify(action: &GameAction, prompt: &WaitingFor) -> Choice {
         | GameAction::ChooseRoomDoor { .. }
         | GameAction::TapForConvoke { .. }
         | GameAction::HarmonizeTap { .. }
+        | GameAction::ChooseSecretAgendaNames { .. }
         | GameAction::DeclareCompanion { .. }
         | GameAction::CompanionToHand
         | GameAction::DiscoverChoice { .. }
@@ -1071,6 +1072,7 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         | WaitingFor::PairChoice { .. }
         | WaitingFor::TributeChoice { .. }
         | WaitingFor::LearnChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::HarmonizeTapChoice { .. }

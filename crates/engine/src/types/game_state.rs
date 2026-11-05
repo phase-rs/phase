@@ -19132,6 +19132,14 @@ pub enum WaitingFor {
         #[serde(default = "default_pile_source_battlefield")]
         pile_source: PileSource,
     },
+    /// CR 702.106a / CR 702.106f: As a face-down agenda conspiracy is put into the
+    /// command zone, its owner secretly chooses `name_count` card names.
+    /// `name_count` is shown only to `player`; viewer projections report 1.
+    SecretAgendaChoice {
+        player: PlayerId,
+        object_id: ObjectId,
+        name_count: u8,
+    },
     /// CR 702.139a: Before the game begins, reveal companion from outside the game.
     CompanionReveal {
         player: PlayerId,
@@ -20198,6 +20206,7 @@ impl WaitingFor {
             WaitingFor::SeparatePilesChooseOpponent { .. } => "SeparatePilesChooseOpponent",
             WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
             WaitingFor::SeparatePilesChoice { .. } => "SeparatePilesChoice",
+            WaitingFor::SecretAgendaChoice { .. } => "SecretAgendaChoice",
             WaitingFor::CompanionReveal { .. } => "CompanionReveal",
             WaitingFor::ChooseLegend { .. } => "ChooseLegend",
             WaitingFor::CommanderZoneChoice { .. } => "CommanderZoneChoice",
@@ -20354,6 +20363,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneOpponentChooser { player, .. }
             | WaitingFor::ChooseAnnouncingOpponent { player, .. }
             | WaitingFor::ClashCardPlacement { player, .. }
+            | WaitingFor::SecretAgendaChoice { player, .. }
             | WaitingFor::CompanionReveal { player, .. }
             | WaitingFor::ChooseLegend { player, .. }
             | WaitingFor::BattleProtectorChoice { player, .. }
@@ -20721,6 +20731,7 @@ impl WaitingFor {
             | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
             | WaitingFor::SeparatePilesChoice { .. }
+            | WaitingFor::SecretAgendaChoice { .. }
             | WaitingFor::CompanionReveal { .. }
             | WaitingFor::ChooseLegend { .. }
             | WaitingFor::CommanderZoneChoice { .. }
@@ -20932,6 +20943,7 @@ impl WaitingFor {
             | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
             | WaitingFor::SeparatePilesChoice { .. }
+            | WaitingFor::SecretAgendaChoice { .. }
             | WaitingFor::CompanionReveal { .. }
             | WaitingFor::ChooseLegend { .. }
             | WaitingFor::CommanderZoneChoice { .. }
@@ -27232,6 +27244,7 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesPartition { .. }
         | WaitingFor::SeparatePilesChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
         | WaitingFor::CommanderZoneChoice { .. }

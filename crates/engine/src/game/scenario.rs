@@ -2183,6 +2183,7 @@ impl GameRunner {
             WaitingFor::TributeChoice { .. } => "TributeChoice",
             WaitingFor::UnlessPayment { .. } => "UnlessPayment",
             WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
+            WaitingFor::SecretAgendaChoice { .. } => "SecretAgendaChoice",
             WaitingFor::CompanionReveal { .. } => "CompanionReveal",
             WaitingFor::ChooseRingBearer { .. } => "ChooseRingBearer",
             WaitingFor::ChooseRoomDoor { .. } => "ChooseRoomDoor",
