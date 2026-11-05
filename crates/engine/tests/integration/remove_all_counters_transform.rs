@@ -50,7 +50,7 @@ fn trigger_effects(parsed: &ParsedAbilities) -> Vec<Effect> {
 /// `Unimplemented`. Unrelated clauses in the same card (e.g. a dynamic
 /// put-counter quantity) are intentionally not asserted here.
 ///
-/// `kind` is the counter kind the anaphor names: CR 608.2k binds "those
+/// `kind` is the counter kind the anaphor names: CR 608.2c binds "those
 /// counters" / "them" to the counters an in-chain condition counted ("Then if it
 /// has seven or more ember counters on it, remove them" → ember only), and
 /// `None` keeps the every-kind reading where no such in-chain antecedent exists.

@@ -7,7 +7,7 @@
 //! taps Beckett by attacking with her. Covers the gendered self-reference in
 //! the counter threshold ("on her", CR 201.5), the gate itself (CR 608.2c), and
 //! the "remove those counters" anaphor binding to the counted promotion
-//! counters only (CR 608.2k + CR 122.1).
+//! counters only (CR 608.2c + CR 122.1).
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -63,7 +63,7 @@ fn counters(runner: &GameRunner, id: ObjectId, kind: &CounterType) -> u32 {
         .unwrap_or(0)
 }
 
-/// CR 608.2c + CR 608.2k: the third promotion counter meets the threshold, so
+/// CR 608.2c: the third promotion counter meets the threshold, so
 /// the promotion counters are removed — but not her +1/+1 counter, which is not
 /// among "those counters" — and each opponent takes 2.
 #[test]

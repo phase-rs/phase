@@ -36,7 +36,7 @@ fn settle(runner: &mut GameRunner) {
 }
 
 /// Park P0 at the end of an earlier turn so the next advance reaches P0's next
-/// precombat main phase, where the Saga gets its lore counter (CR 714.3b).
+/// precombat main phase, where the Saga gets its lore counter (CR 714.3c).
 fn park_for_next_p0_turn(runner: &mut GameRunner) {
     let state = runner.state_mut();
     state.turn_number = 1;
