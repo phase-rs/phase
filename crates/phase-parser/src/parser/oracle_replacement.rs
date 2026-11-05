@@ -17775,7 +17775,7 @@ mod tests {
                     target: TargetFilter::PostReplacementDamageTarget
                 }
             ),
-            "the follow-up must declare the damaged creature as its target, got {:?}",
+            "the follow-up must retain the prevented event's damaged-creature reference, got {:?}",
             execute.effect
         );
         let movement = execute.sub_ability.as_ref().expect("owner-library move");

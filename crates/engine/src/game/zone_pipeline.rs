@@ -3873,12 +3873,27 @@ fn deliver_replaced_batch_member(
     owner: Option<BatchMemberDeliveryOwner>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
-    let component_parent = owner.map(|owner| PendingComponentDeliveryParent {
-        parent_group_id: owner.group,
-        member: owner.member,
-        expected_event: owner.expected_event.unwrap_or_else(|| event.clone()),
-        approved_event: event.clone(),
-    });
+    // A merged permanent's departure is the only path that consumes the
+    // component-delivery parent, so ordinary batch members never clone the
+    // proposed event for it.
+    let merged_permanent_leave = matches!(
+        &event,
+        ProposedEvent::ZoneChange { object_id, from, .. }
+            if *from == Zone::Battlefield
+                && state
+                    .objects
+                    .get(object_id)
+                    .is_some_and(|object| !object.merged_components.is_empty())
+    );
+    let component_parent =
+        owner
+            .filter(|_| merged_permanent_leave)
+            .map(|owner| PendingComponentDeliveryParent {
+                parent_group_id: owner.group,
+                member: owner.member,
+                expected_event: owner.expected_event.unwrap_or_else(|| event.clone()),
+                approved_event: event.clone(),
+            });
     if let ProposedEvent::ZoneChange {
         object_id,
         from,
@@ -3924,11 +3939,6 @@ fn deliver_replaced_batch_member(
                 .flatten()
         });
 
-        let merged_permanent_leave = from == Zone::Battlefield
-            && state
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| !object.merged_components.is_empty());
         if merged_permanent_leave {
             // CR 730.3d + CR 903.9c: the merged permanent's already-approved
             // event is expanded into a single pausable batch. Each component

@@ -96260,9 +96260,9 @@ fn source_owner_possessive_shuffle_moves_the_source() {
 /// single-object `ChangeZone` rather than the selected-population
 /// `ChangeZoneAll`.
 ///
-/// This is a deliberate ability EXCERPT, not the full card: the Aura's
-/// `Enchant creature` line and the untap-restriction static are omitted so the
-/// row isolates the Waterbend ability's own clause. The full verbatim card
+/// This is a deliberate ability EXCERPT, not the full card: the untap-restriction
+/// static and the Waterbend reminder text are omitted so the row isolates the
+/// Waterbend ability's own clause. The full verbatim card
 /// runs through the engine in `riftsweeper_owner_binding`.
 #[test]
 fn enchanted_host_owner_shuffle_moves_the_host_without_a_target_declaration() {
