@@ -14736,6 +14736,53 @@ mod tests {
         );
     }
 
+    /// CR 601.2f + CR 732.2a: the veto inspects BOTH compared frames. `object_content_eq`
+    /// OMITS static definitions, so a projected-reading cost modifier installed only on the
+    /// CURRENT frame — the shape a modifier that lands on the settled board after the prior
+    /// sample takes — is invisible to a prior-only scan while the cumulative journal still
+    /// grows. The fixed control proves the static's presence is not what rejects: only the
+    /// projected read is.
+    #[test]
+    fn constant_depth_projected_cost_modifier_only_in_current_rejects() {
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+        let prior = || {
+            let mut state = GameState::new_two_player(7);
+            inert_token(&mut state, 600, 0, "StaticSource");
+            state
+        };
+        // One cycle's payment: the reserve is identical in both frames (the projection
+        // zeroes it), while the cumulative journal advances.
+        let current = |dynamic_count| {
+            let mut state = prior();
+            state
+                .objects
+                .get_mut(&ObjectId(600))
+                .unwrap()
+                .static_definitions
+                .push(StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::default(),
+                    spell_filter: None,
+                    dynamic_count,
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+                }));
+            state.players[0].energy_paid_or_lost_this_turn = 2;
+            state
+        };
+        assert!(
+            !loop_states_equal_modulo_resources(
+                &prior(),
+                &current(Some(QuantityRef::EnergyPaidOrLostThisTurn))
+            ),
+            "a modifier reading the projected journal only in the current frame ⇒ REJECT"
+        );
+        assert!(
+            loop_states_equal_modulo_resources(&prior(), &current(None)),
+            "control: a fixed reduction present only in the current frame ⇒ EQUAL"
+        );
+    }
+
     /// The cover admits growth beside a non-grown permanent with an activated class-reading pump;
     /// whether it reads the growing class is the confirmer's replay to answer (CR 732.2a).
     #[test]
