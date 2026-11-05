@@ -16920,7 +16920,7 @@ fn parse_per_owner_exiled_this_way(i: &str) -> OracleResult<'_, CardPlayMode> {
     Ok((i, mode))
 }
 
-/// CR 406.3 + CR 608.2c: "[for each card exiled this way, ]the player who
+/// CR 406.3a + CR 608.2c: "[for each card exiled this way, ]the player who
 /// exiled it may play|cast it" (Vulcan Mind-Meld) — each exiled card's grant
 /// binds to the player who performed its exile, not its owner or the
 /// ability's controller (`PermissionGrantee::ObjectExiler`). The distributive
@@ -47478,7 +47478,7 @@ fn parse_effect_chain_ir_body(
                 // controls" is a per-opponent choice, not a repeat count; peeling
                 // the prefix would lose the population "that player" refers to.
                 || is_for_each_opponent_choose_controlled(&text.to_lowercase())
-                // CR 406.3a: "for each card exiled this way, the player who
+                // CR 608.2c: "for each card exiled this way, the player who
                 // exiled it may play it" is one per-card grant.
                 || is_object_exiler_play_grant(&text.to_lowercase())
             {
