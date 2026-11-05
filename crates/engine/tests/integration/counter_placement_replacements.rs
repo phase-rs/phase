@@ -27,7 +27,7 @@ const SURGE_NODE_ORACLE: &str = "This artifact enters with six charge counters o
 const BATTLEGROWTH_ORACLE: &str = "Put a +1/+1 counter on target creature.";
 const DJERUS_RENUNCIATION_ORACLE: &str = "Tap up to two target creatures.";
 const GLIMMER_OF_GENIUS_ORACLE: &str =
-    "Scry 2. Draw two cards. You get {E}{E} (two energy counters).";
+    "Scry 2, then draw two cards. You get {E}{E} (two energy counters).";
 
 fn charge() -> CounterType {
     CounterType::Generic("charge".to_string())
@@ -175,7 +175,21 @@ fn winding_constrictor_adds_one_to_counters_you_get() {
     let mut runner = scenario.build();
 
     let before = runner.state().players[0].energy;
+    let hand_before = runner.state().players[0].hand.len();
     runner.cast(glimmer).resolve();
+    // CR 608.2c: the scry, the draw and the energy placement all complete —
+    // the spell leaves the stack and priority returns.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "Glimmer of Genius must finish resolving, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty(), "the spell left the stack");
+    assert_eq!(
+        runner.state().players[0].hand.len() + 1 - hand_before,
+        2,
+        "the draw ran (Glimmer itself left the hand)"
+    );
     assert_eq!(
         runner.state().players[0].energy - before,
         3,
