@@ -317,22 +317,34 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
     };
   }
 
+  /**
+   * `command_id` is a top-level envelope key (the adapters match
+   * `msg.command_id`), so it goes in `topLevel`; `dataExtra` extends `data`.
+   */
   function stateUpdateEnvelope(
     viewerState: string,
     revision: number,
-    extra: Record<string, unknown> = {},
+    topLevel: Record<string, unknown> = {},
+    dataExtra: Record<string, unknown> = {},
   ) {
     return {
       type: "StateUpdate" as const,
+      ...topLevel,
       data: {
         state_revision: revision,
         state: JSON.parse(viewerState) as GameState,
         events: [{ type: "TurnStarted" }],
         legal_actions: [{ type: "PassPriority" }],
         full_key: FULL_KEY,
-        ...extra,
+        ...dataExtra,
       },
     };
+  }
+
+  /** The viewer state with only its turn number advanced: a small, real diff. */
+  function viewerVariant(viewerJson: string, step: number): string {
+    const state = JSON.parse(viewerJson) as GameState;
+    return JSON.stringify({ ...state, turn_number: (state.turn_number ?? 0) + step });
   }
 
   function revisionedHandle(text: string, revision: bigint) {
@@ -353,7 +365,12 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
     }
   }
 
-  function deltaFrame(text: string, revision: bigint, baseText: string, baseRevision: bigint): Uint8Array {
+  /**
+   * What the real server encoder emits for `text` after `baseText` was
+   * delivered: a Delta only when the baseline is a StateUpdate and the diff
+   * is smaller than a Full. A GameStarted baseline is FullOnly.
+   */
+  function encodeAfter(text: string, revision: bigint, baseText: string, baseRevision: bigint): Uint8Array {
     const handle = revisionedHandle(text, revision);
     const base = revisionedHandle(baseText, baseRevision);
     try {
@@ -366,29 +383,80 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
   const frameText = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
   const frameType = (bytes: Uint8Array) => (JSON.parse(frameText(bytes)) as { type: string }).type;
 
-  it("reconstructs complete server envelopes exactly through the runtime helper", () => {
-    const firstJson = corpus.checkpoints[0].audiences[0].json;
-    const secondJson = corpus.checkpoints[1].audiences[0].json;
-    const startedText = JSON.stringify(gameStartedEnvelope(firstJson, 1));
-    const updateText = JSON.stringify(stateUpdateEnvelope(secondJson, 2));
+  /**
+   * The real stream order: GameStarted Full -> StateUpdate Full -> StateUpdate
+   * Delta. Every kind is asserted, so a codec that stops producing a Delta
+   * fails here instead of silently weakening the rows that depend on one.
+   */
+  function realStream(viewerJson: string) {
+    const startedText = JSON.stringify(gameStartedEnvelope(viewerVariant(viewerJson, 0), 1));
+    const updateText = JSON.stringify(stateUpdateEnvelope(viewerVariant(viewerJson, 1), 2));
+    const nextText = JSON.stringify(stateUpdateEnvelope(viewerVariant(viewerJson, 2), 3));
+    const started = fullFrame(startedText, 1n);
+    const update = encodeAfter(updateText, 2n, startedText, 1n);
+    const delta = encodeAfter(nextText, 3n, updateText, 2n);
+    expect(frameType(started)).toBe("Full");
+    expect(frameType(update), "a GameStarted baseline is FullOnly").toBe("Full");
+    expect(frameType(delta), "StateUpdate after StateUpdate").toBe("Delta");
+    return { startedText, updateText, nextText, started, update, delta };
+  }
 
-    const full = fullFrame(startedText, 1n);
-    expect(frameType(full)).toBe("Full");
-    const delta = deltaFrame(updateText, 2n, startedText, 1n);
+  /** A Delta with one `data` field changed; the original must be a real Delta. */
+  function tamperDelta(frame: Uint8Array, mutate: (data: Record<string, unknown>) => void): Uint8Array {
+    const parsed = JSON.parse(frameText(frame)) as { type: string; data: Record<string, unknown> };
+    expect(parsed.type).toBe("Delta");
+    mutate(parsed.data);
+    return utf8.encode(JSON.stringify(parsed));
+  }
+
+  const flipFirst = (hash: unknown) => {
+    const text = String(hash);
+    return `${text[0] === "0" ? "1" : "0"}${text.slice(1)}`;
+  };
+
+  const baselineJson = () => corpus.checkpoints[0].audiences[0].json;
+
+  it("reconstructs complete server envelopes exactly through the runtime helper", () => {
+    const stream = realStream(baselineJson());
+    const runtime = new StateCodecRuntime(wasm);
+    const session = runtime.open();
+    try {
+      const decodedStarted = runtime.decode(session, stream.started);
+      expect(decodedStarted).toEqual({ kind: "decoded", json: stream.startedText });
+      // The transport observes text only: revisions stay inside WASM.
+      expect(Object.keys(decodedStarted).sort()).toEqual(["json", "kind"]);
+      expect(runtime.decode(session, stream.update)).toEqual({ kind: "decoded", json: stream.updateText });
+      const decodedDelta = runtime.decode(session, stream.delta);
+      expect(decodedDelta).toEqual({ kind: "decoded", json: stream.nextText });
+      expect(JSON.parse((decodedDelta as { json: string }).json)).toEqual(JSON.parse(stream.nextText));
+    } finally {
+      runtime.dispose();
+    }
+  });
+
+  it("reconstructs a deleted top-level command_id exactly", () => {
+    const viewer = baselineJson();
+    const startedText = JSON.stringify(gameStartedEnvelope(viewerVariant(viewer, 0), 1));
+    const withId = JSON.stringify(stateUpdateEnvelope(viewerVariant(viewer, 1), 2, { command_id: 7 }));
+    const withoutId = JSON.stringify(stateUpdateEnvelope(viewerVariant(viewer, 2), 3));
+    expect(JSON.parse(withId)).toHaveProperty("command_id", 7);
+    expect(JSON.parse(withoutId)).not.toHaveProperty("command_id");
+    const delta = encodeAfter(withoutId, 3n, withId, 2n);
     expect(frameType(delta)).toBe("Delta");
+    // Reach guard: the encoder expressed the deletion as a removal patch.
+    expect((JSON.parse(frameText(delta)) as {
+      data: { patch: { message: { remove: string[] } } };
+    }).data.patch.message.remove).toEqual(["command_id"]);
 
     const runtime = new StateCodecRuntime(wasm);
     const session = runtime.open();
     try {
-      const decodedFull = runtime.decode(session, full);
-      expect(decodedFull).toEqual({ kind: "decoded", json: startedText });
-      // The transport observes text only: revisions stay inside WASM.
-      expect(Object.keys(decodedFull).sort()).toEqual(["json", "kind"]);
-
-      const decodedDelta = runtime.decode(session, delta);
-      expect(decodedDelta).toEqual({ kind: "decoded", json: updateText });
-      expect(JSON.parse((decodedDelta as { json: string }).json))
-        .toEqual(JSON.parse(updateText));
+      runtime.decode(session, fullFrame(startedText, 1n));
+      expect(runtime.decode(session, encodeAfter(withId, 2n, startedText, 1n)))
+        .toEqual({ kind: "decoded", json: withId });
+      const decoded = runtime.decode(session, delta);
+      expect(decoded).toEqual({ kind: "decoded", json: withoutId });
+      expect(JSON.parse((decoded as { json: string }).json)).not.toHaveProperty("command_id");
     } finally {
       runtime.dispose();
     }
@@ -400,7 +468,7 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
     const currentEnvelope = stateUpdateEnvelope(currentRow.json, 2);
     const baseText = JSON.stringify(baseEnvelope);
     const currentText = JSON.stringify(currentEnvelope);
-    const delta = deltaFrame(currentText, BigInt(currentRow.revision), baseText, BigInt(baseRow.revision));
+    const delta = encodeAfter(currentText, BigInt(currentRow.revision), baseText, BigInt(baseRow.revision));
     expect(frameType(delta)).toBe("Delta");
 
     const runtime = new StateCodecRuntime(wasm);
@@ -414,33 +482,65 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
     }
   });
 
-  it("reports resyncRequired for a missing baseline and a corrupt frame, then recovers on a Full", () => {
-    const firstJson = corpus.checkpoints[0].audiences[0].json;
-    const secondJson = corpus.checkpoints[1].audiences[0].json;
-    const startedText = JSON.stringify(gameStartedEnvelope(firstJson, 1));
-    const updateText = JSON.stringify(stateUpdateEnvelope(secondJson, 2));
-    const full = fullFrame(startedText, 1n);
-    const delta = deltaFrame(updateText, 2n, startedText, 1n);
-
+  it("reports resyncRequired for a missing baseline and each corrupted integrity field", () => {
+    const stream = realStream(baselineJson());
     const runtime = new StateCodecRuntime(wasm);
-    const session = runtime.open();
+    const establish = () => {
+      const session = runtime.open();
+      expect(runtime.decode(session, stream.started)).toMatchObject({ kind: "decoded" });
+      expect(runtime.decode(session, stream.update)).toMatchObject({ kind: "decoded" });
+      return session;
+    };
     try {
-      // A delta cannot establish a baseline.
-      expect(runtime.decode(session, delta)).toEqual({ kind: "resyncRequired" });
-      // A frame whose result hash was altered is rejected.
-      const tampered = JSON.parse(frameText(delta)) as {
-        data: { result_hash: string };
-      };
-      tampered.data.result_hash =
-        `${tampered.data.result_hash[0] === "0" ? "1" : "0"}${tampered.data.result_hash.slice(1)}`;
-      expect(runtime.decode(session, utf8.encode(JSON.stringify(tampered))))
-        .toEqual({ kind: "resyncRequired" });
-      // A Full establishes the baseline; the same delta then applies.
-      expect(runtime.decode(session, full)).toEqual({ kind: "decoded", json: startedText });
-      expect(runtime.decode(session, delta)).toEqual({ kind: "decoded", json: updateText });
-      // A closed session is a lifecycle failure, not a resync request.
-      runtime.close(session);
-      expect(() => runtime.decode(session, full)).toThrow();
+      // Positive control: the untampered Delta applies on its own baseline.
+      const control = establish();
+      expect(runtime.decode(control, stream.delta)).toEqual({ kind: "decoded", json: stream.nextText });
+
+      // A Delta cannot establish a baseline.
+      expect(runtime.decode(runtime.open(), stream.delta)).toEqual({ kind: "resyncRequired" });
+
+      const tampers: [string, (data: Record<string, unknown>) => void][] = [
+        ["result_hash", (data) => { data.result_hash = flipFirst(data.result_hash); }],
+        ["base_hash", (data) => { data.base_hash = flipFirst(data.base_hash); }],
+        ["base_revision", (data) => { data.base_revision = Number(data.base_revision) + 3; }],
+      ];
+      for (const [label, mutate] of tampers) {
+        const session = establish();
+        expect(runtime.decode(session, tamperDelta(stream.delta, mutate)), label)
+          .toEqual({ kind: "resyncRequired" });
+        // The rejected frame consumed the baseline: only a Full recovers it.
+        expect(runtime.decode(session, stream.delta), `${label}: baseline dropped`)
+          .toEqual({ kind: "resyncRequired" });
+        expect(runtime.decode(session, stream.update), `${label}: Full recovers`)
+          .toEqual({ kind: "decoded", json: stream.updateText });
+        expect(runtime.decode(session, stream.delta), `${label}: Delta applies again`)
+          .toEqual({ kind: "decoded", json: stream.nextText });
+      }
+    } finally {
+      runtime.dispose();
+    }
+  });
+
+  it("isolates baselines between sessions and never recreates a closed one", () => {
+    const stream = realStream(baselineJson());
+    const runtime = new StateCodecRuntime(wasm);
+    try {
+      const a = runtime.open();
+      const b = runtime.open();
+      for (const frame of [stream.started, stream.update]) {
+        expect(runtime.decode(a, frame)).toMatchObject({ kind: "decoded" });
+      }
+      // B has no baseline: the same real Delta is rejected for B only.
+      expect(runtime.decode(b, stream.delta)).toEqual({ kind: "resyncRequired" });
+      expect(runtime.decode(a, stream.delta)).toEqual({ kind: "decoded", json: stream.nextText });
+
+      // Closing A leaves B usable; A's id is never implicitly reopened.
+      runtime.close(a);
+      for (const frame of [stream.started, stream.update]) {
+        expect(runtime.decode(b, frame)).toMatchObject({ kind: "decoded" });
+      }
+      expect(runtime.decode(b, stream.delta)).toEqual({ kind: "decoded", json: stream.nextText });
+      expect(() => runtime.decode(a, stream.started)).toThrow();
     } finally {
       runtime.dispose();
     }
@@ -490,13 +590,26 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
     data: { server_version: "0.0.0-test", selected_state_codec: "StateCodecV1" },
   });
 
+  interface SessionStats {
+    decodes: number;
+    closes: number;
+  }
+
   /** A provider over this file's real module, i.e. real Rust reconstruction. */
-  function realSessionProvider(runtime: StateCodecRuntime) {
+  function realSessionProvider(runtime: StateCodecRuntime, sessions: SessionStats[] = []) {
     return () => {
       const sessionId = runtime.open();
+      const stats: SessionStats = { decodes: 0, closes: 0 };
+      sessions.push(stats);
       return Promise.resolve({
-        decode: async (frame: Uint8Array) => runtime.decode(sessionId, frame),
-        close: () => runtime.close(sessionId),
+        decode: async (frame: Uint8Array) => {
+          stats.decodes++;
+          return runtime.decode(sessionId, frame);
+        },
+        close: () => {
+          stats.closes++;
+          runtime.close(sessionId);
+        },
       });
     };
   }
@@ -505,20 +618,28 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
     return socket.sent.map((raw) => (JSON.parse(raw) as { type?: string }).type ?? "");
   }
 
-  it("normal and draft adapters emit the same state from one real codec stream", async () => {
-    vi.stubGlobal("WebSocket", IntegrationSocket);
-    const firstJson = corpus.checkpoints[0].audiences[0].json;
-    const secondJson = corpus.checkpoints[2].audiences[0].json;
-    const started = gameStartedEnvelope(firstJson, 1);
-    const update = stateUpdateEnvelope(secondJson, 2);
-    const startedText = JSON.stringify(started);
-    const updateText = JSON.stringify(update);
-    const full = frameText(fullFrame(startedText, 1n));
-    const delta = frameText(deltaFrame(updateText, 2n, startedText, 1n));
+  const resyncCount = (socket: IntegrationSocket) =>
+    sentTypes(socket).filter((type) => type === "ResyncState").length;
 
-    // ── Normal adapter ──
-    const normalRuntime = new StateCodecRuntime(wasm);
-    const normal = new WebSocketAdapter(
+  /** Hello, setup-frame wait, then the codec confirmation, on the next socket. */
+  async function handshakeSocket(
+    setupType: string,
+    previous: IntegrationSocket | null = null,
+  ): Promise<IntegrationSocket> {
+    await vi.waitFor(() => expect(IntegrationSocket.last).not.toBe(previous));
+    const socket = IntegrationSocket.last!;
+    socket.deliver(SERVER_HELLO);
+    await vi.waitFor(() => expect(sentTypes(socket)).toContain(setupType));
+    socket.deliver(CONFIRMATION);
+    return socket;
+  }
+
+  type Observed = { type: string; snapshot?: { state: GameState }; state?: GameState };
+
+  function newNormalAdapter(runtime: StateCodecRuntime, sessions: SessionStats[] = []) {
+    vi.stubGlobal("WebSocket", IntegrationSocket);
+    IntegrationSocket.last = null;
+    const adapter = new WebSocketAdapter(
       "ws://localhost:9374/ws",
       "join",
       { main_deck: [], sideboard: [] },
@@ -526,26 +647,54 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
       undefined,
       undefined,
       undefined,
-      { stateCodecSessionProvider: realSessionProvider(normalRuntime) },
+      { stateCodecSessionProvider: realSessionProvider(runtime, sessions) },
     );
-    const normalStates: GameState[] = [];
-    normal.onEvent((event) => {
-      if (event.type === "stateChanged") normalStates.push(event.snapshot.state);
-    });
+    const events: Observed[] = [];
+    adapter.onEvent((event) => events.push(event as unknown as Observed));
+    return { adapter, events };
+  }
+
+  const stateChanges = (events: Observed[]) =>
+    events.filter((event) => event.type === "stateChanged").map((event) => event.snapshot!.state);
+
+  /** A joined normal stream: GameStarted Full accepted, then the first StateUpdate Full. */
+  async function establishedNormal(runtime: StateCodecRuntime, stream: ReturnType<typeof realStream>) {
+    const sessions: SessionStats[] = [];
+    const { adapter, events } = newNormalAdapter(runtime, sessions);
+    const init = adapter.initialize();
+    const socket = await handshakeSocket("JoinGameWithPassword");
+    socket.deliver(frameText(stream.started));
+    await init;
+    // The initializing GameStarted is read through getSnapshot, not stateChanged.
+    expect(stateChanges(events)).toEqual([]);
+    expect((await adapter.getSnapshot()).state).toEqual(JSON.parse(stream.startedText).data.state);
+    socket.deliver(frameText(stream.update));
+    await vi.waitFor(() => expect(stateChanges(events)).toHaveLength(1));
+    return { adapter, events, socket, sessions };
+  }
+
+  it("normal and draft adapters emit the same state from one real codec stream", async () => {
+    vi.stubGlobal("WebSocket", IntegrationSocket);
+    const stream = realStream(baselineJson());
+    const started = JSON.parse(stream.startedText) as ReturnType<typeof gameStartedEnvelope>;
+    const update = JSON.parse(stream.updateText) as ReturnType<typeof stateUpdateEnvelope>;
+    const next = JSON.parse(stream.nextText) as ReturnType<typeof stateUpdateEnvelope>;
+
+    // ── Normal adapter ──
+    const normalRuntime = new StateCodecRuntime(wasm);
+    const { adapter: normal, events: normalEvents } = newNormalAdapter(normalRuntime);
     const normalInit = normal.initialize();
-    await vi.waitFor(() => expect(IntegrationSocket.last).not.toBeNull());
-    const normalSocket = IntegrationSocket.last!;
-    normalSocket.deliver(SERVER_HELLO);
-    await vi.waitFor(() =>
-      expect((normal as unknown as { ws: unknown }).ws).not.toBeNull(),
-    );
-    normalSocket.deliver(CONFIRMATION);
-    normalSocket.deliver(full);
+    const normalSocket = await handshakeSocket("JoinGameWithPassword");
+    normalSocket.deliver(frameText(stream.started));
     await normalInit;
-    normalSocket.deliver(delta);
-    await vi.waitFor(() => expect(normalStates).toHaveLength(2));
-    expect(normalStates[0]).toEqual(started.data.state);
-    expect(normalStates[1]).toEqual(update.data.state);
+    expect((await normal.getSnapshot()).state).toEqual(started.data.state);
+    normalSocket.deliver(frameText(stream.update));
+    normalSocket.deliver(frameText(stream.delta));
+    await vi.waitFor(() => expect(stateChanges(normalEvents)).toHaveLength(2));
+    const normalStates = stateChanges(normalEvents);
+    expect(normalStates[0]).toEqual(update.data.state);
+    expect(normalStates[1]).toEqual(next.data.state);
+    expect(resyncCount(normalSocket)).toBe(0);
 
     // ── Draft adapter ──
     IntegrationSocket.last = null;
@@ -566,13 +715,7 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
       podPolicy: "Competitive",
       podSize: 8,
     });
-    await vi.waitFor(() => expect(IntegrationSocket.last).not.toBeNull());
-    const draftSocket = IntegrationSocket.last!;
-    draftSocket.deliver(SERVER_HELLO);
-    await vi.waitFor(() =>
-      expect((draft as unknown as { ws: unknown }).ws).not.toBeNull(),
-    );
-    draftSocket.deliver(CONFIRMATION);
+    const draftSocket = await handshakeSocket("CreateDraftWithSettings");
     draftSocket.deliver(JSON.stringify({
       type: "DraftCreated",
       data: { draft_code: "INTEG1", player_token: "integration-draft", seat_index: 0 },
@@ -590,13 +733,17 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
         opponent_name: "Opponent",
       },
     }));
-    draftSocket.deliver(full);
-    draftSocket.deliver(delta);
-    await vi.waitFor(() => expect(draftStates).toHaveLength(2));
+    draftSocket.deliver(frameText(stream.started));
+    draftSocket.deliver(frameText(stream.update));
+    draftSocket.deliver(frameText(stream.delta));
+    // The draft adapter also publishes the match's GameStarted state.
+    await vi.waitFor(() => expect(draftStates).toHaveLength(3));
     expect(draftStates[0]).toEqual(started.data.state);
     expect(draftStates[1]).toEqual(update.data.state);
+    expect(draftStates[2]).toEqual(next.data.state);
+    expect(draftStates.slice(1)).toEqual(normalStates);
+    expect(resyncCount(draftSocket)).toBe(0);
 
-    expect(normalStates).toEqual(draftStates);
     normal.dispose();
     draft.dispose();
     normalRuntime.dispose();
@@ -604,51 +751,27 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
   });
 
   it("recovers a corrupted real delta through one ResyncState and a real Full", async () => {
-    vi.stubGlobal("WebSocket", IntegrationSocket);
-    const firstJson = corpus.checkpoints[0].audiences[0].json;
-    const secondJson = corpus.checkpoints[1].audiences[0].json;
-    const thirdJson = corpus.checkpoints[2].audiences[0].json;
-    const started = gameStartedEnvelope(firstJson, 1);
-    const update = stateUpdateEnvelope(secondJson, 2);
-    const startedText = JSON.stringify(started);
-    const updateText = JSON.stringify(update);
-    const delta = deltaFrame(updateText, 2n, startedText, 1n);
-    const tampered = JSON.parse(frameText(delta)) as { data: { result_hash: string } };
-    tampered.data.result_hash =
-      `${tampered.data.result_hash[0] === "0" ? "1" : "0"}${tampered.data.result_hash.slice(1)}`;
-
+    const stream = realStream(baselineJson());
     const runtime = new StateCodecRuntime(wasm);
-    const adapter = new WebSocketAdapter(
-      "ws://localhost:9374/ws",
-      "join",
-      { main_deck: [], sideboard: [] },
-      "GAME01",
-      undefined,
-      undefined,
-      undefined,
-      { stateCodecSessionProvider: realSessionProvider(runtime) },
-    );
-    const init = adapter.initialize();
-    await vi.waitFor(() => expect(IntegrationSocket.last).not.toBeNull());
-    const socket = IntegrationSocket.last!;
-    socket.deliver(SERVER_HELLO);
-    await vi.waitFor(() => expect((adapter as unknown as { ws: unknown }).ws).not.toBeNull());
-    socket.deliver(CONFIRMATION);
-    socket.deliver(frameText(fullFrame(startedText, 1n)));
-    await init;
+    const { adapter, socket } = await establishedNormal(runtime, stream);
+    const viewer = baselineJson();
 
     const pending = adapter.submitAction({ type: "PassPriority" } as never, 0);
     const outcome = pending.then(() => "resolved", (error: unknown) => error);
-    socket.deliver(JSON.stringify(tampered));
+    // A real Delta with a corrupted result hash: Rust rejects it.
+    socket.deliver(frameText(tamperDelta(stream.delta, (data) => {
+      data.result_hash = flipFirst(data.result_hash);
+    })));
     await expect(outcome).resolves.toMatchObject({ code: "WS_CLOSED", recoverable: true });
-    expect(sentTypes(socket).filter((type) => type === "ResyncState")).toHaveLength(1);
+    expect(resyncCount(socket)).toBe(1);
     await expect(adapter.submitAction({ type: "PassPriority" } as never, 0))
       .rejects.toMatchObject({ code: "ACTION_NOT_SENT" });
+    expect(socket.close).not.toHaveBeenCalled();
 
-    // The server answers with a fresh FULL at the current revision.
-    const recovery = stateUpdateEnvelope(thirdJson, 3);
+    // The server answers with a fresh Full at the current revision.
+    const recovery = stateUpdateEnvelope(viewerVariant(viewer, 3), 4);
     const recoveryText = JSON.stringify(recovery);
-    socket.deliver(frameText(fullFrame(recoveryText, 3n)));
+    socket.deliver(frameText(fullFrame(recoveryText, 4n)));
     await vi.waitFor(async () => expect(await adapter.getState()).toEqual(recovery.data.state));
 
     // Command correlation survives: a new stamped command resolves normally.
@@ -660,12 +783,182 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
       .filter((raw) => (JSON.parse(raw) as { type?: string }).type === "Action")
       .slice(-1)[0];
     const commandId = (JSON.parse(actionFrame) as { command_id: number }).command_id;
-    const completion = stateUpdateEnvelope(thirdJson, 4, { command_id: commandId });
-    const completionText = JSON.stringify(completion);
-    socket.deliver(frameText(deltaFrame(completionText, 4n, recoveryText, 3n)));
+    const completionText = JSON.stringify(
+      stateUpdateEnvelope(viewerVariant(viewer, 4), 5, { command_id: commandId }),
+    );
+    const completion = encodeAfter(completionText, 5n, recoveryText, 4n);
+    expect(frameType(completion)).toBe("Delta");
+    socket.deliver(frameText(completion));
     await expect(resumed).resolves.toBeDefined();
+    expect(resyncCount(socket)).toBe(1);
 
     adapter.dispose();
     runtime.dispose();
+  });
+
+  it("retains the real wire baseline across a strictly stale normal update", async () => {
+    const viewer = baselineJson();
+    const startedText = JSON.stringify(gameStartedEnvelope(viewerVariant(viewer, 0), 10));
+    const staleText = JSON.stringify(stateUpdateEnvelope(viewerVariant(viewer, 1), 9));
+    const newerText = JSON.stringify(stateUpdateEnvelope(viewerVariant(viewer, 2), 11));
+    const stale = encodeAfter(staleText, 9n, startedText, 10n);
+    const newer = encodeAfter(newerText, 11n, staleText, 9n);
+    expect(frameType(stale)).toBe("Full");
+    expect(frameType(newer)).toBe("Delta");
+
+    const runtime = new StateCodecRuntime(wasm);
+    const sessions: SessionStats[] = [];
+    const { adapter, events } = newNormalAdapter(runtime, sessions);
+    const init = adapter.initialize();
+    const socket = await handshakeSocket("JoinGameWithPassword");
+    socket.deliver(frameText(fullFrame(startedText, 10n)));
+    await init;
+
+    // The stale Full decodes (reach) but is not applied; its Delta then needs it.
+    socket.deliver(frameText(stale));
+    socket.deliver(frameText(newer));
+    await vi.waitFor(() => expect(stateChanges(events)).toHaveLength(1));
+    expect(stateChanges(events)[0]).toEqual(JSON.parse(newerText).data.state);
+    expect(sessions[0].decodes).toBe(3);
+    expect(resyncCount(socket)).toBe(0);
+    expect(socket.close).not.toHaveBeenCalled();
+    expect(sessions[0].closes).toBe(0);
+    adapter.dispose();
+    runtime.dispose();
+  });
+
+  it("retires the real session on a wrong-key Full and fences its queued Delta", async () => {
+    const stream = realStream(baselineJson());
+    const viewer = baselineJson();
+    const runtime = new StateCodecRuntime(wasm);
+    const { adapter, events, socket, sessions } = await establishedNormal(runtime, stream);
+    const shown = stateChanges(events).length;
+
+    const wrong = { game_code: "GAME01", generation: 2 };
+    const wrongText = JSON.stringify(stateUpdateEnvelope(viewerVariant(viewer, 5), 6, {}, { full_key: wrong }));
+    const wrongNextText = JSON.stringify(stateUpdateEnvelope(viewerVariant(viewer, 6), 7, {}, { full_key: wrong }));
+    const wrongNext = encodeAfter(wrongNextText, 7n, wrongText, 6n);
+    expect(frameType(wrongNext)).toBe("Delta");
+    socket.deliver(frameText(fullFrame(wrongText, 6n)));
+    socket.deliver(frameText(wrongNext));
+
+    await vi.waitFor(() => expect(sessions[0].closes).toBe(1));
+    // started + update + the rejecting Full; the queued Delta is never decoded.
+    expect(sessions[0].decodes).toBe(3);
+    expect(events).toContainEqual(expect.objectContaining({ type: "error" }));
+    expect(stateChanges(events)).toHaveLength(shown);
+    expect(socket.close).toHaveBeenCalledOnce();
+    expect(resyncCount(socket)).toBe(0);
+    adapter.dispose();
+    runtime.dispose();
+  });
+
+  it("keeps a draft's ignored wrong-key Full and dependent Delta on the real wire baseline", async () => {
+    vi.stubGlobal("WebSocket", IntegrationSocket);
+    IntegrationSocket.last = null;
+    const stream = realStream(baselineJson());
+    const viewer = baselineJson();
+    const runtime = new StateCodecRuntime(wasm);
+    const sessions: SessionStats[] = [];
+    const draft = new ServerDraftAdapter("ws://localhost:9374/ws", {
+      stateCodecSessionProvider: realSessionProvider(runtime, sessions),
+    });
+    const labels: GameState[] = [];
+    draft.onEvent((event) => {
+      if (event.type === "gameStateUpdated") labels.push(event.state);
+    });
+    const created = draft.createDraft({
+      displayName: "Integration", setCodes: ["MKM"], kind: "Premier", public: true,
+      tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+    });
+    const socket = await handshakeSocket("CreateDraftWithSettings");
+    socket.deliver(JSON.stringify({
+      type: "DraftCreated",
+      data: { draft_code: "INTEG2", player_token: "integration-draft", seat_index: 0 },
+    }));
+    await created;
+    socket.deliver(JSON.stringify({
+      type: "DraftMatchStart",
+      data: {
+        match_id: "r1-t0", round: 1, game_code: FULL_KEY.game_code, full_key: FULL_KEY,
+        player_token: "integration-draft-match", your_player: 0, opponent_name: "Opponent",
+      },
+    }));
+    socket.deliver(frameText(stream.started));
+    socket.deliver(frameText(stream.update));
+    await vi.waitFor(() => expect(labels).toHaveLength(2));
+
+    // A wrong-key Full, then a Delta that depends on it (same rejected key):
+    // both decode, neither is emitted, and no resync or close results.
+    const wrong = { game_code: "GAME01", generation: 2 };
+    const wrongText = JSON.stringify(stateUpdateEnvelope(viewerVariant(viewer, 5), 6, {}, { full_key: wrong }));
+    const wrongNextText = JSON.stringify(stateUpdateEnvelope(viewerVariant(viewer, 6), 7, {}, { full_key: wrong }));
+    const wrongNext = encodeAfter(wrongNextText, 7n, wrongText, 6n);
+    expect(frameType(wrongNext)).toBe("Delta");
+    socket.deliver(frameText(fullFrame(wrongText, 6n)));
+    socket.deliver(frameText(wrongNext));
+
+    // Restoration uses a matching-key Full (the server forces Full across keys),
+    // then a matching-key Delta: the emitted states prove both decoded.
+    const goodText = JSON.stringify(stateUpdateEnvelope(viewerVariant(viewer, 7), 8));
+    const goodNextText = JSON.stringify(stateUpdateEnvelope(viewerVariant(viewer, 8), 9));
+    const goodNext = encodeAfter(goodNextText, 9n, goodText, 8n);
+    expect(frameType(goodNext)).toBe("Delta");
+    socket.deliver(frameText(fullFrame(goodText, 8n)));
+    socket.deliver(frameText(goodNext));
+    await vi.waitFor(() => expect(labels).toHaveLength(4));
+    expect(labels[2]).toEqual(JSON.parse(goodText).data.state);
+    expect(labels[3]).toEqual(JSON.parse(goodNextText).data.state);
+    expect(sessions[0].decodes).toBe(6);
+    expect(sessions[0].closes).toBe(0);
+    expect(resyncCount(socket)).toBe(0);
+    expect(socket.close).not.toHaveBeenCalled();
+    draft.dispose();
+    runtime.dispose();
+  });
+
+  it("restarts a reconnect on an empty real session: initial Delta fails closed, then a genuine bootstrap restores play", async () => {
+    vi.useFakeTimers();
+    const stream = realStream(baselineJson());
+    const viewer = baselineJson();
+    const runtime = new StateCodecRuntime(wasm);
+    try {
+      const { adapter, events, socket: first, sessions } = await establishedNormal(runtime, stream);
+      expect(sessions).toHaveLength(1);
+      // Lose the connection: the adapter reconnects with a brand-new session.
+      first.onclose?.();
+      await vi.advanceTimersByTimeAsync(1000);
+      const second = await handshakeSocket("Reconnect", first);
+      expect(sessions).toHaveLength(2);
+      expect(sessions[0].closes).toBe(1);
+
+      // A Delta with no baseline in the new session: the real codec rejects it
+      // and, with no bootstrap yet, the attachment fails closed after one resync.
+      second.deliver(frameText(stream.delta));
+      await vi.waitFor(() => expect(sessions[1].closes).toBe(1));
+      expect(resyncCount(second)).toBe(1);
+      expect(second.close).toHaveBeenCalled();
+
+      // The next attempt bootstraps from a genuine GameStarted Full.
+      await vi.advanceTimersByTimeAsync(5000);
+      const third = await handshakeSocket("Reconnect", second);
+      expect(sessions).toHaveLength(3);
+      const shown = stateChanges(events).length;
+      third.deliver(frameText(stream.started));
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+      expect(resyncCount(third)).toBe(0);
+      third.deliver(frameText(stream.update));
+      third.deliver(frameText(stream.delta));
+      await vi.waitFor(() => expect(stateChanges(events)).toHaveLength(shown + 3));
+      expect((await adapter.getState()).turn_number).toBe(
+        (JSON.parse(viewer) as GameState).turn_number + 2,
+      );
+      expect(resyncCount(third)).toBe(0);
+      expect(sessions[2].closes).toBe(0);
+      adapter.dispose();
+    } finally {
+      runtime.dispose();
+      vi.useRealTimers();
+    }
   });
 });

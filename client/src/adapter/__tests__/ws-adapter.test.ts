@@ -4384,8 +4384,11 @@ describe("WebSocketAdapter — negotiated StateCodecV1", () => {
         full_key: REPLY_OWNERSHIP_FULL_KEY,
       },
     });
-    const session = codecSession(() => ({ kind: "resyncRequired" }));
-    const { adapter, raw, init } = await startCodecAdapter(session.session);
+    // Only the first frame is rejected; every later frame WOULD decode, so a
+    // fenced late frame is the wrapper's doing, not the decoder's.
+    const codec = scriptedCodec();
+    codec.rejectNext(1);
+    const { adapter, raw, init } = await startCodecAdapter(codec.session);
     const events: unknown[] = [];
     adapter.onEvent((event) => events.push(event));
     const rejection = trackRejection(init);
@@ -4398,15 +4401,23 @@ describe("WebSocketAdapter — negotiated StateCodecV1", () => {
     ).toHaveLength(1);
     expect(events.some((event) => (event as { type?: string }).type === "playerIdentity")).toBe(false);
     expect(raw.close).toHaveBeenCalled();
-    expect(session.close).toHaveBeenCalledOnce();
+    expect(codec.close).toHaveBeenCalledOnce();
+    expect(codec.decode).toHaveBeenCalledOnce();
 
-    // A late, valid resync Full cannot publish state or bootstrap.
+    // A late, valid resync StateUpdate Full + Delta, then a control frame, still
+    // reach the transport (the wrapper's handler is installed). The receive
+    // queue is microtask-only, so a macrotask boundary proves it drained them.
     const late = vi.fn();
     adapter.onEvent(late);
-    raw.dispatchSynthetic("message", fullFrame(started));
-    await Promise.resolve();
+    expect(raw.onmessage).toBeTypeOf("function");
+    raw.dispatchSynthetic("message", fullFrame(JSON.stringify(codecStateUpdate(2, 2))));
+    raw.dispatchSynthetic("message", deltaFrame(JSON.stringify(codecStateUpdate(3, 3))));
+    raw.dispatchSynthetic("message", JSON.stringify({ type: "Pong", data: { timestamp: Date.now() } }));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(codec.decode).toHaveBeenCalledOnce();
     expect(late).not.toHaveBeenCalled();
     expect(adapter.playerId).toBeNull();
+    await expect(adapter.getSnapshot()).rejects.toBeDefined();
   });
 
   it.each(["nativeAi", "nativePregame"] as const)("keeps %s snapshot-only with same-turn startup", async (nativeKind) => {
@@ -4537,6 +4548,420 @@ describe("WebSocketAdapter — bounded codec preparation", () => {
     );
     void adapter.initialize().catch(() => undefined);
     expect(MockWebSocket.last).not.toBeNull();
+    adapter.dispose();
+  });
+});
+
+// ── Negotiated StateCodecV1: reconnect, recovery and teardown ───────────
+
+/**
+ * A decoder that unwraps each frame's embedded envelope verbatim and rejects
+ * (resync) exactly as many leading frames as the test asks for.
+ */
+function scriptedCodec(): {
+  session: StateCodecSession;
+  decode: ReturnType<typeof vi.fn>;
+  close: ReturnType<typeof vi.fn>;
+  rejectNext: (count?: number) => void;
+} {
+  let rejecting = 0;
+  const decode = vi.fn(async (frame: Uint8Array): Promise<CodecDecodeResult> => {
+    if (rejecting > 0) {
+      rejecting -= 1;
+      return { kind: "resyncRequired" };
+    }
+    const envelope = JSON.parse(new TextDecoder().decode(frame)) as { data: { state: unknown } };
+    return { kind: "decoded", json: JSON.stringify(envelope.data.state) };
+  });
+  const close = vi.fn();
+  return {
+    session: { decode, close },
+    decode,
+    close,
+    rejectNext: (count = 1) => { rejecting = count; },
+  };
+}
+
+function codecGameStarted(turn: number, revision: number, overrides: Record<string, unknown> = {}) {
+  return {
+    type: "GameStarted",
+    data: {
+      state: { ...createMockState(), turn_number: turn },
+      state_revision: revision,
+      your_player: 0,
+      player_token: "codec-token",
+      full_key: REPLY_OWNERSHIP_FULL_KEY,
+      ...overrides,
+    },
+  };
+}
+
+function codecStateUpdate(
+  turn: number,
+  revision: number,
+  topLevel: Record<string, unknown> = {},
+  dataOverrides: Record<string, unknown> = {},
+) {
+  return {
+    type: "StateUpdate",
+    ...topLevel,
+    data: {
+      state: { ...createMockState(), turn_number: turn },
+      state_revision: revision,
+      events: [],
+      full_key: REPLY_OWNERSHIP_FULL_KEY,
+      ...dataOverrides,
+    },
+  };
+}
+
+function deliverCodec(raw: MockWebSocket, kind: "Full" | "Delta", envelope: unknown): void {
+  const text = JSON.stringify(envelope);
+  raw.dispatchSynthetic("message", kind === "Full" ? fullFrame(text) : deltaFrame(text));
+}
+
+const RESYNC_REQUEST = '{"type":"ResyncState"}';
+
+function resyncRequests(raw: MockWebSocket): number {
+  return raw.send.mock.calls.filter(([value]) => value === RESYNC_REQUEST).length;
+}
+
+/** Completes the codec handshake of the socket created after `previous`. */
+async function codecHandshake(setupType: string, previous: MockWebSocket | null): Promise<MockWebSocket> {
+  await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(previous));
+  const raw = latestSocket();
+  raw.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+  await vi.waitFor(() => expect(raw.send).toHaveBeenCalledWith(
+    expect.stringContaining(`"type":"${setupType}"`),
+  ));
+  raw.dispatchSynthetic("message", CODEC_CONFIRMATION);
+  return raw;
+}
+
+/** A joined, bootstrapped codec stream: GameStarted Full accepted. */
+async function establishCodecAdapter(provider: () => Promise<StateCodecSession | null>) {
+  MockWebSocket.last = null;
+  const adapter = new WebSocketAdapter(
+    "wss://localhost:9374/ws",
+    "join",
+    { main_deck: [], sideboard: [] },
+    "GAME01",
+    undefined,
+    undefined,
+    undefined,
+    { stateCodecSessionProvider: provider },
+  );
+  const events: unknown[] = [];
+  adapter.onEvent((event) => events.push(event));
+  const init = adapter.initialize();
+  const raw = await codecHandshake("JoinGameWithPassword", null);
+  deliverCodec(raw, "Full", codecGameStarted(1, 1));
+  await init;
+  return { adapter, raw, events };
+}
+
+describe("WebSocketAdapter — negotiated StateCodecV1 reconnect", () => {
+  /** Established stream A, lost, then a reconnect attachment B with its own session. */
+  async function reconnectedCodecAdapter() {
+    const first = scriptedCodec();
+    const second = scriptedCodec();
+    const sessions = [first.session, second.session];
+    const established = await establishCodecAdapter(() => Promise.resolve(sessions.shift() ?? null));
+    expect((await established.adapter.getSnapshot()).state.turn_number).toBe(1);
+    established.raw.dispatchSynthetic("close");
+    await vi.advanceTimersByTimeAsync(1000);
+    const reconnect = await codecHandshake("Reconnect", established.raw);
+    return { ...established, first, second, reconnect };
+  }
+
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("treats a rejection on a reconnect attachment as pre-bootstrap despite the cached snapshot and token", async () => {
+    const { adapter, events, first, second, reconnect } = await reconnectedCodecAdapter();
+    try {
+      // Reach guard: the previous attachment's lease was released by its close,
+      // and this attachment really is a reconnect that kept the old snapshot.
+      expect(first.close).toHaveBeenCalledOnce();
+      expect(second.close).not.toHaveBeenCalled();
+      expect((await adapter.getSnapshot()).state.turn_number).toBe(1);
+      events.length = 0;
+
+      second.rejectNext(1);
+      deliverCodec(reconnect, "Full", codecGameStarted(5, 5));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(second.decode).toHaveBeenCalledOnce();
+      expect(resyncRequests(reconnect)).toBe(1);
+      expect(reconnect.close).toHaveBeenCalled();
+      expect(second.close).toHaveBeenCalledOnce();
+
+      // Late valid resync StateUpdate Full + Delta, then a control frame. The
+      // decoder would accept them: only the fence keeps them out.
+      deliverCodec(reconnect, "Full", codecStateUpdate(6, 6));
+      deliverCodec(reconnect, "Delta", codecStateUpdate(7, 7));
+      reconnect.dispatchSynthetic("message", JSON.stringify({ type: "Pong", data: { timestamp: 1 } }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(second.decode).toHaveBeenCalledOnce();
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "stateChanged" }));
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "reconnected" }));
+      expect((await adapter.getSnapshot()).state.turn_number).toBe(1);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("accepts a fresh reconnect session's GameStarted Full without a redundant resync, then restores Full and Delta", async () => {
+    const { adapter, events, first, second, reconnect } = await reconnectedCodecAdapter();
+    try {
+      events.length = 0;
+      deliverCodec(reconnect, "Full", codecGameStarted(5, 5));
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+      expect((await adapter.getSnapshot()).state.turn_number).toBe(5);
+      expect(resyncRequests(reconnect)).toBe(0);
+
+      // GameStarted is FullOnly: the first update is a Full, the next a Delta.
+      deliverCodec(reconnect, "Full", codecStateUpdate(6, 6));
+      deliverCodec(reconnect, "Delta", codecStateUpdate(7, 7));
+      await vi.waitFor(() => expect(
+        events.filter((event) => (event as { type?: string }).type === "stateChanged"),
+      ).toHaveLength(3));
+      expect((await adapter.getSnapshot()).state.turn_number).toBe(7);
+      expect(resyncRequests(reconnect)).toBe(0);
+      expect(reconnect.close).not.toHaveBeenCalled();
+      // No old session can authorize the new one: each decoded only its own stream.
+      expect(first.decode).toHaveBeenCalledOnce();
+      expect(second.decode).toHaveBeenCalledTimes(3);
+      expect(second.close).not.toHaveBeenCalled();
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("recovers an established reconnect stream through one resync without closing", async () => {
+    const { adapter, events, second, reconnect } = await reconnectedCodecAdapter();
+    try {
+      deliverCodec(reconnect, "Full", codecGameStarted(5, 5));
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+      deliverCodec(reconnect, "Full", codecStateUpdate(6, 6));
+      await vi.waitFor(() => expect((adapter as unknown as { snapshot: { state: GameState } }).snapshot.state.turn_number).toBe(6));
+
+      second.rejectNext(1);
+      deliverCodec(reconnect, "Delta", codecStateUpdate(7, 7));
+      await vi.waitFor(() => expect(resyncRequests(reconnect)).toBe(1));
+      await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects
+        .toMatchObject({ code: "ACTION_NOT_SENT" });
+      expect(reconnect.close).not.toHaveBeenCalled();
+      expect(second.close).not.toHaveBeenCalled();
+
+      deliverCodec(reconnect, "Full", codecStateUpdate(8, 8));
+      await vi.waitFor(() => expect((adapter as unknown as { snapshot: { state: GameState } }).snapshot.state.turn_number).toBe(8));
+      const resumed = adapter.submitAction({ type: "PassPriority" } as GameAction, 0);
+      await vi.waitFor(() => expect(submissionTypes(reconnect)).toHaveLength(1));
+      deliverCodec(reconnect, "Delta", codecStateUpdate(9, 9, { command_id: lastSubmissionCommandId(reconnect) }));
+      await expect(resumed).resolves.toMatchObject({ events: [] });
+      expect(resyncRequests(reconnect)).toBe(1);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("keeps the still-current socket on the recovery path while a replacement attachment starts", async () => {
+    const first = scriptedCodec();
+    let releasePreparation!: (session: StateCodecSession | null) => void;
+    const providers = [
+      () => Promise.resolve<StateCodecSession | null>(first.session),
+      () => new Promise<StateCodecSession | null>((resolve) => { releasePreparation = resolve; }),
+    ];
+    const { adapter, raw } = await establishCodecAdapter(() => providers.shift()!());
+    try {
+      const pending = adapter.submitAction({ type: "PassPriority" } as GameAction, 0);
+      const outcome = pending.then(() => "resolved", (error: unknown) => error);
+      // The replacement attachment is still preparing; A is the current socket.
+      expect(adapter.tryReconnect({
+        gameCode: "GAME01", playerToken: "codec-token", fullKey: REPLY_OWNERSHIP_FULL_KEY,
+        serverUrl: "wss://localhost:9374/ws", timestamp: Date.now(),
+      })).toBe(true);
+      expect(releasePreparation).toBeTypeOf("function");
+
+      first.rejectNext(1);
+      deliverCodec(raw, "Delta", codecStateUpdate(2, 2));
+      await vi.waitFor(() => expect(resyncRequests(raw)).toBe(1));
+      // Recovery path, not the pre-bootstrap fatal path.
+      await expect(outcome).resolves.toMatchObject({
+        code: "WS_CLOSED", message: "State delivery interrupted during action", recoverable: true,
+      });
+      expect(raw.close).not.toHaveBeenCalled();
+      expect(first.close).not.toHaveBeenCalled();
+      await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects
+        .toMatchObject({ code: "ACTION_NOT_SENT" });
+
+      deliverCodec(raw, "Full", codecStateUpdate(3, 3));
+      await vi.waitFor(() => expect((adapter as unknown as { snapshot: { state: GameState } }).snapshot.state.turn_number).toBe(3));
+      void adapter.submitAction({ type: "PassPriority" } as GameAction, 0).catch(() => undefined);
+      await vi.waitFor(() => expect(submissionTypes(raw)).toHaveLength(2));
+    } finally {
+      adapter.dispose();
+      releasePreparation?.(null);
+    }
+  });
+});
+
+describe("WebSocketAdapter — negotiated StateCodecV1 identity and teardown", () => {
+  const injectedNativeReconnect = (codec: ReturnType<typeof scriptedCodec>) => new WebSocketAdapter(
+    "native-engine",
+    "join",
+    { main_deck: [], sideboard: [] },
+    undefined,
+    undefined,
+    undefined,
+    "Guest",
+    {
+      nativePregame: {
+        kind: "reconnect",
+        socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+        gameCode: "NATIVE",
+        playerId: 1,
+        playerToken: "guest-token",
+        fullKey: { game_code: "NATIVE", generation: 1 },
+      },
+      // Native sessions are snapshot-only by default; an explicit provider opts in.
+      stateCodecSessionProvider: () => Promise.resolve(codec.session),
+    },
+  );
+  const sessionAttached = (fullKey: unknown) => JSON.stringify({
+    type: "SessionAttached",
+    data: { game_code: "NATIVE", player_id: 1, player_token: "guest-token", full_key: fullKey },
+  });
+
+  it("accepts a matching SessionAttached on an injected native reconnect codec stream", async () => {
+    // Reach guard for the terminal rows below: the same route attaches on a valid key.
+    MockWebSocket.last = null;
+    const codec = scriptedCodec();
+    const adapter = injectedNativeReconnect(codec);
+    const attached = adapter.initializePregame();
+    const raw = await codecHandshake("Reconnect", null);
+    raw.dispatchSynthetic("message", sessionAttached({ game_code: "NATIVE", generation: 1 }));
+    await expect(attached).resolves.toMatchObject({ gameCode: "NATIVE", playerId: 1 });
+    expect(raw.close).not.toHaveBeenCalled();
+    expect(codec.close).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+
+  it.each([
+    ["a changed generation", { game_code: "NATIVE", generation: 2 }],
+    ["a wrong game code", { game_code: "OTHER", generation: 1 }],
+    ["a missing key", undefined],
+  ] as const)("retires the codec session on a SessionAttached with %s", async (_label, fullKey) => {
+    MockWebSocket.last = null;
+    const codec = scriptedCodec();
+    const adapter = injectedNativeReconnect(codec);
+    const attached = trackRejection(adapter.initializePregame());
+    const raw = await codecHandshake("Reconnect", null);
+    const events = vi.fn();
+    adapter.onEvent(events);
+    raw.dispatchSynthetic("message", sessionAttached(fullKey));
+
+    await expect(attached()).resolves.toMatchObject({ code: "WS_ERROR" });
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+    expect(raw.close).toHaveBeenCalledOnce();
+    expect(codec.close).toHaveBeenCalledOnce();
+    expect(resyncRequests(raw)).toBe(0);
+    adapter.dispose();
+  });
+
+  it("retires the codec session on a native reconnect GameStarted Full for the wrong seat and fences the queued Delta", async () => {
+    MockWebSocket.last = null;
+    const codec = scriptedCodec();
+    const adapter = injectedNativeReconnect(codec);
+    const attached = adapter.initializePregame();
+    const raw = await codecHandshake("Reconnect", null);
+    raw.dispatchSynthetic("message", sessionAttached({ game_code: "NATIVE", generation: 1 }));
+    await attached;
+    const events = vi.fn();
+    adapter.onEvent(events);
+
+    // Seat 0 was attached, not the expected seat 1: the decoded Full is
+    // terminal, so the queued dependent Delta must never be decoded.
+    const wrongSeat = codecGameStarted(4, 4, {
+      your_player: 0, player_token: "guest-token", full_key: { game_code: "NATIVE", generation: 1 },
+    });
+    deliverCodec(raw, "Full", wrongSeat);
+    deliverCodec(raw, "Delta", codecStateUpdate(5, 5));
+    await vi.waitFor(() => expect(codec.close).toHaveBeenCalledOnce());
+    expect(codec.decode).toHaveBeenCalledOnce();
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+    expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
+    expect(raw.close).toHaveBeenCalledOnce();
+    expect(resyncRequests(raw)).toBe(0);
+    adapter.dispose();
+  });
+
+  it("closes instead of publishing ready when a decoded wrong-key Full arrives during recovery", async () => {
+    const codec = scriptedCodec();
+    MockWebSocket.last = null;
+    const { adapter, raw, events } = await establishCodecAdapter(() => Promise.resolve(codec.session));
+    try {
+      events.length = 0;
+      codec.rejectNext(1);
+      deliverCodec(raw, "Delta", codecStateUpdate(2, 2));
+      await vi.waitFor(() => expect(resyncRequests(raw)).toBe(1));
+      // Reach guard: the stream is in recovery and gates submissions.
+      await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects
+        .toMatchObject({ code: "ACTION_NOT_SENT" });
+      expect(raw.close).not.toHaveBeenCalled();
+
+      const wrongKey = { game_code: "GAME01", generation: 8 };
+      deliverCodec(raw, "Full", codecStateUpdate(9, 9, {}, { full_key: wrongKey }));
+      deliverCodec(raw, "Delta", codecStateUpdate(10, 10, {}, { full_key: wrongKey }));
+      await vi.waitFor(() => expect(codec.close).toHaveBeenCalledOnce());
+      // started + rejected Delta + the decoded wrong-key Full; the Delta is fenced.
+      expect(codec.decode).toHaveBeenCalledTimes(3);
+      expect(events).toContainEqual(expect.objectContaining({ type: "error" }));
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "stateChanged" }));
+      expect(raw.close).toHaveBeenCalledOnce();
+      // The identity failure adds no second resync request.
+      expect(resyncRequests(raw)).toBe(1);
+      expect((await adapter.getSnapshot()).state.turn_number).toBe(1);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("reports an adapter dispose, not a lost connection, to a pending action in codec mode", async () => {
+    const codec = scriptedCodec();
+    const { adapter, raw } = await establishCodecAdapter(() => Promise.resolve(codec.session));
+    const pending = trackRejection(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
+    expect(submissionTypes(raw)).toHaveLength(1);
+
+    adapter.dispose();
+    await expect(pending()).resolves.toMatchObject({
+      code: "WS_CLOSED", message: "Adapter disposed during action", recoverable: true,
+    });
+    expect(codec.close).toHaveBeenCalledOnce();
+    expect(raw.close).toHaveBeenCalled();
+  });
+
+  it("reports a failed setup send as such in codec mode", async () => {
+    MockWebSocket.last = null;
+    const codec = scriptedCodec();
+    const adapter = new WebSocketAdapter(
+      "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      undefined, undefined, undefined,
+      { stateCodecSessionProvider: () => Promise.resolve(codec.session) },
+    );
+    const init = trackRejection(adapter.initialize());
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+    const raw = latestSocket();
+    raw.send.mockImplementation((text: string) => {
+      if (text.includes('"type":"JoinGameWithPassword"')) throw new Error("socket write failed");
+    });
+    raw.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+
+    await expect(init()).resolves.toMatchObject({
+      code: "WS_CLOSED", message: "Failed to send setup frame", recoverable: true,
+    });
+    expect(codec.close).toHaveBeenCalledOnce();
+    expect(raw.close).toHaveBeenCalled();
     adapter.dispose();
   });
 });

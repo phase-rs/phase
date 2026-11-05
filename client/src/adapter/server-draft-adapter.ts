@@ -230,13 +230,16 @@ export class ServerDraftAdapter implements EngineAdapter {
   /** True while the current attachment is recovering codec-delivered state. */
   private stateCodecRecovering = false;
   /**
-   * Application-bootstrap authority for the current attachment. A new draft
-   * match resets it to pending; only an accepted GameStarted completes it.
+   * Application-bootstrap authority for the current socket, published when its
+   * attachment's socket is adopted. A new draft match resets it to pending;
+   * only an accepted GameStarted completes it.
    */
   private attachmentBootstrap: {
     socket: PhaseSocketTransport | null;
     status: StateCodecBootstrap;
   } | null = null;
+  /** The socket the in-flight game command was sent on, if any. */
+  private submissionSocket: PhaseSocketTransport | null = null;
 
   constructor(
     private readonly serverUrl: string,
@@ -359,6 +362,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         reject,
         this._serverInfo?.commandCorrelation === "CommandIdV1",
       );
+      this.submissionSocket = this.ws;
       try {
         this.emit({ type: "actionPendingChanged", pending: true });
       } catch (error) {
@@ -742,6 +746,36 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.stateCodecRecovering = false;
   }
 
+  /**
+   * A retired socket's close fails the command that was claimed on it: its
+   * completion can no longer arrive, and the replacement owns nothing else in
+   * the slot. A command claimed on the replacement is left untouched.
+   */
+  private settleRetiredClose(retired: PhaseSocketTransport): void {
+    if (this.submissionSocket !== retired) return;
+    const dropped = this.submission.drop();
+    if (!dropped) return;
+    dropped.reject(new AdapterError("WS_CLOSED", "Connection closed during action", true));
+    this.emit({ type: "actionPendingChanged", pending: false });
+  }
+
+  /**
+   * A retired socket's StateUpdate is withheld from game delivery, but it still
+   * answers the command that was claimed on it, exactly as it did before the
+   * replacement. It never touches the snapshot, which the replacement owns.
+   */
+  private settleRetiredCompletion(
+    retired: PhaseSocketTransport,
+    msg: { data?: unknown; command_id?: unknown },
+  ): void {
+    if (this.submissionSocket !== retired) return;
+    const pending = this.submission.take(msg.command_id);
+    if (!pending) return;
+    const data = (msg.data ?? {}) as { events?: GameEvent[]; log_entries?: GameLogEntry[] };
+    pending.resolve({ events: data.events ?? [], log_entries: data.log_entries });
+    this.emit({ type: "actionPendingChanged", pending: false });
+  }
+
   private abandonSocket(socket: PhaseSocket): void {
     // An incomplete socket's close must not reject an established draft action.
     socket.ws.onmessage = null;
@@ -769,8 +803,9 @@ export class ServerDraftAdapter implements EngineAdapter {
       socket: null,
       status: "pending",
     };
-    this.attachmentBootstrap = bootstrap;
-    this.stateCodecRecovering = false;
+    // Published as the adapter's binding only when this attachment's socket is
+    // adopted below: until then a still-current older socket keeps its own
+    // binding and recovery gate, and `ownsAttachment` tracks supersession.
     try {
       if (this.stateCodecProvider) {
         try {
@@ -805,6 +840,9 @@ export class ServerDraftAdapter implements EngineAdapter {
       }
       const sourceSocket = socket.ws;
       bootstrap.socket = sourceSocket;
+      // Adoption retires the previous binding and its recovery gate.
+      this.attachmentBootstrap = bootstrap;
+      this.stateCodecRecovering = false;
       this.ws = sourceSocket;
       this._serverInfo = socket.serverInfo;
       this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
@@ -819,7 +857,12 @@ export class ServerDraftAdapter implements EngineAdapter {
         // Preserve uncorrelated draft replies from sent older attachments, but
         // game delivery belongs only to the current socket generation.
         if (this.ws !== sourceSocket) {
-          const message = JSON.parse(event.data as string) as { type?: string };
+          const message = JSON.parse(event.data as string) as {
+            type?: string;
+            data?: unknown;
+            command_id?: unknown;
+          };
+          if (message.type === "StateUpdate") this.settleRetiredCompletion(sourceSocket, message);
           if (message.type === "GameStarted" || message.type === "StateUpdate"
             || message.type === "DraftMatchStart") return;
         }
@@ -836,10 +879,14 @@ export class ServerDraftAdapter implements EngineAdapter {
       };
       sourceSocket.onclose = () => {
         // A retired transport (a superseded attachment whose replacement is
-        // already current) owns no state, command slot or promise: its close
-        // must not drop the replacement's pending command. `this.ws === null`
-        // still means this is the unfinished attachment's own close.
-        if (this.ws !== null && this.ws !== sourceSocket) return;
+        // already current) owns no state or promise, and a command claimed on
+        // the replacement is not its to drop; it settles only a command that
+        // was claimed on itself. `this.ws === null` still means this is the
+        // unfinished attachment's own close.
+        if (this.ws !== null && this.ws !== sourceSocket) {
+          this.settleRetiredClose(sourceSocket);
+          return;
+        }
         if (this.pingInterval) {
           clearInterval(this.pingInterval);
           this.pingInterval = null;

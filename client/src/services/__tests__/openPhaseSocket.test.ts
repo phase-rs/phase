@@ -1283,8 +1283,15 @@ describe("openPhaseSocket — codec stream, recovery and teardown", () => {
   });
 
   it("requests one resync and closes immediately when bootstrap is pending", async () => {
-    const fake = fakeSession(() => ({ kind: "resyncRequired" }));
-    const { raw, socket } = await negotiated(fake, { bootstrap: () => "pending" });
+    // Only the first frame is rejected: every later frame WOULD decode, so a
+    // fenced late frame is the wrapper's doing, not the decoder's.
+    let calls = 0;
+    const fake = fakeSession(() => ++calls === 1
+      ? { kind: "resyncRequired" } : { kind: "decoded", json: DECODED_PONG });
+    const recovery = vi.fn();
+    const { raw, socket, received } = await negotiated(fake, {
+      bootstrap: () => "pending", onRecovery: recovery,
+    });
     const closed = vi.fn();
     socket.ws.onclose = closed;
 
@@ -1292,11 +1299,18 @@ describe("openPhaseSocket — codec stream, recovery and teardown", () => {
     await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
     expect(raw.send).toHaveBeenCalledWith('{"type":"ResyncState"}');
     expect(fake.close).toHaveBeenCalledOnce();
-    // A late valid Full cannot publish ready or emit application state.
-    const received = vi.fn();
+    expect(fake.decode).toHaveBeenCalledOnce();
+    // A late valid Full and Delta, then a control frame, reach the closed
+    // wrapper. The queue is microtask-only, so a macrotask boundary proves it
+    // drained them: nothing was decoded, delivered, or published as ready.
     raw.deliverMessage(codecFrame("Full"));
-    await Promise.resolve();
+    raw.deliverMessage(codecFrame("Delta"));
+    raw.deliverMessage(JSON.stringify({ type: "Pong", data: { timestamp: 3 } }));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(fake.decode).toHaveBeenCalledOnce();
     expect(received).not.toHaveBeenCalled();
+    expect(recovery.mock.calls).toEqual([["recovering"]]);
+    expect(closed).toHaveBeenCalledOnce();
   });
 
   it("closes when the recovery Full is rejected as well", async () => {
@@ -1373,14 +1387,19 @@ describe("openPhaseSocket — codec stream, recovery and teardown", () => {
     const fake = fakeSession();
     fake.decode.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
     const { raw, socket, received } = await negotiated(fake);
+    // Reach guard: this handler observes delivered frames before the close.
+    raw.deliverMessage(JSON.stringify({ type: "Pong", data: { timestamp: 1 } }));
+    await vi.waitFor(() => expect(received).toHaveBeenCalledOnce());
+    received.mockClear();
     raw.deliverMessage(codecFrame("Full"));
     await vi.waitFor(() => expect(fake.decode).toHaveBeenCalledOnce());
 
     socket.close();
     expect(fake.close).toHaveBeenCalledOnce();
     release({ kind: "decoded", json: DECODED_PONG });
-    await Promise.resolve();
-    await Promise.resolve();
+    // The queue is microtask-only: a macrotask boundary means the released
+    // decode has been fully processed by the wrapper.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(received).not.toHaveBeenCalled();
     socket.close();
     expect(fake.close).toHaveBeenCalledOnce();
@@ -1660,8 +1679,11 @@ describe("codec attachment and deadline boundaries", () => {
     raw.deliverMessage(fullHello());
     const socket = await pending;
     socket.close();
+    // Invalidation and lease release are immediate; only the notification is posted.
     expect(fake.close).toHaveBeenCalledOnce();
     expect(raw.close).toHaveBeenCalledOnce();
+    // Let the posted notification find no consumer, so it is retained.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     const closed = vi.fn();
     if (kind === "handler") socket.ws.onclose = closed;
     else socket.ws.addEventListener("close", closed);
@@ -1671,6 +1693,26 @@ describe("codec attachment and deadline boundaries", () => {
     await Promise.resolve();
     expect(closed).toHaveBeenCalledOnce();
     expect(socket.ws.onclose).not.toHaveBeenCalled();
+  });
+
+  it.each(["handler", "listener"] as const)("posts a local close to a %s attached in the same turn, never inside close()", async (kind) => {
+    const fake = fakeSession();
+    const pending = openPhaseSocket("ws://test", { stateCodecSession: fake.session });
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(fullHello());
+    const socket = await pending;
+    const closed = vi.fn();
+    if (kind === "handler") socket.ws.onclose = closed;
+    else socket.ws.addEventListener("close", closed);
+    socket.close();
+    // Native and gzip sockets deliver close asynchronously; so does the codec.
+    expect(closed).not.toHaveBeenCalled();
+    expect(fake.close).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    // A later native close cannot notify a second time.
+    raw.close();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(closed).toHaveBeenCalledOnce();
   });
 
   it("does not publish ready or decode queued frames after recovery delivery closes the socket", async () => {

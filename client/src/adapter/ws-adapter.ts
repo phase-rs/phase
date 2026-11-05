@@ -1690,13 +1690,14 @@ export class WebSocketAdapter implements EngineAdapter {
    * the tab's shared engine. `null` means no preparation and no advertisement.
    */
   private readonly stateCodecProvider: StateCodecSessionProvider | null;
+  /** Identifies the newest attachment; aborting it supersedes the older one. */
   private stateCodecPreparation: AbortController | null = null;
   /** True while the current attachment is recovering codec-delivered state. */
   private stateCodecRecovering = false;
   /**
-   * Application-bootstrap authority for the current attachment. Created fresh
-   * per attach: a surviving snapshot, token or codec baseline never authorizes
-   * a new bootstrap.
+   * Application-bootstrap authority for the current socket. Created fresh per
+   * attach and published when that attachment's socket is adopted: a surviving
+   * snapshot, token or codec baseline never authorizes a new bootstrap.
    */
   private attachmentBootstrap: {
     socket: PhaseSocketTransport | null;
@@ -2028,21 +2029,22 @@ export class WebSocketAdapter implements EngineAdapter {
     let socket: PhaseSocket<PhaseSocketTransport>;
     let diagnostics: SocketDiagnosticObserver | null = null;
     // Fresh bootstrap authority for this attachment: `pending` until a genuine
-    // GameStarted is accepted by the identity guards below.
+    // GameStarted is accepted by the identity guards below. It is published as
+    // the adapter's current binding only when its socket is adopted: until
+    // then the previous socket (if still current) keeps its own binding, and
+    // this attachment's supersession is tracked by `preparation` alone.
     const bootstrap: { socket: PhaseSocketTransport | null; status: StateCodecBootstrap } = {
       socket: null,
       status: "pending",
     };
-    this.attachmentBootstrap = bootstrap;
-    this.stateCodecRecovering = false;
     try {
       // Null/native opt-out must not introduce even a microtask before opening.
       const prepared = this.stateCodecProvider
         ? await this.prepareStateCodecSession(preparation.signal)
         : { kind: "session" as const, session: null };
-      if (this.disposed || this.attachmentBootstrap !== bootstrap || prepared.kind === "aborted") {
+      if (this.disposed || this.stateCodecPreparation !== preparation || prepared.kind === "aborted") {
         if (prepared.kind === "session") prepared.session?.close();
-        if (this.attachmentBootstrap === bootstrap) this.socketOpening = false;
+        if (this.stateCodecPreparation === preparation) this.socketOpening = false;
         return;
       }
       socket = await openPhaseSocket(this.serverUrl, {
@@ -2102,7 +2104,7 @@ export class WebSocketAdapter implements EngineAdapter {
     }
     this.socketOpening = false;
     // A handshake that settled before `dispose()` resumes here after it.
-    if (this.disposed || this.attachmentBootstrap !== bootstrap) {
+    if (this.disposed || this.stateCodecPreparation !== preparation) {
       socket.close();
       return;
     }
@@ -2123,6 +2125,9 @@ export class WebSocketAdapter implements EngineAdapter {
 
     this.ws = socket.ws;
     bootstrap.socket = socket.ws;
+    // Adoption retires the previous binding and its recovery gate.
+    this.attachmentBootstrap = bootstrap;
+    this.stateCodecRecovering = false;
     this._serverInfo = socket.serverInfo;
     this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
     this.startPing();

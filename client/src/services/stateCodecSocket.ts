@@ -106,6 +106,9 @@ type CloseListener = (event: CloseEvent) => void;
 
 type ConnectionState = "awaitingConfirmation" | "ready" | "awaitingFull" | "closed";
 
+/** When a terminating transport tells its consumers about the close. */
+type CloseNotification = "immediate" | "deferred";
+
 type Outbound =
   | { kind: "message"; event: MessageEvent<string> }
   | { kind: "close"; event: CloseEvent }
@@ -201,10 +204,14 @@ export class StateCodecSocket implements PhaseSocketTransport {
   }
 
   close(): void {
-    // Local close is terminal even during an outstanding decode. Retain one
-    // close notification for a consumer that has not attached yet; the later
-    // native close cannot notify again.
-    this.terminate();
+    // Local close is terminal even during an outstanding decode: the state is
+    // invalidated and the lease released here. The notification is posted on a
+    // microtask, as native and gzip sockets deliver close asynchronously, so a
+    // caller that closes and then settles its own state (dispose, a failed
+    // setup send) still observes its own reason before the close handler runs.
+    // One close notification is retained for a consumer that has not attached
+    // yet; the later native close cannot notify again.
+    this.terminate("deferred");
   }
 
   addEventListener(
@@ -397,8 +404,12 @@ export class StateCodecSocket implements PhaseSocketTransport {
     }
   }
 
-  /** Fatal close: immediate, idempotent, independent of the receive queue. */
-  private terminate(): void {
+  /**
+   * Fatal or local close: invalidation, timer cancellation and lease release
+   * are immediate, idempotent and independent of the receive queue. Only the
+   * close notification may be deferred ("deferred" = local `close()`).
+   */
+  private terminate(notification: CloseNotification = "immediate"): void {
     if (this.state === "closed") return;
     this.state = "closed";
     this.clearTimers();
@@ -407,7 +418,15 @@ export class StateCodecSocket implements PhaseSocketTransport {
       this.releaseSession();
     } finally {
       try {
-        this.deliver({ kind: "close", event: new CloseEvent("close") });
+        const item: Extract<Outbound, { kind: "close" }> = {
+          kind: "close",
+          event: new CloseEvent("close"),
+        };
+        if (notification === "deferred") {
+          queueMicrotask(() => this.deliver(item));
+        } else {
+          this.deliver(item);
+        }
       } finally {
         this.options.inner.close();
       }
