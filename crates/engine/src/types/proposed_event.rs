@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::game::game_object::{AttachTarget, DisplayIdentity};
+use crate::game::game_object::{AttachTarget, BackFaceData, DisplayIdentity};
 
 use super::counter::CounterType;
 
@@ -323,6 +323,39 @@ impl CounterPlacement {
     }
 }
 
+/// CR 707.8a: the double-faced shape of a token that is a copy of a double-faced
+/// permanent or double-faced card. The token's `CopiableValues` are the copied
+/// object's face that is up (CR 707.8); this carries the *other* face so the
+/// token is a double-faced token with both faces, and which face it enters up.
+///
+/// Deliberately not part of `CopiableValues`: a permanent that becomes a copy of
+/// a double-faced permanent copies only the face that is up (CR 707.8, CR 712.8e)
+/// and is not itself double-faced, so the other face must not travel through the
+/// layer-1 copy path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DoubleFacedCopy {
+    /// The face that is not up, in the same swap-snapshot form a transformed
+    /// double-faced permanent keeps in `back_face` (`transform_permanent`).
+    pub other_face: Box<BackFaceData>,
+    /// CR 707.8a: which face of the copied permanent is up, so the token enters
+    /// the same way (not a transform, CR 712.14a). Carried from the producer
+    /// rather than re-derived from the stored face's layout, which a transform
+    /// round trip erases.
+    pub orientation: DoubleFacedOrientation,
+}
+
+/// Which face of a double-faced source is up, in the representation a real
+/// double-faced permanent uses for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DoubleFacedOrientation {
+    /// Front face up (also a double-faced card outside the battlefield, CR 712.8a).
+    FrontUp,
+    /// A transforming double-faced permanent with its back face up (`transformed`).
+    TransformedBack,
+    /// A modal double-faced permanent with its back face up (`modal_back_face`).
+    ModalBack,
+}
+
 /// CR 707.2 + CR 707.5: Copy-token creation payload carried by the same
 /// `CreateToken` proposed event that ordinary token creation uses for
 /// replacement effects. `TokenSpec` remains the replacement-visible probe
@@ -365,6 +398,11 @@ pub struct CopyTokenSpec {
     /// `None` where no donor is in scope; consumers fall back to the token id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub donor: Option<ObjectIncarnationRef>,
+    /// CR 707.8a: present iff the copy source is a double-faced permanent or a
+    /// double-faced card, making the token a double-faced token. `None` for every
+    /// single-faced source (and in pre-existing serialized snapshots).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub double_faced: Option<DoubleFacedCopy>,
 }
 
 /// CR 614.1a + CR 111.1 + CR 616.1f: one batch of a CreateToken event — the
@@ -1909,6 +1947,7 @@ mod tests {
             source_id: ObjectId(1),
             controller: PlayerId(0),
             donor: None,
+            double_faced: None,
         }
     }
 

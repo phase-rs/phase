@@ -5341,6 +5341,13 @@ fn create_entry_copy_spec_for_replacement(
         // Forwards BecomeCopy mods, but no BecomeCopy+halving card exists, so the
         // None fallback (today's token-id read) preserves behavior on this route.
         donor: None,
+        // CR 707.8a's final sentence: the double-faced-token rule "does not apply
+        // to tokens that are created with their own set of characteristics and
+        // enter the battlefield as a copy of a double-faced object due to a
+        // replacement effect". This is that route (Mystic Reflection style),
+        // including when the entrant is a token, so it copies only the face that
+        // is up (CR 707.8) and must stay `None`.
+        double_faced: None,
     })
 }
 
