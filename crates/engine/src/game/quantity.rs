@@ -1857,6 +1857,15 @@ fn quantity_expr_is_source_context_previewable(
         QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
         } => target_filter_is_source_context_free(filter),
+        // CR 119: the source's controller's current life total is bound by
+        // the source alone. Other players' totals need a recipient or an
+        // iteration the preview doesn't have.
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+        } => true,
         QuantityExpr::Ref { .. } => false,
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
@@ -3573,7 +3582,7 @@ pub(crate) fn resolve_quantity_for_trigger_check(
         return resolve_quantity_with_ctx(state, expr, controller, ctx);
     }
     if let Some(event) = event {
-        if let Some(value) = resolve_event_scoped_ref(state, expr, event) {
+        if let Some(value) = resolve_event_scoped_ref(state, expr, event, source_context) {
             return value;
         }
         // CR 603.4: Make the triggering event visible to the resolver for
@@ -3846,6 +3855,7 @@ fn resolve_event_scoped_ref(
     state: &GameState,
     expr: &QuantityExpr,
     event: &crate::types::events::GameEvent,
+    source_context: Option<&TriggerSourceContext>,
 ) -> Option<i32> {
     match expr {
         QuantityExpr::Ref {
@@ -3856,13 +3866,18 @@ fn resolve_event_scoped_ref(
                 },
         } => {
             let id = crate::game::targeting::extract_source_from_event(event)?;
+            // CR 106.3 + CR 201.5: the payment record is the spell's, but a source
+            // filter is relative to the ability that reads it. "~" names the
+            // listener, never the spell.
+            let filter_source =
+                source_context.map_or(id, |source| source.identity.reference.object_id);
             // No latch routing: the read subject is the triggering SPELL from
             // the event, never the listener's own latched source.
             resolve_mana_spent_to_cast_metric(
                 state,
                 id,
                 metric,
-                &FilterContext::from_source(state, id),
+                &FilterContext::from_source(state, filter_source),
                 None,
             )
         }
@@ -10958,6 +10973,68 @@ mod tests {
         };
 
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), spell), 2);
+    }
+
+    /// CR 106.3 + CR 201.5: the payment read is the triggering spell's, but `SelfRef`
+    /// in its source filter names the listening ability's source, never the spell.
+    #[test]
+    fn triggering_spell_source_filter_self_ref_binds_to_the_listener() {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Savannah Lions".to_string(),
+            Zone::Stack,
+        );
+        let listener = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Barracks of the Thousand".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Plains".to_string(),
+            Zone::Battlefield,
+        );
+        add_spent_mana_source_snapshot(&mut state, spell, listener);
+        add_spent_mana_source_snapshot(&mut state, spell, listener);
+        add_spent_mana_source_snapshot(&mut state, spell, other);
+
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::TriggeringSpell,
+                metric: CastManaSpentMetric::FromSource {
+                    source_filter: TargetFilter::SelfRef,
+                },
+            },
+        };
+        let event = crate::types::events::GameEvent::SpellCast {
+            card_id: CardId(100),
+            controller: PlayerId(0),
+            object_id: spell,
+            cast_mana_value: None,
+        };
+        let count_for = |source: ObjectId| {
+            let context = crate::game::triggers::trigger_source_context_for_latch(
+                &state,
+                &state.objects[&source],
+            );
+            resolve_quantity_for_trigger_check(
+                &state,
+                &qty,
+                PlayerId(0),
+                Some(&context),
+                Some(&event),
+            )
+        };
+
+        assert_eq!(count_for(listener), 2);
+        assert_eq!(count_for(other), 1);
     }
 
     #[test]
