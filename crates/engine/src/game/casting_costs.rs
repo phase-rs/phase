@@ -5419,9 +5419,12 @@ pub(crate) fn handle_return_to_hand_for_cost(
             ));
         }
     }
-    // CR 113.2c + CR 601.2b: the return choice offered every creature some
-    // interchangeable beam me up instance admits; latch the instance that makes
-    // this return legal, so the cast records the grant it was paid through.
+    // CR 113.2c: the return choice offered every creature some same-cost beam
+    // me up instance admits; latch the instance that makes this return legal,
+    // so the cast records the grant it was paid through. Instances with the
+    // same cost are interchangeable apart from their own "this way"
+    // prohibition, so re-latching here is equivalent to having announced that
+    // instance (CR 601.2b) in the first place; it never changes the cost.
     if let (CastingVariant::BeamMeUp { granted_by }, [returned]) = (pending.casting_variant, chosen)
     {
         pending.casting_variant = CastingVariant::BeamMeUp {

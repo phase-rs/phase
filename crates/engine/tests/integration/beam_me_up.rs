@@ -1995,3 +1995,153 @@ fn two_scottys_grant_once_and_one_leaving_keeps_the_other_grant() {
         );
     }
 }
+
+/// S10 (CR 113.2c + CR 118.9 + CR 601.2b + CR 601.2f): a card with a printed
+/// beam me up and Scotty's grant has two beam me up instances with different
+/// costs, and each is its own alternative cost. Transporter Malfunction's
+/// printed {3}{R}{R}{R} and Scotty's {1}{R} (its mana cost) are both offered,
+/// each showing its own engine-provided cost, and the AI's legal actions name
+/// both. Scotty's option pays {1}{R} and returns another creature (Scotty
+/// can't be beamed up to cast a spell this way); the printed option pays
+/// {3}{R}{R}{R} and may return Scotty, whose prohibition binds only its own
+/// grant.
+#[test]
+fn printed_and_scotty_beam_me_up_costs_are_both_offered() {
+    fn stage() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+        let mut sc = GameScenario::new();
+        sc.at_phase(Phase::PreCombatMain);
+        let scotty = sc
+            .add_creature_from_oracle(P0, "Scotty, Miracle Worker", 2, 3, SCOTTY)
+            .as_legendary()
+            .with_mana_cost(cost(1, &[ManaCostShard::Blue, ManaCostShard::Blue]))
+            .id();
+        let bears = sc.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let card = sorcery_in_graveyard(
+            &mut sc,
+            P0,
+            "Transporter Malfunction",
+            cost(1, &[ManaCostShard::Red]),
+            TRANSPORTER_MALFUNCTION,
+        );
+        sc.with_mana_pool(P0, mana(ManaType::Red, 6));
+        let mut runner = sc.build();
+        runner.state_mut().layers_dirty.mark_full();
+        evaluate_layers(runner.state_mut());
+        (runner, scotty, bears, card)
+    }
+    let printed_cost = cost(3, &[ManaCostShard::Red; 3]);
+    let scotty_cost = cost(1, &[ManaCostShard::Red]);
+
+    // The method menu: one option per cost, each carrying its own cost.
+    let (mut runner, scotty, _, card) = stage();
+    let scotty_ref = ObjectIncarnationRef::of(scotty, runner.state().objects[&scotty].incarnation);
+    let card_id = runner.state().objects[&card].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: card,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Transporter Malfunction");
+    let WaitingFor::CastingVariantChoice { options, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected a method menu, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let offered: Vec<_> = options
+        .iter()
+        .map(|o| (o.variant, o.mana_cost.clone()))
+        .collect();
+    assert_eq!(
+        offered,
+        vec![
+            (
+                CastingVariant::BeamMeUp { granted_by: None },
+                printed_cost.clone()
+            ),
+            (
+                CastingVariant::BeamMeUp {
+                    granted_by: Some(scotty_ref)
+                },
+                scotty_cost.clone()
+            ),
+        ],
+        "both beam me up costs are offered, each with its own cost"
+    );
+    let ai_choices: BTreeSet<usize> = legal_actions(runner.state())
+        .iter()
+        .filter_map(|a| match a {
+            GameAction::ChooseCastingVariant { index } => Some(*index),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ai_choices,
+        BTreeSet::from([0, 1]),
+        "legal actions name both"
+    );
+
+    // Scotty's option: {1}{R}, and Scotty is not a return choice.
+    let (mut runner, scotty, bears, card) = stage();
+    let life = runner.life(P1);
+    let targets = [TargetRef::Player(P1)];
+    let record = cast_with(
+        &mut runner,
+        card,
+        CastIntent {
+            targets: &targets,
+            returned: Some(bears),
+            distribution: None,
+            variant: Some(|v| {
+                matches!(
+                    v,
+                    CastingVariant::BeamMeUp {
+                        granted_by: Some(_)
+                    }
+                )
+            }),
+        },
+    );
+    assert_eq!(record.variant_options.map(|o| o.len()), Some(2));
+    assert_eq!(
+        record.return_choices,
+        Some(vec![bears]),
+        "Scotty can't be beamed up to cast a spell this way"
+    );
+    assert_eq!(pool_total(&runner, P0), 4, "{{1}}{{R}} paid");
+    assert_eq!(zone(&runner, bears), Zone::Hand);
+    assert_eq!(zone(&runner, scotty), Zone::Battlefield);
+    pass_until_prompt(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(runner.life(P1), life - 3);
+    assert_eq!(zone(&runner, card), Zone::Exile);
+
+    // The printed option: {3}{R}{R}{R}, and Scotty may be returned.
+    let (mut runner, scotty, bears, card) = stage();
+    let life = runner.life(P1);
+    let record = cast_with(
+        &mut runner,
+        card,
+        CastIntent {
+            targets: &targets,
+            returned: Some(scotty),
+            distribution: None,
+            variant: Some(|v| matches!(v, CastingVariant::BeamMeUp { granted_by: None })),
+        },
+    );
+    assert_eq!(
+        record.return_choices.as_deref().map(set),
+        Some(set(&[scotty, bears])),
+        "Scotty's prohibition binds only casts through its grant"
+    );
+    assert_eq!(pool_total(&runner, P0), 0, "{{3}}{{R}}{{R}}{{R}} paid");
+    assert_eq!(zone(&runner, scotty), Zone::Hand);
+    assert_eq!(zone(&runner, bears), Zone::Battlefield);
+    pass_until_prompt(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(runner.life(P1), life - 3);
+    assert_eq!(zone(&runner, card), Zone::Exile);
+}

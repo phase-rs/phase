@@ -347,8 +347,10 @@ pub fn effective_harmonize_cost(state: &GameState, object_id: ObjectId) -> Optio
 /// `Keyword::BeamMeUp`. Resolves `ManaCost::SelfManaCost` (a grant whose cost
 /// equals the card's mana cost, e.g. Scotty, Miracle Worker) via
 /// `resolve_keyword_mana_cost`, mirroring `effective_harmonize_cost`. This is
-/// the cost of the first instance `beam_me_up_instances` lists. The keyword's
-/// rule number needs manual verification.
+/// the cost of the first instance `beam_me_up_instances` lists (the default
+/// announcement); a cast pays the cost of the instance it announced
+/// (`beam_me_up_cost_for`). The keyword's rule number needs manual
+/// verification.
 pub fn effective_beam_me_up_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
     beam_me_up_instances(state, object_id)
         .into_iter()
@@ -402,8 +404,10 @@ pub fn beam_me_up_instances(state: &GameState, object_id: ObjectId) -> Vec<BeamM
 }
 
 /// CR 601.2b + CR 613.1f: the granter of the beam me up instance `object_id`
-/// is announced with — the first instance's, so the announced granter and
-/// `effective_beam_me_up_cost` always come from one instance. `None` for a
+/// is announced with by default — the first instance's, so the default
+/// granter and `effective_beam_me_up_cost` always come from one instance. A
+/// player choosing among costs announces another option's granter instead
+/// (`beam_me_up_cast_options`). `None` for a
 /// printed beam me up (or none at all). Latched on
 /// `CastingVariant::BeamMeUp { granted_by }` at announcement. The engine keeps
 /// the card in its graveyard until the cast finalizes, but the granter can
@@ -422,22 +426,65 @@ pub fn beam_me_up_granted_by(
         .and_then(|instance| instance.granted_by)
 }
 
+/// CR 113.2c + CR 601.2b + CR 118.9: the beam me up casts a player may
+/// announce for `object_id` — one per distinct beam me up cost, represented by
+/// the first instance with that cost. A printed beam me up and a Scotty,
+/// Miracle Worker grant usually cost different amounts (Transporter
+/// Malfunction's {3}{R}{R}{R} against its {1}{R} mana cost), so each is its own
+/// alternative cost and both are offered. Same-cost instances are one option:
+/// they differ only in their own "this way" prohibition, and the return choice
+/// may pay through any of them (`beam_me_up_return_granters`).
+///
+/// An option is announced by its `granted_by` (`CastingVariant::BeamMeUp`), so
+/// two different-cost instances that both lack a granter (a printed one and a
+/// transient grant) cannot both be named; only the first-listed is offered. No
+/// printed card grants beam me up transiently. Beam me up rule number: needs
+/// manual verification.
+pub fn beam_me_up_cast_options(state: &GameState, object_id: ObjectId) -> Vec<BeamMeUpInstance> {
+    let mut options: Vec<BeamMeUpInstance> = Vec::new();
+    for instance in beam_me_up_instances(state, object_id) {
+        if !options
+            .iter()
+            .any(|option| option.cost == instance.cost || option.granted_by == instance.granted_by)
+        {
+            options.push(instance);
+        }
+    }
+    options
+}
+
+/// CR 601.2b + CR 601.2f: the beam me up cost of the cast announced through
+/// `latched` — the cost of the instance that granter gives `object_id` (the
+/// first-listed one with no granter for `None`, matching
+/// `beam_me_up_cast_options`). `None` when no such instance exists. Beam me up
+/// rule number: needs manual verification.
+pub fn beam_me_up_cost_for(
+    state: &GameState,
+    object_id: ObjectId,
+    latched: Option<ObjectIncarnationRef>,
+) -> Option<ManaCost> {
+    beam_me_up_instances(state, object_id)
+        .into_iter()
+        .find(|instance| instance.granted_by == latched)
+        .map(|instance| instance.cost)
+}
+
 /// CR 113.2c + CR 601.2b: the granters a beam me up cast latched to `latched`
-/// may be paid through. Each instance with the cost the cast pays (the first
-/// instance's) is interchangeable except for its own "this way" prohibition,
-/// so the return is legal if any of them admits it. `latched` comes first; it
-/// stays in the set after its granter leaves, where it binds nothing.
-/// Instances with a different cost are a different alternative cost and are
-/// not merged. Beam me up rule number: needs manual verification.
+/// may be paid through. Each instance with the cost the cast pays (the latched
+/// instance's, `beam_me_up_cost_for`) is interchangeable except for its own
+/// "this way" prohibition, so the return is legal if any of them admits it.
+/// `latched` comes first; it stays in the set after its granter leaves, where
+/// it binds nothing. Instances with a different cost are a different
+/// alternative cost (`beam_me_up_cast_options`) and are not merged. Beam me up
+/// rule number: needs manual verification.
 pub fn beam_me_up_return_granters(
     state: &GameState,
     object_id: ObjectId,
     latched: Option<ObjectIncarnationRef>,
 ) -> Vec<Option<ObjectIncarnationRef>> {
-    let instances = beam_me_up_instances(state, object_id);
     let mut granters = vec![latched];
-    if let Some(cast_cost) = instances.first().map(|instance| instance.cost.clone()) {
-        for instance in instances {
+    if let Some(cast_cost) = beam_me_up_cost_for(state, object_id, latched) {
+        for instance in beam_me_up_instances(state, object_id) {
             if instance.cost == cast_cost && !granters.contains(&instance.granted_by) {
                 granters.push(instance.granted_by);
             }

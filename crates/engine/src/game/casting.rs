@@ -1982,19 +1982,24 @@ fn beam_me_up_castable_from_graveyard(state: &GameState, object_id: ObjectId) ->
 }
 
 /// CR 118.3 + CR 601.2h: a beam me up cast also returns a creature you control
-/// that can be beamed up, so it is offered only while one exists.
+/// that can be beamed up, so it is offered only while one exists for some
+/// announceable beam me up cost.
 fn beam_me_up_has_returnable_creature(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
 ) -> bool {
     beam_me_up_castable_from_graveyard(state, object_id)
-        && casting_costs::can_pay_beam_me_up_additional_cost(
-            state,
-            player,
-            object_id,
-            super::keywords::beam_me_up_granted_by(state, object_id),
-        )
+        && super::keywords::beam_me_up_cast_options(state, object_id)
+            .into_iter()
+            .any(|option| {
+                casting_costs::can_pay_beam_me_up_additional_cost(
+                    state,
+                    player,
+                    object_id,
+                    option.granted_by,
+                )
+            })
 }
 
 /// CR 702.146: Check if an object has the Disturb keyword.
@@ -9240,10 +9245,16 @@ fn casting_candidates(
         if jumpstart_castable_from_graveyard(state, object_id) {
             candidates.push(CastingVariant::JumpStart);
         }
+        // CR 118.9 + CR 601.2b: one beam me up option per distinct cost, so a
+        // printed beam me up and Scotty's mana-cost grant are both offered.
         if beam_me_up_castable_from_graveyard(state, object_id) {
-            candidates.push(CastingVariant::BeamMeUp {
-                granted_by: super::keywords::beam_me_up_granted_by(state, object_id),
-            });
+            candidates.extend(
+                super::keywords::beam_me_up_cast_options(state, object_id)
+                    .into_iter()
+                    .map(|option| CastingVariant::BeamMeUp {
+                        granted_by: option.granted_by,
+                    }),
+            );
         }
         if super::keywords::effective_disturb_cost(state, object_id).is_some() {
             candidates.push(CastingVariant::Disturb);
@@ -10696,12 +10707,15 @@ fn prepare_spell_cast_announced(
     } else {
         None
     };
-    let effective_beam_me_up_cost_for_path =
-        if matches!(casting_variant, CastingVariant::BeamMeUp { .. }) {
-            beam_me_up_cost
-        } else {
-            None
-        };
+    // CR 601.2b + CR 601.2f: the cost of the beam me up instance announced,
+    // not the first one listed, so Scotty's grant on a card with a printed
+    // beam me up pays its own cost.
+    let effective_beam_me_up_cost_for_path = match casting_variant {
+        CastingVariant::BeamMeUp { granted_by } if beam_me_up_cost.is_some() => {
+            super::keywords::beam_me_up_cost_for(state, object_id, granted_by)
+        }
+        _ => None,
+    };
     let mut mana_cost = if energy_cost_from_exile
         || hand_cast_free
         || next_spell_without_paying
