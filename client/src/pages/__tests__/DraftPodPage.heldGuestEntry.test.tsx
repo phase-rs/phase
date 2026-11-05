@@ -42,7 +42,8 @@ vi.mock("../../adapter/p2p-draft-guest", () => ({
 }));
 
 const hostAd = vi.hoisted(() => ({ ctor: vi.fn(), dispose: vi.fn(async () => {}) }));
-vi.mock("../../adapter/draftPodHostAdapter", () => ({
+vi.mock("../../adapter/draftPodHostAdapter", async (importOriginal) => ({
+  preflightDraftPodHostRecovery: (await importOriginal<typeof import("../../adapter/draftPodHostAdapter")>()).preflightDraftPodHostRecovery,
   DraftPodHostAdapter: vi.fn().mockImplementation(function () {
     hostAd.ctor();
     return {
@@ -90,6 +91,7 @@ vi.mock("../../components/draft/HostControls", () => {
 vi.mock("../../components/draft/SetSelector", () => ({ SetSelector: () => null }));
 
 import { DraftPodPage } from "../DraftPodPage";
+import { useDraftPodStore } from "../../stores/draftPodStore";
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 
 const guestLocator = { roomCode: "ABCDE", displayName: "Alice", hostPeerId: "phase2-ABCDE", timestamp: Date.now() };
@@ -128,7 +130,7 @@ function presentHostRecord() {
     meta: hostMeta,
     capture: { id: hostMeta.id, roomCode: hostMeta.roomCode, updatedAt: hostMeta.updatedAt },
   });
-  persist.loadDraftHostSession.mockResolvedValue(hostSession);
+  persist.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: hostSession, raw: hostSession });
 }
 
 async function arrive(path: string) {
@@ -215,5 +217,20 @@ describe("DraftPodPage entry with a held session", () => {
     const s = useMultiplayerDraftStore.getState();
     expect(hostAd.ctor).toHaveBeenCalledTimes(1);
     expect(s.role).toBe("host");
+  });
+
+  it("explicit host entry with a held guest publishes the saved hosted pod's configuration", async () => {
+    useDraftPodStore.getState().reset();
+    expect(useDraftPodStore.getState().config).toMatchObject({ setCode: "", packs: [] });
+    presentHostRecord();
+    await useMultiplayerDraftStore.getState().joinDraft({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
+    await arrive("/draft-pod?entry=host");
+
+    expect(hostAd.ctor).toHaveBeenCalledTimes(1);
+    expect(useMultiplayerDraftStore.getState().role).toBe("host");
+    expect(useDraftPodStore.getState().config).toMatchObject({
+      setCode: "TST",
+      packs: [{ code: "TST", name: "TST" }],
+    });
   });
 });
