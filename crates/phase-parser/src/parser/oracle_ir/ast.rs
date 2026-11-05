@@ -2413,12 +2413,19 @@ pub(crate) fn placeholder_parsed_clause(name: &str) -> ParsedEffectClause {
 ///
 /// # `Some(Duration::UntilEndOfTurn)` is DELIBERATELY NOT in the unset set
 ///
-/// Some recognizers inject it as a default that is byte-identical to a printed "until
-/// end of turn". Enumerate those sites with
-/// `rg 'duration: Some\(Duration::UntilEndOfTurn\)' crates/phase-parser/src/parser/ | grep -v tests`.
-/// Distinguishing an injected default from a printed window is
-/// <https://github.com/phase-rs/phase/issues/7962> and is OUT OF SCOPE here: this
-/// predicate NEITHER FIXES NOR CLAIMS TO FIX that class.
+/// It stays EXPLICIT because it is also what a card prints. #7962 removed the
+/// recognizers that DEFAULTED a parsed `Option<Duration>` to it (they now emit the
+/// parsed value verbatim, leaving the fallback to the resolver), so a value here is
+/// no longer indistinguishable from a printed one at those sites. It remains the
+/// value a printed "until end of turn" parses to, and recognizing THAT is this
+/// predicate's whole job.
+///
+/// Not yet distinguishable, and therefore still refused as "stated": the sites whose
+/// destination field is a NON-`Option` `Duration` — `ForceAttack`, `ForceBlock`, and
+/// `CastingPermission::PlayFromExile` (`oracle_effect/subject.rs`,
+/// `oracle_effect/imperative.rs`, `oracle_effect/mod.rs`). Those fields have no unset
+/// sentinel to test, so their defaults cannot be removed without an
+/// `Effect`-shape change; `duration_governs`'s doc records each one's standing.
 ///
 /// The consequence, stated as the rule's own cost: a node whose recognizer injected
 /// `UntilEndOfTurn` will decline a governing prefix of a different window. Whether
@@ -2818,11 +2825,12 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
         //     embedded write this guard declines. The guard therefore corrects the
         //     EXPORTED PROVENANCE (card-data, the coverage report, the semantic
         //     audit, the client's parse overlay) and does NOT yet change the
-        //     installed window. Closing that half needs the chain walk to decline the
-        //     CARRIER too, which is blocked on
-        //     <https://github.com/phase-rs/phase/issues/7962>. Do NOT read this arm as
-        //     a runtime guarantee, and do NOT delete it as inert: it is what makes the
-        //     exported AST honest, and it is what the #7962 fix will build on.
+        //     installed window. #7962 closed the class that blocked the distribution
+        //     (injected defaults removed at the parsed-`Option` sites, plus the
+        //     sentence-scoped stamp in `oracle_effect::assembly`), so"the carrier
+        //     wins" now means a PRINTED window wins. Do NOT delete this arm as inert:
+        //     it is what keeps a printed embedded window from being clobbered when
+        //     the carrier is stamped, and it is what makes the exported AST honest.
         //   * `CastFromZone` — `cast_from_zone::resolve` takes the window ONLY out of
         //     `ability.effect` and never consults `ability.duration`, and that same
         //     field gates its driver selection. RUNTIME-LOAD-BEARING: without the
@@ -3424,9 +3432,13 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
 /// effect's own embedded `duration` field. This walk gates on the FIRST, via
 /// `duration_is_unset_sentinel(&def.duration)`. The SECOND is decided per arm inside
 /// `apply_duration_to_effect`, by the same predicate — so the two carriers now share
-/// one definition of "unset" instead of two inline copies. Declining the CARRIER for
-/// a `GenericEffect` whose embedded window is written is the remaining half, and it
-/// is blocked on <https://github.com/phase-rs/phase/issues/7962>.
+/// one definition of "unset" instead of two inline copies.
+///
+/// A coordinated clause that the clause splitter minted as its OWN `ClauseIr` is not
+/// in this walk at all (it is a sibling in `EffectChainIr::clauses`, not a
+/// `sub_ability` link). That half is stamped where the sibling chain is actually
+/// built: `oracle_effect::assembly`'s sentence-scoped
+/// [`stamp_governed_chain_duration`] call, gated on the same predicate (#7962).
 ///
 /// Walks ONLY `sub_ability` — CR 608.2c: "The controller of the spell or ability
 /// follows its instructions in the order written." `else_ability` and
@@ -3439,22 +3451,41 @@ pub(crate) fn with_clause_chain_duration(
     duration: Duration,
 ) -> ParsedEffectClause {
     let mut clause = with_clause_duration(clause, duration.clone());
-    let mut link = clause.sub_ability.as_deref_mut();
-    while let Some(def) = link {
-        // The gate is on the CARRIER only, deliberately. Do NOT add an
-        // embedded-duration conjunct here: `apply_duration_to_effect` already decides
-        // the embedded field per arm (CR 611.2a), and declining the carrier as well is
-        // the `GenericEffect` half that is blocked on
-        // <https://github.com/phase-rs/phase/issues/7962> — see
-        // `duration_is_unset_sentinel`'s doc. "Completing" this gate here would widen
-        // this change's scope silently.
-        if duration_governs(&def.effect) && duration_is_unset_sentinel(&def.duration) {
-            def.duration = Some(duration.clone());
-            apply_duration_to_effect(&mut def.effect, &duration);
-        }
-        link = def.sub_ability.as_deref_mut();
+    if let Some(sub) = clause.sub_ability.as_deref_mut() {
+        stamp_governed_chain_duration(sub, &duration);
     }
     clause
+}
+
+/// CR 611.2a + CR 608.2c: write a stated duration onto a governed sub-ability chain,
+/// node by node, yielding to every node that states a window of its own.
+///
+/// The single authority for the CHAIN half of duration distribution, so the
+/// `sub_ability` walk of `with_clause_chain_duration` (a clause's own chain) and the
+/// sentence-scoped stamp in `oracle_effect::assembly` (a later coordinated clause of
+/// the same printed sentence) cannot drift apart.
+///
+/// The gate is on the node's CARRIER (`AbilityDefinition.duration`) only, deliberately.
+/// `apply_duration_to_effect` already decides the effect's EMBEDDED field per arm
+/// (CR 611.2a), by the same `duration_is_unset_sentinel` predicate, so an explicitly
+/// written embedded window survives a governing prefix. Both sentinels are refused:
+/// `None` (nothing written) and `Some(Permanent)` (`build_become_clause`'s "no window
+/// stated" sentinel). Any other value is a window its own recognizer printed or was
+/// handed, and outranks the duration being distributed.
+///
+/// `None` is only trustworthy as "nothing stated" because no recognizer injects an
+/// `UntilEndOfTurn` default any more (#7962); an injected default would be
+/// byte-identical to a printed one and would both refuse this stamp and silently
+/// propagate as if it had been printed.
+pub(crate) fn stamp_governed_chain_duration(def: &mut AbilityDefinition, duration: &Duration) {
+    let mut link = Some(def);
+    while let Some(current) = link {
+        if duration_governs(&current.effect) && duration_is_unset_sentinel(&current.duration) {
+            current.duration = Some(duration.clone());
+            apply_duration_to_effect(&mut current.effect, duration);
+        }
+        link = current.sub_ability.as_deref_mut();
+    }
 }
 
 pub(crate) fn is_play_from_exile_lifetime_duration(duration: &Duration) -> bool {

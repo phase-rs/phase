@@ -141,6 +141,7 @@ impl CastUndoAction {
             | GameAction::TapForConvoke { .. }
             | GameAction::HarmonizeTap { .. }
             | GameAction::DeclareCompanion { .. }
+            | GameAction::ChooseSecretAgendaNames { .. }
             | GameAction::CompanionToHand
             | GameAction::DiscoverChoice { .. }
             | GameAction::GraveyardPaidCastChoice { .. }
