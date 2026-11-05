@@ -45,6 +45,8 @@ use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit
 use engine::types::match_config::{MatchConfig, MatchPhase, MatchType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
+use engine::types::zones::Zone;
 
 use crate::loop_period_remade_token_source::{markers, repetitions, take_recorded};
 
@@ -124,6 +126,121 @@ pub(crate) fn setup_2p_drain(mode: LoopDetectionMode) -> (GameRunner, ObjectId) 
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;
     (runner, kickoff)
+}
+
+// ─────────── #7899: projected cost journals must not veto an unrelated recurrence ───────────
+
+/// Blaster Hulk verbatim (`data/card-data.json`). Its first line is a self-spell cost reduction
+/// whose `active_zones` opt into hand and library (CR 113.6), so the static FUNCTIONS while the
+/// card sits uncast in hand — the metadata that must not veto an energy-free recurrence.
+const BLASTER_HULK: &str = "This spell costs {1} less to cast for each {E} (energy counter) you've paid or lost this turn.\nHaste\nWhenever this creature attacks, you get {E}{E}, then you may pay eight {E}. When you do, this creature deals 8 damage divided as you choose among up to eight targets.";
+
+/// Park a REAL Blaster Hulk in `P0`'s hand, parsed by the production parser.
+fn add_uncast_blaster_hulk(scenario: &mut GameScenario) -> ObjectId {
+    let mut builder =
+        scenario.add_creature_to_hand_from_oracle(P0, "Blaster Hulk", 8, 8, BLASTER_HULK);
+    builder
+        .as_artifact_creature()
+        .with_subtypes(vec!["Pirate"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+            generic: 6,
+        });
+    builder.id()
+}
+
+/// The shipped 2p constant-depth drain pair (the Exquisite Blood / Marauding Blight-Priest shape)
+/// plus an uncast Hulk in hand, under the production `LoopDetectionMode::On`.
+fn setup_2p_drain_with_uncast_hulk() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 6);
+    scenario.add_creature_from_oracle(P0, "Test Drain Cleric", 2, 2, DRAIN_CLERIC);
+    scenario.add_creature_from_oracle(P0, "Test Blood Sipper", 2, 2, BLOOD_SIPPER);
+    let kickoff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .id();
+    let hulk = add_uncast_blaster_hulk(&mut scenario);
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::On;
+    (runner, kickoff, hulk)
+}
+
+/// CR 732.2a + CR 601.2f: an UNCAST Blaster Hulk in hand must not stop an unrelated, energy-free
+/// recurrence from certifying. Its self-spell reduction functions in hand (CR 113.6 —
+/// `active_zones` opts into Hand/Library), but the period pays no energy, so the journal it
+/// prices on is zero on both compared frames and its price cannot differ between repeats. Under
+/// `LoopDetectionMode::On` the winner is crowned EARLY, with the victim still at positive life —
+/// a natural CR 704.5a death would mean the recurrence was refused.
+#[test]
+fn uncast_blaster_hulk_in_hand_does_not_block_drain_loop_certification() {
+    let (mut runner, kickoff, hulk) = setup_2p_drain_with_uncast_hulk();
+
+    // Reach guard: the production parser put the real self-spell reduction on the hand card,
+    // and it functions from Hand — the exact metadata that used to trip the veto.
+    {
+        let state = runner.state();
+        assert_eq!(state.objects[&hulk].zone, Zone::Hand);
+        let reduction = state.objects[&hulk]
+            .static_definitions
+            .iter_all()
+            .find(|def| {
+                matches!(
+                    def.mode,
+                    StaticMode::ModifyCost {
+                        dynamic_count: Some(
+                            engine::types::ability::QuantityRef::EnergyPaidOrLostThisTurn
+                        ),
+                        ..
+                    }
+                )
+            })
+            .expect("the parsed Blaster Hulk carries its energy cost reduction");
+        assert!(
+            reduction.active_zones.contains(&Zone::Hand),
+            "CR 113.6: the self-spell reduction is live from hand"
+        );
+        assert_eq!(
+            state.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+            0
+        );
+    }
+
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 500);
+    assert_eq!(
+        wf,
+        WaitingFor::GameOver { winner: Some(P0) },
+        "the drain recurrence must still certify with an uncast Hulk in hand"
+    );
+    assert!(
+        life(&runner, P1) > 0,
+        "the shortcut crowned early — the victim should still be at positive life, not {}",
+        life(&runner, P1)
+    );
+}
+
+/// CR 601.2f + CR 107.14 + CR 732.2a: the control that keeps the test above from being a blanket
+/// exemption. On the SAME production board with the SAME real Hulk, a frame where the journal the
+/// reduction reads has MOVED (the shape one `{E}{E}` payment leaves) must compare UNEQUAL: the
+/// journal is projected out of the comparison, so without the period-tied veto these frames would
+/// certify an energy-paying recurrence whose price changes every repeat.
+#[test]
+fn moved_energy_journal_with_live_hulk_rejects_the_recurrence() {
+    let (runner, _kickoff, hulk) = setup_2p_drain_with_uncast_hulk();
+    assert_eq!(runner.state().objects[&hulk].zone, Zone::Hand);
+    assert!(
+        loop_states_equal_modulo_resources(runner.state(), &runner.state().clone()),
+        "control: unchanged frames compare EQUAL"
+    );
+
+    let mut paid = runner.state().clone();
+    paid.players[P0.0 as usize].energy_paid_or_lost_this_turn = 2;
+    assert!(
+        !loop_states_equal_modulo_resources(runner.state(), &paid),
+        "CR 601.2f: the live Hulk prices the moved journal ⇒ the recurrence is not constant"
+    );
 }
 
 /// 2p ESCALATING TARGETED drain (PR-7 gate-relax witness): Vito + Sanguine Bond (two

@@ -25,7 +25,7 @@ use crate::analysis::decision_template::{
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityUseTally, ActivationRestriction, CastingPermission,
-    DamageModification, TargetRef,
+    DamageModification, QuantityRef, TargetRef,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -3438,9 +3438,9 @@ fn cover_projection(state: &GameState) -> GameState {
 /// INHERITED EXTRAPOLATION ASSUMPTION: this constant-depth path extrapolates the per-cycle
 /// delta over unboundedly many cycles and does not guard every fire-time read surface. The
 /// cost-CONSTANCY half is closed structurally: a live cost modifier whose `dynamic_count`
-/// reads a projected journal vetoes the comparison outright
-/// ([`cost_modifier_reads_projected_resource`]), because such a modifier prices the next
-/// repeat differently from the one it extrapolates. The remaining assumption is a dormant
+/// reads a projected journal that MOVED between the compared frames vetoes the comparison
+/// ([`cost_modifier_reads_changed_projected_resource`]), because such a modifier prices the
+/// next repeat differently from the one it extrapolates. The remaining assumption is a dormant
 /// intervening-if / static / replacement CONDITION reading a projected resource, which could
 /// arm mid-extrapolation; the shipped 2p drain detection depends on this behaviour and is
 /// regression-pinned. [`loop_states_cover_modulo_growth`] closes both surfaces by
@@ -3467,9 +3467,7 @@ pub(crate) fn loop_states_equal_modulo_resources_side<'a, C: CurrentSide<'a>>(
     // projecting. Check BOTH the prior state and the current state, because a cost modifier
     // (e.g., a spell on the stack) may only be live in the current state at the priority
     // window sample point, not in the prior state.
-    if cost_modifier_reads_projected_resource(a)
-        || cost_modifier_reads_projected_resource(b.state())
-    {
+    if cost_modifier_reads_changed_projected_resource(a, b.state()) {
         return false;
     }
     let pa = project_out_resources(a);
@@ -3504,36 +3502,243 @@ fn loyalty_activation_counts_match(a: &GameState, b: &GameState) -> bool {
     })
 }
 
-/// CR 601.2f + CR 732.2a: does a LIVE cost-MODIFIER static read, through its `dynamic_count`
-/// multiplier, a resource [`project_out_resources`] zeroes? A `ModifyCost` /
-/// `ReduceAbilityCost` whose multiplier is a per-turn journal (`EnergyPaidOrLostThisTurn`,
-/// Blaster Hulk) changes value on EVERY repeat of a loop that pays energy — even when the
-/// loop restores the same energy total, because the journal is a cumulative tally, not the
-/// reserve. Both compared frames have the journal projected out, so without this veto a
-/// constant-depth comparison would certify a recurrence whose cost is not constant.
+/// CR 601.2f + CR 732.2a: does a LIVE cost modifier's projected-journal multiplier observe a
+/// DIFFERENT value on the two compared frames?
 ///
-/// Narrow by design: the question is membership in the cost-modifier variant pair, not a
-/// classification of every `StaticMode` (the exhaustive totality gate for cost surfaces is
-/// [`static_mode_references_growing_class`], which the growth covers consult). A new
-/// non-modifier variant is answerable here without an edit; a new MODIFIER that carries its
-/// multiplier on another field would have to be added.
-fn cost_modifier_reads_projected_resource(state: &GameState) -> bool {
+/// [`project_out_resources`] zeroes the per-turn journals on BOTH compared frames, so a pair
+/// whose journal moved compares equal and would certify a recurrence whose price is not
+/// constant. This veto is that missing conjunct — but it is a claim about the PERIOD, not about
+/// the modifier's presence in the state: a projected-reading modifier prices the next repeat
+/// differently only when the journal it reads actually MOVED across the compared period.
+///
+/// Presence is not a dependency. CR 601.2f prices the spell actually cast, and CR 732.2a's
+/// "predictable results" are untouched by a value that does not move — so a modifier that
+/// prices an unmoved journal permits the recurrence. That matters because a self-spell
+/// reduction functions OFF the stack as well as on it (CR 113.6; Blaster Hulk's
+/// `self_spell_cost_mod_active_zones` opts into hand and library precisely so the card can
+/// price its own cast): a Hulk nobody casts, sitting in hand with the journal at zero on both
+/// frames, must not refuse to certify an unrelated, energy-free drain recurrence.
+///
+/// The same question covers a BATTLEFIELD reducer that prices ANOTHER spell ("Instant and
+/// sorcery spells you cast cost {1} less …"). No "only its own source's cast counts"
+/// carve-out is applied — and none would be correct for a board-wide reducer — because the
+/// period tie is the journal's observed value, not the source's role.
+///
+/// Fail-closed: a modifier whose source exists on only one frame cannot be priced on both, so
+/// it vetoes.
+pub(crate) fn cost_modifier_reads_changed_projected_resource(
+    prior: &GameState,
+    current: &GameState,
+) -> bool {
+    prior
+        .objects
+        .keys()
+        .chain(current.objects.keys())
+        .any(|id| {
+            let multipliers = projected_cost_multipliers(*id, prior, current);
+            if multipliers.is_empty() {
+                return false;
+            }
+            let (Some(before), Some(after)) = (prior.objects.get(id), current.objects.get(id))
+            else {
+                return true;
+            };
+            multipliers.into_iter().any(|qty| {
+                resolve_cost_multiplier(prior, before.controller, *id, qty)
+                    != resolve_cost_multiplier(current, after.controller, *id, qty)
+            })
+        })
+}
+
+/// CR 601.2f + CR 113.6: the projected-journal multipliers of the LIVE cost-modifier statics
+/// `id` carries on EITHER compared frame. `object_content_eq` omits static definitions, so a
+/// modifier installed only on the current frame is invisible to a prior-only scan while the
+/// journal it reads still moves.
+fn projected_cost_multipliers<'a>(
+    id: ObjectId,
+    prior: &'a GameState,
+    current: &'a GameState,
+) -> Vec<&'a QuantityRef> {
+    let mut multipliers = Vec::new();
+    for state in [prior, current] {
+        let Some(object) = state.objects.get(&id) else {
+            continue;
+        };
+        multipliers.extend(object.static_definitions.iter_all().filter_map(|def| {
+            // CR 113.6: a static that does not function in its source's zone modifies no
+            // cost, so an inert copy (a graveyard it does not function from) is not a live
+            // cost dependency.
+            crate::game::functioning_abilities::static_functions_in_zone(object, def)
+                .then(|| static_mode_projected_count(&def.mode))
+                .flatten()
+        }));
+    }
+    multipliers
+}
+
+/// CR 601.2f: one cost modifier's multiplier, priced on `state` exactly as cost determination
+/// prices it — the source's controller is the payer whose journal the multiplier reads.
+fn resolve_cost_multiplier(
+    state: &GameState,
+    controller: PlayerId,
+    source: ObjectId,
+    qty: &QuantityRef,
+) -> i32 {
+    use crate::game::quantity::{resolve_quantity_with_ctx, QuantityContext};
+    resolve_quantity_with_ctx(
+        state,
+        &crate::types::ability::QuantityExpr::Ref { qty: qty.clone() },
+        controller,
+        QuantityContext::new(source),
+    )
+}
+
+/// CR 601.2f: EXHAUSTIVE projection (no `_` arm) of a `StaticMode`'s cost multiplier — the
+/// `dynamic_count` of `ModifyCost` / `ReduceAbilityCost` when it reads a projected per-turn
+/// journal (e.g. `EnergyPaidOrLostThisTurn`), else `None`. Every non-modifier variant binds
+/// read-free, so a new variant must be classified here before it compiles.
+///
+/// ONE authority for this axis, shared by the constant-depth veto
+/// ([`cost_modifier_reads_changed_projected_resource`]) and by
+/// [`static_mode_references_growing_class`] — both scans ask the same question.
+fn static_mode_projected_count(mode: &crate::types::statics::StaticMode) -> Option<&QuantityRef> {
     use crate::game::ability_scan::quantity_ref_references_projected_resource as reads_projected;
     use crate::types::statics::StaticMode;
-    state.objects.values().any(|obj| {
-        obj.static_definitions.iter_all().any(|def| {
-            // CR 113.6: a static that does not function in its source's zone modifies no
-            // cost, so an inert copy (in hand, in a graveyard it does not function from)
-            // is not a live cost dependency.
-            crate::game::functioning_abilities::static_functions_in_zone(obj, def)
-                && matches!(
-                    &def.mode,
-                    StaticMode::ModifyCost { dynamic_count: Some(q), .. }
-                        | StaticMode::ReduceAbilityCost { dynamic_count: Some(q), .. }
-                        if reads_projected(q)
-                )
-        })
-    })
+    match mode {
+        StaticMode::ModifyCost { dynamic_count, .. }
+        | StaticMode::ReduceAbilityCost { dynamic_count, .. } => dynamic_count
+            .as_ref()
+            .filter(|dynamic_count| reads_projected(dynamic_count)),
+        // All other variants do not carry a projected-resource-reading dynamic_count.
+        StaticMode::ImposeAdditionalCost { .. }
+        | StaticMode::AlternativeKeywordCost { .. }
+        | StaticMode::CastWithAlternativeCost { .. }
+        | StaticMode::TopOfLibraryCastPermission { .. }
+        | StaticMode::GraveyardCastPermission { .. }
+        | StaticMode::ExileCastPermission { .. }
+        | StaticMode::CastWithKeyword { .. }
+        | StaticMode::MustAttackDefender { .. }
+        | StaticMode::Continuous
+        | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::CantAttack
+        | StaticMode::CantBlock
+        | StaticMode::CantAttackOrBlock
+        | StaticMode::CantBecomeSuspected
+        | StaticMode::MaxAttackersEachCombat { .. }
+        | StaticMode::MaxBlockersEachCombat { .. }
+        | StaticMode::CantBeTargeted
+        | StaticMode::CantBeCast { .. }
+        | StaticMode::CantBeActivated { .. }
+        | StaticMode::CantSearchLibrary { .. }
+        | StaticMode::RestrictLibrarySearchToTop { .. }
+        | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
+        | StaticMode::CantCauseSacrificeOrExile { .. }
+        | StaticMode::CantCauseForcedAction { .. }
+        | StaticMode::CastWithFlash
+        | StaticMode::GrantsExtraVote
+        | StaticMode::GrantsExtraVillainousChoice
+        | StaticMode::ReduceActionCost { .. }
+        | StaticMode::ModifyActivationLimit { .. }
+        | StaticMode::ActivateAsInstant { .. }
+        | StaticMode::CantPayCost { .. }
+        | StaticMode::CantGainLife
+        | StaticMode::CantLoseLife
+        | StaticMode::PlayerProtection(..)
+        | StaticMode::MustAttack
+        | StaticMode::MustBlock
+        | StaticMode::MustBlockAttacker { .. }
+        | StaticMode::CantDraw { .. }
+        | StaticMode::DrawFromBottom { .. }
+        | StaticMode::DoubleTriggers { .. }
+        | StaticMode::IgnoreHexproof
+        | StaticMode::ExtraBlockers { .. }
+        | StaticMode::RevealTopOfLibrary { .. }
+        | StaticMode::RevealHand { .. }
+        | StaticMode::TopOfLibraryHasPlot
+        | StaticMode::TopOfLibraryPlotPermission
+        | StaticMode::CastFromHandFree { .. }
+        | StaticMode::LinkedCollectionCounterPlayPermission
+        | StaticMode::CountersPersistAcrossZones { .. }
+        | StaticMode::CountersCantBeRemoved { .. }
+        | StaticMode::CantBeCountered
+        | StaticMode::CantBeCopied
+        | StaticMode::CantEnterBattlefieldFrom
+        | StaticMode::CantCastFrom { .. }
+        | StaticMode::CantCastDuring { .. }
+        | StaticMode::CantActivateDuring { .. }
+        | StaticMode::PerTurnCastLimit { .. }
+        | StaticMode::PerTurnDrawLimit { .. }
+        | StaticMode::SuppressTriggers { .. }
+        | StaticMode::CantBeBlocked
+        | StaticMode::CantBeBlockedExceptBy { .. }
+        | StaticMode::CantBeBlockedBy { .. }
+        | StaticMode::CantBeBlockedByMoreThan { .. }
+        | StaticMode::CantBeBlockedUnlessAllBlock
+        | StaticMode::AttachmentRestriction { .. }
+        | StaticMode::Protection
+        | StaticMode::Indestructible
+        | StaticMode::CantBeDestroyed
+        | StaticMode::CantBeRegenerated
+        | StaticMode::FlashBack
+        | StaticMode::Shroud
+        | StaticMode::Hexproof
+        | StaticMode::Vigilance
+        | StaticMode::Menace
+        | StaticMode::Reach
+        | StaticMode::Flying
+        | StaticMode::Trample
+        | StaticMode::Deathtouch
+        | StaticMode::Lifelink
+        | StaticMode::CantTap
+        | StaticMode::CantUntap
+        | StaticMode::MustBeBlocked { .. }
+        | StaticMode::MustBeBlockedByAll { .. }
+        | StaticMode::Goaded
+        | StaticMode::MustAttackAwayFromSource
+        | StaticMode::CombatAlone { .. }
+        | StaticMode::CantCrew
+        | StaticMode::CantPhaseIn
+        | StaticMode::CrewContribution { .. }
+        | StaticMode::MayLookAtTopOfLibrary
+        | StaticMode::MayLookAtFaceDown
+        | StaticMode::CantBeTurnedFaceUp
+        | StaticMode::MayChooseNotToUntap
+        | StaticMode::AdditionalLandDrop { .. }
+        | StaticMode::EmblemStatic
+        | StaticMode::BlockRestriction { .. }
+        | StaticMode::NoMaximumHandSize
+        | StaticMode::MaximumHandSize { .. }
+        | StaticMode::MayPlayAdditionalLand
+        | StaticMode::CantHaveKeyword { .. }
+        | StaticMode::CantWinTheGame
+        | StaticMode::CantLoseTheGame
+        | StaticMode::LegendRuleDoesntApply
+        | StaticMode::SpeedCanIncreaseBeyondFour
+        | StaticMode::DefilerCostReduction { .. }
+        | StaticMode::SkipStep { .. }
+        | StaticMode::SpendManaAsAnyColor { .. }
+        | StaticMode::PayLifeAsColoredMana { .. }
+        | StaticMode::StepEndUnspentMana { .. }
+        | StaticMode::UnspentManaLossCausesLifeLoss
+        | StaticMode::WinFirstCoinFlipSetEachTurn
+        | StaticMode::CanAttackWithDefender
+        | StaticMode::AttackOnlyNeighbor
+        | StaticMode::IgnoreLandwalkForBlocking { .. }
+        | StaticMode::CanActivateAbilitiesAsThoughHaste
+        | StaticMode::CanBlockShadow
+        | StaticMode::AssignNoCombatDamage
+        | StaticMode::UntapsDuringEachOtherPlayersUntapStep
+        | StaticMode::MaxUntapPerType { .. }
+        | StaticMode::EntersWithAdditionalCounters { .. }
+        | StaticMode::CountsAsNamed { .. }
+        | StaticMode::Other(..) => None,
+    }
+}
+
+/// [`static_mode_projected_count`] as a predicate: the projected axis of
+/// [`static_mode_references_growing_class`]'s cost-modifier arm.
+fn static_mode_reads_projected_resource(mode: &crate::types::statics::StaticMode) -> bool {
+    static_mode_projected_count(mode).is_some()
 }
 
 /// CR 110.1: a permanent is a card or token on the battlefield — this captures one such
@@ -4368,9 +4573,10 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a, C: CurrentSide<'a>>(
     if !(loop_states_equal(&pa, &pb)
         && loyalty_activation_counts_match(&pa, &pb)
         && object_resource_axes_match(prior, current)
-        // CR 601.2f + CR 732.2a: a live cost modifier reading a projected journal makes the
-        // next repeat cost something else, so the covered recurrence is not constant.
-        && !cost_modifier_reads_projected_resource(current))
+        // CR 601.2f + CR 732.2a: a live cost modifier whose projected journal MOVED between
+        // these frames makes the next repeat cost something else, so the covered recurrence is
+        // not constant.
+        && !cost_modifier_reads_changed_projected_resource(prior, current))
     {
         return false;
     }
@@ -6854,7 +7060,6 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
     use crate::game::ability_scan::{
         ability_cost_references_sibling_mutable as cost_reads,
         keyword_cost_reads_growing_class as kw_reads,
-        quantity_ref_references_projected_resource as qty_reads_projected,
         quantity_ref_references_sibling_mutable as qty_reads,
     };
     use crate::types::statics::StaticMode;
@@ -6870,9 +7075,13 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         // recurrence. `amount` (a fixed `ManaCost`) and every other field are
         // read-free.
         StaticMode::ModifyCost { dynamic_count, .. }
-        | StaticMode::ReduceAbilityCost { dynamic_count, .. } => dynamic_count
-            .as_ref()
-            .is_some_and(|q| qty_reads(q) || qty_reads_projected(q)),
+        | StaticMode::ReduceAbilityCost { dynamic_count, .. } => {
+            let reads_sibling = dynamic_count
+                .as_ref()
+                .is_some_and(qty_reads);
+            let reads_projected = static_mode_reads_projected_resource(mode);
+            reads_sibling || reads_projected
+        }
         // CR 118.8 / CR 118.9 / CR 601.2f: variants carrying an `AbilityCost` payment
         // — the additional/alternative cast cost — route it through the exhaustive
         // `AbilityCost` scanner (a `PayLife`/`ManaDynamic`/… reading `ObjectCount`
@@ -14717,19 +14926,11 @@ mod tests {
         };
         let hand = board(Zone::Hand);
         assert!(
-            !cost_modifier_reads_projected_resource(&hand),
-            "CR 113.6: a battlefield-only static on a hand card is not a live cost modifier"
-        );
-        assert!(
             loop_states_equal_modulo_resources(&hand, &paid_two(&hand)),
             "an inert modifier prices nothing ⇒ the projected journal stays pure history"
         );
         // Reach guard: the identical static on the battlefield IS live and vetoes.
         let battlefield = board(Zone::Battlefield);
-        assert!(
-            cost_modifier_reads_projected_resource(&battlefield),
-            "reach guard: the identical static on the battlefield must be live"
-        );
         assert!(
             !loop_states_equal_modulo_resources(&battlefield, &paid_two(&battlefield)),
             "reach guard: a live modifier reading the projected journal ⇒ REJECT"
@@ -14780,6 +14981,111 @@ mod tests {
         assert!(
             loop_states_equal_modulo_resources(&prior(), &current(None)),
             "control: a fixed reduction present only in the current frame ⇒ EQUAL"
+        );
+    }
+
+    /// CR 601.2f + CR 732.2a: the veto is the OBSERVED journal value, not the modifier's
+    /// presence. A real Blaster Hulk's self-spell reduction opts into Hand and Library
+    /// (`self_spell_cost_mod_active_zones`), so it FUNCTIONS while its card sits uncast in hand
+    /// (CR 113.6). A period that pays no energy reads the same journal on both frames, so its
+    /// price cannot differ between repeats and the recurrence IS certified. Reverting to a
+    /// presence scan (the shape this replaced) flips the first assertion: an unrelated,
+    /// energy-free loop would be refused because of a Hulk nobody casts.
+    #[test]
+    fn constant_depth_projected_cost_modifier_is_period_tied() {
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+        use crate::types::TargetFilter;
+        let hand = || {
+            let oid = ObjectId(600);
+            let mut object = GameObject::new(
+                oid,
+                CardId(600),
+                PlayerId(0),
+                "Blaster Hulk".into(),
+                Zone::Hand,
+            );
+            // CR 601.2f: the printed card's shape — a SELF-SPELL reduction whose zone opt-in
+            // keeps it live from hand/library, exactly as the production parser emits it.
+            let mut def = StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::default(),
+                spell_filter: None,
+                dynamic_count: Some(QuantityRef::EnergyPaidOrLostThisTurn),
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+            })
+            .affected(TargetFilter::SelfRef);
+            def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
+            object.static_definitions.push(def);
+            let mut state = GameState::new_two_player(7);
+            state.objects.insert(oid, object);
+            state
+        };
+        let before = hand();
+        // Reach guard: the hand-resident self-spell modifier IS live, so the veto's scan
+        // reaches it — the assertion below is not vacuous.
+        {
+            let object = &before.objects[&ObjectId(600)];
+            let def = object.static_definitions.iter_all().next().unwrap();
+            assert!(
+                crate::game::functioning_abilities::static_functions_in_zone(object, def),
+                "CR 113.6: the self-spell reduction functions from hand"
+            );
+        }
+        // Control: a period that moves only projected HISTORY (life gained) and pays no energy
+        // ⇒ the journal the modifier prices on is identical on both frames ⇒ EQUAL.
+        let mut no_energy_paid = before.clone();
+        no_energy_paid.players[0].life_gained_this_turn = 1;
+        assert!(
+            loop_states_equal_modulo_resources(&before, &no_energy_paid),
+            "CR 601.2f: an uncast hand Hulk whose journal did not move prices both frames the \
+             same ⇒ an energy-free recurrence is certified"
+        );
+        // Reject: one cycle pays {E}{E} ⇒ the live modifier prices the next repeat lower.
+        let mut energy_paid = before.clone();
+        energy_paid.players[0].energy_paid_or_lost_this_turn = 2;
+        assert!(
+            !loop_states_equal_modulo_resources(&before, &energy_paid),
+            "CR 107.14 + CR 601.2f: the journal the live modifier reads MOVED ⇒ REJECT"
+        );
+    }
+
+    /// CR 601.2f + CR 732.2a: the period tie is NOT a "the source must cast itself" carve-out.
+    /// A BATTLEFIELD reducer that prices ANOTHER spell ("Instant and sorcery spells you cast
+    /// cost less …") is asked the same question: an unmoved journal certifies, a moved one
+    /// rejects. This is the half a self-spell-only exclusion would lose.
+    #[test]
+    fn constant_depth_board_wide_projected_cost_modifier_is_period_tied() {
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+        let board = || {
+            let mut state = GameState::new_two_player(7);
+            let sid = inert_token(&mut state, 600, 0, "Board Reducer");
+            state
+                .objects
+                .get_mut(&sid)
+                .unwrap()
+                .static_definitions
+                .push(StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::default(),
+                    spell_filter: None,
+                    dynamic_count: Some(QuantityRef::EnergyPaidOrLostThisTurn),
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+                }));
+            state
+        };
+        let before = board();
+        assert!(
+            loop_states_equal_modulo_resources(&before, &before.clone()),
+            "control: an unmoved journal prices both frames the same ⇒ EQUAL"
+        );
+        let mut energy_paid = before.clone();
+        energy_paid.players[0].energy_paid_or_lost_this_turn = 2;
+        assert!(
+            !loop_states_equal_modulo_resources(&before, &energy_paid),
+            "CR 601.2f: a board-wide reducer pricing another spell still vetoes once the \
+             journal it reads moves"
         );
     }
 
