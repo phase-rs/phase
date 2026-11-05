@@ -35249,9 +35249,11 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // The outside-game authority (`imperative::try_parse_play_from_outside_game`,
     // probed before this seam) claims the forms the engine models — one card
     // from the sideboard pool via `SearchOutsideGame`. Any other "cast/play …
-    // from outside the game" clause that reaches here (Sovereign's Realm's
-    // plural "basic lands", Frontier Explorer's "one basic Plains card") has no
-    // carrier, so refuse it instead of granting an in-game cast.
+    // outside the game" clause that reaches here (Sovereign's Realm's plural
+    // "basic lands", Frontier Explorer's "one basic Plains card", Spawnsire of
+    // Ulamog's "any number of Eldrazi spells from among cards you own outside
+    // the game") has no carrier, so refuse it instead of granting an in-game
+    // cast.
     if cast_origin_is_outside_the_game(rest) {
         return Some(Effect::unimplemented(OUTSIDE_GAME_CAST_GAP, rest));
     }
@@ -36182,10 +36184,13 @@ fn parse_additional_mana_cost_rider(rest: &str) -> Option<crate::types::mana::Ma
 /// (`cast_origin_is_outside_the_game`).
 const OUTSIDE_GAME_CAST_GAP: &str = "cast_from_outside_the_game";
 
-/// CR 400.11: the cast clause names "outside the game" as its card's origin.
+/// CR 400.11: the cast clause draws its card from outside the game — whether
+/// the origin is printed as "from outside the game" or as a pool "from among
+/// cards you own outside the game" (Spawnsire of Ulamog). Both phrasings end in
+/// the same "outside the game" head, so the scan anchors on that.
 fn cast_origin_is_outside_the_game(rest: &str) -> bool {
     nom_primitives::scan_at_word_boundaries(rest, |input| {
-        value((), tag::<_, _, OracleError<'_>>("from outside the game")).parse(input)
+        value((), tag::<_, _, OracleError<'_>>("outside the game")).parse(input)
     })
     .is_some()
 }

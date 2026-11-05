@@ -35506,8 +35506,9 @@ fn sen_triplets_lowers_restrictions_reveal_and_other_hand_permission() {
 /// cast seam rather than lowered to an in-game `CastFromZone`. Covers the
 /// plural form (Sovereign's Realm, reached through its leading "This turn,"
 /// duration) and the quantified singular form (Frontier Explorer, reached
-/// through "Until end of turn,"); Wish's modeled singular form keeps its
-/// `SearchOutsideGame` lowering.
+/// through "Until end of turn,") and the "from among cards you own outside the
+/// game" pool form (Spawnsire of Ulamog); Wish's modeled singular form keeps
+/// its `SearchOutsideGame` lowering.
 #[test]
 fn unmodeled_outside_game_play_permissions_stay_unsupported() {
     fn effects_of(parsed: &ParsedAbilities) -> Vec<Effect> {
@@ -35530,6 +35531,11 @@ fn unmodeled_outside_game_play_permissions_stay_unsupported() {
         (
             "Frontier Explorer",
             "{3}, {T}: Until end of turn, you may play one basic Plains card from outside the game.",
+            &["Creature"][..],
+        ),
+        (
+            "Spawnsire of Ulamog",
+            "Annihilator 1 (Whenever this creature attacks, defending player sacrifices a permanent of their choice.)\n{4}: Create two 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice this token: Add {C}.\"\n{20}: Cast any number of Eldrazi spells from among cards you own outside the game without paying their mana costs.",
             &["Creature"][..],
         ),
     ] {
