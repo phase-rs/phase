@@ -15,7 +15,8 @@ use engine::types::zones::Zone;
 
 const P2: PlayerId = PlayerId(2);
 const INDORAPTOR: &str = "Menace\nEnrage — Whenever Indoraptor is dealt damage, choose an opponent at random. Indoraptor deals damage equal to its power to that player unless they sacrifice a nontoken creature of their choice.";
-const POKE: &str = "~ deals 1 damage to target creature.";
+const GUT_SHOT: &str =
+    "({R/P} can be paid with either {R} or 2 life.)\nGut Shot deals 1 damage to any target.";
 
 fn setup() -> (
     engine::game::scenario::GameRunner,
@@ -28,15 +29,16 @@ fn setup() -> (
     let indoraptor = scenario
         .add_creature_from_oracle(P0, "Indoraptor, the Perfect Hybrid", 3, 3, INDORAPTOR)
         .id();
-    let poke = scenario
-        .add_spell_to_hand_from_oracle(P0, "Poke", true, POKE)
+    // Test-only cost override: cast printed Gut Shot for free to trigger Enrage.
+    let gut_shot = scenario
+        .add_spell_to_hand_from_oracle(P0, "Gut Shot", true, GUT_SHOT)
         .with_mana_cost(ManaCost::zero())
         .id();
     // Both opponents control a nontoken creature so each can answer.
     let p1_creature = scenario.add_creature(P1, "P1 Fodder", 1, 1).id();
     let p2_creature = scenario.add_creature(P2, "P2 Fodder", 1, 1).id();
     let mut runner = scenario.build();
-    runner.cast(poke).target_object(indoraptor).resolve();
+    runner.cast(gut_shot).target_object(indoraptor).resolve();
     (runner, indoraptor, p1_creature, p2_creature)
 }
 

@@ -51852,15 +51852,15 @@ fn clause_declares_player_target(clause_text: &str) -> bool {
 }
 
 /// CR 115.1: scan probe for [`clause_declares_player_target`]. Delegates the
-/// phrase grammar to the single target parser and accepts only the declared
-/// player shapes the target keyword introduces, so the construction rule stays
-/// in `declared_player_controller_ref`.
-fn parse_declared_player_target_probe(input: &str) -> OracleResult<'_, ControllerRef> {
+/// phrase grammar to the single target parser and the player-containing shape
+/// check to the existing explicit-player-target predicate.
+fn parse_declared_player_target_probe(input: &str) -> OracleResult<'_, ()> {
     let (filter, rest, syntax) =
         super::oracle_target::parse_target_with_syntax(input, &mut ParseContext::default());
-    match declared_player_controller_ref(&filter) {
-        Some(declared) if syntax == TargetSyntax::TargetKeyword => Ok((rest, declared)),
-        _ => Err(oracle_err(input)),
+    if syntax == TargetSyntax::TargetKeyword && target_filter_is_explicit_player_target(&filter) {
+        Ok((rest, ()))
+    } else {
+        Err(oracle_err(input))
     }
 }
 
