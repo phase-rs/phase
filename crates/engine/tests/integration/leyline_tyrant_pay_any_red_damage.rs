@@ -337,8 +337,13 @@ fn mountain_scenario(with_fertile_ground: bool) -> (GameRunner, ObjectId) {
     let mut runner = scenario.build();
     if let Some(aura) = aura {
         let state = runner.state_mut();
-        state.objects.get_mut(&aura).expect("the Aura").attached_to =
-            Some(AttachTarget::Object(mountain));
+        // CR 704.5p: a non-Aura enchantment attached to a permanent becomes
+        // unattached. The oracle-text builder adds no subtype, so give Fertile
+        // Ground its printed Aura subtype before attaching it.
+        let aura_obj = state.objects.get_mut(&aura).expect("the Aura");
+        aura_obj.card_types.subtypes.push("Aura".to_string());
+        aura_obj.base_card_types = aura_obj.card_types.clone();
+        aura_obj.attached_to = Some(AttachTarget::Object(mountain));
         state
             .objects
             .get_mut(&mountain)
