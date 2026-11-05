@@ -433,20 +433,23 @@ fn resolve_reveal(
         // newcomers are still presence-gated by segment collection and see only
         // entries at or after their own — a pipeline-wide gap outside this seam.
         match zone_pipeline::move_objects_simultaneously(state, reqs, events) {
-            zone_pipeline::BatchMoveResult::Done => {}
+            zone_pipeline::SimultaneousMoveResult::Done => {}
             // CR 303.4f / CR 614.1c / CR 616.1: the batch parked an as-enters
             // Aura-host or replacement-ordering prompt and stashed every
-            // undelivered matched card in the active `BatchDelivery` frame.
-            // Deferring the rest-pile tail onto that same frame means the drain
-            // delivers the remaining matched cards, then the misses, the
-            // reveal-marker cleanup, and `EffectResolved`, exactly once — so no
-            // card strands in the library and `EffectResolved` never lands over
-            // the parked prompt.
-            zone_pipeline::BatchMoveResult::NeedsChoice => {
+            // undelivered matched card in its `BatchDelivery` owner. Deferring
+            // the rest-pile tail onto that same owner means the drain delivers
+            // the remaining matched cards, then the misses, the reveal-marker
+            // cleanup, and `EffectResolved`, exactly once — so no card strands
+            // in the library and `EffectResolved` never lands over the parked
+            // prompt. CR 706.6 + CR 614.12a: a kept card's tied as-enters roll
+            // parks that owner beneath the card's own frames, so it is
+            // addressed where it was parked.
+            zone_pipeline::SimultaneousMoveResult::NeedsChoice(owner) => {
                 let mut clear_markers = revealed_misses.clone();
                 clear_markers.extend(&hit_cards);
-                zone_pipeline::defer_completion_on_pause(
+                zone_pipeline::defer_completion_on_paused_move(
                     state,
+                    zone_pipeline::PausedMoveOwner::Batch(owner),
                     BatchCompletion::RevealRestPile {
                         delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                         player: revealing_player,
@@ -2079,5 +2082,123 @@ mod tests {
         }
         assert_eq!(state.objects[&forest].zone, Zone::Graveyard);
         assert!(state.players[1].graveyard.contains(&forest));
+    }
+
+    /// Hammer Jammer revealed from the top of P0's library under Barbarian
+    /// Class, with the optional kept card's route ("You may put that card onto
+    /// the battlefield"); the runner is at the kept choice.
+    fn accepted_jammer_board(seed: u64) -> (crate::game::scenario::GameRunner, ObjectId) {
+        const HAMMER_JAMMER: &str = "As this creature enters, roll a six-sided die. This creature enters with a number of +1/+1 counters on it equal to the result.\nWhenever you roll a die, remove all +1/+1 counters from this creature, then put a number of +1/+1 counters on it equal to the result.";
+        const BARBARIAN_CLASS_L1: &str = "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.";
+        let mut scenario = crate::game::scenario::GameScenario::new_n_player(2, seed);
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario.add_enchantment_from_oracle(
+            crate::game::scenario::P0,
+            "Barbarian Class",
+            BARBARIAN_CLASS_L1,
+        );
+        let jammer = scenario
+            .add_creature_to_hand_from_oracle(
+                crate::game::scenario::P0,
+                "Hammer Jammer",
+                0,
+                0,
+                HAMMER_JAMMER,
+            )
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.players[0].hand.retain(|card| *card != jammer);
+        state.players[0].library.insert(0, jammer);
+        state.objects.get_mut(&jammer).unwrap().zone = Zone::Library;
+        let ability = ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                matched_disposition: RevealUntilDisposition::KeepEach,
+                kept_destination: Zone::Library,
+                rest_destination: Zone::Library,
+                rest_order: DigRestOrder::Preserve,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: Some(Zone::Battlefield),
+                enters_under: None,
+                kept_destination_if: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        resolve(state, &ability, &mut Vec::new()).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::RevealUntilKeptChoice { hit_card, .. } if hit_card == jammer
+        ));
+        (runner, jammer)
+    }
+
+    /// CR 706.6 + CR 614.12a: an accepted kept card's tied as-enters roll asks
+    /// which die to ignore before the card enters. The single move parks no
+    /// owner, so the completion carrying the reveal's rest gets a standalone
+    /// record at the boundary captured before the move, beneath the card's whole
+    /// child stack; the frame that owns the choice stays on top, and the record
+    /// drains once the entry completes.
+    #[test]
+    fn an_accepted_kept_cards_keep_choice_owns_the_top_of_the_stack() {
+        let accept = crate::types::actions::GameAction::DecideOptionalEffect { accept: true };
+        let seed = (0..600)
+            .find(|&seed| {
+                let (mut runner, _) = accepted_jammer_board(seed);
+                runner.act(accept.clone()).unwrap();
+                matches!(runner.state().waiting_for, WaitingFor::DieKeepChoice { .. })
+            })
+            .expect("a seed whose roll ties");
+        let (mut runner, jammer) = accepted_jammer_board(seed);
+        runner.act(accept).unwrap();
+        let frames: Vec<crate::types::resolution::FrameKind> = runner
+            .state()
+            .resolution_stack
+            .iter()
+            .map(crate::types::resolution::ResolutionFrame::kind)
+            .collect();
+        assert_eq!(
+            frames,
+            vec![
+                crate::types::resolution::FrameKind::BatchDelivery,
+                crate::types::resolution::FrameKind::PostReplacement,
+                crate::types::resolution::FrameKind::AbilityContinuation,
+                crate::types::resolution::FrameKind::DieRoll,
+            ]
+        );
+        let WaitingFor::DieKeepChoice {
+            ignorable_indices,
+            ignore_count,
+            results,
+            ..
+        } = runner.state().waiting_for.clone()
+        else {
+            unreachable!("checked by the seed search");
+        };
+        let ignore_indices = ignorable_indices.into_iter().take(ignore_count).collect();
+        runner
+            .act(crate::types::actions::GameAction::SelectDieRolls { ignore_indices })
+            .unwrap();
+        let state = runner.state();
+        let kept: u32 = results.iter().map(|&n| u32::from(n)).sum::<u32>()
+            - u32::from(*results.iter().min().expect("dice"));
+        assert!(state.battlefield.contains(&jammer));
+        assert_eq!(
+            state.objects[&jammer]
+                .counters
+                .get(&crate::types::counter::CounterType::Plus1Plus1)
+                .copied(),
+            Some(kept)
+        );
+        assert!(
+            state.resolution_stack.is_empty(),
+            "the record drained once the entry completed"
+        );
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 }

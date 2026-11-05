@@ -30247,7 +30247,9 @@ impl GameState {
     /// CR 706.6 + CR 614.12a: a batch member's as-enters choice (a tied roll's
     /// ignore choice, CR 706.6) is made before that member enters, so the rest of
     /// the batch waits beneath that member's whole child stack; the frame that
-    /// owns the live choice stays on top.
+    /// owns the live choice stays on top. A single move's standalone completion
+    /// record (`zone_pipeline::defer_completion_on_paused_move`) is parked the
+    /// same way, at the boundary captured before that move.
     ///
     /// A prompt owned outside the stack (`pending_replacement`'s
     /// `ReplacementChoice`, `ReturnAsAuraTarget`) leaves the batch on top, where

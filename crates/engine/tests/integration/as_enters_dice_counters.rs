@@ -107,6 +107,7 @@ const DOUBLING_SEASON: &str = "If an effect would create one or more tokens unde
 const WINDING_CONSTRICTOR: &str = "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.\nIf you would get one or more counters, you get that many plus one of each of those kinds of counters instead.";
 const RITE_OF_THE_MOTH: &str = "Return target creature card from your graveyard to the battlefield with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)";
 const GRIM_REAPER_LETHAL_LEGIONNAIRE: &str = "Whenever Grim Reaper attacks, you may pay {3}{B}. When you do, return target creature card from your graveyard to the battlefield tapped and attacking with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)";
+const POLYMORPH: &str = "Destroy target creature. It can't be regenerated. Its controller reveals cards from the top of their library until they reveal a creature card. The player puts that card onto the battlefield, then shuffles all other cards revealed this way into their library.";
 
 /// The scenario module exports only `P0` and `P1`.
 const P2: PlayerId = PlayerId(2);
@@ -4982,6 +4983,7 @@ fn a_paused_single_pick_attacking_entry_is_seated_after_its_chain() {
         assert!(attacking_at_prompt.is_empty(), "{what}");
         assert_eq!(triggers_seen_from(jammer), 0, "{what}");
         assert_eq!(life(state, P0), p0_before + 1, "{what}: Warden once");
+        assert_eq!(change_zone_resolved_for(&events, ilharg), 1, "{what}");
         assert_eq!(
             returns_installed_by(state, ilharg),
             vec![vec![TargetRef::Object(jammer)]],
@@ -5006,11 +5008,12 @@ fn a_seat_frame_asks_the_attack_target_after_the_entry() {
         attack_to_entry_prompt(&mut board, &mut events);
         let AttackBoard {
             mut runner,
+            attackers,
             jammer,
             dwarf,
             warden,
-            ..
         } = board;
+        let ilharg = attackers[0];
         answer_counter_prompt(&mut runner, pick, &mut events);
         pass_to_attack_target_choice(&mut runner, &mut events);
         let r = die_results(&events)[0];
@@ -5052,6 +5055,7 @@ fn a_seat_frame_asks_the_attack_target_after_the_entry() {
         assert_eq!(triggers_seen_from(dwarf), 1, "{what}: Dwarf once");
         assert_eq!(triggers_seen_from(jammer), 0, "{what}");
         assert_eq!(life(state, P0), p0_before + 1, "{what}: Warden once");
+        assert_eq!(change_zone_resolved_for(&events, ilharg), 1, "{what}");
         assert_finished(state, &[dwarf, warden], &what);
     }
 }
@@ -6723,4 +6727,120 @@ fn a_lone_batch_members_keep_choice_is_seen_by_a_resident_once() {
     );
     assert_eq!(life(state, P0), p0_before + 1, "Warden once");
     assert_finished(state, &[dwarf, warden], "R17b");
+}
+
+/// R18's board: Polymorph, free in P0's hand, over Hammer Jammer on top of P0's
+/// library, with Barbarian Class, Soul Warden, a resident Brazen Dwarf and P0's
+/// vanilla creature, Polymorph's target.
+struct PolymorphBoard {
+    runner: GameRunner,
+    polymorph: ObjectId,
+    jammer: ObjectId,
+    dwarf: ObjectId,
+    warden: ObjectId,
+    victim: ObjectId,
+}
+
+fn polymorph_board(seed: u64) -> PolymorphBoard {
+    let mut scenario = board(seed);
+    add_barbarian_class(&mut scenario);
+    let dwarf = add_dwarf(&mut scenario);
+    let warden = add_warden_p0(&mut scenario);
+    let jammer = jammer_card(&mut scenario);
+    let polymorph = free_spell(&mut scenario, "Polymorph", false, POLYMORPH);
+    let victim = scenario.add_vanilla(P0, 2, 2);
+    let mut runner = scenario.build();
+    seat_on_library_top(&mut runner, jammer);
+    PolymorphBoard {
+        runner,
+        polymorph,
+        jammer,
+        dwarf,
+        warden,
+        victim,
+    }
+}
+
+/// Cast Polymorph at the vanilla creature and pass until Hammer Jammer's
+/// as-enters roll pauses or the stack empties.
+fn polymorph_to_roll(board: &mut PolymorphBoard, events: &mut Vec<GameEvent>) {
+    cast_and_pass(
+        &mut board.runner,
+        board.polymorph,
+        None,
+        Some(board.victim),
+        events,
+    );
+}
+
+fn reveal_until_resolved_for(events: &[GameEvent], source: ObjectId) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: engine::types::ability::EffectKind::RevealUntil,
+                    source_id,
+                    ..
+                } if *source_id == source
+            )
+        })
+        .count()
+}
+
+/// R18 (Unit E's sibling, the simultaneous mover). Polymorph destroys P0's
+/// vanilla creature and puts Hammer Jammer, revealed from the top of P0's
+/// library, onto the battlefield under Barbarian Class + CR 706.6 +
+/// CR 614.12a: a tie for the lowest asks which die to ignore before Hammer
+/// Jammer enters, so the reveal-until's rest waits on the batch's own owner,
+/// beneath Hammer Jammer's whole child stack, and the frame that owns the choice
+/// stays on top. Hammer Jammer enters with the kept result and does not see its
+/// own roll (CR 113.6); the resident Brazen Dwarf sees it once (CR 603.2), and
+/// Soul Warden sees the entry once.
+#[test]
+fn a_reveal_until_kept_cards_keep_choice_owns_the_top_of_the_stack() {
+    let seed = find_seed("a Polymorph tie", |seed| {
+        let mut board = polymorph_board(seed);
+        polymorph_to_roll(&mut board, &mut Vec::new());
+        tie_prompt_results(board.runner.state()).is_some()
+    });
+    reset_triggers_seen();
+    let mut board = polymorph_board(seed);
+    let p0_before = life(board.runner.state(), P0);
+    let mut events = Vec::new();
+    polymorph_to_roll(&mut board, &mut events);
+    let PolymorphBoard {
+        mut runner,
+        polymorph,
+        jammer,
+        dwarf,
+        warden,
+        victim,
+    } = board;
+    let frames_at_tie = stack_frames(runner.state());
+    let naturals = answer_tie(&mut runner, &mut events);
+    settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+    let state = runner.state();
+    assert_eq!(
+        frames_at_tie,
+        vec![
+            FrameKind::BatchDelivery,
+            FrameKind::PostReplacement,
+            FrameKind::AbilityContinuation,
+            FrameKind::DieRoll,
+        ]
+    );
+    assert_eq!(zone(state, jammer), Zone::Battlefield);
+    assert_eq!(
+        plus_counters(state, jammer),
+        survivors_total(&naturals),
+        "{naturals:?}"
+    );
+    assert_eq!(triggers_seen_from(jammer), 0);
+    assert_eq!(triggers_seen_from(dwarf), 1, "the resident once");
+    assert_eq!(life(state, P0), p0_before + 1, "Warden once");
+    assert_eq!(reveal_until_resolved_for(&events, polymorph), 1);
+    assert_eq!(zone(state, victim), Zone::Graveyard);
+    assert_finished(state, &[dwarf, warden], "R18");
 }

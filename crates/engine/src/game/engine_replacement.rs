@@ -12380,17 +12380,67 @@ mod entry_continuation_release_tests {
         assert!(state.deferred_entry_events.is_empty());
     }
 
+    /// A `ChangeZone` owner whose paused delivery of `x` carries `delivery`,
+    /// counted as `count` says, pushed on top.
+    fn change_zone_owner(
+        state: &mut GameState,
+        x: ObjectId,
+        delivery: GameEvent,
+        count: crate::types::game_state::PausedZoneChangeDeliveryCount,
+    ) {
+        let mut paused = PendingZoneChangeDelivery::new(
+            reference(state, x),
+            ProposedEvent::zone_change(x, Zone::Graveyard, Zone::Battlefield, None),
+        );
+        paused.delivery_events = vec![delivery];
+        paused.count = count;
+        let logical_zone_change_group = state.allocate_logical_zone_change_group(&[]);
+        state
+            .resolution_stack
+            .push_inner(ResolutionFrame::ChangeZone(Box::new(
+                crate::types::resolution::ChangeZoneFrame {
+                    pending: Some(crate::types::game_state::PendingChangeZoneIteration {
+                        logical_zone_change_group,
+                        pending_return_result_producer: None,
+                        paused_current: Some(paused),
+                        remaining: Vec::new(),
+                        source_id: x,
+                        controller: P0,
+                        origin: None,
+                        destination: Zone::Battlefield,
+                        enter_transformed: false,
+                        enters_under_player: None,
+                        duration: None,
+                        track_exiled_by_source: false,
+                        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+                        moved_count: None,
+                        face_down_profile: None,
+                        library_placement: None,
+                        enter_attached_to: None,
+                        effect_kind: crate::types::ability::EffectKind::ChangeZone,
+                    }),
+                    devour_eligible_snapshot: None,
+                },
+            )));
+    }
+
     /// R15. CR 603.6d + CR 603.2 + CR 508.4 + CR 400.7: the delivery-tail flush
     /// leaves every entry a live collector owns: one bound to a paused drain
-    /// beneath the top, one a logical owner's paused delivery holds deeper down,
-    /// and one that owes its attacking seat. It takes the entry no collector owns.
-    /// No printed board separates the bound entry from the owner-held one.
+    /// beneath the top, one a batch owner's paused delivery holds deeper down,
+    /// one a `ChangeZone` owner's paused delivery holds while that owner still
+    /// counts its member, and one that owes its attacking seat. It takes the
+    /// entries no collector owns, including one whose `ChangeZone` owner already
+    /// counted it. No printed board separates the bound entry from the
+    /// owner-held one.
     #[test]
     fn the_delivery_tail_flush_takes_only_unowned_entries() {
+        use crate::types::game_state::PausedZoneChangeDeliveryCount;
         let mut state = settled_state(2);
         let (x, bound) = entered(&mut state, 900, P0, P0);
         let bound_ref = reference(&state, x);
         let held = reenter(&mut state, x);
+        let change_zone_held = reenter(&mut state, x);
+        let change_zone_counted = reenter(&mut state, x);
         let stamped = reenter(&mut state, x);
         let land_played = GameEvent::LandPlayed {
             object_id: x,
@@ -12402,6 +12452,8 @@ mod entry_continuation_release_tests {
         state.deferred_entry_events = vec![
             seeded(bound.clone(), PENDING),
             seeded(held.clone(), PENDING),
+            seeded(change_zone_held.clone(), PENDING),
+            seeded(change_zone_counted.clone(), PENDING),
             owed.clone(),
             seeded(land_played.clone(), PENDING),
         ];
@@ -12431,6 +12483,18 @@ mod entry_continuation_release_tests {
                     deferred_events: Vec::new(),
                 },
             )));
+        change_zone_owner(
+            &mut state,
+            x,
+            change_zone_held.clone(),
+            PausedZoneChangeDeliveryCount::NeedsCount,
+        );
+        change_zone_owner(
+            &mut state,
+            x,
+            change_zone_counted.clone(),
+            PausedZoneChangeDeliveryCount::AlreadyCounted,
+        );
         paused_owner(&mut state, bound_ref);
         for _ in 0..2 {
             state.push_counter_additions(PendingCounterAdditionQueue {
@@ -12442,13 +12506,18 @@ mod entry_continuation_release_tests {
         flush_deferred_entry_events_into_priority_scan(&mut state, x, &mut events);
         assert_eq!(
             events,
-            vec![land_played],
-            "only the unowned entry is flushed"
+            vec![change_zone_counted, land_played],
+            "only the unowned entries are flushed"
         );
         assert_eq!(
             state.deferred_entry_events,
-            vec![seeded(bound.clone(), PENDING), seeded(held, PENDING), owed],
-            "the three owned entries stay parked"
+            vec![
+                seeded(bound.clone(), PENDING),
+                seeded(held, PENDING),
+                seeded(change_zone_held, PENDING),
+                owed
+            ],
+            "the four owned entries stay parked"
         );
 
         // CR 400.7: a drain bound to another incarnation of X does not own this one.

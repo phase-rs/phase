@@ -53099,8 +53099,8 @@ pub mod tests {
                         crate::game::zone_pipeline::move_objects_simultaneously(
                             state, requests, events,
                         ),
-                        crate::game::zone_pipeline::BatchMoveResult::Done
-                            | crate::game::zone_pipeline::BatchMoveResult::NeedsChoice
+                        crate::game::zone_pipeline::SimultaneousMoveResult::Done
+                            | crate::game::zone_pipeline::SimultaneousMoveResult::NeedsChoice(_)
                     ),
                     "BatchDelivery production carrier resolves or parks"
                 );
@@ -54839,7 +54839,7 @@ pub mod tests {
                 requests,
                 &mut events,
             ),
-            crate::game::zone_pipeline::BatchMoveResult::NeedsChoice
+            crate::game::zone_pipeline::SimultaneousMoveResult::NeedsChoice(_)
         ));
         assert_eq!(
             state.objects[&provider].zone,

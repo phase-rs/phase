@@ -2887,6 +2887,7 @@ pub(super) fn handle_resolution_choice(
                     );
                     req.mods.enter_tapped = enter_tapped;
                     req.mods.enters_attacking = enters_attacking;
+                    let move_owner = crate::game::zone_pipeline::PausedMoveOwner::single(state);
                     match crate::game::zone_pipeline::move_object(state, req, events) {
                         crate::game::zone_pipeline::ZoneMoveResult::Done => {}
                         // CR 303.4f / CR 616.1: the accepted card's battlefield
@@ -2896,12 +2897,16 @@ pub(super) fn handle_resolution_choice(
                         // entry resolves — otherwise the misses strand (the
                         // early-`return` bug). `EffectResolved` was already emitted
                         // before this prompt, so the completion does not re-emit it.
+                        // CR 706.6 + CR 614.12a: a tied as-enters roll's ignore
+                        // choice is owned by the card's own frame, so the record
+                        // waits beneath the card's frames.
                         crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
                         | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
                             let mut clear_markers = misses.clone();
                             clear_markers.push(hit_card);
-                            crate::game::zone_pipeline::defer_completion_on_pause(
+                            crate::game::zone_pipeline::defer_completion_on_paused_move(
                                 state,
+                                move_owner,
                                 crate::types::game_state::BatchCompletion::RevealRestPile {
                                     delivery_stage:
                                         crate::types::game_state::DigDeliveryStage::Rest,
@@ -4830,10 +4835,11 @@ pub(super) fn handle_resolution_choice(
                     match crate::game::zone_pipeline::move_objects_simultaneously(
                         state, reqs, events,
                     ) {
-                        crate::game::zone_pipeline::BatchMoveResult::Done => {}
-                        crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
-                            crate::game::zone_pipeline::defer_completion_on_pause(
+                        crate::game::zone_pipeline::SimultaneousMoveResult::Done => {}
+                        crate::game::zone_pipeline::SimultaneousMoveResult::NeedsChoice(owner) => {
+                            crate::game::zone_pipeline::defer_completion_on_paused_move(
                                 state,
+                                crate::game::zone_pipeline::PausedMoveOwner::Batch(owner),
                                 crate::types::game_state::BatchCompletion::RevealRestPile {
                                     delivery_stage:
                                         crate::types::game_state::DigDeliveryStage::Rest,
@@ -8550,12 +8556,12 @@ pub(super) fn handle_resolution_choice(
                 })
                 .collect();
             match crate::game::zone_pipeline::move_objects_simultaneously(state, reqs, events) {
-                crate::game::zone_pipeline::BatchMoveResult::Done => {
+                crate::game::zone_pipeline::SimultaneousMoveResult::Done => {
                     ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
                         player: state.active_player,
                     })
                 }
-                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                crate::game::zone_pipeline::SimultaneousMoveResult::NeedsChoice(_) => {
                     ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
                 }
             }
@@ -9300,14 +9306,16 @@ fn route_kept_card_or_defer(
     if cx.destination == Zone::Library {
         req = req.at_library_position(LibraryPosition::Bottom);
     }
+    let move_owner = crate::game::zone_pipeline::PausedMoveOwner::single(state);
     match crate::game::zone_pipeline::move_object(state, req, events) {
         crate::game::zone_pipeline::ZoneMoveResult::Done => None,
         crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
         | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
             let mut clear_markers = cx.misses.to_vec();
             clear_markers.push(cx.hit_card);
-            crate::game::zone_pipeline::defer_completion_on_pause(
+            crate::game::zone_pipeline::defer_completion_on_paused_move(
                 state,
+                move_owner,
                 crate::types::game_state::BatchCompletion::RevealRestPile {
                     delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                     player,

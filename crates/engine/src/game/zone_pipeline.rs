@@ -1301,7 +1301,7 @@ fn install_intrinsic_characteristic_counters(
     }
 }
 
-/// Result of a batch zone-move (`move_objects_simultaneously`).
+/// Result of a batch zone-move (`move_objects_simultaneously_then`).
 pub(crate) enum BatchMoveResult {
     /// Every requested object and any inline completion tail were delivered.
     Done,
@@ -1312,6 +1312,34 @@ pub(crate) enum BatchMoveResult {
     /// know that it paused — the resume path (`drain_pending_batch_deliveries`)
     /// finishes the batch.
     NeedsChoice,
+}
+
+/// Result of [`move_objects_simultaneously`], whose caller may hang its own
+/// [`BatchCompletion`] on a pause ([`defer_completion_on_paused_move`]).
+pub(crate) enum SimultaneousMoveResult {
+    /// Every requested object was delivered.
+    Done,
+    /// A member's delivery paused on a player choice; the batch's owner was
+    /// parked where the named placement says.
+    NeedsChoice(crate::types::game_state::ParkedBatchOwner),
+}
+
+/// Where a paused move's caller hangs its [`BatchCompletion`]
+/// ([`defer_completion_on_paused_move`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PausedMoveOwner {
+    /// The owner [`move_objects_simultaneously`] parked for the batch.
+    Batch(crate::types::game_state::ParkedBatchOwner),
+    /// A single [`move_object`], which parks no owner of its own. Its child
+    /// stack begins at this boundary, captured before the move.
+    Single(crate::types::resolution::ChildStackDepth),
+}
+
+impl PausedMoveOwner {
+    /// A single move about to run: capture where its child stack will begin.
+    pub(crate) fn single(state: &GameState) -> Self {
+        Self::Single(state.resolution_stack.capture_child_boundary())
+    }
 }
 
 /// Internal batch-loop result carrying the one logical zone-change owner until
@@ -1346,13 +1374,17 @@ enum BatchDeliveryParking {
 /// undelivered tail is stashed in the active `BatchDelivery` frame; the resume
 /// path drains it (`drain_pending_batch_deliveries`). The owner crosses that
 /// boundary unchanged, so its final settlement covers the whole batch rather
-/// than one delivered segment.
+/// than one delivered segment. A pause names where that owner was parked, so a
+/// caller that hangs its own completion on the pause addresses that exact owner.
 pub(crate) fn move_objects_simultaneously(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
     events: &mut Vec<GameEvent>,
-) -> BatchMoveResult {
-    move_objects_simultaneously_then(state, reqs, None, events)
+) -> SimultaneousMoveResult {
+    match deliver_simultaneous_batch(state, reqs, &mut None, events) {
+        BatchDeliveryResult::Done(_) => SimultaneousMoveResult::Done,
+        BatchDeliveryResult::NeedsChoice(parked) => SimultaneousMoveResult::NeedsChoice(parked),
+    }
 }
 
 /// CR 603.10a + CR 616.1: As [`move_objects_simultaneously`], but runs a typed
@@ -1373,6 +1405,33 @@ pub(crate) fn move_objects_simultaneously_then(
     completion: Option<BatchCompletion>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
+    let mut completion = completion;
+    match deliver_simultaneous_batch(state, reqs, &mut completion, events) {
+        BatchDeliveryResult::Done(logical_zone_change_group) => {
+            // Synchronous completion (the common single-redirect path): run the
+            // cleanup now, and surface a pause it raises to the enclosing caller.
+            completion.map_or(BatchMoveResult::Done, |mut completion| {
+                crate::types::game_state::settle_batch_delivery_outcome(
+                    &mut completion,
+                    state,
+                    &logical_zone_change_group,
+                );
+                run_batch_completion(state, completion, events)
+            })
+        }
+        BatchDeliveryResult::NeedsChoice(_) => BatchMoveResult::NeedsChoice,
+    }
+}
+
+/// CR 603.10a + CR 616.1: deliver one simultaneous batch. A settled batch's
+/// trigger collection is completed; a paused batch's owner takes `completion`,
+/// so its drain runs it once, after logical settlement.
+fn deliver_simultaneous_batch(
+    state: &mut GameState,
+    reqs: Vec<ZoneMoveRequest>,
+    completion: &mut Option<BatchCompletion>,
+    events: &mut Vec<GameEvent>,
+) -> BatchDeliveryResult {
     let event_start = events.len();
     let zone_change_record_start = state.zone_changes_this_turn.len();
     let ids: Vec<ObjectId> = reqs.iter().map(|r| r.object_id).collect();
@@ -1398,41 +1457,40 @@ pub(crate) fn move_objects_simultaneously_then(
                 &logical_zone_change_group,
                 &events[event_start..],
             );
-            // Synchronous completion (the common single-redirect path): run the
-            // cleanup now, and surface a pause it raises to the enclosing caller.
-            completion.map_or(BatchMoveResult::Done, |mut completion| {
-                crate::types::game_state::settle_batch_delivery_outcome(
-                    &mut completion,
-                    state,
-                    &logical_zone_change_group,
-                );
-                run_batch_completion(state, completion, events)
-            })
+            BatchDeliveryResult::Done(logical_zone_change_group)
         }
         BatchDeliveryResult::NeedsChoice(parked) => {
             // `deliver_batch` always stashes the exact owner, including when the
             // paused object was the last member and the undelivered tail is empty.
             // Attach the completion to that same owner so its drain can run it
-            // once, after logical settlement. CR 706.6 + CR 614.12a: an owner
-            // parked beneath its member's prompt-owning child stack is addressed
-            // at that member's boundary.
-            let pending = match parked {
-                crate::types::game_state::ParkedBatchOwner::Active => {
-                    ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard))
-                }
-                crate::types::game_state::ParkedBatchOwner::AtChildBoundary(member_stack_start) => {
-                    state
-                        .resolution_stack
-                        .batch_delivery_at_child_boundary_mut(member_stack_start)
-                        .expect("a paused batch owner sits at its member's child boundary")
-                }
-            };
-            pending.completion = completion;
+            // once, after logical settlement.
+            let pending =
+                parked_batch_record(state, parked, destination.unwrap_or(Zone::Graveyard));
+            pending.completion = completion.take();
             pending.attempted = ids;
             pending.zone_change_record_start = zone_change_record_start;
             pending.deferred_events.extend(events.drain(event_start..));
-            BatchMoveResult::NeedsChoice
+            BatchDeliveryResult::NeedsChoice(parked)
         }
+    }
+}
+
+/// The record of a batch owner parked as `parked` says. CR 706.6 +
+/// CR 614.12a: an owner parked beneath its member's prompt-owning child stack is
+/// addressed at that member's boundary.
+fn parked_batch_record(
+    state: &mut GameState,
+    parked: crate::types::game_state::ParkedBatchOwner,
+    destination: Zone,
+) -> &mut PendingBatchDeliveries {
+    match parked {
+        crate::types::game_state::ParkedBatchOwner::Active => {
+            ensure_batch_record(state, destination)
+        }
+        crate::types::game_state::ParkedBatchOwner::AtChildBoundary(member_stack_start) => state
+            .resolution_stack
+            .batch_delivery_at_child_boundary_mut(member_stack_start)
+            .expect("a paused batch owner sits at its member's child boundary"),
     }
 }
 
@@ -1454,10 +1512,40 @@ fn run_batch_completion(
 /// prompt) does not stash a batch tail, so this creates an empty-`remaining`
 /// record carrying only the completion; the drain delivers nothing and runs the
 /// completion. Used by the reveal-until / dig kept-card sites to defer the
-/// rest-pile move when the kept card's battlefield entry pauses.
+/// rest-pile move when the kept card's battlefield entry pauses. The record is
+/// the top one; a kept card whose entry can pause on a prompt one of its own
+/// frames owns uses [`defer_completion_on_paused_move`] instead.
 pub(crate) fn defer_completion_on_pause(state: &mut GameState, completion: BatchCompletion) {
     // The destination is irrelevant for an empty tail (no object re-delivers).
     ensure_batch_record(state, Zone::Graveyard).completion = Some(completion);
+}
+
+/// CR 706.6 + CR 614.12a: As [`defer_completion_on_pause`], on the record
+/// `owner` names. A batch's completion rides on the owner
+/// [`move_objects_simultaneously`] parked, wherever it was parked. A single
+/// move's standalone record is parked like a batch owner
+/// (`GameState::park_batch_delivery_for_paused_member`) at the boundary captured
+/// before the move: beneath the entrant's whole child stack when the entrant's
+/// as-enters choice is owned by one of its frames (a tied roll's ignore choice,
+/// CR 706.6), so the completion runs only once that entry has completed, and on
+/// top otherwise.
+pub(crate) fn defer_completion_on_paused_move(
+    state: &mut GameState,
+    owner: PausedMoveOwner,
+    completion: BatchCompletion,
+) {
+    // The destination is irrelevant for an empty tail (no object re-delivers).
+    let parked = match owner {
+        PausedMoveOwner::Batch(parked) => parked,
+        PausedMoveOwner::Single(_) if state.active_batch_delivery().is_some() => {
+            crate::types::game_state::ParkedBatchOwner::Active
+        }
+        PausedMoveOwner::Single(move_stack_start) => {
+            let pending = standalone_batch_record(state, Zone::Graveyard);
+            state.park_batch_delivery_for_paused_member(pending, move_stack_start)
+        }
+    };
+    parked_batch_record(state, parked, Zone::Graveyard).completion = Some(completion);
 }
 
 /// Return the live parked-batch record, creating an empty-tail one only for a
@@ -1465,34 +1553,41 @@ pub(crate) fn defer_completion_on_pause(state: &mut GameState, completion: Batch
 /// always arrives here with its original logical owner already stashed.
 fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut PendingBatchDeliveries {
     if state.active_batch_delivery().is_none() {
-        let zone_change_record_start = state.zone_changes_this_turn.len();
-        let paused_current = state.pending_zone_change_delivery_from_replacement();
-        let announced_members = paused_current
-            .iter()
-            .map(|delivery| delivery.member.object_id)
-            .collect::<Vec<_>>();
-        let logical_zone_change_group =
-            crate::game::triggers::allocate_logical_zone_change_group(state, &announced_members);
-        state.push_batch_delivery(PendingBatchDeliveries {
-            logical_zone_change_group,
-            paused_current,
-            remaining: Vec::new(),
-            destination,
-            source_id: None,
-            enter_tapped: EtbTapState::Unspecified,
-            exile_tracking: ZoneDeliveryExileTracking::None,
-            library_placement: None,
-            completion: None,
-            replacement_applied: HashSet::new(),
-            requests: Vec::new(),
-            attempted: Vec::new(),
-            zone_change_record_start,
-            deferred_events: Vec::new(),
-        });
+        let pending = standalone_batch_record(state, destination);
+        state.push_batch_delivery(pending);
     }
     state
         .active_batch_delivery_mut()
         .expect("pending batch record was just initialized")
+}
+
+/// An empty-tail record for a standalone paused delivery, which carries only a
+/// [`BatchCompletion`] and the paused replacement's delivery, if any.
+fn standalone_batch_record(state: &mut GameState, destination: Zone) -> PendingBatchDeliveries {
+    let zone_change_record_start = state.zone_changes_this_turn.len();
+    let paused_current = state.pending_zone_change_delivery_from_replacement();
+    let announced_members = paused_current
+        .iter()
+        .map(|delivery| delivery.member.object_id)
+        .collect::<Vec<_>>();
+    let logical_zone_change_group =
+        crate::game::triggers::allocate_logical_zone_change_group(state, &announced_members);
+    PendingBatchDeliveries {
+        logical_zone_change_group,
+        paused_current,
+        remaining: Vec::new(),
+        destination,
+        source_id: None,
+        enter_tapped: EtbTapState::Unspecified,
+        exile_tracking: ZoneDeliveryExileTracking::None,
+        library_placement: None,
+        completion: None,
+        replacement_applied: HashSet::new(),
+        requests: Vec::new(),
+        attempted: Vec::new(),
+        zone_change_record_start,
+        deferred_events: Vec::new(),
+    }
 }
 
 /// CR 603.10a + CR 616.1: shared batch delivery loop. Runs each request through
@@ -6260,7 +6355,7 @@ mod w3_library_placement_tests {
         let mut events = Vec::new();
         assert!(matches!(
             move_objects_simultaneously(&mut state, reqs, &mut events),
-            BatchMoveResult::NeedsChoice
+            SimultaneousMoveResult::NeedsChoice(crate::types::game_state::ParkedBatchOwner::Active)
         ));
         assert_eq!(
             state
@@ -6576,7 +6671,7 @@ mod w3_library_placement_tests {
                 ],
                 &mut Vec::new(),
             ),
-            BatchMoveResult::NeedsChoice
+            SimultaneousMoveResult::NeedsChoice(crate::types::game_state::ParkedBatchOwner::Active)
         ));
         let frames = state.resolution_stack.iter().collect::<Vec<_>>();
         assert!(matches!(
@@ -8060,7 +8155,7 @@ mod hand_entry_receiver_tests {
         ];
         assert!(matches!(
             move_objects_simultaneously(&mut state, requests, &mut Vec::new()),
-            BatchMoveResult::NeedsChoice
+            SimultaneousMoveResult::NeedsChoice(crate::types::game_state::ParkedBatchOwner::Active)
         ));
         (state, first, second)
     }
