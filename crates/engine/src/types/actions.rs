@@ -1199,7 +1199,7 @@ pub enum DebugCardCreationKind {
 
 /// Direct game-state manipulation actions for debugging, testing, and remediation.
 /// Bypasses `WaitingFor` validation — fires from any game state without disrupting
-/// the current prompt, except the player-resource variants that
+/// the current prompt, except the player-event variants (life, counters, energy, discard) that
 /// [`DebugAction::requires_settled_priority`] gates to a Priority window, and the
 /// payload-dependent checks (`CreateCard { zone: Battlefield, run_etb: true }`,
 /// `MoveToZone { simulate: true }`) that `preflight_debug_action` gates the same

@@ -295,7 +295,8 @@ fn r5_madness_offers_cast_then_decline_goes_to_graveyard() {
     assert_eq!(zone_of(&runner, card), Zone::Graveyard);
 }
 
-/// R6: the cause is Effect, so Library of Leng's replacement applies.
+/// R6: the cause is Effect, so Library of Leng's replacement applies. The
+/// discard is recorded once, at the answer (not when the prompt is parked).
 #[test]
 fn r6_library_of_leng_applies_to_sandbox_discard() {
     let Some(db) = load_db() else { return };
@@ -306,18 +307,26 @@ fn r6_library_of_leng_applies_to_sandbox_discard() {
     });
     let card = card.unwrap();
 
-    runner.act(discard(card)).expect("discard succeeds");
+    let first = runner.act(discard(card)).expect("discard succeeds");
+    assert!(
+        discarded_events(&first.events).is_empty(),
+        "parking the prompt records no discard"
+    );
     let accept = choice_index(&runner, P0, "Library of Leng prompt", |d| d != "Decline");
 
-    // Pre-existing upstream gap, out of scope here: once a replacement choice
-    // pauses a frameless single-card discard, the resume moves the card but
-    // records no discard and emits no `Discarded` event (measured for both
-    // Library of Leng answers and for two Rest in Peace). This row therefore
-    // asserts only the placement.
-    runner
+    let result = runner
         .act(GameAction::ChooseReplacement { index: accept })
         .expect("choosing the library option succeeds");
+    assert_eq!(discarded_events(&result.events), vec![(P0, card)]);
     let state = runner.state();
+    assert_eq!(
+        state
+            .cards_discarded_this_turn_by_player
+            .get(&P0)
+            .copied()
+            .unwrap_or(0),
+        1
+    );
     let top = state
         .players
         .iter()
@@ -335,14 +344,18 @@ fn r7_parked_choice_refuses_second_debug_discard() {
     let mut ids = None;
     let mut runner = table(db, |s, db| {
         s.add_real_card(P0, "Library of Leng", Zone::Battlefield, db);
-        s.add_real_card(P1, "Geth's Grimoire", Zone::Battlefield, db);
+        let grimoire = s.add_real_card(P1, "Geth's Grimoire", Zone::Battlefield, db);
         let first = s.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
         let second = s.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
-        ids = Some((first, second));
+        ids = Some((first, second, grimoire));
     });
-    let (first, second) = ids.unwrap();
+    let (first, second, grimoire) = ids.unwrap();
 
-    runner.act(discard(first)).expect("discard parks a choice");
+    let parked = runner.act(discard(first)).expect("discard parks a choice");
+    assert!(
+        discarded_events(&parked.events).is_empty(),
+        "parking the prompt records no discard"
+    );
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { player: P0, .. }
@@ -353,14 +366,31 @@ fn r7_parked_choice_refuses_second_debug_discard() {
     assert!(runner.act(discard(second)).is_err());
     assert_eq!(digest(&runner), before, "a refused action changes nothing");
 
-    // Pre-existing upstream gap (see R6): the declined answer moves the card
-    // to the graveyard but emits no `Discarded` event, so the opponent's
-    // Grimoire does not trigger. Only the placement is asserted.
     let decline = choice_index(&runner, P0, "Library of Leng prompt", |d| d == "Decline");
-    runner
+    let result = runner
         .act(GameAction::ChooseReplacement { index: decline })
         .expect("choosing the graveyard option succeeds");
     assert_eq!(zone_of(&runner, first), Zone::Graveyard);
+    assert_eq!(discarded_events(&result.events), vec![(P0, first)]);
+    assert_eq!(
+        runner
+            .state()
+            .cards_discarded_this_turn_by_player
+            .get(&P0)
+            .copied()
+            .unwrap_or(0),
+        1
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|e| e.source_id == grimoire)
+            .count(),
+        1,
+        "the opponent's Grimoire triggers exactly once"
+    );
 }
 
 /// R8: no source object, so "a spell or ability an opponent controls causes you
