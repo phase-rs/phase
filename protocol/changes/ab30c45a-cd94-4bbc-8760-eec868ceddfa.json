@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "Add StaticMode::CantSacrifice (player-scoped sacrifice prohibition)"
+  "reason": "Add StaticMode::CantSacrifice (player-scoped sacrifice prohibition) and ResolutionFrame::SimultaneousDeparture (parked destroy / state-based death batch)"
 }

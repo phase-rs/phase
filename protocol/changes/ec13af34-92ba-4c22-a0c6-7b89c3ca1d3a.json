@@ -1,7 +1,0 @@
-{
-  "surfaces": [
-    "full",
-    "wire"
-  ],
-  "reason": "Add ResolutionFrame::SimultaneousDeparture (parked destroy-all / state-based death batch)"
-}
