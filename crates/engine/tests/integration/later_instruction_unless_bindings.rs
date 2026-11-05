@@ -137,7 +137,7 @@ fn assert_settled(runner: &GameRunner, context: &str) {
 /// predicate holds it carries on and resolves the spell as well.
 fn cast_and_resolve_trigger(runner: &mut GameRunner, spell: ObjectId) -> (usize, WaitingFor) {
     let outcome = runner.cast(spell).resolve();
-    let baseline = hand_len(runner) as i64 - outcome.hand_drawn(P0) as i64;
+    let baseline = hand_len(runner) as i64 - outcome.hand_drawn(P0);
     (baseline as usize, outcome.final_waiting_for().clone())
 }
 
