@@ -54,6 +54,9 @@ struct Board {
 enum AllyGear {
     Combadge,
     PlainEquipment,
+    /// A second Combadge on the attacker itself (the board a cast-trigger copy
+    /// makes likely); the attacker is not "another creature".
+    SecondBadgeOnAttacker,
     Nothing,
 }
 
@@ -74,14 +77,19 @@ fn board(ally_gear: AllyGear) -> Board {
                 .with_subtypes(vec!["Equipment"])
                 .id(),
         ),
-        AllyGear::Nothing => None,
+        AllyGear::SecondBadgeOnAttacker | AllyGear::Nothing => None,
     };
+    let second_badge =
+        matches!(ally_gear, AllyGear::SecondBadgeOnAttacker).then(|| add_combadge(&mut scenario));
     scenario.with_library_top(P0, &["Plains"; 5]);
     scenario.with_library_top(P1, &["Plains"; 5]);
     let mut runner = scenario.build();
     attach(&mut runner, badge, attacker);
     if let Some(equipment) = ally_equipment {
         attach(&mut runner, equipment, ally);
+    }
+    if let Some(equipment) = second_badge {
+        attach(&mut runner, equipment, attacker);
     }
     Board {
         runner,
@@ -156,6 +164,26 @@ fn no_other_communicator_leaves_the_attacker_blockable() {
         .declare_blockers(&[(board.blocker, board.attacker)])
         .expect("the attacker stays blockable");
     assert!(board.runner.state().stack.is_empty());
+}
+
+/// CR 301.5a + CR 603.2: both Combadges grant the trigger to the same creature,
+/// but "another creature with a Communicator attached to it" excludes the
+/// attacker itself, so two badges on one creature never satisfy the gate.
+#[test]
+fn two_combadges_on_the_attacker_do_not_make_it_unblockable() {
+    let mut board = board(AllyGear::SecondBadgeOnAttacker);
+    assert!(
+        !attack_to_blocks(&mut board),
+        "the attacker wearing both Combadges is not \"another creature\""
+    );
+    assert!(matches!(
+        board.runner.state().waiting_for,
+        WaitingFor::DeclareBlockers { .. }
+    ));
+    board
+        .runner
+        .declare_blockers(&[(board.blocker, board.attacker)])
+        .expect("the attacker stays blockable");
 }
 
 #[test]

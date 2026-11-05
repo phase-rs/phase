@@ -28,6 +28,15 @@ const INNER_LIGHT_ORACLE: &str = "(As this Saga enters and after your draw step,
 
 /// The Saga (already on chapter I) and a 3-power attacker for P0.
 fn setup() -> (GameRunner, ObjectId, ObjectId) {
+    let (runner, saga, wurm, _) = setup_with_bystander(false);
+    (runner, saga, wurm)
+}
+
+/// `setup`, plus (when `with_bystander`) a second 2-power P0 creature that is
+/// not chapter II's chosen creature.
+fn setup_with_bystander(
+    with_bystander: bool,
+) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let saga = scenario
@@ -37,6 +46,7 @@ fn setup() -> (GameRunner, ObjectId, ObjectId) {
         .from_oracle_text(INNER_LIGHT_ORACLE)
         .id();
     let wurm = scenario.add_creature(P0, "Craw Wurm", 3, 4).id();
+    let bystander = with_bystander.then(|| scenario.add_creature(P0, "Grizzly Bears", 2, 2).id());
     scenario.with_library_top(P0, &["Plains"; 20]);
     scenario.with_library_top(P1, &["Plains"; 20]);
     let mut runner = scenario.build();
@@ -47,7 +57,7 @@ fn setup() -> (GameRunner, ObjectId, ObjectId) {
         .unwrap()
         .counters
         .insert(CounterType::Lore, 1);
-    (runner, saga, wurm)
+    (runner, saga, wurm, bystander)
 }
 
 /// Advance from P0's end step through P0's next draw step (CR 714.3c adds the
@@ -123,6 +133,25 @@ fn chosen_creature_dealing_combat_damage_this_turn_draws_that_many() {
     outcome.assert_life_delta(P1, -3);
     // CR 603.7b + CR 120.3: draw cards equal to the 3 combat damage dealt.
     outcome.assert_hand_drawn(P0, 3);
+}
+
+/// CR 603.7c + CR 608.2c: the delayed trigger watches only the chosen creature
+/// ("it"). A different creature of ours dealing combat damage the same turn
+/// draws nothing; the chosen one still draws its own damage.
+#[test]
+fn a_non_chosen_creature_dealing_combat_damage_draws_nothing() {
+    let (mut runner, saga, wurm, bystander) = setup_with_bystander(true);
+    let bystander = bystander.expect("bystander staged");
+    resolve_chapter_two(&mut runner, saga, wurm);
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(bystander, AttackTarget::Player(P1))])
+        .expect("the non-chosen Grizzly Bears attacks alone");
+    let outcome = runner.combat_damage();
+    // Reach guard: the bystander did deal its combat damage.
+    outcome.assert_life_delta(P1, -2);
+    outcome.assert_hand_drawn(P0, 0);
 }
 
 #[test]
