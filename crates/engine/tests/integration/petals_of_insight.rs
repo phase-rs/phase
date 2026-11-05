@@ -13,7 +13,7 @@
 //!   by an effect (e.g. self-bounce), it is placed into its owner's graveyard.
 
 use crate::rules::{GameAction, GameRunner, GameScenario, ObjectId, WaitingFor, Zone, P0, P1};
-use engine::game::filter_state_for_viewer;
+use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{DigRestOrder, DigSource, Effect, QuantityExpr, TargetFilter};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -295,6 +295,25 @@ pub fn petals_of_insight_bottom_order_prompt_hides_looked_at_ids_from_opponent()
         wire.get("private_look_ids").is_none(),
         "serialized opponent projection must omit private_look_ids, got {:?}",
         wire.get("private_look_ids")
+    );
+
+    // CR 701.20e: an unseated wire has no private access to any player either,
+    // so it gets the same redaction as the opponent.
+    let unseated = filter_state_for_unseated_viewer(runner.state());
+    assert!(
+        unseated.private_look_ids.is_empty(),
+        "unseated viewer must not receive the looked-at ids, got {:?}",
+        unseated.private_look_ids
+    );
+    assert!(matches!(
+        &unseated.waiting_for,
+        WaitingFor::DigBottomOrder { cards, .. } if *cards == vec![ObjectId(0); 3]
+    ));
+    let unseated_wire = serde_json::to_value(&unseated).expect("projection serializes");
+    assert!(
+        unseated_wire.get("private_look_ids").is_none(),
+        "serialized unseated projection must omit private_look_ids, got {:?}",
+        unseated_wire.get("private_look_ids")
     );
 }
 
