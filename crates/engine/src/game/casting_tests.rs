@@ -63908,3 +63908,103 @@ fn copy_cast_with_no_spell_ability_records_no_targets() {
         "an empty declared list never satisfies `targets [something]`"
     );
 }
+
+/// R10 (hostile) — CR 707.12 + CR 601.2c: an absent stack entry is a hard refusal,
+/// never an empty default. This arm is reachable only from a direct call, which is
+/// exactly why no production test can cover it: restating the derivation as
+/// `.find(..).and_then(StackEntry::ability).map(..).unwrap_or_default()` makes this
+/// call return `Ok(())`, publish `SpellCast` and record a cast with no facts, while
+/// every other test in the suite — including both delivered R10 legs — still passes.
+#[test]
+fn copy_cast_without_a_stack_entry_is_refused_and_records_nothing() {
+    let mut state = setup_game_at_main_phase();
+    // Fixture: a Stack-zone spell object for the real vanilla (Grizzly Bears, 2/2, no
+    // Oracle text, so no card text is exercised) that has NO `state.stack` entry.
+    // `create_object` seeds the zone directly and `add_to_zone` no-ops for `Zone::Stack`,
+    // which is the state a copy left behind by an announcement walk that never reached
+    // `finalize_copy_walk` would present.
+    let copy_id = create_object(
+        &mut state,
+        CardId(201),
+        P0,
+        "Grizzly Bears".to_string(),
+        Zone::Stack,
+    );
+    {
+        let copy = state.objects.get_mut(&copy_id).expect("the copy exists");
+        copy.is_copy = true;
+        copy.card_types.core_types.push(CoreType::Creature);
+        copy.base_card_types = copy.card_types.clone();
+        copy.power = Some(2);
+        copy.toughness = Some(2);
+        copy.base_power = Some(2);
+        copy.base_toughness = Some(2);
+    }
+    // Reach guards for the three negative assertions below: the object is present and in
+    // the Stack zone (so the object-not-found refusal is not what fires), it is UNSTAMPED
+    // (so the idempotency early-return on `cast_occurrence.is_some()` cannot swallow the
+    // call and hand back `Ok(())`), and the stack holds no entry for it.
+    assert_eq!(state.objects[&copy_id].zone, Zone::Stack);
+    assert!(state.objects[&copy_id].cast_occurrence.is_none());
+    assert!(
+        !state.stack.iter().any(|entry| entry.id == copy_id),
+        "fixture: the copy has no stack entry to derive a declared list from"
+    );
+    let turn_records_before: usize = state
+        .spells_cast_this_turn_by_player
+        .values()
+        .map(|records| records.len())
+        .sum();
+    let game_records_before: usize = state
+        .spells_cast_this_game_by_player
+        .values()
+        .map(|records| records.len())
+        .sum();
+    let journal_records_before = spell_cast_ledger_entry_count(&state);
+
+    let mut events = Vec::new();
+    let err = casting_costs::commit_copy_cast(&mut state, copy_id, P0, &mut events)
+        .expect_err("an entry-less copy is refused, not recorded with an empty list");
+    assert!(
+        matches!(&err, EngineError::InvalidAction(_)),
+        "the refusal is an InvalidAction, got {err:?}"
+    );
+    // Pins WHICH arm fired: the object-not-found refusal is also an `InvalidAction`.
+    assert!(
+        matches!(&err, EngineError::InvalidAction(message) if message.contains("has no stack entry")),
+        "the refusal is the absent-stack-entry arm, got {err:?}"
+    );
+    // CR 601.2i: validation precedes journaling, so a refused copy cast publishes no
+    // `SpellCast` and leaves no cast record or latch behind.
+    assert!(
+        events.is_empty(),
+        "a refused copy cast publishes no event, got {events:?}"
+    );
+    assert_eq!(
+        state
+            .spells_cast_this_turn_by_player
+            .values()
+            .map(|records| records.len())
+            .sum::<usize>(),
+        turn_records_before,
+        "a refused copy cast adds no turn-history record"
+    );
+    assert_eq!(
+        state
+            .spells_cast_this_game_by_player
+            .values()
+            .map(|records| records.len())
+            .sum::<usize>(),
+        game_records_before,
+        "a refused copy cast adds no game-history record"
+    );
+    assert_eq!(
+        spell_cast_ledger_entry_count(&state),
+        journal_records_before,
+        "a refused copy cast journals no ledger edit"
+    );
+    assert!(
+        state.objects[&copy_id].cast_occurrence.is_none(),
+        "a refused copy cast stamps no occurrence on the copy"
+    );
+}
