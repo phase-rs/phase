@@ -46,11 +46,14 @@ pub mod wire;
 #[cfg(feature = "draft")]
 pub mod draft_decision;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use error::{LlmError, LlmResult};
 pub use format_guidance::game_format_brief;
 pub use game_decision::{
-    build_game_decision_prompt, decision_fingerprint, select_action, select_action_from_response,
-    GameDecisionRequest, LlmActionSelection,
+    build_game_decision_prompt, decision_fingerprint, information_fingerprint, select_action,
+    select_action_from_response, GameDecisionRequest, LlmActionSelection, LlmDecisionMemory,
 };
 pub use probe::{connection_probe_prompt, validate_probe_response};
 pub use prompt::{difficulty_brief, LlmChoice, LlmPrompt};
@@ -60,7 +63,7 @@ pub use provider::{
 };
 pub use wire::{
     build_chat_request, completion_from_response, extract_completion_text, system_one_option_keys,
-    LlmReply,
+    token_usage, LlmReply, TokenUsage,
 };
 
 #[cfg(feature = "draft")]

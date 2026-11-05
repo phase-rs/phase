@@ -4,6 +4,7 @@
 
 use engine::game::effects::attach::attach_to;
 use engine::game::filter::{matches_target_filter, FilterContext};
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::game_object::{PhaseOutCause, PhaseStatus};
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
@@ -16,6 +17,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{LayersDirty, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use engine::types::keywords::{EchoCost, Keyword};
@@ -172,7 +174,7 @@ fn take_control(runner: &mut GameRunner, source: ObjectId, recipient: ObjectId) 
     // CR 611.2b + CR 613.1b: the positive reach guard is actual control.
     assert_eq!(outcome.state().objects[&recipient].controller, P0);
     assert!(outcome.events().iter().any(|event| matches!(event,
-        GameEvent::ControllerChanged { object_id, old_controller: P1, new_controller: P0 }
+        GameEvent::ControllerChanged { object_id, old_controller: P1, new_controller: P0, .. }
             if *object_id == recipient
     )));
 }
@@ -245,7 +247,7 @@ fn commandeer_preserves_permanent_spell_control_on_battlefield_entry() {
         control_changed |= result.events.iter().any(|event| {
             matches!(
                 event,
-                GameEvent::ControllerChanged { object_id, old_controller: P0, new_controller: P1 }
+                GameEvent::ControllerChanged { object_id, old_controller: P0, new_controller: P1, .. }
                     if *object_id == permanent
             )
         });
@@ -451,6 +453,7 @@ fn rootwater_source_can_depart_before_the_activation_resolves() {
         .act(GameAction::ActivateAbility {
             source_id: sources[0],
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .unwrap();
     assert!(matches!(
@@ -689,6 +692,7 @@ fn never_started_control_duration_cannot_sustain_itself() {
             .act(GameAction::ActivateAbility {
                 source_id: champion,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         runner

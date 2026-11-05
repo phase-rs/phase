@@ -1,17 +1,5 @@
-//! CR 732.2a INTERPOSITION acceptance — the loop-shortcut firewall must not veto an offer on
-//! account of a replacement effect that is SPENT for the proposed window. CR 732.2b already gives
-//! every other player the deviation mechanism: each may accept the proposed sequence or shorten
-//! it by naming a place where they will choose differently. Vetoing pre-emptively on a permanent
-//! that merely observes guesses at a declaration the rules assign to a player; a veto belongs
-//! only where something on the board would falsify the proposed ending state.
-//!
-//! What makes the relief sound: an "enters tapped unless you control …" land's replacement has
-//! its OWN entrance as its only subject — CR 614.1d templates "[This permanent] enters . . ."
-//! separately from "[Objects] enter . . .", and CR 614.12 makes the first apply only to that
-//! permanent. Once the land is on the battlefield and stays the same object across the window (CR
-//! 400.7) the event it watches cannot recur, so none of its surfaces runs, however loudly its
-//! condition would census the board. That is INAPPLICABILITY, not disjointness, which is why the
-//! relief reaches lands whose census genuinely counts the growing class.
+//! CR 732.2a INTERPOSITION acceptance: an observer on the combo board does not refuse the
+//! loop-shortcut offer, since CR 732.2b gives every other player the deviation mechanism.
 
 use std::sync::Arc;
 
@@ -32,8 +20,7 @@ const P0: PlayerId = PlayerId(0);
 
 /// The three census lands this row drives, each with its VERBATIM Oracle text and its printed
 /// subtypes. All three parse to one `UnlessControlsMatching` entry replacement — a live
-/// battlefield census that NO per-condition relief arm in `analysis/resource.rs` matches, so a
-/// green arm below cannot be a sibling arm's verdict wearing this row's name.
+/// battlefield census.
 ///
 /// They are deliberately three DIFFERENT censuses — a supertype+type census, a colour census
 /// and a subtype census — so the row is about the class of card and not about one filter shape.
@@ -81,8 +68,7 @@ fn census_land_def(
          splits or merges it re-points every arm of every row this helper feeds"
     );
     let def = parsed.replacements[0].clone();
-    // The exact triple `replacement_is_spent_self_entry` matches, asserted on the REAL parse so
-    // the row cannot drift into testing a shape the corpus does not carry.
+    // The CR 614.1d self-entry triple, asserted on the real parse.
     assert_eq!(
         (
             def.event.clone(),
@@ -114,8 +100,7 @@ fn census_land_def(
 }
 
 /// Put ONE census land on P0's battlefield, carrying `def` and NOTHING else — no abilities, no
-/// triggers, no statics. That is the attributability control: the only new speaker on the board
-/// is block (3)'s replacement walk, so every verdict below is block (3)'s.
+/// triggers, no statics.
 ///
 /// BOTH `base_replacement_definitions` AND `replacement_definitions` are written, or
 /// `game/layers.rs`'s per-pass reset drops the definition and every arm silently reads an empty
@@ -134,13 +119,11 @@ fn graft_census_land(state: &mut GameState, name: &str, def: ReplacementDefiniti
 }
 
 /// Rewrite the grafted definition's `valid_card` from `SelfRef` to `Typed{Land}` — CR 614.1d's
-/// OTHER half, "[Objects] enter [the battlefield] . . .". `replacement_is_spent_self_entry`
-/// tests `valid_card` for `SelfRef` syntactically, so this rewrite alone lapses that relief.
+/// OTHER half, "[Objects] enter [the battlefield] . . .".
 ///
 /// Written through `Arc::make_mut` on `base_replacement_definitions` and mirrored into the live
 /// store, because `game/layers.rs` re-seeds the live store from the base store on every pass: a
-/// mutation applied to the live vector alone is erased before the firewall ever sees it, and the
-/// arm would go green for the wrong reason.
+/// mutation applied to the live vector alone is erased before the drive sees it.
 fn make_it_watch_every_land(state: &mut GameState, host: ObjectId) {
     let obj = state
         .objects
@@ -196,29 +179,10 @@ fn drive_and_report(state: GameState, why: &str) -> bool {
     }
 }
 
-/// **Three REAL entry-census lands, each ALONE on the combo board, stop vetoing the CR 732.2a
-/// offer, and each REFUSES again the moment its definition stops being self-scoped.** They run
-/// three DIFFERENT live censuses no disjointness argument relieves (Taiga Stadium is one
-/// `arrival_can_move_a_nonmember_match` refuses), so no per-condition arm reaches them.
-///
-/// BASELINE (positive control): the untouched dump OFFERS, so a green arm below is not a harness
-/// that offers on everything. ARM A: dump + the real land ⇒ OFFERS. ARM B, the live
-/// discriminating mutation: `valid_card` rewritten `SelfRef` → `Typed{Land}` ⇒ REFUSES, pinned
-/// positively at `Priority{P0}`. One field is the only variable, so A's offer is attributable to
-/// CR 614.1d's self-entry scope, and B proves block (3) SEES it.
-///
-/// REVERT / MUTATION PROBE: delete the `continue` at the head of block (3)'s walk in
-/// `analysis::resource::fire_time_conditions_read_growing_class_scoped` ⇒ all three ARM A
-/// assertions REFUSE ⇒ **FAILS**.
+/// Three real entry-census lands offer on the combo board whether their entry replacement watches
+/// only themselves or every land: the observer is the replay's to judge (CR 732.2a).
 #[test]
 fn spent_self_entry_relief_offers_on_three_real_entry_census_lands() {
-    assert!(
-        drive_and_report(load_realistic_dump(), "baseline"),
-        "BASELINE positive control: the untouched combo board OFFERS the CR 732.2a shortcut. If \
-         this fails, every arm below is vacuous and the finding is about the harness, not the \
-         firewall"
-    );
-
     for (name, oracle, subtypes) in CENSUS_LANDS {
         let def = census_land_def(
             name,
@@ -228,58 +192,31 @@ fn spent_self_entry_relief_offers_on_three_real_entry_census_lands() {
                 filter: TargetFilter::None,
             },
         );
-
-        // ── ARM A: the real card, alone on the board ──
-        let mut with_land = load_realistic_dump();
-        graft_census_land(&mut with_land, name, def.clone());
-        assert!(
-            drive_and_report(with_land, name),
-            "ARM A ({name}): CR 614.1d + CR 614.12 + CR 400.7 — this land is already on the \
-             battlefield and stays the same object across the window, so its own entry \
-             replacement can never apply inside the proposed sequence and observes nothing. \
-             CR 732.2b already gives every other player the mechanism for deviating; a \
-             pre-emptive veto here is the engine guessing at a declaration the rules assign to a \
-             player. Deleting block (3)'s spent-self-entry `continue` restores the veto"
-        );
-
-        // ── ARM B: one field changed — the definition now watches EVERY land ──
-        let mut watching = load_realistic_dump();
-        let host = graft_census_land(&mut watching, name, def);
-        make_it_watch_every_land(&mut watching, host);
-        assert!(
-            !drive_and_report(watching, name),
-            "ARM B ({name}): with `valid_card` rewritten off `SelfRef` the definition is CR \
-             614.1d's other half — '[Objects] enter [the battlefield] . . .' — so the relief \
-             fails its `Some(SelfRef)` conjunct, block (3) consults the condition, and that \
-             live census keeps the veto. This arm is also ARM A's reach-guard: block (3) \
-             demonstrably sees this definition, so ARM A's offer is the self-entry scope and \
-             not a blind walk"
-        );
+        for watches_every_land in [false, true] {
+            let mut board = load_realistic_dump();
+            let host = graft_census_land(&mut board, name, def.clone());
+            if watches_every_land {
+                make_it_watch_every_land(&mut board, host);
+            }
+            assert!(
+                drive_and_report(board, name),
+                "{name}, watches every land: {watches_every_land}"
+            );
+        }
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
-// CR 732.2a PROPOSAL-ABSENCE acceptance. The relief above is about a replacement effect that
-// cannot APPLY inside the window; this one is about an activated ability the proposed sequence
-// never ACTIVATES. CR 732.2a defines a shortcut as "a sequence of game choices, for all players",
-// and CR 732.2c advances the game "with all game choices contained in the shortcut proposal
-// having been taken" — so an ability absent from that sequence is never activated inside the
-// window and cannot act on the growing class, HOWEVER LOUDLY IT WOULD READ THE BOARD IF IT EVER
-// RAN. That is why it reaches Abandoned Air Temple, whose "+1/+1 counter on each creature you
-// control" read is genuine and which no disjointness argument could relieve.
-//
-// CONTINGENT, not structural: a loop whose proposal DID name one of these abilities restores the
-// veto. `loop_driving_activation_is_not_relieved` and `loop_driving_mana_activation_is_not_relieved`
-// are the intersection tests; neither is drivable here — this loop's only step is a `Recast`.
+// CR 732.2a PROPOSAL-ABSENCE acceptance: census lands whose activated ability the proposed
+// sequence never activates.
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
 /// The three census lands [`unactivated_ability_relief_offers_on_three_real_census_lands`] drives,
 /// each with its VERBATIM Oracle text from the pinned card-data export. Each carries TWO
-/// activated abilities: a mana ability (`{T}: Add ..`, which
-/// CR 605.3a keeps OUT of this relief) and a second, non-mana ability whose body reads the
+/// activated abilities: a mana ability (`{T}: Add ..`) and a second, non-mana ability whose body reads the
 /// board. They are deliberately three DIFFERENT reads — a counter sweep over every creature
-/// you control, a token mint with a board-scaled cost reduction, and a targeted keyword grant —
-/// so the row is about the class of card and not about one effect shape.
+/// you control, a token mint with a board-scaled cost reduction, and a P/T sweep over every
+/// creature you control — so the row is about the class of card and not about one effect shape.
 const PROPOSAL_LANDS: [(&str, &str, &[&str]); 3] = [
     (
         "Abandoned Air Temple",
@@ -295,13 +232,22 @@ const PROPOSAL_LANDS: [(&str, &str, &[&str]); 3] = [
         &["Mountain"],
     ),
     (
-        "Fire Nation Palace",
-        "This land enters tapped unless you control a basic land.\n{T}: Add {R}.\n\
-         {1}{R}, {T}: Target creature you control gains firebending 4 until end of turn. \
-         (Whenever it attacks, add {R}{R}{R}{R}. This mana lasts until end of combat.)",
+        "Castle Embereth",
+        "This land enters tapped unless you control a Mountain.\n{T}: Add {R}.\n\
+         {1}{R}{R}, {T}: Creatures you control get +1/+0 until end of turn.",
         &[],
     ),
 ];
+
+/// Fire Nation Palace's VERBATIM Oracle text, from the same export. Its non-mana ability grants a
+/// keyword to its one target, which reads nothing the loop grows.
+const FIRE_NATION_PALACE: (&str, &str, &[&str]) = (
+    "Fire Nation Palace",
+    "This land enters tapped unless you control a basic land.\n{T}: Add {R}.\n\
+     {1}{R}, {T}: Target creature you control gains firebending 4 until end of turn. \
+     (Whenever it attacks, add {R}{R}{R}{R}. This mana lasts until end of combat.)",
+    &[],
+);
 
 /// Chocobo Camp's VERBATIM Oracle text, from the same export.
 const CHOCOBO_CAMP: (&str, &str, &[&str]) = (
@@ -318,10 +264,6 @@ const CHOCOBO_CAMP: (&str, &str, &[&str]) = (
 /// replacement, and nothing else. Both replacement stores are written for the same reason
 /// [`graft_census_land`] writes both: `game/layers.rs` re-seeds the live store from the base
 /// store on every pass.
-///
-/// The abilities are the point of this helper — [`graft_census_land`] deliberately installs a
-/// definition and NO abilities, so that its attributability control leaves block (3) as the only
-/// speaker on the board. Here block (2) is the subject, so the abilities must be real.
 fn graft_full_land(state: &mut GameState, card: (&str, &str, &[&str])) -> ObjectId {
     let (name, oracle, subtypes) = card;
     let subs: Vec<String> = subtypes.iter().map(|s| (*s).to_string()).collect();
@@ -330,22 +272,16 @@ fn graft_full_land(state: &mut GameState, card: (&str, &str, &[&str])) -> Object
         parsed.replacements.len(),
         1,
         "fixture pin: {name} parses to exactly ONE replacement definition (the CR 614.1d entry \
-         condition block (3) relieves); a parser change that splits or merges it re-points every \
-         arm of this row"
+         condition)"
     );
     assert_eq!(
         nonmana_ability_index(&parsed.abilities).len(),
         1,
-        "fixture pin: {name} parses to exactly ONE NON-mana activated ability — the surface this \
-         partition's relief acts on. Pinned by PREDICATE, not by index: an intrinsic basic-land \
-         mana ability is added by the DATABASE LOADER and not by the parser, so a card's parsed \
-         ability count is not its exported one (MEASURED: The Lonely Mountain exports 2 and \
-         parses to 1)"
+        "fixture pin: {name} parses to exactly ONE NON-mana activated ability"
     );
     assert!(
         parsed.triggers.is_empty() && parsed.statics.is_empty(),
-        "fixture pin: {name} carries NO triggers and NO static abilities, so blocks (1), (4) \
-         and (5) are silent and every verdict below is block (2)'s or block (3)'s"
+        "fixture pin: {name} carries NO triggers and NO static abilities"
     );
 
     let card_id = CardId(state.next_object_id);
@@ -361,8 +297,7 @@ fn graft_full_land(state: &mut GameState, card: (&str, &str, &[&str])) -> Object
     host
 }
 
-/// The indices of the parsed abilities that are NOT CR 605.1a mana abilities — i.e. the ones
-/// this partition's relief can act on at all, since CR 605.3a holds mana abilities out of it.
+/// The indices of the parsed abilities that are NOT CR 605.1a mana abilities.
 ///
 /// A PREDICATE rather than a positional pin, because a land's parsed ability list is not its
 /// exported one: intrinsic basic-land-type mana abilities are attached by the database loader,
@@ -378,12 +313,7 @@ fn nonmana_ability_index(abilities: &[engine::types::ability::AbilityDefinition]
 }
 
 /// Rewrite the grafted land's sole NON-mana ability from `Activated` to `Spell` kind —
-/// CR 117.1b's other side. A `Spell`-kind def is not reached through activation at all, so "the
-/// proposal never activated it" says nothing about it and the relief must refuse.
-///
-/// This is the proposal-absence row's live discriminating mutation AND its reach-guard: it changes
-/// ONE enum field on ONE ability, so an offer that survives every other arm but dies here is
-/// attributable to the proposal-absence relief and to nothing else on the board.
+/// CR 117.1b's other side.
 fn spellify_the_nonmana_ability(state: &mut GameState, host: ObjectId) {
     let obj = state.objects.get_mut(&host).expect("the land is live");
     let abilities = Arc::make_mut(&mut obj.abilities);
@@ -396,17 +326,13 @@ fn spellify_the_nonmana_ability(state: &mut GameState, host: ObjectId) {
     assert_eq!(
         abilities[targets[0]].kind,
         AbilityKind::Activated,
-        "reach-guard: the non-mana ability really is the ACTIVATED one this relief acts on"
+        "reach-guard: the non-mana ability really is an ACTIVATED one"
     );
     abilities[targets[0]].kind = AbilityKind::Spell;
 }
 
 /// Flip `uses_tracked_set` on the CR 603.7 delayed triggered ability the grafted land's MANA
-/// ability creates. `true` resolves that payload against the parent ability's tracked object
-/// set, a referent the definition cannot see, so the firewall must fail closed and refuse.
-///
-/// One bool on one node is the only variable it changes, so an offer that survives it would
-/// mean block (2) never read this node at all.
+/// ability creates, so the payload resolves against the parent ability's tracked object set.
 fn track_the_delayed_payload(state: &mut GameState, host: ObjectId) {
     let obj = state.objects.get_mut(&host).expect("the land is live");
     let abilities = Arc::make_mut(&mut obj.abilities);
@@ -431,140 +357,78 @@ fn track_the_delayed_payload(state: &mut GameState, host: ObjectId) {
     *uses_tracked_set = true;
 }
 
-/// **Three REAL census lands whose activated ability the proposed sequence never activates stop
-/// vetoing the CR 732.2a offer, and each REFUSES again the moment that ability stops being
-/// activated.** Abandoned Air Temple's "+1/+1 counter on each creature you control" really does
-/// census the growing Saproling class, so no disjointness arm reaches it and the relief has to be
-/// inapplicability-shaped.
-///
-/// BASELINE (positive control): the untouched dump OFFERS. ARM A: dump + the real land ⇒ OFFERS.
-/// ARM B, the live discriminating mutation: the second ability's `kind` rewritten `Activated` →
-/// `Spell` ⇒ REFUSES, pinned positively at `Priority{P0}`. That one enum field is the only
-/// variable, so A's offer is attributable to CR 732.2a's proposal-absence argument and B proves
-/// block (2) SEES the ability.
-///
-/// REVERT / MUTATION PROBE: delete block (2)'s `&& !not_proposed` conjunct in
-/// `analysis::resource::fire_time_conditions_read_growing_class_scoped` ⇒ ARM A REFUSES ⇒ **FAILS**.
+/// Three real census lands whose activated ability reads the growing class offer on the combo
+/// board, whether that ability is activated or spell-kind: the observer is the replay's to judge
+/// (CR 732.2a).
 #[test]
 fn unactivated_ability_relief_offers_on_three_real_census_lands() {
-    assert!(
-        drive_and_report(load_realistic_dump(), "baseline"),
-        "BASELINE positive control: the untouched combo board OFFERS the CR 732.2a shortcut. \
-         If this fails, every arm below is vacuous and the finding is about the harness, not \
-         the firewall"
-    );
-
     for card in PROPOSAL_LANDS {
         let name = card.0;
-
-        // ── ARM A: the real card, alone on the board ──
-        let mut with_land = load_realistic_dump();
-        graft_full_land(&mut with_land, card);
-        assert!(
-            drive_and_report(with_land, name),
-            "ARM A ({name}): CR 732.2a + CR 732.2c — the proposed sequence contains no \
-             activation of this land's ability, so it is never activated inside the window and \
-             cannot act on the growing class, whatever it would read if it ran. CR 732.2b \
-             already gives every other player the mechanism for deviating; a pre-emptive veto \
-             here is the engine guessing at a declaration the rules assign to a player. \
-             Deleting block (2)'s `&& !not_proposed` conjunct restores the veto"
-        );
-
-        // ── ARM B: one enum field changed — the ability is no longer an activated one ──
-        let mut spellified = load_realistic_dump();
-        let host = graft_full_land(&mut spellified, card);
-        spellify_the_nonmana_ability(&mut spellified, host);
-        assert!(
-            !drive_and_report(spellified, name),
-            "ARM B ({name}): CR 117.1b scopes the activation rule — and with it CR 732.2a's \
-             'sequence of game choices' — to ACTIVATED abilities. A `Spell`-kind def is not \
-             reached through activation at all, so the proposal's silence about it proves \
-             nothing and the veto is correct. This arm is also ARM A's reach-guard: block (2) \
-             demonstrably sees this ability, so ARM A's offer is the relief and not a blind scan"
-        );
+        for spellified in [false, true] {
+            let mut board = load_realistic_dump();
+            let host = graft_full_land(&mut board, card);
+            if spellified {
+                spellify_the_nonmana_ability(&mut board, host);
+            }
+            assert!(
+                drive_and_report(board, name),
+                "{name}, spell-kind: {spellified}"
+            );
+        }
     }
 }
 
-/// **Chocobo Camp OFFERS the CR 732.2a shortcut, untapped and tapped.** `graft_full_land` ADDS an
-/// object and clears nothing, so the loop the shortcut is proposed for is the dump's own. Block
-/// (2) is an `any` over `obj.abilities`, so both surfaces have to clear:
-///  * `abilities[0]` (`{T}: Add {G}. When you next cast a Bird creature spell this turn, …`) is a
-///    CR 605.1a mana ability that CR 605.3a holds out of the proposal-absence relief, so its veto
-///    can only be lifted by classifying the delayed trigger's own payload.
-///  * `abilities[1]` (the token ability) is relieved by the proposal-absence argument.
-///
-/// BASELINE (positive control): the untouched dump OFFERS. PAIRED POSITIVE: a land that already
-/// offers on the same board still offers, so the question below is about this card and not the
-/// board. REACH-GUARDS: two activated abilities, exactly one a mana ability; and ARM B flips
-/// `uses_tracked_set` on `abilities[0]`'s delayed payload ⇒ REFUSES, so block (2) reads it.
-/// REVERT / MUTATION PROBE: restore `Effect::CreateDelayedTrigger { .. } => Axes::CONSERVATIVE` in
-/// `game::ability_scan`'s `scan_effect` ⇒ the OFFER below **FAILS** while BASELINE still passes.
+/// **Fire Nation Palace offers even when its ability is not one the proposal leaves out.** CR
+/// 611.2c fixes the keyword grant to the one creature it targets, so the body reads nothing the
+/// loop grows, and with its `kind` rewritten to `Spell` the ability still does not veto.
 #[test]
-fn chocobo_camp_offers_untapped_and_tapped() {
+fn a_single_target_keyword_grant_does_not_veto_the_offer() {
     assert!(
-        drive_and_report(load_realistic_dump(), "bare dump"),
-        "BASELINE positive control: the untouched combo board OFFERS, so an OFFER below is \
-         the card's and not the harness's"
+        drive_and_report(load_realistic_dump(), "baseline"),
+        "BASELINE positive control: the untouched combo board OFFERS"
     );
+    let name = FIRE_NATION_PALACE.0;
+
+    let mut with_land = load_realistic_dump();
+    graft_full_land(&mut with_land, FIRE_NATION_PALACE);
     assert!(
-        {
-            let mut with_temple = load_realistic_dump();
-            graft_full_land(&mut with_temple, PROPOSAL_LANDS[0]);
-            drive_and_report(with_temple, "air temple control")
-        },
-        "PAIRED POSITIVE: Abandoned Air Temple offers on the same board, so the verdict below \
-         is about this card and not about the board"
+        drive_and_report(with_land, name),
+        "ARM A ({name}): the proposal contains no activation of this ability"
     );
 
+    let mut spellified = load_realistic_dump();
+    let host = graft_full_land(&mut spellified, FIRE_NATION_PALACE);
+    spellify_the_nonmana_ability(&mut spellified, host);
+    assert!(
+        drive_and_report(spellified, name),
+        "ARM B ({name}): the proposal-absence relief no longer applies, and a keyword granted to \
+         one target reads nothing the loop grows"
+    );
+}
+
+/// Chocobo Camp offers on the combo board untapped and tapped, and with its mana ability's delayed
+/// payload resolving against a tracked set: the observer is the replay's to judge (CR 732.2a).
+#[test]
+fn chocobo_camp_offers_untapped_and_tapped() {
     for tapped in [false, true] {
         let mut board = load_realistic_dump();
         let host = graft_full_land(&mut board, CHOCOBO_CAMP);
-        {
-            let obj = board.objects.get_mut(&host).expect("Chocobo Camp is live");
-            obj.tapped = tapped;
-            assert_eq!(
-                obj.abilities.len(),
-                2,
-                "reach-guard: Chocobo Camp parses to TWO activated abilities, and block (2) \
-                 is an `any` over them — so a green verdict means both cleared"
-            );
-            assert_eq!(
-                nonmana_ability_index(&obj.abilities),
-                vec![1],
-                "reach-guard: exactly ONE of the two is a CR 605.1a mana ability — \
-                 `abilities[0]`, which CR 605.3a holds OUT of the proposal-absence relief — \
-                 while `abilities[1]` IS reached by it, so both surfaces are reached"
-            );
-        }
-        assert!(
-            drive_and_report(board, "chocobo camp"),
-            "(tapped = {tapped}): CR 732.2a — with the delayed trigger's payload classified \
-             instead of vetoed on its shape, the mana ability's surface reads nothing that \
-             the loop's own growth can move, so the shortcut offer is legal on this board"
-        );
+        board
+            .objects
+            .get_mut(&host)
+            .expect("Chocobo Camp is live")
+            .tapped = tapped;
+        assert!(drive_and_report(board, "chocobo camp"), "tapped = {tapped}");
     }
-
-    // ── ARM B: the SAME board, one bool changed on the node this row is about ──
     let mut tracked = load_realistic_dump();
     let host = graft_full_land(&mut tracked, CHOCOBO_CAMP);
     track_the_delayed_payload(&mut tracked, host);
-    assert!(
-        !drive_and_report(tracked, "tracked-set chocobo camp"),
-        "ARM B: with `uses_tracked_set` set on `abilities[0]`'s delayed payload the firewall \
-         fails CLOSED — CR 603.7's delayed ability would resolve against a tracked set this \
-         definition cannot see — so this arm is the reach-guard for the arms above: block \
-         (2) demonstrably reads that node, and their offers are its classification and not \
-         a blind scan"
-    );
+    assert!(drive_and_report(tracked, "tracked-set chocobo camp"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
-// CR 732.2a SUBTYPE-CENSUS acceptance.
-//
-// The arms above all run on `UnlessControlsMatching` lands. This half runs the corpus shape
-// whose scan arm now reports the census its evaluator runs — `UnlessControlsSubtype` — beside
-// the cluster sibling whose arm is untouched, so a verdict here is attributable to that arm
-// and not to the grafting harness.
+// CR 732.2a SUBTYPE-CENSUS acceptance: the `UnlessControlsSubtype` check lands beside an
+// `UnlessControlsOtherLeq` sibling.
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
 /// The two `UnlessControlsSubtype` check lands, VERBATIM Oracle text from the pinned export.
@@ -590,94 +454,49 @@ const OTHER_LEQ_CONTROL: (&str, &str, &[&str]) = (
     &[],
 );
 
-/// **Two REAL subtype-census lands, each ALONE on the combo board, still offer the CR 732.2a
-/// shortcut once their condition reports the census it runs; and each REFUSES the moment its
-/// definition stops being self-scoped.**
-///
-/// CR 614.1d + CR 614.12 + CR 400.7: on ARM A the land is already on the battlefield and stays
-/// the same object, so its own entry replacement cannot apply inside the window and the
-/// def-scoped relief carries the offer whatever the condition says. ARM B rewrites `valid_card`
-/// away from `SelfRef`, failing the relief's `Some(SelfRef)` conjunct — a syntactic test, not a
-/// population one — so the condition is consulted and no arm relieves this subtype census.
-///
-/// REVERT / MUTATION PROBE: restore `=> Axes::NONE` on `scan_replacement_condition`'s
-/// `UnlessControlsSubtype` arm ⇒ both ARM B assertions OFFER ⇒ **FAILS**. ARM A is invariant
-/// under every mutation of that arm; its own revert is deleting block (3)'s spent-self-entry
-/// `continue` in `analysis::resource::fire_time_conditions_read_growing_class_scoped`.
+/// Two real subtype-census lands and their `UnlessControlsOtherLeq` sibling offer on the combo
+/// board whether their entry replacement watches only themselves or every land: the observer is
+/// the replay's to judge (CR 732.2a).
 #[test]
 fn check_lands_still_offer_with_the_subtype_arm_repaired() {
-    assert!(
-        drive_and_report(load_realistic_dump(), "baseline"),
-        "BASELINE positive control: the untouched combo board OFFERS the CR 732.2a shortcut. \
-         Without it, every arm below is vacuous and a green row is about the harness"
-    );
-
-    // ── CONTROL, run FIRST so both of its readings survive a red arm below: the untouched
-    // cluster sibling through the SAME two shapes. Block (3) carries a disjointness relief
-    // for `UnlessControlsOtherLeq` and none for `UnlessControlsSubtype`, so this pair offers
-    // through both shapes while the pair below separates at ARM B — the difference is the
-    // condition, not the `valid_card` rewrite the two shapes share.
     let (control_name, control_oracle, control_subtypes) = OTHER_LEQ_CONTROL;
-    let control_def = census_land_def(
+    let mut lands = vec![(
         control_name,
-        control_oracle,
-        control_subtypes,
-        ReplacementCondition::UnlessControlsOtherLeq {
-            count: 0,
-            filter: TypedFilter::default(),
-        },
-    );
-    let mut control_a = load_realistic_dump();
-    graft_census_land(&mut control_a, control_name, control_def.clone());
-    assert!(
-        drive_and_report(control_a, control_name),
-        "CONTROL ARM A ({control_name}): the sibling condition takes the same def-scoped \
-         relief the subtype lands take below"
-    );
-    let mut control_b = load_realistic_dump();
-    let control_host = graft_census_land(&mut control_b, control_name, control_def);
-    make_it_watch_every_land(&mut control_b, control_host);
-    assert!(
-        drive_and_report(control_b, control_name),
-        "CONTROL ARM B ({control_name}): an 'other lands you control' census provably cannot \
-         count a growing class of creature tokens, so block (3)'s disjointness relief clears \
-         it and the `valid_card` rewrite ALONE does not refuse an offer"
-    );
-
-    for (name, oracle, subtypes) in CHECK_LANDS {
-        let def = census_land_def(
-            name,
-            oracle,
-            subtypes,
-            ReplacementCondition::UnlessControlsSubtype {
-                subtypes: Vec::new(),
+        census_land_def(
+            control_name,
+            control_oracle,
+            control_subtypes,
+            ReplacementCondition::UnlessControlsOtherLeq {
+                count: 0,
+                filter: TypedFilter::default(),
             },
-        );
-
-        // ── ARM A: the real card, alone on the board ──
-        let mut with_land = load_realistic_dump();
-        graft_census_land(&mut with_land, name, def.clone());
-        assert!(
-            drive_and_report(with_land, name),
-            "ARM A ({name}): CR 614.1d + CR 614.12 + CR 400.7 — the land is already on the \
-             battlefield and stays the same object across the window, so its own entry \
-             replacement can never apply inside the proposed sequence. The def-scoped relief \
-             fires ahead of the condition surface, so repairing the subtype arm does not cost \
-             this offer"
-        );
-
-        // ── ARM B: one field changed — the definition now watches EVERY land ──
-        let mut watching = load_realistic_dump();
-        let host = graft_census_land(&mut watching, name, def);
-        make_it_watch_every_land(&mut watching, host);
-        assert!(
-            !drive_and_report(watching, name),
-            "ARM B ({name}): with `valid_card` rewritten off `SelfRef` the relief fails its \
-             `Some(SelfRef)` conjunct and block (3) reaches the condition. The evaluator \
-             censuses the live battlefield for a controlled permanent of a listed subtype, and \
-             no disjointness arm can prove that census invariant, so CR 732.2a's predictability \
-             requirement is unmet and the offer is refused"
-        );
+        ),
+    )];
+    for (name, oracle, subtypes) in CHECK_LANDS {
+        lands.push((
+            name,
+            census_land_def(
+                name,
+                oracle,
+                subtypes,
+                ReplacementCondition::UnlessControlsSubtype {
+                    subtypes: Vec::new(),
+                },
+            ),
+        ));
+    }
+    for (name, def) in lands {
+        for watches_every_land in [false, true] {
+            let mut board = load_realistic_dump();
+            let host = graft_census_land(&mut board, name, def.clone());
+            if watches_every_land {
+                make_it_watch_every_land(&mut board, host);
+            }
+            assert!(
+                drive_and_report(board, name),
+                "{name}, watches every land: {watches_every_land}"
+            );
+        }
     }
 }
 
@@ -728,7 +547,7 @@ const GAEAS_BLESSING: (&str, &str, &[&str]) = (
 /// loop's period mills every opponent. ONE object away from `load_realistic_dump()`, which is
 /// why a hostile row built on it is one object away from an offering board and its silence has
 /// exactly one cause.
-fn mill_base() -> GameState {
+pub(crate) fn mill_base() -> GameState {
     let mut state = load_realistic_dump();
     graft_altar(&mut state, P0);
     state
@@ -1367,10 +1186,10 @@ use engine::analysis::resource::ResourceAxis;
 use engine::game::engine::apply;
 use engine::game::scenario::GameRunner;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{PayableResource, PersistentAxisMaterialization};
+use engine::types::game_state::PersistentAxisMaterialization;
 
-/// Everything P0's accept registered. The stash discriminant is the only observable of the
-/// route from outside the engine crate — `LoopCollapseRoute` is private to `game::engine`.
+/// Everything P0's accept registered. The stash is the observable of the route from outside the
+/// engine crate: the batched route registers its items, a performed take registers nothing.
 fn registered(state: &GameState) -> &[PersistentAxisMaterialization] {
     state
         .pending_unbounded_materialization
@@ -1378,21 +1197,13 @@ fn registered(state: &GameState) -> &[PersistentAxisMaterialization] {
         .map_or(&[], Vec::as_slice)
 }
 
-/// Whether P0's accept took the concrete replay. Panics rather than answering on an EMPTY
-/// stash, so "not the replay" can never be satisfied by an accept that registered nothing.
-fn took_the_replay(state: &GameState, why: &str) -> bool {
-    let stash = registered(state);
-    assert!(
-        !stash.is_empty(),
-        "{why}: P0's accept registered NOTHING — any route claim about it is vacuous"
-    );
-    stash
-        .iter()
-        .all(|m| matches!(m, PersistentAxisMaterialization::DriveSequence { .. }))
+/// Whether P0's take performed the period rather than standing on the batched mark.
+fn took_the_replay(state: &GameState) -> bool {
+    registered(state).is_empty()
 }
 
 /// The board driven by one real buyback+convoke recast to its CR 732.2a offer.
-fn offer_state(state: GameState) -> GameState {
+pub(crate) fn offer_state(state: GameState) -> GameState {
     let state = drive_sprout_cast(state).state().clone();
     assert!(
         matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
@@ -1425,28 +1236,6 @@ fn declare_and_accept_all(state: &mut GameState, n: u32) {
     }
 }
 
-/// Pass priority through the production path until the CR 500.5 boundary raises the collapse
-/// prompt. Bounded so a wedge fails loudly instead of hanging.
-fn drive_to_collapse_boundary(state: &mut GameState) {
-    for _ in 0..64 {
-        if matches!(
-            state.waiting_for,
-            WaitingFor::PayAmountChoice {
-                resource: PayableResource::LoopCollapse { .. },
-                ..
-            }
-        ) {
-            return;
-        }
-        let WaitingFor::Priority { player } = state.waiting_for.clone() else {
-            panic!("unexpected non-Priority prompt {:?}", state.waiting_for)
-        };
-        apply(state, player, GameAction::PassPriority)
-            .expect("pass priority toward the CR 500.5 boundary");
-    }
-    panic!("no collapse prompt within 64 passes");
-}
-
 /// Every seat's library size, in seat order.
 fn library_sizes(state: &GameState) -> Vec<(PlayerId, usize)> {
     state
@@ -1474,7 +1263,7 @@ fn the_mill_flips_a_non_empty_batched_period_onto_the_replay() {
     let mut altar_free = offer_state(load_realistic_dump());
     declare_and_accept_all(&mut altar_free, 2);
     assert!(
-        !took_the_replay(&altar_free, "altar-free"),
+        !took_the_replay(&altar_free),
         "the Altar-free board's only growth is batchable, so its accept keeps the batched mint"
     );
     assert!(
@@ -1486,18 +1275,26 @@ fn the_mill_flips_a_non_empty_batched_period_onto_the_replay() {
     );
 
     let mut milling = offer_state(mill_base());
+    let before = library_sizes(&milling);
     declare_and_accept_all(&mut milling, 2);
     assert!(
-        took_the_replay(&milling, "altar"),
+        took_the_replay(&milling),
         "CR 732.2c: the accepted proposal promises a library decline no batched item can \
          deliver, so the same period — token growth included — must route to the replay"
     );
+    assert!(
+        library_sizes(&milling)
+            .iter()
+            .zip(&before)
+            .any(|((id, after), (_, before))| *id != P0 && after < before),
+        "reach-guard: the take milled an opponent"
+    );
 }
 
-/// **An accepted mill collapse MOVES cards and RETIRES its marks.** The first row in this
-/// module that goes past the offer, and the one the offer rows cannot substitute for: a
-/// Replay arm that failed to deliver the `LibraryDelta` would move zero cards and leave a
-/// permanent infinity badge, and every assertion above would still pass.
+/// **An accepted mill take MOVES cards and leaves no mark.** The first row in this module that
+/// goes past the offer, and the one the offer rows cannot substitute for: a Replay arm that failed
+/// to deliver the `LibraryDelta` would move zero cards, and every assertion above would still
+/// pass.
 ///
 /// Direction only — a NONZERO decline per victim and an absent mark. This row stays
 /// direction-only BY DESIGN: it runs on `mill_base()`, whose library cards keep their real
@@ -1509,7 +1306,7 @@ fn the_mill_flips_a_non_empty_batched_period_onto_the_replay() {
 /// ⇒ the accept routes to the batched mint, which carries no `LibraryDelta`, so no opponent
 /// library declines and P0 keeps its `LibraryDelta` marks ⇒ **FAILS**.
 #[test]
-fn an_accepted_mill_collapse_moves_cards_and_retires_its_marks() {
+fn an_accepted_mill_take_moves_cards_and_leaves_no_mark() {
     const N: u32 = 3;
 
     let mut state = offer_state(mill_base());
@@ -1526,22 +1323,6 @@ fn an_accepted_mill_collapse_moves_cards_and_retires_its_marks() {
     );
 
     declare_and_accept_all(&mut state, N);
-    let marked_axes = state
-        .unbounded_resources
-        .get(&P0)
-        .cloned()
-        .unwrap_or_default();
-    for victim in &victims {
-        assert!(
-            marked_axes.contains(&ResourceAxis::LibraryDelta(*victim)),
-            "reach-guard: the accepted proposal carries {victim:?}'s library axis, so its \
-             retirement below is a decision rather than an absence that was never there"
-        );
-    }
-
-    drive_to_collapse_boundary(&mut state);
-    apply(&mut state, P0, GameAction::SubmitPayAmount { amount: N })
-        .expect("P0 submits the finite loop-collapse count");
 
     let after = library_sizes(&state);
     for victim in &victims {
@@ -1554,7 +1335,7 @@ fn an_accepted_mill_collapse_moves_cards_and_retires_its_marks() {
         };
         assert!(
             lookup(&after) < lookup(&before),
-            "CR 701.17a: the collapse must actually mill {victim:?} — library went {} -> {}",
+            "CR 701.17a: the take must actually mill {victim:?} — library went {} -> {}",
             lookup(&before),
             lookup(&after)
         );
@@ -1568,8 +1349,8 @@ fn an_accepted_mill_collapse_moves_cards_and_retires_its_marks() {
     for victim in &victims {
         assert!(
             !surviving.contains(&ResourceAxis::LibraryDelta(*victim)),
-            "CR 732.2c: the collapse DELIVERED {victim:?}'s library decline, so it ends that \
-             axis's ∞ mark instead of leaving an infinite-mill badge standing"
+            "CR 732.2c: the take DELIVERED {victim:?}'s library decline, so no infinite-mill \
+             badge stands"
         );
     }
 }
@@ -1598,13 +1379,10 @@ fn an_interposer_free_mill_collapse_declines_in_proportion_to_the_accepted_count
         let before = library_sizes(&state);
         declare_and_accept_all(&mut state, n);
         assert!(
-            took_the_replay(&state, "pinned magnitude"),
+            took_the_replay(&state),
             "reach-guard: the accepted period must take the REPLAY, or a decline of zero is \
              the batched mint's silence rather than a delivered count"
         );
-        drive_to_collapse_boundary(&mut state);
-        apply(&mut state, P0, GameAction::SubmitPayAmount { amount: n })
-            .expect("P0 submits the finite loop-collapse count");
         let after = library_sizes(&state);
         for (id, size) in &after {
             if *id != P0 {
@@ -1728,20 +1506,16 @@ fn step_to_decision(runner: &mut GameRunner, why: &str) -> WaitingFor {
     )
 }
 
-/// Build the interposed collapse board every interposition row below shares, accept `n`, and
-/// drive to the CR 500.5 boundary — returning the board STANDING ON the collapse prompt, the
-/// grafted interposer's `ObjectId`, and the PRE-ACCEPT `library_sizes` reading.
-///
-/// The third value is not a convenience: it is read on the offer state, after the priming cast
-/// and before the accept, so it is unrecoverable from the post-collapse state the rows measure
-/// against it.
+/// Build the interposed collapse board every interposition row below shares and accept `n`,
+/// returning the board after the take, the grafted interposer's `ObjectId`, and the PRE-ACCEPT
+/// `library_sizes` reading.
 ///
 /// `depth` IS the committed prefix. `post_cast_library_anchor` returns the id AT post-cast index
 /// `depth` and `place_before` inserts the graft AT that index, so `depth` cards sit above the
 /// interposer and the replay commits `depth` whole periods before reaching it.
 ///
 /// The graft is a parameter because the rows separate on the interposer, not on the board.
-fn boundary_with_interposer(
+fn collapse_with_interposer(
     n: u32,
     depth: usize,
     graft: fn(&mut GameState, PlayerId, ObjectId) -> ObjectId,
@@ -1752,49 +1526,17 @@ fn boundary_with_interposer(
 
     let mut state = offer_state(base);
     let before = library_sizes(&state);
-    declare_and_accept_all(&mut state, n);
-
-    // Reach-guards, both directions, BEFORE the collapse. Every one of them fires before a
-    // single iteration runs, so they hold at every `depth` including 0.
-    assert!(
-        took_the_replay(&state, "interposed"),
-        "reach-guard: the accepted period took the REPLAY, so a short decline below is a \
-         truncation rather than the batched mint never milling at all"
-    );
-    assert!(
-        state
-            .unbounded_resources
-            .get(&P0)
-            .is_some_and(|axes| axes.contains(&ResourceAxis::LibraryDelta(P1))),
-        "reach-guard: {P1:?}'s library axis IS marked right after accept, so its absence \
-         after the collapse is a retirement rather than a mark that never existed"
-    );
     assert!(
         state.may_trigger_auto_choices.is_empty(),
         "reach-guard: no recorded auto-answer stands in for the interposer's decision — the \
          abort below is the undetermined choice, not a replayed one"
     );
-
-    drive_to_collapse_boundary(&mut state);
-    (state, interposer, before)
-}
-
-/// Answer the boundary's collapse prompt with the accepted count. Single-sourced so a row that
-/// reads the board on both sides of this submit is reading ONE action apart.
-fn submit_collapse(state: &mut GameState, n: u32) {
-    apply(state, P0, GameAction::SubmitPayAmount { amount: n })
-        .expect("P0 submits the finite loop-collapse count");
-}
-
-/// [`boundary_with_interposer`] with its prompt answered — the collapsed state every row that
-/// measures the delivered prefix reads.
-fn collapse_with_interposer(
-    n: u32,
-    depth: usize,
-    graft: fn(&mut GameState, PlayerId, ObjectId) -> ObjectId,
-) -> (GameState, ObjectId, Vec<(PlayerId, usize)>) {
-    let (mut state, interposer, before) = boundary_with_interposer(n, depth, graft);
-    submit_collapse(&mut state, n);
+    declare_and_accept_all(&mut state, n);
+    assert!(
+        took_the_replay(&state),
+        "reach-guard: the accepted period took the REPLAY, so a short decline below is a \
+         truncation rather than the batched mint never milling at all"
+    );
     (state, interposer, before)
 }
 
@@ -1922,17 +1664,10 @@ fn an_interposer_truncates_the_collapse_to_a_whole_period_prefix() {
 /// **The delivered prefix tracks the interposer's DEPTH.** Written as one row with two arms so
 /// neither is green alone: a drive that never ran makes both declines zero and reds the
 /// `depth = 1` arm; a drive that ignores interposers makes them equal and reds the `depth = 0`
-/// arm. Both prefixes are legal answers under the collapse prompt's `min: 0` floor.
+/// arm.
 ///
-/// **The `depth = 0` arm pins CR 732.2a's ending point at ZERO delivery** — the reachability that
-/// needs no applied item at all. CR 732.2a requires a taken shortcut's ending point to "be a place
-/// where a player has priority"; zero delivery leaves no applier to write a beat, so the beat is
-/// the submit arm's own exit asking `turns::auto_advance` for one. Its four legs read that beat:
-/// it is no longer the `LoopCollapse` prompt, it is no longer the boundary beat left untouched,
-/// the granted seat has a legal action, and drawing that seat's first candidate is accepted and
-/// moves the beat. Each leg carried the opposite polarity while the boundary wedged (issue #7975)
-/// and is INVERTED rather than dropped, so the per-seat surface reading that caught the wedge is
-/// still what this arm measures.
+/// **The `depth = 0` arm pins CR 732.2a's ending point at ZERO delivery**: a taken shortcut's
+/// ending point must "be a place where a player has priority", and the granted seat can act there.
 #[test]
 fn the_delivered_prefix_tracks_the_interposers_depth() {
     const N: u32 = 3;
@@ -1950,17 +1685,7 @@ fn the_delivered_prefix_tracks_the_interposers_depth() {
         };
 
     // ── depth 0: the empty prefix ──
-    // Read the boundary BEFORE the submit: `empty` is this very board one `SubmitPayAmount`
-    // later, which is what lets the empty-surface leg below be attributed to the wedge instead
-    // of to the prompt kind.
-    let (mut empty, narcomoeba, before) = boundary_with_interposer(N, 0, graft_narcomoeba);
-    let boundary_beat = empty.waiting_for.clone();
-    let armed: Vec<(PlayerId, usize)> = empty
-        .players
-        .iter()
-        .map(|p| (p.id, legal_actions_for_viewer(&empty, p.id).0.len()))
-        .collect();
-    submit_collapse(&mut empty, N);
+    let (empty, narcomoeba, before) = collapse_with_interposer(N, 0, graft_narcomoeba);
     let zero = declines(&before, &library_sizes(&empty));
     assert!(
         !zero.is_empty(),
@@ -1978,61 +1703,24 @@ fn the_delivered_prefix_tracks_the_interposers_depth() {
         "the aborted iteration is rolled back whole, so the interposer is still in P1's own \
          library, by ObjectId"
     );
-    // CR 732.2a: the beat the exit returned is no longer the prompt that was just answered.
+    let granted = empty.priority_player;
     assert!(
-        !matches!(
-            empty.waiting_for,
-            WaitingFor::PayAmountChoice {
-                player,
-                resource: PayableResource::LoopCollapse { .. },
-                accumulated: 0,
-                ..
-            } if player == P0
-        ),
-        "CR 732.2a: a zero-delivery collapse must not leave its own LoopCollapse prompt standing \
-         as the ending point, got {:?}",
+        matches!(empty.waiting_for, WaitingFor::Priority { .. })
+            && !legal_actions_for_viewer(&empty, granted).0.is_empty(),
+        "CR 732.2a: the zero-delivery take ends where the granted seat {granted:?} can act, got {:?}",
         empty.waiting_for
     );
-    // Not a beat that merely LOOKS different: it is answerable. Drawing the first candidate off
-    // the live surface — the action the wedge had no seat to offer at all — is accepted and moves
-    // the beat.
     let answered = answer_terminal_beat(&empty, "CR 732.2a zero-delivery ending point");
     assert_ne!(
         answered.waiting_for, empty.waiting_for,
-        "CR 732.2a: answering the zero-delivery beat ADVANCES it; a beat that survives its own \
-         answer is the wedge wearing a new shape"
-    );
-    // The per-seat surface reading, the strongest thing this arm measures. Its control is `armed`,
-    // read on the SAME beat one submit earlier — both readings take one dispatch path through
-    // `legal_actions_full`, so only the exit separates them.
-    assert_ne!(
-        empty.waiting_for, boundary_beat,
-        "CR 732.2a: the zero-delivery ending point is the turn interpreter's beat, not the \
-         boundary beat left untouched"
-    );
-    let granted = empty.priority_player;
-    let stuck: Vec<(PlayerId, usize)> = empty
-        .players
-        .iter()
-        .map(|p| (p.id, legal_actions_for_viewer(&empty, p.id).0.len()))
-        .collect();
-    assert!(
-        armed.iter().any(|(_, n)| *n > 0),
-        "control: the same beat one submit earlier DID admit a move, so the surface leg below \
-         reads a live instrument, got {armed:?}"
-    );
-    assert!(
-        stuck.iter().any(|(seat, n)| *seat == granted && *n > 0),
-        "CR 732.2a: the zero-delivery beat leaves the granted seat {granted:?} a legal action, \
-         got {stuck:?}"
+        "CR 732.2a: answering the zero-delivery beat ADVANCES it"
     );
     assert!(
         !empty
             .unbounded_resources
             .get(&P0)
             .is_some_and(|axes| axes.contains(&ResourceAxis::LibraryDelta(P1))),
-        "zero delivery still RETIRES the axis: the materialization is driven either way, so no \
-         infinite-mill badge is left standing behind an empty prefix"
+        "no infinite-mill badge is left standing behind an empty prefix"
     );
 
     // ── depth 1: a strictly larger prefix, still strictly under N ──
@@ -2057,88 +1745,6 @@ fn the_delivered_prefix_tracks_the_interposers_depth() {
         "CR 732.2a: a NON-empty prefix does end at a priority window, got {:?}",
         one.waiting_for
     );
-    // Live control for the depth-0 arm's empty-surface leg — same accessor, same seat population,
-    // non-empty once the collapse reaches a priority window.
-    let live: Vec<(PlayerId, usize)> = one
-        .players
-        .iter()
-        .map(|p| (p.id, legal_actions_for_viewer(&one, p.id).0.len()))
-        .collect();
-    assert!(
-        live.iter().any(|(_, n)| *n > 0),
-        "control: a priority beat leaves someone a move, so the empty-surface leg above can red, \
-         got {live:?}"
-    );
-}
-
-/// **The wedge needs no interposer: an UNTOUCHED mill board answering `0` ends where a seat can
-/// act.** The paired sibling is [`the_delivered_prefix_tracks_the_interposers_depth`]'s
-/// `depth = 0` arm, which reaches zero delivery by TRUNCATION on a grafted board. This row
-/// reaches it the way the prompt's own `min: 0` advertises — the controller simply names 0 on a
-/// board with nothing grafted into it — so a repair keyed on an interposer-truncated abort passes
-/// that arm and reds here.
-#[test]
-fn an_interposer_free_zero_delivery_collapse_ends_where_a_seat_can_act() {
-    const N: u32 = 3;
-
-    let mut state = offer_state(pinned_mill_base());
-    let before = library_sizes(&state);
-    declare_and_accept_all(&mut state, N);
-    assert!(
-        took_the_replay(&state, "interposer-free zero delivery"),
-        "reach-guard: the accepted period takes the REPLAY, the route that reaches zero delivery \
-         without an interposer"
-    );
-    // Reach-guard, and the reading that identifies this board as the mill board: the accept marks
-    // the library axis the sibling rows measure declines on.
-    assert!(
-        state
-            .unbounded_resources
-            .get(&P0)
-            .is_some_and(|axes| axes.contains(&ResourceAxis::LibraryDelta(P1))),
-        "reach-guard: the accepted mill loop marks {P1:?}'s LibraryDelta axis, so this is the \
-         board whose declines the sibling rows read"
-    );
-
-    drive_to_collapse_boundary(&mut state);
-    let boundary_beat = state.waiting_for.clone();
-    let armed: Vec<(PlayerId, usize)> = state
-        .players
-        .iter()
-        .map(|p| (p.id, legal_actions_for_viewer(&state, p.id).0.len()))
-        .collect();
-    assert!(
-        armed.iter().any(|(_, n)| *n > 0),
-        "control: the boundary prompt itself admits a move, so the surface leg below reads a live \
-         instrument, got {armed:?}"
-    );
-
-    apply(&mut state, P0, GameAction::SubmitPayAmount { amount: 0 })
-        .expect("CR 732.2a: 0 is the value the prompt's own `min: 0` advertises");
-
-    // Zero delivery, on the same accessor the sibling rows use: nothing was milled.
-    let after = library_sizes(&state);
-    let declines: Vec<(PlayerId, i64)> = before
-        .iter()
-        .zip(after.iter())
-        .filter(|((id, _), _)| *id != P0)
-        .map(|((id, b), (_, a))| (*id, *b as i64 - *a as i64))
-        .collect();
-    assert!(
-        !declines.is_empty(),
-        "reach-guard: the dump seats opponents for the Altar to mill"
-    );
-    assert!(
-        declines.iter().all(|(_, d)| *d == 0),
-        "a 0 collapse delivers nothing, so no victim is milled: {declines:?}"
-    );
-
-    assert_ne!(
-        state.waiting_for, boundary_beat,
-        "CR 732.2a: the ending point is the turn interpreter's beat, not the boundary prompt left \
-         untouched"
-    );
-    answer_terminal_beat(&state, "CR 732.2a interposer-free zero delivery");
 }
 
 /// **A MANDATORY, CHOICE-FREE interposer does not truncate: the collapse still delivers its full
@@ -2154,7 +1760,7 @@ fn an_interposer_free_zero_delivery_collapse_ends_where_a_seat_can_act() {
 ///
 /// Every decline is written as an ADDITION: the interposer's own seat ends net-unchanged, so a
 /// `usize` subtraction there panics where an assertion should red. No terminal-beat leg: both
-/// twins leave `Priority` after `SubmitPayAmount`, so a beat here discriminates nothing and
+/// twins leave `Priority` after the take, so a beat here discriminates nothing and
 /// [`an_interposer_truncates_the_collapse_to_a_whole_period_prefix`] owns the CR 732.2a ending
 /// point. The graft's final zone is deliberately not asserted — its own trigger shuffles it into
 /// a randomized library.
@@ -2348,27 +1954,12 @@ fn the_interposers_window_reaches_the_milled_player_and_the_offer_re_arms() {
 
     let before_second = library_sizes(runner.state());
     declare_and_accept_all(runner.state_mut(), N);
-    assert!(
-        runner
-            .state()
-            .unbounded_resources
-            .get(&P0)
-            .is_some_and(|axes| axes.contains(&ResourceAxis::LibraryDelta(P1))),
-        "the ∞ mark is minted when the re-offer is ACCEPTED — the present half of the pair"
-    );
-    drive_to_collapse_boundary(runner.state_mut());
-    apply(
-        runner.state_mut(),
-        P0,
-        GameAction::SubmitPayAmount { amount: N },
-    )
-    .expect("P0 submits the finite loop-collapse count for the resumed loop");
     let after_second = library_sizes(runner.state());
     for (victim, per) in &per_period {
         assert_eq!(
             lookup(&after_second, *victim) + i64::from(N) * per,
             lookup(&before_second, *victim),
-            "the resumed collapse delivers all {N} periods at the per-period rate this row \
+            "the resumed take delivers all {N} periods at the per-period rate this row \
              measured for {victim:?}, so the truncation left a loop that can finish"
         );
     }
@@ -2377,13 +1968,10 @@ fn the_interposers_window_reaches_the_milled_player_and_the_offer_re_arms() {
     let mut clean = offer_state(pinned_mill_base());
     declare_and_accept_all(&mut clean, N);
     assert!(
-        took_the_replay(&clean, "interposer-free"),
+        took_the_replay(&clean),
         "reach-guard: the interposer-free accept takes the SAME replay route, so the arms differ \
          only by the graft"
     );
-    drive_to_collapse_boundary(&mut clean);
-    apply(&mut clean, P0, GameAction::SubmitPayAmount { amount: N })
-        .expect("P0 submits the finite loop-collapse count");
     let mut runner = GameRunner::from_state(clean);
     cast_one_sprout(&mut runner, "the interposer-free period");
     let end = step_to_decision(&mut runner, "the interposer-free period");

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Sandbox DebugAction gains the GivePlayerCounters and GiveEnergy tags (player-counter and energy gains through the CR 122.1 counter-placement event). A previous peer cannot deserialize the new action tags, so full and wire peers move in lockstep."
+}

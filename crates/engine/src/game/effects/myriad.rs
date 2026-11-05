@@ -1,7 +1,7 @@
 use crate::game::{combat, players};
 use crate::types::ability::{
-    DelayedTriggerCondition, Effect, EffectError, QuantityExpr, ResolvedAbility, TargetFilter,
-    TargetRef,
+    DelayedTriggerCondition, DelayedTriggerKind, Effect, EffectError, QuantityExpr,
+    ResolvedAbility, TargetFilter, TargetRef, TokenAttackDestination,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
@@ -47,13 +47,14 @@ pub fn resolve(
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: true,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],
             additional_modifications: vec![],
         };
         let copy_ability =
-            ResolvedAbility::new(copy_effect, vec![], ability.source_id, ability.controller);
+            crate::game::effects::token_copy::own_source_copy_ability(copy_effect, ability);
         crate::game::effects::token_copy::resolve(state, &copy_ability, events)?;
 
         let token_ids = state.last_created_token_ids.clone();
@@ -101,6 +102,7 @@ pub fn resolve(
             controller: ability.controller,
             source_id: ability.source_id,
             one_shot: true,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         };
         crate::game::triggers::install_delayed_trigger(state, exile_tokens, events);

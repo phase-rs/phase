@@ -1,0 +1,29 @@
+---
+source: crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Unimplemented",
+        "name": "unknown",
+        "description": "Flying, first strike, lifelink, protection from Demons and from Dragons"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": null,
+      "description": "Flying, first strike, lifelink, protection from Demons and from Dragons",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

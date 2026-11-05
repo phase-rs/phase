@@ -51,7 +51,7 @@ fn assert_hand(state: &GameState, seat: PlayerId, id: ObjectId, label: &str) {
         .rev()
         .find(|record| record.object_id == id && record.to_zone == Zone::Hand)
         .unwrap_or_else(|| panic!("{label}: a Hand arrival record exists"));
-    assert_eq!(record.owner, seat, "{label}: arrival record owner");
+    assert_eq!(record.arrival.owner, seat, "{label}: arrival record owner");
 }
 
 fn give_turn(runner: &mut GameRunner, seat: PlayerId) {
@@ -147,7 +147,10 @@ fn v1_brainstorm_draw_from_the_pile_is_owned_by_the_drawer() {
             .iter()
             .find(|record| record.object_id == *id && record.to_zone == Zone::Hand)
             .expect("the draw arrival is recorded");
-        assert_eq!(record.owner, P1, "the draw arrival record names the drawer");
+        assert_eq!(
+            record.arrival.owner, P1,
+            "the draw arrival record names the drawer"
+        );
     }
     assert_eq!(
         pile(state)[..2],

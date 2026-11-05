@@ -12,6 +12,7 @@ use engine::game::combat::{AttackTarget, BlockHistoryPair};
 use engine::game::filter::{
     matches_target_filter, matches_target_filter_on_zone_change_record, FilterContext,
 };
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     CombatHistoryScope, CombatRelation, CombatRelationSubject, FilterProp, TargetFilter,
@@ -219,7 +220,8 @@ fn declare_blockers_records_each_blocker_to_attacker_pair() {
     // Evaluator reads (E10).
     let ctx = FilterContext::from_source_with_controller(blocker, P1);
     for scope in [CombatHistoryScope::ThisCombat, CombatHistoryScope::ThisTurn] {
-        let filter = combat_relation_filter(CombatRelation::BlockedBySubject { scope });
+        let filter =
+            combat_relation_filter(CombatRelation::BlockedBySubject { scope: Some(scope) });
         assert!(
             matches_target_filter(state, blocked, &filter, &ctx),
             "{scope:?}: the blocked attacker must match"
@@ -290,9 +292,11 @@ fn banding_block_records_the_whole_band_not_just_the_chosen_attacker() {
 /// T3: a dying blocker's OWN dies trigger still finds what it blocked,
 /// because the resolving trigger's captured identity (`ability.trigger_source`)
 /// names the exact incarnation that blocked — not the live graveyard
-/// incarnation the blocker becomes once SBAs move it (CR 400.7). The live
-/// `BlockingOrBlockedBy` relation still fails closed here (CR 506.4): the live
-/// map was pruned the moment the blocker left combat.
+/// incarnation the blocker becomes once SBAs move it (CR 400.7). The current
+/// `BlockingOrBlockedBy` relation also finds the attacker: the live map was
+/// pruned the moment the blocker left combat (CR 506.4), but the departed
+/// blocker's trigger reads its last known pairing (CR 608.2h + CR 113.7a), and
+/// the attacker is still attacking.
 #[test]
 fn a_dying_blocker_still_finds_what_it_blocked_through_its_trigger_source() {
     let mut scenario = GameScenario::new();
@@ -362,7 +366,8 @@ fn a_dying_blocker_still_finds_what_it_blocked_through_its_trigger_source() {
 
     let ctx = FilterContext::from_ability(ability);
     for scope in [CombatHistoryScope::ThisCombat, CombatHistoryScope::ThisTurn] {
-        let history_filter = combat_relation_filter(CombatRelation::BlockedBySubject { scope });
+        let history_filter =
+            combat_relation_filter(CombatRelation::BlockedBySubject { scope: Some(scope) });
         assert!(
             matches_target_filter(state, attacker, &history_filter, &ctx),
             "{scope:?}: CR 509.1g + CR 400.7: the dying blocker's own trigger must still find what it blocked"
@@ -370,8 +375,8 @@ fn a_dying_blocker_still_finds_what_it_blocked_through_its_trigger_source() {
     }
     let live_filter = combat_relation_filter(CombatRelation::BlockingOrBlockedBy);
     assert!(
-        !matches_target_filter(state, attacker, &live_filter, &ctx),
-        "CR 506.4: the live relation must be pruned once the blocker leaves combat"
+        matches_target_filter(state, attacker, &live_filter, &ctx),
+        "CR 608.2h: the dying blocker's trigger reads its last known pairing; the attacker is still attacking"
     );
 }
 
@@ -411,7 +416,7 @@ fn look_back_evaluator_answers_the_history_relation_for_a_departed_candidate() {
 
     let ctx = FilterContext::from_source_with_controller(blocker, P1);
     let history_filter = combat_relation_filter(CombatRelation::BlockedBySubject {
-        scope: CombatHistoryScope::ThisCombat,
+        scope: Some(CombatHistoryScope::ThisCombat),
     });
     let live_filter = combat_relation_filter(CombatRelation::BlockingOrBlockedBy);
 
@@ -491,7 +496,7 @@ fn look_back_answers_with_a_departed_subject_named_by_its_trigger_identity() {
 
     let ctx = FilterContext::from_trigger_source(blocker_trigger_source);
     let history_filter = combat_relation_filter(CombatRelation::BlockedBySubject {
-        scope: CombatHistoryScope::ThisTurn,
+        scope: Some(CombatHistoryScope::ThisTurn),
     });
     assert!(
         matches_target_filter_on_zone_change_record(state, attacker_record, &history_filter, &ctx),
@@ -565,10 +570,10 @@ fn this_combat_and_this_turn_disagree_across_two_combat_phases() {
 
                     let ctx = FilterContext::from_source_with_controller(blocker, P1);
                     let this_combat = combat_relation_filter(CombatRelation::BlockedBySubject {
-                        scope: CombatHistoryScope::ThisCombat,
+                        scope: Some(CombatHistoryScope::ThisCombat),
                     });
                     let this_turn = combat_relation_filter(CombatRelation::BlockedBySubject {
-                        scope: CombatHistoryScope::ThisTurn,
+                        scope: Some(CombatHistoryScope::ThisTurn),
                     });
                     assert!(
                         !matches_target_filter(state, attacker, &this_combat, &ctx),
@@ -707,10 +712,10 @@ fn combat_scoped_history_is_gone_after_the_end_of_combat_step() {
 
     let ctx = FilterContext::from_source_with_controller(blocker, P1);
     let this_combat = combat_relation_filter(CombatRelation::BlockedBySubject {
-        scope: CombatHistoryScope::ThisCombat,
+        scope: Some(CombatHistoryScope::ThisCombat),
     });
     let this_turn = combat_relation_filter(CombatRelation::BlockedBySubject {
-        scope: CombatHistoryScope::ThisTurn,
+        scope: Some(CombatHistoryScope::ThisTurn),
     });
     assert!(
         !matches_target_filter(state, attacker, &this_combat, &ctx),
@@ -746,7 +751,7 @@ fn an_attacker_that_left_and_returned_is_a_new_object_and_does_not_match() {
 
     let ctx = FilterContext::from_source_with_controller(blocker, P1);
     let filter = combat_relation_filter(CombatRelation::BlockedBySubject {
-        scope: CombatHistoryScope::ThisCombat,
+        scope: Some(CombatHistoryScope::ThisCombat),
     });
 
     // Positive control: before the blink, the relation matches.
@@ -829,10 +834,10 @@ fn a_blocker_that_left_and_returned_does_not_inherit_its_predecessors_blocks() {
         engine::game::triggers::trigger_source_context_for_latch(state, &state.objects[&blocker]);
 
     let filter_combat = combat_relation_filter(CombatRelation::BlockedBySubject {
-        scope: CombatHistoryScope::ThisCombat,
+        scope: Some(CombatHistoryScope::ThisCombat),
     });
     let filter_turn = combat_relation_filter(CombatRelation::BlockedBySubject {
-        scope: CombatHistoryScope::ThisTurn,
+        scope: Some(CombatHistoryScope::ThisTurn),
     });
 
     // (a) The predecessor's captured identity still finds its own record.
@@ -920,6 +925,7 @@ fn an_activated_ability_finds_its_stamped_incarnation_not_the_live_object() {
         .act(GameAction::ActivateAbility {
             source_id: blocker,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the blocker's {0} ability must succeed");
 
@@ -980,7 +986,8 @@ fn an_activated_ability_finds_its_stamped_incarnation_not_the_live_object() {
 
     let ctx = FilterContext::from_ability(ability);
     for scope in [CombatHistoryScope::ThisCombat, CombatHistoryScope::ThisTurn] {
-        let history_filter = combat_relation_filter(CombatRelation::BlockedBySubject { scope });
+        let history_filter =
+            combat_relation_filter(CombatRelation::BlockedBySubject { scope: Some(scope) });
         assert!(
             matches_target_filter(state, attacker, &history_filter, &ctx),
             "{scope:?}: CR 608.2h: the activated ability's stamped incarnation must still find what it blocked"
@@ -991,7 +998,8 @@ fn an_activated_ability_finds_its_stamped_incarnation_not_the_live_object() {
     // incarnation, must not inherit its predecessor's blocks.
     let live_ctx = FilterContext::from_source_with_controller(blocker, P1);
     for scope in [CombatHistoryScope::ThisCombat, CombatHistoryScope::ThisTurn] {
-        let history_filter = combat_relation_filter(CombatRelation::BlockedBySubject { scope });
+        let history_filter =
+            combat_relation_filter(CombatRelation::BlockedBySubject { scope: Some(scope) });
         assert!(
             !matches_target_filter(state, attacker, &history_filter, &live_ctx),
             "{scope:?}: CR 400.7: the returned blocker's live incarnation must not inherit its predecessor's blocks"

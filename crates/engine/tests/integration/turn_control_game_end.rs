@@ -2,8 +2,7 @@
 //! combat phase, so every player-control effect over it is over too. Driven from
 //! the CR 104.4b mandatory-loop draw, a game end that eliminates nobody and
 //! therefore never reaches CR 800.4a's leave-game teardown, and from the
-//! CR 732.2a loop crown, which parks the terminal wait inside `game/engine.rs`
-//! without ever calling `elimination::end_game`.
+//! CR 732.2a loop crown.
 
 use std::sync::Arc;
 
@@ -20,8 +19,8 @@ use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::format::{FormatConfig, SideboardPolicy};
 use engine::types::game_state::{
-    ActivePlayerControl, GameState, LoopDetectionMode, PlayerDeckPool, ScheduledTurnControl,
-    WaitingFor,
+    ActivePlayerControl, GameEnd, GameState, LoopDetectionMode, PlayerDeckPool,
+    ScheduledTurnControl, WaitingFor,
 };
 use engine::types::interaction::{
     InteractionOpportunityResponse, InteractionResponseSpec, InteractionSessionId,
@@ -428,10 +427,10 @@ const DRAIN_CLERIC: &str = "Whenever you gain life, each opponent loses 1 life."
 const BLOOD_SIPPER: &str = "Whenever an opponent loses life, you gain 1 life.";
 const KICKOFF: &str = "You gain 1 life.";
 
-/// CR 104.1 + CR 723.1 through the production entry point: a CR 732.2a loop
-/// crown parks `WaitingFor::GameOver` inside `game/engine.rs` without ever
-/// calling `elimination::end_game`, so only the teardown in
-/// `match_flow::handle_game_over_transition` can end player control on it.
+/// CR 104.1 + CR 723.1 + CR 100.4 through the production entry point: a
+/// CR 732.2a loop crown ends player control with the game, and its
+/// best-of-three goes on to sideboarding with each seat answering its own
+/// prompt.
 ///
 /// Seats: **P0** is the active player, the drain engine's owner, the crown's
 /// winner, and the CR 723 effect's `target_player`. **P1** is the seat the drain
@@ -440,7 +439,7 @@ const KICKOFF: &str = "You gain 1 life.";
 /// `semantic_player == active_player` and never reads `target_player`, so a latch
 /// whose controller is the active seat is indistinguishable from no latch.
 #[test]
-fn an_open_coded_crown_driven_through_apply_ends_player_control() {
+fn a_loop_crown_ends_player_control_and_reaches_sideboarding() {
     let mut scenario = GameScenario::new_n_player(2, 7);
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_life(P0, 20);
@@ -454,8 +453,8 @@ fn an_open_coded_crown_driven_through_apply_ends_player_control() {
 
     // Order matters: `install_match` projects `MatchConfig::loop_detection` onto
     // `state.loop_detection`, and `Off` is its default — arming first would be
-    // silently reset, the board would die by natural CR 704.5a SBA through
-    // `end_game`, and this row would measure the wrong teardown.
+    // silently reset and the board would die by natural CR 704.5a SBA instead
+    // of the crown.
     install_match(runner.state_mut(), MatchType::Bo3, 2);
     runner.state_mut().loop_detection = LoopDetectionMode::On;
 
@@ -512,26 +511,34 @@ fn an_open_coded_crown_driven_through_apply_ends_player_control() {
 
     let state = runner.state();
     assert!(
-        matches!(state.waiting_for, WaitingFor::GameOver { .. })
-            || state.match_phase == MatchPhase::BetweenGames,
-        "reach guard: the drive reached the crown rather than exhausting its cap ({:?})",
-        state.waiting_for
-    );
-    assert!(
         state.players.iter().find(|p| p.id == P1).unwrap().life > 0,
         "reach guard: the CR 732.2a crown ended it early, not a natural CR 704.5a death"
     );
+    assert_eq!(state.game_end, Some(GameEnd { winner: Some(P0) }));
+    assert_eq!(state.match_phase, MatchPhase::BetweenGames);
     assert!(
-        state.game_end.is_none(),
-        "reach guard: the open-coded park ran, not `elimination::end_game`"
+        matches!(
+            state.waiting_for,
+            WaitingFor::BetweenGamesSideboard {
+                player: P0,
+                game_number: 2,
+                ..
+            }
+        ),
+        "{:?}",
+        state.waiting_for
     );
-    assert_eq!(
-        state.match_phase,
-        MatchPhase::BetweenGames,
-        "reach guard: `handle_game_over_transition` ran on this ending"
-    );
-    assert_no_control_survives(
-        state,
-        "the teardown's call in `handle_game_over_transition`",
+    assert_no_control_survives(state, "a CR 732.2a loop crown");
+
+    runner
+        .act(submit_whole_pool())
+        .expect("the winner submits its own sideboard");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::BetweenGamesSideboard { player: P1, .. }
+        ),
+        "{:?}",
+        runner.state().waiting_for
     );
 }

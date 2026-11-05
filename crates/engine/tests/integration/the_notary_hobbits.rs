@@ -167,6 +167,7 @@ fn the_notary_hobbits_mana_ability_scales_with_halflings_controlled() {
         .act(GameAction::ActivateAbility {
             source_id: notary_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the mana ability must succeed");
 
@@ -175,7 +176,7 @@ fn the_notary_hobbits_mana_ability_scales_with_halflings_controlled() {
         pool.count_color(ManaType::Colorless),
         3,
         "expected {{C}} equal to the number of Halflings controlled (3); pool = {:?}",
-        pool.mana,
+        pool,
     );
     assert_eq!(
         pool.total(),

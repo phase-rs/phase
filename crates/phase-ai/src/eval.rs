@@ -134,8 +134,33 @@ impl EvalWeightSet {
     }
 }
 
-const WIN_SCORE: f64 = 10000.0;
-const LOSS_SCORE: f64 = -10000.0;
+pub(crate) const WIN_SCORE: f64 = 10000.0;
+pub(crate) const LOSS_SCORE: f64 = -10000.0;
+
+/// How a finished game ended for the evaluating player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalOutcome {
+    Won,
+    Lost,
+}
+
+/// CR 104.1: a game ends immediately when a player wins; a player at 0 or less life loses
+/// (CR 104.3b) and, in a multiplayer game, leaves a game that continues (CR 800.4). The
+/// evaluator scores a won position `WIN_SCORE` and a lost one `LOSS_SCORE`
+/// ([`evaluate_features`]); every term the planner layers on a leaf (strategy terms, the
+/// 0.05-scaled interior and prior terms, the utility reducer's elimination and pressure terms)
+/// is bounded far inside half of either, as is the evaluation of any realistic unfinished
+/// board. A search value past half of either bound therefore came from a position the
+/// evaluating player has already won or lost. A drawn game scores 0.0 and is not distinguished.
+pub(crate) fn terminal_outcome(value: f64) -> Option<TerminalOutcome> {
+    if value >= WIN_SCORE / 2.0 {
+        Some(TerminalOutcome::Won)
+    } else if value <= LOSS_SCORE / 2.0 {
+        Some(TerminalOutcome::Lost)
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrategicIntent {
@@ -827,7 +852,8 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> BoardStats {
 /// `policies::landfall_timing` live. Those policies hold that regime; this offset
 /// does not reach it.
 ///
-/// - **REACHED — ward-cost sacrifice, and only that.**
+/// - **REACHED — ward-cost sacrifice, and the damage-recipient choice recorded
+///   under `ChooseObjectsSelection` below.**
 ///   `WaitingFor::WardSacrificeChoice` (CR 702.21a, "choose a permanent to
 ///   sacrifice as ward cost payment") emits one candidate per permanent in its
 ///   single-permanent form (`engine::ai_support::candidates`).
@@ -853,18 +879,26 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> BoardStats {
 ///   by `sacrifice_key`, not by this offset, and changing this coefficient
 ///   cannot move it. Only the residue that the arm's guard excludes —
 ///   `up_to` (optional) sacrifices and `count == 0` — falls through to scoring.
-/// - **NOT REACHED — `WaitingFor::ChooseObjectsSelection`.** Recorded explicitly
-///   because an earlier revision of this very block cited it as the primary
-///   reached class, and it is not one. Per its own variant doc in
-///   `types::game_state`, it is the `ChooseObjectsIntoTrackedSet` selection: it
-///   *references* battlefield permanents into a tracked set for a downstream
-///   `PayCost { ScaledMana }` / `IfYouDo` / `Untap`.
-///   **The permanents are not given up.** Its candidates do reach
+/// - **`WaitingFor::ChooseObjectsSelection` — NOT REACHED for the tracked-set
+///   selection, REACHED for the damage-recipient choice.** Two kinds of selection share the
+///   prompt (its variant doc in `types::game_state`). Recorded explicitly because
+///   an earlier revision of this very block cited it as the primary reached
+///   class, and the first kind is not one: the `ChooseObjectsIntoTrackedSet`
+///   selection *references* battlefield permanents into a tracked set for a
+///   downstream `PayCost { ScaledMana }` / `IfYouDo` / `Untap`.
+///   **Those permanents are not given up.** Its candidates do reach
 ///   scoring, but every one of them leaves the board population identical, so
 ///   `BoardStats::mana_sources` is equal across them and this offset cannot
 ///   discriminate. (`Untap` downstream does not change that: the count is a
 ///   development measure that ignores tapped state — see
 ///   `zone_eval::is_intrinsic_mana_source`.)
+///   The other kind is an untargeted damage recipient ("deals N damage to a
+///   creature or player", CR 115.10a + CR 608.2d): its candidates are the
+///   creatures and players the damage may hit, they likewise reach scoring, and
+///   the damage is applied inside each scored candidate. So a pair of them
+///   differs by one `BoardStats::mana_sources` whenever the damage kills a mana
+///   source on one side — a creature of either player — which is where this
+///   offset discriminates.
 /// - **NOT REACHED — block assignment.** `score_candidates_core` intercepts
 ///   `WaitingFor::DeclareAttackers | DeclareBlockers` *after* `build_decision_context`
 ///   has already generated candidates, but *before* validation, gating, and
@@ -895,8 +929,8 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> BoardStats {
 /// is a property of the **evaluation function**: of two states differing by
 /// which permanent left, the one that kept the dork scores higher. It becomes an
 /// observable *decision* only where a scored candidate pair actually differs by
-/// one source — per the routing, the ward-cost sacrifice and the optional
-/// (`up_to`) residue — **plus, now that the term is a differential, any pair
+/// one source — per the routing, the ward-cost sacrifice, the optional
+/// (`up_to`) residue and the damage-recipient choice — **plus, now that the term is a differential, any pair
 /// that differs in an *opponent's* source count (removal of an opponent's mana
 /// source, a countered ramp spell, an opponent's simulated land drop), and — in
 /// the `opponents.len() >= 2` branch only — any pair that differs merely in an
@@ -2283,6 +2317,49 @@ mod tests {
         state.players[1].life = 0;
         let weights = EvalWeights::default();
         assert_eq!(evaluate_state(&state, PlayerId(0), &weights), WIN_SCORE);
+    }
+
+    /// `terminal_outcome` reads the evaluator's own terminal values, and nothing else: a won
+    /// `GameOver`, a lost one, and every opponent at 0 life classify; an unfinished board and a
+    /// drawn game (0.0, the documented limit) do not.
+    #[test]
+    fn terminal_outcome_reads_finished_games_only() {
+        let weights = EvalWeights::default();
+
+        let mut over = make_state();
+        over.waiting_for = WaitingFor::GameOver {
+            winner: Some(PlayerId(0)),
+        };
+        assert_eq!(
+            terminal_outcome(evaluate_state(&over, PlayerId(0), &weights)),
+            Some(TerminalOutcome::Won)
+        );
+        assert_eq!(
+            terminal_outcome(evaluate_state(&over, PlayerId(1), &weights)),
+            Some(TerminalOutcome::Lost)
+        );
+
+        let mut opponents_dead = make_state();
+        opponents_dead.players[1].life = 0;
+        assert_eq!(
+            terminal_outcome(evaluate_state(&opponents_dead, PlayerId(0), &weights)),
+            Some(TerminalOutcome::Won)
+        );
+
+        let open = make_state();
+        let open_value = evaluate_state(&open, PlayerId(0), &weights);
+        assert!(
+            open_value.is_finite(),
+            "reach: the unfinished board evaluates"
+        );
+        assert_eq!(terminal_outcome(open_value), None);
+
+        let mut drawn = make_state();
+        drawn.waiting_for = WaitingFor::GameOver { winner: None };
+        assert_eq!(
+            terminal_outcome(evaluate_state(&drawn, PlayerId(0), &weights)),
+            None
+        );
     }
 
     #[test]

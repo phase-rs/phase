@@ -93,6 +93,90 @@ describe("GameProvider semantic visual avatars", () => {
     ]));
   });
 
+  /**
+   * Issue #8053. The commander derivation used to be gated on a non-empty
+   * `command_zone`, which is only what sits in the command zone at that instant
+   * (`viewmodel/commanderColumn.ts` reads it that way). By turn 34 a commander
+   * is usually on the battlefield — or in its graveyard or exile — so the list
+   * is empty, the derivation was skipped, and a reload kept the seeded random
+   * planeswalker identities instead of the commander ones the player had been
+   * looking at. Every seat's name and avatar visibly changed.
+   */
+  it("keeps commander identities when a reload lands with the commander out of the command zone", () => {
+    const gameId = "avatar-mid-game-reload";
+    render(
+      <GameProvider gameId={gameId} mode="ai" playerCount={2}>
+        <div />
+      </GameProvider>,
+    );
+    // The page starts here on a reload: the random fallback is installed before
+    // the resumed state arrives.
+    expect(useMultiplayerStore.getState().playerAvatars).toEqual(expectedRandom(2, gameId));
+
+    act(() => {
+      useGameStore.setState({
+        gameId,
+        gameState: {
+          ...buildGameState({ players: buildPlayers([{ id: 0 }, { id: 1 }]) }),
+          command_zone: [],
+          objects: {
+            40: { name: "Atraxa, Praetors' Voice", owner: 0, is_commander: true, zone: "Battlefield" },
+            41: { name: "Muldrotha, the Gravetide", owner: 1, is_commander: true, zone: "Graveyard" },
+          },
+        } as never,
+      });
+    });
+
+    expect(useMultiplayerStore.getState().playerNames).toEqual(
+      new Map([[0, "Atraxa"], [1, "Muldrotha"]]),
+    );
+    expect(useMultiplayerStore.getState().playerAvatars).toEqual(new Map([
+      [0, { kind: "card", cardName: "Atraxa, Praetors' Voice" }],
+      [1, { kind: "card", cardName: "Muldrotha, the Gravetide" }],
+    ]));
+  });
+
+  it("does not wipe the seeded identities for a state that carries no commander", () => {
+    const gameId = "avatar-no-commander";
+    render(
+      <GameProvider gameId={gameId} mode="ai" playerCount={2}>
+        <div />
+      </GameProvider>,
+    );
+
+    act(() => {
+      useGameStore.setState({
+        gameId,
+        gameState: {
+          ...buildGameState({ players: buildPlayers([{ id: 0 }, { id: 1 }]) }),
+          objects: { 50: { name: "Sol Ring", owner: 0, zone: "Battlefield" } },
+        } as never,
+      });
+    });
+
+    // A non-Commander game keeps the random identity map it started with rather
+    // than having it replaced with the empty maps a commander scan would build.
+    expect(useMultiplayerStore.getState().playerAvatars).toEqual(expectedRandom(2, gameId));
+    expect(useMultiplayerStore.getState().playerNames.get(0)).toBe("You");
+
+    // ...and the derivation is still listening, so a commander that lands in a
+    // later snapshot is picked up instead of being missed by a one-shot check.
+    act(() => {
+      useGameStore.setState({
+        gameState: {
+          ...buildGameState({ players: buildPlayers([{ id: 0 }, { id: 1 }]) }),
+          objects: {
+            51: { name: "Kinnan, Bonder Prodigy", owner: 0, is_commander: true, zone: "Command" },
+            52: { name: "Muldrotha, the Gravetide", owner: 1, is_commander: true, zone: "Battlefield" },
+          },
+        } as never,
+      });
+    });
+    expect(useMultiplayerStore.getState().playerNames).toEqual(
+      new Map([[0, "Kinnan"], [1, "Muldrotha"]]),
+    );
+  });
+
   it.each([
     [{ type: "Bot", botName: "Jace" }, 0, "Jace, the Mind Sculptor"],
     [{ type: "HumanHost", opponentName: "Liliana" }, 0, "Liliana of the Veil"],
@@ -171,5 +255,41 @@ describe("GameProvider semantic visual avatars", () => {
     );
     expect(useMultiplayerStore.getState().playerAvatars).toEqual(new Map());
     expect(useMultiplayerStore.getState().playerNames).toEqual(new Map());
+  });
+
+  // Same defect as the AI case above, on the wire-assigned path: the online
+  // effect also gated its commander derivation on `command_zone`.
+  it("keeps commander avatars for an online reload with an empty command zone", () => {
+    useMultiplayerStore.setState({
+      playerNames: new Map([[0, "Lobby Host"], [1, "Lobby Guest"]]),
+    });
+    render(
+      <GameProvider gameId="avatar-online-reload" mode="online" playerCount={2}>
+        <div />
+      </GameProvider>,
+    );
+
+    act(() => {
+      useGameStore.setState({
+        gameState: {
+          ...buildGameState({ players: buildPlayers([{ id: 0 }, { id: 1 }]) }),
+          format_config: buildCommanderFormatConfig(),
+          command_zone: [],
+          objects: {
+            60: { name: "Kinnan, Bonder Prodigy", owner: 0, is_commander: true, zone: "Battlefield" },
+            61: { name: "Muldrotha, the Gravetide", owner: 1, is_commander: true, zone: "Exile" },
+          },
+        } as never,
+      });
+    });
+
+    // Lobby names stay authoritative here; only the artworks are derived.
+    expect(useMultiplayerStore.getState().playerNames).toEqual(
+      new Map([[0, "Lobby Host"], [1, "Lobby Guest"]]),
+    );
+    expect(useMultiplayerStore.getState().playerAvatars).toEqual(new Map([
+      [0, { kind: "card", cardName: "Kinnan, Bonder Prodigy" }],
+      [1, { kind: "card", cardName: "Muldrotha, the Gravetide" }],
+    ]));
   });
 });

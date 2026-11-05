@@ -324,3 +324,77 @@ fn combine_host_preserves_existing_merged_stack_and_current_values() {
         "augment should extend the existing merged stack without discarding prior components"
     );
 }
+
+/// CR 115.1 + CR 608.2d: The augment card chosen from the library while the
+/// ability resolves is not a target, so the continuation that combines it
+/// declares nothing once that choice fills its targets.
+#[test]
+fn a_chosen_augment_card_is_not_a_declared_target_of_the_combine() {
+    use crate::game::ability_utils::{assign_targets_in_chain, declared_targets_in_chain};
+    use crate::types::ability::{ControllerRef, FilterProp, TypedFilter};
+
+    let mut state = GameState::new_two_player(1);
+    let host = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Adorable Kitten".to_string(),
+        Zone::Battlefield,
+    );
+    apply_card_face_to_object(state.objects.get_mut(&host).unwrap(), &host_face());
+    let augments: Vec<_> = [CardId(2), CardId(3)]
+        .into_iter()
+        .map(|card_id| {
+            let augment = create_object(
+                &mut state,
+                card_id,
+                PlayerId(0),
+                "Monkey-".to_string(),
+                Zone::Library,
+            );
+            apply_card_face_to_object(state.objects.get_mut(&augment).unwrap(), &augment_face());
+            augment
+        })
+        .collect();
+    let source = create_object(
+        &mut state,
+        CardId(4),
+        PlayerId(0),
+        "Teacher's Pet".to_string(),
+        Zone::Battlefield,
+    );
+    let mut ability = ResolvedAbility::new(
+        Effect::ChooseAugmentAndCombineWithHost {
+            zones: vec![Zone::Library],
+            filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+            host: Box::new(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::HasSupertype {
+                        value: Supertype::Host,
+                    }])
+                    .into(),
+            ),
+        },
+        Vec::new(),
+        source,
+        PlayerId(0),
+    );
+    assign_targets_in_chain(&state, &mut ability, &[TargetRef::Object(host)]).unwrap();
+    assert_eq!(
+        declared_targets_in_chain(&ability),
+        vec![TargetRef::Object(host)]
+    );
+
+    let mut events = Vec::<GameEvent>::new();
+    crate::game::augment::resolve_choose_augment_and_combine(&mut state, &ability, &mut events)
+        .unwrap();
+
+    let continuation = &mut state
+        .active_ability_continuation_frame_mut()
+        .expect("two augment cards park the choice")
+        .pending
+        .chain;
+    continuation.targets = vec![TargetRef::Object(augments[0])];
+    assert_eq!(declared_targets_in_chain(continuation), Vec::new());
+}

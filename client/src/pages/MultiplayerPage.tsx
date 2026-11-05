@@ -27,11 +27,21 @@ import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MyDecks } from "../components/menu/MyDecks";
-import { ACTIVE_DECK_KEY, loadActiveDeck, touchDeckPlayed } from "../constants/storage";
+import {
+  ACTIVE_DECK_KEY,
+  loadActiveDeck,
+  loadActiveDeckBracket,
+  loadSavedDeck,
+  touchDeckPlayed,
+} from "../constants/storage";
+import { formatSuppliesDeck, isPlanechaseFamilyFormat } from "../data/formatRegistry";
+import { DEFAULT_PILE_SOURCE, pileSeatDeck, pileSourceParam } from "../services/pileSource";
 import { withSavedDeckLibraryOrSkip } from "../services/savedDeckTransaction";
 import { parseRoomCode, stripPeerIdPrefix } from "../network/connection";
 import { evaluateDeckCompatibility } from "../services/deckCompatibility";
-import { expandParsedDeck } from "../services/deckParser";
+import type { ParsedDeck } from "../services/deckParser";
+import { submitParsedDeck } from "../services/deckSubmission";
+import { bracketToEngineTier } from "../types/bracketEstimate";
 import type { ActionableBotLink, BotLink, HostSeed, LiveCheck, MultiplayerView } from "./multiplayerPageState";
 import {
   classifyCompatResult,
@@ -69,6 +79,7 @@ import {
 import { assertNever } from "../utils/assertNever";
 import { useGameStore, saveActiveGame } from "../stores/gameStore";
 import { useCardDataStore } from "../stores/cardDataStore";
+import { AI_DECK_RANDOM } from "../stores/preferencesStore";
 import { useEffectiveOffline } from "../stores/connectivityStore";
 import type { HostSettings } from "../components/lobby/HostSetup";
 
@@ -79,6 +90,11 @@ const BUILD_UPDATE_DEADLINE_MS = 15_000;
 type BuildUpdateDialog =
   | { status: "updating" }
   | { status: "manual"; link: ActionableBotLink; arrival: number };
+
+/** The player builds no deck for this format (engine-fixed or host-supplied pile). */
+function isSuppliedFormat(format: GameFormat | undefined): boolean {
+  return format !== undefined && formatSuppliesDeck(format);
+}
 
 function parseViewParam(value: string | null): MultiplayerView {
   if (value === "host-setup" || value === "deck-select") return value;
@@ -167,6 +183,9 @@ function MultiplayerPageContent({
   setView: Dispatch<SetStateAction<MultiplayerView>>;
   pendingLobbyJoins: MutableRefObject<Set<AbortController>>;
 }) {
+  // Only the current page attempt may hand prepared decks to a transport.
+  const preparationAttempt = useRef(0);
+  useEffect(() => () => { preparationAttempt.current += 1; }, []);
   const { t } = useTranslation("multiplayer");
   useAudioContext("lobby");
   const navigate = useNavigate();
@@ -253,6 +272,8 @@ function MultiplayerPageContent({
   const compatibilityPlayerCount = useMultiplayerStore(
     (s) => s.compatibilityPlayerCount,
   );
+  // The host-setup form's pile picker is the deck control for a supplied-deck format.
+  const hostFormatSupplied = isSuppliedFormat(storeFormatConfig?.format);
   // Live deck-vs-format compatibility state, rendered as a chip under the
   // Active Deck banner on host-setup. `idle` suppresses the chip entirely
   // (no deck, no format, or not on host-setup). Evaluation runs through
@@ -275,17 +296,23 @@ function MultiplayerPageContent({
       server?: string;
     } | null;
     if (!state?.deckRejected) return;
-    showToast(state.reason ?? t("page.deckRejected"));
-    setPendingAction({
+    const action: PendingAction = {
       type: "join",
       code: state.joinCode ?? "",
       format: (state.format as GameFormat) ?? undefined,
       origin:
         (typeof state.server === "string" ? adHocLobbySource(state.server) : null)
         ?? hostingLobbySource(useMultiplayerStore.getState()),
-    });
-    setView("deck-select");
+    };
     navigate(location.pathname, { replace: true, state: null });
+    // A supplied-deck format takes the empty submission, so a rejected join re-dials with it.
+    if (isSuppliedFormat(action.format)) {
+      void executeAction(action);
+      return;
+    }
+    showToast(state.reason ?? t("page.deckRejected"));
+    setPendingAction(action);
+    setView("deck-select");
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Guarantee a lobby anchor. The lobby browses, joins and spectates through
@@ -326,7 +353,7 @@ function MultiplayerPageContent({
       return;
     }
     const format = storeFormatConfig?.format;
-    if (!format) {
+    if (!format || isSuppliedFormat(format)) {
       setLiveCheck({ status: "idle" });
       return;
     }
@@ -370,6 +397,7 @@ function MultiplayerPageContent({
   // the choice, then either execute the pending host/join action or return
   // to wherever the user triggered the "Change" affordance from.
   const handleSelectDeck = (name: string) => {
+    preparationAttempt.current += 1;
     setActiveDeckName(name);
     localStorage.setItem(ACTIVE_DECK_KEY, name);
 
@@ -380,8 +408,10 @@ function MultiplayerPageContent({
 
     if (pendingAction) {
       const action = pendingAction;
-      void executeAction(action).then((ok) => {
-        if (ok) setPendingAction(null);
+      const pending = executeAction(action);
+      const attempt = preparationAttempt.current;
+      void pending.then((ok) => {
+        if (ok && attempt === preparationAttempt.current) setPendingAction(null);
       });
       return;
     }
@@ -389,6 +419,8 @@ function MultiplayerPageContent({
   };
 
   const handleEditDeck = useCallback((name: string) => {
+    preparationAttempt.current += 1;
+    setBrokerOfflinePrompt(null);
     // A Discord host flow must come back through the bot-link arrival: `view`
     // and `hostSeed` are component state, and the deck-builder route unmounts
     // this page.
@@ -431,10 +463,16 @@ function MultiplayerPageContent({
     view,
   ]);
 
-  const expandDeck = useCallback(() => {
+  // Supplied formats never read the active deck; ordinary hosts bind art here.
+  const hostDeck = useCallback(async (settings: HostSettings) => {
+    const format = settings.formatConfig.format;
+    if (formatSuppliesDeck(format)) {
+      return pileSeatDeck(format, settings.pile ?? DEFAULT_PILE_SOURCE);
+    }
     const deck = loadActiveDeck();
     if (!deck) return null;
-    return expandParsedDeck(deck);
+    const bracket = bracketToEngineTier(loadActiveDeckBracket());
+    return { ...await submitParsedDeck(deck), bracket_tier: bracket };
   }, []);
 
   const resolveGuestFromStore = useMultiplayerStore((s) => s.resolveGuest);
@@ -520,6 +558,16 @@ function MultiplayerPageContent({
     [refreshToLatestBuild, resolveGuestFromStore, showToast, t],
   );
 
+  const navigateDirectP2PJoin = useCallback(
+    (roomCode: string, format?: GameFormat) => {
+      const gameId = crypto.randomUUID();
+      useGameStore.setState({ gameId });
+      const formatParam = format ? `&format=${encodeURIComponent(format)}` : "";
+      navigate(`/game/${gameId}?mode=p2p-join&code=${roomCode}${formatParam}`);
+    },
+    [navigate],
+  );
+
   // Declared above `executeAction` so the deck-select → re-dispatch
   // path can route LobbyOnly joins through the broker too.
   const joinP2PRoom = useCallback(
@@ -527,18 +575,17 @@ function MultiplayerPageContent({
       code: string,
       origin: LobbySource,
       initialPassword?: string,
+      format?: GameFormat,
     ): Promise<boolean> => {
       const roomCode = await resolveP2PDialTarget(code, origin, initialPassword);
       if (roomCode === null) return false;
-      const gameId = crypto.randomUUID();
-      useGameStore.setState({ gameId });
-      navigate(`/game/${gameId}?mode=p2p-join&code=${roomCode}`);
+      navigateDirectP2PJoin(roomCode, format);
       return true;
     },
-    [navigate, resolveP2PDialTarget],
+    [navigateDirectP2PJoin, resolveP2PDialTarget],
   );
 
-  // Execute a pending action (host or join) with the currently active deck.
+  // Execute a pending action (host or join) with the active deck, or with none for a supplied-deck format.
   //
   // Before routing, we validate the active deck against the chosen format
   // via the engine's `evaluateDeckCompatibility` (the only authority on
@@ -548,39 +595,24 @@ function MultiplayerPageContent({
   // side after the room is already open.
   const executeAction = useCallback(
     async (action: PendingAction): Promise<boolean> => {
-      const deckName = localStorage.getItem(ACTIVE_DECK_KEY);
-      if (!deckName) {
-        showToast(t("page.selectDeckFirst"));
-        return false;
-      }
-
-      const parsedDeck = loadActiveDeck();
-      if (!parsedDeck) {
-        showToast(t("page.couldNotLoadDeck"));
-        return false;
-      }
-
+      const attempt = ++preparationAttempt.current;
+      const current = () => attempt === preparationAttempt.current;
       const validationFormat: GameFormat | undefined =
         action.type === "host"
           ? action.settings.formatConfig.format
           : action.format;
-
-      if (validationFormat) {
+      const supplied = isSuppliedFormat(validationFormat);
+      const checkDeck = async (deck: ParsedDeck, format: GameFormat): Promise<string | null | false> => {
         try {
-          const compat = await evaluateDeckCompatibility(parsedDeck, {
-            selectedFormat: validationFormat,
+          const compat = await evaluateDeckCompatibility(deck, {
+            selectedFormat: format,
             playerCount: action.type === "host" ? action.settings.formatConfig.max_players : undefined,
           });
-          if (compat.selected_format_compatible === false) {
-            const reason =
-              compat.selected_format_reasons[0]
-              ?? t("page.deckNotLegal", { format: validationFormat });
-            showToast(reason);
-            setPendingAction(action);
-            setView("deck-select");
-            return false;
-          }
+          return compat.selected_format_compatible === false
+            ? (compat.selected_format_reasons[0] ?? t("page.deckNotLegal", { format }))
+            : null;
         } catch (err) {
+          if (!current()) return false;
           showToast(
             err instanceof Error
               ? t("page.deckCheckFailed", { error: err.message })
@@ -588,29 +620,66 @@ function MultiplayerPageContent({
           );
           return false;
         }
-      }
+      };
 
-      void withSavedDeckLibraryOrSkip((txn) => touchDeckPlayed(txn, deckName), "run-unguarded");
+      if (!supplied) {
+        const deckName = localStorage.getItem(ACTIVE_DECK_KEY);
+        if (!deckName) {
+          showToast(t("page.selectDeckFirst"));
+          return false;
+        }
 
-      if (action.type === "host") {
-        const deck = expandDeck();
-        if (!deck) {
+        const parsedDeck = loadActiveDeck();
+        if (!parsedDeck) {
           showToast(t("page.couldNotLoadDeck"));
           return false;
         }
 
+        if (validationFormat) {
+          const refusal = await checkDeck(parsedDeck, validationFormat);
+          if (!current()) return false;
+          if (refusal === false) return false;
+          if (refusal !== null) {
+            showToast(refusal);
+            setPendingAction(action);
+            setView("deck-select");
+            return false;
+          }
+        }
+
+        void withSavedDeckLibraryOrSkip((txn) => touchDeckPlayed(txn, deckName), "run-unguarded");
+      } else if (action.type === "host" && action.settings.pile?.type === "SavedDeck") {
+        // An unreadable pile is not checked here; the server/P2P host-deck read below, or the local AI start for an all-AI table, reports it.
+        const pile = loadSavedDeck(action.settings.pile.name);
+        if (pile) {
+          const refusal = await checkDeck(pile, action.settings.formatConfig.format);
+          if (!current()) return false;
+          if (refusal === false) return false;
+          if (refusal !== null) {
+            showToast(refusal);
+            return false;
+          }
+        }
+      }
+
+      if (action.type === "host") {
         const opponentCount = Math.max(0, action.settings.formatConfig.max_players - 1);
         const aiSeatIndexes = new Set(action.settings.aiSeats.map((seat) => seat.seatIndex));
         const allOpponentsAreAi =
           opponentCount > 0
-          && action.settings.formatConfig.format !== "Planechase"
+          && !isPlanechaseFamilyFormat(action.settings.formatConfig.format)
           && Array.from({ length: opponentCount }, (_, i) => i + 1)
             .every((seatIndex) => aiSeatIndexes.has(seatIndex));
         if (allOpponentsAreAi) {
           const sortedAiSeats = [...action.settings.aiSeats]
             .sort((a, b) => a.seatIndex - b.seatIndex);
+          // The seat snapshot is what the local start reads: `deckId` is the
+          // seat's selection (a catalog id, or null for Random), so the host
+          // form's per-seat deck (or Random) wins over the single-player
+          // preferences and Random is drawn by the local start itself.
           const aiSeats = sortedAiSeats.map((seat) => ({
             difficulty: seat.difficulty,
+            deckId: seat.deckId && seat.deckId !== AI_DECK_RANDOM ? seat.deckId : null,
             deckName: seat.deckName,
           }));
           const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
@@ -624,10 +693,18 @@ function MultiplayerPageContent({
             formatConfig: action.settings.formatConfig,
           });
           useGameStore.setState({ gameId });
+          const pileName = action.settings.pile ? pileSourceParam(action.settings.pile) : null;
+          const pileParam = pileName ? `&pile=${encodeURIComponent(pileName)}` : "";
           navigate(
-            `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${action.settings.formatConfig.format}&players=${action.settings.formatConfig.max_players}&match=${action.settings.matchType.toLowerCase()}&source=multiplayer`,
+            `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${action.settings.formatConfig.format}&players=${action.settings.formatConfig.max_players}&match=${action.settings.matchType.toLowerCase()}&source=multiplayer${pileParam}`,
           );
           return true;
+        }
+        const deck = await hostDeck(action.settings);
+        if (!current()) return false;
+        if (!deck) {
+          showToast(t("page.couldNotLoadDeck"));
+          return false;
         }
 
         const store = useMultiplayerStore.getState();
@@ -645,6 +722,7 @@ function MultiplayerPageContent({
               url: action.serverUrl,
               socket: action.serverUrl === null ? null : await store.ensureSubscriptionSocket(action.serverUrl),
             };
+        if (!current()) return false;
         const target = resolved.url;
         const socket = resolved.socket;
 
@@ -663,7 +741,7 @@ function MultiplayerPageContent({
             brokerUrl: target,
             roomName: action.settings.roomName,
           });
-          if (!ok) {
+          if (!current() || !ok) {
             return false;
           }
           navigate("/");
@@ -678,16 +756,16 @@ function MultiplayerPageContent({
         }
       } else {
         const { code, password, context, origin } = action;
+        // The room's format rides a supplied-deck join so the guest submits nothing.
+        const joinFormat = supplied ? action.format : undefined;
 
         if (origin !== null && (context?.is_p2p === true || action.isP2P === true)) {
-          return joinP2PRoom(code, origin, password);
+          return joinP2PRoom(code, origin, password, joinFormat);
         }
 
         const p2pCode = parseRoomCode(code);
         if (p2pCode && code.trim().length === 5) {
-          const gameId = crypto.randomUUID();
-          useGameStore.setState({ gameId });
-          navigate(`/game/${gameId}?mode=p2p-join&code=${p2pCode}`);
+          navigateDirectP2PJoin(p2pCode, joinFormat);
           return true;
         }
 
@@ -711,22 +789,26 @@ function MultiplayerPageContent({
         if (password) {
           params.set("password", password);
         }
+        if (joinFormat) {
+          params.set("format", joinFormat);
+        }
         navigate(`/game/${gameId}?${params.toString()}`);
       }
 
       return true;
     },
-    [expandDeck, startHosting, startP2PHostingSession, navigate, showToast, joinP2PRoom, t],
+    [hostDeck, startHosting, startP2PHostingSession, navigate, navigateDirectP2PJoin, showToast, joinP2PRoom, t],
   );
 
-  // Host setup complete → execute immediately if deck exists, otherwise prompt
+  // Host setup complete → execute immediately if a deck exists or the format supplies it, otherwise prompt
   const handleHostSetupComplete = useCallback(
     async (settings: HostSettings, serverUrl: string | null): Promise<boolean> => {
+      preparationAttempt.current += 1;
       const action: PendingAction = {
         type: "host", settings, serverUrl,
         connectionMode: serverUrl === null ? "p2p" : "server",
       };
-      if (activeDeckName) {
+      if (activeDeckName || isSuppliedFormat(settings.formatConfig.format)) {
         return executeAction(action);
       }
       setPendingAction(action);
@@ -814,6 +896,7 @@ function MultiplayerPageContent({
 
   const handleSpectate = useCallback(
     async (code: string, origin: LobbySource | null, context?: LobbyGame) => {
+      preparationAttempt.current += 1;
       // Boundary guard: spectating needs an authority to watch through, so a
       // null origin here is nothing this page can open a socket on.
       if (origin === null) {
@@ -874,6 +957,7 @@ function MultiplayerPageContent({
       context?: LobbyGame,
       onNotFound?: () => void,
     ) => {
+      preparationAttempt.current += 1;
       const trimmedCode = code.trim();
 
       // Draft entries bypass the normal join-with-deck flow entirely — draft
@@ -893,6 +977,12 @@ function MultiplayerPageContent({
       // Raw 5-character room codes are direct PeerJS joins with no server
       // metadata to query. Preserve the old flow and skip lookup entirely.
       if (!format && !context && directP2PCode && trimmedCode.length === 5) {
+        // The room's format is unknowable before dialling: a deckless guest dials
+        // with an empty submission and the host's guest gate answers it.
+        if (!activeDeckName) {
+          navigateDirectP2PJoin(directP2PCode);
+          return;
+        }
         setPendingAction({
           type: "join",
           code,
@@ -949,10 +1039,14 @@ function MultiplayerPageContent({
         origin,
         context,
       };
+      if (isSuppliedFormat(action.format)) {
+        void executeAction(action);
+        return;
+      }
       setPendingAction(action);
       setView("deck-select");
     },
-    [lookupJoinTargetFromStore, handleJoinDraftFromLobby, showToast, t],
+    [activeDeckName, executeAction, lookupJoinTargetFromStore, handleJoinDraftFromLobby, navigateDirectP2PJoin, showToast, t],
   );
 
   // Guest join from a Discord link. A room the host has not opened yet (or has
@@ -1021,6 +1115,7 @@ function MultiplayerPageContent({
   // Same-version gate: players on different builds cannot share a game, so a
   // stale tab first tries to reload onto the deployed build.
   const gateBotLink = async (link: ActionableBotLink) => {
+    preparationAttempt.current += 1;
     const arrival = ++latestArrival.current;
     const superseded = () => arrival !== latestArrival.current;
     const build = await checkDeployedBuild();
@@ -1066,6 +1161,7 @@ function MultiplayerPageContent({
     const stashed = readStashedBotLinkOnce();
     const fromUrl = parseBotLink(location.search);
     if (fromUrl !== null) {
+      preparationAttempt.current += 1;
       // Stash before strip: an autoUpdate reload after the strip must still
       // find the link.
       if (fromUrl.kind !== "invalid") stashBotLink(location.search);
@@ -1085,6 +1181,8 @@ function MultiplayerPageContent({
   }, [location.key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleBack = () => {
+    preparationAttempt.current += 1;
+    setBrokerOfflinePrompt(null);
     if (view === "deck-select") {
       // With a pending action the user clearly came from a host/join
       // attempt; without one they came from the "Change Deck" affordance,
@@ -1170,7 +1268,7 @@ function MultiplayerPageContent({
             meaningless at the lobby level because no format is chosen yet;
             joining a table picks the deck against the host's format via
             the deck-select view. */}
-        {view === "host-setup" && activeDeckName && (
+        {view === "host-setup" && !hostFormatSupplied && activeDeckName && (
           <div className="mb-4 flex w-full max-w-3xl items-center justify-between gap-3 rounded-[10px] border border-white/10 bg-black/20 px-4 py-2.5 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm">
             <div className="min-w-0">
               <div className="text-[0.6rem] uppercase tracking-[0.22em] text-slate-500">
@@ -1187,6 +1285,8 @@ function MultiplayerPageContent({
               </button>
               <button
                 onClick={() => {
+                  preparationAttempt.current += 1;
+                  setBrokerOfflinePrompt(null);
                   setDeckSelectReturn(view as MultiplayerView);
                   setPendingAction(null);
                   setView("deck-select");
@@ -1199,18 +1299,21 @@ function MultiplayerPageContent({
           </div>
         )}
 
-        {view === "host-setup" && activeDeckName && liveCheck.status !== "idle" && (
+        {view === "host-setup" && !hostFormatSupplied && activeDeckName && liveCheck.status !== "idle" && (
           <DeckLegalityChip check={liveCheck} />
         )}
 
         {/* No deck warning — host-setup only, for the same reason as above. */}
-        {view === "host-setup" && !activeDeckName && (
+        {view === "host-setup" && !hostFormatSupplied && !activeDeckName && (
           <div className="mb-4 flex w-full max-w-3xl items-center justify-between gap-3 rounded-[10px] border border-amber-400/20 bg-amber-500/[0.07] px-4 py-2.5 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm">
             <span className="text-xs text-amber-200">
               {t("page.noDeckWarning")}
             </span>
             <button
               onClick={() => {
+                preparationAttempt.current += 1;
+                setBrokerOfflinePrompt(null);
+                setPendingAction(null);
                 setDeckSelectReturn(view as MultiplayerView);
                 setView("deck-select");
               }}
@@ -1233,6 +1336,7 @@ function MultiplayerPageContent({
             // Host Game itself, so arriving there keeps whatever the player
             // last chose rather than silently overriding it.
             onHostGame={() => {
+              preparationAttempt.current += 1;
               // The lobby's own Host Game never inherits a Discord seed.
               setHostSeed(null);
               setView("host-setup");
@@ -1250,10 +1354,22 @@ function MultiplayerPageContent({
             // mounted, so the seed is applied once, at mount.
             key={hostSeed?.code ?? "manual"}
             seed={hostSeed ?? undefined}
+            preparationEpoch={{
+              get current() { return preparationAttempt.current; },
+              invalidate: () => {
+                preparationAttempt.current += 1;
+                setPendingAction(null);
+                setBrokerOfflinePrompt(null);
+              },
+            }}
             onHost={handleHostSetupComplete}
-            onBack={() => setView("lobby")}
+            onBack={handleBack}
             connectionMode={connectionMode}
-            onConnectionModeChange={setConnectionMode}
+            onConnectionModeChange={(mode) => {
+              // HostSetup may already have delegated its human-deck preparation.
+              preparationAttempt.current += 1;
+              setConnectionMode(mode);
+            }}
             hostDisabled={liveCheck.status === "illegal" || liveCheck.status === "checking"}
             hostDisabledReason={
               liveCheck.status === "illegal"
@@ -1326,22 +1442,27 @@ function MultiplayerPageContent({
       {brokerOfflinePrompt && (
         <BrokerOfflinePrompt
           serverAddress={brokerOfflinePrompt.serverAddress ?? undefined}
-          onCancel={() => setBrokerOfflinePrompt(null)}
+          onCancel={() => {
+            preparationAttempt.current += 1;
+            setBrokerOfflinePrompt(null);
+          }}
           onContinueWithoutLobby={() => {
+            const attempt = ++preparationAttempt.current;
             const { action } = brokerOfflinePrompt;
             setBrokerOfflinePrompt(null);
             if (action.type === "host") {
-              const deck = expandDeck();
-              if (!deck) {
-                showToast(t("page.couldNotLoadDeck"));
-                return;
-              }
-              void startP2PHostingSession(action.settings, deck, {
-                brokerUrl: null,
-                roomName: action.settings.roomName,
-              }).then((ok) => {
-                if (ok) navigate("/");
-              });
+              void (async () => {
+                const deck = await hostDeck(action.settings);
+                if (attempt !== preparationAttempt.current) return;
+                if (!deck) {
+                  showToast(t("page.couldNotLoadDeck"));
+                  return;
+                }
+                if (await startP2PHostingSession(action.settings, deck, {
+                  brokerUrl: null,
+                  roomName: action.settings.roomName,
+                }) && attempt === preparationAttempt.current) navigate("/");
+              })();
             }
           }}
         />

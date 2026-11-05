@@ -17,7 +17,7 @@
 # rows was returned.
 #
 # Each case runs against a throwaway repo in a mktemp dir: `scripts/` holding a
-# copy of the real gate plus a fixture ledger, and `crates/engine/src/parser/`
+# copy of the real gate plus a fixture ledger, and `crates/phase-parser/src/parser/`
 # holding .rs files with a chosen number of `PreLowered` occurrences. The gate
 # resolves both its ledger and its repo root from its own location, so a copy in
 # a fixture tree measures the fixture and nothing else.
@@ -83,7 +83,7 @@ trap cleanup EXIT
 new_fixture() {
   FIXTURE="$(mktemp -d)"
   FIXTURES+=("$FIXTURE")
-  mkdir -p "$FIXTURE/scripts" "$FIXTURE/crates/engine/src/parser"
+  mkdir -p "$FIXTURE/scripts" "$FIXTURE/crates/phase-parser/src/parser"
   cp "$GATE" "$FIXTURE/scripts/check-prelowered-ratchet.sh"
 }
 
@@ -93,10 +93,10 @@ ledger() { cat > "$FIXTURE/scripts/prelowered-ratchet.txt"; }
 # parser_file <path-under-parser/> <occurrences>
 parser_file() {
   local rel="$1" n="$2" i
-  mkdir -p "$(dirname "$FIXTURE/crates/engine/src/parser/$rel")"
-  : > "$FIXTURE/crates/engine/src/parser/$rel"
+  mkdir -p "$(dirname "$FIXTURE/crates/phase-parser/src/parser/$rel")"
+  : > "$FIXTURE/crates/phase-parser/src/parser/$rel"
   for (( i = 0; i < n; i++ )); do
-    echo "    OracleNodeIr::PreLowered(x)," >> "$FIXTURE/crates/engine/src/parser/$rel"
+    echo "    OracleNodeIr::PreLowered(x)," >> "$FIXTURE/crates/phase-parser/src/parser/$rel"
   done
 }
 
@@ -134,21 +134,21 @@ $(printf '%s\n' "$OUT" | sed 's/^/      | /')" ;;
 # That gap is the ratchet being bypassed by a stale row, so: rejected.
 new_fixture
 ledger <<'EOF'
-crates/engine/src/parser/oracle.rs 3
-crates/engine/src/parser/oracle.rs 1
+crates/phase-parser/src/parser/oracle.rs 3
+crates/phase-parser/src/parser/oracle.rs 1
 EOF
 parser_file oracle.rs 2
 run_gate
 expect_rc  "duplicate ledger path (loose row first) is rejected" 1
-expect_out "duplicate ledger path names the path" "duplicate ledger entry for 'crates/engine/src/parser/oracle.rs'"
+expect_out "duplicate ledger path names the path" "duplicate ledger entry for 'crates/phase-parser/src/parser/oracle.rs'"
 
 # The mirror image: old gate PASSES (ceiling 3), first-match port FAILS
 # (ceiling 1). Same file, same counts, only the row order flipped -- proof the
 # answer was order-dependent rather than merely first-vs-last.
 new_fixture
 ledger <<'EOF'
-crates/engine/src/parser/oracle.rs 1
-crates/engine/src/parser/oracle.rs 3
+crates/phase-parser/src/parser/oracle.rs 1
+crates/phase-parser/src/parser/oracle.rs 3
 EOF
 parser_file oracle.rs 2
 run_gate
@@ -159,8 +159,8 @@ expect_rc "duplicate ledger path (tight row first) is rejected too" 1
 # the one place the rule needs to be structural.
 new_fixture
 ledger <<'EOF'
-crates/engine/src/parser/oracle.rs 3
-crates/engine/src/parser/oracle.rs 3
+crates/phase-parser/src/parser/oracle.rs 3
+crates/phase-parser/src/parser/oracle.rs 3
 EOF
 parser_file oracle.rs 2
 run_gate
@@ -170,8 +170,8 @@ expect_rc "duplicate ledger path with equal ceilings is rejected" 1
 # repaired when it is edited rather than when a file happens to trip it.
 new_fixture
 ledger <<'EOF'
-crates/engine/src/parser/gone.rs 2
-crates/engine/src/parser/gone.rs 1
+crates/phase-parser/src/parser/gone.rs 2
+crates/phase-parser/src/parser/gone.rs 1
 EOF
 run_gate
 expect_rc "duplicate ledger path is rejected with no matching file" 1
@@ -182,7 +182,7 @@ expect_rc "duplicate ledger path is rejected with no matching file" 1
 
 new_fixture
 ledger <<'EOF'
-crates/engine/src/parser/oracle.rs 2
+crates/phase-parser/src/parser/oracle.rs 2
 EOF
 parser_file oracle.rs 2
 run_gate
@@ -191,7 +191,7 @@ expect_out "equal count reports the gate name" "Gate P PASS"
 
 new_fixture
 ledger <<'EOF'
-crates/engine/src/parser/oracle.rs 2
+crates/phase-parser/src/parser/oracle.rs 2
 EOF
 parser_file oracle.rs 3
 run_gate
@@ -200,28 +200,28 @@ expect_out "over-ceiling names the count and the ceiling" "has 3 'PreLowered' oc
 
 new_fixture
 ledger <<'EOF'
-crates/engine/src/parser/oracle.rs 5
+crates/phase-parser/src/parser/oracle.rs 5
 EOF
 parser_file oracle.rs 2
 run_gate
 expect_rc  "count below ceiling passes" 0
-expect_out "slack prints the exact tightening edit" "crates/engine/src/parser/oracle.rs 5 -> 2"
+expect_out "slack prints the exact tightening edit" "crates/phase-parser/src/parser/oracle.rs 5 -> 2"
 
 # The whole reason the gate greps: a producer smuggled into a file nobody
 # listed must fail, not go unmeasured.
 new_fixture
 ledger <<'EOF'
-crates/engine/src/parser/oracle.rs 1
+crates/phase-parser/src/parser/oracle.rs 1
 EOF
 parser_file oracle.rs 1
 parser_file oracle_new.rs 1
 run_gate
 expect_rc  "unledgered file carrying PreLowered fails" 1
-expect_out "unledgered file is named" "crates/engine/src/parser/oracle_new.rs has 1 'PreLowered' occurrence(s) but no ledger entry"
+expect_out "unledgered file is named" "crates/phase-parser/src/parser/oracle_new.rs has 1 'PreLowered' occurrence(s) but no ledger entry"
 
 new_fixture
 ledger <<'EOF'
-crates/engine/src/parser/oracle.rs 3
+crates/phase-parser/src/parser/oracle.rs 3
 EOF
 run_gate
 expect_rc  "ledger entry whose file is gone passes as slack" 0
@@ -231,7 +231,7 @@ expect_out "retired entry is flagged for deletion" "(entry can be deleted)"
 # ratchet for reasons unrelated to the burn-down.
 new_fixture
 ledger <<'EOF'
-crates/engine/src/parser/oracle.rs 1
+crates/phase-parser/src/parser/oracle.rs 1
 EOF
 parser_file oracle.rs 1
 parser_file oracle_ir/snapshots/big.rs 9
@@ -244,7 +244,7 @@ new_fixture
 ledger <<'EOF'
 # a comment mentioning PreLowered
 
-crates/engine/src/parser/oracle.rs 1   # trailing prose is ignored
+crates/phase-parser/src/parser/oracle.rs 1   # trailing prose is ignored
 EOF
 parser_file oracle.rs 1
 run_gate
@@ -252,7 +252,7 @@ expect_rc "comments and blank lines are skipped" 0
 
 new_fixture
 ledger <<'EOF'
-crates/engine/src/parser/oracle.rs lots
+crates/phase-parser/src/parser/oracle.rs lots
 EOF
 parser_file oracle.rs 1
 run_gate

@@ -7,6 +7,7 @@ use std::io::Read;
 use engine::ai_support::legal_actions;
 use engine::game::effects::change_zone::resolve_all;
 use engine::game::engine::apply_as_current;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::types::ability::{
     ControllerRef, Effect, LibraryPosition, ResolvedAbility, TargetFilter, TypedFilter,
 };
@@ -24,7 +25,8 @@ fn gunzip(gz: &[u8]) -> String {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 fn legacy_turn15_persisted() -> PersistedGameState {
@@ -127,6 +129,13 @@ fn real_single_owner_mass_library_order_state(
 /// A persisted legacy queue must retain its old tuple provenance on every save
 /// until it has promoted each owner batch. The public reducer can then advance
 /// both owners back to priority without relaxing ordinary library-zone choices.
+///
+/// CR 101.4 + CR 401.4: the first owner's order is collected, not delivered;
+/// it survives a save of the mid-arrangement state, and every owner's cards
+/// move together after the second owner chooses.
+///
+/// REVERT-FAILING: with per-owner delivery restored, 199 is already in its
+/// owner's library after the first submission.
 #[test]
 fn turn15_legacy_mass_order_survives_save_reload_and_both_owners_complete() {
     let persisted = legacy_turn15_persisted();
@@ -165,6 +174,18 @@ fn turn15_legacy_mass_order_survives_save_reload_and_both_owners_complete() {
         },
     )
     .expect("current owner can submit the archived ordering");
+    assert_eq!(
+        state.objects[&ObjectId(199)].zone,
+        Zone::Battlefield,
+        "CR 101.4: the first owner's card does not move before the last owner chooses"
+    );
+
+    let saved = serde_json::to_string(&PersistedGameState::capture(state))
+        .expect("mid-arrangement state saves");
+    let mut state = serde_json::from_str::<PersistedGameState>(&saved)
+        .expect("mid-arrangement state decodes")
+        .into_game_state()
+        .expect("mid-arrangement state restores through the production chokepoint");
 
     let successor_cards = match &state.waiting_for {
         WaitingFor::EffectZoneChoice {
@@ -194,6 +215,19 @@ fn turn15_legacy_mass_order_survives_save_reload_and_both_owners_complete() {
         },
     )
     .expect("successor owner can submit the promoted ordering");
+    for card in [ObjectId(199), ObjectId(161), ObjectId(189)] {
+        assert_eq!(
+            state.objects[&card].zone,
+            Zone::Library,
+            "every owner's cards move together after the last choice"
+        );
+    }
+    for token in [ObjectId(216), ObjectId(211)] {
+        assert!(
+            !state.objects.contains_key(&token),
+            "CR 111.7 + CR 704.5d: a token put into a library ceases to exist"
+        );
+    }
     assert!(
         matches!(state.waiting_for, WaitingFor::Priority { .. }),
         "completing every legacy batch must finish the resolving spell"
@@ -218,6 +252,7 @@ fn mass_library_order_rejects_stale_typed_incarnation_and_legacy_origin() {
             identity: ObjectIncarnationRef::from_object(object),
             origin: Zone::Battlefield,
         }],
+        arranger: None,
     };
     let WaitingFor::EffectZoneChoice {
         mass_library_order, ..

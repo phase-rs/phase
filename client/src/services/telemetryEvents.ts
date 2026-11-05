@@ -28,16 +28,28 @@ export function coarseRoute(pathname?: string): string {
   return segment ? `/${segment}` : "/";
 }
 
+/** A SpiderMonkey (Firefox) / JavaScriptCore (Safari) stack frame:
+ *  `fn@url:line:col`, `@url:line:col` (anonymous), or `fn@[native code]`. */
+const AT_SIGN_FRAME = /@(?:\[native code\]|.+:\d+:\d+)$/;
+
+/** The first frame of `stack` (the throw site). V8 frames (`at fn (url:1:2)`)
+ *  are tried first because only V8 prefixes the stack with a `Name: message`
+ *  header, and a message containing `url:1:2` after an `@` would otherwise read
+ *  as an at-sign frame. Firefox/Safari stacks have no header. */
+function topStackFrame(stack: string): string | undefined {
+  const lines = stack.split("\n").map((line) => line.trim());
+  return lines.find((line) => line.startsWith("at ")) ?? lines.find((line) => AT_SIGN_FRAME.test(line));
+}
+
 /** Extract the reportable shape of a thrown value. `top_frame` is the first
- *  stack line (the throw site); the full stack is intentionally NOT sent. */
+ *  stack frame (the throw site); the full stack is intentionally NOT sent. */
 function errorFields(
   err: unknown,
   message: string | undefined,
   source: "boundary" | "window" | "unhandledrejection",
 ): Record<string, unknown> {
   const error = err instanceof Error ? err : undefined;
-  const stack = error?.stack ?? "";
-  const topFrame = stack.split("\n").find((line) => line.trim().startsWith("at"))?.trim();
+  const topFrame = topStackFrame(error?.stack ?? "");
   return {
     name: error?.name ?? "Error",
     message: error?.message ?? message ?? String(err),

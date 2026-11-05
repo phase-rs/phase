@@ -284,6 +284,8 @@ describe("persisted store hydration", () => {
         { id: "a", provider: "anthropic", model: "m" },
         { id: "b", provider: "Open-AI", model: "m" },
         { id: "c", provider: "some-self-hosted-thing", model: "m" },
+        { id: "d", provider: "OpenRouter", model: "m" },
+        { id: "e", provider: "oPeN-rOuTeR", model: "m" },
       ],
       seatBindings: {},
       draftEnabled: false,
@@ -296,7 +298,13 @@ describe("persisted store hydration", () => {
       useLlmStore.getState().profiles.map((profile) => [profile.id, profile.provider]),
     );
     // Same normalization the engine's `LlmProvider::from_label` applies.
-    expect(byId).toEqual({ a: "Anthropic", b: "OpenAi", c: "OpenAiCompatible" });
+    expect(byId).toEqual({
+      a: "Anthropic",
+      b: "OpenAi",
+      c: "OpenAiCompatible",
+      d: "OpenRouter",
+      e: "OpenRouter",
+    });
   });
 
   it("drops a record with no usable id rather than fabricating one", async () => {

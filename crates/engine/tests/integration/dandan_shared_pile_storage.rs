@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use engine::database::card_db::CardDatabase;
 use engine::game::deck_loading::{
-    dandan_fixed_deck_names, load_and_hydrate_decks, momir_fixed_deck_names, DeckPayload,
+    dandan_default_pile_names, load_and_hydrate_decks, momir_fixed_deck_names, DeckPayload,
 };
 use engine::game::engine::{apply, start_game_with_starting_player};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -30,8 +30,8 @@ use crate::support::shared_card_db;
 const WASM_LIB_RS: &str = include_str!("../../../engine-wasm/src/lib.rs");
 
 /// The decklist as printed in the format announcement, written out
-/// independently of `DANDAN_DECKLIST`.
-fn expected_decklist() -> BTreeMap<String, usize> {
+/// independently of `DANDAN_DEFAULT_PILE`.
+pub(crate) fn expected_decklist() -> BTreeMap<String, usize> {
     let mut list: BTreeMap<String, usize> = [
         ("Dandân", 10),
         ("Island", 20),
@@ -180,7 +180,7 @@ fn v1_non_shared_formats_keep_per_seat_libraries() {
 #[test]
 fn v2_fixed_list_resolves_against_the_real_database() {
     let Some(db) = shared_card_db() else { return };
-    let names = dandan_fixed_deck_names();
+    let names = dandan_default_pile_names();
     assert_eq!(names.len(), 80);
     let distinct: std::collections::BTreeSet<_> = names.iter().collect();
     assert_eq!(distinct.len(), 23);
@@ -359,11 +359,21 @@ fn v3_mulligan_by_either_seat_shuffles_the_pile() {
 fn shuffling_the_empty_seat_consumes_no_entropy() {
     let mut state = GameState::new_two_player(7);
     let before = state.rng.get_word_pos();
-    engine::util::im_ext::shuffle_vector(&mut im::Vector::<ObjectId>::new(), &mut state.rng);
+    engine::util::im_ext::shuffle_vector(
+        &mut im::Vector::<ObjectId>::new(),
+        state
+            .rng
+            .draw(engine::types::game_state::RandomDraw::Placement),
+    );
     assert_eq!(state.rng.get_word_pos(), before);
 
     let mut pile: im::Vector<ObjectId> = (1..=8).map(ObjectId).collect();
-    engine::util::im_ext::shuffle_vector(&mut pile, &mut state.rng);
+    engine::util::im_ext::shuffle_vector(
+        &mut pile,
+        state
+            .rng
+            .draw(engine::types::game_state::RandomDraw::Placement),
+    );
     assert_ne!(
         state.rng.get_word_pos(),
         before,

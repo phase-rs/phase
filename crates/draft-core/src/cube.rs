@@ -315,6 +315,9 @@ mod tests {
             .collect();
         let source = CubePackSource::new(cards);
         let config = DraftConfig {
+            flow: crate::types::DraftFlow::LegacyBarrier,
+            selection_policy: crate::types::DraftSelectionPolicy::default(),
+            clock_policy: crate::types::DraftClockPolicy::default(),
             source: DraftSource::Cube {
                 id: "cube".to_string(),
                 name: "Cube".to_string(),

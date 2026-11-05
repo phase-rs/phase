@@ -18,23 +18,25 @@
 //!    rest-of-game trigger before its first upkeep ever arrived.
 //! 2. **Synthesized firing.** At the beginning of each of the controller's
 //!    upkeeps, [`epic_upkeep_trigger`] synthesizes an [`Effect::EpicCopy`]
-//!    triggered ability from the stored snapshot, fired through the normal
-//!    delayed-trigger path (`triggers::check_delayed_triggers`). Resolving that
-//!    body puts a copy of the spell onto the stack (CR 707.10).
+//!    triggered ability that names the stored snapshot by handle
+//!    ([`EpicEffectId`]), fired through the normal delayed-trigger path
+//!    (`triggers::check_delayed_triggers`). Resolving that body reads the
+//!    snapshot through [`GameState::epic_effect`] and puts a copy of the spell
+//!    onto the stack (CR 707.10).
 //!
 //! The copy keeps the snapshot's declared targets: CR 702.50a's "you may choose
 //! new targets" is an optional permission whose default — keeping the original
 //! (still-legal) targets — is itself a legal choice.
 
-use crate::game::effects::copy_spell::{open_copy_retarget_choice, set_resolved_source_recursive};
+use crate::game::effects::copy_spell::set_resolved_source_recursive;
 use crate::types::ability::{
-    DelayedTriggerCondition, Effect, EffectError, EffectKind, ResolvedAbility,
+    DelayedTriggerCondition, DelayedTriggerKind, Effect, EffectError, EffectKind, ResolvedAbility,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CastingVariant, DelayedTrigger, EpicEffect, GameState, StackEntry, StackEntryKind,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{EpicEffectId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -53,26 +55,29 @@ pub(crate) fn is_epic_locked(state: &GameState, player: PlayerId) -> bool {
 /// [`EpicEffect`]: its presence locks `controller` out of casting (CR 702.50b)
 /// and drives the recurring upkeep copies (CR 702.50a). `source_id` is the
 /// resolved Epic card whose characteristics each copy clones; `spell_ability`
-/// is the snapshot each copy resolves.
+/// is the snapshot each copy resolves. Returns the handle naming the new
+/// entry: its position in the append-only `epic_effects`.
 pub(crate) fn arm_epic(
     state: &mut GameState,
     source_id: ObjectId,
     controller: PlayerId,
     spell_ability: ResolvedAbility,
-) {
+) -> EpicEffectId {
+    let id = EpicEffectId(state.epic_effects.len() as u64);
     state.epic_effects.push(EpicEffect {
         controller,
         prototype_id: source_id,
         spell: Box::new(spell_ability),
     });
+    id
 }
 
 /// CR 702.50a: Build the recurring upkeep trigger for `effect`, fired through
 /// the normal delayed-trigger path. Keyed on the controller's upkeep with an
-/// [`Effect::EpicCopy`] body carrying a fresh clone of the stored snapshot.
+/// [`Effect::EpicCopy`] body naming the stored snapshot by handle (`epic`).
 /// The returned trigger is synthesized on demand each upkeep — it is never
 /// stored in `delayed_triggers`, so cleanup can't purge it.
-pub(crate) fn epic_upkeep_trigger(effect: &EpicEffect) -> DelayedTrigger {
+pub(crate) fn epic_upkeep_trigger(epic: EpicEffectId, effect: &EpicEffect) -> DelayedTrigger {
     DelayedTrigger {
         condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: Phase::Upkeep,
@@ -84,9 +89,7 @@ pub(crate) fn epic_upkeep_trigger(effect: &EpicEffect) -> DelayedTrigger {
             binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
         },
         ability: Box::new(ResolvedAbility::new(
-            Effect::EpicCopy {
-                spell: effect.spell.clone(),
-            },
+            Effect::EpicCopy { epic },
             Vec::new(),
             effect.prototype_id,
             effect.controller,
@@ -96,6 +99,7 @@ pub(crate) fn epic_upkeep_trigger(effect: &EpicEffect) -> DelayedTrigger {
         // Synthesized fresh each upkeep; the one-shot flag is irrelevant because
         // it is never stored — `epic_effects` is the persistent generator.
         one_shot: true,
+        kind: DelayedTriggerKind::Ordinary,
         provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
     }
 }
@@ -108,9 +112,17 @@ pub(crate) fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let Effect::EpicCopy { spell } = &ability.effect else {
+    let Effect::EpicCopy { epic } = &ability.effect else {
         return Err(EffectError::MissingParam("EpicCopy".to_string()));
     };
+    // CR 702.50a: the handle names the stored snapshot; a miss is an invariant
+    // violation (live play and decode only ever produce in-range handles).
+    let spell = state
+        .epic_effect(*epic)
+        .map(|effect| effect.spell.clone())
+        .ok_or_else(|| {
+            EffectError::InvalidParam(format!("EpicCopy names no Epic effect: {epic:?}"))
+        })?;
 
     // The resolved Epic card supplies the copy's characteristics. If it has
     // left the game (no last-known object), the copy can't be built — resolve
@@ -133,6 +145,8 @@ pub(crate) fn resolve(
     // Epic ("except for its epic ability") so the copy's own resolution does
     // not arm a second Epic effect. The copy is a token spell on the stack.
     let mut copy_obj = source_obj.clone();
+    // CR 123.1 + CR 707.2: stickers and their changes aren't copiable values.
+    crate::game::stickers::remove_stickers_from_copy(&mut copy_obj);
     copy_obj.id = copy_id;
     copy_obj.controller = controller;
     // allow-raw-zone: spell-copy birth directly on stack has no from-zone event (CR 707.10).
@@ -150,7 +164,7 @@ pub(crate) fn resolve(
 
     // CR 707.10: the copy resolves the snapshotted ability, re-sourced to the
     // copy so every SelfRef resolves to the copy rather than the original.
-    let mut copy_ability = (**spell).clone();
+    let mut copy_ability = *spell;
     set_resolved_source_recursive(&mut copy_ability, copy_id);
 
     // CR 707.10 + CR 702.50a: the copy-onto-stack authority emits `StackPushed`.
@@ -183,17 +197,14 @@ pub(crate) fn resolve(
     // CR 702.50a + CR 707.10c: Epic grants "you may choose new targets for the
     // copy." Reuse the same CopyRetarget choice path as other spell-copy
     // effects so the player may keep the old targets or choose legal new ones.
-    let copy_targets = copy_ability.targets.clone();
-    if !copy_targets.is_empty() {
-        open_copy_retarget_choice(
-            state,
-            controller,
-            copy_id,
-            &copy_targets,
-            &copy_ability,
-            EffectKind::EpicCopy,
-            ability.source_id,
-        );
+    // B5: the chain census decides whether there is anything to choose.
+    if crate::game::effects::copy_choice::open_copy_retarget_walk(
+        state,
+        controller,
+        copy_id,
+        EffectKind::EpicCopy,
+        ability.source_id,
+    ) {
         // EffectResolved is deferred until the retarget choice completes.
         return Ok(());
     }
@@ -251,14 +262,8 @@ mod tests {
             prototype,
             owner,
         );
-        let ability = ResolvedAbility::new(
-            Effect::EpicCopy {
-                spell: Box::new(inner),
-            },
-            vec![],
-            prototype,
-            owner,
-        );
+        let epic = arm_epic(&mut state, prototype, owner, inner);
+        let ability = ResolvedAbility::new(Effect::EpicCopy { epic }, vec![], prototype, owner);
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).expect("EpicCopy resolves");
 

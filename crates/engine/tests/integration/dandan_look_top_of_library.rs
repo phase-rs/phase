@@ -7,6 +7,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
 use engine::types::format::FormatConfig;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -128,6 +129,11 @@ fn dandan_casting_an_opponent_owned_hit_bottoms_every_other_looked_at_card() {
         })
         .expect("choosing a P1-owned hit must succeed");
     assert_eq!(p.runner.state().objects[&chosen].zone, Zone::Stack);
+    assert_eq!(
+        p.runner.state().objects[&chosen].owner,
+        P0,
+        "the caster owns the spell it cast"
+    );
     let lib = library(&p);
     let tail: Vec<_> = lib[lib.len() - 3..].to_vec();
     let mut rest: Vec<_> = (1..4).map(|i| id_of(&p, i)).collect();
@@ -294,7 +300,7 @@ mod top_cast {
                 "reach: pile top"
             );
             assert!(
-                state.players[holder.0 as usize].mana_pool.mana.is_empty(),
+                state.players[holder.0 as usize].mana_pool.is_empty(),
                 "reach: no mana to pay with"
             );
             assert!(
@@ -419,6 +425,7 @@ mod top_plot {
                 .act(GameAction::ActivateAbility {
                     source_id: top,
                     ability_index: index,
+                    payment_mode: CastPaymentMode::Auto,
                 })
                 .expect("the holder plots the pile top");
             let plotted = &runner.state().objects[&top];
@@ -455,6 +462,7 @@ mod top_plot {
                 .act(GameAction::ActivateAbility {
                     source_id: top,
                     ability_index: index,
+                    payment_mode: CastPaymentMode::Auto,
                 })
                 .is_err(),
             "the owner of the pile top cannot plot it without the permission"
@@ -474,6 +482,7 @@ mod top_plot {
             .act(GameAction::ActivateAbility {
                 source_id: own_top,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("the holder plots its own top");
         assert_eq!(runner.state().objects[&own_top].zone, Zone::Exile);

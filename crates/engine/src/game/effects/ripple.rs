@@ -43,14 +43,11 @@ pub fn resolve(
         return Err(EffectError::InvalidParam("Expected Ripple".to_string()));
     };
 
-    // CR 603.3a: Re-read the controller from the source spell at resolution time
-    // (a control-change between trigger creation and resolution is honored); fall
-    // back to the trigger snapshot if the spell has left the stack.
-    let controller = state
-        .objects
-        .get(&ability.source_id)
-        .map(|obj| obj.controller)
-        .unwrap_or(ability.controller);
+    // CR 603.3a + CR 109.5: a triggered ability is controlled by the player who
+    // controlled its source when it triggered, and "you"/"your" in its text
+    // mean that player. A later control change of the Ripple spell (e.g.
+    // Commandeer) does not move the reveal to another library.
+    let controller = ability.controller;
 
     if !state.players.iter().any(|p| p.id == controller) {
         return Err(EffectError::PlayerNotFound);
@@ -91,15 +88,15 @@ pub fn resolve(
 /// CR 702.60a: the controller accepted the optional reveal. Publish the top-N
 /// pile (still in the library, CR 701.20b), then either offer the first
 /// same-named card for a free cast or move to the bottom-order step.
+/// `controller` is the Ripple trigger's controller (CR 603.3a), carried on the
+/// reveal prompt, never the source spell's current controller.
 pub(crate) fn perform_reveal_and_offer(
     state: &mut GameState,
     source_id: ObjectId,
+    controller: PlayerId,
     count: u32,
     events: &mut Vec<GameEvent>,
 ) {
-    let Some(controller) = state.objects.get(&source_id).map(|obj| obj.controller) else {
-        return;
-    };
     let source_name = state
         .objects
         .get(&source_id)
@@ -172,30 +169,28 @@ pub(crate) fn open_bottom_order_or_place(
         };
         return BatchMoveResult::Done;
     }
-    place_on_library_bottom(state, source_id, &cards, final_cast, events)
+    place_on_library_bottom(state, source_id, controller, &cards, final_cast, events)
 }
 
 /// CR 702.60a + CR 603.3b: place `ordered` on the library bottom in the given
 /// order and fire `RippleTerminalComplete`. The completion is what un-pauses the
 /// resolving Ripple trigger (it sets `waiting_for` back to `Priority`), so it
 /// runs on *every* terminal path — even an empty `ordered` (a declined reveal or
-/// an all-hits Ripple) still passes an empty batch to fire it.
+/// an all-hits Ripple) still passes an empty batch to fire it. `controller` is
+/// the Ripple trigger's controller (CR 603.3a).
 pub(crate) fn place_on_library_bottom(
     state: &mut GameState,
     source_id: ObjectId,
+    controller: PlayerId,
     ordered: &[ObjectId],
     final_cast: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
-    let completion = state
-        .objects
-        .get(&source_id)
-        .map(|obj| obj.controller)
-        .map(|player| BatchCompletion::RippleTerminalComplete {
-            player,
-            source_id,
-            final_cast,
-        });
+    let completion = Some(BatchCompletion::RippleTerminalComplete {
+        player: controller,
+        source_id,
+        final_cast,
+    });
     crate::game::engine_resolution_choices::route_rest_partition_then(
         state,
         ordered,
@@ -298,7 +293,7 @@ mod tests {
             "resolve must open the optional-reveal prompt, got {:?}",
             state.waiting_for
         );
-        perform_reveal_and_offer(state, source_id, count, events);
+        perform_reveal_and_offer(state, source_id, PlayerId(0), count, events);
     }
 
     /// CR 702.60a: `resolve` opens the "you may reveal" decision, carrying N.

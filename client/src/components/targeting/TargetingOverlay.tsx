@@ -14,6 +14,7 @@ import {
   buildBoardChoiceAction,
   canConfirmBoardChoice,
   getBoardChoiceView,
+  getWaitingForPlayerChoiceIds,
   isBoardChoiceImmediate,
   type BoardChoiceView,
 } from "../../viewmodel/gameStateView.ts";
@@ -117,7 +118,7 @@ export const TARGET_NOUN_SLUG: Record<TargetObjectCategory, TargetNounSlug> = {
 };
 
 export function TargetingOverlay() {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const canActForWaitingState = useCanActForWaitingState();
   const localPlayerId = usePlayerId();
   const waitingFor = useGameStore((s) => s.waitingFor);
@@ -127,13 +128,18 @@ export function TargetingOverlay() {
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const targetKind = useGameStore((s) => s.gameState?.derived?.current_target_kind);
   const legalActions = useGameStore((s) => s.legalActions);
+  const allowsCancelCast = useGameStore((s) => s.gameState?.allows_cancel_cast);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
   const clearSelectedCards = useUiStore((s) => s.clearSelectedCards);
 
   const isTargetSelection = waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection";
   const isCopyTargetChoice = waitingFor?.type === "CopyTargetChoice";
   const isCopyRetarget = waitingFor?.type === "CopyRetarget";
-  const canKeepCurrentTargets = isCopyRetarget && waitingFor.data.target_slots.every((slot) => slot.current != null);
+  // CR 707.10c: both keep permissions are engine-derived (keeping still has a
+  // legal completion); the overlay only renders them.
+  const canKeepCurrentTargets = isCopyRetarget && waitingFor.data.can_keep_rest === true;
+  const canKeepCurrentTarget = isCopyRetarget
+    && waitingFor.data.target_slots[waitingFor.data.current_slot ?? 0]?.can_keep === true;
   const isExploreChoice = waitingFor?.type === "ExploreChoice";
   const isEquipTarget = waitingFor?.type === "EquipTarget";
   // CR 701.36a: Populate — choose a creature token you control to copy.
@@ -142,9 +148,21 @@ export function TargetingOverlay() {
   // CHOICE (not a target), but the action shape mirrors ExploreChoice
   // (`GameAction::ChooseTarget` with the chosen ObjectId).
   const isReturnAsAuraTarget = waitingFor?.type === "ReturnAsAuraTarget";
+  // Digital-only Alchemy (no CR entry): a batch boon's "one of them" token-host
+  // pick. Picker is a CHOICE (not a target), and the action shape mirrors
+  // ReturnAsAuraTarget (`GameAction::ChooseTarget` with the chosen host ref).
+  const isChooseTokenHost = waitingFor?.type === "ChooseTokenHost";
   // CR 115.7: Single-target retargets (Bolt Bend, Misdirection) are picked on the
   // board through this overlay; multi-target retargets keep the dialog.
   const isRetargetChoice = waitingFor?.type === "RetargetChoice" && waitingFor.data.scope.type === "Single";
+  // CR 608.2d + CR 115.10a: a single-pick resolution choice picked on the board. It is a
+  // CHOICE made while the ability resolves, not a target — so no target wording, and no
+  // Cancel: the spell or ability is already resolving (CR 608.2d), so nothing is left to
+  // reverse; `CancelCast` backs out of an incomplete cast or activation (CR 733.1).
+  // Highlights come from the engine's `eligible` via the shared click authorities.
+  const isChooseObjectsSinglePick = waitingFor?.type === "ChooseObjectsSelection" && waitingFor.data.max === 1;
+  // Skip (choose nothing) only when the engine-published `min` admits an empty selection.
+  const canSkipObjectChoice = isChooseObjectsSinglePick && waitingFor.data.min === 0;
   // CR 115.7: Name the spell/ability being retargeted (the entry the redirect
   // resolved onto), so the player knows what they are choosing a new target for.
   const retargetSpellName = isRetargetChoice
@@ -152,7 +170,7 @@ export function TargetingOverlay() {
     : undefined;
   const isTapCreatureChoice =
     waitingFor?.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures";
-  const boardChoice = getBoardChoiceView(waitingFor, objects);
+  const boardChoice = getBoardChoiceView(waitingFor, objects, allowsCancelCast);
   const isBoardChoice = boardChoice != null;
   // Cancel-01 scope: only the five in-scope flows gate cancel on engine
   // legalActions. Every other cancel button keeps status-quo rendering:
@@ -176,7 +194,11 @@ export function TargetingOverlay() {
     ? (waitingFor.data.current_slot ?? 0)
     : (selection?.current_slot ?? 0);
   const activeSlot = targetSlots[currentTargetSlot];
-  const isOptionalCurrentSlot = activeSlot?.optional === true;
+  // CR 115.6: an optional slot may be declined. A copy announcement's decline
+  // permission is engine-derived (`can_decline`); the overlay only renders it.
+  const isOptionalCurrentSlot = isCopyRetarget
+    ? waitingFor.data.target_slots[currentTargetSlot]?.can_decline === true
+    : activeSlot?.optional === true;
   // CR 601.2c: display-only hint that this slot is announced by a non-controller
   // ("of an opponent's choice", e.g. Volcanic Offering). The engine routes the
   // prompt's `WaitingFor.player` to that announcer — who is exactly the viewer of
@@ -187,10 +209,12 @@ export function TargetingOverlay() {
   // clickable object for a player, so the overlay lists every legal player
   // target as its own control instead of relying on the seat chrome alone.
   const legalPlayerTargets = useMemo(
-    () => (selection?.current_legal_targets ?? []).flatMap((target) =>
-      "Player" in target ? [target.Player] : [],
-    ),
-    [selection],
+    () => isChooseObjectsSinglePick
+      ? getWaitingForPlayerChoiceIds(waitingFor)
+      : (selection?.current_legal_targets ?? []).flatMap((target) =>
+        "Player" in target ? [target.Player] : [],
+      ),
+    [isChooseObjectsSinglePick, selection, waitingFor],
   );
   const sourceId = boardChoice?.sourceId ?? (
     waitingFor?.type === "TriggerTargetSelection"
@@ -202,6 +226,8 @@ export function TargetingOverlay() {
         : waitingFor?.type === "PopulateChoice"
           ? waitingFor.data.source_id
         : waitingFor?.type === "ReturnAsAuraTarget"
+          ? waitingFor.data.source_id
+        : waitingFor?.type === "ChooseTokenHost"
           ? waitingFor.data.source_id
         : undefined
   );
@@ -290,6 +316,12 @@ export function TargetingOverlay() {
           ? t("targeting.chooseCreatureTokenToPopulate")
           : isReturnAsAuraTarget
             ? t("targeting.chooseReturnAsAuraTarget")
+            : isChooseTokenHost
+              ? t("targeting.chooseTokenHost")
+            : isChooseObjectsSinglePick
+              ? (waitingFor.data.min === 0
+                  ? t("targeting.chooseUpToOneHighlighted")
+                  : t("targeting.chooseOneHighlighted"))
             : isRetargetChoice
               ? (retargetSpellName
                   ? t("targeting.chooseNewTargetForSpell", { spell: retargetSpellName })
@@ -363,7 +395,7 @@ export function TargetingOverlay() {
     return () => clearSelectedCards();
   }, [clearSelectedCards, isBoardChoice, waitingFor]);
 
-  if (!isTargetSelection && !isCopyTargetChoice && !isCopyRetarget && !isExploreChoice && !isEquipTarget && !isPopulateChoice && !isReturnAsAuraTarget && !isRetargetChoice && !isTapCreatureChoice && !isBoardChoice) return null;
+  if (!isTargetSelection && !isCopyTargetChoice && !isCopyRetarget && !isExploreChoice && !isEquipTarget && !isPopulateChoice && !isReturnAsAuraTarget && !isChooseTokenHost && !isChooseObjectsSinglePick && !isRetargetChoice && !isTapCreatureChoice && !isBoardChoice) return null;
 
   // Only show targeting UI for the human player
   if (!canActForWaitingState) return null;
@@ -742,7 +774,20 @@ export function TargetingOverlay() {
               {t("targeting.keepCurrentTargets")}
             </button>
           )}
-          {isOptionalCurrentSlot && (
+          {canKeepCurrentTarget && (
+            <button
+              onClick={() =>
+                dispatch({
+                  type: "ChooseTarget",
+                  data: { target: null },
+                })
+              }
+              className="pointer-events-auto rounded-lg bg-emerald-800 px-6 py-2 font-semibold text-white shadow-lg transition hover:bg-emerald-700"
+            >
+              {t("targeting.keepCurrentTarget")}
+            </button>
+          )}
+          {(isOptionalCurrentSlot || canSkipObjectChoice) && (
             <button
               onClick={handleSkip}
               className="pointer-events-auto rounded-lg bg-amber-700 px-6 py-2 font-semibold text-white shadow-lg transition hover:bg-amber-600"

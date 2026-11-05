@@ -1,21 +1,28 @@
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::game::quantity::try_resolve_quantity_in_source_context;
-use engine::types::ability::{
-    AbilityKind, ContinuousModification, ControllerRef, Effect, EffectScope, PtValue, QuantityExpr,
-    ResolvedAbility, SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef,
-    TriggerDefinition, TypeFilter,
+use engine::game::restrictions::{
+    ability_confined_to_sorcery_timing, spell_confined_to_sorcery_timing,
 };
+use engine::types::ability::{
+    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration,
+    Effect, EffectScope, PerpetualGrantModification, PerpetualModification, PlayerFilter, PtValue,
+    QuantityExpr, ResolvedAbility, StaticDefinition, SubAbilityLink, TapStateChange,
+    TargetChoiceTiming, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
+};
+use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastingVariant, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
+use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 use super::context::PolicyContext;
+use crate::cast_facts::{cast_object_for_action, collect_definition_effects, CastFacts};
 
 /// Player-impact magnitude above which target selection has a directional
 /// preference rather than falling back to the spell's broader polarity.
@@ -294,10 +301,20 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         // `SetTapState { .. }` here catches only the non-Single scopes; the
         // beneficial (Single+Untap) and harmful (Single+Tap) cases are handled
         // by the guarded arms above.
+        // A granted one-time boon carries the direction of the trigger it
+        // grants: a pump boon is beneficial to its recipient, a stun-counter
+        // boon (Loch Larent, granted to an opponent) is harmful. Read it
+        // through the shared granted-trigger seam so target selection aims
+        // beneficial boons at self and harmful boons at opponents.
+        Effect::CreateBoon { trigger, .. } => boon_granted_trigger_polarity(trigger),
         Effect::Adapt { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::AddPendingEntersModifications { .. }
+        // CR 701.33: abandoning an ongoing scheme turns it face down onto the
+        // bottom of its owner's scheme deck — whether that is good depends on
+        // the scheme (ongoing pressure vs. cycling to the next scheme).
+        | Effect::AbandonScheme
         | Effect::AddRestriction { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::Amass { .. }
@@ -346,6 +363,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::CopyTokenOf { .. }
         | Effect::CounterAll { .. }
         | Effect::CrankContraptions { .. }
+        | Effect::NoteNumber { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::CreateDelayedTrigger { .. }
         | Effect::CreateDrawReplacement { .. }
@@ -357,7 +375,9 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Dig { .. }
         | Effect::Discard { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachPlayerCopyChosen { .. }
@@ -376,9 +396,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ExileFaceDownPile { .. }
         | Effect::Exploit { .. }
         | Effect::ExploreAll { .. }
-        | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }
-        | Effect::FlipCoinUntilLose { .. }
         | Effect::Forage
         | Effect::CompletePlayerAction { .. }
         | Effect::ForceAttack { .. }
@@ -458,6 +476,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::SearchOutsideGame { .. }
         | Effect::Seek { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SetClassLevel { .. }
         | Effect::SetDayNight { .. }
         | Effect::SetLifeTotal { .. }
@@ -897,6 +916,10 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         // CR 115.10a: a compound "you and permanents you control" recipient.
         TargetFilter::ControllerAndControlledPermanents { .. } => FilterDomain::ANYTHING,
 
+        // CR 506.3: the player or planeswalker an attacker is attacking. A planeswalker
+        // may itself be a creature, so this fails open rather than claiming a player.
+        TargetFilter::AttackedPlayerOrPlaneswalker => FilterDomain::ANYTHING,
+
         TargetFilter::Player
         | TargetFilter::Controller
         | TargetFilter::SourceController
@@ -911,10 +934,14 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSourceController
         | TargetFilter::ParentTargetController
+        | TargetFilter::DeclaredPlayer { .. }
         // CR 120.1 + CR 109.4: the damage recipient's CONTROLLER is a player,
         // unlike `EventTarget` (the recipient object itself) below.
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — denotes players,
+        // never the affected objects themselves.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
@@ -950,6 +977,7 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::OriginalSource
@@ -1419,6 +1447,17 @@ fn selected_player_target_filter(effect: &Effect) -> Option<&TargetFilter> {
             target: Some(target),
             ..
         } => chosen_player_binding(target).then_some(target),
+        // Boon recipient semantics: the granted body's impact lands on the
+        // RECIPIENT, so route it to the chosen candidate — but only when the
+        // recipient IS a chosen slot. Contextual holders (`Controller` "you
+        // get", `TriggeringPlayer` "that player gets") resolve independently
+        // of target selection and must not score (they would pollute
+        // unrelated slots in mixed abilities); declared player slots
+        // (`Player` "target player", player-shaped `Typed` "target opponent")
+        // and inherited chain targets (`ParentTarget`) do.
+        Effect::CreateBoon { recipient, .. } => {
+            boon_recipient_is_selected(recipient).then_some(recipient)
+        }
         _ => extract_target_filter(effect),
     }
 }
@@ -1426,6 +1465,21 @@ fn selected_player_target_filter(effect: &Effect) -> Option<&TargetFilter> {
 fn chosen_player_binding(filter: &TargetFilter) -> bool {
     matches!(filter, TargetFilter::Player | TargetFilter::ParentTarget)
         || filter_names_the_chosen_players_permanents(filter)
+}
+
+/// Whether a boon `recipient` is a slot target selection chooses (as opposed
+/// to a contextual holder that resolves on its own). Mirrors the recipient
+/// shapes `Effect::CreateBoon` documents: `Player` ("target player") and
+/// player-shaped `Typed` ("target opponent", Loch Larent) declare slots;
+/// `ParentTarget` inherits the chain target being chosen now. `Controller`
+/// ("you get"), `TriggeringPlayer` ("that player gets"), and every other
+/// shape resolve independently of selection. Object-shaped `Typed` recipients
+/// fail closed later in the player matcher.
+fn boon_recipient_is_selected(recipient: &TargetFilter) -> bool {
+    matches!(
+        recipient,
+        TargetFilter::Player | TargetFilter::ParentTarget | TargetFilter::Typed(_)
+    )
 }
 
 /// "each creature target player controls" (Requisition
@@ -1667,12 +1721,254 @@ pub(crate) fn static_mode_polarity(mode: &StaticMode) -> EffectPolarity {
 /// grant-a-trigger buffs and downside curses (AI heuristic). The polarity is
 /// bound statically from the parsed `TriggerDefinition.execute.effect`; no live
 /// game-state lookup.
+/// The `CreateBoon` recipient-routing reading. Unlike
+/// `granted_trigger_polarity` (the committed target-relative reading kept for
+/// non-boon granted triggers), the boon holder RECEIVES the body, so the inner
+/// is re-based into the holder's frame: a weapon aimed at the holder's enemies
+/// is a benefit to hold, a debuff on the holder's own creatures a harm. The
+/// two paths stay split because event anaphors (`TriggeringSource`) need
+/// trigger-shape analysis to place — self-referential in a Malice-style grant,
+/// anyone's in a general boon — which is out of scope for the boon routing.
+fn boon_granted_trigger_polarity(trigger: &TriggerDefinition) -> EffectPolarity {
+    let Some(exec) = trigger.execute.as_deref() else {
+        return EffectPolarity::Contextual;
+    };
+    // A granted body that installs a floating replacement carries its
+    // direction in the REPLACEMENT body, not the install wrapper (which is
+    // Contextual): Loch Larent's boon installs "enters tapped with a stun
+    // counter", whose tap-first root is Harmful to the entering creature's
+    // controller. Without this descent the harmful grant would read
+    // Contextual and the recipient routing below would score it 0.0.
+    if let Effect::AddTargetReplacement { replacement, .. } = exec.effect.as_ref() {
+        return replacement
+            .execute
+            .as_deref()
+            .map(boon_executable_polarity_for_holder)
+            .unwrap_or(EffectPolarity::Contextual);
+    }
+    boon_executable_polarity_for_holder(exec)
+}
+
 fn granted_trigger_polarity(trigger: &TriggerDefinition) -> EffectPolarity {
-    trigger
-        .execute
-        .as_deref()
-        .map(|exec| effect_polarity(&exec.effect))
-        .unwrap_or(EffectPolarity::Contextual)
+    let Some(exec) = trigger.execute.as_deref() else {
+        return EffectPolarity::Contextual;
+    };
+    // Same replacement descent as the boon path, but the committed
+    // target-relative reading: non-boon granted triggers (Undying Malice)
+    // keep their pinned polarity; only the `CreateBoon` recipient router
+    // re-bases into the holder's frame.
+    if let Effect::AddTargetReplacement { replacement, .. } = exec.effect.as_ref() {
+        return replacement
+            .execute
+            .as_deref()
+            .map(|body| effect_polarity(&body.effect))
+            .unwrap_or(EffectPolarity::Contextual);
+    }
+    effect_polarity(&exec.effect)
+}
+
+/// Which side of a granted boon body an inner target sits on, in the HOLDER's
+/// frame. The install re-stamp makes the holder the body's controller, so
+/// holder-relative is CR 608.2c controller-relative at fire time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoonTargetSide {
+    /// The holder's own objects, or the holder (`Controller`, `SelfRef`,
+    /// `ParentTarget`, and untargeted verbs that default to the controller).
+    Holder,
+    /// The holder's opponents or their objects (`Typed{Opponent}`, opponent
+    /// players).
+    Enemy,
+    /// A slot the holder aims at fire time (`Player`, `Any`, an unrestricted
+    /// `Typed`): the holder picks the target that favors them.
+    Chosen,
+    /// Anything else — fail closed to `Contextual`.
+    Unknown,
+}
+
+/// Impact of a granted boon body ON ITS HOLDER. `effect_polarity` reads impact
+/// on the inner TARGET; a boon holder RECEIVES the body, so that reading must
+/// be re-based into the holder's frame: a weapon aimed at the holder's enemies
+/// is a benefit to hold, a debuff on the holder's own creatures a harm.
+/// Without the flip, "target opponent loses 3 life" would read Harmful and the
+/// recipient routing would aim the weapon-grant AT the opponent.
+///
+/// Classified at the EXECUTABLE level, not the bare effect: the executable
+/// carries the `player_scope` a targetless verb inherits ("each opponent
+/// loses 5 life" harms the holder's enemies, not the holder) and the
+/// `sub_ability` / `else_ability` continuations a single-effect reading
+/// cannot see. A chained or conditional body fails closed to Contextual —
+/// the continuation's direction is uninspected — while simple scoped and
+/// unscoped bodies keep their directed readings.
+fn boon_executable_polarity_for_holder(exec: &AbilityDefinition) -> EffectPolarity {
+    if exec.sub_ability.is_some() || exec.else_ability.is_some() {
+        return EffectPolarity::Contextual;
+    }
+    let effect = exec.effect.as_ref();
+    // Perpetual bodies carry no global polarity (`ApplyPerpetual` is
+    // Contextual by default — the modified card's owner varies), so the boon
+    // path reads the modification's own direction instead of `effect_polarity`.
+    if let Effect::ApplyPerpetual { modification, .. } = effect {
+        return holder_relative_polarity(
+            perpetual_modification_direction(modification),
+            boon_inner_target_side(exec),
+        );
+    }
+    holder_relative_polarity(effect_polarity(effect), boon_inner_target_side(exec))
+}
+
+/// Re-base a target-relative reading into the boon holder's frame.
+fn holder_relative_polarity(
+    target_relative: EffectPolarity,
+    side: BoonTargetSide,
+) -> EffectPolarity {
+    if target_relative == EffectPolarity::Contextual {
+        return EffectPolarity::Contextual;
+    }
+    match side {
+        BoonTargetSide::Holder => target_relative,
+        BoonTargetSide::Enemy => invert(target_relative),
+        // The holder aims a chosen slot at fire time and picks the target
+        // that favors them, so any directed weapon or gift is a benefit to
+        // hold regardless of which way the verb itself points.
+        BoonTargetSide::Chosen => EffectPolarity::Beneficial,
+        BoonTargetSide::Unknown => EffectPolarity::Contextual,
+    }
+}
+
+/// Side of a granted body's primary target via the engine's own slot accessor:
+/// `target_filter()` already resolves the Token / CopyTokenOf / ApplyPerpetual
+/// axes. Precedence is explicit target, then executable `player_scope`, then
+/// the CR 608.2c controller default: a targetless verb under "each opponent"
+/// harms the holder's enemies (not the holder), while an untargeted unscoped
+/// verb (or the perpetual self-subject `Any`) defaults to the resolving
+/// controller — the holder once the install re-stamp lands.
+fn boon_inner_target_side(exec: &AbilityDefinition) -> BoonTargetSide {
+    if let Some(filter) = exec.effect.target_filter() {
+        return boon_filter_side(filter);
+    }
+    if let Some(scope) = exec.player_scope.as_ref() {
+        return boon_player_filter_side(scope);
+    }
+    BoonTargetSide::Holder
+}
+
+/// Side of one `PlayerFilter` in the boon holder's frame. Shared by the
+/// `PlayerMatching` target arm and the executable-scope arm so the two
+/// recipient axes cannot drift: holder-affiliated filters keep the inner
+/// reading, enemy-side filters flip it, anything else fails closed.
+fn boon_player_filter_side(player: &PlayerFilter) -> BoonTargetSide {
+    match player {
+        PlayerFilter::Controller => BoonTargetSide::Holder,
+        PlayerFilter::Opponent
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife => BoonTargetSide::Enemy,
+        _ => BoonTargetSide::Unknown,
+    }
+}
+
+/// Classify one target filter into the boon holder's frame. Holder-affiliated
+/// context refs keep the inner reading; enemy-side filters flip it; slots the
+/// holder aims read as weapons to hold. `TriggeringPlayer` is whoever's event
+/// fired the boon — which may be an opponent ("whenever an opponent casts") —
+/// and `CostPaidObject` names no one in a trigger fire, so both fail closed.
+fn boon_filter_side(filter: &TargetFilter) -> BoonTargetSide {
+    match filter {
+        TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::SelfRef
+        | TargetFilter::ParentTarget => BoonTargetSide::Holder,
+        TargetFilter::Opponent => BoonTargetSide::Enemy,
+        TargetFilter::Player | TargetFilter::Any => BoonTargetSide::Chosen,
+        TargetFilter::Typed(typed) => match typed.controller {
+            // Unrestricted "target creature" — the holder aims it.
+            None => BoonTargetSide::Chosen,
+            Some(ControllerRef::You) => BoonTargetSide::Holder,
+            Some(ControllerRef::Opponent | ControllerRef::TargetOpponent) => BoonTargetSide::Enemy,
+            // The holder targets the player first, then aims within.
+            Some(ControllerRef::TargetPlayer) => BoonTargetSide::Chosen,
+            _ => BoonTargetSide::Unknown,
+        },
+        TargetFilter::PlayerMatching { player } => boon_player_filter_side(player.as_ref()),
+        _ => BoonTargetSide::Unknown,
+    }
+}
+
+/// Direction of a perpetual edit for its TARGET (before the holder-relative
+/// re-base): signed P/T deltas, keyword grants, and cost changes each carry
+/// their own sign. Absolute sets (`Become`, `SetBasePowerToughness`) are
+/// directionless without the target's base stats, and dynamic (`X`) deltas
+/// freeze only at application time, so both stay Contextual. A zero-delta edit
+/// with a keyword rider (the Jaheira combined shape with no P/T movement)
+/// takes the rider's sign.
+fn perpetual_modification_direction(modification: &PerpetualModification) -> EffectPolarity {
+    match modification {
+        PerpetualModification::ModifyPowerToughness {
+            power,
+            toughness,
+            keywords,
+        } => {
+            let deltas = match (power, toughness) {
+                (QuantityExpr::Fixed { value: p }, QuantityExpr::Fixed { value: t }) => {
+                    Some((*p, *t))
+                }
+                _ => None,
+            };
+            match deltas {
+                Some((0, 0)) if !keywords.is_empty() => perpetual_keyword_sign(keywords),
+                Some((p, t)) if p >= 0 && t >= 0 && (p, t) != (0, 0) => EffectPolarity::Beneficial,
+                Some((p, t)) if p <= 0 && t <= 0 && (p, t) != (0, 0) => EffectPolarity::Harmful,
+                _ => EffectPolarity::Contextual,
+            }
+        }
+        PerpetualModification::GrantKeywords { keywords } => perpetual_keyword_sign(keywords),
+        PerpetualModification::Become { .. }
+        | PerpetualModification::SetBasePowerToughness { .. } => EffectPolarity::Contextual,
+        PerpetualModification::ModifyCost { mode, .. } => match mode {
+            engine::types::statics::CostModifyMode::Reduce => EffectPolarity::Beneficial,
+            // A raise — or a floor, which can only ever raise what is paid —
+            // hurts the modified card's caster.
+            engine::types::statics::CostModifyMode::Raise
+            | engine::types::statics::CostModifyMode::Minimum => EffectPolarity::Harmful,
+        },
+        PerpetualModification::GrantAbility { modifications } => {
+            // First directed grant wins, mirroring the `GenericEffect` arm.
+            for grant in modifications {
+                let polarity = match grant {
+                    PerpetualGrantModification::AddKeyword { keyword } => {
+                        perpetual_keyword_sign(std::slice::from_ref(keyword))
+                    }
+                    PerpetualGrantModification::AddStaticMode { mode } => {
+                        static_mode_polarity(mode)
+                    }
+                    PerpetualGrantModification::GrantAbility { definition } => {
+                        effect_polarity(&definition.effect)
+                    }
+                    PerpetualGrantModification::GrantTrigger { trigger } => {
+                        granted_trigger_polarity(trigger)
+                    }
+                };
+                if polarity != EffectPolarity::Contextual {
+                    return polarity;
+                }
+            }
+            EffectPolarity::Contextual
+        }
+    }
+}
+
+/// Sign of granted keywords for the card that bears them: CR 702.147a decayed
+/// is the one keyword grant that is a drawback, mirroring the keyword-counter
+/// rule in `counter_sign_polarity`.
+fn perpetual_keyword_sign(keywords: &[Keyword]) -> EffectPolarity {
+    if keywords.is_empty() {
+        return EffectPolarity::Contextual;
+    }
+    if keywords.iter().any(|k| matches!(k, Keyword::Decayed)) {
+        EffectPolarity::Harmful
+    } else {
+        EffectPolarity::Beneficial
+    }
 }
 
 /// Classify a continuous modification as beneficial/harmful to its target.
@@ -1732,6 +2028,413 @@ fn filter_excludes_parent_target(filter: &TargetFilter) -> bool {
         TargetFilter::And { filters } => filters.iter().any(filter_excludes_parent_target),
         _ => false,
     }
+}
+
+/// CR 611.2a + CR 514.2: a continuous effect from resolution lasts as stated, and "until end of
+/// turn" effects end in the cleanup step, so a P/T (CR 613.4c) or keyword grant that lasts until
+/// end of turn is bound to this turn, whatever the keyword. [`effect_is_combat_trick_payload`]
+/// is the narrower reading of which such grants are priced as combat tricks.
+pub(crate) fn ability_is_temporary_combat_modifier(ability: &AbilityDefinition) -> bool {
+    ability_effect_is_temporary_combat_modifier(ability)
+        && ability
+            .sub_ability
+            .as_deref()
+            .is_none_or(ability_is_temporary_combat_modifier)
+        && ability
+            .else_ability
+            .as_deref()
+            .is_none_or(ability_is_temporary_combat_modifier)
+        && ability
+            .mode_abilities
+            .iter()
+            .all(ability_is_temporary_combat_modifier)
+}
+
+fn ability_effect_is_temporary_combat_modifier(ability: &AbilityDefinition) -> bool {
+    match &*ability.effect {
+        Effect::Pump { .. } => matches!(ability.duration, Some(Duration::UntilEndOfTurn)),
+        effect => effect_is_temporary_combat_modifier(effect),
+    }
+}
+
+pub(crate) fn effect_is_temporary_combat_modifier(effect: &Effect) -> bool {
+    match effect {
+        Effect::GenericEffect {
+            static_abilities,
+            duration: Some(Duration::UntilEndOfTurn),
+            ..
+        } => {
+            // An empty grant modifies nothing, so it is no combat modifier.
+            !static_abilities.is_empty()
+                && static_abilities
+                    .iter()
+                    .all(static_definition_is_temporary_combat_modifier)
+        }
+        _ => false,
+    }
+}
+
+fn static_definition_is_temporary_combat_modifier(static_def: &StaticDefinition) -> bool {
+    matches!(static_def.mode, StaticMode::Continuous)
+        && !static_def.modifications.is_empty()
+        && static_def
+            .modifications
+            .iter()
+            .all(continuous_modification_is_temporary_combat_modifier)
+}
+
+fn continuous_modification_is_temporary_combat_modifier(
+    modification: &ContinuousModification,
+) -> bool {
+    matches!(
+        modification,
+        ContinuousModification::AddPower { .. }
+            | ContinuousModification::AddToughness { .. }
+            | ContinuousModification::AddKeyword { .. }
+    )
+}
+
+/// Is this keyword's value bound to this turn's combat (CR 506.1), so that granting it until
+/// end of turn is a combat trick's payload? The rules read each of these as attackers or
+/// blockers are declared or as combat damage is dealt: evasion and blocking restrictions,
+/// combat-damage modifiers, and attack, block and combat-damage triggers. Deathtouch, lifelink,
+/// wither, infect and haste are not confined to combat by their rules, but combat is where a
+/// grant of them pays out. Double team is Alchemy's and has no CR entry; it is an attack trigger.
+///
+/// A keyword whose value lands elsewhere is refused by not being listed: a dies trigger pays
+/// off in any phase (undying, persist, afterlife: CR 702.93a, CR 702.79a, CR 702.135a), a
+/// graveyard keyword pays off from the graveyard (flashback, escape, embalm: CR 702.34a,
+/// CR 702.138a, CR 702.128a), and a protective keyword pays off against removal in any phase
+/// (hexproof, indestructible, protection, shroud: CR 702.11b, CR 702.12b, CR 702.16b,
+/// CR 702.18a). Like `keyword_is_defensive`, this is an allowlist rather than an exhaustive
+/// `match`, so that an unclassified or future keyword fails closed and takes no combat-window
+/// penalty.
+fn keyword_is_bound_to_combat(keyword: &Keyword) -> bool {
+    matches!(
+        keyword,
+        Keyword::Flying
+            | Keyword::Fear
+            | Keyword::Intimidate
+            | Keyword::Skulk
+            | Keyword::Shadow
+            | Keyword::Horsemanship
+            | Keyword::Menace
+            | Keyword::Landwalk(_)
+            | Keyword::Reach
+            | Keyword::Defender
+            | Keyword::Banding
+            | Keyword::BandsWithOther(_)
+            | Keyword::FirstStrike
+            | Keyword::DoubleStrike
+            | Keyword::Trample
+            | Keyword::TrampleOverPlaneswalkers
+            | Keyword::Deathtouch
+            | Keyword::Lifelink
+            | Keyword::Wither
+            | Keyword::Infect
+            | Keyword::Toxic(_)
+            | Keyword::Poisonous(_)
+            | Keyword::Vigilance
+            | Keyword::Haste
+            | Keyword::Afflict(_)
+            | Keyword::Annihilator(_)
+            | Keyword::Battlecry
+            | Keyword::Bushido(_)
+            | Keyword::Decayed
+            | Keyword::Dethrone
+            | Keyword::DoubleTeam
+            | Keyword::Enlist
+            | Keyword::Exalted
+            | Keyword::Firebending(_)
+            | Keyword::Flanking
+            | Keyword::Frenzy(_)
+            | Keyword::Ingest
+            | Keyword::Melee
+            | Keyword::Mentor
+            | Keyword::Mobilize(_)
+            | Keyword::Myriad
+            | Keyword::Provoke
+            | Keyword::Rampage(_)
+            | Keyword::Renown(_)
+            | Keyword::Training
+    )
+}
+
+fn modification_is_bound_to_combat(modification: &ContinuousModification) -> bool {
+    match modification {
+        ContinuousModification::AddPower { .. } | ContinuousModification::AddToughness { .. } => {
+            true
+        }
+        ContinuousModification::AddKeyword { keyword } => keyword_is_bound_to_combat(keyword),
+        _ => false,
+    }
+}
+
+/// CR 702.73a: a creature-type grant pays off neither in combat nor anywhere else in
+/// particular. Beside a P/T change it leaves a trick a trick (Blades of Velis Vel), and alone
+/// it is none (Amoeboid Changeling).
+fn modification_is_creature_type_rider(modification: &ContinuousModification) -> bool {
+    matches!(
+        modification,
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Changeling
+        }
+    )
+}
+
+/// The payload of a combat trick, read one effect at a time: a P/T change (`Pump`,
+/// `DoublePT`) or an until-end-of-turn `GenericEffect` made only of P/T and keyword
+/// modifications (`effect_is_temporary_combat_modifier`), whose value is bound to the
+/// combat window (CR 611.2a + CR 514.2). A `GenericEffect` needs a modification bound to
+/// that window and none whose value lands elsewhere ([`keyword_is_bound_to_combat`]), so
+/// a grant that also protects its creature or brings it back is not a trick in any part.
+/// `Pump`/`DoublePT` carry their duration on the ability, not the effect, so at this
+/// granularity they are accepted as the effect-timing and hint call sites always have;
+/// the ability-level [`ability_is_temporary_combat_modifier`] stays the authority where
+/// the definition is in hand. [`CombatBinding`] reads a candidate's whole resolution.
+pub(crate) fn effect_is_combat_trick_payload(effect: &Effect) -> bool {
+    match effect {
+        Effect::Pump { .. } | Effect::DoublePT { .. } => true,
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => {
+            let modifications = || {
+                static_abilities
+                    .iter()
+                    .flat_map(|static_def| &static_def.modifications)
+            };
+            effect_is_temporary_combat_modifier(effect)
+                && modifications().any(modification_is_bound_to_combat)
+                && modifications().all(|modification| {
+                    modification_is_bound_to_combat(modification)
+                        || modification_is_creature_type_rider(modification)
+                })
+        }
+        _ => false,
+    }
+}
+
+/// How much of a candidate's resolution is bound to the combat window. CR 601.2b + CR 700.2a:
+/// the caller's walk decides which modes are read: every mode of a spell not yet announced,
+/// only the chosen modes at the prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CombatBinding {
+    /// No combat-trick payload.
+    Unbound,
+    /// A payload beside value that lands elsewhere. Combat still pays the payload, but
+    /// waiting costs the rest, so timing takes no penalty out of the window.
+    Partial,
+    /// A payload and only riders of it: the combat window is the candidate's whole value
+    /// (CR 611.2a + CR 514.2).
+    Whole,
+}
+
+impl CombatBinding {
+    pub(crate) fn of_resolution(effects: &[&Effect]) -> Self {
+        if !effects.iter().copied().any(effect_is_combat_trick_payload) {
+            return Self::Unbound;
+        }
+        if effects.iter().copied().all(|effect| {
+            effect_is_combat_trick_payload(effect) || effect_has_no_value_outside_combat(effect)
+        }) {
+            Self::Whole
+        } else {
+            Self::Partial
+        }
+    }
+
+    /// The binding of the candidate that resolves `effects`: [`Self::of_resolution`], except
+    /// that an activation putting loyalty counters on its permanent keeps them whatever the
+    /// phase (CR 606.4), and the permanent's one loyalty activation of the turn (CR 606.3) is
+    /// not banked by passing, so combat is not its whole value. The cost is read through
+    /// [`PolicyContext::effective_activated_ability`], so a granted loyalty ability counts.
+    pub(crate) fn of_candidate(ctx: &PolicyContext<'_>, effects: &[&Effect]) -> Self {
+        match Self::of_resolution(effects) {
+            Self::Whole
+                if ctx
+                    .effective_activated_ability()
+                    .and_then(|ability| ability.cost)
+                    .is_some_and(|cost| net_loyalty_cost(&cost) > 0) =>
+            {
+                Self::Partial
+            }
+            binding => binding,
+        }
+    }
+}
+
+/// CR 606.4 + CR 606.5: the loyalty counters a cost puts on its permanent, net of those it
+/// removes, its loyalty costs combining into one. A `[−X]` ability, modeled as removing counters,
+/// reads 0: it puts none on.
+fn net_loyalty_cost(cost: &AbilityCost) -> i32 {
+    match cost {
+        AbilityCost::Loyalty { amount } => *amount,
+        AbilityCost::Composite { costs } => costs.iter().map(net_loyalty_cost).sum(),
+        _ => 0,
+    }
+}
+
+/// Does this effect, beside a combat-trick payload, add no value outside the combat window?
+/// This is an allowlist, as [`keyword_is_bound_to_combat`] is, so that an unclassified or
+/// future effect fails closed: it reads as value elsewhere and takes no combat-window penalty.
+fn effect_has_no_value_outside_combat(effect: &Effect) -> bool {
+    match effect {
+        // CR 613.4c: a group's P/T change, in the window a `Pump` is.
+        Effect::PumpAll { .. }
+        // CR 701.26a + CR 701.26b: a tap or untap beside a pump decides a combat's attackers
+        // and blockers.
+        | Effect::SetTapState { .. }
+        // CR 509.1c: a requirement on this turn's blocks.
+        | Effect::ForceBlock { .. } => true,
+        Effect::GenericEffect {
+            static_abilities,
+            duration: Some(Duration::UntilEndOfTurn),
+            ..
+        } => {
+            !static_abilities.is_empty()
+                && static_abilities.iter().all(|static_def| {
+                    !static_def.modifications.is_empty()
+                        && static_def
+                            .modifications
+                            .iter()
+                            .all(modification_rides_a_trick)
+                })
+        }
+        // CR 603.7: a delayed removal of what was pumped is the pump's drawback, not a payoff.
+        Effect::CreateDelayedTrigger { effect, .. } => collect_definition_effects(effect)
+            .into_iter()
+            .all(effect_removes_its_own_subject),
+        _ => false,
+    }
+}
+
+fn modification_rides_a_trick(modification: &ContinuousModification) -> bool {
+    modification_is_bound_to_combat(modification)
+        || modification_is_creature_type_rider(modification)
+        || matches!(
+            modification,
+            ContinuousModification::AddStaticMode { mode } if static_mode_is_bound_to_combat(mode)
+        )
+}
+
+/// CR 508.1c + CR 508.1d + CR 509.1b + CR 509.1c: the restrictions and requirements read as
+/// attackers and blockers are declared, among them goad's (CR 701.15b), plus the permissions to
+/// attack despite defender (CR 702.3b) and to block more than the one attacker of CR 509.1a.
+/// Unlisted modes fail closed.
+fn static_mode_is_bound_to_combat(mode: &StaticMode) -> bool {
+    matches!(
+        mode,
+        StaticMode::CantAttack
+            | StaticMode::CantBlock
+            | StaticMode::CantAttackOrBlock
+            | StaticMode::AttackOnlyNeighbor
+            | StaticMode::MaxAttackersEachCombat { .. }
+            | StaticMode::MaxBlockersEachCombat { .. }
+            | StaticMode::MustAttack
+            | StaticMode::MustAttackDefender { .. }
+            | StaticMode::MustAttackAwayFromSource
+            | StaticMode::Goaded
+            | StaticMode::MustBlock
+            | StaticMode::MustBlockAttacker { .. }
+            | StaticMode::ExtraBlockers { .. }
+            | StaticMode::BlockRestriction { .. }
+            | StaticMode::CombatAlone { .. }
+            | StaticMode::CantBeBlocked
+            | StaticMode::CantBeBlockedExceptBy { .. }
+            | StaticMode::CantBeBlockedBy { .. }
+            | StaticMode::CantBeBlockedByMoreThan { .. }
+            | StaticMode::CantBeBlockedUnlessAllBlock
+            | StaticMode::MustBeBlocked { .. }
+            | StaticMode::MustBeBlockedByAll { .. }
+            | StaticMode::CanAttackWithDefender
+    )
+}
+
+/// CR 701.21a + CR 701.8a: sacrificing, destroying or bouncing the creature that was pumped, or
+/// the source, only takes it away. Any other subject is a payoff, or fails closed.
+fn effect_removes_its_own_subject(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Sacrifice { target, .. }
+            | Effect::Destroy { target, .. }
+            | Effect::Bounce { target, .. }
+            if matches!(target, TargetFilter::ParentTarget | TargetFilter::SelfRef)
+    )
+}
+
+/// The effects a cast spell itself resolves: its spell abilities (CR 113.3a + CR 608.2), read
+/// through `CastFacts::primary_effects`' `AbilityKind::Spell` filter. A permanent spell's
+/// activated and triggered abilities (CR 113.3b + CR 113.3c) resolve only once activated or
+/// triggered, after the permanent has entered (CR 608.3a + CR 603.6a), so a combat-window
+/// payload among them is not the cast's.
+pub(crate) fn spell_resolution_effects<'a>(facts: &CastFacts<'a>) -> Vec<&'a Effect> {
+    facts
+        .primary_effects
+        .iter()
+        .copied()
+        .flat_map(collect_definition_effects)
+        .collect()
+}
+
+/// The object whose timing governs a candidate's own resolution: a spell being cast
+/// (CR 601.2a), or having its modes chosen (CR 601.2b + CR 700.2a), or an activated ability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TimingSubject {
+    Spell(ObjectId),
+    Ability {
+        source_id: ObjectId,
+        ability_index: usize,
+    },
+}
+
+impl TimingSubject {
+    /// A cast through the AI's cast object authority, an activation by its engine index, a
+    /// spell's mode prompt by the pending cast's object. Anything else has no subject, so a
+    /// modal ability's prompt keeps its pricing.
+    pub(crate) fn of_candidate(ctx: &PolicyContext<'_>) -> Option<Self> {
+        match (&ctx.candidate.action, &ctx.decision.waiting_for) {
+            (GameAction::CastSpell { .. }, _) => {
+                cast_object_for_action(ctx.state, &ctx.candidate.action, ctx.ai_player)
+                    .map(|object| Self::Spell(object.id))
+            }
+            (
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index,
+                    ..
+                },
+                _,
+            ) => Some(Self::Ability {
+                source_id: *source_id,
+                ability_index: *ability_index,
+            }),
+            (GameAction::SelectModes { .. }, WaitingFor::ModeChoice { pending_cast, .. }) => {
+                Some(Self::Spell(pending_cast.object_id))
+            }
+            _ => None,
+        }
+    }
+
+    fn confined_to_sorcery_timing(self, state: &GameState, player: PlayerId) -> bool {
+        match self {
+            Self::Spell(object_id) => spell_confined_to_sorcery_timing(state, player, object_id),
+            Self::Ability {
+                source_id,
+                ability_index,
+            } => ability_confined_to_sorcery_timing(state, player, source_id, ability_index),
+        }
+    }
+}
+
+/// CR 505.1a + CR 307.1 + CR 307.5: is this the precombat main phase, the first main phase of
+/// the turn, for a subject confined to sorcery timing? Then no later window reaches this turn's
+/// combat, and an until-end-of-turn payload lasts through it (CR 611.2a + CR 514.2).
+pub(crate) fn precombat_main_is_last_trick_window(
+    state: &GameState,
+    player: PlayerId,
+    subject: TimingSubject,
+) -> bool {
+    state.phase == Phase::PreCombatMain && subject.confined_to_sorcery_timing(state, player)
 }
 
 #[cfg(test)]
@@ -1969,6 +2672,658 @@ mod suspect_scope_tests {
 }
 
 #[cfg(test)]
+mod temporary_combat_modifier_tests {
+    use super::CombatBinding::{Partial, Unbound, Whole};
+    use super::*;
+    use crate::cast_facts::{collect_definition_effects_with, ModeWalk};
+    use engine::types::ability::{
+        BounceSelection, DelayedTriggerCondition, EffectKind, EffectKind as K, TypedFilter,
+    };
+    use engine::types::identifiers::ObjectIncarnationRef;
+    use engine::types::keywords::{EmbalmCost, EscapeCost, FlashbackCost};
+    use engine::types::statics::{
+        BlockExceptionKind, CombatAloneAction, CombatAloneRequirement, RequiredDefender,
+    };
+
+    fn until_end_of_turn(static_abilities: Vec<StaticDefinition>) -> Effect {
+        Effect::GenericEffect {
+            static_abilities,
+            target: Some(TargetFilter::ParentTarget),
+            duration: Some(Duration::UntilEndOfTurn),
+            end_cost: None,
+        }
+    }
+
+    fn pump(modifications: Vec<ContinuousModification>) -> StaticDefinition {
+        StaticDefinition::continuous()
+            .affected(TargetFilter::ParentTarget)
+            .modifications(modifications)
+    }
+
+    #[test]
+    fn empty_until_end_of_turn_grant_is_no_combat_modifier() {
+        let control = until_end_of_turn(vec![pump(vec![ContinuousModification::AddPower {
+            value: 1,
+        }])]);
+        assert!(
+            effect_is_temporary_combat_modifier(&control),
+            "reach-guard: a +1/+0 grant is a combat modifier"
+        );
+        assert!(!effect_is_temporary_combat_modifier(&until_end_of_turn(
+            vec![]
+        )));
+        assert!(!effect_is_temporary_combat_modifier(&until_end_of_turn(
+            vec![pump(vec![])]
+        )));
+        assert!(!effect_is_combat_trick_payload(&until_end_of_turn(vec![])));
+    }
+
+    fn grant(keyword: Keyword) -> ContinuousModification {
+        ContinuousModification::AddKeyword { keyword }
+    }
+
+    fn trick_payload(modifications: Vec<ContinuousModification>) -> bool {
+        effect_is_combat_trick_payload(&until_end_of_turn(vec![pump(modifications)]))
+    }
+
+    /// Every keyword kind an until-end-of-turn grant adds in the card pool whose value is bound
+    /// to combat, plus the class's other attack, block and combat-damage keywords.
+    #[test]
+    fn a_keyword_bound_to_combat_is_a_trick_payload_alone() {
+        for keyword in [
+            Keyword::Flying,
+            Keyword::Fear,
+            Keyword::Intimidate,
+            Keyword::Skulk,
+            Keyword::Shadow,
+            Keyword::Horsemanship,
+            Keyword::Menace,
+            Keyword::Landwalk("Island".to_string()),
+            Keyword::Reach,
+            Keyword::Defender,
+            Keyword::FirstStrike,
+            Keyword::DoubleStrike,
+            Keyword::Trample,
+            Keyword::TrampleOverPlaneswalkers,
+            Keyword::Deathtouch,
+            Keyword::Lifelink,
+            Keyword::Wither,
+            Keyword::Infect,
+            Keyword::Toxic(1),
+            Keyword::Banding,
+            Keyword::Vigilance,
+            Keyword::Haste,
+            Keyword::Annihilator(1),
+            Keyword::Myriad,
+            Keyword::Melee,
+            Keyword::Firebending(QuantityExpr::Fixed { value: 5 }),
+            Keyword::DoubleTeam,
+            Keyword::Exalted,
+            Keyword::Battlecry,
+            Keyword::Rampage(2),
+            Keyword::Bushido(1),
+            Keyword::Flanking,
+            Keyword::Provoke,
+        ] {
+            assert!(
+                trick_payload(vec![grant(keyword.clone())]),
+                "{keyword:?} pays out in combat"
+            );
+        }
+    }
+
+    /// CR 702.93a + CR 702.79a + CR 702.135a: a dies trigger pays off in any phase. CR 702.34a +
+    /// CR 702.138a + CR 702.128a: a graveyard keyword pays off from the graveyard. CR 702.73a: a
+    /// creature-type grant has no combat value. An unclassified keyword fails closed. Beside a
+    /// +1/+0 reach guard, none of them is a payload alone.
+    #[test]
+    fn a_keyword_whose_value_lands_elsewhere_is_no_trick_payload() {
+        let mana = || engine::types::mana::ManaCost::zero();
+        assert!(
+            trick_payload(vec![ContinuousModification::AddPower { value: 1 }]),
+            "reach-guard: a +1/+0 grant is a trick payload"
+        );
+        for keyword in [
+            Keyword::Undying,
+            Keyword::Persist,
+            Keyword::Afterlife(1),
+            Keyword::Flashback(FlashbackCost::Mana(mana())),
+            Keyword::Escape(EscapeCost::Mana(mana())),
+            Keyword::Embalm(EmbalmCost::Mana(mana())),
+            Keyword::JumpStart,
+            Keyword::Unearth(mana()),
+            Keyword::Changeling,
+            Keyword::Flash,
+            Keyword::Absorb(1),
+            Keyword::Unknown("unclassified".to_string()),
+        ] {
+            assert!(
+                !trick_payload(vec![grant(keyword.clone())]),
+                "{keyword:?} is not bound to combat"
+            );
+        }
+    }
+
+    /// A mixed grant reads as the protective one does: value that lands elsewhere refuses the
+    /// whole payload, however much of it is bound to combat. A creature-type grant does not,
+    /// since it pays off nowhere else either, but it does not make a payload by itself.
+    #[test]
+    fn a_mixed_grant_is_a_trick_payload_only_if_nothing_in_it_lands_elsewhere() {
+        let plus_one = || ContinuousModification::AddPower { value: 1 };
+        assert!(trick_payload(vec![plus_one(), grant(Keyword::Trample)]));
+        assert!(trick_payload(vec![plus_one(), grant(Keyword::Changeling)]));
+        assert!(trick_payload(vec![
+            grant(Keyword::Flying),
+            grant(Keyword::Changeling)
+        ]));
+        assert!(!trick_payload(vec![plus_one(), grant(Keyword::Undying)]));
+        assert!(!trick_payload(vec![
+            grant(Keyword::Flying),
+            grant(Keyword::Persist)
+        ]));
+        assert!(!trick_payload(vec![
+            plus_one(),
+            grant(Keyword::Indestructible)
+        ]));
+    }
+
+    fn parsed(oracle_text: &str, name: &str, core_type: &str) -> Vec<AbilityDefinition> {
+        engine::parser::oracle::parse_oracle_text(
+            oracle_text,
+            name,
+            &[],
+            &[core_type.to_string()],
+            &[],
+        )
+        .abilities
+    }
+
+    /// A cast reads every Spell ability and every mode (CR 601.2b).
+    fn cast_walk(abilities: &[AbilityDefinition]) -> Vec<&Effect> {
+        abilities
+            .iter()
+            .filter(|ability| ability.kind == AbilityKind::Spell)
+            .flat_map(collect_definition_effects)
+            .collect()
+    }
+
+    /// An activation reads the one ability it activates, here the card's first.
+    fn activation_walk(abilities: &[AbilityDefinition]) -> Vec<&Effect> {
+        let ability = abilities
+            .iter()
+            .find(|ability| ability.kind == AbilityKind::Activated)
+            .expect("the card prints an activated ability");
+        collect_definition_effects_with(ability, ModeWalk::RootOnly)
+    }
+
+    /// `Whole` needs every effect to be a payload or a rider of one; the premise pins each
+    /// card's parsed shape, so a row cannot pass by parsing into a different chain.
+    #[test]
+    fn combat_binding_reads_the_whole_resolution() {
+        type Row = (
+            &'static str,
+            &'static str,
+            &'static str,
+            &'static [EffectKind],
+            CombatBinding,
+        );
+
+        let instant_or_sorcery: [Row; 22] = [
+            (
+                "Giant Growth",
+                "Instant",
+                "Target creature gets +3/+3 until end of turn.",
+                &[K::Pump],
+                Whole,
+            ),
+            (
+                "Barge In",
+                "Instant",
+                "Target attacking creature gets +2/+2 until end of turn. Each attacking non-Human creature gains trample until end of turn.",
+                &[K::Pump, K::GenericEffect],
+                Whole,
+            ),
+            (
+                "Arm the Cathars",
+                "Sorcery",
+                "Until end of turn, target creature gets +3/+3, up to one other target creature gets +2/+2, and up to one other target creature gets +1/+1. Those creatures gain vigilance until end of turn.",
+                &[K::Pump, K::Pump, K::Pump, K::GenericEffect],
+                Whole,
+            ),
+            (
+                "Coordinated Assault",
+                "Instant",
+                "Up to two target creatures each get +1/+0 and gain first strike until end of turn. (They deal combat damage before creatures without first strike.)",
+                &[K::GenericEffect],
+                Whole,
+            ),
+            (
+                "Gerrard's Command",
+                "Instant",
+                "Untap target creature. It gets +3/+3 until end of turn.",
+                &[K::Untap, K::Pump],
+                Whole,
+            ),
+            (
+                "Stabbing Pain",
+                "Instant",
+                "Target creature gets -1/-1 until end of turn. Tap that creature.",
+                &[K::Pump, K::Tap],
+                Whole,
+            ),
+            (
+                "Echoing Courage",
+                "Instant",
+                "Target creature and all other creatures with the same name as that creature get +2/+2 until end of turn.",
+                &[K::Pump, K::PumpAll],
+                Whole,
+            ),
+            (
+                "Monstrous Step",
+                "Sorcery",
+                "Target creature gets +7/+7 until end of turn. Up to one other target creature blocks it this turn if able.\nCycling {2} ({2}, Discard this card: Draw a card.)",
+                &[K::Pump, K::ForceBlock],
+                Whole,
+            ),
+            (
+                "Give No Ground",
+                "Instant",
+                "Target creature gets +2/+6 until end of turn and can block any number of creatures this turn.",
+                &[K::Pump, K::GenericEffect],
+                Whole,
+            ),
+            (
+                "Emergent Growth",
+                "Sorcery",
+                "Target creature gets +5/+5 until end of turn and must be blocked this turn if able.",
+                &[K::Pump, K::GenericEffect],
+                Whole,
+            ),
+            (
+                "Blood Frenzy",
+                "Instant",
+                "Cast this spell only before the combat damage step.\nTarget attacking or blocking creature gets +4/+0 until end of turn. Destroy that creature at the beginning of the next end step.",
+                &[K::Pump, K::CreateDelayedTrigger],
+                Whole,
+            ),
+            (
+                "Invigorated Rampage",
+                "Instant",
+                "Choose one —\n• Target creature gets +4/+0 and gains trample until end of turn.\n• Two target creatures each get +2/+0 and gain trample until end of turn.",
+                &[K::GenericEffect, K::GenericEffect],
+                Whole,
+            ),
+            (
+                "Heroic Reinforcements",
+                "Sorcery",
+                "Create two 1/1 white Soldier creature tokens. Until end of turn, creatures you control get +1/+1 and gain haste. (They can attack and {T} this turn.)",
+                &[K::Token, K::GenericEffect],
+                Partial,
+            ),
+            (
+                "Deafening Clarion",
+                "Sorcery",
+                "Choose one or both —\n• Deafening Clarion deals 3 damage to each creature.\n• Creatures you control gain lifelink until end of turn.",
+                &[K::DamageAll, K::GenericEffect],
+                Partial,
+            ),
+            (
+                "Goblin War Party",
+                "Sorcery",
+                "Choose one —\n• Create three 1/1 red Goblin creature tokens.\n• Creatures you control get +1/+1 and gain haste until end of turn.\nEntwine {2}{R} (Choose both if you pay the entwine cost.)",
+                &[K::Token, K::GenericEffect],
+                Partial,
+            ),
+            (
+                "Monstrous Rage",
+                "Instant",
+                "Target creature gets +2/+0 until end of turn. Create a Monster Role token attached to it. (If you control another Role on it, put that one into the graveyard. Enchanted creature gets +1/+1 and has trample.)",
+                &[K::Pump, K::Token],
+                Partial,
+            ),
+            (
+                "Afflict",
+                "Instant",
+                "Target creature gets -1/-1 until end of turn.\nDraw a card.",
+                &[K::Pump, K::Draw],
+                Partial,
+            ),
+            (
+                "Moment of Triumph",
+                "Instant",
+                "Target creature gets +2/+2 until end of turn. You gain 2 life.",
+                &[K::Pump, K::GainLife],
+                Partial,
+            ),
+            (
+                "A Good Day to Die",
+                "Instant",
+                "Target creature gets +2/+0 until end of turn. When that creature dies this turn, you draw a card.",
+                &[K::Pump, K::CreateDelayedTrigger],
+                Partial,
+            ),
+            (
+                "Karametra's Blessing",
+                "Instant",
+                "Target creature gets +2/+2 until end of turn. If it's an enchanted creature or enchantment creature, it also gains hexproof and indestructible until end of turn. (It can't be the target of spells or abilities your opponents control. Damage and effects that say \"destroy\" don't destroy it.)",
+                &[K::Pump, K::GenericEffect],
+                Partial,
+            ),
+            (
+                "Unnatural Endurance",
+                "Instant",
+                "Devoid (This card has no color.)\nTarget creature gets +2/+0 until end of turn. Regenerate it.",
+                &[K::Pump, K::Regenerate],
+                Partial,
+            ),
+            (
+                "Act of Treason",
+                "Sorcery",
+                "Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn. (It can attack and {T} this turn.)",
+                &[K::GainControl, K::Untap, K::GenericEffect],
+                Partial,
+            ),
+        ];
+        let activated: [Row; 5] = [
+            (
+                "Vectis Agents",
+                "Creature",
+                "{U}{B}: This creature gets -2/-0 until end of turn and can't be blocked this turn.",
+                &[K::Pump, K::GenericEffect],
+                Whole,
+            ),
+            (
+                "Mobile Fort",
+                "Creature",
+                "Defender (This creature can't attack.)\n{3}: This creature gets +3/-1 until end of turn and can attack this turn as though it didn't have defender. Activate only once each turn.",
+                &[K::Pump, K::GenericEffect],
+                Whole,
+            ),
+            (
+                "Pyric Salamander",
+                "Creature",
+                "{R}: This creature gets +1/+0 until end of turn. Sacrifice this creature at the beginning of the next end step.",
+                &[K::Pump, K::CreateDelayedTrigger],
+                Whole,
+            ),
+            (
+                "Dragon Mask",
+                "Artifact",
+                "{3}, {T}: Target creature you control gets +2/+2 until end of turn. Return it to its owner's hand at the beginning of the next end step. (Return it only if it's on the battlefield.)",
+                &[K::Pump, K::CreateDelayedTrigger],
+                Whole,
+            ),
+            (
+                "The Wandering Emperor",
+                "Planeswalker",
+                "Flash\nAs long as The Wandering Emperor entered this turn, you may activate her loyalty abilities any time you could cast an instant.\n[+1]: Put a +1/+1 counter on up to one target creature. It gains first strike until end of turn.\n[−1]: Create a 2/2 white Samurai creature token with vigilance.\n[−2]: Exile target tapped creature. You gain 2 life.",
+                &[K::PutCounter, K::GenericEffect],
+                Partial,
+            ),
+        ];
+
+        let check = |name: &str, walk: Vec<&Effect>, kinds: &[EffectKind], binding| {
+            let parsed_kinds: Vec<EffectKind> = walk
+                .iter()
+                .map(|effect| EffectKind::from(*effect))
+                .collect();
+            assert_eq!(parsed_kinds, kinds, "premise: {name} parses to this chain");
+            assert_eq!(CombatBinding::of_resolution(&walk), binding, "{name}");
+        };
+        for (name, core_type, oracle_text, kinds, binding) in instant_or_sorcery {
+            let abilities = parsed(oracle_text, name, core_type);
+            check(name, cast_walk(&abilities), kinds, binding);
+        }
+        for (name, core_type, oracle_text, kinds, binding) in activated {
+            let abilities = parsed(oracle_text, name, core_type);
+            check(name, activation_walk(&abilities), kinds, binding);
+        }
+    }
+
+    /// CR 606.5: loyalty costs combine into one, so its example's `[−4]` with an additional
+    /// `[+1]` removes counters and an added mana cost changes nothing. A `[0]` puts no counter.
+    #[test]
+    fn net_loyalty_cost_combines_the_loyalty_parts_of_a_cost() {
+        let loyalty = |amount| AbilityCost::Loyalty { amount };
+        let mana = || AbilityCost::Mana {
+            cost: engine::types::mana::ManaCost::generic(2),
+        };
+        let composite = |costs| AbilityCost::Composite { costs };
+
+        for (cost, net) in [
+            (loyalty(1), 1),
+            (loyalty(0), 0),
+            (loyalty(-3), -3),
+            (mana(), 0),
+            (AbilityCost::Tap, 0),
+            (composite(vec![mana(), loyalty(1)]), 1),
+            (composite(vec![mana(), loyalty(-1)]), -1),
+            (composite(vec![loyalty(-4), loyalty(1)]), -3),
+            (composite(vec![loyalty(1), loyalty(1)]), 2),
+            (composite(vec![mana(), composite(vec![loyalty(2)])]), 2),
+        ] {
+            assert_eq!(net_loyalty_cost(&cost), net, "{cost:?}");
+        }
+    }
+
+    fn bare_pump() -> Effect {
+        Effect::Pump {
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            target: TargetFilter::ParentTarget,
+        }
+    }
+
+    fn static_grant(mode: StaticMode, duration: Option<Duration>) -> Effect {
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(mode.clone())
+                .affected(TargetFilter::ParentTarget)
+                .modifications(vec![ContinuousModification::AddStaticMode { mode }])],
+            target: Some(TargetFilter::ParentTarget),
+            duration,
+            end_cost: None,
+        }
+    }
+
+    fn delayed(ability: AbilityDefinition) -> Effect {
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            effect: Box::new(ability),
+            uses_tracked_set: false,
+        }
+    }
+
+    fn sacrifice(target: TargetFilter) -> Effect {
+        Effect::Sacrifice {
+            target,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        }
+    }
+
+    fn draw() -> Effect {
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    }
+
+    fn set_tap_state() -> Effect {
+        Effect::SetTapState {
+            target: TargetFilter::ParentTarget,
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
+        }
+    }
+
+    fn pump_all() -> Effect {
+        Effect::PumpAll {
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            target: TargetFilter::ParentTarget,
+        }
+    }
+
+    fn beside_a_pump(effect: &Effect) -> CombatBinding {
+        CombatBinding::of_resolution(&[&bare_pump(), effect])
+    }
+
+    /// The riders read in full: every attack and block static of CR 508.1c, CR 508.1d, CR 509.1b
+    /// and CR 509.1c, with the permissions beside them, and a delayed removal of what was pumped.
+    /// A rider alone is no payload, and anything else beside a payload fails closed.
+    #[test]
+    fn only_attack_and_block_statics_and_self_removal_ride_a_trick() {
+        let until_eot = Some(Duration::UntilEndOfTurn);
+        for mode in [
+            StaticMode::CantAttack,
+            StaticMode::CantBlock,
+            StaticMode::CantAttackOrBlock,
+            StaticMode::AttackOnlyNeighbor,
+            StaticMode::MaxAttackersEachCombat {
+                max: 1,
+                defender: None,
+            },
+            StaticMode::MaxBlockersEachCombat { max: 1 },
+            StaticMode::MustAttack,
+            StaticMode::MustAttackDefender {
+                defender: RequiredDefender::Fixed {
+                    player: PlayerId(1),
+                },
+            },
+            StaticMode::MustAttackAwayFromSource,
+            StaticMode::Goaded,
+            StaticMode::MustBlock,
+            StaticMode::MustBlockAttacker {
+                attacker: ObjectIncarnationRef::of(ObjectId(1), 0),
+            },
+            StaticMode::ExtraBlockers { count: None },
+            StaticMode::BlockRestriction {
+                filter: TargetFilter::Any,
+            },
+            StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            },
+            StaticMode::CantBeBlocked,
+            StaticMode::CantBeBlockedExceptBy {
+                kind: BlockExceptionKind::MinBlockers { min: 2 },
+            },
+            StaticMode::CantBeBlockedBy {
+                filter: TargetFilter::Any,
+            },
+            StaticMode::CantBeBlockedByMoreThan { max: 1 },
+            StaticMode::CantBeBlockedUnlessAllBlock,
+            StaticMode::MustBeBlocked { by: None },
+            StaticMode::MustBeBlockedByAll { blockers: None },
+            StaticMode::CanAttackWithDefender,
+        ] {
+            let rider = static_grant(mode.clone(), until_eot.clone());
+            assert_eq!(beside_a_pump(&rider), Whole, "{mode:?} rides a pump");
+            assert_eq!(
+                CombatBinding::of_resolution(&[&rider]),
+                Unbound,
+                "{mode:?} alone is no payload"
+            );
+        }
+
+        assert_eq!(CombatBinding::of_resolution(&[]), Unbound);
+        let forced_block = Effect::ForceBlock {
+            target: TargetFilter::ParentTarget,
+            attacker: None,
+            duration: Duration::UntilEndOfTurn,
+        };
+        for rider in [set_tap_state(), pump_all(), forced_block] {
+            assert_eq!(beside_a_pump(&rider), Whole, "{rider:?} rides a pump");
+            assert_eq!(
+                CombatBinding::of_resolution(&[&rider]),
+                Unbound,
+                "{rider:?} alone is no payload"
+            );
+        }
+
+        for target in [TargetFilter::ParentTarget, TargetFilter::SelfRef] {
+            for removal in [
+                sacrifice(target.clone()),
+                Effect::Destroy {
+                    target: target.clone(),
+                    cant_regenerate: false,
+                },
+                Effect::Bounce {
+                    target: target.clone(),
+                    destination: None,
+                    selection: BounceSelection::Targeted,
+                },
+            ] {
+                let rider = delayed(AbilityDefinition::new(AbilityKind::Spell, removal));
+                assert_eq!(beside_a_pump(&rider), Whole, "{rider:?} rides a pump");
+                assert_eq!(
+                    CombatBinding::of_resolution(&[&rider]),
+                    Unbound,
+                    "{rider:?} alone is no payload"
+                );
+            }
+        }
+
+        for (why, effect) in [
+            (
+                "a rule modification outside declarations",
+                static_grant(StaticMode::CantGainLife, until_eot.clone()),
+            ),
+            (
+                "a protective grant",
+                until_end_of_turn(vec![pump(vec![grant(Keyword::Hexproof)])]),
+            ),
+            (
+                "a grant that outlasts the turn",
+                static_grant(StaticMode::CantBlock, Some(Duration::Permanent)),
+            ),
+            ("an empty grant", until_end_of_turn(vec![])),
+            ("empty modifications", until_end_of_turn(vec![pump(vec![])])),
+            (
+                "an empty static beside a rider",
+                until_end_of_turn(vec![
+                    pump(vec![]),
+                    pump(vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantBlock,
+                    }]),
+                ]),
+            ),
+            (
+                "another creature's sacrifice",
+                delayed(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    sacrifice(TargetFilter::Typed(TypedFilter::default())),
+                )),
+            ),
+            (
+                "a token's sacrifice",
+                delayed(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    sacrifice(TargetFilter::LastCreated),
+                )),
+            ),
+            (
+                "a delayed draw",
+                delayed(AbilityDefinition::new(AbilityKind::Spell, draw())),
+            ),
+            (
+                "a delayed draw behind a removal",
+                delayed(
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        sacrifice(TargetFilter::ParentTarget),
+                    )
+                    .sub_ability(AbilityDefinition::new(AbilityKind::Spell, draw())),
+                ),
+            ),
+            ("a draw", draw()),
+        ] {
+            assert_eq!(beside_a_pump(&effect), Partial, "{why} is value elsewhere");
+        }
+    }
+}
+
+#[cfg(test)]
 mod grant_trigger_polarity_tests {
     use super::*;
     use engine::types::ability::{AbilityDefinition, AbilityKind, StaticDefinition, TypedFilter};
@@ -2089,6 +3444,533 @@ mod grant_trigger_polarity_tests {
                 )),
             }),
             EffectPolarity::Beneficial
+        );
+    }
+}
+
+#[cfg(test)]
+mod create_boon_polarity_tests {
+    use super::*;
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, PerpetualGrantModification,
+        PerpetualModification, PlayerFilter, QuantityRef, ReplacementDefinition, TapStateChange,
+        TypedFilter,
+    };
+    use engine::types::mana::ManaCost;
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::statics::CostModifyMode;
+
+    fn boon_with_body(recipient: TargetFilter, exec: Option<Effect>) -> Effect {
+        let mut trigger = TriggerDefinition::new(TriggerMode::SpellCast);
+        trigger.execute = exec.map(|e| Box::new(AbilityDefinition::new(AbilityKind::Spell, e)));
+        Effect::CreateBoon {
+            recipient,
+            trigger: Box::new(trigger),
+        }
+    }
+
+    fn boon_with_exec(recipient: TargetFilter, exec: AbilityDefinition) -> Effect {
+        let mut trigger = TriggerDefinition::new(TriggerMode::SpellCast);
+        trigger.execute = Some(Box::new(exec));
+        Effect::CreateBoon {
+            recipient,
+            trigger: Box::new(trigger),
+        }
+    }
+
+    fn scoped_exec(effect: Effect, scope: PlayerFilter) -> AbilityDefinition {
+        let mut exec = AbilityDefinition::new(AbilityKind::Spell, effect);
+        exec.player_scope = Some(scope);
+        exec
+    }
+
+    fn opponent_recipient() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: Vec::new(),
+            controller: Some(ControllerRef::Opponent),
+            properties: Vec::new(),
+        })
+    }
+
+    /// Loch Larent's boon body: a floating install whose replacement taps the
+    /// entering creature first, then places the stun counter.
+    fn loch_install() -> Effect {
+        let tap = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+        );
+        Effect::AddTargetReplacement {
+            replacement: Box::new(ReplacementDefinition {
+                execute: Some(Box::new(tap)),
+                ..ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            }),
+            target: TargetFilter::None,
+        }
+    }
+
+    #[test]
+    fn create_boon_polarity_follows_granted_body() {
+        let gain = boon_with_body(
+            TargetFilter::Player,
+            Some(Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            }),
+        );
+        assert_eq!(effect_polarity(&gain), EffectPolarity::Beneficial);
+        let drain = boon_with_body(
+            TargetFilter::Player,
+            Some(Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            }),
+        );
+        assert_eq!(effect_polarity(&drain), EffectPolarity::Harmful);
+        let bodiless = boon_with_body(TargetFilter::Player, None);
+        assert_eq!(effect_polarity(&bodiless), EffectPolarity::Contextual);
+    }
+
+    /// F3: a targetless harm under opponent scope ("each opponent loses 5
+    /// life") harms the holder's enemies, so holding the boon is beneficial —
+    /// not harmful to the holder. The unscoped targetless shape keeps its
+    /// Harmful reading (see `create_boon_polarity_follows_granted_body`).
+    #[test]
+    fn boon_opponent_scoped_targetless_harm_reads_beneficial() {
+        let drain = boon_with_exec(
+            TargetFilter::Player,
+            scoped_exec(
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    target: None,
+                },
+                PlayerFilter::Opponent,
+            ),
+        );
+        assert_eq!(effect_polarity(&drain), EffectPolarity::Beneficial);
+    }
+
+    /// F3 control: the same targetless harm under holder scope ("you lose 5
+    /// life") stays Harmful — scope names the victim, it does not excuse it.
+    #[test]
+    fn boon_holder_scoped_targetless_harm_reads_harmful() {
+        let drain = boon_with_exec(
+            TargetFilter::Player,
+            scoped_exec(
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    target: None,
+                },
+                PlayerFilter::Controller,
+            ),
+        );
+        assert_eq!(effect_polarity(&drain), EffectPolarity::Harmful);
+    }
+
+    /// F3: Underbridge Warlock's full body — opponent-scoped loss chained to a
+    /// holder gain — fails closed to Contextual: the single-effect reading
+    /// cannot see the continuation's direction.
+    #[test]
+    fn boon_mixed_continuation_body_reads_contextual() {
+        let mut exec = scoped_exec(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: None,
+            },
+            PlayerFilter::Opponent,
+        );
+        exec.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Controller,
+            },
+        )));
+        let mixed = boon_with_exec(TargetFilter::Player, exec);
+        assert_eq!(effect_polarity(&mixed), EffectPolarity::Contextual);
+    }
+
+    /// F3: a conditional body ("... Otherwise, ...") fails closed to
+    /// Contextual: the untaken branch's direction is uninspected.
+    #[test]
+    fn boon_conditional_body_reads_contextual() {
+        let mut exec = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+        );
+        exec.else_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: None,
+            },
+        )));
+        let conditional = boon_with_exec(TargetFilter::Player, exec);
+        assert_eq!(effect_polarity(&conditional), EffectPolarity::Contextual);
+    }
+
+    #[test]
+    fn create_boon_loch_replacement_body_reads_harmful() {
+        // The install wrapper is Contextual; the seam must descend into the
+        // replacement body (tap-first root: Harmful) or the harmful grant
+        // scores 0.0 and aims nowhere.
+        let loch = boon_with_body(opponent_recipient(), Some(loch_install()));
+        assert_eq!(effect_polarity(&loch), EffectPolarity::Harmful);
+    }
+
+    #[test]
+    fn boon_harmful_grant_scores_opponent_negative() {
+        // Loch Larent: "target opponent gets [stun] boon" must score -1.0 for
+        // the opponent candidate, so selection aims the harmful grant away
+        // from self. (It must NOT read beneficial-for-self.)
+        let runner = GameScenario::new().build();
+        let state = runner.state();
+        let loch = boon_with_body(opponent_recipient(), Some(loch_install()));
+        assert_eq!(
+            targeted_player_impact_in(
+                state,
+                Some(P0),
+                Some(engine::types::identifiers::ObjectId(0)),
+                &[&loch],
+                P1,
+            ),
+            Some(-1.0),
+        );
+    }
+
+    #[test]
+    fn boon_beneficial_grant_prefers_self_and_ignores_contextual_holder() {
+        let runner = GameScenario::new().build();
+        let state = runner.state();
+        let source = Some(engine::types::identifiers::ObjectId(0));
+        let gain = boon_with_body(
+            TargetFilter::Player,
+            Some(Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            }),
+        );
+        // "Target player gets [beneficial] boon": +1.0 for self, so selection
+        // keeps the good boon instead of gifting it to an opponent.
+        assert_eq!(
+            targeted_player_impact_in(state, Some(P0), source, &[&gain], P0),
+            Some(1.0),
+        );
+        // "You get [beneficial] boon": the Controller holder is contextual —
+        // it resolves independently of selection and must not score (no
+        // per-candidate signal, so it can never pollute an unrelated slot in
+        // a mixed ability).
+        let self_gain = boon_with_body(
+            TargetFilter::Controller,
+            Some(Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            }),
+        );
+        assert_eq!(
+            targeted_player_impact_in(state, Some(P0), source, &[&self_gain], P0),
+            None,
+        );
+        assert_eq!(
+            targeted_player_impact_in(state, Some(P0), source, &[&self_gain], P1),
+            None,
+        );
+    }
+
+    fn drain_some(target: TargetFilter) -> Effect {
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            target: Some(target),
+        }
+    }
+
+    fn typed_controller(controller: Option<ControllerRef>) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: Vec::new(),
+            controller,
+            properties: Vec::new(),
+        })
+    }
+
+    fn perpetual(target: TargetFilter, modification: PerpetualModification) -> Effect {
+        Effect::ApplyPerpetual {
+            target,
+            modification,
+        }
+    }
+
+    fn modify_pt(power: i32, toughness: i32) -> PerpetualModification {
+        PerpetualModification::ModifyPowerToughness {
+            power: QuantityExpr::Fixed { value: power },
+            toughness: QuantityExpr::Fixed { value: toughness },
+            keywords: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn boon_opponent_aimed_harm_reads_beneficial_to_hold() {
+        // A weapon aimed at the holder's enemies is a benefit to RECEIVE: the
+        // enemy-side inner flips, or selection would aim the weapon-grant at
+        // the opponent.
+        for target in [
+            typed_controller(Some(ControllerRef::Opponent)),
+            typed_controller(Some(ControllerRef::TargetOpponent)),
+            TargetFilter::PlayerMatching {
+                player: Box::new(PlayerFilter::Opponent),
+            },
+            TargetFilter::Opponent,
+        ] {
+            let weapon = boon_with_body(TargetFilter::Player, Some(drain_some(target.clone())));
+            assert_eq!(
+                effect_polarity(&weapon),
+                EffectPolarity::Beneficial,
+                "opponent-aimed drain must flip to Beneficial for the holder, got {target:?}"
+            );
+        }
+        let burn = boon_with_body(
+            TargetFilter::Player,
+            Some(Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: typed_controller(Some(ControllerRef::Opponent)),
+                damage_source: None,
+                excess: None,
+            }),
+        );
+        assert_eq!(effect_polarity(&burn), EffectPolarity::Beneficial);
+    }
+
+    #[test]
+    fn boon_chosen_slot_reads_beneficial_holder_aims() {
+        // The holder aims a chosen slot at fire time and picks the target that
+        // favors them, so any directed verb on a chosen slot is a benefit to
+        // hold regardless of which way the verb points.
+        let chosen_drain =
+            boon_with_body(TargetFilter::Player, Some(drain_some(TargetFilter::Player)));
+        assert_eq!(effect_polarity(&chosen_drain), EffectPolarity::Beneficial);
+        let any_burn = boon_with_body(
+            TargetFilter::Player,
+            Some(Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            }),
+        );
+        assert_eq!(effect_polarity(&any_burn), EffectPolarity::Beneficial);
+        let open_destroy = boon_with_body(
+            TargetFilter::Player,
+            Some(Effect::Destroy {
+                target: typed_controller(None),
+                cant_regenerate: false,
+            }),
+        );
+        assert_eq!(effect_polarity(&open_destroy), EffectPolarity::Beneficial);
+        let chosen_gift = boon_with_body(
+            TargetFilter::Player,
+            Some(Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Player,
+            }),
+        );
+        assert_eq!(effect_polarity(&chosen_gift), EffectPolarity::Beneficial);
+    }
+
+    #[test]
+    fn boon_self_side_readings_keep_inner_direction() {
+        // Holder-side inners keep their direction: a self-drain is a curse to
+        // hold, a self-gift a benefit.
+        for target in [TargetFilter::Controller, TargetFilter::ParentTarget] {
+            let curse = boon_with_body(TargetFilter::Player, Some(drain_some(target.clone())));
+            assert_eq!(
+                effect_polarity(&curse),
+                EffectPolarity::Harmful,
+                "holder-side drain must stay Harmful, got {target:?}"
+            );
+        }
+        let own_destroy = boon_with_body(
+            TargetFilter::Player,
+            Some(Effect::Destroy {
+                target: typed_controller(Some(ControllerRef::You)),
+                cant_regenerate: false,
+            }),
+        );
+        assert_eq!(effect_polarity(&own_destroy), EffectPolarity::Harmful);
+    }
+
+    #[test]
+    fn boon_perpetual_pt_deltas_signal_direction() {
+        // Perpetual bodies read their modification's own P/T deltas (the
+        // global ApplyPerpetual default stays Contextual): buffs on the
+        // holder's side are benefits, debuffs harms, enemy-side debuffs flip.
+        let buff = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(TargetFilter::ParentTarget, modify_pt(1, 0))),
+        );
+        assert_eq!(effect_polarity(&buff), EffectPolarity::Beneficial);
+        let self_buff = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(TargetFilter::Any, modify_pt(3, 3))),
+        );
+        assert_eq!(effect_polarity(&self_buff), EffectPolarity::Beneficial);
+        let shrink = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(TargetFilter::ParentTarget, modify_pt(-1, -2))),
+        );
+        assert_eq!(effect_polarity(&shrink), EffectPolarity::Harmful);
+        // "Target creature an opponent controls perpetually gets -1/-2": an
+        // enemy-side debuff is a weapon to hold.
+        let enemy_shrink = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(
+                typed_controller(Some(ControllerRef::Opponent)),
+                modify_pt(-1, -2),
+            )),
+        );
+        assert_eq!(effect_polarity(&enemy_shrink), EffectPolarity::Beneficial);
+        // Dynamic (X) deltas freeze only at application time — no static sign.
+        let dynamic = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(
+                TargetFilter::ParentTarget,
+                PerpetualModification::ModifyPowerToughness {
+                    power: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    toughness: QuantityExpr::Fixed { value: 0 },
+                    keywords: Vec::new(),
+                },
+            )),
+        );
+        assert_eq!(effect_polarity(&dynamic), EffectPolarity::Contextual);
+        // Mixed deltas and absolute sets are directionless without a base.
+        let mixed = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(TargetFilter::ParentTarget, modify_pt(1, -1))),
+        );
+        assert_eq!(effect_polarity(&mixed), EffectPolarity::Contextual);
+        let set_base = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(
+                TargetFilter::ParentTarget,
+                PerpetualModification::SetBasePowerToughness {
+                    power: 4,
+                    toughness: 4,
+                },
+            )),
+        );
+        assert_eq!(effect_polarity(&set_base), EffectPolarity::Contextual);
+    }
+
+    #[test]
+    fn boon_perpetual_keyword_cost_and_grant_signals() {
+        let flying = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(
+                TargetFilter::ParentTarget,
+                PerpetualModification::GrantKeywords {
+                    keywords: vec![Keyword::Flying],
+                },
+            )),
+        );
+        assert_eq!(effect_polarity(&flying), EffectPolarity::Beneficial);
+        // Decayed is the one keyword grant that is a drawback for its bearer.
+        let decayed = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(
+                TargetFilter::ParentTarget,
+                PerpetualModification::GrantKeywords {
+                    keywords: vec![Keyword::Decayed],
+                },
+            )),
+        );
+        assert_eq!(effect_polarity(&decayed), EffectPolarity::Harmful);
+        let discount = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(
+                TargetFilter::Any,
+                PerpetualModification::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::default(),
+                },
+            )),
+        );
+        assert_eq!(effect_polarity(&discount), EffectPolarity::Beneficial);
+        let tax = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(
+                TargetFilter::Any,
+                PerpetualModification::ModifyCost {
+                    mode: CostModifyMode::Raise,
+                    amount: ManaCost::default(),
+                },
+            )),
+        );
+        assert_eq!(effect_polarity(&tax), EffectPolarity::Harmful);
+        // Quoted grants route through the shared static inspector.
+        let evasive = boon_with_body(
+            TargetFilter::Player,
+            Some(perpetual(
+                TargetFilter::ParentTarget,
+                PerpetualModification::GrantAbility {
+                    modifications: vec![PerpetualGrantModification::AddStaticMode {
+                        mode: StaticMode::CantBeBlocked,
+                    }],
+                },
+            )),
+        );
+        assert_eq!(effect_polarity(&evasive), EffectPolarity::Beneficial);
+    }
+
+    #[test]
+    fn boon_unresolvable_sides_fail_closed() {
+        // `TriggeringPlayer` is whoever's event fired the boon — possibly an
+        // opponent — and `CostPaidObject` / fixed ids name no side at all.
+        for target in [
+            TargetFilter::TriggeringPlayer,
+            TargetFilter::CostPaidObject,
+            TargetFilter::SpecificObject {
+                id: engine::types::identifiers::ObjectId(7),
+            },
+        ] {
+            let murky = boon_with_body(TargetFilter::Player, Some(drain_some(target.clone())));
+            assert_eq!(
+                effect_polarity(&murky),
+                EffectPolarity::Contextual,
+                "unresolvable side must fail closed, got {target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn boon_weapon_grant_scores_self_positive() {
+        // "Target player gets [opponent-draining] boon": the flipped weapon
+        // reads Beneficial, so selection scores keeping it +1.0 for self —
+        // the same keep-the-good-boon signal as the gift test above.
+        let runner = GameScenario::new().build();
+        let state = runner.state();
+        let weapon = boon_with_body(
+            TargetFilter::Player,
+            Some(drain_some(typed_controller(Some(ControllerRef::Opponent)))),
+        );
+        assert_eq!(effect_polarity(&weapon), EffectPolarity::Beneficial);
+        assert_eq!(
+            targeted_player_impact_in(
+                state,
+                Some(P0),
+                Some(engine::types::identifiers::ObjectId(0)),
+                &[&weapon],
+                P0,
+            ),
+            Some(1.0),
         );
     }
 }
@@ -4155,5 +6037,19 @@ mod filter_domain_tests {
         );
         assert!(!filter_admits_creature(&filter));
         assert!(!filter_is_creature_only(&filter));
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_domain_tests {
+    use super::*;
+
+    /// CR 506.3: a planeswalker may itself be a creature, so the referent fails open.
+    #[test]
+    fn attacked_referent_domain_is_anything() {
+        assert_eq!(
+            filter_domain(&TargetFilter::AttackedPlayerOrPlaneswalker),
+            FilterDomain::ANYTHING
+        );
     }
 }

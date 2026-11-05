@@ -2,7 +2,7 @@ use crate::game::effects::life::{apply_life_gain, apply_life_loss};
 use crate::game::static_abilities::{player_has_cant_gain_life, player_has_cant_lose_life};
 use crate::types::ability::{
     ContinuousModification, Duration, Effect, EffectError, EffectKind, PtStat, ResolvedAbility,
-    TargetFilter, TargetRef,
+    TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -26,8 +26,8 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let stat = match &ability.effect {
-        Effect::ExchangeLifeWithStat { stat, .. } => *stat,
+    let (stat, player_filter) = match &ability.effect {
+        Effect::ExchangeLifeWithStat { stat, player } => (*stat, player),
         // Dispatcher in effects/mod.rs only routes ExchangeLifeWithStat here.
         _ => return Ok(()),
     };
@@ -36,14 +36,10 @@ pub fn resolve(
 
     // "your life total" forms declare no player target and fall back to the
     // ability's controller; "target opponent's life total" supplies a player.
-    let player_id = ability
-        .targets
-        .iter()
-        .find_map(|t| match t {
-            TargetRef::Player(pid) => Some(*pid),
-            TargetRef::Object(_) => None,
-        })
-        .unwrap_or(ability.controller);
+    let Some(player_id) = super::resolve_player_for_context_ref(state, ability, player_filter)
+    else {
+        return Ok(());
+    };
 
     // CR 701.12a: capture both previous values before any mutation.
     let Some(source) = state.objects.get(&ability.source_id) else {
@@ -99,6 +95,21 @@ pub fn resolve(
         return Ok(());
     }
 
+    // CR 701.12g: the player gains or loses the difference to reach the stat's
+    // previous value (a gain/loss, not a set). Compute it BEFORE the stat side
+    // is written: a difference the engine cannot represent must fail the whole
+    // exchange with no partial mutation (the open ingress window records it;
+    // the action boundary then rejects and restores).
+    let Some(diff) = super::life::life_total_difference(
+        state,
+        player_id,
+        stat_value,
+        old_life,
+        "exchange life total with stat",
+    ) else {
+        return Ok(());
+    };
+
     // CR 613.4b: Set the source's exchanged stat to the player's previous life
     // total via an indefinite (Duration::Permanent) layer-7b continuous effect.
     let modification = match stat {
@@ -121,13 +132,12 @@ pub fn resolve(
         None,
     );
 
-    // CR 701.12g: the player gains or loses the difference to reach the stat's
-    // previous value (a gain/loss, not a set). The helpers re-check CR
-    // 119.7/119.8 and route through the replacement pipeline.
-    let diff = stat_value - old_life;
+    // CR 701.12g + CR 119.7/CR 119.8: the helpers re-check the life-change
+    // prohibitions and route through the replacement pipeline.
     let deferred = match diff.signum() {
         1 => apply_life_gain(state, player_id, diff as u32, events).err(),
-        -1 => apply_life_loss(state, player_id, (-diff) as u32, events).err(),
+        // `unsigned_abs`: the difference may be `i32::MIN`.
+        -1 => apply_life_loss(state, player_id, diff.unsigned_abs(), events).err(),
         _ => None,
     };
     if deferred.is_some() {
@@ -149,7 +159,7 @@ mod tests {
     use super::*;
     use crate::game::layers::evaluate_layers;
     use crate::game::zones::create_object;
-    use crate::types::ability::{ContinuousModification, ControllerRef, TypedFilter};
+    use crate::types::ability::{ContinuousModification, ControllerRef, TargetRef, TypedFilter};
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;

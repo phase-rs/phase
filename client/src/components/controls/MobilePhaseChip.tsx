@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -6,8 +7,8 @@ import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { DialogShell } from "../modal/DialogShell.tsx";
+import { PhaseIconFor } from "./phaseIcons.tsx";
 import {
-  PHASE_ICONS,
   PHASE_KEY,
   SCOPE_DOT_CLASS,
   usePhaseStopCycle,
@@ -31,11 +32,11 @@ const ALL_PHASES: Phase[] = [
   "Cleanup",
 ];
 
-const SCOPE_SHORT_KEY: Record<PhaseStopScope, string> = {
+const SCOPE_SHORT_KEY = {
   AllTurns: "phaseStop.scopeShortAllTurns",
   OwnTurn: "phaseStop.scopeShortOwnTurn",
   OpponentsTurns: "phaseStop.scopeShortOpponentsTurns",
-};
+} as const satisfies Record<PhaseStopScope, ParseKeys<"game">>;
 
 // Same hue axis as SCOPE_DOT_CLASS in PhaseStopBar.tsx (keep in sync): amber =
 // all turns, emerald = own turns, rose = opponents' turns. Full class strings
@@ -92,7 +93,7 @@ export function MobilePhaseChip({ className }: { className?: string } = {}) {
           style={{ backgroundColor: turnSeatColor }}
         />
         <span aria-hidden className="text-cyan-300 [&>svg]:h-3 [&>svg]:w-3">
-          {PHASE_ICONS[phase]}
+          <PhaseIconFor phase={phase} />
         </span>
         <span className="truncate">{phaseLabel}</span>
         {currentStop && (
@@ -158,7 +159,7 @@ function PhaseStopRow({ phase }: { phase: Phase }) {
               : "border-white/10 bg-white/5 text-slate-400"
           } [&>svg]:h-3.5 [&>svg]:w-3.5`}
         >
-          {PHASE_ICONS[phase]}
+          <PhaseIconFor phase={phase} />
         </span>
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium text-slate-100">

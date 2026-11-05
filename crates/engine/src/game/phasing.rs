@@ -1158,7 +1158,9 @@ mod tests {
         // Mark the Aura as bestowed (it has both Enchantment and Creature types).
         if let Some(obj) = state.objects.get_mut(&bestow_id) {
             obj.card_types.core_types.push(CoreType::Enchantment);
-            obj.bestow_form = Some(BestowFormState);
+            obj.bestow_form = Some(BestowFormState {
+                removed_creature_subtypes: vec!["Bear".into()],
+            });
         }
 
         // Phase out the host (and the bestow Aura cascades indirectly).
@@ -1192,6 +1194,12 @@ mod tests {
         assert!(
             !obj.card_types.subtypes.iter().any(|s| s == "Aura"),
             "CR 702.103g: Aura subtype removed on revert"
+        );
+        // CR 205.1a: the creature types the bestow form removed come back.
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Bear")
+                && obj.base_card_types.subtypes.iter().any(|s| s == "Bear"),
+            "CR 205.1a: creature subtype restored on 702.103g revert"
         );
     }
 }

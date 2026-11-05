@@ -240,8 +240,10 @@ fn independent_self_grant_is_unaffected_by_closed_gate() {
     assert!(!flag(&runner, plain), "closed Behemoth gate grants nothing");
 }
 
-/// T3: "you control" binds to the Behemoth's controller, live. Reach guard: the
-/// controller's own creature is flagged in the same body.
+/// T3: "you control" binds to the Behemoth's controller, live (CR 109.4). The
+/// owner-controlled attack is the reach guard; the same Behemoth controlled by P1
+/// since before combat (CR 506.4 forbids changing control while it attacks)
+/// grants P1's creature, not its owner's.
 #[test]
 fn behemoth_grant_follows_its_controller() {
     let mut scenario = GameScenario::new();
@@ -263,20 +265,51 @@ fn behemoth_grant_follows_its_controller() {
         "opponent's creature is not 'you control'"
     );
 
-    // Control of the (still attacking) Behemoth changes to P1: the pronoun re-binds.
-    // Fixture: base_controller is what every layer pass resets the controller from.
-    // A real control change would also remove it from combat (CR 506.4); this fixture
-    // deliberately isolates the layer-level re-binding of "you control".
+    // The same Behemoth (owned by P0) under P1's control since before combat —
+    // CR 506.4 removes a permanent from combat when its controller changes, so a
+    // control change must precede the attack for the Behemoth to attack for P1.
+    // `controlled_by` sets `base_controller`, which every layer pass resets from.
+    // P1 is the active player and declares it attacking P0: "you" now binds to P1.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut b = scenario.add_creature(P0, "Siege Behemoth", 5, 5);
+    b.from_oracle_text_with_keywords(&["hexproof"], SIEGE_BEHEMOTH);
+    b.controlled_by(P1);
+    let behemoth = b.id();
+    let old_controllers = scenario.add_creature(P0, "Bear", 3, 3).id();
+    let new_controllers = scenario.add_creature(P1, "Wall", 1, 4).id();
+    let mut runner = scenario.build();
     {
         let state = runner.state_mut();
-        let obj = state.objects.get_mut(&behemoth).unwrap();
-        obj.base_controller = Some(P1);
-        state.layers_dirty.mark_full();
-        evaluate_layers(state);
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
     }
-    assert_eq!(runner.state().objects[&behemoth].controller, P1);
-    assert!(flag(&runner, theirs), "now P1's creature is granted");
-    assert!(!flag(&runner, mine), "P0's creature is no longer granted");
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(behemoth, AttackTarget::Player(P0))],
+            bands: vec![],
+        })
+        .expect("P1 declares the Behemoth it controls as an attacker");
+    let obj = &runner.state().objects[&behemoth];
+    assert_eq!((obj.owner, obj.controller), (P0, P1));
+    assert!(
+        runner
+            .state()
+            .combat
+            .as_ref()
+            .is_some_and(|c| c.attackers.iter().any(|a| a.object_id == behemoth)),
+        "reach guard: the Behemoth is attacking for P1"
+    );
+    assert!(
+        flag(&runner, new_controllers),
+        "the Behemoth's controller P1's creature is granted"
+    );
+    assert!(
+        !flag(&runner, old_controllers),
+        "the owner P0's creature is not 'you control'"
+    );
 }
 
 /// T4: the choice is per creature — one blocked attacker chooses as-though-unblocked,

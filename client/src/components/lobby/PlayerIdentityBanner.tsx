@@ -15,7 +15,7 @@ import { useMultiplayerStore } from "../../stores/multiplayerStore";
  * actions.
  */
 export function PlayerIdentityBanner() {
-  const { t } = useTranslation("multiplayer");
+  const { t } = useTranslation(["multiplayer", "common"]);
   const displayName = useMultiplayerStore((s) => s.displayName);
   const setDisplayName = useMultiplayerStore((s) => s.setDisplayName);
 
