@@ -4705,6 +4705,13 @@ describe("WebSocketAdapter — negotiated StateCodecV1 reconnect", () => {
       expect(events).not.toContainEqual(expect.objectContaining({ type: "stateChanged" }));
       expect(events).not.toContainEqual(expect.objectContaining({ type: "reconnected" }));
       expect((await adapter.getSnapshot()).state.turn_number).toBe(1);
+
+      // The bootstrap-fatal close still reaches the reconnect boundary: the
+      // reconnect socket is the current one until the backoff elapses, and then
+      // a third socket is created.
+      expect(MockWebSocket.last).toBe(reconnect);
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(MockWebSocket.last).not.toBe(reconnect);
     } finally {
       adapter.dispose();
     }
