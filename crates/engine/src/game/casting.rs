@@ -7743,11 +7743,6 @@ pub(super) fn exile_land_play_authorization(
     Some(ExileLandPlayAuthorization::Static { source, frequency })
 }
 
-/// CR 305.1 + CR 601.2a + CR 113.6b: Find exiled lands `player` may play, via
-/// either the object-tagged `CastingPermission::PlayFromExile` (impulse draw) or
-/// a battlefield `StaticMode::ExileCastPermission { play_mode: Play }` static
-/// (The Matrix of Time). Returns `(land_id, source_id)` for once-per-turn
-/// tracking by the play-land path.
 /// CR 601.2a + CR 116.2a + CR 611.2c: the source of a resolution-created
 /// `StaticMode::HandPlayPermission` (Sen Triplets: "You may play lands and cast
 /// spells from that player's hand this turn") that lets `player` take `obj` from
@@ -7856,6 +7851,11 @@ pub fn other_hand_lands_playable_by_permission(
         .collect()
 }
 
+/// CR 305.1 + CR 601.2a + CR 113.6b: Find exiled lands `player` may play, via
+/// either the object-tagged `CastingPermission::PlayFromExile` (impulse draw) or
+/// a battlefield `StaticMode::ExileCastPermission { play_mode: Play }` static
+/// (The Matrix of Time). Returns `(land_id, source_id)` for once-per-turn
+/// tracking by the play-land path.
 pub fn exile_lands_playable_by_permission(
     state: &GameState,
     player: PlayerId,

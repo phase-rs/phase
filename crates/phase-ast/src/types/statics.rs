@@ -1733,9 +1733,6 @@ pub enum StaticMode {
     /// text — CR 702.170f itself has no land/nonland clause), exactly as
     /// `TopOfLibraryHasPlot` carries its grant scope.
     TopOfLibraryPlotPermission,
-    /// CR 601.2b + CR 118.9a: Static ability granting permission to cast matching
-    /// spells without paying their mana costs. `Unlimited` = Omniscience,
-    /// Tamiyo emblem, Dracogenesis. `OncePerTurn` = Zaffai and the Tempests.
     /// CR 601.2a + CR 116.2a + CR 611.2c: Resolution-created permission letting
     /// the permission's holder play (`Play`: lands and spells) or cast (`Cast`:
     /// spells only) cards from ANOTHER player's hand — Sen Triplets: "You may
@@ -1752,6 +1749,9 @@ pub enum StaticMode {
     HandPlayPermission {
         play_mode: CardPlayMode,
     },
+    /// CR 601.2b + CR 118.9a: Static ability granting permission to cast matching
+    /// spells without paying their mana costs. `Unlimited` = Omniscience,
+    /// Tamiyo emblem, Dracogenesis. `OncePerTurn` = Zaffai and the Tempests.
     CastFromHandFree {
         /// CR 601.2b: Per-turn cast frequency.
         frequency: CastFrequency,
