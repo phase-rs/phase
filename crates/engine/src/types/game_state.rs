@@ -4719,6 +4719,24 @@ impl PendingZoneChangeDelivery {
         Ok(())
     }
 
+    /// CR 400.7 + CR 406.3: Retain one matched delivery's completion and
+    /// face-down Exile event annotation. The caller applies live concealment
+    /// only after releasing this paused-owner borrow.
+    fn settle_delivery(
+        &mut self,
+        delivery_events: &[GameEvent],
+        terminal_completion: ZoneMoveCompletion,
+    ) -> Option<PausedExileOccurrence> {
+        self.append_delivery_events(delivery_events);
+        self.record_terminal_completion(terminal_completion)
+            .expect("one paused zone-change delivery has one terminal completion");
+        if self.face_down_in_exile.is_face_down() {
+            annotate_paused_exile_event(&mut self.delivery_events, self.member)
+        } else {
+            None
+        }
+    }
+
     /// CR 400.7: A zone change creates a new object, so the retained delivery
     /// event slice — not current object state — identifies whether this exact
     /// pre-delivery incarnation moved.
@@ -31929,13 +31947,7 @@ impl GameState {
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
-            paused.append_delivery_events(delivery_events);
-            paused
-                .record_terminal_completion(terminal_completion)
-                .expect("one paused zone-change delivery has one terminal completion");
-            if paused.face_down_in_exile.is_face_down() {
-                occurrence = annotate_paused_exile_event(&mut paused.delivery_events, member);
-            }
+            occurrence = paused.settle_delivery(delivery_events, terminal_completion);
             true
         } else {
             false
@@ -31954,13 +31966,7 @@ impl GameState {
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
-            paused.append_delivery_events(delivery_events);
-            paused
-                .record_terminal_completion(terminal_completion)
-                .expect("one paused zone-change delivery has one terminal completion");
-            if paused.face_down_in_exile.is_face_down() {
-                occurrence = annotate_paused_exile_event(&mut paused.delivery_events, member);
-            }
+            occurrence = paused.settle_delivery(delivery_events, terminal_completion);
             true
         } else {
             false
@@ -31994,13 +32000,7 @@ impl GameState {
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures_resumed(member, approved_event))
         {
-            paused.append_delivery_events(delivery_events);
-            paused
-                .record_terminal_completion(terminal_completion)
-                .expect("one paused zone-change delivery has one terminal completion");
-            if paused.face_down_in_exile.is_face_down() {
-                occurrence = annotate_paused_exile_event(&mut paused.delivery_events, member);
-            }
+            occurrence = paused.settle_delivery(delivery_events, terminal_completion);
             true
         } else {
             false
@@ -32019,13 +32019,7 @@ impl GameState {
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures_resumed(member, approved_event))
         {
-            paused.append_delivery_events(delivery_events);
-            paused
-                .record_terminal_completion(terminal_completion)
-                .expect("one paused zone-change delivery has one terminal completion");
-            if paused.face_down_in_exile.is_face_down() {
-                occurrence = annotate_paused_exile_event(&mut paused.delivery_events, member);
-            }
+            occurrence = paused.settle_delivery(delivery_events, terminal_completion);
             true
         } else {
             false
@@ -32045,13 +32039,7 @@ impl GameState {
             .paused_batch_delivery_mut_for_member(member, approved_event)
             .and_then(|owner| owner.paused_current.as_mut())
         {
-            paused.append_delivery_events(delivery_events);
-            paused
-                .record_terminal_completion(terminal_completion)
-                .expect("one paused zone-change delivery has one terminal completion");
-            if paused.face_down_in_exile.is_face_down() {
-                occurrence = annotate_paused_exile_event(&mut paused.delivery_events, member);
-            }
+            occurrence = paused.settle_delivery(delivery_events, terminal_completion);
             true
         } else {
             false
