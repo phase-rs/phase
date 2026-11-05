@@ -537,8 +537,10 @@ fn handle_replacement_choice_inner(
                     // a tail park returns early and the batch owner later reaches
                     // `drain_pending_batch_deliveries` with `terminal_completion:
                     // None` (issue #10431). A pre-move park (merge leave) pushes a
-                    // child batch frame that owns the pause, so its parent key does
-                    // not match and nothing is recorded for it here.
+                    // child batch frame that owns the pause; the member has not
+                    // moved, so its classification is `Remained`, the exact path
+                    // sees only the child, and the occurrence-level walk (gated on
+                    // `Moved`) records nothing for the parent.
                     if let Some(paused) = parked_zone_change_delivery.as_ref() {
                         let completion =
                             crate::game::zone_pipeline::zone_move_completion_from_delivery(
