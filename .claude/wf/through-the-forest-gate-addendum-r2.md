@@ -4,9 +4,11 @@ Remedy for review finding **F2** (published contribution record), now covering t
 This file is committed **inside the merge commit** it describes, so it cannot name its own SHA.
 Identity of that head:
 
+- merge commit carrying this file: `f0be2a81210e92221ef161ea709a124eac1c5313`
 - first parent (the branch head the review examined): `d33a0513c2e8f6d6bc0a7fc4f8865360486a71c2`
 - second parent (`origin/main` at merge time): `4b6808c7c9a5c81b6c0c7cedab5f1b24734ca81a`
 - r1 (`through-the-forest-gate-addendum-r1.md`) is historical: it describes `d33a0513` only.
+  Any commit after the merge is documentation-only and leaves every claim above unchanged.
 
 Everything in the **Historical body** section at the bottom is historical and must not be read as a
 description of this head. Specifically void: the `default_silent_dig_rest_to_library` finished-card
@@ -141,10 +143,9 @@ fabricated; the gate was run locally and its exact line is recorded below.
 Local checks on this working tree, in this order:
 
 - `cargo fmt --all` — clean.
-- `./scripts/check-parser-combinators.sh` — `Gate A PASS head=8de5d3bf0f9e4851892ecf8f5a304dcf63ca5a45
-  base=bf584d6bd39f254549be49ed9ff2b845e748e32c`: the run happened before the merge commit existed, so
-  its reported head is the previous commit; it is re-run on the committed merge head and the exact line
-  is quoted in the PR follow-up.
+- `./scripts/check-parser-combinators.sh` — `Gate A PASS head=f0be2a81210e92221ef161ea709a124eac1c5313
+  base=4b6808c7c9a5c81b6c0c7cedab5f1b24734ca81a`, re-run on the committed merge head (the pre-commit
+  run reported the previous commit).
 - `cargo test -p phase-parser --lib` — 12226 passed, 0 failed, 3 ignored.
 - `cargo test -p phase-engine --test integration` — 2811 passed, 0 failed, 3 ignored (532 s).
 - `cargo clippy -p phase-parser --lib -- -D warnings` — passed (exit 0, 3 m 11 s), covering the
