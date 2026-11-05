@@ -10084,12 +10084,26 @@ pub(super) fn park_acquired_copy_offer(
     state.waiting_for.clone()
 }
 
-/// CR 616.1f: whether the parked replacement is an acquired-copy offer raised
-/// by [`park_acquired_copy_offer`] — an optional choice over a copy-surface
-/// (battlefield-to-battlefield) proposal. A genuine entry proposal always
-/// arrives from another zone, and the copy-surfaced payment park is mandatory.
+/// CR 616.1f + CR 614.5: whether the parked replacement is an acquired-copy
+/// offer raised by [`park_acquired_copy_offer`]. The offer is identified by its
+/// typed provenance key: its proposal's applied set records the offered
+/// candidate as an [`AppliedReplacementKey::EnterAsCopyFrom`] for the entrant,
+/// which only that park writes.
 pub(crate) fn parked_replacement_is_acquired_copy_offer(pending: &PendingReplacement) -> bool {
-    pending.is_optional && parked_entry_payment_is_copy_surface(pending)
+    let (ProposedEvent::ZoneChange { object_id, .. }, [rid]) =
+        (&pending.proposed, pending.candidates.as_slice())
+    else {
+        return false;
+    };
+    pending.is_optional
+        && rid.source == *object_id
+        && pending.proposed.applied_set().iter().any(|key| {
+            matches!(
+                key,
+                AppliedReplacementKey::EnterAsCopyFrom { source, index, .. }
+                    if *source == rid.source && *index == rid.index
+            )
+        })
 }
 
 /// CR 614.12a + CR 707.2 + CR 614.1c: surface a copied as-enters life payment (Clone

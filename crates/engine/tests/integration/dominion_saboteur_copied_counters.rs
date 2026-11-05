@@ -517,6 +517,7 @@ fn a_token_copy_also_offers_the_acquired_copy_replacement() {
         .add_spell_to_hand_from_oracle(P0, "Cackling Counterpart", true, CACKLING_COUNTERPART)
         .id();
     let mut runner = scenario.build();
+    let library_before = runner.state().players[0].library.len();
     let _ = runner.cast(counterpart).target_object(saboteur).commit();
     runner.advance_until_stack_empty();
     assert!(
@@ -557,6 +558,11 @@ fn a_token_copy_also_offers_the_acquired_copy_replacement() {
         tokens[0].counters.is_empty(),
         "CR 707.9e: no copied counters survive the later copy; got {:?}",
         tokens[0].counters
+    );
+    assert_eq!(
+        runner.state().players[0].library.len(),
+        library_before - 1,
+        "CR 603.6a: the token's entry is observed once, as the Golden Egg copy"
     );
 }
 
@@ -806,6 +812,11 @@ fn a_kicked_rite_of_replication_batch_completes_through_each_accepted_offer() {
     assert_eq!(own_offers, 5);
     assert_eq!(acquired_offers, 5);
 
+    // The five copies' entry draws are deliberately not counted here: a liminal
+    // copy-token batch observes only its first token's entry today (the same
+    // count when the tokens copy Golden Egg directly, with no acquired chain).
+    // That pre-existing batch-ETB defect is tracked separately; the single-token
+    // draw is asserted in `a_token_copy_also_offers_the_acquired_copy_replacement`.
     let tokens = battlefield_tokens(&runner);
     assert_eq!(tokens.len(), 5, "kicked: five token copies enter");
     for token in &tokens {

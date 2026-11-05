@@ -424,34 +424,43 @@ pub(crate) fn snapshot_copied_counter_exceptions(
         .collect();
 }
 
-/// CR 707.2 + CR 613.1a: whether `recipient` carries a layer-1 copy effect
-/// installed by [`apply_precomputed_copy_values`]. A `BecomeCopy` that errored
-/// (for example because its source is gone) installs none, so entry-time copy
-/// exceptions must not be evaluated against the uncopied object.
-pub(crate) fn has_installed_copy_effect(
-    state: &GameState,
+/// CR 707.2 + CR 613.1a + CR 707.9e: a point in one recipient's copy-effect
+/// history, taken before a `BecomeCopy` resolves, that answers whether that
+/// resolution installed a layer-1 copy effect on it (via
+/// [`apply_precomputed_copy_values`]).
+///
+/// "The recipient carries a copy effect" cannot answer this once an entry has
+/// already copied once (CR 707.9e's later copy): the earlier copy is still
+/// installed when a later `BecomeCopy` errors because its source is gone.
+/// Continuous-effect ids are allocated monotonically, so an installed copy
+/// effect on this exact incarnation with an id at or past the mark was
+/// installed by the resolution that followed it.
+#[derive(Clone, Copy)]
+pub(crate) struct CopyInstallMark {
     recipient: ObjectIncarnationRef,
-) -> bool {
-    installed_copy_effect_count(state, recipient) > 0
+    first_new_effect_id: u64,
 }
 
-/// CR 707.2 + CR 613.1a: how many layer-1 copy effects are installed on
-/// `recipient`. A count that grows across a resolution means that resolution
-/// installed a later copy effect (CR 707.9e).
-pub(crate) fn installed_copy_effect_count(
-    state: &GameState,
-    recipient: ObjectIncarnationRef,
-) -> usize {
-    state
-        .transient_continuous_effects
-        .iter()
-        .filter(|effect| {
-            effect.affected_recipient == Some(recipient)
+impl CopyInstallMark {
+    pub(crate) fn before(state: &GameState, recipient: ObjectIncarnationRef) -> Self {
+        Self {
+            recipient,
+            first_new_effect_id: state.next_continuous_effect_id,
+        }
+    }
+
+    /// Whether a copy effect was installed on the recipient since the mark.
+    /// When it was not, entry-time copy exceptions must not be evaluated
+    /// against the object (CR 707.9f).
+    pub(crate) fn copy_installed(&self, state: &GameState) -> bool {
+        state.transient_continuous_effects.iter().any(|effect| {
+            effect.id >= self.first_new_effect_id
+                && effect.affected_recipient == Some(self.recipient)
                 && effect.modifications.iter().any(|modification| {
                     matches!(modification, ContinuousModification::CopyValues { .. })
                 })
         })
-        .count()
+    }
 }
 
 /// Fold the permanent `BecomeCopy` exception vocabulary into `values`.
