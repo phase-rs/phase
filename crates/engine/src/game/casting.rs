@@ -35943,14 +35943,28 @@ fn cant_cast_filter_matches_for(
         // CR 201.2: "spells with the chosen name" — the shared spell-filter path
         // has no top-level chosen-name variant, so match the spell name against
         // the source's chosen name here.
-        TargetFilter::HasChosenName => {
-            let chosen_name = source_obj.chosen_attributes.iter().find_map(|a| match a {
-                ChosenAttribute::CardName(n) => Some(n.as_str()),
-                _ => None,
-            });
-            chosen_name
-                .is_some_and(|name| crate::game::filter::card_names_match(name, &spell_obj.name))
-        }
+        TargetFilter::HasChosenName => source_obj.chosen_attributes.iter().any(|a| match a {
+            ChosenAttribute::CardName(n) => {
+                crate::game::filter::card_names_match(n, &spell_obj.name)
+            }
+            ChosenAttribute::Color(_)
+            | ChosenAttribute::CreatureType(_)
+            | ChosenAttribute::BasicLandType(_)
+            | ChosenAttribute::CardType(_)
+            | ChosenAttribute::OddOrEven(_)
+            | ChosenAttribute::Number(_)
+            | ChosenAttribute::RevealedNumber(_)
+            | ChosenAttribute::Player(_)
+            | ChosenAttribute::TwoColors(_)
+            | ChosenAttribute::TributeOutcome(_)
+            | ChosenAttribute::Keyword(_)
+            | ChosenAttribute::Label(_)
+            | ChosenAttribute::Card(_)
+            | ChosenAttribute::Counter(_)
+            | ChosenAttribute::Direction(_)
+            | ChosenAttribute::CopiableSnapshot(_)
+            | ChosenAttribute::NotedManaSpent(_) => false,
+        }),
         // Everything else — including IsChosenColor / IsChosenCardType properties —
         // flows through the shared source-aware typed-filter conjunction.
         _ => super::filter::spell_object_matches_filter_with_announced_x(
