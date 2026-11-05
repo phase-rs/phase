@@ -95758,3 +95758,65 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
         );
     }
 }
+
+/// CR 614.1a + CR 603.12: the until-EOT token-replacement installer claims only
+/// a clause whose antecedent is a token-creation event. A reflexive "when you pay
+/// this cost one or more times, put that many … then create twice that many …
+/// tokens" clause (Tainted Adversary) has no "would" antecedent and no
+/// "instead": it creates tokens, it does not replace their creation, so the
+/// "twice that many" consequent must not lower to a `CreateToken` doubler.
+#[test]
+fn token_creation_replacement_installer_requires_a_token_creation_antecedent() {
+    let reflexive = "when you pay this cost one or more times, put that many +1/+1 counters \
+                     on ~, then create twice that many 2/2 black zombie creature tokens with \
+                     decayed";
+    assert!(
+        parse_token_creation_replacement_effect(reflexive).is_none(),
+        "a reflexive token-creating clause is not a token-creation replacement"
+    );
+
+    let kaya = "until end of turn, if one or more tokens would be created under your control, \
+                twice that many of those tokens are created instead";
+    assert!(
+        matches!(
+            parse_token_creation_replacement_effect(kaya),
+            Some(Effect::AddTargetReplacement { ref replacement, .. })
+                if replacement.event == ReplacementEvent::CreateToken
+        ),
+        "Kaya's until-EOT token doubler still installs a CreateToken replacement"
+    );
+}
+
+/// Card-level pin for the same gate: Tainted Adversary's ETB chain carries no
+/// `CreateToken` replacement anywhere (the pre-gate misparse installed one and
+/// was reported as supported while never putting counters or creating tokens).
+#[test]
+fn tainted_adversary_reflexive_clause_is_not_a_token_doubler() {
+    let parsed = parse_oracle_text(
+        "Deathtouch\nWhen this creature enters, you may pay {2}{B} any number of times. When \
+         you pay this cost one or more times, put that many +1/+1 counters on this creature, \
+         then create twice that many 2/2 black Zombie creature tokens with decayed.",
+        "Tainted Adversary",
+        &["Deathtouch".to_string()],
+        &["Creature".to_string()],
+        &["Zombie".to_string(), "Horror".to_string()],
+    );
+    let installs_token_replacement = |def: &AbilityDefinition| {
+        std::iter::successors(Some(def), |d| d.sub_ability.as_deref()).any(|d| {
+            matches!(
+                &*d.effect,
+                Effect::AddTargetReplacement { replacement, .. }
+                    if replacement.event == ReplacementEvent::CreateToken
+            )
+        })
+    };
+    let etb = parsed
+        .triggers
+        .first()
+        .and_then(|t| t.execute.as_deref())
+        .expect("REACH: the ETB trigger parses with an execute chain");
+    assert!(
+        !installs_token_replacement(etb),
+        "the reflexive clause must not install a token-creation replacement: {etb:?}"
+    );
+}
