@@ -36635,8 +36635,10 @@ fn elder_brain_they_draw_binds_to_defending_player() {
     assert_eq!(def.mode, TriggerMode::Attacks);
     let execute = def.execute.as_ref().expect("should have execute");
     assert!(
-        matches!(&*execute.effect, Effect::ChangeZoneAll { .. }),
-        "head effect must remain the exile-hand ChangeZoneAll, got {:?}",
+        matches!(&*execute.effect, Effect::Unimplemented { .. }),
+        "CR 400.1: the exile names ONE player's hand, but the possessive binds no \
+         player, so it stays an honest gap rather than an every-hand ChangeZoneAll; \
+         got {:?}",
         execute.effect
     );
     let draw = execute
@@ -42704,4 +42706,125 @@ fn peel_trailing_cast_mana_source_splits_only_a_trailing_self_reference() {
         peel_trailing_cast_mana_source("spell using mana produced by a treasure"),
         ("spell using mana produced by a treasure", None)
     );
+}
+
+/// CR 201.5 + CR 608.2c + CR 122.1: a counter-threshold continuation whose
+/// subject is a gendered self-reference ("on her") gates the rest of the
+/// instruction, and its "remove those counters" anaphor names the counted KIND
+/// (promotion / ribbon), not every counter on the source. Verbatim Oracle text.
+#[test]
+fn counter_threshold_continuation_binds_remove_those_counters_to_counted_kind() {
+    let cases = [
+        (
+            "First strike\nReckless Behavior \u{2014} Whenever Beckett Mariner becomes tapped, put a promotion counter on her. Then if there are three or more promotion counters on her, remove those counters and she deals 2 damage to each opponent.",
+            "Beckett Mariner, Impetuous Ensign",
+            "promotion",
+            3,
+        ),
+        (
+            "Whenever you gain life, put that many ribbon counters on this creature. Then if there are three or more ribbon counters on this creature, remove those counters and untap it.\n{T}: Add one mana of any color.",
+            "Prize Pig",
+            "ribbon",
+            3,
+        ),
+    ];
+    for (text, name, kind, threshold) in cases {
+        let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let parsed = parse_oracle_text(text, name, &[], &owned(&["Creature"]), &[]);
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{name}: {:?}",
+            parsed.parse_warnings
+        );
+        assert_eq!(parsed.triggers.len(), 1, "{name}");
+        let execute = parsed.triggers[0].execute.as_deref().expect("trigger body");
+        assert_no_unimplemented(execute);
+        let remove = execute.sub_ability.as_deref().expect("gated continuation");
+        let counter_type = crate::types::counter::parse_counter_type(kind);
+        assert_eq!(
+            remove.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(counter_type.clone()),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: threshold },
+            }),
+            "{name}"
+        );
+        assert_eq!(
+            *remove.effect,
+            Effect::RemoveCounter {
+                counter_type: Some(counter_type),
+                count: QuantityExpr::Fixed { value: -1 },
+                target: TargetFilter::SelfRef,
+            },
+            "{name}"
+        );
+    }
+}
+
+/// CR 608.2c + CR 122.1: when the counter-threshold gate scopes over SEVERAL
+/// instructions ("remove those counters, transform this artifact, and create
+/// three Treasure tokens"), the body is parsed through the recursive
+/// conditional-body seam, and the counted KIND must still reach "remove those
+/// counters" there — landmark / soul, not every counter on the permanent. The
+/// gate also covers the removal itself. Verbatim Oracle text (MTGJSON).
+#[test]
+fn multi_instruction_counter_gate_binds_remove_those_counters_to_counted_kind() {
+    let cases = [
+        (
+            "{1}, {T}: Scry 1. Put a landmark counter on this artifact. Then if there are three or more landmark counters on it, remove those counters, transform this artifact, and create three Treasure tokens. (They're artifacts with \"{T}, Sacrifice this token: Add one mana of any color.\")",
+            "Treasure Map",
+            "Artifact",
+            "landmark",
+        ),
+        (
+            "{T}: Add {C}.\n{1}, {T}, Sacrifice a creature: Put a soul counter on this land. Then if there are three or more soul counters on it, remove those counters, transform it, then untap it. Activate only as a sorcery.",
+            "Hostile Hostel",
+            "Land",
+            "soul",
+        ),
+    ];
+    for (text, name, core_type, kind) in cases {
+        let parsed = parse_oracle_text(text, name, &[], &[core_type.to_string()], &[]);
+        let counter_type = crate::types::counter::parse_counter_type(kind);
+        let removals: Vec<&AbilityDefinition> = parsed
+            .abilities
+            .iter()
+            .flat_map(|ability| {
+                std::iter::successors(Some(ability), |def| def.sub_ability.as_deref())
+            })
+            .filter(|def| matches!(*def.effect, Effect::RemoveCounter { .. }))
+            .collect();
+        assert_eq!(removals.len(), 1, "{name}: {:#?}", parsed.abilities);
+        let remove = removals[0];
+        assert_no_unimplemented(remove);
+        assert_eq!(
+            *remove.effect,
+            Effect::RemoveCounter {
+                counter_type: Some(counter_type.clone()),
+                count: QuantityExpr::Fixed { value: -1 },
+                target: TargetFilter::SelfRef,
+            },
+            "{name}"
+        );
+        assert_eq!(
+            remove.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(counter_type),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            }),
+            "{name}"
+        );
+    }
 }

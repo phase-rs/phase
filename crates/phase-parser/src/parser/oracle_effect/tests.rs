@@ -12666,6 +12666,66 @@ fn return_each_card_they_exiled_this_way_uses_exiled_tracked_set() {
 /// `ExiledBySource` (resolved at runtime via `exile_links`), not the chain-local
 /// `TrackedSet(0)` sentinel that is empty at LTB time. Third emission site of the
 /// #5571 cross-resolution fix (after the Copy verb and `try_parse_cast_effect`).
+/// CR 603.7 + CR 608.2c: the plural-recall rebind is itself the act of making
+/// the delayed payload read the chain's published set, so it must also mark the
+/// wrapper as a tracked-set consumer. The generic "those cards" / battlefield
+/// gates do not recognize "Put them into their owners' hands", and an unbound
+/// `TrackedSet` sentinel would resolve against whatever set happens to be
+/// latest when the trigger fires instead of the set this chain published.
+#[test]
+fn plural_recall_rebind_marks_the_delayed_payload_as_a_tracked_set_consumer() {
+    let mut effect = Effect::CreateDelayedTrigger {
+        condition: crate::types::ability::DelayedTriggerCondition::AtNextPhase {
+            phase: crate::types::phase::Phase::End,
+        },
+        effect: Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )),
+        uses_tracked_set: false,
+    };
+
+    rebind_plural_recall_delayed_payload_to_tracked_set(&mut effect);
+
+    let Effect::CreateDelayedTrigger {
+        effect: payload,
+        uses_tracked_set,
+        ..
+    } = &effect
+    else {
+        panic!("expected the delayed wrapper to survive the rebind");
+    };
+    assert!(
+        *uses_tracked_set,
+        "the rebind must mark the delayed trigger as reading the published set"
+    );
+    assert!(
+        matches!(
+            &*payload.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::TrackedSet { id },
+                ..
+            } if *id == crate::types::identifiers::TrackedSetId(0)
+        ),
+        "the plural recall must bind the tracked-set sentinel: {:?}",
+        payload.effect
+    );
+}
+
 #[test]
 fn hideaway_ltb_put_exiled_card_binds_exiled_by_source() {
     let parsed = parse_oracle_text(
@@ -55525,6 +55585,59 @@ fn cast_from_among_the_cards_exiled_this_way_binds_to_exiled_by_source() {
     assert_eq!(target, TargetFilter::ExiledBySource);
 }
 
+/// CR 712.8a + CR 712.11c: a type printed on BOTH sides of the anchor ("cast
+/// enchantment spells from among the creature cards exiled this way") gates
+/// two different things at two different stages — the suffix the card pool,
+/// judged on the card where it is (CR 712.8a), the prefix the spell, judged on
+/// the face being cast (CR 712.11c). One cast filter cannot carry both, so the
+/// clause is refused: it lowers to the `from_among_pool_and_spell_gate` gap,
+/// never to a cast grant, for both the "exiled this way" anchor and the
+/// "those nonland cards" anchor, with counted ("up to two") and uncounted
+/// wording. (The "up to two artifact spells" row reaches the generic anchor
+/// arm, not the counted free-cast helper, which needs the bare "spells" noun
+/// right after the count.)
+///
+/// Shape-only hardening, not a card test: no printed card carries a type gate
+/// on both sides of the anchor. The nearest printed cards each carry one side —
+/// Wand of Wonder the prefix gate ("instant and/or sorcery spells from among
+/// cards exiled this way"), Etali, Primal Conqueror the suffix gate ("from
+/// among the nonland cards exiled this way"). Positive controls: Etali's
+/// printed one-sided clause, and the "those nonland cards" clause without a
+/// prefix type (Fevered Suspicion's shape), still lower to cast grants.
+#[test]
+fn cast_from_among_exiled_this_way_refuses_a_prefix_and_a_suffix_type_gate() {
+    let lowered: Vec<_> = [
+        "cast any number of enchantment spells from among the creature cards exiled this way without paying their mana costs",
+        "cast up to two artifact spells from among the instant or sorcery cards exiled this way without paying their mana costs",
+        "cast any number of enchantment spells from among those nonland cards exiled this way without paying their mana costs",
+        "cast up to two enchantment spells from among those nonland cards exiled this way without paying their mana costs",
+    ]
+    .into_iter()
+    .map(|combined| (combined, parse_effect(combined)))
+    .filter(|(_, e)| {
+        !matches!(e, Effect::Unimplemented { name, .. } if name == FROM_AMONG_POOL_AND_SPELL_GATE_GAP)
+    })
+    .collect();
+    assert!(
+        lowered.is_empty(),
+        "a type on both sides of the anchor is refused, not lowered: {lowered:#?}"
+    );
+
+    for one_sided in [
+        "cast any number of spells from among the nonland cards exiled this way without paying their mana costs",
+        "cast any number of spells from among those nonland cards exiled this way without paying their mana costs",
+    ] {
+        let e = parse_effect(one_sided);
+        let Effect::CastFromZone { target, .. } = &e else {
+            panic!("positive control: a one-sided clause lowers to CastFromZone: {one_sided:?} -> {e:?}");
+        };
+        assert!(
+            target.references_exiled_by_source(),
+            "positive control: the grant binds the exile anaphor: {one_sided:?} -> {target:?}"
+        );
+    }
+}
+
 /// CR 610.3 + CR 608.2c: Disjunctive typed leg via
 /// `parse_cast_type_list` — "from among the instant or sorcery
 /// cards exiled this way" must bind to `And { ExiledBySource, Typed(...) }`
@@ -57834,6 +57947,32 @@ fn cast_this_way_enters_with_counter_rider_is_counter_generic() {
         clause.sub_ability.is_none(),
         "bare counter rider has no sub-ability"
     );
+}
+
+/// CR 205.2b: the anaphoric subject is "that" + the permission's printed type
+/// noun phrase, which may stack card types ("that artifact creature": Overflow
+/// Submatrix) or name "permanent". A non-type word after "that" is refused.
+#[test]
+fn cast_this_way_enters_with_counter_accepts_stacked_type_anaphor() {
+    for subject in [
+        "that creature",
+        "that artifact",
+        "that permanent",
+        "that artifact creature",
+        "that enchantment creature",
+    ] {
+        let text = format!(
+            "if you cast a spell this way, {subject} enters with a finality counter on it."
+        );
+        let (counter, rest) = parse_cast_this_way_enters_with_counter(&text)
+            .unwrap_or_else(|| panic!("{subject:?} anaphor should parse"));
+        assert_eq!(counter, CounterType::Finality, "{subject:?}");
+        assert_eq!(rest, ".", "{subject:?}");
+    }
+    assert!(parse_cast_this_way_enters_with_counter(
+        "if you cast a spell this way, that card enters with a finality counter on it."
+    )
+    .is_none());
 }
 
 /// Whole-card production-path parse: Osteomancer Adept's residual rider
