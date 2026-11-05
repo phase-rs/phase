@@ -42602,12 +42602,13 @@ fn chosen_name_cast_or_activate_halves_carry_has_chosen_name() {
     }
 }
 
-/// SHAPE — a bare "a spell" still leaves `valid_card` unset (every spell).
+/// SHAPE — a bare "a spell" still leaves `valid_card` unset (every spell):
+/// Memory Erosion's verbatim trigger.
 #[test]
 fn opponent_casts_bare_spell_keeps_valid_card_unset() {
     let triggers = parse_trigger_lines(
-        "Whenever an opponent casts a spell, that player loses 1 life.",
-        "Test Card",
+        "Whenever an opponent casts a spell, that player mills two cards.",
+        "Memory Erosion",
     );
     assert_eq!(triggers[0].mode, TriggerMode::SpellCast);
     assert_eq!(triggers[0].valid_card, None);
