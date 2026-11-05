@@ -1413,11 +1413,16 @@ fn matching_batched_trigger_events(
 /// per-candidate intervening-if), then groups the survivors by `object_id`
 /// preserving first-seen order. No empty inner batches are produced.
 ///
+/// The removal mirror ("Whenever one or more counters are removed from a
+/// permanent you control") groups `GameEvent::CounterRemoved` the same way:
+/// the key is the counter event's object (`counter_event_object`), and the
+/// matcher admits only events of the trigger's own mode.
+///
 /// The per-candidate survival test is the shared `candidate_passes_batched_filters`
 /// (identical to `matching_batched_trigger_events`); this function layers only the
 /// two genuine deltas on top — grouping survivors by `object_id` and the
 /// deliberate omission of `contextual_batched_trigger_event` (a no-op passthrough
-/// for `CounterAdded` events anyway, since it only narrows attack-family events).
+/// for counter events anyway, since it only narrows attack-family events).
 #[allow(clippy::too_many_arguments)] // The shared per-candidate filter chain needs each input.
 fn matching_counter_added_events_by_recipient(
     state: &GameState,
@@ -1431,7 +1436,7 @@ fn matching_counter_added_events_by_recipient(
 ) -> Vec<Vec<(usize, GameEvent)>> {
     let mut groups: Vec<(ObjectId, Vec<(usize, GameEvent)>)> = Vec::new();
     for (index, candidate) in event_batch.iter().enumerate() {
-        let GameEvent::CounterAdded { object_id, .. } = candidate else {
+        let Some(object_id) = counter_event_object(candidate) else {
             continue;
         };
         if !candidate_passes_batched_filters(
@@ -1446,12 +1451,24 @@ fn matching_counter_added_events_by_recipient(
         ) {
             continue;
         }
-        match groups.iter_mut().find(|(id, _)| id == object_id) {
+        match groups.iter_mut().find(|(id, _)| *id == object_id) {
             Some((_, events)) => events.push((index, candidate.clone())),
-            None => groups.push((*object_id, vec![(index, candidate.clone())])),
+            None => groups.push((object_id, vec![(index, candidate.clone())])),
         }
     }
     groups.into_iter().map(|(_, events)| events).collect()
+}
+
+/// CR 122.1: the object a counter placement or removal event acts on — the
+/// per-recipient grouping key for batched counter triggers. `None` for every
+/// other event shape.
+fn counter_event_object(event: &GameEvent) -> Option<ObjectId> {
+    match event {
+        GameEvent::CounterAdded { object_id, .. } | GameEvent::CounterRemoved { object_id, .. } => {
+            Some(*object_id)
+        }
+        _ => None,
+    }
 }
 
 /// CR 508.3d + CR 508.5a + CR 603.2c: collect one firing per ATTACKED player
@@ -1535,14 +1552,16 @@ fn attack_fires_per_defending_player(trig_def: &TriggerDefinition) -> bool {
             .is_some_and(|filter| filter.is_player_scope())
 }
 
-/// CR 603.2c: Whether a `CounterAdded` trigger fires once PER RECIPIENT object
-/// rather than once for the whole simultaneous batch.
+/// CR 603.2c: Whether a `CounterAdded` / `CounterRemoved` trigger fires once
+/// PER RECIPIENT object rather than once for the whole simultaneous batch.
 ///
 /// This is a property of the TRIGGER PHRASING, not of the effect. The only
 /// phrasing that marks a `CounterAdded` trigger `batched` is the kind-agnostic
 /// "one or more counters on a <singular recipient>" form (set by
 /// `try_parse_counter_trigger`, re-gated off for still-`Unimplemented` effects by
-/// `lower_trigger_ir`). Under CR 603.2c a single event that places counters on
+/// `lower_trigger_ir`); the removal mirror is "one or more [type] counters are
+/// removed from <subject>" (`try_parse_counter_removed`, same re-gate). Under
+/// CR 603.2c a single event that places counters on
 /// several recipients "contains multiple occurrences", so the ability triggers
 /// once for EACH recipient — while a multi-KIND placement on ONE recipient folds
 /// into a single occurrence. `matching_counter_added_events_by_recipient`
@@ -1555,8 +1574,18 @@ fn attack_fires_per_defending_player(trig_def: &TriggerDefinition) -> bool {
 /// `ReproduceEventCounters`) would silently fall same-phrasing cards with a
 /// non-reproduction effect through to the all-in-one arm, collapsing their
 /// per-recipient occurrences into a single wrong firing (CR 603.2c violation).
-fn counter_added_fires_per_recipient(trig_def: &TriggerDefinition) -> bool {
-    trig_def.batched && matches!(trig_def.mode, TriggerMode::CounterAdded)
+///
+/// For removal, the recipient's removal events are then summed into one
+/// event (`FiringGroup::fold_counter_removed`) so "that much" reads every counter
+/// removed from that recipient at once (CR 120.3c / CR 306.8: simultaneous
+/// damage from several sources to one planeswalker removes its loyalty
+/// counters in one event).
+fn counter_event_fires_per_recipient(trig_def: &TriggerDefinition) -> bool {
+    trig_def.batched
+        && matches!(
+            trig_def.mode,
+            TriggerMode::CounterAdded | TriggerMode::CounterRemoved
+        )
 }
 
 /// CR 603.2c: a "one or more … deal damage to a player" trigger fires once for
@@ -1639,7 +1668,7 @@ fn matching_damage_done_once_by_controller_events_by_player_recipient(
 /// CR 120.4b: a received-damage threshold with no source scoping reads the whole
 /// simultaneous damage event, so the trigger fires once per recipient with the
 /// batch summed — not once per damaging source. Class-level property of the
-/// trigger's typed scope, exactly like `counter_added_fires_per_recipient`.
+/// trigger's typed scope, exactly like `counter_event_fires_per_recipient`.
 ///
 /// Written as an exhaustive `match` with NO wildcard arm so a future third
 /// aggregation domain fails to compile here rather than silently defaulting to
@@ -1932,6 +1961,41 @@ impl FiringGroup {
             events: vec![event],
         }
     }
+
+    /// CR 603.2c + CR 122.1: one recipient's simultaneous counter removals are
+    /// one occurrence of a batched "one or more counters are removed" trigger,
+    /// so its firing context is a single `CounterRemoved` whose `count` is the
+    /// sum of every member — "that much" (`EventContextAmount`) then reads the
+    /// whole removal, not the first event's share. `raw` keeps every member's
+    /// index for consumed-occurrence bookkeeping. The first member's
+    /// `counter_type` is kept; an untyped trigger that sees several kinds
+    /// removed from one recipient sums across kinds (no printed card reads a
+    /// per-kind amount there). A `CounterRemoved` trigger's matcher admits only
+    /// `CounterRemoved` members, so nothing else is in the group.
+    fn fold_counter_removed(members: Vec<(usize, GameEvent)>) -> Self {
+        let mut group = Self::from_indexed(members);
+        let total: u32 = group
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CounterRemoved { count, .. } => Some(*count),
+                _ => None,
+            })
+            .sum();
+        if let Some(GameEvent::CounterRemoved {
+            object_id,
+            counter_type,
+            ..
+        }) = group.events.first().cloned()
+        {
+            group.events = vec![GameEvent::CounterRemoved {
+                object_id,
+                counter_type,
+                count: total,
+            }];
+        }
+        group
+    }
 }
 
 /// CR 603.2c + CR 603.4: the firings one admitted event produces for one
@@ -1981,13 +2045,13 @@ fn trigger_firing_groups(
     let indexed_groups = |groups: Vec<Vec<(usize, GameEvent)>>| -> Vec<FiringGroup> {
         groups.into_iter().map(FiringGroup::from_indexed).collect()
     };
-    let groups = if counter_added_fires_per_recipient(trig_def) {
+    let groups = if counter_event_fires_per_recipient(trig_def) {
         // CR 603.2c: the "one or more counters on a <singular recipient>"
         // class fires once per recipient object, folding that recipient's
         // whole kind-multiset into one firing. A class-level property of the
-        // trigger phrasing (see `counter_added_fires_per_recipient`), not of
+        // trigger phrasing (see `counter_event_fires_per_recipient`), not of
         // the effect leaf.
-        indexed_groups(matching_counter_added_events_by_recipient(
+        let recipients = matching_counter_added_events_by_recipient(
             state,
             event_batch,
             trig_def,
@@ -1996,7 +2060,19 @@ fn trigger_firing_groups(
             matcher,
             active_suppress_triggers,
             conditions,
-        ))
+        );
+        if trig_def.mode == TriggerMode::CounterRemoved {
+            // CR 603.2c + CR 122.1: one removal occurrence per recipient,
+            // summed so "that much" reads every counter removed at once.
+            recipients
+                .into_iter()
+                .map(FiringGroup::fold_counter_removed)
+                .collect()
+        } else {
+            // `CounterAdded`: the placement multiset stays unfolded; its
+            // consumers (`Effect::ReproduceEventCounters`) read each kind-event.
+            indexed_groups(recipients)
+        }
     } else if damage_received_aggregates_whole_event(trig_def) {
         // CR 120.4b: an unscoped received-damage threshold reads the whole
         // simultaneous damage event, grouped by recipient and summed before

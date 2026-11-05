@@ -35,6 +35,7 @@ mod bring_to_light_free_cast_2880;
 mod cartographers_hawk_relative_damage_recipient;
 mod case_solve_condition;
 mod cast_this_way_gate_8721;
+mod chandra_fire_artisan_loyalty_damage;
 mod charging_cinderhorn_issue_2868;
 mod choose_creature_and_opponent_flip;
 mod chosen_object_reader_hand_built;

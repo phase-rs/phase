@@ -27900,6 +27900,145 @@ fn trigger_counter_removed_no_zone_constraint() {
     assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
+fn typed_counter_filter(
+    counter_type: CounterType,
+) -> Option<crate::types::ability::CounterTriggerFilter> {
+    Some(crate::types::ability::CounterTriggerFilter {
+        counter_type,
+        threshold: None,
+    })
+}
+
+// CR 122.1 + CR 603.2c: the plural passive "one or more <type> counters are
+// removed from <subject>" form parses to a typed, batched `CounterRemoved`
+// trigger (Chandra, Fire Artisan) instead of an `Unknown` trigger mode.
+#[test]
+fn trigger_one_or_more_typed_counters_removed_is_batched_and_typed() {
+    let def = parse_trigger_line(
+        "Whenever one or more loyalty counters are removed from Chandra, she deals that much damage to target opponent or planeswalker.",
+        "Chandra, Fire Artisan",
+    );
+    assert_eq!(def.mode, TriggerMode::CounterRemoved);
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.counter_filter,
+        typed_counter_filter(CounterType::Loyalty)
+    );
+    assert!(def.batched, "\"one or more\" fires once per batch");
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
+}
+
+// CR 122.1: an untyped "one or more counters" matches every counter kind, and
+// "counters" must never be read as a custom counter kind. Its subject is an
+// arbitrary permanent filter (Cloudsculpt Armorer).
+#[test]
+fn trigger_one_or_more_untyped_counters_removed_from_filtered_subject() {
+    let def = parse_trigger_line(
+        "Whenever one or more counters are removed from a permanent you control, seek a nonland card.",
+        "Cloudsculpt Armorer",
+    );
+    assert_eq!(def.mode, TriggerMode::CounterRemoved);
+    assert_eq!(def.counter_filter, None);
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(
+            TypedFilter::permanent().controller(ControllerRef::You)
+        ))
+    );
+    assert!(def.batched);
+}
+
+// CR 122.1: the singular passive form now records its counter kind in
+// `counter_filter` (the field `match_counter_removed` reads), so the trigger
+// stops firing on every counter kind. Covers the "while it's exiled" rider
+// (Aeon Chronicler) and a P/T counter kind (Protean Hydra).
+#[test]
+fn trigger_singular_typed_counter_removed_sets_counter_filter() {
+    let aeon = parse_trigger_line(
+        "Whenever a time counter is removed from this card while it's exiled, draw a card.",
+        "Aeon Chronicler",
+    );
+    assert_eq!(aeon.mode, TriggerMode::CounterRemoved);
+    assert_eq!(aeon.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(aeon.counter_filter, typed_counter_filter(CounterType::Time));
+    assert_eq!(aeon.trigger_zones, vec![Zone::Exile]);
+    assert!(!aeon.batched, "the singular form fires per removal");
+
+    let hydra = parse_trigger_line(
+        "Whenever a +1/+1 counter is removed from this creature, put two +1/+1 counters on it at the beginning of the next end step.",
+        "Protean Hydra",
+    );
+    assert_eq!(hydra.mode, TriggerMode::CounterRemoved);
+    assert_eq!(hydra.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        hydra.counter_filter,
+        typed_counter_filter(CounterType::Plus1Plus1)
+    );
+    assert!(!hydra.batched);
+}
+
+// CR 122.1: the passive grammar declines a quantifier/noun number mismatch
+// and an unmodelled subject tail instead of silently dropping text.
+#[test]
+fn trigger_counter_removed_passive_grammar_declines_malformed_forms() {
+    let agreement = parse_trigger_line(
+        "Whenever a loyalty counters is removed from ~, you gain 1 life.",
+        "Test Walker",
+    );
+    assert_ne!(agreement.mode, TriggerMode::CounterRemoved);
+
+    let tail = parse_trigger_line(
+        "Whenever a time counter is removed from ~ during your upkeep, you gain 1 life.",
+        "Test Card",
+    );
+    assert_ne!(tail.mode, TriggerMode::CounterRemoved);
+
+    // Reach guard: the same frame without the malformed part parses.
+    let control = parse_trigger_line(
+        "Whenever a time counter is removed from ~, you gain 1 life.",
+        "Test Card",
+    );
+    assert_eq!(control.mode, TriggerMode::CounterRemoved);
+}
+
+// CR 603.2c: `lower_trigger_ir` re-gates the batched flag on the lowered
+// effect — a typed effect keeps it (Regenerations Restored's scry/gain-life
+// chain), an `Unimplemented` effect drops it.
+#[test]
+fn trigger_one_or_more_counters_removed_batched_regate() {
+    let restored = parse_trigger_line(
+        "Whenever one or more time counters are removed from this enchantment, scry 1 and you gain 1 life. Then if this enchantment has no time counters on it, exile it. When you do, take an extra turn after this one.",
+        "Regenerations Restored",
+    );
+    assert_eq!(restored.mode, TriggerMode::CounterRemoved);
+    assert_eq!(restored.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        restored.counter_filter,
+        typed_counter_filter(CounterType::Time)
+    );
+    let execute = restored
+        .execute
+        .as_ref()
+        .expect("the trigger has an effect");
+    assert!(!matches!(*execute.effect, Effect::Unimplemented { .. }));
+    assert!(restored.batched);
+
+    let unsupported = parse_trigger_line(
+        "Whenever one or more time counters are removed from ~, florble the zorbit.",
+        "Test Card",
+    );
+    assert_eq!(unsupported.mode, TriggerMode::CounterRemoved);
+    let execute = unsupported
+        .execute
+        .as_ref()
+        .expect("the trigger has an effect");
+    assert!(
+        matches!(*execute.effect, Effect::Unimplemented { .. }),
+        "reach guard: the effect must be unimplemented: {execute:?}"
+    );
+    assert!(!unsupported.batched);
+}
+
 // -----------------------------------------------------------------------
 // CR 608.2k: Trigger pronoun resolution — "it"/"its" context-dependent
 // -----------------------------------------------------------------------

@@ -1172,6 +1172,21 @@ fn count_matching_trigger_event_subjects(
                 0
             }
         }
+        // CR 603.2c + CR 122.1: the removal mirror of `CounterAdded` above. A
+        // batched "one or more counters are removed from <FILTER>" trigger whose
+        // effect reads "that much" (`EventContextAmount`) reads the NUMBER OF
+        // COUNTERS removed from matching objects, not a subject headcount —
+        // a headcount here would outrank the event's own magnitude in the
+        // `EventContextAmount` cascade.
+        GameEvent::CounterRemoved {
+            object_id, count, ..
+        } => {
+            if matches(*object_id) {
+                *count
+            } else {
+                0
+            }
+        }
         GameEvent::GameStarted
         | GameEvent::TurnStarted { .. }
         | GameEvent::PhaseChanged { .. }
@@ -1205,7 +1220,6 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::DamagePrevented { .. }
         | GameEvent::SpellCountered { .. }
         | GameEvent::ObjectIntensified { .. }
-        | GameEvent::CounterRemoved { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::ObjectConjured { .. }
         | GameEvent::EffectResolved { .. }
