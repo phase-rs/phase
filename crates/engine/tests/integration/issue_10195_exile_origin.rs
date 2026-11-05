@@ -17,7 +17,8 @@
 //! (disclosed residual, not a regression).
 
 use engine::database::card_db::CardDatabase;
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::layers::evaluate_layers;
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -30,6 +31,8 @@ use engine::types::zones::Zone;
 use crate::support::shared_card_db;
 
 const SWORDS: &str = "Exile target creature. Its controller gains life equal to its power.";
+const DECLARATION_IN_STONE: &str = "Exile target creature and all other creatures its controller controls with the same name as that creature. That player investigates for each nontoken creature exiled this way.";
+const UNMAKE: &str = "Exile target creature.";
 const CLING_TO_DUST: &str =
     "Exile target card from a graveyard. If it was a creature card, you gain 3 life. Otherwise, you draw a card.";
 
@@ -158,5 +161,91 @@ fn r1_soulherder_fires_when_a_token_is_exiled_from_the_battlefield() {
         1,
         "CR 603.6c + CR 111.7: the token's battlefield exile triggers Soulherder \
          once, before the token ceases to exist"
+    );
+}
+
+/// R1-simultaneous: Soulherder counts every creature exiled from the battlefield
+/// by a single effect. CR 603.6c + CR 603.10a: each creature that moves from the
+/// battlefield to exile is its own leaves-the-battlefield event that the
+/// ability looks back in time to see, and Soulherder is still on the
+/// battlefield when they happen, so it triggers once per creature. Declaration
+/// in Stone exiles both Bears at once.
+#[test]
+fn r1_soulherder_counts_every_creature_exiled_at_once_while_it_survives() {
+    let mut scenario = board();
+    let soulherder = scenario.add_real_card(P0, "Soulherder", Zone::Battlefield, db());
+    let bear = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db());
+    let twin = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db());
+    let declaration = in_hand(
+        &mut scenario,
+        P0,
+        "Declaration in Stone",
+        false,
+        DECLARATION_IN_STONE,
+    );
+    let mut runner = scenario.build();
+
+    runner.cast(declaration).target_object(bear).resolve();
+
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Exile,
+        "reach guard: the targeted Bears was exiled"
+    );
+    assert_eq!(
+        runner.state().objects[&twin].zone,
+        Zone::Exile,
+        "reach guard: the other same-name Bears was exiled by the same effect"
+    );
+    assert_eq!(
+        runner.state().objects[&soulherder].zone,
+        Zone::Battlefield,
+        "reach guard: Soulherder survived and was on the battlefield for both exiles"
+    );
+    assert_eq!(
+        p1p1(&runner, soulherder),
+        2,
+        "CR 603.6c + CR 603.10a: one trigger per creature exiled from the battlefield"
+    );
+}
+
+/// R1-last-known-power: Captain Marvel, Shooting Star gains life equal to the
+/// exiled creature's power as it last existed on the battlefield. CR 603.10a:
+/// a leaves-the-battlefield trigger looks back in time, so the +1/+1 counters
+/// that were on the Bears count even though the card in exile has none
+/// (power 4 on the battlefield, 2 in exile).
+#[test]
+fn r1_captain_marvel_gains_the_exiled_creatures_last_known_power() {
+    let mut scenario = board();
+    scenario.add_real_card(P0, "Captain Marvel, Shooting Star", Zone::Battlefield, db());
+    let bear = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db());
+    let unmake = in_hand(&mut scenario, P0, "Unmake", true, UNMAKE);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&bear)
+        .unwrap()
+        .counters
+        .insert(CounterType::Plus1Plus1, 2);
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects[&bear].power,
+        Some(4),
+        "reach guard: the Bears is a 4/4 on the battlefield"
+    );
+    let life_before = runner.life(P0);
+
+    runner.cast(unmake).target_object(bear).resolve();
+
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Exile,
+        "reach guard: the Bears was exiled"
+    );
+    assert_eq!(
+        runner.life(P0) - life_before,
+        4,
+        "CR 603.10a: life gained is the Bears' last-known battlefield power (4), not 2"
     );
 }
