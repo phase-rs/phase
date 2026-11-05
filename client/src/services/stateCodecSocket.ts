@@ -41,6 +41,10 @@ export interface StateCodecBootstrapBinding {
 /** Rejection message for a command dropped while codec recovery begins. */
 export const STATE_CODEC_RECOVERY_INTERRUPTED_MESSAGE = "State delivery interrupted during action";
 
+/** Rejection message for a submission refused while codec recovery is in progress. */
+export const STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE =
+  "State delivery is being recovered; this submission was not sent.";
+
 /** Bounded optional preparation budget (event-loop time, not network). */
 export const STATE_CODEC_PREPARATION_TIMEOUT_MS = 5_000;
 /** Confirmation and recovery window; the same value bounds both. */

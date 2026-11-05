@@ -47,6 +47,7 @@ import {
   StateCodecPreparationAbortError,
   prepareStateCodecSession as prepareBoundedStateCodecSession,
   STATE_CODEC_RECOVERY_INTERRUPTED_MESSAGE,
+  STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE,
   type StateCodecBootstrap,
   type StateCodecBootstrapBinding,
   type StateCodecRecoveryState,
@@ -354,7 +355,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (this.stateCodecRecovering) {
       throw new AdapterError(
         AdapterErrorCode.ACTION_NOT_SENT,
-        "State delivery is being recovered; this submission was not sent.",
+        STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE,
         true,
       );
     }
