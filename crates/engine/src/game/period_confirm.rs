@@ -2351,9 +2351,8 @@ fn first_pair_certifies(verdict: &ObjectGrowthVerdict) -> bool {
     }
 }
 
-/// CR 800.4a + CR 514.1 + CR 401.2 + CR 732.2a: whether the count ends where a refused second
-/// cycle stopped at `replay`: its holder left the game, or its cleanup must discard a card the
-/// holder has not yet drawn, which no shortcut can name.
+/// CR 800.4a + CR 514.1 + CR 732.2a: whether the count ends where a refused second cycle
+/// stopped at `replay`: its holder left the game, or awaits its own cleanup discard.
 fn count_ends_at(replay: &GameState, holder: PlayerId) -> bool {
     !crate::game::players::is_alive(replay, holder)
         || matches!(replay.waiting_for, WaitingFor::DiscardToHandSize { player, .. } if player == holder)
