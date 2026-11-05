@@ -180,6 +180,7 @@ mod cast_decline_branch_is_not_a_graveyard_rider;
 mod cast_during_resolution_pipeline;
 mod cast_grant_mana_rider_conjunct;
 mod cast_undo_sparse_record;
+mod cast_using_source_mana;
 mod cavern_hoard_dragon_cost_reduction;
 mod cda_counted_quantities_pt;
 mod celes_kotis_graveyard_origin_batch;

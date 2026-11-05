@@ -3678,7 +3678,12 @@ fn bile_blight_target_and_same_name_creatures_emit_pump_plus_pumpall() {
         }
         other => panic!("expected PumpAll sub_ability, got {other:?}"),
     }
-    assert_eq!(sub.duration, Some(Duration::UntilEndOfTurn));
+    // CR 611.2a (#7962): the mass link states no window of its own — the printed
+    // "until end of turn" is hoisted onto the clause carrier (asserted above), and the
+    // resolver supplies the end-of-turn fallback for this link. An injected value here
+    // was byte-identical to a printed window, so an enclosing printed window could not
+    // distribute onto it.
+    assert_eq!(sub.duration, None);
 }
 
 /// Class coverage: the +N/+N sibling (Echoing Courage) takes the same recognizer,
@@ -23899,6 +23904,7 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
         AttackTargetFilter::OwnerOrPlaneswalker,
         AttackTargetFilter::PlayerOrPermanents,
         AttackTargetFilter::Monarch,
+        AttackTargetFilter::PlayerAttackedBySourceThisTurn,
     ];
     for scope in attack_target_scopes {
         let expected_rebind = match scope {
@@ -23909,7 +23915,8 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
             | AttackTargetFilter::Battle
             | AttackTargetFilter::Owner
             | AttackTargetFilter::OwnerOrPlaneswalker
-            | AttackTargetFilter::PlayerOrPermanents => false,
+            | AttackTargetFilter::PlayerOrPermanents
+            | AttackTargetFilter::PlayerAttackedBySourceThisTurn => false,
         };
         assert_eq!(
             attack_intervening_if_anaphor_is_defending_player(&base(Some(scope.clone()))),
