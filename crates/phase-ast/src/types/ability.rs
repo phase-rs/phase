@@ -11699,7 +11699,9 @@ pub enum CardTypeSetSource {
     Zone { zone: ZoneRef, scope: CountScope },
     /// CR 607.2a + CR 406.6: Cards exiled by the source's linked ability.
     ExiledBySource,
-    /// CR 109.2: Objects matching a battlefield-style filter.
+    /// Objects matching `filter`. A typed filter that names no zone reads the
+    /// battlefield (CR 109.2); `FilterProp::InZone` / `FilterProp::InAnyZone`
+    /// name the zones it reads otherwise.
     Objects { filter: TargetFilter },
     /// CR 608.2c + CR 205.2a: distinct card types among the current chain
     /// tracked set, optionally restricted to members produced by `caused_by`.

@@ -9796,4 +9796,148 @@ mod tests {
         .is_none());
         assert!(parse_for_each_target_controlled_type("creature you control").is_none());
     }
+
+    /// The population of a `Ref` over an object-property aggregate.
+    fn aggregate_population(expr: &QuantityExpr) -> &TargetFilter {
+        let QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(aggregate),
+        } = expr
+        else {
+            panic!("expected a property aggregate, got {expr:?}");
+        };
+        let CardTypeSetSource::Objects { filter } = aggregate.source() else {
+            panic!(
+                "expected an object population, got {:?}",
+                aggregate.source()
+            );
+        };
+        filter
+    }
+
+    /// CR 903.3e: what "your commanders" reads in an aggregate.
+    fn your_commanders_in_every_zone() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().properties(vec![
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+            FilterProp::IsCommander,
+            FilterProp::InAnyZone {
+                zones: Zone::ALL.to_vec(),
+            },
+        ]))
+    }
+
+    /// CR 903.3e: the printed phrase of Tangleweave Armor and Cactus Preserve
+    /// reaches the widened population through the CDA entry point, so the
+    /// combinator route wins before the legacy aggregate block. No printed card
+    /// exhibits the "twice ..." composite; the nearest printed card is Tangleweave
+    /// Armor.
+    #[test]
+    fn cda_quantity_your_commanders_read_every_zone() {
+        let printed = parse_cda_quantity("the greatest mana value among your commanders")
+            .expect("the printed phrase parses");
+        assert_eq!(
+            *aggregate_population(&printed),
+            your_commanders_in_every_zone()
+        );
+
+        let Some(QuantityExpr::Multiply { factor: 2, inner }) =
+            parse_event_context_quantity("twice the greatest mana value among your commanders")
+        else {
+            panic!("the composite parses as Multiply by 2");
+        };
+        assert_eq!(
+            *aggregate_population(&inner),
+            your_commanders_in_every_zone()
+        );
+    }
+
+    /// CR 903.3e + CR 903.3d: the verbatim Oracle text of the two printed cards
+    /// that aggregate over "your commanders" reads every zone, and Command Chair's
+    /// "commanders you control" keeps its controller scope.
+    #[test]
+    fn printed_commander_aggregate_text_reads_every_zone() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::{ContinuousModification, Effect, ManaProduction};
+
+        let armor = parse_oracle_text(
+            "Living weapon (When this Equipment enters, create a 0/0 black Phyrexian Germ creature token, then attach this to it.)\nEquipped creature gets +X/+X, where X is the greatest mana value among your commanders.\nEquip {4}",
+            "Tangleweave Armor",
+            &[],
+            &["Artifact".to_string()],
+            &["Equipment".to_string()],
+        );
+        let ContinuousModification::AddDynamicPower { value } = &armor.statics[0].modifications[0]
+        else {
+            panic!("{:?}", armor.statics[0].modifications[0]);
+        };
+        assert_eq!(
+            *aggregate_population(value),
+            your_commanders_in_every_zone()
+        );
+        let ContinuousModification::AddDynamicToughness { value } =
+            &armor.statics[0].modifications[1]
+        else {
+            panic!("{:?}", armor.statics[0].modifications[1]);
+        };
+        assert_eq!(
+            *aggregate_population(value),
+            your_commanders_in_every_zone()
+        );
+
+        let land = parse_oracle_text(
+            "This land enters tapped.\n{T}: Add one mana of any type that a land you control could produce.\n{3}: Until end of turn, this land becomes an X/X green Plant creature with reach, where X is the greatest mana value among your commanders. It's still a land.",
+            "Cactus Preserve",
+            &[],
+            &["Land".to_string()],
+            &["Desert".to_string()],
+        );
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*land.abilities[1].effect
+        else {
+            panic!("{:?}", land.abilities[1].effect);
+        };
+        let ContinuousModification::SetPowerDynamic { value } =
+            &static_abilities[0].modifications[0]
+        else {
+            panic!("{:?}", static_abilities[0].modifications[0]);
+        };
+        assert_eq!(
+            *aggregate_population(value),
+            your_commanders_in_every_zone()
+        );
+        let ContinuousModification::SetToughnessDynamic { value } =
+            &static_abilities[0].modifications[1]
+        else {
+            panic!("{:?}", static_abilities[0].modifications[1]);
+        };
+        assert_eq!(
+            *aggregate_population(value),
+            your_commanders_in_every_zone()
+        );
+
+        let chair = parse_oracle_text(
+            "This artifact enters tapped.\n{T}: Add three mana of any one color.\n{T}: Add X mana of any one color, where X is the greatest mana value among commanders you control.",
+            "Command Chair",
+            &[],
+            &["Artifact".to_string()],
+            &[],
+        );
+        let Effect::Mana {
+            produced: ManaProduction::AnyOneColor { count, .. },
+            ..
+        } = &*chair.abilities[1].effect
+        else {
+            panic!("{:?}", chair.abilities[1].effect);
+        };
+        assert_eq!(
+            *aggregate_population(count),
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::IsCommander])
+            )
+        );
+    }
 }
