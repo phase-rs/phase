@@ -8,10 +8,10 @@ use super::*;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
     CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageKindFilter,
-    Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
-    PlayerScope, ProtectionDoesNotRemove, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    SharedQuality, SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter,
-    ZoneRef,
+    Duration, Effect, FilterProp, ObjectProperty, ObjectScope, Parity, ParitySource, PlayerFilter,
+    PlayerRelation, PlayerScope, ProtectionDoesNotRemove, PtStat, PtValueScope, QuantityExpr,
+    QuantityRef, SharedQuality, SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -2793,6 +2793,49 @@ fn cant_attack_scoped_player_only_variant() {
         Some(crate::types::triggers::AttackTargetFilter::Player),
         "companion must be scoped to Player, got {:?}",
         lockout.attack_defended
+    );
+}
+
+/// CR 508.1c + CR 508.6: Bloodthirster / Port Razer — "This creature can't attack
+/// a player it has already attacked this turn." The defended scope is the
+/// creature's OWN attack history, not a blanket prohibition. Before this arm
+/// existed the history rider was left unconsumed after the bare " a player" match,
+/// the whole line fell through to the blanket `CantAttack` arm, and the creature
+/// could not attack any opponent at all (issue #8064).
+///
+/// Both printed printings normalize their subject to the self-reference the static
+/// grammar understands (`This creature` and the card name both become `~`), so the
+/// subject axis is covered by the shared self-reference combinator rather than a
+/// per-card string.
+#[test]
+fn cant_attack_player_already_attacked_scopes_to_the_source_history() {
+    for line in [
+        "This creature can't attack a player it has already attacked this turn.",
+        "~ can't attack a player it has already attacked this turn.",
+    ] {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} must parse"));
+        assert_eq!(def.mode, StaticMode::CantAttack, "{line}");
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
+        assert_eq!(
+            def.attack_defended,
+            Some(crate::types::triggers::AttackTargetFilter::PlayerAttackedBySourceThisTurn),
+            "{line}: the restriction must scope to players this creature already attacked, got {:?}",
+            def.attack_defended
+        );
+        assert!(
+            def.condition.is_none(),
+            "{line}: the history rider belongs to the defended scope, not a gate; got {:?}",
+            def.condition
+        );
+    }
+
+    // Control: the bare self restriction is still a blanket `CantAttack` with no
+    // defended scope, so the new arm cannot swallow it.
+    let bare = parse_static_line("~ can't attack.").expect("bare cant attack");
+    assert_eq!(bare.mode, StaticMode::CantAttack);
+    assert_eq!(
+        bare.attack_defended, None,
+        "a bare CantAttack must stay unscoped"
     );
 }
 
@@ -12853,6 +12896,80 @@ fn static_same_turn_loyalty_abilities_activate_as_instant() {
     );
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     assert_eq!(def.condition, Some(StaticCondition::SourceEnteredThisTurn));
+}
+
+/// CR 606.3 + CR 304.5: Teferi, Master of Time's timing permission (Scryfall-
+/// verified verbatim Oracle line 1; the production pipeline normalizes "Teferi"
+/// to `~` before the static line parses, so the unit shape uses `~` directly).
+/// Unlike the Wandering Emperor's conditional possessive form, this is
+/// unconditional with an "of \<subject\>" axis plus the "on any player's turn"
+/// infix — which CR 304.5 subsumes into instant timing (priority only), so it
+/// lowers to the same shared `ActivateAsInstant { PaysLoyalty, None }` mode,
+/// self-scoped. Reverting the `dispatch.rs` call site yields `None` here.
+#[test]
+fn static_teferi_master_of_time_loyalty_timing_permission() {
+    let def = parse_static_line(
+        "You may activate loyalty abilities of ~ on any player's turn any time you could cast an instant.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ActivateAsInstant {
+            cost_category: CostCategory::PaysLoyalty,
+            keyword: None,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(def.condition, None);
+}
+
+/// CR 606.3 + CR 304.5: the subject axis composes — Teferi's Talent's emblem
+/// carries the same timing permission scoped to "planeswalkers you control"
+/// (verbatim emblem text, already quoted in the granted-loyalty corpus below).
+/// Same shared mode; only `affected` differs.
+#[test]
+fn static_loyalty_timing_permission_subject_axis_composes() {
+    let def = parse_static_line(
+        "You may activate loyalty abilities of planeswalkers you control on any player's turn any time you could cast an instant.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ActivateAsInstant {
+            cost_category: CostCategory::PaysLoyalty,
+            keyword: None,
+        }
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::You),
+        ))
+    );
+    assert_eq!(def.condition, None);
+}
+
+/// CR 304.5: the "on any player's turn" infix is optional — instant timing
+/// already spans any player's turn, so the bare tail parses to the same
+/// permission rather than failing closed. Combinator pin: no printed card
+/// carries the bare form yet. Both apostrophe forms parse.
+#[test]
+fn static_loyalty_timing_permission_turn_infix_optional() {
+    for line in [
+        "You may activate loyalty abilities of ~ any time you could cast an instant.",
+        "You may activate loyalty abilities of ~ on any player\u{2019}s turn any time you could cast an instant.",
+    ] {
+        let def = parse_static_line(line).unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::ActivateAsInstant {
+                cost_category: CostCategory::PaysLoyalty,
+                keyword: None,
+            },
+            "{line}"
+        );
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
+    }
 }
 
 #[test]
@@ -24839,7 +24956,17 @@ fn cant_cast_spells_of_chosen_color() {
 
 #[test]
 fn cant_cast_spells_with_even_mana_values() {
-    // CR 101.2: "can't cast spells with even mana values"
+    // CR 601.3a: "can't cast spells with even mana values" — Void Winnower, the
+    // card that rule's own example is written about. The parity is one of the
+    // "certain qualities" CR 601.3a says the prohibition names, so it must
+    // reach `affected`; CR 202.3 defines the mana value it is read from.
+    //
+    // This test used to assert `def.mode` ALONE and passed with the card
+    // completely broken: `affected` was `None`, and
+    // `is_blocked_by_cant_be_cast_for` skips its filter test when `affected` is
+    // `None` and falls through to PROHIBITED — so Void Winnower stopped
+    // opponents from casting every spell in the game. Asserting the filter is
+    // the whole point of this test; do not weaken it back to a mode check.
     let def = parse_static_line("Your opponents can't cast spells with even mana values.").unwrap();
     assert_eq!(
         def.mode,
@@ -24847,6 +24974,44 @@ fn cant_cast_spells_with_even_mana_values() {
             who: ProhibitionScope::Opponents,
         }
     );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => assert!(
+            tf.properties.contains(&FilterProp::ManaValueParity {
+                parity: ParitySource::Fixed(Parity::Even),
+            }),
+            "even-mana-value cast prohibition must scope to EVEN mana values; got {:?}",
+            tf.properties
+        ),
+        other => panic!(
+            "expected a Typed filter carrying ManaValueParity(Fixed(Even)), got {other:?} \
+             (an unfiltered prohibition is a total cast-lock on every spell)"
+        ),
+    }
+}
+
+#[test]
+fn cant_cast_spells_with_odd_mana_values() {
+    // CR 601.3a + CR 202.3: the ODD mirror of the Void Winnower arm. No printed
+    // card uses it today, but the parity must be read from the text rather than
+    // defaulted — a head that hardcoded `Even` would pass the sibling test
+    // above and silently invert this one.
+    let def = parse_static_line("Your opponents can't cast spells with odd mana values.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantBeCast {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => assert!(
+            tf.properties.contains(&FilterProp::ManaValueParity {
+                parity: ParitySource::Fixed(Parity::Odd),
+            }),
+            "odd-mana-value cast prohibition must scope to ODD mana values; got {:?}",
+            tf.properties
+        ),
+        other => panic!("expected ManaValueParity(Fixed(Odd)), got {other:?}"),
+    }
 }
 
 #[test]
