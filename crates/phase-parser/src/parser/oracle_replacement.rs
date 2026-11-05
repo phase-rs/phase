@@ -2512,11 +2512,15 @@ fn parse_as_enters_pay(norm_lower: &str, original_text: &str) -> Option<Replacem
     let (pay_residue, _) = tag::<_, _, OracleError<'_>>("pay ")
         .parse(payment_text)
         .ok()?;
-    let cost = super::oracle_effect::imperative::parse_pay_residue_cost(pay_residue, pay_residue)?;
+    let super::oracle_effect::imperative::PayResidueCost { cost, scale } =
+        super::oracle_effect::imperative::parse_pay_residue_cost(pay_residue, pay_residue)?;
     let AbilityCost::PayLife { amount } = &cost else {
         return None;
     };
-    if !crate::types::ability::is_pay_any_amount(amount) {
+    // CR 118.1: this builder's `Effect::PayCost` has no amount-multiplier
+    // surface, so a scaled residue declines rather than having its scale
+    // dropped.
+    if !crate::types::ability::is_pay_any_amount(amount) || scale.is_some() {
         return None;
     }
     let execute = AbilityDefinition::new(
@@ -20536,6 +20540,9 @@ mod tests {
             "as ~ enters, pay 2 life.",
             "as ~ enters, pay {2}{b}.",
             "as ~ enters, pay any amount of {e}.",
+            // A per-unit scaled mana residue: this builder has no scale
+            // surface, so it declines rather than dropping the scale.
+            "as ~ enters, pay any amount of {r}.",
             // Cap sentence without the payment sentence.
             "as ~ enters. the amount you pay can't be more than the total number of white cards in their graveyards.",
             // Cap head with an unparseable body.
