@@ -180,6 +180,7 @@ pub(crate) fn can_sacrifice_for_ability(
     player: PlayerId,
 ) -> bool {
     !sacrifice_cause_muzzled(state, ability, object_id, player)
+        && !crate::game::static_abilities::player_cant_sacrifice(state, player, object_id)
         && !crate::game::static_abilities::object_has_static_other(
             state,
             object_id,
@@ -356,6 +357,19 @@ pub fn resolve(
         // CR 608.2k: the resolved back-reference IS the whole subject set;
         // never widen it with inherited targets.
         vec![referent]
+    } else if matches!(filter, TargetFilter::SelfRef) && !ability.targets.is_empty() {
+        // CR 608.2c: `~` is the source object itself, never an inherited target.
+        // A replacing chain whose parent target is a different permanent
+        // (Crackling Emergence: "sacrifice this Aura and that land gains
+        // indestructible") must sacrifice the source, not that permanent. With
+        // no targets at all, the pool path below already resolves `SelfRef`.
+        crate::game::targeting::resolved_targets(ability, filter, state)
+            .into_iter()
+            .filter_map(|t| match t {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .collect()
     } else if matches!(
         sacrifice_controller_scope(filter),
         Some(ControllerRef::ParentTargetController)
@@ -505,7 +519,7 @@ pub fn resolve(
                         obj.controller == chooser
                             && !obj.is_emblem
                             && crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
-                            && !sacrifice_cause_muzzled(state, ability, *id, chooser)
+                            && can_sacrifice_for_ability(state, ability, *id, chooser)
                     })
             })
             .collect();
@@ -672,7 +686,10 @@ pub fn resolve(
 
         let player_id = obj.controller;
 
-        if sacrifice_cause_muzzled(state, ability, obj_id, player_id) {
+        // CR 701.21a: a permanent the player can't sacrifice (Quark's player-scoped
+        // static, "can't be sacrificed", or a muzzled cause) is skipped rather
+        // than handed to `sacrifice_permanent`, which would silently refuse it.
+        if !can_sacrifice_for_ability(state, ability, obj_id, player_id) {
             continue;
         }
 

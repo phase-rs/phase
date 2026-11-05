@@ -94,6 +94,11 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::ImposeAdditionalCost { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantPayCost { .. }
+            // CR 701.21a: CantSacrifice carries `who` + the per-permanent
+            // `filter` (Quark, Humble Proprietor). Runtime enforcement is
+            // static_abilities.rs::player_cant_sacrifice, consulted by the
+            // sacrifice-effect choice and the sacrifice-cost authority.
+            | StaticMode::CantSacrifice { .. }
             | StaticMode::CantBeCast { .. }
             // CR 601.3 + CR 109.5: CantCastFrom carries `who`; the prohibited-zone
             // list rides `affected`. Runtime enforcement is in
@@ -25982,6 +25987,31 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         assert!(
             card_face_gaps(&face).is_empty(),
             "CantHaveKeyword(Flying) should be covered by is_data_carrying_static()"
+        );
+    }
+
+    /// CR 701.21a: a player-scoped "can't sacrifice <filter>" static parses to
+    /// `CantSacrifice` and is covered by `is_data_carrying_static()` (Quark,
+    /// Humble Proprietor: "You can't sacrifice Treasure tokens.").
+    #[test]
+    fn cant_sacrifice_static_has_no_coverage_gap() {
+        let face = counter_rider_face(
+            "Quark, Humble Proprietor",
+            "You can't sacrifice Treasure tokens.",
+            &[],
+            &["Creature"],
+        );
+        assert!(
+            face.static_abilities
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::CantSacrifice { .. })),
+            "REACH: the line parses to a CantSacrifice static: {:?}",
+            face.static_abilities
+        );
+        assert!(
+            card_face_gaps(&face).is_empty(),
+            "CantSacrifice should be covered by is_data_carrying_static(): {:?}",
+            card_face_gaps(&face)
         );
     }
     /// The `fmt_quantity_ref` `PreviousEffectAmount` arms are ORDER-DEPENDENT:

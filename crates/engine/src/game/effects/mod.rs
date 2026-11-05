@@ -2055,6 +2055,12 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         ResolutionFrame::DebugCardEntries(_) => {
             crate::game::engine_debug::drain_pending_debug_card_entries(state, events);
         }
+        // CR 614.6 + CR 616.1 + CR 704.3: a simultaneous departure resumes the
+        // members it has not yet consulted or delivered once the child that
+        // paused it has settled.
+        ResolutionFrame::SimultaneousDeparture(_) => {
+            resume_simultaneous_departure_and_exposed_continuation(state, events);
+        }
         ResolutionFrame::EachPlayerCopyChosen(_) => {
             each_player_copy_chosen::drain_pending(state, events);
         }
@@ -2178,9 +2184,35 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         }
     }
 
+    // CR 608.2c + CR 616.1: the child just settled may have been the work a
+    // simultaneous departure was parked under (a member's delivery prompt,
+    // its replacing instructions' prompt). The batch resumes in this same
+    // boundary, so its remaining members leave the battlefield before anything
+    // else can observe it.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.active_simultaneous_departure().is_some()
+    {
+        resume_simultaneous_departure_and_exposed_continuation(state, events);
+    }
+
     clear_post_replacement_token_choice_seed_if_resolution_drained(state);
     if waits_for_resolution_choice(&state.waiting_for) {
         state.resolution_stack.note_repeat_until_descendant_choice();
+    }
+}
+
+/// CR 608.2c: resume the active simultaneous departure, then the enclosing
+/// instruction's continuation its completion exposes ("Destroy all creatures.
+/// Then ..."), mirroring the batch-delivery arm.
+fn resume_simultaneous_departure_and_exposed_continuation(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    destroy::drain_pending_simultaneous_departure(state, events);
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.active_ability_continuation().is_some()
+    {
+        drain_pending_continuation(state, events);
     }
 }
 
@@ -3089,6 +3121,9 @@ fn active_frame_requires_ability_continuation_parent(state: &GameState) -> bool 
         || state.active_counter_additions().is_some()
         || state.active_copy_token().is_some()
         || state.active_multi_draw_frame().is_some()
+        // CR 608.2c + CR 701.8a: a parked destruction batch is one instruction
+        // still in progress; the instructions after it wait beneath it.
+        || state.active_simultaneous_departure().is_some()
 }
 
 pub(crate) fn append_to_pending_continuation(
@@ -5571,11 +5606,27 @@ fn batch_completion_may_apply_with_entry(
     }
 }
 
+/// Whether a post-replacement drain's not-yet-run continuation may apply with
+/// an entry (see [`frame_may_apply_with_entry`]).
+fn post_replacement_drain_may_apply_with_entry(
+    drain: &crate::types::game_state::PostReplacementDrain,
+) -> bool {
+    use crate::types::ability::PostReplacementContinuation;
+    match drain.ready_continuation() {
+        Some(PostReplacementContinuation::Template(definition)) => {
+            definition_chain_may_apply_with_entry(definition)
+        }
+        Some(PostReplacementContinuation::Resolved(resolved)) => {
+            resolved_chain_may_apply_with_entry(resolved)
+        }
+        None => false,
+    }
+}
+
 /// CR 611.2e: does a frame-held later instruction of this resolution (an outer continuation, a
 /// paused iteration's remainder, or any other parked chain) carry an instruction stamped to
 /// apply with the entry? Exhaustive over `ResolutionFrame` so a new frame kind forces a decision.
 fn frame_may_apply_with_entry(frame: &ResolutionFrame) -> bool {
-    use crate::types::ability::PostReplacementContinuation;
     match frame {
         ResolutionFrame::AbilityContinuation(frame) => {
             let pending = &frame.pending;
@@ -5647,19 +5698,16 @@ fn frame_may_apply_with_entry(frame: &ResolutionFrame) -> bool {
             .results_table
             .iter()
             .any(|branch| definition_chain_may_apply_with_entry(&branch.effect)),
-        ResolutionFrame::PostReplacement(stack) => {
-            stack
-                .drains()
-                .any(|drain| match drain.ready_continuation() {
-                    Some(PostReplacementContinuation::Template(definition)) => {
-                        definition_chain_may_apply_with_entry(definition)
-                    }
-                    Some(PostReplacementContinuation::Resolved(resolved)) => {
-                        resolved_chain_may_apply_with_entry(resolved)
-                    }
-                    None => false,
-                })
-        }
+        ResolutionFrame::PostReplacement(stack) => stack
+            .drains()
+            .any(post_replacement_drain_may_apply_with_entry),
+        // A queued member's replacing instructions are later instructions of
+        // the same departure, exactly like a resident post-replacement drain.
+        ResolutionFrame::SimultaneousDeparture(pending) => pending
+            .queued
+            .iter()
+            .filter_map(|queued| queued.rider.as_ref())
+            .any(post_replacement_drain_may_apply_with_entry),
         ResolutionFrame::ChangeZone(_)
         | ResolutionFrame::CounterMoves(_)
         | ResolutionFrame::CounterRemovals(_)
@@ -10239,6 +10287,7 @@ fn static_mode_reads_filter_population(
             CostPaymentProhibition::Sacrifice { filter } => has_filter(filter),
             CostPaymentProhibition::PayLife => false,
         },
+        StaticMode::CantSacrifice { filter, .. } => has_filter(filter),
         StaticMode::PlayerProtection(inner0) => has_protection(inner0),
         StaticMode::MustAttackDefender { defender } => match defender {
             RequiredDefender::Matching { filter } => has_player(filter),
@@ -25383,7 +25432,15 @@ fn resolve_chain_body(
                 || sub_clone.reads_return_result.is_some()
                 || state
                     .resolution_stack
-                    .copy_token_at_child_boundary(child_stack_start))
+                    .copy_token_at_child_boundary(child_stack_start)
+                // CR 608.2c + CR 701.8a: a destroy instruction parked its
+                // simultaneous departure at this boundary (whether on a
+                // consult's prompt or beneath a delivery's child work). Its
+                // later instructions ("You gain 1 life for each creature
+                // destroyed this way") follow the whole departure.
+                || state
+                    .resolution_stack
+                    .simultaneous_departure_at_child_boundary(child_stack_start))
                 && state.resolution_stack.capture_child_boundary() > child_stack_start
             {
                 // CR 608.2c: the rest of the chain follows the complete producer action,

@@ -1573,6 +1573,46 @@ fn settle_trailing_guard(
     }
 }
 
+/// CR 614.1a + CR 608.2c: the `Instead` meaning of an override clause, with the
+/// antecedent its body names declared now, while the chain's clauses are known.
+fn instead_meaning(clauses: &[ClauseIr], def: AbilityDefinition) -> ReplaceMeaningKind {
+    ReplaceMeaningKind::Instead {
+        antecedent: declared_those_tokens_antecedent(clauses, &def),
+        def: Box::new(def),
+    }
+}
+
+/// CR 111.1 + CR 608.2c: the clause a "create N of those tokens instead"
+/// override restates. Its "those tokens" anaphor names the chain's
+/// token-creating instruction, which the chain declares by `ClauseId` here,
+/// at parse time, when exactly one emitted clause creates tokens (Conquest
+/// Mission: the counter clause comes first, then the Borg creation). Two
+/// token-creating clauses leave the anaphor ambiguous, so nothing is declared
+/// and the override keeps its default antecedent.
+fn declared_those_tokens_antecedent(
+    clauses: &[ClauseIr],
+    instead: &AbilityDefinition,
+) -> Option<ClauseId> {
+    let body = if matches!(*instead.effect, Effect::NoOp) {
+        instead.sub_ability.as_deref()?
+    } else {
+        instead
+    };
+    lower::match_create_of_those_tokens(&body.effect)?;
+    let mut producers = clauses
+        .iter()
+        .filter(|clause| {
+            matches!(clause.disposition, ClauseDisposition::Emit { .. })
+                && matches!(
+                    clause.parsed.effect,
+                    Effect::Token { .. } | Effect::CopyTokenOf { .. }
+                )
+        })
+        .map(|clause| clause.id);
+    let producer = producers.next()?;
+    producers.next().is_none().then_some(producer)
+}
+
 /// The replacement body of an [`instead_override_definition`] result: the
 /// carrier's sub when one was built, else the override itself.
 pub(crate) fn instead_override_body_mut(instead: &mut AbilityDefinition) -> &mut AbilityDefinition {
@@ -46833,7 +46873,13 @@ fn parse_effect_chain_ir_body(
                         placeholder_parsed_clause("instead_clause_placeholder"),
                         chunk.boundary_after,
                         ClauseDisposition::ReplaceMeaning {
-                            kind: ReplaceMeaningKind::Instead(instead_def),
+                            kind: ReplaceMeaningKind::Instead {
+                                antecedent: declared_those_tokens_antecedent(
+                                    builder.clauses(),
+                                    &instead_def,
+                                ),
+                                def: instead_def,
+                            },
                         },
                     )
                     .push();
@@ -46915,9 +46961,10 @@ fn parse_effect_chain_ir_body(
                         placeholder_parsed_clause("instead_clause_placeholder"),
                         chunk.boundary_after,
                         ClauseDisposition::ReplaceMeaning {
-                            kind: ReplaceMeaningKind::Instead(Box::new(
+                            kind: instead_meaning(
+                                builder.clauses(),
                                 instead_override_definition(body, selector.clone()),
-                            )),
+                            ),
                         },
                     )
                     .push();
@@ -47473,7 +47520,7 @@ fn parse_effect_chain_ir_body(
                             placeholder_parsed_clause("instead_clause_placeholder"),
                             chunk.boundary_after,
                             ClauseDisposition::ReplaceMeaning {
-                                kind: ReplaceMeaningKind::Instead(Box::new(def)),
+                                kind: instead_meaning(builder.clauses(), def),
                             },
                         )
                         .push();
@@ -50176,7 +50223,7 @@ fn parse_effect_chain_ir_body(
                             !matches!(
                                 c.disposition,
                                 ClauseDisposition::ReplaceMeaning {
-                                    kind: ReplaceMeaningKind::Instead(_)
+                                    kind: ReplaceMeaningKind::Instead { .. }
                                 }
                             )
                         })

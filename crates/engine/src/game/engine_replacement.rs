@@ -429,6 +429,12 @@ fn handle_replacement_choice_inner(
         .pending_replacement
         .as_ref()
         .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::BeginPhase { .. }));
+    // CR 616.1 + CR 614.6: a simultaneous departure (Wrath of God, a
+    // state-based death batch) whose member's consult parked on this choice.
+    // Read before the answer applies, which may stash the chosen
+    // replacement's instructions above the batch.
+    let parked_departure_consult =
+        effects::destroy::parked_departure_consult(state, parked_affected_object_id);
     let result = super::replacement::continue_replacement(state, index, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
@@ -454,6 +460,28 @@ fn handle_replacement_choice_inner(
             state, result, events,
         ));
     }
+    // CR 616.1 + CR 701.8a: the answered consult belongs to a parked
+    // simultaneous departure. Its result joins that batch's queue rather than
+    // being carried out alone, so the members consulted after it still see
+    // every co-departing replacement source; the shared boundary then consults
+    // and delivers the rest. A further choice for the same member re-parks it.
+    let result = match parked_departure_consult {
+        Some(parked)
+            if !matches!(
+                result,
+                super::replacement::ReplacementResult::NeedsChoice(_)
+            ) =>
+        {
+            match effects::destroy::resume_parked_departure_consult(state, parked, result, events) {
+                Ok(()) => {
+                    super::engine::resume_pending_continuation_if_priority(state, events)?;
+                    return Ok(state.waiting_for.clone());
+                }
+                Err(result) => *result,
+            }
+        }
+        _ => result,
+    };
     match result {
         super::replacement::ReplacementResult::Execute(event) => {
             let mut zone_change_object_id = None;

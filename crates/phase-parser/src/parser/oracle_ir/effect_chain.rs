@@ -816,7 +816,15 @@ pub(crate) enum ReplaceMeaningKind {
     /// clause's definition via Cow-swap; tail clauses are stashed in the
     /// override's `else_ability`. This remains distinct from the cross-document-
     /// item `DocumentRelationIr::SelfReplacementOverride` relation.
-    Instead(Box<AbilityDefinition>),
+    ///
+    /// `antecedent` is the clause the override restates when its body names one
+    /// through an anaphor, declared at parse time ("create two of those tokens
+    /// instead" names the chain's token-creating clause — Conquest Mission).
+    /// `None` keeps the override's default antecedent, the first instruction.
+    Instead {
+        def: Box<AbilityDefinition>,
+        antecedent: Option<ClauseId>,
+    },
     /// CR 608.2c: build this clause's def from `parsed` + condition, attach as the
     /// prior def's `sub_ability` (keyword-instead override).
     KeywordOverride,

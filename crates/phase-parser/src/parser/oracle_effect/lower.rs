@@ -3925,7 +3925,7 @@ pub(super) fn rewrite_counter_instead_target_from_antecedent(
 /// Match an `Unimplemented` effect whose description is
 /// "create <N> of those tokens" (optionally with a trailing modifier like
 /// "that are tapped and attacking" or "instead"). Returns the parsed count.
-fn match_create_of_those_tokens(effect: &Effect) -> Option<QuantityExpr> {
+pub(super) fn match_create_of_those_tokens(effect: &Effect) -> Option<QuantityExpr> {
     // The discriminator is the `tag("create ")` + count/anaphor parse below, read off the
     // recorded description; the gap's name is the parser's verdict on which sub-grammar
     // refused the clause and is not a stable key for this rewrite.

@@ -557,7 +557,7 @@ fn try_consume_counter_list_separator(input: &str) -> Option<&str> {
 pub(super) fn try_parse_put_chosen_counter(input: &str) -> Option<Effect> {
     let (recipient_text, _) = (
         opt(alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))),
-        opt(tag("additional ")),
+        opt(alt((tag("additional "), tag("another ")))),
         tag("counter of that kind on "),
     )
         .parse(input.trim())

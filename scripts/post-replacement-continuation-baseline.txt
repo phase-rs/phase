@@ -29,10 +29,11 @@ crates/engine/src/game/effects/attach.rs	deliver_attach	consumer	1
 crates/engine/src/game/effects/deal_damage.rs	apply_damage_to_target	consumer	1
 crates/engine/src/game/effects/deal_damage.rs	resolve_each_source_deals_damage	consumer	1
 crates/engine/src/game/effects/deal_damage.rs	resolve_each_target_power_damage	consumer	1
+crates/engine/src/game/effects/destroy.rs	run_prevented_destruction_continuation	consumer	1
 crates/engine/src/game/effects/draw.rs	draw_through_replacement_with_applied	consumer	1
 crates/engine/src/game/effects/life.rs	drain_substitution_continuation	consumer	1
-crates/engine/src/game/effects/mod.rs	frame_may_apply_with_entry	resolved	1
-crates/engine/src/game/effects/mod.rs	frame_may_apply_with_entry	template	1
+crates/engine/src/game/effects/mod.rs	post_replacement_drain_may_apply_with_entry	resolved	1
+crates/engine/src/game/effects/mod.rs	post_replacement_drain_may_apply_with_entry	template	1
 crates/engine/src/game/effects/mod.rs	resume_resolution_frames	consumer	1
 crates/engine/src/game/effects/scry.rs	resolve	consumer	1
 crates/engine/src/game/effects/token_copy.rs	apply_copy_token_after_replacement_with_created_ids	consumer	1
@@ -45,6 +46,8 @@ crates/engine/src/game/planechase.rs	planeswalk_through_replacements	consumer	1
 crates/engine/src/game/replacement.rs	apply_single_replacement	resolved	1
 crates/engine/src/game/replacement.rs	apply_single_replacement	stash	2
 crates/engine/src/game/replacement.rs	apply_single_replacement	template	5
+crates/engine/src/game/replacement.rs	bind_prevented_destroy_continuation	resolved	1
+crates/engine/src/game/replacement.rs	bind_prevented_destroy_continuation	template	1
 crates/engine/src/game/replacement.rs	continue_replacement_impl	template	1
 crates/engine/src/game/replacement.rs	replace_combat_damage_batch	consumer	1
 crates/engine/src/game/stack.rs	resolve_top	consumer	1

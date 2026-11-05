@@ -936,6 +936,11 @@ pub(crate) fn parse_static_line_inner(
         return defs.into_iter().next();
     }
 
+    // CR 701.21a: "You can't sacrifice Treasure tokens." (Quark, Humble Proprietor).
+    if let Some(def) = parse_cant_sacrifice_static(&tp, &text) {
+        return Some(def);
+    }
+
     if let Some(def) = parse_loyalty_activation_timing_permission(&tp, &text) {
         return Some(def);
     }

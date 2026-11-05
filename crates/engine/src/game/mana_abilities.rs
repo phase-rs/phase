@@ -2106,6 +2106,7 @@ fn legality_simulation_is_redundant(
         // (CR 604.1): a `false` here is precise post-flush, so the two
         // evaluations are provably identical; a `true` declines and simulates.
         && !static_kind_present(state, StaticModeKind::CantPayCost)
+        && !static_kind_present(state, StaticModeKind::CantSacrifice)
 }
 
 pub fn can_activate_mana_ability_now(

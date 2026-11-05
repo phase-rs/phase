@@ -389,6 +389,12 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- "If [filter] would be destroyed, instead remove all <counter> counters
+    //     from it and all damage already dealt to it is healed" (Dr. McCoy) ---
+    if let Some(def) = parse_destroy_instead_remove_counters_heal_replacement(&norm_lower, &text) {
+        return Some(def);
+    }
+
     // --- "If [filter] would die, exile it instead" (non-self replacement) ---
     // CR 614.1a: Replacement effects that exile dying creatures instead of putting
     // them into the graveyard. Subject is a creature filter, not self-reference.
@@ -13881,6 +13887,75 @@ fn parse_damage_redirection_replacement(
     }
 
     None
+}
+
+/// CR 614.1a + CR 701.8a + CR 120.6: "If <filter> would be destroyed, instead
+/// remove all <counter> counters from it and all damage already dealt to it is
+/// healed." (Dr. McCoy, Surly Surgeon.) A destruction replacement scoped to a
+/// permanent filter (not the source): the destruction never happens (CR 614.6),
+/// the counters are removed, and all marked damage is removed. Unlike
+/// regeneration (CR 701.19) it neither taps the permanent nor removes it from
+/// combat. The anaphoric "it" is the object whose destruction is replaced, which
+/// the engine binds as the replacing chain's parent target (`ParentTarget`);
+/// `SelfRef` stays the replacement's own source (see
+/// `bind_prevented_destroy_continuation`).
+fn parse_destroy_instead_remove_counters_heal_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (before, rest) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
+        tag::<_, _, OracleError<'_>>("would be destroyed, instead ").parse(i)
+    })?;
+    let subject = before.trim_end().strip_prefix("if ")?; // allow-noncombinator: structural lead-in strip before the shared type-phrase parser
+    let subject = nom_primitives::parse_article
+        .parse(subject)
+        .map_or(subject, |(rest, _)| rest)
+        .trim();
+    let (filter, subject_rest) = parse_type_phrase_folding(subject);
+    if matches!(&filter, TargetFilter::Any) || !subject_rest.trim().is_empty() {
+        return None;
+    }
+
+    let (rest, _) = tag::<_, _, OracleError<'_>>("would be destroyed, instead ")
+        .parse(rest)
+        .ok()?;
+    let (_, (_, counter_type, _, _, _, _, _)) = all_consuming(terminated(
+        (
+            tag::<_, _, OracleError<'_>>("remove all "),
+            nom_primitives::parse_counter_type_typed,
+            tag(" counters from "),
+            nom_primitives::parse_object_recipient_pronoun,
+            tag(" and all damage already dealt to "),
+            nom_primitives::parse_object_recipient_pronoun,
+            tag(" is healed"),
+        ),
+        opt(char('.')),
+    ))
+    .parse(rest.trim())
+    .ok()?;
+
+    // "Remove all" is the shared RemoveCounter resolver's -1 count sentinel.
+    let mut execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::RemoveCounter {
+            counter_type: Some(counter_type),
+            count: QuantityExpr::Fixed { value: -1 },
+            target: TargetFilter::ParentTarget,
+        },
+    );
+    execute.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::RemoveAllDamage {
+            target: TargetFilter::ParentTarget,
+        },
+    )));
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Destroy)
+            .valid_card(attach_zone_to_filter(filter, Zone::Battlefield))
+            .execute(execute)
+            .description(original_text.to_string()),
+    )
 }
 
 /// CR 614.1a + CR 120.6 + CR 510.2: Wolverine, Fierce Fighter — "If damage
@@ -36676,5 +36751,39 @@ mod parent_controller_population_tests {
                 )));
             }
         }
+    }
+
+    /// CR 614.6 + CR 608.2c: the destroy-instead heal binds "it" to the replaced
+    /// permanent (`ParentTarget`), never `SelfRef`, which is the replacement's
+    /// own source.
+    #[test]
+    fn destroy_instead_remove_counters_heal_binds_it_to_parent_target() {
+        let def = parse_replacement_line(
+            "If another creature you control with a +1/+1 counter on it would be \
+             destroyed, instead remove all +1/+1 counters from it and all damage already \
+             dealt to it is healed.",
+            "Dr. McCoy, Surly Surgeon",
+        )
+        .expect("destroy-instead heal must parse to a replacement");
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        let execute = def.execute.as_deref().expect("execute present");
+        let Effect::RemoveCounter {
+            counter_type,
+            count,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("expected RemoveCounter, got {:?}", execute.effect);
+        };
+        assert_eq!(counter_type, &Some(CounterType::Plus1Plus1));
+        assert_eq!(count, &QuantityExpr::Fixed { value: -1 });
+        assert_eq!(target, &TargetFilter::ParentTarget);
+        let heal = execute.sub_ability.as_deref().expect("heal sub-ability");
+        assert_eq!(
+            &*heal.effect,
+            &Effect::RemoveAllDamage {
+                target: TargetFilter::ParentTarget
+            }
+        );
     }
 }

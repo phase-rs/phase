@@ -987,6 +987,19 @@ fn check_lethal_damage(
     perform_creature_deaths(state, events, any_performed, &to_die);
 }
 
+/// CR 704.3 + CR 704.5g: a state-based death redirected back to the
+/// battlefield keeps no lethal damage (the degenerate self-redirect guard the
+/// one-at-a-time path applies too). Run by a simultaneous death batch's
+/// completion over the members whose moves it carried out.
+pub(crate) fn settle_redirected_state_based_deaths(state: &mut GameState, delivered: &[ObjectId]) {
+    for object_id in delivered {
+        if let Some(obj) = live_battlefield_object_mut(state, object_id) {
+            obj.damage_marked = 0;
+            obj.dealt_deathtouch_damage = false;
+        }
+    }
+}
+
 fn perform_creature_deaths(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -994,141 +1007,46 @@ fn perform_creature_deaths(
     to_die: &[CreatureDeathSba],
 ) {
     // CR 704.3 + CR 614.6: zero-toughness and lethal-damage SBAs are
-    // simultaneous. Consult every graveyard move (and, for lethal damage, its
-    // destruction) while the complete co-dying set is still present, then
-    // deliver the approved moves. A static die-exile replacement on a creature
-    // that is itself dying (Etching of Kumano) must still be able to replace
-    // the other creature's death.
-    //
-    // A replacement consult is not pure: applying an earlier one-shot can mark
-    // it consumed before a later object surfaces a CR 616.1 ordering choice.
-    // Keep a transaction snapshot for this multi-object path and, on a pause,
-    // restore both state and emitted events before falling back to the safe
-    // sequential path below. There, every consumed replacement is delivered
-    // before the later prompt is parked; no approved move can be dropped.
-    let co_dying_replacement_source = to_die.iter().any(|death| {
-        state
-            .objects
-            .get(&death.object_id())
-            .is_some_and(|obj| !obj.replacement_definitions.is_empty())
-    });
-    if to_die.len() > 1 && co_dying_replacement_source {
-        let snapshot = state.clone();
-        let events_start = events.len();
-        let mut deliveries: Vec<(ObjectId, Option<ObjectId>, Option<ApprovedZoneChange>, bool)> =
-            Vec::with_capacity(to_die.len());
-        let mut paused = false;
-
-        for &death in to_die {
-            let id = death.object_id();
-            if !death.is_destroy() {
-                let proposed =
-                    ProposedEvent::zone_change(id, Zone::Battlefield, Zone::Graveyard, None);
-                match replacement::replace_event(state, proposed, events) {
-                    ReplacementResult::Execute(zone_event) => {
-                        let approved =
-                            ApprovedZoneChange::approve_post_replacement(zone_event).ok();
-                        deliveries.push((id, None, approved, false));
-                    }
-                    ReplacementResult::Prevented => deliveries.push((id, None, None, false)),
-                    ReplacementResult::NeedsChoice(_) => {
-                        paused = true;
-                        break;
-                    }
-                }
-                *any_performed = true;
-                continue;
-            }
-
-            let proposed = ProposedEvent::Destroy {
-                object_id: id,
-                source: None,
-                cant_regenerate: false,
-                applied: HashSet::new(),
-            };
-
-            match replacement::replace_event(state, proposed, events) {
-                ReplacementResult::Execute(ProposedEvent::Destroy {
-                    object_id, source, ..
-                }) => {
-                    let zone_proposed = ProposedEvent::zone_change(
-                        object_id,
-                        Zone::Battlefield,
-                        Zone::Graveyard,
-                        source,
-                    );
-                    match replacement::replace_event(state, zone_proposed, events) {
-                        ReplacementResult::Execute(zone_event) => {
-                            let approved =
-                                ApprovedZoneChange::approve_post_replacement(zone_event).ok();
-                            deliveries.push((object_id, source, approved, true));
-                        }
-                        ReplacementResult::Prevented => {
-                            deliveries.push((object_id, source, None, true));
-                        }
-                        ReplacementResult::NeedsChoice(_) => {
-                            paused = true;
-                            break;
-                        }
-                    }
-                    *any_performed = true;
-                }
-                ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
-                    *any_performed = true;
-                }
-                ReplacementResult::NeedsChoice(_) => {
-                    paused = true;
-                    break;
-                }
-            }
-        }
-
-        if !paused {
-            let mut performed_ids = Vec::with_capacity(deliveries.len());
-            for (object_id, source, approved, destroyed) in deliveries {
-                if let Some(approved) = approved {
-                    let ctx = DeliveryCtx {
-                        source_id: source,
-                        exile_links: ExileLinkSpec::default(),
-                        drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                        library_placement: None,
-                    };
-                    if let ZoneDeliveryResult::NeedsChoice(_) =
-                        zone_pipeline::deliver(state, approved, ctx, events)
-                    {
-                        return;
-                    }
-                    if let Some(obj) = state.objects.get_mut(&object_id) {
-                        if obj.zone == Zone::Battlefield {
-                            obj.damage_marked = 0;
-                            obj.dealt_deathtouch_damage = false;
-                        }
-                    }
-                }
-                if destroyed {
-                    // CR 704.5g / CR 704.5h: a state-based destruction has no destroying source.
-                    events.push(GameEvent::CreatureDestroyed {
-                        object_id,
-                        source_id: None,
-                    });
-                }
-                performed_ids.push(object_id);
-            }
-            zones::mark_simultaneous_departures(
-                events,
-                &zones::departed_subset(state, &performed_ids),
-            );
-            return;
-        }
-
-        *state = snapshot;
-        events.truncate(events_start);
+    // simultaneous. When a co-dying creature is the source of a replacement
+    // that applies to another one's death (Etching of Kumano, Kalitas, Dr.
+    // McCoy), consult every death while the whole set is present, then deliver
+    // them. A choice on the way parks the rest of the batch with each member's
+    // consulted move and replacing instructions, so it resumes under the same
+    // replacement authority instead of re-deriving the deaths after a
+    // co-dying source has gone.
+    use crate::game::effects::destroy::{
+        co_departing_replacement_applies, depart_simultaneously, SimultaneousDeparture,
+    };
+    use crate::types::game_state::{SimultaneousDepartureMember, SimultaneousDepartureOwner};
+    let members: Vec<_> = to_die
+        .iter()
+        .map(|&death| SimultaneousDepartureMember {
+            object_id: death.object_id(),
+            departure: if death.is_destroy() {
+                SimultaneousDeparture::Destroy
+            } else {
+                SimultaneousDeparture::PutIntoGraveyard
+            },
+        })
+        .collect();
+    // CR 704.5g / CR 704.5h: a state-based destruction has no destroying source.
+    if members.len() > 1 && co_departing_replacement_applies(state, &members, None, false) {
+        *any_performed = true;
+        let _ = depart_simultaneously(
+            state,
+            &members,
+            SimultaneousDepartureOwner::StateBasedDeaths,
+            None,
+            false,
+            events,
+        );
+        return;
     }
 
-    // CR 701.19b: Route a single death (or a rolled-back, choice-bearing batch)
-    // through the replacement pipeline so regeneration shields can intercept
-    // destruction. The synchronous multi-object path above keeps co-dying
-    // replacement sources alive through all consultations.
+    // CR 701.19b: Route a single death (or a batch with no co-dying replacement
+    // source) through the replacement pipeline so regeneration shields can
+    // intercept destruction. With no co-dying source, each death's
+    // replacements are consulted while their sources are still present.
     let mut performed_ids = Vec::new();
     for &death in to_die {
         let id = death.object_id();
@@ -1252,6 +1170,14 @@ fn perform_creature_deaths(
             ReplacementResult::Prevented => {
                 // CR 701.19b: Regeneration prevented destruction — still counts as SBA performed.
                 *any_performed = true;
+                if let Some(waiting_for) =
+                    crate::game::effects::destroy::run_prevented_destruction_continuation(
+                        state, events,
+                    )
+                {
+                    state.waiting_for = waiting_for;
+                    return;
+                }
             }
             ReplacementResult::NeedsChoice(player) => {
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);

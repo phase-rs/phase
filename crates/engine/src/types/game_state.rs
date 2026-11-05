@@ -5026,6 +5026,159 @@ pub struct PendingDebugCardEntries {
     pub remaining: u32,
 }
 
+/// How one member of a simultaneous departure leaves the battlefield.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SimultaneousDeparture {
+    /// CR 701.8a: destroyed. The destruction is consulted, then its graveyard
+    /// move.
+    Destroy,
+    /// CR 704.5f: put into its owner's graveyard without being destroyed, so
+    /// only the graveyard move is consulted.
+    PutIntoGraveyard,
+}
+
+/// One announced member of a simultaneous departure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimultaneousDepartureMember {
+    pub object_id: ObjectId,
+    pub departure: SimultaneousDeparture,
+}
+
+/// What a consulted member's departure turned out to be, once its
+/// replacements applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DepartureCause {
+    /// CR 701.8a: the member is destroyed; its delivery publishes
+    /// `CreatureDestroyed`.
+    Destruction,
+    /// CR 704.5f: put into the graveyard without being destroyed, or CR 614.6:
+    /// a destruction replaced outright by a move elsewhere. Not a destruction.
+    Move,
+}
+
+/// Who holds the replacing instructions a member's consult stashes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DepartureRiderCustody {
+    /// CR 614.6: each member's stashed instructions are detached and run with
+    /// that member's own delivery.
+    #[default]
+    PerMember,
+    /// A rider was already pending for an outer event when the batch began. The
+    /// batch leaves the pending drain in place: it neither detaches it nor runs
+    /// it out of turn.
+    OuterPending,
+}
+
+/// Which replacement consult of a member is in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SimultaneousDepartureConsultStep {
+    /// CR 701.8a + CR 614.6: the destruction itself.
+    Destruction,
+    /// CR 614.6: the graveyard move, of a destruction or of a CR 704.5f death.
+    GraveyardMove {
+        source: Option<ObjectId>,
+        cause: DepartureCause,
+    },
+}
+
+/// One member's consulted departure, held until every member is consulted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueuedSimultaneousDeparture {
+    pub object_id: ObjectId,
+    /// CR 400.7: the battlefield object that was consulted. A replacing
+    /// instruction run for an earlier member (Crackling Emergence's "sacrifice
+    /// this Aura") may already have moved it, and a new object is not the one
+    /// this departure was consulted for.
+    pub binding: ObjectIdentityBinding,
+    /// The destroying source, carried onto the delivery and `CreatureDestroyed`.
+    pub source: Option<ObjectId>,
+    /// The approved zone change, or `None` when the graveyard move was
+    /// prevented.
+    pub zone_event: Option<ProposedEvent>,
+    /// Whether the departure is a destruction (emits `CreatureDestroyed`).
+    pub cause: DepartureCause,
+    /// CR 614.6: the replacing instructions the consult stashed for this
+    /// member (Kalitas's "create a 2/2 black Zombie"), run as part of its own
+    /// delivery. Held here because the pipeline keeps one pending rider: a
+    /// second member's would be discarded while the first one waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rider: Option<PostReplacementDrain>,
+}
+
+/// Where a parked simultaneous departure stopped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SimultaneousDepartureStage {
+    /// CR 616.1: a member's consult surfaced a replacement choice; the parked
+    /// `PendingReplacement` is that member's. Its answer is recorded into the
+    /// queue (never delivered on its own), so every member is still consulted
+    /// while the whole set is present.
+    Consulting {
+        member: SimultaneousDepartureMember,
+        binding: ObjectIdentityBinding,
+        step: SimultaneousDepartureConsultStep,
+    },
+    /// CR 614.6 + CR 608.2c: a member's delivery (its move, or the replacing
+    /// instructions run with it) surfaced a choice. The delivery itself
+    /// finishes through that choice's own owner; the batch then records the
+    /// member and delivers the rest. Its rider has been handed to the delivery.
+    Delivering {
+        member: Box<QueuedSimultaneousDeparture>,
+    },
+}
+
+/// The logical owner whose completion a simultaneous departure finishes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SimultaneousDepartureOwner {
+    /// CR 701.8a: a destroy instruction ("destroy all creatures", "destroy
+    /// them"). Completion stamps its co-departures, publishes what it destroyed
+    /// as the "destroyed this way" set for the instructions after it
+    /// (CR 608.2c), and publishes the instruction's `EffectResolved`.
+    Destruction { producer: Box<ResolvedAbility> },
+    /// CR 704.3 + CR 704.5f / CR 704.5g / CR 704.5h: one state-based-action
+    /// death batch. Completion
+    /// settles a death redirected back to the battlefield and stamps the
+    /// co-departures.
+    StateBasedDeaths,
+}
+
+/// CR 614.1a + CR 614.6 + CR 616.1 + CR 704.3: a simultaneous departure (a
+/// "destroy all" instruction, a state-based-action death batch) parked on a
+/// player's choice. Holds every member not yet consulted, every consulted
+/// member's approved move with its own replacing instructions, the member
+/// whose consult or delivery is in flight, and the logical owner, so the batch
+/// resumes exactly where it stopped and every member's departure keeps the
+/// replacement authority it was consulted under.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingSimultaneousDeparture {
+    pub owner: SimultaneousDepartureOwner,
+    /// The destroying source, if any (none for a state-based action).
+    pub source: Option<ObjectId>,
+    /// Whether the destruction "can't be regenerated" (Wrath of God).
+    pub cant_regenerate: bool,
+    /// Every announced member, for the co-departure stamp (CR 603.10a).
+    pub announced: Vec<ObjectId>,
+    /// Members not yet consulted, in announcement order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unconsulted: Vec<SimultaneousDepartureMember>,
+    /// Consulted members awaiting delivery, in consult order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued: Vec<QueuedSimultaneousDeparture>,
+    /// The member whose consult or delivery is in flight, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<SimultaneousDepartureStage>,
+    /// Members whose (possibly redirected) zone change was carried out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivered: Vec<ObjectId>,
+    /// Who holds the replacing instructions each consult stashes.
+    #[serde(default)]
+    pub rider_custody: DepartureRiderCustody,
+    /// Events the batch produced before it paused. They stay hidden until the
+    /// whole departure settles, so one co-departure batch is observable
+    /// (CR 603.10a).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_events: Vec<GameEvent>,
+}
+
 /// CR 616.1: Which pausing primitive of an `EachPlayerCopyChosen` per-player
 /// step is currently mid-flight, so the drain resumes at the right point
 /// (neither re-reading a stale token nor double-placing counters).
@@ -14088,6 +14241,7 @@ pub(crate) fn live_return_result_occurrences(
             | ResolutionFrame::CounterAdditions(_)
             | ResolutionFrame::CopyToken(_)
             | ResolutionFrame::DebugCardEntries(_)
+            | ResolutionFrame::SimultaneousDeparture(_)
             | ResolutionFrame::EachPlayerCopyChosen(_)
             | ResolutionFrame::ChooseOneOf(_)
             | ResolutionFrame::VoteBallot(_)
@@ -14258,6 +14412,7 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             | ResolutionFrame::CounterAdditions(_)
             | ResolutionFrame::CopyToken(_)
             | ResolutionFrame::DebugCardEntries(_)
+            | ResolutionFrame::SimultaneousDeparture(_)
             | ResolutionFrame::EachPlayerCopyChosen(_)
             | ResolutionFrame::ChooseOneOf(_)
             | ResolutionFrame::VoteBallot(_)
@@ -16776,6 +16931,7 @@ impl PersistedGameState {
             | ResolutionFrame::CounterAdditions(_)
             | ResolutionFrame::CopyToken(_)
             | ResolutionFrame::DebugCardEntries(_)
+            | ResolutionFrame::SimultaneousDeparture(_)
             | ResolutionFrame::EachPlayerCopyChosen(_)
             | ResolutionFrame::ChooseOneOf(_)
             | ResolutionFrame::VoteBallot(_)
@@ -27594,6 +27750,7 @@ fn validate_restored_attack_authority(
             | ResolutionFrame::CounterAdditions(_)
             | ResolutionFrame::CopyToken(_)
             | ResolutionFrame::DebugCardEntries(_)
+            | ResolutionFrame::SimultaneousDeparture(_)
             | ResolutionFrame::EachPlayerCopyChosen(_)
             | ResolutionFrame::VoteBallot(_)
             | ResolutionFrame::CoinFlip(_)
@@ -28403,6 +28560,19 @@ impl PostReplacementDrainStack {
         match self.drains.last()?.status {
             DrainStatus::Dispatching => self.drains.pop(),
             DrainStatus::Ready(_) | DrainStatus::Paused => None,
+        }
+    }
+
+    /// CR 614.6: detach the innermost drain if its continuation has not run
+    /// yet, so a caller that consults several sibling events before
+    /// delivering any of them can keep each event's rider beside its own
+    /// queued delivery instead of letting [`ResidentDrainPolicy::KeepResident`]
+    /// discard the later ones. A `Dispatching` or `Paused` resident is live
+    /// work and is never detached.
+    pub fn take_ready_resident(&mut self) -> Option<PostReplacementDrain> {
+        match self.drains.last()?.status {
+            DrainStatus::Ready(_) => self.drains.pop(),
+            DrainStatus::Dispatching | DrainStatus::Paused => None,
         }
     }
 
@@ -30310,6 +30480,37 @@ impl GameState {
             .insert_debug_card_entries_parent_at_child_boundary(pending, child_stack_start)
     }
 
+    /// Returns the parked simultaneous departure only when its typed frame
+    /// owns the stack top.
+    pub fn active_simultaneous_departure(&self) -> Option<&PendingSimultaneousDeparture> {
+        self.resolution_stack.active_simultaneous_departure()
+    }
+
+    /// Consume exactly the active simultaneous departure. A buried one is a
+    /// parent waiting on its child, not a fallback.
+    pub fn take_active_simultaneous_departure(
+        &mut self,
+    ) -> Result<Option<PendingSimultaneousDeparture>, ResolutionStackError> {
+        self.resolution_stack.take_active_simultaneous_departure()
+    }
+
+    /// Park a simultaneous departure: below the exact child stack its current
+    /// consult or delivery raised when it raised one, otherwise as the active
+    /// frame beside a frameless prompt (a parked `PendingReplacement`).
+    pub fn park_simultaneous_departure(
+        &mut self,
+        pending: PendingSimultaneousDeparture,
+        child_stack_start: ChildStackDepth,
+    ) {
+        if self.resolution_stack.capture_child_boundary() > child_stack_start {
+            self.resolution_stack
+                .insert_simultaneous_departure_parent_at_child_boundary(pending, child_stack_start)
+                .expect("simultaneous departure must sit below its member's child stack");
+        } else {
+            self.resolution_stack.push_simultaneous_departure(pending);
+        }
+    }
+
     /// Returns the EachPlayerCopyChosen owner only when its typed frame owns
     /// the stack top.
     pub fn active_each_player_copy_chosen(&self) -> Option<&PendingEachPlayerCopyChosen> {
@@ -31202,6 +31403,19 @@ impl GameState {
             // for the remaining co-arrivers.
             self.clear_completed_active_devour_snapshot();
         }
+    }
+
+    /// CR 614.6: detach the active general drain's ready resident (see
+    /// [`PostReplacementDrainStack::take_ready_resident`]) and retire its frame
+    /// if that left it empty. Reinstall the drain with
+    /// [`Self::install_post_replacement_drain`] just before the event it
+    /// belongs to is delivered.
+    pub fn detach_ready_post_replacement_drain(&mut self) -> Option<PostReplacementDrain> {
+        let drain = self
+            .active_post_replacement_drains_mut()?
+            .take_ready_resident()?;
+        self.remove_empty_active_post_replacement_frame();
+        Some(drain)
     }
 
     /// Removes an exhausted general-drain frame only when it is the active top.
