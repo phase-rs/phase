@@ -164,10 +164,23 @@ fn resolved_node_value(
         + node.else_ability.as_deref().map_or(0.0, |other| {
             resolved_node_value(state, other, scope).min(0.0)
         });
-    if node.optional {
-        total.max(0.0)
+    if !(node.optional || node.optional_for.is_some()) {
+        return total;
+    }
+    // CR 608.2d: whoever makes an optional instruction's choice takes the
+    // reading that favors them — the controller declines a net harm, an
+    // opponent (an "opponent may" grant, or the iterated opponent of a scope)
+    // declines a net gain.
+    let opponent_chooses = node.optional_for.is_some()
+        || node
+            .optional_player
+            .as_ref()
+            .is_some_and(|player| boon_filter_side(player) == BoonTargetSide::Enemy)
+        || scope.is_some_and(|scope| boon_player_filter_side(scope) == BoonTargetSide::Enemy);
+    if opponent_chooses {
+        total.min(0.0)
     } else {
-        total
+        total.max(0.0)
     }
 }
 
@@ -206,6 +219,9 @@ fn resolved_effect_value(
             target: TargetFilter::SelfRef,
             ..
         } => 1.0,
+        // CR 701.17a: milling yourself fills your own graveyard, which is as
+        // often fuel as loss, so it names no direction.
+        Effect::Mill { .. } if side == BoonTargetSide::Holder => 0.0,
         _ => player_impact(
             Some(state),
             Some(node.controller),
@@ -221,21 +237,57 @@ fn resolved_effect_value(
     }
 }
 
-/// Whose side an instruction's recipient is on. The recipient is the engine's
-/// own `Effect::target_filter`; with none, the controller is the default (CR
-/// 608.2c). Inside a per-player iteration, the controller roles name the
-/// iterated player (CR 109.5). A parent-target anaphor is bound only at
-/// resolution, so it names no side here.
+/// Whose side an instruction's recipient is on.
+///
+/// The acting player is the controller, or inside a per-player iteration the
+/// iterated player (CR 109.5 + CR 608.2c). A targetless instruction lands on
+/// them, and so do the controller roles and a "you control" population.
+/// - A sacrifice is always the acting player's own (CR 701.21a): its filter
+///   narrows which permanents, never whose, unless it names the defending
+///   player or an opponent (annihilator, CR 702.86a).
+/// - A mass effect's population (`DamageAll`, `DestroyAll`, `PumpAll`) is read
+///   by whose permanents it covers; one covering everyone's names no side.
+/// - Otherwise the recipient is the engine's own `Effect::target_filter`, read
+///   by the shared side vocabulary. A parent-target anaphor is bound only at
+///   resolution, so it names no side here.
 fn resolved_recipient_side(effect: &Effect, scope: Option<&PlayerFilter>) -> BoonTargetSide {
-    match (effect.target_filter(), scope) {
-        (Some(TargetFilter::Controller | TargetFilter::ScopedPlayer) | None, Some(scope)) => {
-            boon_player_filter_side(scope)
+    let actor = scope.map_or(BoonTargetSide::Holder, boon_player_filter_side);
+    match effect {
+        Effect::Sacrifice { target, .. } => {
+            return population_side(target, actor).unwrap_or(actor);
         }
-        (None, None) => BoonTargetSide::Holder,
-        (Some(TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }), _) => {
+        Effect::DamageAll { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::PumpAll { target, .. } => {
+            return population_side(target, actor).unwrap_or(BoonTargetSide::Unknown);
+        }
+        _ => {}
+    }
+    match effect.target_filter() {
+        None | Some(TargetFilter::Controller | TargetFilter::ScopedPlayer) => actor,
+        Some(TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }) => {
             BoonTargetSide::Unknown
         }
-        (Some(filter), _) => boon_filter_side(filter),
+        Some(filter) => population_side(filter, actor).unwrap_or_else(|| boon_filter_side(filter)),
+    }
+}
+
+/// Whose permanents a `Typed` population names: the acting player's for "you
+/// control", an enemy's for the defending player's or an opponent's, and no
+/// one in particular otherwise (`None`).
+fn population_side(filter: &TargetFilter, actor: BoonTargetSide) -> Option<BoonTargetSide> {
+    let TargetFilter::Typed(typed) = filter else {
+        return None;
+    };
+    match typed.controller {
+        Some(ControllerRef::You | ControllerRef::ScopedPlayer) => Some(actor),
+        // CR 506.2: the defending player is always an opponent of the attacker.
+        Some(
+            ControllerRef::Opponent
+            | ControllerRef::TargetOpponent
+            | ControllerRef::DefendingPlayer,
+        ) => Some(BoonTargetSide::Enemy),
+        _ => None,
     }
 }
 
@@ -6272,6 +6324,36 @@ mod controller_value_tests {
                 // Master of Cruelties: "that player" is an unbound parent target.
                 r#"{"kind":"Spell","effect":{"type":"SetLifeTotal","target":{"type":"ParentTarget"},"amount":{"type":"Fixed","value":1}},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"GenericEffect","static_abilities":[{"mode":"AssignNoCombatDamage","affected":{"type":"SelfRef"},"modifications":[{"type":"AssignNoCombatDamage"}],"condition":null,"affected_zone":null,"effect_zone":null,"active_zones":[],"characteristic_defining":false,"description":null}],"duration":"UntilEndOfTurn","target":null},"cost":null,"sub_ability":null,"duration":"UntilEndOfTurn","description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
                 Reading::Nothing,
+            ),
+            (
+                // Daemogoth Titan: "sacrifice a creature" is your own (CR 701.21a).
+                r#"{"kind":"Spell","effect":{"type":"Sacrifice","target":{"type":"Typed","type_filters":["Creature"],"controller":null,"properties":[]},"count":{"type":"Fixed","value":1}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Harm,
+            ),
+            (
+                // Lesser Gargadon: "sacrifice a land" is your own.
+                r#"{"kind":"Spell","effect":{"type":"Sacrifice","target":{"type":"Typed","type_filters":["Land"],"controller":null,"properties":[]},"count":{"type":"Fixed","value":1}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Harm,
+            ),
+            (
+                // Shard of the Void Dragon: under "each opponent", "you control" is the iterated opponent's.
+                r#"{"kind":"Spell","effect":{"type":"Sacrifice","target":{"type":"Typed","type_filters":["Permanent",{"Non":"Land"}],"controller":"You","properties":[]},"count":{"type":"Fixed","value":1}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"player_scope":{"type":"Opponent"}}"#,
+                Reading::Gain,
+            ),
+            (
+                // Swathcutter Giant: damage to each creature the defending player controls.
+                r#"{"kind":"Spell","effect":{"type":"DamageAll","amount":{"type":"Fixed","value":1},"target":{"type":"Typed","type_filters":["Creature"],"controller":"DefendingPlayer","properties":[]}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Gain,
+            ),
+            (
+                // Sludge Titan: milling yourself names no direction (CR 701.17a).
+                r#"{"kind":"Spell","effect":{"type":"Mill","count":{"type":"Fixed","value":5},"target":{"type":"Controller"},"destination":"Graveyard"},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"ChangeZone","origin":null,"destination":"Hand","target":{"type":"TrackedSetFiltered","id":0,"filter":{"type":"Or","filters":[{"type":"Typed","type_filters":["Creature"],"controller":null,"properties":[]},{"type":"Typed","type_filters":["Land"],"controller":null,"properties":[]}]}},"owner_library":false,"enter_transformed":false,"enter_tapped":false,"enters_attacking":false,"up_to":true},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+                Reading::Nothing,
+            ),
+            (
+                // Harbor Guardian: the defending player may draw, and chooses to (CR 608.2d).
+                r#"{"kind":"Spell","effect":{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":true,"forward_result":false,"player_scope":{"type":"DefendingPlayer"}}"#,
+                Reading::Harm,
             ),
         ] {
             assert_eq!(reading(value_at(json, 20)), expected, "{json}");

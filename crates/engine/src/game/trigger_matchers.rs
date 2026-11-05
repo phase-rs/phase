@@ -2270,31 +2270,36 @@ fn attack_declaration_attacker_matches(
     }
 }
 
-/// CR 508.3a + CR 603.2: whether declaring `attacker` would match the
-/// attacker-side filter of `trigger`, an attack trigger on the functioning
-/// `source` — the per-creature check [`matching_attack_events`] applies to
-/// each declared attacker, for a caller weighing an attack before it is
-/// declared. A player-scope subject ("whenever you attack", CR 508.3d), a
-/// "whenever [player] is attacked" target filter, or an attack-target
-/// restriction ("attacks a player", "attacks the monarch") isn't decided by
-/// the attacker alone, so such a trigger answers false.
-pub fn attack_trigger_matches_attacker(
+/// CR 508.3a + CR 603.2: whether declaring `attacker` as attacking `target`
+/// would match `trigger`, an attack trigger on the functioning `source` — the
+/// per-attacker checks [`matching_attack_events`] applies to each declared
+/// attacker (its attacker-side filter, then its attack-target restriction such
+/// as "attacks a player"), for a caller weighing an attack before it is
+/// declared. A player-scope subject ("whenever you attack", CR 508.3d) or a
+/// "whenever [player] is attacked" filter answers once per declaration rather
+/// than per attacker, so such a trigger answers false.
+pub fn attack_trigger_matches_attack(
     state: &GameState,
     source: &crate::game::game_object::GameObject,
     trigger: &TriggerDefinition,
     attacker: ObjectId,
+    target: crate::game::combat::AttackTarget,
 ) -> bool {
     if trigger
         .valid_source
         .as_ref()
         .is_some_and(|filter| filter.is_player_scope())
         || trigger.valid_target.is_some()
-        || trigger.attack_target_filter.is_some()
     {
         return false;
     }
+    let Some(defending_player) = crate::game::combat::defending_player_for_target(state, target)
+    else {
+        return false;
+    };
     let source_context = super::triggers::trigger_source_context_for_latch(state, source);
     attack_declaration_attacker_matches(trigger, state, attacker, &source_context)
+        && attack_target_matches(trigger, state, target, defending_player, &source_context)
 }
 
 /// CR 508.3d + CR 508.5a: expand one `AttackersDeclared` event into one
