@@ -245,7 +245,7 @@ fn vengeful_archon_activated_x2_prevents_two_to_you() {
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(P0, mana(ManaType::Colorless, 2));
     let archon = scenario
-        .add_creature_from_oracle(P0, "Vengeful Archon", 5, 5, VENGEFUL_ARCHON)
+        .add_creature_from_oracle(P0, "Vengeful Archon", 7, 7, VENGEFUL_ARCHON)
         .id();
 
     let mut runner = scenario.build();
@@ -339,12 +339,16 @@ fn battlefield_medic_where_x_binder_overrides_the_word_x() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let medic = scenario
-        .add_creature_from_oracle(P0, "Battlefield Medic", 1, 2, BATTLEFIELD_MEDIC)
+        .add_creature_from_oracle(P0, "Battlefield Medic", 1, 1, BATTLEFIELD_MEDIC)
+        .with_subtypes(vec!["Human", "Cleric"])
         .id();
     let target = scenario.add_creature(P1, "Shielded", 2, 2).id();
     // CR 107.3c: the binder counts the Clerics on the battlefield at
     // resolution. `with_subtypes` writes both the live and the base card
-    // types, so the activation's layer flush keeps the subtype.
+    // types, so the activation's layer flush keeps the subtype. The board is
+    // the printed Human Cleric Medic itself (it counts itself), two Clerics
+    // under P1, and the non-Cleric 2/2 target: X = 3, while a binder that
+    // counted every creature would read 4.
     for name in ["Cleric One", "Cleric Two"] {
         scenario
             .add_creature(P1, name, 1, 1)
@@ -359,20 +363,25 @@ fn battlefield_medic_where_x_binder_overrides_the_word_x() {
         .resolve();
     assert_priority(&outcome);
 
+    // 4 damage against the X = 3 shield: 3 prevented, 1 marked.
     let mut events = Vec::new();
     deal_damage::resolve(
         runner.state_mut(),
-        &damage_ability(medic, TargetRef::Object(target), 2),
+        &damage_ability(medic, TargetRef::Object(target), 4),
         &mut events,
     )
     .expect("damage event resolves");
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, GameEvent::DamagePrevented { amount: 2, .. })),
-        "the Cleric-count binder must yield a 2-point shield, got {events:?}"
+            .any(|e| matches!(e, GameEvent::DamagePrevented { amount: 3, .. })),
+        "the Cleric-count binder must yield a 3-point shield (the Medic and two other Clerics), got {events:?}"
     );
-    assert_eq!(runner.state().objects[&target].damage_marked, 0);
+    assert_eq!(
+        runner.state().objects[&target].damage_marked,
+        1,
+        "4 damage minus the 3-point shield leaves 1 marked on the target"
+    );
 }
 
 fn walk_prevention_dynamic(ability: &AbilityDefinition, out: &mut Vec<Option<QuantityExpr>>) {

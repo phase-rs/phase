@@ -25666,27 +25666,24 @@ enum ExpectedTarget {
     Unasserted,
 }
 
-/// Collects every `Effect::PreventDamage` node reachable through the
-/// `sub_ability` chain and the modal branches.
+/// Every `Effect::PreventDamage` reachable from ordinary ability roots and
+/// trigger execution roots, as `(amount, amount_dynamic, target)`. Built on
+/// `collect_all_effects`, so it walks exactly what `unimplemented_keys` walks.
 fn collect_prevention_nodes(
-    ability: &AbilityDefinition,
-    out: &mut Vec<(PreventionAmount, Option<QuantityExpr>, TargetFilter)>,
-) {
-    if let Effect::PreventDamage {
-        amount,
-        amount_dynamic,
-        target,
-        ..
-    } = &*ability.effect
-    {
-        out.push((*amount, amount_dynamic.clone(), target.clone()));
-    }
-    if let Some(sub) = &ability.sub_ability {
-        collect_prevention_nodes(sub, out);
-    }
-    for mode in &ability.mode_abilities {
-        collect_prevention_nodes(mode, out);
-    }
+    parsed: &ParsedAbilities,
+) -> Vec<(PreventionAmount, Option<QuantityExpr>, TargetFilter)> {
+    collect_all_effects(parsed)
+        .into_iter()
+        .filter_map(|effect| match effect {
+            Effect::PreventDamage {
+                amount,
+                amount_dynamic,
+                target,
+                ..
+            } => Some((amount, amount_dynamic, target)),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -25814,10 +25811,7 @@ fn x_prevention_class_parses_announced_x_as_dynamic_amount() {
 
         // Reach guard: the prevention clause was represented, not discarded by an
         // upstream guard, and no warning quotes it as unrepresented text.
-        let mut nodes = Vec::new();
-        for ability in &parsed.abilities {
-            collect_prevention_nodes(ability, &mut nodes);
-        }
+        let nodes = collect_prevention_nodes(&parsed);
         assert_eq!(
             nodes.len(),
             expected.len(),
@@ -26014,10 +26008,7 @@ fn x_prevention_unconsumed_quantity_connective_fails_closed() {
     for (name, printed, synthetic, core_types) in cases {
         // Positive reach guard: the printed text publishes the announced-X shield.
         let printed_parsed = parse(printed, name, &[], core_types, &[]);
-        let mut printed_nodes = Vec::new();
-        for ability in &printed_parsed.abilities {
-            collect_prevention_nodes(ability, &mut printed_nodes);
-        }
+        let printed_nodes = collect_prevention_nodes(&printed_parsed);
         assert_eq!(
             printed_nodes.len(),
             1,
@@ -26041,10 +26032,7 @@ fn x_prevention_unconsumed_quantity_connective_fails_closed() {
             "{name}: the unconsumed quantity must be an explicit gap, keys={:?}",
             unimplemented_keys(&parsed)
         );
-        let mut nodes = Vec::new();
-        for ability in &parsed.abilities {
-            collect_prevention_nodes(ability, &mut nodes);
-        }
+        let nodes = collect_prevention_nodes(&parsed);
         assert!(
             nodes.is_empty(),
             "{name}: no one-operand shield may be published, got {nodes:?}"

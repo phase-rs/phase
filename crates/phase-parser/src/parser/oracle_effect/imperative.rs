@@ -29105,6 +29105,15 @@ mod tests {
     /// whose remainder does not open on the prevention damage noun (an
     /// unconsumed "plus X" / "minus X" connective, or the out-of-model
     /// "noncombat damage") is `None`: it never becomes the fallback `Next(1)`.
+    ///
+    /// No printed card prints a counted dynamic prevention other than "the next
+    /// X damage" (Festival of the Guildpact: "Prevent the next X damage that
+    /// would be dealt to you this turn.") or "X of that damage" (Errant Minion /
+    /// Power Leak: "Prevent X of that damage, where X is the amount of mana that
+    /// player paid this way."). The combat-noun, offset, connective and
+    /// noncombat rows are synthetic boundary probes; the nearest printed combat
+    /// form is Decorated Griffin ("{1}{W}: Prevent the next 1 combat damage that
+    /// would be dealt to you this turn.").
     #[test]
     fn prevention_amount_covers_counted_and_blanket_forms() {
         let variable_x = Some(QuantityExpr::Ref {
@@ -29214,6 +29223,10 @@ mod tests {
     /// dealt-by gap for "target creature". The bidirectional gate-off reach guard
     /// (`parent_target_available == false`) lives here too, because
     /// `parse_prevent_effect` is a private test-only function.
+    ///
+    /// No printed card prints a counted (X) prevention dealt by a target source;
+    /// the nearest is Benalish Missionary ("{1}{W}, {T}: Prevent all combat
+    /// damage that would be dealt by target blocked creature this turn.").
     #[test]
     fn unconsumed_prevention_quantity_is_a_receipt_ahead_of_every_emitter() {
         let announced_x = Some(QuantityExpr::Ref {
