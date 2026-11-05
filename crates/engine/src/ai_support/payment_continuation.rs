@@ -1000,11 +1000,14 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
                 PaymentContinuationState::NotAffiliated
             }
         },
-        // CR 601.2h: a Delve commit parked mid-exile still owns the cast's payment root.
+        // CR 601.2h: a Delve or deferred-return commit parked mid-move still owns the
+        // cast's payment root.
         PendingCostMoveResume::Cast {
             pending: Some(pending),
             player,
-            completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
+            completion:
+                PendingCostMoveCompletion::FinalizeDelvedCast { .. }
+                | PendingCostMoveCompletion::ResumeDeferredSpellCommit { .. },
             ..
         } => PaymentContinuationState::Affiliated(root_from_pending_cast(pending, *player)),
         // CR 602.2b: The parked mill leg retains the announced activation's

@@ -24,9 +24,8 @@ use crate::types::game_state::{
     DeferredSpellSacrifice, DistributionUnit, FinalizePrePaymentChecks, GameState,
     ManaAbilityCostParent, ManaAbilityResume, PausedCounterCostRemoval, PayCostKind, PendingCast,
     PendingCostMoveCompletion, PendingCostMoveResume, PendingCounterRemoval,
-    PendingDiscardForCostResume, PendingSacrificeCostCompletion, PrepaidCostMoveStage,
-    PrepaidSpellFinalization, SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot,
-    WaitingFor,
+    PendingDiscardForCostResume, PendingSacrificeCostCompletion, PrepaidSpellFinalization,
+    SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{GiftKind, Keyword};
@@ -3233,13 +3232,10 @@ fn move_cost_objects(
     for (index, &object_id) in chosen.iter().enumerate().skip(start_at_index) {
         let mut request = ZoneMoveRequest::cost(object_id, destination, pending.object_id);
         // CR 406.6: the delve exile is the casting spell's own cost, so a delivered
-        // card is linked to that spell. A deferred return is not an exile.
+        // card is linked to that spell.
         if matches!(
             completion,
-            PendingCostMoveCompletion::FinalizeDelvedCast {
-                stage: PrepaidCostMoveStage::Delve,
-                ..
-            }
+            PendingCostMoveCompletion::FinalizeDelvedCast { .. }
         ) {
             request = request.track_exiled_by_source();
         }
@@ -3451,7 +3447,6 @@ fn finish_cost_object_moves(
         PendingCostMoveCompletion::FinalizeDelvedCast {
             phyrexian_choices,
             pre_payment_checks,
-            stage: PrepaidCostMoveStage::Delve,
         } => resume_prepaid_spell_finalization(
             state,
             player,
@@ -3462,28 +3457,20 @@ fn finish_cost_object_moves(
         )?,
         // CR 601.2h: the deferred returns are paid; the commit continues with
         // the remaining deferred sacrifices, discard and finalization.
-        PendingCostMoveCompletion::FinalizeDelvedCast {
+        PendingCostMoveCompletion::ResumeDeferredSpellCommit {
             phyrexian_choices,
             pre_payment_checks,
-            stage: PrepaidCostMoveStage::DeferredReturns,
-        } => {
-            let pre_payment_checks = pre_payment_checks.ok_or_else(|| {
-                EngineError::InvalidAction(
-                    "deferred returns lost their pre-payment checks".to_string(),
-                )
-            })?;
-            pay_deferred_spell_sacrifices_at_commit(
-                state,
-                player,
-                pending,
-                PendingSacrificeCostCompletion::FinalizeSpell {
-                    phyrexian_choices,
-                    pre_payment_checks,
-                },
-                None,
-                events,
-            )?
-        }
+        } => pay_deferred_spell_sacrifices_at_commit(
+            state,
+            player,
+            pending,
+            PendingSacrificeCostCompletion::FinalizeSpell {
+                phyrexian_choices,
+                pre_payment_checks,
+            },
+            None,
+            events,
+        )?,
     };
     if park_events_after_completion {
         park_cost_payment_triggers_if_paused(
@@ -4113,10 +4100,9 @@ fn pay_deferred_spell_sacrifices_at_commit(
             returns,
             0,
             Zone::Hand,
-            PendingCostMoveCompletion::FinalizeDelvedCast {
+            PendingCostMoveCompletion::ResumeDeferredSpellCommit {
                 phyrexian_choices,
-                pre_payment_checks: Some(pre_payment_checks),
-                stage: PrepaidCostMoveStage::DeferredReturns,
+                pre_payment_checks,
             },
             cost_event_start,
             false,
@@ -4303,7 +4289,6 @@ pub(super) fn pay_delve_after_distribution(
     let completion = PendingCostMoveCompletion::FinalizeDelvedCast {
         phyrexian_choices: None,
         pre_payment_checks: None,
-        stage: PrepaidCostMoveStage::Delve,
     };
     pay_delve_at_commit(state, player, pending, spent, completion, events)
 }
@@ -6055,9 +6040,12 @@ pub(crate) fn resume_counter_cost_removal_payment(
         ),
         PendingCostMoveCompletion::PublishExileTrackedSet
         | PendingCostMoveCompletion::FinalizeCast { .. }
-        | PendingCostMoveCompletion::FinalizeDelvedCast { .. } => Err(EngineError::InvalidAction(
-            "a counter-cost removal root cannot carry a cast finalization".to_string(),
-        )),
+        | PendingCostMoveCompletion::FinalizeDelvedCast { .. }
+        | PendingCostMoveCompletion::ResumeDeferredSpellCommit { .. } => {
+            Err(EngineError::InvalidAction(
+                "a counter-cost removal root cannot carry a cast finalization".to_string(),
+            ))
+        }
     }
 }
 
@@ -14096,7 +14084,6 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 cast_this_way_etb_counter: cast_this_way_etb_counter.clone(),
                 cast_this_way_enters_mods: cast_this_way_enters_mods.clone(),
             })),
-            stage: PrepaidCostMoveStage::Delve,
         };
         if let Some(waiting_for) = pay_delve_at_commit(
             state,

@@ -9104,39 +9104,22 @@ pub enum PendingCostMoveCompletion {
         prepaid_actual_mana_spent: Option<u32>,
     },
     /// CR 601.2h + CR 702.66a: The cast's mana is already paid and `pending`
-    /// carries that payment; once this commit-time cost move settles (the Delve
-    /// exiles, or the deferred returns of a spell cost), continue the commit at
-    /// `stage` with what the first pass already decided.
+    /// carries that payment; once the Delve exiles settle, re-enter the inner
+    /// finalizer with what the first pass already decided.
     FinalizeDelvedCast {
         phyrexian_choices: Option<Vec<ShardChoice>>,
         /// `None` when the first pass had not reached the pre-payment checks.
         pre_payment_checks: Option<Box<FinalizePrePaymentChecks>>,
-        /// Which commit-time move settled. Absent on the wire for Delve, the
-        /// original and default stage.
-        #[serde(default, skip_serializing_if = "PrepaidCostMoveStage::is_delve")]
-        stage: PrepaidCostMoveStage,
     },
-}
-
-/// CR 601.2h: which commit-time cost move of an already-paid spell a
-/// `PendingCostMoveCompletion::FinalizeDelvedCast` root settles, and so where
-/// the commit continues once it has.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PrepaidCostMoveStage {
-    /// CR 702.66a: the Delve exiles; the spell's finalization resumes.
-    #[default]
-    Delve,
-    /// CR 601.2g + CR 601.2h: the permanents a spell cost returns to their
-    /// owners' hands, kept through the mana-ability window; the commit resumes
-    /// with the remaining deferred sacrifices.
-    DeferredReturns,
-}
-
-impl PrepaidCostMoveStage {
-    /// `true` for the default stage; the serde `skip_serializing_if` predicate.
-    pub fn is_delve(&self) -> bool {
-        matches!(self, Self::Delve)
-    }
+    /// CR 601.2g + CR 601.2h: The cast's mana is already paid and `pending`
+    /// carries that payment; the permanents a spell cost returns to their
+    /// owners' hands were kept through the mana-ability window and have now
+    /// moved. Continue the same payment commit with its remaining deferred
+    /// sacrifices, discard and finalization.
+    ResumeDeferredSpellCommit {
+        phyrexian_choices: Option<Vec<ShardChoice>>,
+        pre_payment_checks: Box<FinalizePrePaymentChecks>,
+    },
 }
 
 /// CR 601.2h: What a spell's payment commit decided before its mana was spent.
@@ -26903,6 +26886,9 @@ fn visit_cost_move_completion_chains<'a>(
         } => pre_payment_checks
             .as_deref()
             .map_or(Ok(()), |checks| visit_pre_payment_checks_chains(checks, f)),
+        PendingCostMoveCompletion::ResumeDeferredSpellCommit {
+            pre_payment_checks, ..
+        } => visit_pre_payment_checks_chains(pre_payment_checks, f),
         PendingCostMoveCompletion::FinishPending
         | PendingCostMoveCompletion::CompleteSelectedReturnToHand { .. }
         | PendingCostMoveCompletion::PublishExileTrackedSet => Ok(()),
@@ -58405,7 +58391,6 @@ mod restored_exact_attack_authority_tests {
                         completion: PendingCostMoveCompletion::FinalizeDelvedCast {
                             phyrexian_choices: None,
                             pre_payment_checks: Some(Box::new(pre_payment_checks())),
-                            stage: PrepaidCostMoveStage::Delve,
                         },
                         deferred_cost_events: vec![],
                         departure_record_indices: vec![],

@@ -9670,7 +9670,8 @@ pub(crate) fn drain_pending_cost_move_resume(
                     state.pending_cost_move_resume,
                     Some(
                         PendingCostMoveResume::Cast {
-                            completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
+                            completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. }
+                                | PendingCostMoveCompletion::ResumeDeferredSpellCommit { .. },
                             ..
                         } | PendingCostMoveResume::ManaAbilityPayment { .. }
                             | PendingCostMoveResume::CounterCostRemovalPayment { .. }
