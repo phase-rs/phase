@@ -694,6 +694,19 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::RetargetSpell { new_targets, .. } => {
             bound_list("RetargetSpell.new_targets", new_targets.len())?;
         }
+        // CR 702.106a / CR 702.106f: an agenda names at most two cards; the
+        // reducer validates the exact count, this only bounds the wire payload.
+        GameAction::ChooseSecretAgendaNames { names } => {
+            if names.len() > 2 {
+                return Err(format!(
+                    "ChooseSecretAgendaNames.names has {} entries; at most 2 allowed",
+                    names.len()
+                ));
+            }
+            for (index, name) in names.iter().enumerate() {
+                bound_string(&format!("ChooseSecretAgendaNames.names[{index}]"), name)?;
+            }
+        }
         GameAction::ChooseOption { choice, .. } => {
             bound_string("ChooseOption.choice", choice)?;
         }
