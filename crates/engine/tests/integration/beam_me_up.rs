@@ -1622,6 +1622,12 @@ fn beam_me_up_returned_elf_stays_through_the_mana_window() {
 /// Goblin Electromancer's reduction while the Electromancer chosen for the
 /// return is still on the battlefield; it leaves only when the locked {1}{U}
 /// is paid, so two Islands pay {2}{U} minus {1}.
+///
+/// Only the zone assertion in the mana window discriminates the ordering. The
+/// cost and mana assertions also held when the return was paid at selection:
+/// the total was already computed while the Electromancer was on the
+/// battlefield, and the lock kept it because no cost modifier remained to
+/// recompute it.
 #[test]
 fn beam_me_up_returned_electromancer_keeps_its_cost_reduction() {
     let mut sc = GameScenario::new();
