@@ -1103,6 +1103,55 @@ fn each_target_filter_mut_does_not_visit_shuffle() {
     );
 }
 
+/// CR 608.2c: the player who performs an `ExileTop` is a player slot like the
+/// library owner, so an anaphor rewrite reaches a named subject; the fieldless
+/// controller and library-owner roles stay fieldless.
+#[test]
+fn each_target_filter_mut_visits_exile_top_named_actor() {
+    use crate::types::ability::{LibraryInstructionActor, LibraryPosition};
+
+    let exile_top = |actor| Effect::ExileTop {
+        player: TargetFilter::TriggeringPlayer,
+        count: QuantityExpr::Fixed { value: 1 },
+        position: LibraryPosition::Top,
+        face_down: true,
+        actor,
+    };
+    let rewrite = |mut effect: Effect| {
+        each_target_filter_mut(&mut effect, &mut |f| {
+            if matches!(f, TargetFilter::TriggeringPlayer) {
+                *f = TargetFilter::SelfRef;
+            }
+        });
+        effect
+    };
+
+    assert_eq!(
+        rewrite(exile_top(LibraryInstructionActor::Player {
+            player: TargetFilter::TriggeringPlayer,
+        })),
+        Effect::ExileTop {
+            player: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Top,
+            face_down: true,
+            actor: LibraryInstructionActor::Player {
+                player: TargetFilter::SelfRef,
+            },
+        }
+    );
+    for fieldless in [
+        LibraryInstructionActor::Controller,
+        LibraryInstructionActor::LibraryPlayer,
+    ] {
+        let Effect::ExileTop { player, actor, .. } = rewrite(exile_top(fieldless.clone())) else {
+            unreachable!("the walker keeps the effect variant");
+        };
+        assert_eq!(player, TargetFilter::SelfRef);
+        assert_eq!(actor, fieldless);
+    }
+}
+
 #[test]
 fn player_scope_rewrite_reaches_modal_mode_abilities() {
     let mode = AbilityDefinition::new(
@@ -30958,6 +31007,142 @@ fn bare_copy_it_stays_copy_spell_not_cast_copy() {
         matches!(copy.effect.as_ref(), Effect::CopySpell { .. }),
         "bare 'copy it' must not fuse to CastCopyOfCard, got {:?}",
         copy.effect
+    );
+}
+
+/// CR 707.12 + CR 707.12a: "Copy that card N times. You may cast the copies"
+/// keeps the copy multiplicity on the fused `CastCopyOfCard` as its
+/// `repeat_for`, for a fixed count (Mnemonic Deluge) and a where-X-bound count
+/// (Infinite Diversity) alike. Reverting the Case 1 carry in
+/// `fold_cast_copy_of_card_defs` drops it with the redundant `CopySpell`, so a
+/// single copy is cast.
+#[test]
+fn copy_card_n_times_then_cast_copies_keeps_multiplicity() {
+    let cases = [
+        (
+            "Exile target instant or sorcery card from a graveyard. Copy that card three times. You may cast the copies without paying their mana costs. Exile Mnemonic Deluge.",
+            "fixed",
+        ),
+        (
+            "Exile target instant or sorcery card from your graveyard. Copy that card X times, where X is the number of creature types among non-Borg creatures you control. You may cast the copies without paying their mana costs. Exile Infinite Diversity.",
+            "where-x",
+        ),
+    ];
+    for (text, label) in cases {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let cast_copy = def
+            .sub_ability
+            .as_deref()
+            .expect("card-copy cast sub-ability");
+        assert!(
+            matches!(
+                cast_copy.effect.as_ref(),
+                Effect::CastCopyOfCard {
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0)
+                    },
+                    count: None,
+                    ..
+                }
+            ),
+            "{label}: expected uncapped CastCopyOfCard, got {:?}",
+            cast_copy.effect
+        );
+        match (label, cast_copy.repeat_for.as_ref()) {
+            ("fixed", Some(QuantityExpr::Fixed { value: 3 })) => {}
+            (
+                "where-x",
+                Some(QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::DistinctSubtypes {
+                            restrict: Some(crate::types::card_type::SubtypeSet::Creature),
+                            ..
+                        },
+                }),
+            ) => {}
+            (_, other) => panic!("{label}: unexpected copy multiplicity {other:?}"),
+        }
+        let self_exile = cast_copy
+            .sub_ability
+            .as_deref()
+            .expect("self-exile follows the copy cast");
+        assert!(matches!(
+            self_exile.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+    }
+}
+
+/// CR 107.1a + CR 608.2c: "for every N <things>" is the marker spelling of
+/// "for each N <things>" in a verb's count position — a draw counts complete
+/// groups (Sarek, Federation Ambassador; class: any "<verb> a card for every N").
+#[test]
+fn draw_a_card_for_every_n_counts_complete_groups() {
+    let def = parse_effect_chain(
+        "Draw a card for every five creature types among non-Borg creatures you control.",
+        AbilityKind::Spell,
+    );
+    let Effect::Draw { count, .. } = def.effect.as_ref() else {
+        panic!("expected Draw, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::DivideRounded {
+                divisor: 5,
+                rounding: RoundingMode::Down,
+                inner,
+            } if matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref { qty: QuantityRef::DistinctSubtypes { .. } }
+            )
+        ),
+        "got {count:?}"
+    );
+    let def = parse_effect_chain(
+        "Draw a card for every three cards in your graveyard.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::Draw {
+                count: QuantityExpr::DivideRounded { divisor: 3, .. },
+                ..
+            }
+        ),
+        "got {:?}",
+        def.effect
+    );
+}
+
+/// SHAPE: extending creature-type quantities must leave Svega's unsupported
+/// planeswalker-type for-each activation honestly unparsed, independently of
+/// the other abilities on the card.
+#[test]
+fn svega_planeswalker_type_token_activation_keeps_unparsed_quantity() {
+    let parsed = parse_oracle_text(
+        "Landfall — Whenever a land enters under your control, put a loyalty counter on target planeswalker.\n−2: For each planeswalker type among planeswalkers you control, create a 1/1 Attendee creature token that's all colors.\n−X: Choose an Elspeth, Teferi, Liliana, Chandra, or Garruk planeswalker card name with mana value X. Create a copy of the card with the chosen name. You may cast the copy without paying its mana cost.\nSvega can be your commander.",
+        "Svega, the Unconventional",
+        &[],
+        &["Planeswalker".to_string()],
+        &["Svega".to_string()],
+    );
+    let activation = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(ability.cost, Some(AbilityCost::Loyalty { amount: -2 })))
+        .expect("Svega's printed −2 activation is retained");
+    assert!(
+        matches!(
+            activation.effect.as_ref(),
+            Effect::Unimplemented { name, .. } if name == "unparsed_quantity"
+        ),
+        "the specific −2 activation must fail honestly, got {:?}",
+        activation.effect
     );
 }
 
@@ -96164,4 +96349,134 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
             "reveal-choice return keeps its pre-routing outcome, got {parsed:?} for {line:?}"
         );
     }
+}
+
+/// SHAPE (Vulcan Mind-Meld, verbatim): CR 608.2c + CR 115.1 — the targeted
+/// subject performs the exile from the caster's library; "their library" binds
+/// to that declared player; CR 406.3a — each exiled card's grant binds to its
+/// exiling player; CR 609.4b — the standalone "this way" concession folds onto
+/// that grant.
+#[test]
+fn vulcan_mind_meld_parses_subject_exiles_and_exiler_grant() {
+    let chain = parse_effect_chain(
+        "Target opponent looks at the top card of your library, then exiles it face down. You \
+         look at the top two cards of their library, then exile them face down. For each card \
+         exiled this way, the player who exiled it may play it for as long as it remains exiled. \
+         Mana of any type can be spent to cast spells this way.",
+        AbilityKind::Spell,
+    );
+    let effects = collect_chain_effects(&chain);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+        "{effects:?}"
+    );
+    assert_eq!(effects.len(), 3, "{effects:?}");
+    assert!(
+        matches!(
+            effects[0],
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Player { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        effects[0]
+    );
+    assert!(
+        effects[0]
+            .target_filter()
+            .is_some_and(|filter| !filter.is_context_ref()),
+        "the targeted subject is the declared player target: {:?}",
+        effects[0]
+    );
+    assert!(
+        matches!(
+            effects[1],
+            Effect::ExileTop {
+                player: TargetFilter::DeclaredPlayer { .. },
+                count: QuantityExpr::Fixed { value: 2 },
+                face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                ..
+            }
+        ),
+        "{:?}",
+        effects[1]
+    );
+    assert!(
+        matches!(
+            effects[2],
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    mode: Play,
+                    duration: Duration::Permanent,
+                    mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                    ..
+                },
+                target: TargetFilter::TrackedSet { .. },
+                grantee: PermissionGrantee::ObjectExiler,
+            }
+        ),
+        "{:?}",
+        effects[2]
+    );
+    assert!(chain.repeat_for.is_none());
+    assert!(chain
+        .sub_ability
+        .as_deref()
+        .and_then(|sub| sub.sub_ability.as_deref())
+        .is_some_and(|grant| grant.repeat_for.is_none()));
+}
+
+/// SHAPE: CR 608.2c requires the whole fused look/exile instruction to be
+/// represented. Mind-Meld supplies the printed suffix-free sentence. No verified
+/// printed card combines that exact grammar with the synthetic hatching rider;
+/// the nearest printed forms are Mind-Meld and The Dragon-Kami Reborn's different
+/// "Exile one of them face down with a hatching counter on it" instruction.
+#[test]
+fn fused_subject_look_exile_preserves_or_rejects_the_complete_instruction() {
+    let printed = parse_effect_chain(
+        "Target opponent looks at the top card of your library, then exiles it face down.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        printed.effect.as_ref(),
+        Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+            face_down: true,
+            actor: crate::types::ability::LibraryInstructionActor::Player {
+                player: TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::Opponent),
+                    ..
+                })
+            },
+            ..
+        }
+    ));
+    assert!(printed.sub_ability.is_none());
+
+    // Structural synthetic fixture, not a claimed printed card or counter feature.
+    let fragment = "looks at the top card of your library, then exiles it face down with a hatching counter on it";
+    let ast = super::imperative::parse_search_and_creation_ast(
+        fragment,
+        fragment,
+        &mut ParseContext::default(),
+    )
+    .expect("the fused recognizer must claim even an unsupported tail");
+    let gap = super::imperative::lower_search_and_creation_ast(ast);
+    assert_eq!(gap.unimplemented_description(), Some(fragment));
+
+    let unsupported =
+        parse_effect_chain(&format!("Target opponent {fragment}."), AbilityKind::Spell);
+    assert!(
+        collect_chain_effects(&unsupported).iter().any(|effect| {
+            matches!(effect, Effect::Unimplemented { name, .. } if name == "look_exile_tail")
+        }),
+        "the public chain must retain the honest gap, not fall back to Dig: {unsupported:?}"
+    );
 }

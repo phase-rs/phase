@@ -8732,6 +8732,13 @@ fn parse_event_context_ref_with_ctx<'a>(
         (TargetFilter::TriggeringPlayer, Some(ControllerRef::ParentTargetController)) => {
             TargetFilter::ParentTargetController
         }
+        // CR 608.2c: "that player" after "choose an opponent (at random)"
+        // names the player the `Choose` selected, not the trigger event's
+        // player (Indoraptor, the Perfect Hybrid).
+        (TargetFilter::TriggeringPlayer, Some(scope @ ControllerRef::ChosenPlayer { .. })) => {
+            subject::chosen_player_anaphor_filter(Some(scope))
+                .unwrap_or(TargetFilter::TriggeringPlayer)
+        }
         // CR 608.2c + CR 109.4 + CR 115.1: "that player" after a targeted
         // `Choose` ("target opponent chooses self or others") or a
         // player-typed `TargetOnly` names the ANNOUNCED target — the most
@@ -9570,6 +9577,12 @@ fn parse_effect_clause_with_damage_context(
             );
             let (stripped, unless_pay) =
                 extract_resolution_unless_pay_modifier(&clause_text, player_scope.as_ref());
+            let mut unless_pay = unless_pay;
+            rebind_chosen_player_unless_payer(
+                unless_pay.as_mut(),
+                ctx.relative_player_scope.as_ref(),
+                &stripped,
+            );
             if unless_pay.is_some() {
                 unless_pay_deferred = unless_pay;
                 (None, stripped)
@@ -16968,6 +16981,36 @@ fn parse_per_owner_exiled_this_way(i: &str) -> OracleResult<'_, CardPlayMode> {
     Ok((i, mode))
 }
 
+/// CR 406.3a + CR 608.2c: "[for each card exiled this way, ]the player who
+/// exiled it may play|cast it" (Vulcan Mind-Meld) — each exiled card's grant
+/// binds to the player who performed its exile, not its owner or the
+/// ability's controller (`PermissionGrantee::ObjectExiler`). The distributive
+/// "for each card exiled this way" head names the same per-card binding the
+/// singular "it" pronoun already carries, so it adds no repetition.
+fn parse_object_exiler_play_grant(i: &str) -> OracleResult<'_, CardPlayMode> {
+    let (i, _) = opt(alt((
+        tag("for each card exiled this way, "),
+        tag("for each of those cards, "),
+    )))
+    .parse(i)?;
+    let (i, _) = tag("the player who exiled ").parse(i)?;
+    let (i, _) = alt((tag("it"), tag("that card"))).parse(i)?;
+    let (i, mode) = alt((
+        value(CardPlayMode::Play, tag(" may play ")),
+        value(CardPlayMode::Cast, tag(" may cast ")),
+    ))
+    .parse(i)?;
+    let (i, _) = alt((tag("it"), tag("that card"))).parse(i)?;
+    Ok((i, mode))
+}
+
+/// CR 611.2a + CR 406.3a: Recognizer for [`parse_object_exiler_play_grant`],
+/// consulted before the generic "for each <X>, " repeat peel — the
+/// distributive head is part of the per-card grant, not a repeat count.
+pub(crate) fn is_object_exiler_play_grant(lower: &str) -> bool {
+    parse_object_exiler_play_grant(lower).is_ok()
+}
+
 /// CR 603.2 + CR 109.4: "that creature's controller may play|cast that card|it"
 /// as a whole clause inside a trigger, where "that creature" is the object that
 /// caused the trigger (Curse of Hospitality: "Whenever a creature deals combat
@@ -17010,7 +17053,12 @@ fn try_parse_per_grantee_play_grant(
     let per_owner_mode = parse_per_owner_exiled_this_way(lower)
         .ok()
         .map(|(_, mode)| mode);
-    let grantee = if alt((
+    let exiler_mode = parse_object_exiler_play_grant(lower)
+        .ok()
+        .map(|(_, mode)| mode);
+    let grantee = if exiler_mode.is_some() {
+        crate::types::ability::PermissionGrantee::ObjectExiler
+    } else if alt((
         tag::<_, _, OracleError<'_>>("for each of those cards, its owner may play it"),
         tag("for each of those cards, its owner may cast it"),
         tag("its owner may play it"),
@@ -17067,7 +17115,7 @@ fn try_parse_per_grantee_play_grant(
     } else {
         return None;
     };
-    let mode = per_owner_mode.unwrap_or_else(|| {
+    let mode = per_owner_mode.or(exiler_mode).unwrap_or_else(|| {
         if alt((
             tag::<_, _, OracleError<'_>>("for each of those cards, its owner may cast it"),
             tag("its owner may cast it"),
@@ -17369,6 +17417,9 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
             tag::<_, _, OracleError<'_>>("that card"),
             tag("that spell"),
             tag("those cards"),
+            // CR 608.2c: "the chosen cards" names the cards a preceding choice
+            // selected from the exiled set (Ensign Pavel Chekov).
+            tag("the chosen cards"),
             tag("the cards exiled this way"),
             tag("cards exiled this way"),
             tag("it "),
@@ -17430,12 +17481,12 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         ))
         .parse(tp.lower)
         .is_ok();
-        let mass_anaphor_form = alt((
-            tag::<_, _, OracleError<'_>>("play those cards"),
-            tag("cast those cards"),
-        ))
-        .parse(tp.lower)
-        .is_ok();
+        let mass_anaphor_form = (
+            alt((tag::<_, _, OracleError<'_>>("play "), tag("cast "))),
+            alt((tag("those cards"), tag("the chosen cards"))),
+        )
+            .parse(tp.lower)
+            .is_ok();
         if look_at_play_anaphor_form || mass_anaphor_form {
             // fall through to the grant builder.
         } else {
@@ -26822,6 +26873,15 @@ fn has_player_anaphoric_reference(lower: &str) -> bool {
     .is_some()
 }
 
+/// CR 608.2c: the possessive "their library" — a library-owner anaphor that a
+/// preceding player declaration can bind.
+fn has_their_library_possessive(lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(lower, |input| {
+        tag::<_, _, OracleError<'_>>("their library").parse(input)
+    })
+    .is_some()
+}
+
 /// CR 608.2c: the bare pronoun "they", which `resolve_they_pronoun` spells as the
 /// declared player only when the chain announced exactly one.
 fn has_they_pronoun(lower: &str) -> bool {
@@ -32657,6 +32717,24 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
         Effect::FlipCoins { flipper, .. } if *flipper == TargetFilter::Controller =>
         {
             *flipper = subject_filter;
+        }
+        // CR 608.2c + CR 115.1: "Target opponent looks at the top card of YOUR
+        // library, then exiles it face down" (Vulcan Mind-Meld) — the subject
+        // is not the library's owner, so it is the player who performs the
+        // exile. A subject acting on its own library ("their") keeps the
+        // library-owner reading; only "your library" under a player subject
+        // reaches this arm.
+        Effect::ExileTop {
+            player,
+            actor: actor @ crate::types::ability::LibraryInstructionActor::Controller,
+            ..
+        } if subject_names_player
+            && *player == TargetFilter::Controller
+            && subject_filter != TargetFilter::Controller =>
+        {
+            *actor = crate::types::ability::LibraryInstructionActor::Player {
+                player: subject_filter,
+            };
         }
         // CR 608.2d + CR 109.4 + CR 115.1: "target opponent chooses …" /
         // "target player chooses …" — bind the named chooser so the choice
@@ -39916,10 +39994,34 @@ fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
         // `CastCopyOfCard` both creates and casts the copies — so drop it and
         // keep the count-bearing `CastCopyOfCard`. The `up_to` choice in the
         // resolver carries the "you may cast" optionality, so the def-level
-        // `optional`/`repeat_for` are cleared to mirror the legacy fold.
-        if matches!(&*defs[index + 1].effect, Effect::CastCopyOfCard { .. }) {
+        // `optional` is cleared to mirror the legacy fold.
+        //
+        // CR 707.12 + CR 707.12a: the copy half's multiplicity ("copy that
+        // card three times" — Mnemonic Deluge; "X times, where X is …" —
+        // Infinite Diversity) rides the copy def's `repeat_for`. It is carried
+        // onto the fused `CastCopyOfCard` so each iteration creates one copy of
+        // every source and offers its cast individually (CR 707.12a), instead
+        // of being dropped with the redundant `CopySpell`. Only an uncapped cast
+        // carries it: an "up to N of the copies" cap counts across ALL copies,
+        // which a per-iteration cap cannot express (no printed card combines
+        // the two), so a capped cast keeps the legacy single-pass reading. A
+        // member-driven "for each card exiled this way" loop is not a
+        // multiplicity either: the resolver already covers every tracked-set
+        // member in one pass (the Case 2 rationale), so it is dropped too.
+        if let Effect::CastCopyOfCard { count, .. } = &*defs[index + 1].effect {
+            let member_driven = matches!(
+                defs[index].repeat_for,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. },
+                })
+            );
+            let multiplicity = if count.is_none() && !member_driven {
+                defs[index].repeat_for.take()
+            } else {
+                None
+            };
             defs[index + 1].optional = false;
-            defs[index + 1].repeat_for = None;
+            defs[index + 1].repeat_for = multiplicity;
             defs.remove(index);
             continue;
         }
@@ -40389,7 +40491,6 @@ pub fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mut Targe
         | Effect::Surveil { target, .. }
         | Effect::Dig { player: target, .. }
         | Effect::RevealTop { player: target, .. }
-        | Effect::ExileTop { player: target, .. }
         | Effect::Manifest { target, .. }
         // CR 701.60a: Suspect acts on a target permanent; expose its filter so
         // anaphor rewrites (e.g. self-targeting "Otherwise, suspect it") reach it.
@@ -40399,6 +40500,16 @@ pub fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mut Targe
         // "~ is no longer suspected") reach it.
         | Effect::Unsuspect { target, .. }
         | Effect::TargetOnly { target, .. } => f(target),
+        // CR 608.2c: a named subject that performs the exile is a player slot
+        // like the library owner, so an anaphor rewrite reaches both alike.
+        Effect::ExileTop { player, actor, .. } => {
+            f(player);
+            match actor {
+                crate::types::ability::LibraryInstructionActor::Controller
+                | crate::types::ability::LibraryInstructionActor::LibraryPlayer => {}
+                crate::types::ability::LibraryInstructionActor::Player { player } => f(player),
+            }
+        }
         Effect::PutCounter { target, .. } | Effect::RemoveCounter { target, .. } => f(target),
         Effect::GoadAll { target } => f(target),
         Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => f(target),
@@ -47686,6 +47797,9 @@ fn parse_effect_chain_ir_body(
                 // controls" is a per-opponent choice, not a repeat count; peeling
                 // the prefix would lose the population "that player" refers to.
                 || is_for_each_opponent_choose_controlled(&text.to_lowercase())
+                // CR 608.2c: "for each card exiled this way, the player who
+                // exiled it may play it" is one per-card grant.
+                || is_object_exiler_play_grant(&text.to_lowercase())
             {
                 (None, text, None, None)
             } else if let Some(stripped) = strip_redundant_flip_win_quantifier(&text) {
@@ -48020,6 +48134,11 @@ fn parse_effect_chain_ir_body(
 
         let (text, mut unless_pay) =
             extract_resolution_unless_pay_modifier(&text, player_scope.as_ref());
+        rebind_chosen_player_unless_payer(
+            unless_pay.as_mut(),
+            chain_chosen_player_scope.as_ref(),
+            &text,
+        );
 
         // CR 701.17a + CR 608.2k: Derive the actor performing this chunk's effect
         // from any actor prefix that was just stripped ("you (may) ", "an
@@ -49600,6 +49719,29 @@ fn parse_effect_chain_ir_body(
                 )
                 .unwrap_or(TargetFilter::ParentTarget)
             });
+        }
+        // CR 608.2c + CR 115.1: "You look at the top two cards of THEIR library"
+        // after a clause that announced a player target ("Target opponent looks
+        // at the top card of your library, then exiles it face down" — Vulcan
+        // Mind-Meld). The possessive names that declared player; a bare
+        // `ParentTarget` would instead read the object the previous instruction
+        // handed on (the card it just exiled) and so the wrong library.
+        if chain_has_prior_player_target_referent(builder.clauses())
+            && has_their_library_possessive(&text_lower)
+        {
+            if let Effect::Dig { player, .. } | Effect::ExileTop { player, .. } = &mut clause.effect
+            {
+                if *player == TargetFilter::ParentTarget {
+                    if let Some(declared) = declared_player_reference(
+                        builder.clauses(),
+                        &mut declarations,
+                        &mut chain_declared_groups,
+                        &enclosing_declared_player,
+                    ) {
+                        *player = declared;
+                    }
+                }
+            }
         }
         if chunk.boundary_after != Some(ClauseBoundary::Sentence)
             && !carried_player
@@ -52148,6 +52290,65 @@ fn parse_unless_have_you_draw_cost(after_unless: &str) -> Option<AbilityCost> {
             target: TargetFilter::OriginalController,
         }),
     })
+}
+
+/// CR 608.2c + CR 118.12a: after "choose an opponent at random." the anaphoric
+/// unless-payer "they" names the player that `Choose` selected, not a declared
+/// target slot (which resolves to nobody when none exists). Rebinds through the
+/// single chosen-player anaphor authority.
+///
+/// CR 608.2c: this is a FALLBACK, not an override. A clause that declares its
+/// own player subject ("Target player loses 3 life unless they discard a card")
+/// supplies the NEARER antecedent for the "they", which `TargetFilter::Player`
+/// already binds, so an earlier choice must never capture that payer.
+fn rebind_chosen_player_unless_payer(
+    modifier: Option<&mut UnlessPayModifier>,
+    scope: Option<&ControllerRef>,
+    clause_text: &str,
+) {
+    let Some(modifier) = modifier else {
+        return;
+    };
+    if modifier.payer != TargetFilter::Player {
+        return;
+    }
+    // Only a chain that actually chose a player can supply a competing
+    // antecedent, so the clause scan below runs only for that shape.
+    let Some(chosen) = subject::chosen_player_anaphor_filter(scope) else {
+        return;
+    };
+    if clause_declares_player_target(clause_text) {
+        return;
+    }
+    modifier.payer = chosen;
+}
+
+/// CR 115.1 + CR 608.2c: True when an effect clause declares its own player
+/// target ("target player", "target opponent") — as the subject ("Target player
+/// loses 3 life …") or as a recipient after a verb ("deals 3 damage to target
+/// player"). Either position is the nearer antecedent of a following "they"/
+/// "that player", so anaphor rebinding must not reach past it to a player an
+/// earlier instruction chose.
+///
+/// Scans at word boundaries because a declared recipient sits mid-clause. The
+/// probe requires the target KEYWORD, so a descriptor or anaphoric phrase
+/// ("a player", "that player") never blocks rebinding.
+fn clause_declares_player_target(clause_text: &str) -> bool {
+    let lower = clause_text.to_ascii_lowercase();
+    nom_primitives::scan_at_word_boundaries(&lower, parse_declared_player_target_probe).is_some()
+}
+
+/// CR 115.1: scan probe for [`clause_declares_player_target`]. Delegates the
+/// phrase grammar to the single target parser and the player-containing shape
+/// check to the existing explicit-player-target predicate.
+fn parse_declared_player_target_probe(input: &str) -> OracleResult<'_, ()> {
+    let (filter, rest, syntax) =
+        super::oracle_target::parse_target_with_syntax(input, &mut ParseContext::default());
+    if syntax == TargetSyntax::TargetKeyword && target_filter_is_explicit_player_target(&filter) {
+        Ok((rest, ()))
+    } else {
+        Err(oracle_err(input))
+    }
 }
 
 fn extract_resolution_unless_pay_modifier(
