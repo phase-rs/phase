@@ -11935,7 +11935,7 @@ fn detach_after_player_scope_local_chain(
     }
 }
 
-pub(crate) fn split_player_scope_chain(
+pub fn split_player_scope_chain(
     ability: &ResolvedAbility,
     scope: &PlayerFilter,
 ) -> (ResolvedAbility, Option<Box<ResolvedAbility>>) {
