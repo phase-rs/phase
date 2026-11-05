@@ -1971,12 +1971,24 @@ pub(crate) fn finish_pending_cost_or_cast(
                 });
             }
         }
-        state.pending_cast = Some(Box::new(pending));
-        return enter_payment_step(state, player, None, events);
+        // CR 601.2g: the mana window opens with the spell's tap-payment mode,
+        // exactly as for a cast with nothing kept until the commit.
+        return enter_locked_spell_payment(
+            state,
+            player,
+            pending,
+            AutoPaymentEntry::ThroughPaymentStep,
+            events,
+        );
     }
     if pending.deferred_hand_discard_cost.is_some() {
-        state.pending_cast = Some(Box::new(pending));
-        return enter_payment_step(state, player, None, events);
+        return enter_locked_spell_payment(
+            state,
+            player,
+            pending,
+            AutoPaymentEntry::ThroughPaymentStep,
+            events,
+        );
     }
     // CR 601.2f: carry this cast's declared additional mana costs and any
     // reduction the caster already accepted into the lock seam — the seam
@@ -13419,24 +13431,37 @@ pub(super) fn pay_and_push_adventure(
     lock: CostLockInput,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    // CR 702.51a: Convoke lets players tap creatures to reduce mana cost.
-    // CR 702.126a: Improvise lets players tap artifacts to pay generic mana.
-    // Check for Convoke, Waterbend, or Improvise keyword on the spell.
+    let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+    pending.base_cost = base_cost;
+    pending.casting_variant = casting_variant;
+    pending.casting_permission_index = casting_permission_index;
+    pending.cast_timing_permission = cast_timing_permission;
+    pending.distribute = distribute;
+    pending.origin_zone = origin_zone;
+    pending.payment_mode = payment_mode;
+    // CR 601.2f: the `{X}` route re-derives the whole total in
+    // `apply_post_x_cost_modifiers` once X is concrete. Without these the
+    // re-derivation would drop the declared additional costs and silently
+    // discard the caster's elected reduction order.
+    lock.apply_to(&mut pending);
+    enter_locked_spell_payment(state, player, pending, AutoPaymentEntry::PayNow, events)
+}
+
+/// CR 702.51a + CR 702.126a + CR 702.66a: the tap-payment mode (convoke,
+/// waterbend, improvise or delve) the spell's own or granted keywords give this
+/// cast, offered only while something can pay through it.
+fn eligible_spell_tap_payment_mode(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+) -> Option<ConvokeMode> {
     // CR 702.102b: derive the pre-payment fused hint from the casting variant so a
     // `CastWithKeyword`-granted tap-payment keyword keyed on the combined mana
     // value / colors is seen on a fused split spell before its marker is set.
-    let convoke_mode = super::casting::spell_tap_payment_mode_for(
-        state,
-        player,
-        object_id,
-        casting_variant == CastingVariant::Fuse,
-    );
-    let has_delve = super::casting::spell_has_delve_payment_for(
-        state,
-        player,
-        object_id,
-        casting_variant == CastingVariant::Fuse,
-    );
+    let fused = casting_variant == CastingVariant::Fuse;
+    let convoke_mode = super::casting::spell_tap_payment_mode_for(state, player, object_id, fused);
+    let has_delve = super::casting::spell_has_delve_payment_for(state, player, object_id, fused);
     // Gate on eligible creatures/artifacts being present.
     // CR 702.66a: delve needs at least one fuel card in the caster's graveyard.
     let has_delve_fuel = || {
@@ -13445,7 +13470,7 @@ pub(super) fn pay_and_push_adventure(
             .keys()
             .any(|&id| state.is_delve_fuel_for(player, object_id, id))
     };
-    let convoke_mode = convoke_mode.filter(|mode| {
+    convoke_mode.filter(|mode| {
         (match mode {
             ConvokeMode::Convoke => state
                 .objects
@@ -13461,80 +13486,103 @@ pub(super) fn pay_and_push_adventure(
                 .any(|o| o.is_improvise_eligible(player)),
             ConvokeMode::Delve => has_delve_fuel(),
         }) || (has_delve && has_delve_fuel())
-    });
+    })
+}
+
+/// How an automatic (`CastPaymentMode::Auto`) payment that needs no input is
+/// entered by [`enter_locked_spell_payment`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AutoPaymentEntry {
+    /// An ordinary cast: offer assist and pay at once.
+    PayNow,
+    /// A cast that already committed a sacrifice, return or hand-discard
+    /// selection to its payment commit: the payment step decides, so an
+    /// unpayable or zero total leaves the mana window open rather than
+    /// unwinding the selection (CR 601.2g).
+    ThroughPaymentStep,
+}
+
+/// CR 601.2g + CR 601.2h: the single entry into a spell's mana payment once its
+/// total cost is locked in (CR 601.2f): the ordinary cast and the casts that
+/// keep a sacrifice, return or hand-discard cost until the payment commit.
+/// Opens the mana-ability window with the spell's tap-payment mode (the spell's
+/// own or granted convoke, improvise, waterbend or delve) when the payment
+/// needs input (X, a tap-payment mode, manual payment, or an automatic payment
+/// that needs a mana-ability choice); otherwise pays automatically per `auto`,
+/// keeping sacrificial mana sources for the caster's selection under
+/// `AutoExceptSacrificialMana`.
+fn enter_locked_spell_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    auto: AutoPaymentEntry,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let object_id = pending.object_id;
+    let cost = pending.cost.clone();
+    let payment_mode = pending.payment_mode;
+    let casting_variant = pending.casting_variant;
+    let assist_offerable = pending.assist_state == AssistState::NotOffered;
+    // CR 601.2h + CR 605.3b + CR 616.1: The payment root is established before
+    // probing mana sources, so the probes see the cast's kept sacrifice and
+    // return selections (which no mana ability may consume) and a source-cost
+    // replacement can suspend into this root rather than falling through to
+    // priority.
+    state.pending_cast = Some(Box::new(pending));
+    let convoke_mode = eligible_spell_tap_payment_mode(state, player, object_id, casting_variant);
 
     // Enter the payment step if cost needs player input (X), convoke/waterbend is active,
     // or auto-tap cannot pay the locked cost without additional mana-ability choices.
     // `enter_payment_step` diverts to `ChooseXValue` when the cost has an unchosen X,
     // per CR 601.2f (X chosen before mana is paid).
-    let has_x = cost_has_x(cost);
+    let has_x = cost_has_x(&cost);
     let manual_payment = payment_mode == CastPaymentMode::Manual && cost.mana_value() > 0;
     let auto_payment_needs_input = payment_mode == CastPaymentMode::Auto
         && cost.mana_value() > 0
-        && !super::casting::can_pay_cost_after_auto_tap(state, player, object_id, cost)
-        && super::casting::spell_payment_manual_route(state, player, object_id, cost)
+        && !super::casting::can_pay_cost_after_auto_tap(state, player, object_id, &cost)
+        && super::casting::spell_payment_manual_route(state, player, object_id, &cost)
             == super::casting::ManualPaymentRoute::Feasible;
     if has_x || convoke_mode.is_some() || manual_payment || auto_payment_needs_input {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
-        pending.base_cost = base_cost.clone();
-        pending.casting_variant = casting_variant;
-        pending.casting_permission_index = casting_permission_index;
-        pending.cast_timing_permission = cast_timing_permission;
-        pending.distribute = distribute;
-        pending.origin_zone = origin_zone;
-        pending.payment_mode = payment_mode;
-        // CR 601.2f: the `{X}` route re-derives the whole total in
-        // `apply_post_x_cost_modifiers` once X is concrete. Without these the
-        // re-derivation would drop the declared additional costs and silently
-        // discard the caster's elected reduction order.
-        lock.apply_to(&mut pending);
-        state.pending_cast = Some(Box::new(pending));
         return enter_payment_step(state, player, convoke_mode, events);
     }
-
-    // CR 601.2h + CR 605.3b + CR 616.1: The automatic path must establish its
-    // authoritative payment root before probing mana sources. A source-cost
-    // replacement can suspend either ordinary payment or Phyrexian selection;
-    // retaining this `PendingCast` lets its typed mana resume finish the original
-    // operation rather than falling through to priority.
-    let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
-    pending.base_cost = base_cost;
-    pending.casting_variant = casting_variant;
-    pending.casting_permission_index = casting_permission_index;
-    pending.cast_timing_permission = cast_timing_permission;
-    pending.distribute = distribute;
-    pending.origin_zone = origin_zone;
-    pending.payment_mode = payment_mode;
-    lock.apply_to(&mut pending);
+    // A kept selection's payment step classifies `Auto` and `Manual` itself
+    // (and offers assist); only the sacrificial-mana preference is applied here.
+    if auto == AutoPaymentEntry::ThroughPaymentStep
+        && payment_mode != CastPaymentMode::AutoExceptSacrificialMana
+    {
+        return enter_payment_step(state, player, None, events);
+    }
 
     // CR 702.132a: Assist — the cost is now fully locked (no X / convoke / manual
     // step pending), so before finalizing, a spell with assist and a generic
     // component lets the caster choose another player to help pay it. Stash the
     // pending cast so the assist answer handlers can resume via `enter_payment_step`.
-    if let Some((generic, candidates)) = assist_offer_params(
-        state,
-        player,
-        object_id,
-        cost,
-        casting_variant == CastingVariant::Fuse,
-    ) {
-        pending.assist_state = AssistState::Offered;
-        state.pending_cast = Some(Box::new(pending));
-        return Ok(WaitingFor::AssistChoosePlayer {
+    if assist_offerable {
+        if let Some((generic, candidates)) = assist_offer_params(
+            state,
             player,
-            candidates,
-            max_generic: generic,
-            convoke_mode: None,
-        });
+            object_id,
+            &cost,
+            casting_variant == CastingVariant::Fuse,
+        ) {
+            if let Some(pending) = state.pending_cast.as_mut() {
+                pending.assist_state = AssistState::Offered;
+            }
+            return Ok(WaitingFor::AssistChoosePlayer {
+                player,
+                candidates,
+                max_generic: generic,
+                convoke_mode: None,
+            });
+        }
     }
 
-    state.pending_cast = Some(Box::new(pending));
     if payment_mode == CastPaymentMode::AutoExceptSacrificialMana {
-        let keep_untapped = sacrificial_tap_sources_to_keep(state, player, cost, object_id);
+        let keep_untapped = sacrificial_tap_sources_to_keep(state, player, &cost, object_id);
         auto_tap_non_sacrificial_mana_sources(
             state,
             player,
-            cost,
+            &cost,
             events,
             object_id,
             &keep_untapped,

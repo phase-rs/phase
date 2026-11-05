@@ -25,8 +25,8 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{
-    CastPaymentMode, CastingVariant, CastingVariantChoiceOption, PayCostKind, StackEntryKind,
-    WaitingFor,
+    CastPaymentMode, CastingVariant, CastingVariantChoiceOption, ConvokeMode, PayCostKind,
+    StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -255,6 +255,8 @@ const COUNTERSPELL: &str = "Counter target spell.";
 const LLANOWAR_ELVES: &str = "{T}: Add {G}.";
 const GOBLIN_ELECTROMANCER: &str = "Instant and sorcery spells you cast cost {1} less to cast.";
 const BIRDS_OF_PARADISE: &str = "Flying\n{T}: Add one mana of any color.";
+const INSPIRING_STATUARY: &str = "Nonartifact spells you cast have improvise. (Your artifacts can help cast those spells. Each artifact you tap after you're done activating mana abilities pays for {1}.)";
+const TINKER: &str = "As an additional cost to cast this spell, sacrifice an artifact.\nSearch your library for an artifact card, put that card onto the battlefield, then shuffle.";
 
 fn cost(generic: u32, shards: &[ManaCostShard]) -> ManaCost {
     ManaCost::Cost {
@@ -1887,4 +1889,164 @@ fn beam_me_up_returned_commander_offers_the_command_zone_at_the_commit() {
         runner.state().waiting_for
     );
     assert_eq!(mana_spent_on(&runner, card), 2);
+}
+
+/// Tap `artifact` for improvise through the live mana window's public action.
+fn improvise_with(runner: &mut GameRunner, artifact: ObjectId) {
+    let action = legal_actions(runner.state())
+        .into_iter()
+        .find(|action| {
+            matches!(action, GameAction::TapForConvoke { object_id, .. } if *object_id == artifact)
+        })
+        .unwrap_or_else(|| panic!("{artifact:?} is not offered for improvise"));
+    runner
+        .act(action)
+        .unwrap_or_else(|err| panic!("improvise with {artifact:?}: {err:?}"));
+}
+
+/// R14 (CR 601.2g + CR 702.126a): the kept return does not change how the
+/// mana window opens. Inspiring Statuary gives Final Frontier improvise, so
+/// the window offers the Statuary's tap for {1} and the Forest pays {G}; the
+/// Bears return at the commit.
+#[test]
+fn beam_me_up_mana_window_keeps_a_granted_improvise() {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let card = sorcery_in_graveyard(
+        &mut sc,
+        P0,
+        "Final Frontier",
+        cost(2, &[ManaCostShard::Green]),
+        FINAL_FRONTIER,
+    );
+    let statuary = sc
+        .add_artifact_from_oracle(P0, "Inspiring Statuary", INSPIRING_STATUARY)
+        .id();
+    let forest = sc.add_basic_land(P0, ManaColor::Green);
+    let bears = sc.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    sc.add_card_to_library_top(P0, "Library Card");
+    let mut runner = sc.build();
+    assert!(
+        offers_cast_of(&runner, card),
+        "REACH: improvise pays the {{1}}"
+    );
+
+    let card_id = runner.state().objects[&card].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: card,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Final Frontier with beam me up");
+    select(&mut runner, vec![bears]);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaPayment {
+                convoke_mode: Some(ConvokeMode::Improvise),
+                ..
+            }
+        ),
+        "the mana window carries the granted improvise: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone(&runner, bears), Zone::Battlefield);
+    improvise_with(&mut runner, statuary);
+    activate_for_mana(&mut runner, forest);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the payment commits");
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the cast completes: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone(&runner, card), Zone::Stack);
+    assert!(
+        runner.state().objects[&statuary].tapped,
+        "improvise paid {{1}}"
+    );
+    assert!(
+        runner.state().objects[&forest].tapped,
+        "the Forest paid {{G}}"
+    );
+    assert_eq!(zone(&runner, bears), Zone::Hand, "returned at the commit");
+}
+
+/// R15 (CR 601.2g + CR 702.126a): the same mana window for a kept sacrifice.
+/// Tinker's sacrificed artifact can first be tapped for improvise: two
+/// Inspiring Statuaries pay {2}, an Island pays {U}, then one Statuary is
+/// sacrificed.
+#[test]
+fn tinker_sacrificed_artifact_can_improvise_first() {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let tinker = sc
+        .add_spell_to_hand_from_oracle(P0, "Tinker", false, TINKER)
+        .with_mana_cost(cost(2, &[ManaCostShard::Blue]))
+        .id();
+    let kept = sc
+        .add_artifact_from_oracle(P0, "Inspiring Statuary", INSPIRING_STATUARY)
+        .id();
+    let sacrificed = sc
+        .add_artifact_from_oracle(P0, "Inspiring Statuary", INSPIRING_STATUARY)
+        .id();
+    let island = sc.add_basic_land(P0, ManaColor::Blue);
+    let mut runner = sc.build();
+
+    let card_id = runner.state().objects[&tinker].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: tinker,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Tinker");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                ..
+            }
+        ),
+        "expected the sacrifice prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    select(&mut runner, vec![sacrificed]);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaPayment {
+                convoke_mode: Some(ConvokeMode::Improvise),
+                ..
+            }
+        ),
+        "the mana window carries the granted improvise: {:?}",
+        runner.state().waiting_for
+    );
+    improvise_with(&mut runner, kept);
+    improvise_with(&mut runner, sacrificed);
+    activate_for_mana(&mut runner, island);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the payment commits");
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the cast completes: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone(&runner, tinker), Zone::Stack);
+    assert!(runner.state().objects[&kept].tapped);
+    assert!(runner.state().objects[&island].tapped);
+    assert_eq!(
+        zone(&runner, sacrificed),
+        Zone::Graveyard,
+        "tapped for improvise, then sacrificed"
+    );
 }
