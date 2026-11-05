@@ -48,6 +48,18 @@ import {
   commitFullTerminalDelivery,
   type FullTerminalDelivery,
 } from "../services/fullTerminalResult";
+import {
+  STATE_CODEC_PREPARATION_TIMEOUT_MS,
+  StateCodecSocket,
+  StateCodecPreparationAbortError,
+  prepareStateCodecSession as prepareBoundedStateCodecSession,
+  type StateCodecBootstrap,
+  type StateCodecRecoveryState,
+  type StateCodecSessionProvider,
+} from "../services/stateCodecSocket";
+import type { StateCodecName } from "../services/stateCodecSocket";
+import type { StateCodecSession } from "./state-codec-runtime";
+import { getSharedAdapter } from "./wasm-adapter";
 import type { WireFormat } from "../network/wireEnvelope";
 
 /** Deck data format matching server protocol. */
@@ -205,6 +217,14 @@ export interface NativeSessionAttachment {
 export interface WebSocketAdapterOptions {
   nativeAi?: NativeAiAdapterOptions;
   nativePregame?: NativePregameAdapterOptions;
+  /**
+   * Supplies the negotiated StateCodecV1 decoder session for an attachment.
+   * `undefined` selects the default: none for native sidecar sockets (their
+   * sessions stay snapshot-only), otherwise the tab's shared engine. An
+   * explicit `null` opts out and starts the handshake in the same turn, with
+   * no newly introduced await.
+   */
+  stateCodecSessionProvider?: StateCodecSessionProvider | null;
 }
 
 export class NativeEngineVersionMismatchError extends Error {
@@ -1412,6 +1432,12 @@ export interface ServerInfo {
   publicUrl?: string;
   /** Optional binary JSON envelopes understood by this server. */
   wireFormats?: WireFormat[];
+  /**
+   * Negotiated-delivery capabilities this server offered in `ServerHello`.
+   * Only names this client implements are kept. Absent for servers that
+   * advertise none (lobby brokers, older Full servers).
+   */
+  stateCodecs?: StateCodecName[];
   /** Advertised liveness budget; exceeding it is recorded in diagnostics, never acted on. */
   heartbeat?: { pingIntervalMs: number; silenceBudgetMs: number };
   /** A completion echoes only the command issued by this connection. */
@@ -1658,6 +1684,24 @@ export class WebSocketAdapter implements EngineAdapter {
   private disposed = false;
   // Aborts a handshake still in flight when the adapter is disposed.
   private readonly disposeAbort = new AbortController();
+  /**
+   * Prepared decoder source for this adapter. Resolved once at construction:
+   * native sidecar sockets keep snapshot-only bring-up, everything else gets
+   * the tab's shared engine. `null` means no preparation and no advertisement.
+   */
+  private readonly stateCodecProvider: StateCodecSessionProvider | null;
+  private stateCodecPreparation: AbortController | null = null;
+  /** True while the current attachment is recovering codec-delivered state. */
+  private stateCodecRecovering = false;
+  /**
+   * Application-bootstrap authority for the current attachment. Created fresh
+   * per attach: a surviving snapshot, token or codec baseline never authorizes
+   * a new bootstrap.
+   */
+  private attachmentBootstrap: {
+    socket: PhaseSocketTransport | null;
+    status: StateCodecBootstrap;
+  } | null = null;
   /** A rejected Full identity is terminal for this socket. */
   private sessionIdentityRejected = false;
   /** Set by AiDriverFault: the server permanently rejects every later submission for this game code. */
@@ -1697,6 +1741,14 @@ export class WebSocketAdapter implements EngineAdapter {
     // Keep retrying through the server's reconnect grace; pregame remains terminal.
     this.reconnectPolicy = options.nativeAi ? NATIVE_AI_RECONNECT_POLICY : REMOTE_RECONNECT_POLICY;
     this.maxReconnectAttempts = options.nativePregame ? 0 : this.reconnectPolicy.maxAttempts;
+    // R1: a native sidecar socket (solo/AI/reconnect) keeps snapshot bring-up.
+    // Resolved here, before any attach can await, and the lazy default is only
+    // invoked during an actual attach.
+    this.stateCodecProvider = options.stateCodecSessionProvider !== undefined
+      ? options.stateCodecSessionProvider
+      : this.isNativeSocket()
+        ? null
+        : () => getSharedAdapter().openStateCodecSession();
   }
 
   get gameCode(): string | null {
@@ -1823,6 +1875,80 @@ export class WebSocketAdapter implements EngineAdapter {
     });
   }
 
+  /**
+   * Bounded optional decoder preparation for one attachment. Expiry and
+   * provider failure select snapshot-only delivery; only an abort (dispose)
+   * stops the attachment before it opens a socket.
+   */
+  private async prepareStateCodecSession(signal: AbortSignal): Promise<
+    { kind: "session"; session: StateCodecSession | null } | { kind: "aborted" }
+  > {
+    const provider = this.stateCodecProvider;
+    if (!provider) return { kind: "session", session: null };
+    try {
+      return {
+        kind: "session",
+        session: await prepareBoundedStateCodecSession(
+          provider,
+          signal,
+          STATE_CODEC_PREPARATION_TIMEOUT_MS,
+        ),
+      };
+    } catch (error) {
+      if (error instanceof StateCodecPreparationAbortError) return { kind: "aborted" };
+      return { kind: "session", session: null };
+    }
+  }
+
+  /** Bootstrap status reported to the codec transport for one attachment. */
+  private bootstrapStatus(bootstrap: {
+    socket: PhaseSocketTransport | null;
+    status: StateCodecBootstrap;
+  }): StateCodecBootstrap {
+    // Before the socket is adopted this attachment is the only authority; a
+    // retired socket's binding never authorizes a replacement.
+    if (this.attachmentBootstrap !== bootstrap || this.disposed) return "pending";
+    if (bootstrap.socket !== null && this.ws !== bootstrap.socket) return "pending";
+    return bootstrap.status;
+  }
+
+  /** Genuine GameStarted accepted, after the identity guards and snapshot cache. */
+  private markBootstrapAccepted(): void {
+    const bootstrap = this.attachmentBootstrap;
+    if (!bootstrap) return;
+    if (bootstrap.socket !== null && this.ws !== bootstrap.socket) return;
+    bootstrap.status = "accepted";
+  }
+
+  /**
+   * Codec recovery notification. The command slot is dropped before any
+   * listener can observe the state: `emit` runs synchronously and a listener
+   * may submit, which must be refused while recovery is in progress.
+   */
+  private handleStateCodecRecovery(
+    bootstrap: {
+      socket: PhaseSocketTransport | null;
+      status: StateCodecBootstrap;
+    },
+    state: StateCodecRecoveryState,
+  ): void {
+    if (this.disposed) return;
+    if (this.attachmentBootstrap !== bootstrap) return;
+    if (bootstrap.socket === null || this.ws !== bootstrap.socket) return;
+    if (state === "recovering") {
+      this.stateCodecRecovering = true;
+      const dropped = this.submission.drop();
+      if (dropped) {
+        dropped.reject(
+          new AdapterError("WS_CLOSED", "State delivery interrupted during action", true),
+        );
+        this.emit({ type: "actionPendingChanged", pending: false });
+      }
+      return;
+    }
+    this.stateCodecRecovering = false;
+  }
+
   /** Connect to a local native full server and stop once this socket has a
    * server-issued pregame seat identity. `initialize()` intentionally remains
    * game-start based for normal server sessions. */
@@ -1896,12 +2022,35 @@ export class WebSocketAdapter implements EngineAdapter {
   private async attachSocket(setupFrame: unknown): Promise<void> {
     if (this.disposed) return;
     this.socketOpening = true;
+    this.stateCodecPreparation?.abort();
+    const preparation = new AbortController();
+    this.stateCodecPreparation = preparation;
     let socket: PhaseSocket<PhaseSocketTransport>;
     let diagnostics: SocketDiagnosticObserver | null = null;
+    // Fresh bootstrap authority for this attachment: `pending` until a genuine
+    // GameStarted is accepted by the identity guards below.
+    const bootstrap: { socket: PhaseSocketTransport | null; status: StateCodecBootstrap } = {
+      socket: null,
+      status: "pending",
+    };
+    this.attachmentBootstrap = bootstrap;
+    this.stateCodecRecovering = false;
     try {
+      // Null/native opt-out must not introduce even a microtask before opening.
+      const prepared = this.stateCodecProvider
+        ? await this.prepareStateCodecSession(preparation.signal)
+        : { kind: "session" as const, session: null };
+      if (this.disposed || this.attachmentBootstrap !== bootstrap || prepared.kind === "aborted") {
+        if (prepared.kind === "session") prepared.session?.close();
+        if (this.attachmentBootstrap === bootstrap) this.socketOpening = false;
+        return;
+      }
       socket = await openPhaseSocket(this.serverUrl, {
         socketFactory: this.nativeSocketOptions()?.socketFactory,
         signal: this.disposeAbort.signal,
+        stateCodecSession: prepared.session,
+        stateCodecBootstrap: () => this.bootstrapStatus(bootstrap),
+        onStateCodecRecovery: (state) => this.handleStateCodecRecovery(bootstrap, state),
         onSocketCreated: (raw) => {
           // Diagnostics are best-effort: a failure here must never abort the handshake.
           try {
@@ -1953,7 +2102,7 @@ export class WebSocketAdapter implements EngineAdapter {
     }
     this.socketOpening = false;
     // A handshake that settled before `dispose()` resumes here after it.
-    if (this.disposed) {
+    if (this.disposed || this.attachmentBootstrap !== bootstrap) {
       socket.close();
       return;
     }
@@ -1973,6 +2122,7 @@ export class WebSocketAdapter implements EngineAdapter {
     }
 
     this.ws = socket.ws;
+    bootstrap.socket = socket.ws;
     this._serverInfo = socket.serverInfo;
     this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
     this.startPing();
@@ -2018,6 +2168,9 @@ export class WebSocketAdapter implements EngineAdapter {
     socket.ws.onclose = () => {
       if (this.ws !== socket.ws) return;
       this.ws = null;
+      // The attachment is gone; a retired transport can never keep gating
+      // submissions or report recovered state for its replacement.
+      this.stateCodecRecovering = false;
       if (this.pingInterval) {
         clearInterval(this.pingInterval);
         this.pingInterval = null;
@@ -2127,6 +2280,15 @@ export class WebSocketAdapter implements EngineAdapter {
     // fail fast instead of parking a submission forever.
     if (this.aiDriverFault !== null && this.aiDriverFault.gameCode === this._gameCode) {
       throw new AdapterError("WS_ERROR", this.aiDriverFault.message, false);
+    }
+    // While codec state is being resynced, a new command would be sent into a
+    // stream whose completions are suppressed. Refuse it before it is stamped.
+    if (this.stateCodecRecovering) {
+      throw new AdapterError(
+        AdapterErrorCode.ACTION_NOT_SENT,
+        "State delivery is being recovered; this submission was not sent.",
+        true,
+      );
     }
     if (this.submission.occupied) {
       throw new AdapterError(
@@ -2349,6 +2511,8 @@ export class WebSocketAdapter implements EngineAdapter {
     this.disposed = true;
     this.setSessionLifecycleListeners(false);
     this.disposeAbort.abort();
+    this.stateCodecPreparation?.abort();
+    this.stateCodecPreparation = null;
     this.finishSocketDiagnostics("not-attempted");
     // Native close can follow an error/dispose; its observer removes itself on close.
     this.socketDiagnostics = null;
@@ -2393,6 +2557,8 @@ export class WebSocketAdapter implements EngineAdapter {
     this.reconnectInFlight = false;
     this._serverInfo = null;
     this.receivedGameStarted = false;
+    this.stateCodecRecovering = false;
+    this.attachmentBootstrap = null;
     this.emit({ type: "actionPendingChanged", pending: false });
     this.emit({ type: "latencyChanged", latencyMs: null });
     if (this.gameEnded && !this.terminalCleanupPending) {
@@ -2705,7 +2871,9 @@ export class WebSocketAdapter implements EngineAdapter {
     }
     try {
       ws.send(JSON.stringify(msg));
-      if (!(ws instanceof GzipEnvelopeSocket)) this.socketDiagnostics?.didSend();
+      if (!(ws instanceof GzipEnvelopeSocket) && !(ws instanceof StateCodecSocket)) {
+        this.socketDiagnostics?.didSend();
+      }
       return true;
     } catch (err) {
       this.emit({
@@ -2961,6 +3129,10 @@ export class WebSocketAdapter implements EngineAdapter {
           this.gameStartedResolve = null;
           this.gameStartedReject = null;
         }
+        // The attachment is bootstrapped now: every identity guard above
+        // passed and the snapshot is cached. Recorded before the final emit so
+        // a throwing listener cannot leave a bootstrapped socket pending.
+        this.markBootstrapAccepted();
         // Always an array, never `undefined`: on this transport `undefined`
         // would mean "this transport does not publish", which is false here —
         // an omitted field means the server published none.

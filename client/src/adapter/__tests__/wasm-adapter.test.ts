@@ -22,6 +22,10 @@ import type {
   SubmitResult,
 } from "../types";
 import { AdapterError, AdapterErrorCode } from "../types";
+import {
+  STATE_CODEC_DECODE_TIMEOUT_MS,
+  StateCodecLifecycleError,
+} from "../state-codec-runtime";
 import { PLAYER_ID } from "../../constants/game";
 import { buildGameState, gameStateFactory } from "../../test/factories/gameStateFactory";
 
@@ -39,6 +43,7 @@ const getViewerTransitionSnapshotJs = vi.hoisted(() => vi.fn());
 const setMultiplayerModeJs = vi.hoisted(() => vi.fn());
 const clearGameStateJs = vi.hoisted(() => vi.fn());
 const canonicalCardNamesJs = vi.hoisted(() => vi.fn());
+const stateCodecDecodeJs = vi.hoisted(() => vi.fn());
 
 vi.mock("../main-thread-engine", () => ({
   ensureWasmInit,
@@ -58,6 +63,7 @@ vi.mock("@wasm/engine", () => ({
   set_multiplayer_mode: setMultiplayerModeJs,
   clear_game_state: clearGameStateJs,
   canonicalCardNames: canonicalCardNamesJs,
+  state_codec_decode: stateCodecDecodeJs,
 }));
 
 // Mock EngineWorkerClient to avoid actual Worker creation in tests
@@ -79,6 +85,9 @@ const mockWorkerClient = {
   getCardParseDetails: vi.fn().mockResolvedValue([{ category: "ability" }]),
   getCardRulings: vi.fn().mockResolvedValue([{ date: "2020-01-01", text: "Test" }]),
   canonicalCardNames: vi.fn().mockResolvedValue([]),
+  openStateCodec: vi.fn().mockResolvedValue(1),
+  decodeStateCodec: vi.fn().mockResolvedValue({ kind: "decoded", json: "{}" }),
+  closeStateCodec: vi.fn().mockResolvedValue(undefined),
   query: vi.fn().mockResolvedValue("answer"),
   initializeGame: vi
     .fn()
@@ -1679,5 +1688,256 @@ describe("worker preview envelope", () => {
 
     await expect(pending).resolves.toEqual(answer);
     client.dispose();
+  });
+});
+
+// ── Negotiated state-codec sessions ─────────────────────────────────────
+//
+// Sessions are decoder leases over one engine endpoint. These rows pin
+// ownership: ids are per-open, one close never affects another session or a
+// replacement runtime, and every facade releases only what it opened.
+
+describe("WasmAdapter state-codec sessions", () => {
+  let subject: WasmAdapter;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    subject = new WasmAdapter();
+    getGameStateJs.mockReturnValue(buildGameState());
+    getLegalActionsForViewerJs.mockReturnValue({ actions: [], autoPassRecommended: false });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    subject.dispose();
+  });
+
+  it("binds a lease to its worker session and closes it exactly once", async () => {
+    mockWorkerClient.openStateCodec.mockResolvedValueOnce(41);
+    mockWorkerClient.decodeStateCodec.mockResolvedValueOnce({
+      kind: "decoded",
+      json: '{"type":"Pong"}',
+    });
+    await subject.initialize();
+
+    const session = await subject.openStateCodecSession();
+    expect(session).not.toBeNull();
+    await expect(session!.decode(new Uint8Array([1, 2]))).resolves.toEqual({
+      kind: "decoded",
+      json: '{"type":"Pong"}',
+    });
+    expect(mockWorkerClient.decodeStateCodec).toHaveBeenCalledWith(41, expect.any(Uint8Array));
+
+    session!.close();
+    session!.close();
+    expect(mockWorkerClient.closeStateCodec).toHaveBeenCalledOnce();
+    expect(mockWorkerClient.closeStateCodec).toHaveBeenCalledWith(41);
+    await expect(session!.decode(new Uint8Array([3]))).rejects
+      .toBeInstanceOf(StateCodecLifecycleError);
+  });
+
+  it("disposing fallback facade A preserves facade B's retained baseline", async () => {
+    const sibling = new WasmAdapter();
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    await subject.initialize();
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    await sibling.initialize();
+    const aFree = vi.fn();
+    const bFree = vi.fn();
+    const bClone = { json: () => '{"viewer":"B"}', free: vi.fn() };
+    stateCodecDecodeJs
+      .mockReturnValueOnce({ json: () => '{"viewer":"A"}', free: aFree, clone_handle: vi.fn() })
+      .mockReturnValueOnce({ json: () => '{"viewer":"B"}', free: bFree, clone_handle: () => bClone })
+      .mockImplementationOnce((_frame, baseline) => {
+        // B's second decode must receive B's retained clone, not A or null.
+        expect(baseline).toBe(bClone);
+        return { json: () => '{"viewer":"B","turn":2}', free: vi.fn(), clone_handle: vi.fn() };
+      });
+    try {
+      const first = await subject.openStateCodecSession();
+      const second = await sibling.openStateCodecSession();
+      expect(await first!.decode(new Uint8Array([1]))).toEqual({ kind: "decoded", json: '{"viewer":"A"}' });
+      expect(await second!.decode(new Uint8Array([2]))).toEqual({ kind: "decoded", json: '{"viewer":"B"}' });
+      subject.dispose();
+      expect(await second!.decode(new Uint8Array([3]))).toEqual({ kind: "decoded", json: '{"viewer":"B","turn":2}' });
+      expect(aFree).toHaveBeenCalledOnce();
+      expect(bFree).toHaveBeenCalledOnce();
+      await expect(first!.decode(new Uint8Array([4]))).rejects.toBeInstanceOf(StateCodecLifecycleError);
+    } finally {
+      sibling.dispose();
+    }
+  });
+
+  it("releases this facade's leases on dispose", async () => {
+    mockWorkerClient.openStateCodec.mockResolvedValueOnce(1).mockResolvedValueOnce(2);
+    await subject.initialize();
+    await subject.openStateCodecSession();
+    await subject.openStateCodecSession();
+
+    subject.dispose();
+
+    expect(mockWorkerClient.closeStateCodec).toHaveBeenCalledTimes(2);
+    expect(mockWorkerClient.closeStateCodec).toHaveBeenCalledWith(1);
+    expect(mockWorkerClient.closeStateCodec).toHaveBeenCalledWith(2);
+  });
+
+  it("closes a session that opens after disposal won the race", async () => {
+    let finishOpen!: (sessionId: number) => void;
+    mockWorkerClient.openStateCodec.mockReturnValueOnce(
+      new Promise<number>((resolve) => { finishOpen = resolve; }),
+    );
+    await subject.initialize();
+
+    const opening = subject.openStateCodecSession();
+    await vi.waitFor(() => expect(mockWorkerClient.openStateCodec).toHaveBeenCalledOnce());
+    subject.dispose();
+    finishOpen(7);
+
+    await expect(opening).resolves.toBeNull();
+    expect(mockWorkerClient.closeStateCodec).toHaveBeenCalledWith(7);
+  });
+
+  it("opens and decodes through the shared main-thread fallback", async () => {
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    const free = vi.fn();
+    stateCodecDecodeJs.mockReturnValue({
+      json: () => '{"type":"StateUpdate"}',
+      free,
+      clone_handle: vi.fn(),
+    });
+    await subject.initialize();
+    expect(subject.getEngineClient()).toBeNull();
+
+    const session = await subject.openStateCodecSession();
+    expect(session).not.toBeNull();
+    await expect(session!.decode(new Uint8Array([1]))).resolves.toEqual({
+      kind: "decoded",
+      json: '{"type":"StateUpdate"}',
+    });
+    expect(stateCodecDecodeJs).toHaveBeenCalledOnce();
+    session!.close();
+    await expect(session!.decode(new Uint8Array([2]))).rejects
+      .toBeInstanceOf(StateCodecLifecycleError);
+  });
+
+  it("applies the caller-visible decode deadline on the main-thread fallback", async () => {
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    stateCodecDecodeJs.mockReturnValue({ json: () => "{}", free: vi.fn(), clone_handle: vi.fn() });
+    await subject.initialize();
+    const session = await subject.openStateCodecSession();
+
+    // Block the shared runtime queue behind one never-settling engine read.
+    let releaseQueue!: (state: unknown) => void;
+    getGameStateJs.mockReturnValueOnce(new Promise((resolve) => { releaseQueue = resolve; }));
+    void subject.getState();
+
+    vi.useFakeTimers();
+    // Observe before the timer fires: the rejection lands inside the advance.
+    const outcome = session!.decode(new Uint8Array([1])).then(
+      () => "resolved",
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(STATE_CODEC_DECODE_TIMEOUT_MS + 1);
+    await expect(outcome).resolves.toMatchObject({ message: expect.stringMatching(/timed out/) });
+    session!.close();
+
+    releaseQueue(buildGameState());
+    await vi.advanceTimersByTimeAsync(0);
+  });
+});
+
+// ── Decode-frame transfer across the real worker boundary ───────────────
+//
+// The rest of this file mocks `EngineWorkerClient`, so this row loads the real
+// module (bypassing the mock) to prove the transfer list itself.
+
+describe("EngineWorkerClient codec frame transfer", () => {
+  class TransferWorker {
+    static last: TransferWorker | null = null;
+    onmessage: ((event: MessageEvent) => void) | null = null;
+    onerror: ((event: ErrorEvent) => void) | null = null;
+    readonly ids: number[] = [];
+
+    constructor() {
+      TransferWorker.last = this;
+    }
+
+    postMessage(message: Record<string, unknown>, transfer?: Transferable[]): void {
+      // A real transfer detaches the source buffer; structuredClone emulates it.
+      structuredClone(message, { transfer });
+      this.ids.push(message.id as number);
+      const id = message.id as number;
+      const result = { kind: "decoded", json: '{"type":"Pong"}' };
+      queueMicrotask(() => {
+        this.onmessage?.({ data: { type: "result", id, data: result } } as MessageEvent);
+      });
+    }
+
+    terminate(): void {}
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("transfers the whole frame buffer so the caller's view is detached", async () => {
+    vi.stubGlobal("Worker", TransferWorker);
+    const actual = await vi.importActual<typeof import("../engine-worker-client")>(
+      "../engine-worker-client",
+    );
+    const client = new actual.EngineWorkerClient();
+    try {
+      const frame = new TextEncoder().encode(JSON.stringify({ type: "Full", data: {} }));
+      const pending = client.decodeStateCodec(3, frame);
+
+      expect(TransferWorker.last!.ids).toHaveLength(1);
+      // Ownership moved: the caller can no longer read through its view.
+      expect(frame.byteLength).toBe(0);
+      await expect(pending).resolves.toEqual({ kind: "decoded", json: '{"type":"Pong"}' });
+    } finally {
+      client.dispose();
+    }
+  });
+
+  it("rejects decode at 60s, ignores its late reply, and still accepts a subsequent request", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("Worker", StubWorker);
+    const actual = await vi.importActual<typeof import("../engine-worker-client")>("../engine-worker-client");
+    const client = new actual.EngineWorkerClient();
+    try {
+      const outcome = client.decodeStateCodec(3, new TextEncoder().encode("frame")).catch((error: unknown) => error);
+      const worker = StubWorker.last!;
+      const firstId = worker.posted[0].id as number;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await outcome).toMatchObject({ message: expect.stringContaining("timed out") });
+      worker.replyResult(firstId, { kind: "decoded", json: "late" });
+      const next = client.decodeStateCodec(4, new TextEncoder().encode("next"));
+      worker.replyResult(worker.posted[1].id as number, { kind: "decoded", json: "live" });
+      await expect(next).resolves.toEqual({ kind: "decoded", json: "live" });
+    } finally {
+      client.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects synchronous post failure without a lingering timeout or poisoned requests", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("Worker", StubWorker);
+    const actual = await vi.importActual<typeof import("../engine-worker-client")>("../engine-worker-client");
+    const client = new actual.EngineWorkerClient();
+    try {
+      const worker = StubWorker.last!;
+      const post = vi.spyOn(worker, "postMessage").mockImplementationOnce(() => { throw new Error("post failed"); });
+      await expect(client.decodeStateCodec(1, new Uint8Array([1]))).rejects.toThrow("post failed");
+      expect(vi.getTimerCount()).toBe(0);
+      post.mockRestore();
+      const next = client.openStateCodec();
+      await vi.advanceTimersByTimeAsync(60_001);
+      worker.replyResult(worker.posted[0].id as number, 5);
+      await expect(next).resolves.toBe(5); // Open responses are never orphaned by a watchdog.
+    } finally {
+      client.dispose();
+      vi.useRealTimers();
+    }
   });
 });

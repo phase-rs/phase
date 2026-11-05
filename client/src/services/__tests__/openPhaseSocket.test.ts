@@ -62,6 +62,8 @@ function helloFrame(
     lobby_protocol_version: number;
     wire_formats: string[];
     command_correlation: unknown;
+    state_codecs: unknown;
+    selected_state_codec: unknown;
   }> = {},
 ): string {
   return JSON.stringify({
@@ -1010,5 +1012,690 @@ describe("LAN default transport", () => {
     (await pending).close();
     expect(authorizeLan).not.toHaveBeenCalled();
     expect(channelListener.current).toBeNull();
+  });
+});
+
+// ── Negotiated StateCodecV1 delivery ────────────────────────────────────
+//
+// These rows drive the real handshake helper, the real codec transport and the
+// real receive queue over the stubbed transport. The decoder itself is
+// substituted: orchestration is what this file proves. Exact reconstruction is
+// `stateCodec.integration.test.ts`'s real-WASM job.
+
+import type { Mock } from "vitest";
+import type {
+  StateCodecDecodeResult,
+  StateCodecSession,
+} from "../../adapter/state-codec-runtime";
+import { STATE_CODEC_SOCKET_TIMEOUT_MS } from "../stateCodecSocket";
+
+const DECODED_PONG = '{"type":"Pong","data":{"timestamp":11}}';
+
+type DecodeHandler = (
+  frame: Uint8Array,
+) => { kind: "decoded"; json: string } | { kind: "resyncRequired" };
+
+function fakeSession(handler?: DecodeHandler): {
+  session: StateCodecSession;
+  decode: Mock;
+  close: Mock;
+} {
+  const decode = vi.fn(async (frame: Uint8Array): Promise<StateCodecDecodeResult> =>
+    handler ? handler(frame) : { kind: "decoded", json: DECODED_PONG });
+  const close = vi.fn();
+  return { session: { decode, close }, decode, close };
+}
+
+/** The second, plain-text hello that confirms the negotiated codec. */
+function confirmationFrame(selected: unknown = "StateCodecV1"): string {
+  return JSON.stringify({
+    type: "ServerHello",
+    data: { server_version: "0.0.0-test", selected_state_codec: selected },
+  });
+}
+
+function codecFrame(type: "Full" | "Delta"): string {
+  return JSON.stringify({ type, data: { state: { type: "Pong" }, revision: 1 } });
+}
+
+function fullHello(overrides: Parameters<typeof helloFrame>[0] = {}): string {
+  return helloFrame({ state_codecs: ["StateCodecV1"], ...overrides });
+}
+
+describe("openPhaseSocket — negotiated StateCodecV1", () => {
+  it("advertises, confirms once, and emits the decoded message text", async () => {
+    const fake = fakeSession();
+    const promise = openPhaseSocket("ws://test", {
+      stateCodecSession: fake.session,
+      stateCodecBootstrap: () => "accepted",
+    });
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(fullHello());
+    const socket = await promise;
+
+    expect(socket.serverInfo.stateCodecs).toEqual(["StateCodecV1"]);
+    expect(raw.send).toHaveBeenCalledWith(
+      expect.stringContaining('"state_codecs":["StateCodecV1"]'),
+    );
+
+    const received = vi.fn();
+    socket.ws.onmessage = received;
+    raw.deliverMessage(confirmationFrame());
+    raw.deliverMessage(codecFrame("Full"));
+
+    await vi.waitFor(() => expect(received).toHaveBeenCalledOnce());
+    expect(received.mock.calls[0][0].data).toBe(DECODED_PONG);
+    expect(fake.decode).toHaveBeenCalledOnce();
+    const frame = fake.decode.mock.calls[0][0] as Uint8Array;
+    expect(frame).toBeInstanceOf(Uint8Array);
+    // The ORIGINAL text crosses the boundary; the routing parse is never
+    // re-serialized.
+    expect(new TextDecoder().decode(frame)).toBe(codecFrame("Full"));
+  });
+
+  it.each([
+    ["no prepared session", () => undefined],
+    ["an explicit null session", () => null],
+  ])("does not advertise with %s", async (_label, build) => {
+    const promise = openPhaseSocket("ws://test", {
+      stateCodecSession: build() as StateCodecSession | null | undefined,
+    });
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(fullHello());
+    await promise;
+
+    expect(raw.send).not.toHaveBeenCalledWith(
+      expect.stringContaining("state_codecs"),
+    );
+  });
+
+  it.each([
+    ["a server that offers no codec", helloFrame()],
+    ["a LobbyOnly server", fullHello({ mode: "LobbyOnly" })],
+  ])("releases the prepared lease against %s", async (_label, hello) => {
+    const fake = fakeSession();
+    const promise = openPhaseSocket("ws://test", { stateCodecSession: fake.session });
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(hello);
+    await promise;
+
+    expect(raw.send).not.toHaveBeenCalledWith(expect.stringContaining("state_codecs"));
+    expect(fake.close).toHaveBeenCalledOnce();
+    expect(fake.decode).not.toHaveBeenCalled();
+  });
+
+  it("keeps the lease on the lobby surface even when the Full protocol matches", async () => {
+    const fake = fakeSession();
+    const promise = openPhaseSocket("ws://test", {
+      surface: "lobby",
+      stateCodecSession: fake.session,
+    });
+    MockWebSocket.instances[0].deliverMessage(fullHello());
+    await promise;
+
+    expect(MockWebSocket.instances[0].send).not.toHaveBeenCalledWith(
+      expect.stringContaining("state_codecs"),
+    );
+    expect(fake.close).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["an unknown name", ["FutureCodec"]],
+    ["a mix that keeps only the implemented name", ["FutureCodec", "StateCodecV1"]],
+    ["a non-array", { 0: "StateCodecV1" }],
+    ["numbers", [1, 2]],
+    ["null", null],
+  ])("parses state_codecs defensively: %s", async (_label, advertised) => {
+    const fake = fakeSession();
+    const promise = openPhaseSocket("ws://test", { stateCodecSession: fake.session });
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(helloFrame({ state_codecs: advertised }));
+    const socket = await promise;
+
+    const advertisedNames = (Array.isArray(advertised) ? advertised : []) as unknown[];
+    const expectsCodec = advertisedNames.includes("StateCodecV1");
+    if (expectsCodec) {
+      expect(socket.serverInfo.stateCodecs).toEqual(["StateCodecV1"]);
+      expect(raw.send).toHaveBeenCalledWith(
+        expect.stringContaining('"state_codecs":["StateCodecV1"]'),
+      );
+      return;
+    }
+    expect(socket.serverInfo.stateCodecs).toBeUndefined();
+    expect(raw.send).not.toHaveBeenCalledWith(expect.stringContaining("state_codecs"));
+    expect(fake.close).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["a contradictory selection", () => confirmationFrame("FutureCodec")],
+    ["no selection at all", () => JSON.stringify({ type: "ServerHello", data: { server_version: "0.0.0-test" } })],
+  ])("closes on %s", async (_label, build) => {
+    const fake = fakeSession();
+    const promise = openPhaseSocket("ws://test", { stateCodecSession: fake.session });
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(fullHello());
+    const socket = await promise;
+    const closed = vi.fn();
+    socket.ws.onclose = closed;
+    raw.deliverMessage(build());
+
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(fake.close).toHaveBeenCalledOnce());
+  });
+
+  it("closes when a codec frame arrives before confirmation", async () => {
+    const fake = fakeSession();
+    const promise = openPhaseSocket("ws://test", { stateCodecSession: fake.session });
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(fullHello());
+    const socket = await promise;
+    const closed = vi.fn();
+    socket.ws.onclose = closed;
+    raw.deliverMessage(codecFrame("Full"));
+
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    expect(fake.decode).not.toHaveBeenCalled();
+    expect(fake.close).toHaveBeenCalledOnce();
+  });
+
+  it("closes when confirmation never arrives", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = fakeSession();
+      const promise = openPhaseSocket("ws://test", { stateCodecSession: fake.session });
+      const raw = MockWebSocket.instances[0];
+      raw.deliverMessage(fullHello());
+      const socket = await promise;
+      const closed = vi.fn();
+      socket.ws.onclose = closed;
+
+      await vi.advanceTimersByTimeAsync(STATE_CODEC_SOCKET_TIMEOUT_MS + 1);
+      expect(closed).toHaveBeenCalledOnce();
+      expect(fake.close).toHaveBeenCalledOnce();
+      expect(raw.close).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("openPhaseSocket — codec stream, recovery and teardown", () => {
+  async function negotiated(
+    fake: ReturnType<typeof fakeSession>,
+    options: {
+      bootstrap?: () => "pending" | "accepted";
+      onRecovery?: (state: "recovering" | "ready") => void;
+    } = {},
+  ) {
+    const promise = openPhaseSocket("ws://test", {
+      stateCodecSession: fake.session,
+      stateCodecBootstrap: options.bootstrap ?? (() => "accepted"),
+      onStateCodecRecovery: options.onRecovery,
+    });
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(fullHello());
+    const socket = await promise;
+    const received = vi.fn();
+    socket.ws.onmessage = received;
+    raw.deliverMessage(confirmationFrame());
+    return { raw, socket, received };
+  }
+
+  it("passes non-state frames through untouched and in order", async () => {
+    const fake = fakeSession();
+    const { raw, received } = await negotiated(fake);
+    raw.deliverMessage(JSON.stringify({ type: "Pong", data: { timestamp: 5 } }));
+    raw.deliverMessage(codecFrame("Full"));
+
+    await vi.waitFor(() => expect(received).toHaveBeenCalledTimes(2));
+    expect(received.mock.calls[0][0].data).toBe('{"type":"Pong","data":{"timestamp":5}}');
+    expect(received.mock.calls[1][0].data).toBe(DECODED_PONG);
+  });
+
+  it("requests one resync, gates deltas, then publishes ready after a recovery Full", async () => {
+    const frames: Uint8Array[] = [];
+    const fake = fakeSession((frame) => {
+      frames.push(frame);
+      return frames.length === 1 ? { kind: "resyncRequired" } : { kind: "decoded", json: '{"type":"StateUpdate"}' };
+    });
+    const recovery: string[] = [];
+    const { raw, received } = await negotiated(fake, { onRecovery: (state) => recovery.push(state) });
+
+    raw.deliverMessage(codecFrame("Delta"));
+    await vi.waitFor(() => expect(recovery).toEqual(["recovering"]));
+    expect(raw.send).toHaveBeenCalledWith('{"type":"ResyncState"}');
+
+    // Deltas and plain notices are suppressed/ordered without extending the
+    // window; only a Full clears the latch.
+    raw.deliverMessage(codecFrame("Delta"));
+    raw.deliverMessage(JSON.stringify({ type: "Error", data: { message: "busy" } }));
+    await vi.waitFor(() => expect(received).toHaveBeenCalledOnce());
+    expect(received.mock.calls[0][0].data).toBe('{"type":"Error","data":{"message":"busy"}}');
+
+    raw.deliverMessage(codecFrame("Full"));
+    await vi.waitFor(() => expect(recovery).toEqual(["recovering", "ready"]));
+    expect(received).toHaveBeenCalledTimes(2);
+    expect(received.mock.calls[1][0].data).toBe('{"type":"StateUpdate"}');
+    expect(
+      raw.send.mock.calls.filter(([value]) => value === '{"type":"ResyncState"}'),
+    ).toHaveLength(1);
+    expect(fake.close).not.toHaveBeenCalled();
+  });
+
+  it("requests one resync and closes immediately when bootstrap is pending", async () => {
+    const fake = fakeSession(() => ({ kind: "resyncRequired" }));
+    const { raw, socket } = await negotiated(fake, { bootstrap: () => "pending" });
+    const closed = vi.fn();
+    socket.ws.onclose = closed;
+
+    raw.deliverMessage(codecFrame("Delta"));
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    expect(raw.send).toHaveBeenCalledWith('{"type":"ResyncState"}');
+    expect(fake.close).toHaveBeenCalledOnce();
+    // A late valid Full cannot publish ready or emit application state.
+    const received = vi.fn();
+    raw.deliverMessage(codecFrame("Full"));
+    await Promise.resolve();
+    expect(received).not.toHaveBeenCalled();
+  });
+
+  it("closes when the recovery Full is rejected as well", async () => {
+    const fake = fakeSession(() => ({ kind: "resyncRequired" }));
+    const { raw, socket } = await negotiated(fake);
+    const closed = vi.fn();
+    socket.ws.onclose = closed;
+
+    raw.deliverMessage(codecFrame("Delta"));
+    await vi.waitFor(() => expect(raw.send).toHaveBeenCalledWith('{"type":"ResyncState"}'));
+    raw.deliverMessage(codecFrame("Full"));
+
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    expect(fake.close).toHaveBeenCalledOnce();
+    expect(
+      raw.send.mock.calls.filter(([value]) => value === '{"type":"ResyncState"}'),
+    ).toHaveLength(1);
+  });
+
+  it("closes when the recovery window expires and does not extend it", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = fakeSession(() => ({ kind: "resyncRequired" }));
+      const promise = openPhaseSocket("ws://test", {
+        stateCodecSession: fake.session,
+        stateCodecBootstrap: () => "accepted",
+      });
+      const raw = MockWebSocket.instances[0];
+      raw.deliverMessage(fullHello());
+      const socket = await promise;
+      const closed = vi.fn();
+      socket.ws.onclose = closed;
+      socket.ws.onmessage = vi.fn();
+      raw.deliverMessage(confirmationFrame());
+      raw.deliverMessage(codecFrame("Delta"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(raw.send).toHaveBeenCalledWith('{"type":"ResyncState"}');
+      await vi.advanceTimersByTimeAsync(STATE_CODEC_SOCKET_TIMEOUT_MS - 1);
+      raw.deliverMessage(JSON.stringify({ type: "Pong", data: { timestamp: 1 } }));
+      await vi.advanceTimersByTimeAsync(2);
+      expect(closed).toHaveBeenCalledOnce();
+      expect(fake.close).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("buffers frames until a handler attaches and delivers each exactly once, close last", async () => {
+    const fake = fakeSession();
+    const promise = openPhaseSocket("ws://test", {
+      stateCodecSession: fake.session,
+      stateCodecBootstrap: () => "accepted",
+    });
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(fullHello());
+    const socket = await promise;
+    raw.deliverMessage(confirmationFrame());
+    raw.deliverMessage(codecFrame("Full"));
+    raw.deliverMessage(JSON.stringify({ type: "Pong", data: { timestamp: 2 } }));
+    raw.close();
+
+    const order: string[] = [];
+    socket.ws.onmessage = (event) => order.push(`message:${event.data}`);
+    socket.ws.addEventListener("close", () => order.push("close"));
+
+    await vi.waitFor(() => expect(order).toContain("close"));
+    expect(order.filter((entry) => entry === "close")).toHaveLength(1);
+    expect(order).toEqual([`message:${DECODED_PONG}`, 'message:{"type":"Pong","data":{"timestamp":2}}', "close"]);
+    expect(fake.close).toHaveBeenCalledOnce();
+  });
+
+  it("local close releases once and fences a late decode result", async () => {
+    let release!: (value: { kind: "decoded"; json: string }) => void;
+    const fake = fakeSession();
+    fake.decode.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    const { raw, socket, received } = await negotiated(fake);
+    raw.deliverMessage(codecFrame("Full"));
+    await vi.waitFor(() => expect(fake.decode).toHaveBeenCalledOnce());
+
+    socket.close();
+    expect(fake.close).toHaveBeenCalledOnce();
+    release({ kind: "decoded", json: DECODED_PONG });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(received).not.toHaveBeenCalled();
+    socket.close();
+    expect(fake.close).toHaveBeenCalledOnce();
+  });
+
+  it("publishes ready even when the recovery handler throws", async () => {
+    const frames: Uint8Array[] = [];
+    const fake = fakeSession((frame) => {
+      frames.push(frame);
+      return frames.length === 1 ? { kind: "resyncRequired" } : { kind: "decoded", json: DECODED_PONG };
+    });
+    const recovery: string[] = [];
+    const { raw, socket } = await negotiated(fake, { onRecovery: (state) => recovery.push(state) });
+
+    raw.deliverMessage(codecFrame("Delta"));
+    await vi.waitFor(() => expect(recovery).toEqual(["recovering"]));
+    socket.ws.onmessage = () => {
+      throw new Error("listener blew up");
+    };
+    raw.deliverMessage(codecFrame("Full"));
+
+    // The bootstrap decision is made after delivery, in a throwing-listener-safe
+    // path: a throw must not leave the socket stuck in recovery.
+    await vi.waitFor(() => expect(recovery).toEqual(["recovering", "ready"]));
+    expect(fake.close).not.toHaveBeenCalled();
+  });
+
+  it("propagates a listener throw without skipping queue cleanup", async () => {
+    const fake = fakeSession();
+    const { raw, socket } = await negotiated(fake);
+    const closed = vi.fn();
+    socket.ws.onmessage = () => { throw new Error("listener blew up"); };
+    socket.ws.onclose = closed;
+    raw.deliverMessage(codecFrame("Full"));
+    raw.close();
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    expect(fake.close).toHaveBeenCalledOnce();
+  });
+});
+
+describe("openPhaseSocket — codec lease ownership across preflight and send failure", () => {
+  it.each(["resolve", "reject"] as const)(
+    "releases the prepared lease once when LAN approval late-%ss after abort",
+    async (completion) => {
+      lanSupported.mockReturnValue(true); probeLan.mockResolvedValue(true);
+      let complete!: () => void;
+      const approval = new Promise<void>((resolve, reject) => {
+        complete = () => completion === "resolve" ? resolve() : reject(new Error("Late approval failure"));
+      });
+      authorizeLan.mockReturnValue(approval);
+      const fake = fakeSession();
+      const controller = new AbortController();
+      const pending = openPhaseSocket("ws://192.168.1.2:9374/ws", {
+        signal: controller.signal,
+        stateCodecSession: fake.session,
+      });
+      await vi.waitFor(() => expect(authorizeLan).toHaveBeenCalledOnce());
+      controller.abort();
+      await expect(pending).rejects.toMatchObject({ kind: "aborted" });
+      complete();
+      await approval.catch(() => {});
+      await Promise.resolve();
+      expect(fake.close).toHaveBeenCalledOnce();
+      expect(MockWebSocket.instances).toHaveLength(0);
+    },
+  );
+
+  it("releases the prepared lease once when LAN preflight fails", async () => {
+    lanSupported.mockReturnValue(true); probeLan.mockResolvedValue(true);
+    authorizeLan.mockRejectedValue(new Error("LAN approval denied"));
+    const fake = fakeSession();
+    await expect(openPhaseSocket("ws://192.168.1.2:9374/ws", {
+      stateCodecSession: fake.session,
+    })).rejects.toThrow("LAN approval denied");
+    expect(fake.close).toHaveBeenCalledOnce();
+    expect(MockWebSocket.instances).toHaveLength(0);
+  });
+
+  it("hands one lease through the recursive preflight call and closes it once", async () => {
+    lanSupported.mockReturnValue(true); probeLan.mockResolvedValue(true);
+    const fake = fakeSession();
+    const pending = openPhaseSocket("ws://192.168.1.2:9374/ws", {
+      stateCodecSession: fake.session,
+      stateCodecBootstrap: () => "accepted",
+    });
+    await vi.waitFor(() => expect(channelListener.current).not.toBeNull());
+    channelListener.current?.({ type: "message", text: fullHello({ mode: "Full" }) });
+    // The recursive call owns the lease; negotiation wraps it for this socket.
+    channelListener.current?.({
+      type: "message",
+      text: confirmationFrame(),
+    });
+    const socket = await pending;
+    socket.ws.close();
+    await vi.waitFor(() => expect(fake.close).toHaveBeenCalledOnce());
+    expect(fake.close).toHaveBeenCalledOnce();
+  });
+
+  it("releases the prepared lease when the ClientHello send throws", async () => {
+    const fake = fakeSession();
+    const promise = openPhaseSocket("ws://test", {
+      stateCodecSession: fake.session,
+      stateCodecBootstrap: () => "accepted",
+    });
+    const raw = MockWebSocket.instances[0];
+    raw.send.mockImplementationOnce(() => {
+      throw new Error("socket closed before handshake hello");
+    });
+    raw.deliverMessage(fullHello());
+
+    await expect(promise).rejects.toMatchObject({ kind: "ws_error" });
+    expect(fake.close).toHaveBeenCalledOnce();
+  });
+});
+
+describe("codec attachment and deadline boundaries", () => {
+  it.each([false, true])("preserves immediate handoff and exact bytes (gzip=%s)", async (gzip) => {
+    const text = ' { "type" : "Full", "data" : {"unicode":"雪 🧙"} } ';
+    const fake = fakeSession();
+    const sent = vi.fn();
+    const pending = openPhaseSocket("ws://test", {
+      stateCodecSession: fake.session, stateCodecBootstrap: () => "accepted", onFrameSent: sent,
+    });
+    const raw = MockWebSocket.instances[0];
+    raw.send.mockImplementationOnce(() => {
+      raw.deliverMessage(confirmationFrame());
+      raw.deliverMessage(gzip ? new Uint8Array([0, ...new TextEncoder().encode(text)]) : text);
+    });
+    raw.deliverMessage(fullHello({ wire_formats: gzip ? ["GzipEnvelopeV1"] : [] }));
+    const socket = await pending;
+    const received = vi.fn();
+    socket.ws.onmessage = received;
+    await vi.waitFor(() => expect(received).toHaveBeenCalledOnce());
+    expect(received.mock.calls[0][0].data).toBe(DECODED_PONG);
+    expect(new TextDecoder().decode(fake.decode.mock.calls[0][0])).toBe(text);
+    socket.ws.send('{"type":"Ping"}');
+    await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(2));
+    socket.close();
+    expect(fake.close).toHaveBeenCalledOnce();
+  });
+
+  it("retains an early fatal close until the close handler attaches, even if it throws", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = fakeSession();
+      const pending = openPhaseSocket("ws://test", { stateCodecSession: fake.session });
+      const raw = MockWebSocket.instances[0];
+      raw.deliverMessage(fullHello());
+      const socket = await pending;
+      await vi.advanceTimersByTimeAsync(5000);
+      const closed = vi.fn(() => { throw new Error("consumer"); });
+      socket.ws.onclose = closed;
+      expect(closed).toHaveBeenCalledOnce();
+      expect(raw.close).toHaveBeenCalledOnce();
+      expect(fake.close).toHaveBeenCalledOnce();
+      raw.close();
+      expect(closed).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["Error", "StateWithheld", "no response", "hung Full"] as const)(
+    "keeps a fixed recovery deadline with %s", async (mode) => {
+      vi.useFakeTimers();
+      try {
+        const fake = fakeSession(() => ({ kind: "resyncRequired" }));
+        const recovery = vi.fn();
+        const pending = openPhaseSocket("ws://test", {
+          stateCodecSession: fake.session, stateCodecBootstrap: () => "accepted",
+          onStateCodecRecovery: recovery,
+        });
+        const raw = MockWebSocket.instances[0];
+        raw.deliverMessage(fullHello());
+        const socket = await pending;
+        const received = vi.fn();
+        const closed = vi.fn();
+        socket.ws.onmessage = received;
+        socket.ws.onclose = closed;
+        raw.deliverMessage(confirmationFrame());
+        raw.deliverMessage(codecFrame("Delta"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(recovery).toHaveBeenCalledWith("recovering");
+        expect(raw.send.mock.calls.filter(([text]) => text === '{"type":"ResyncState"}')).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(4999);
+        if (mode === "hung Full") {
+          fake.decode.mockImplementationOnce(() => new Promise(() => undefined));
+          raw.deliverMessage(codecFrame("Full"));
+        } else if (mode !== "no response") {
+          const notice = JSON.stringify({ type: mode, data: { message: "notice" } });
+          raw.deliverMessage(notice);
+          raw.deliverMessage(codecFrame("Delta"));
+          raw.deliverMessage(codecFrame("Delta"));
+          await vi.advanceTimersByTimeAsync(0);
+          expect(received).toHaveBeenCalledWith(expect.objectContaining({ data: notice }));
+        }
+        await vi.advanceTimersByTimeAsync(1);
+        expect(closed).toHaveBeenCalledOnce();
+        expect(fake.close).toHaveBeenCalledOnce();
+        expect(recovery).not.toHaveBeenCalledWith("ready");
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("delivers queued bootstrap before recovery and clears the deadline after Full", async () => {
+    vi.useFakeTimers();
+    try {
+      let bootstrap: "pending" | "accepted" = "pending";
+      let calls = 0;
+      const fake = fakeSession(() => ++calls === 2
+        ? { kind: "resyncRequired" } : { kind: "decoded", json: DECODED_PONG });
+      const recovery: string[] = [];
+      const pending = openPhaseSocket("ws://test", {
+        stateCodecSession: fake.session, stateCodecBootstrap: () => bootstrap,
+        onStateCodecRecovery: (state) => recovery.push(state),
+      });
+      const raw = MockWebSocket.instances[0];
+      raw.deliverMessage(fullHello());
+      const socket = await pending;
+      raw.deliverMessage(confirmationFrame());
+      raw.deliverMessage(codecFrame("Full"));
+      raw.deliverMessage(codecFrame("Delta"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fake.decode).not.toHaveBeenCalled();
+      const messages: string[] = [];
+      socket.ws.onmessage = (event) => { messages.push(event.data); bootstrap = "accepted"; };
+      const closed = vi.fn();
+      socket.ws.onclose = closed;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(recovery).toEqual(["recovering"]);
+      raw.deliverMessage(codecFrame("Full"));
+      raw.deliverMessage(codecFrame("Delta"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(messages).toEqual([DECODED_PONG, DECODED_PONG, DECODED_PONG]);
+      expect(recovery).toEqual(["recovering", "ready"]);
+      await vi.advanceTimersByTimeAsync(5001);
+      expect(closed).not.toHaveBeenCalled();
+      socket.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes rather than clearing recovery when delivery resets bootstrap", async () => {
+    let calls = 0;
+    const fake = fakeSession(() => ++calls === 1
+      ? { kind: "resyncRequired" } : { kind: "decoded", json: DECODED_PONG });
+    let bootstrap: "pending" | "accepted" = "accepted";
+    const recovery = vi.fn();
+    const pending = openPhaseSocket("ws://test", {
+      stateCodecSession: fake.session, stateCodecBootstrap: () => bootstrap,
+      onStateCodecRecovery: recovery,
+    });
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(fullHello());
+    const socket = await pending;
+    const received = vi.fn(() => { bootstrap = "pending"; throw new Error("listener"); });
+    const closed = vi.fn();
+    socket.ws.onmessage = received;
+    socket.ws.onclose = closed;
+    raw.deliverMessage(confirmationFrame());
+    raw.deliverMessage(codecFrame("Delta"));
+    await vi.waitFor(() => expect(recovery).toHaveBeenCalledWith("recovering"));
+    raw.deliverMessage(codecFrame("Full"));
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    expect(received).toHaveBeenCalledOnce();
+    expect(recovery).not.toHaveBeenCalledWith("ready");
+    expect(raw.close).toHaveBeenCalledOnce();
+  });
+
+  it.each(["handler", "listener"] as const)("retains a local close for a late close-only %s once", async (kind) => {
+    const fake = fakeSession();
+    const pending = openPhaseSocket("ws://test", { stateCodecSession: fake.session });
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(fullHello());
+    const socket = await pending;
+    socket.close();
+    expect(fake.close).toHaveBeenCalledOnce();
+    expect(raw.close).toHaveBeenCalledOnce();
+    const closed = vi.fn();
+    if (kind === "handler") socket.ws.onclose = closed;
+    else socket.ws.addEventListener("close", closed);
+    expect(closed).toHaveBeenCalledOnce();
+    socket.ws.onclose = vi.fn();
+    raw.close();
+    await Promise.resolve();
+    expect(closed).toHaveBeenCalledOnce();
+    expect(socket.ws.onclose).not.toHaveBeenCalled();
+  });
+
+  it("does not publish ready or decode queued frames after recovery delivery closes the socket", async () => {
+    let calls = 0;
+    const fake = fakeSession(() => ++calls === 1
+      ? { kind: "resyncRequired" } : { kind: "decoded", json: DECODED_PONG });
+    const recovery = vi.fn();
+    const pending = openPhaseSocket("ws://test", {
+      stateCodecSession: fake.session, stateCodecBootstrap: () => "accepted",
+      onStateCodecRecovery: recovery,
+    });
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(fullHello());
+    const socket = await pending;
+    const closed = vi.fn();
+    socket.ws.onmessage = () => socket.close();
+    socket.ws.onclose = closed;
+    raw.deliverMessage(confirmationFrame());
+    raw.deliverMessage(codecFrame("Delta"));
+    await vi.waitFor(() => expect(recovery).toHaveBeenCalledWith("recovering"));
+    raw.deliverMessage(codecFrame("Full"));
+    raw.deliverMessage(codecFrame("Delta"));
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    expect(fake.decode).toHaveBeenCalledTimes(2);
+    expect(fake.close).toHaveBeenCalledOnce();
+    expect(recovery.mock.calls).toEqual([["recovering"]]);
   });
 });

@@ -38,6 +38,16 @@ import type {
 } from "./draft-adapter";
 import { SubmissionSlot } from "./submissionSlot";
 import type { FullSessionKey, ServerInfo } from "./ws-adapter";
+import { getSharedAdapter } from "./wasm-adapter";
+import type { StateCodecSession } from "./state-codec-runtime";
+import {
+  STATE_CODEC_PREPARATION_TIMEOUT_MS,
+  StateCodecPreparationAbortError,
+  prepareStateCodecSession as prepareBoundedStateCodecSession,
+  type StateCodecBootstrap,
+  type StateCodecRecoveryState,
+  type StateCodecSessionProvider,
+} from "../services/stateCodecSocket";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -138,6 +148,15 @@ function fullSessionKeysEqual(
     && left.generation === right.generation;
 }
 
+export interface ServerDraftAdapterOptions {
+  /**
+   * Supplies the negotiated StateCodecV1 decoder session for an attachment.
+   * `undefined` uses the tab's shared engine; `null` keeps snapshot-only
+   * delivery with no newly introduced await before the handshake.
+   */
+  stateCodecSessionProvider?: StateCodecSessionProvider | null;
+}
+
 // ── ServerDraftAdapter ──────────────────────────────────────────────────
 
 /**
@@ -206,8 +225,27 @@ export class ServerDraftAdapter implements EngineAdapter {
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
   private _serverInfo: ServerInfo | null = null;
+  /** Prepared decoder source: snapshot-only only when an explicit `null` opts out. */
+  private readonly stateCodecProvider: StateCodecSessionProvider | null;
+  /** True while the current attachment is recovering codec-delivered state. */
+  private stateCodecRecovering = false;
+  /**
+   * Application-bootstrap authority for the current attachment. A new draft
+   * match resets it to pending; only an accepted GameStarted completes it.
+   */
+  private attachmentBootstrap: {
+    socket: PhaseSocketTransport | null;
+    status: StateCodecBootstrap;
+  } | null = null;
 
-  constructor(private readonly serverUrl: string) {}
+  constructor(
+    private readonly serverUrl: string,
+    options: ServerDraftAdapterOptions = {},
+  ) {
+    this.stateCodecProvider = options.stateCodecSessionProvider !== undefined
+      ? options.stateCodecSessionProvider
+      : () => getSharedAdapter().openStateCodecSession();
+  }
 
   // ── Public accessors ───────────────────────────────────────────────
 
@@ -296,6 +334,13 @@ export class ServerDraftAdapter implements EngineAdapter {
   }
 
   private assertNoPendingSubmission(): void {
+    if (this.stateCodecRecovering) {
+      throw new AdapterError(
+        AdapterErrorCode.ACTION_NOT_SENT,
+        "State delivery is being recovered; this submission was not sent.",
+        true,
+      );
+    }
     if (this.submission.occupied) {
       throw new AdapterError(
         AdapterErrorCode.ACTION_NOT_SENT,
@@ -645,6 +690,58 @@ export class ServerDraftAdapter implements EngineAdapter {
       && (attachment.owner.type === "join" || this.pendingInit === attachment.owner.init);
   }
 
+  /** Bootstrap status reported to the codec transport for one attachment. */
+  private bootstrapStatus(bootstrap: {
+    socket: PhaseSocketTransport | null;
+    status: StateCodecBootstrap;
+  }): StateCodecBootstrap {
+    if (this.disposed || this.attachmentBootstrap !== bootstrap) return "pending";
+    if (bootstrap.socket !== null && this.ws !== bootstrap.socket) return "pending";
+    return bootstrap.status;
+  }
+
+  /** Genuine GameStarted accepted for the current match/player/full key. */
+  private markBootstrapAccepted(sourceSocket: PhaseSocketTransport): void {
+    const bootstrap = this.attachmentBootstrap;
+    if (!bootstrap || bootstrap.socket !== sourceSocket) return;
+    bootstrap.status = "accepted";
+  }
+
+  /** A new match on this attachment: only a fresh GameStarted may complete it. */
+  private resetBootstrap(sourceSocket: PhaseSocketTransport): void {
+    const bootstrap = this.attachmentBootstrap;
+    if (!bootstrap || bootstrap.socket !== sourceSocket) return;
+    bootstrap.status = "pending";
+  }
+
+  /**
+   * Codec recovery notification. Mark recovery and drop the command slot
+   * before emitting, because listeners run synchronously and may submit.
+   */
+  private handleStateCodecRecovery(
+    bootstrap: {
+      socket: PhaseSocketTransport | null;
+      status: StateCodecBootstrap;
+    },
+    state: StateCodecRecoveryState,
+  ): void {
+    if (this.disposed) return;
+    if (this.attachmentBootstrap !== bootstrap) return;
+    if (bootstrap.socket === null || this.ws !== bootstrap.socket) return;
+    if (state === "recovering") {
+      this.stateCodecRecovering = true;
+      const dropped = this.submission.drop();
+      if (dropped) {
+        dropped.reject(
+          new AdapterError("WS_CLOSED", "State delivery interrupted during action", true),
+        );
+        this.emit({ type: "actionPendingChanged", pending: false });
+      }
+      return;
+    }
+    this.stateCodecRecovering = false;
+  }
+
   private abandonSocket(socket: PhaseSocket): void {
     // An incomplete socket's close must not reject an established draft action.
     socket.ws.onmessage = null;
@@ -661,19 +758,53 @@ export class ServerDraftAdapter implements EngineAdapter {
   }
 
   /**
-   * One await only: ownership spans handshake completion, synchronous hello
+   * Ownership spans codec preparation, handshake completion, synchronous hello
    * listeners and setup send. Established sockets are not retired here.
    */
   private async attachSocket(attachment: DraftAttachment, setupFrame: unknown): Promise<void> {
     let socket: PhaseSocket | null = null;
+    let prepared: StateCodecSession | null = null;
     const initOwner = attachment.owner.type === "init" ? attachment.owner.init : null;
+    const bootstrap: { socket: PhaseSocketTransport | null; status: StateCodecBootstrap } = {
+      socket: null,
+      status: "pending",
+    };
+    this.attachmentBootstrap = bootstrap;
+    this.stateCodecRecovering = false;
     try {
-      socket = await openPhaseSocket(this.serverUrl, { signal: attachment.controller.signal });
+      if (this.stateCodecProvider) {
+        try {
+          prepared = await prepareBoundedStateCodecSession(
+            this.stateCodecProvider,
+            attachment.controller.signal,
+            STATE_CODEC_PREPARATION_TIMEOUT_MS,
+          );
+        } catch (error) {
+          if (error instanceof StateCodecPreparationAbortError) throw error;
+          prepared = null;
+        }
+      }
+      if (!this.ownsAttachment(attachment)) {
+        prepared?.close();
+        prepared = null;
+        return;
+      }
+      // Ownership of the lease moves into the handshake helper, which releases
+      // it on every failure path and on non-negotiation.
+      const handed = prepared;
+      prepared = null;
+      socket = await openPhaseSocket(this.serverUrl, {
+        signal: attachment.controller.signal,
+        stateCodecSession: handed,
+        stateCodecBootstrap: () => this.bootstrapStatus(bootstrap),
+        onStateCodecRecovery: (state) => this.handleStateCodecRecovery(bootstrap, state),
+      });
       if (!this.ownsAttachment(attachment)) {
         this.abandonSocket(socket);
         return;
       }
       const sourceSocket = socket.ws;
+      bootstrap.socket = sourceSocket;
       this.ws = sourceSocket;
       this._serverInfo = socket.serverInfo;
       this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
@@ -685,6 +816,13 @@ export class ServerDraftAdapter implements EngineAdapter {
       this.startPing();
 
       sourceSocket.onmessage = (event) => {
+        // Preserve uncorrelated draft replies from sent older attachments, but
+        // game delivery belongs only to the current socket generation.
+        if (this.ws !== sourceSocket) {
+          const message = JSON.parse(event.data as string) as { type?: string };
+          if (message.type === "GameStarted" || message.type === "StateUpdate"
+            || message.type === "DraftMatchStart") return;
+        }
         this.handleMessage(JSON.parse(event.data as string), initOwner, sourceSocket);
       };
       sourceSocket.onerror = () => {
@@ -697,6 +835,11 @@ export class ServerDraftAdapter implements EngineAdapter {
         }
       };
       sourceSocket.onclose = () => {
+        // A retired transport (a superseded attachment whose replacement is
+        // already current) owns no state, command slot or promise: its close
+        // must not drop the replacement's pending command. `this.ws === null`
+        // still means this is the unfinished attachment's own close.
+        if (this.ws !== null && this.ws !== sourceSocket) return;
         if (this.pingInterval) {
           clearInterval(this.pingInterval);
           this.pingInterval = null;
@@ -704,6 +847,9 @@ export class ServerDraftAdapter implements EngineAdapter {
         // Settle this socket's own init before any notification below: `emit`
         // runs listeners synchronously, so a throwing close listener must not
         // strand the operation's promise.
+        if (this.ws === sourceSocket) {
+          this.stateCodecRecovering = false;
+        }
         // A close that settles this socket's own init is the failure signal for
         // that operation; it must not also surface as a lost established
         // connection (the pre-fix behavior emitted only with no init pending).
@@ -844,6 +990,9 @@ export class ServerDraftAdapter implements EngineAdapter {
         if (!sameMatch) {
           this.snapshot = null;
           this.acceptedFullKey = null;
+          // A new match needs its own GameStarted: reset before any listener
+          // can observe the transition.
+          this.resetBootstrap(sourceSocket);
         }
         this.phase = "match";
         this.activeMatchId = data.match_id;
@@ -945,6 +1094,9 @@ export class ServerDraftAdapter implements EngineAdapter {
           },
         );
         this._playerId = data.your_player;
+        // Accepted after the match/player/full-key guards above and after the
+        // snapshot is cached, but before the listener emit.
+        this.markBootstrapAccepted(sourceSocket);
         this.emit({
           type: "gameStateUpdated",
           state: startedSnapshot.state,
@@ -1314,6 +1466,8 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.activeMatchId = null;
     this.activeFullKey = null;
     this.acceptedFullKey = null;
+    this.stateCodecRecovering = false;
+    this.attachmentBootstrap = null;
     this.submission.drop()?.reject(
       new AdapterError("WS_CLOSED", "Adapter disposed during action", true),
     );

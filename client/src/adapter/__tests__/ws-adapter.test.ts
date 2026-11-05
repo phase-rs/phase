@@ -22,6 +22,8 @@ import {
   WebSocketAdapter,
 } from "../ws-adapter";
 import { AdapterError, AdapterErrorCode, supportsMatchConcede, supportsTakeback, supportsTurnRewind } from "../types";
+import type { StateCodecSession } from "../state-codec-runtime";
+import { STATE_CODEC_PREPARATION_TIMEOUT_MS } from "../../services/stateCodecSocket";
 import type { FormatConfig, GameAction, GameState, SubmitResult } from "../types";
 import type {
   InteractionChoiceId,
@@ -294,6 +296,10 @@ describe("WebSocketAdapter", () => {
       "join",
       { main_deck: [], sideboard: [] },
       "GAME01",
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
     );
     const initPromise = adapter.initialize();
     ws = await completeHandshake(adapter);
@@ -548,6 +554,11 @@ describe("WebSocketAdapter", () => {
       "ws://localhost:9374/ws",
       "host",
       { main_deck: [], sideboard: [] },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
     );
 
     await expect(insecure.exportPersistenceState()).rejects.toMatchObject({
@@ -805,7 +816,11 @@ describe("WebSocketAdapter", () => {
         "join",
         { main_deck: [], sideboard: [] },
         "ABC123",
-      );
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
+    );
       const listener = vi.fn();
       reconnected.onEvent(listener);
       const initPromise = reconnected.initialize();
@@ -1879,7 +1894,11 @@ describe("WebSocketAdapter", () => {
         "join",
         { main_deck: [], sideboard: [] },
         "ABC123",
-      );
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
+    );
       const listener = vi.fn();
       adapter2.onEvent(listener);
       const initPromise2 = adapter2.initialize();
@@ -1904,7 +1923,11 @@ describe("WebSocketAdapter", () => {
     async function liveReconnectFixture(hello = HEARTBEAT_HELLO) {
       const subject = new WebSocketAdapter(
         "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
-      );
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
+    );
       const initialized = subject.initialize();
       const socket = await completeHandshake(subject, hello);
       socket.dispatchSynthetic("message", JSON.stringify({
@@ -2313,7 +2336,11 @@ describe("WebSocketAdapter", () => {
     it("fails a withheld reconnect without a board recoverably, then clears the failure when a state arrives", async () => {
       const subject = new WebSocketAdapter(
         "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
-      );
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
+    );
       const events = vi.fn();
       subject.onEvent(events);
       const session = {
@@ -2369,7 +2396,11 @@ describe("WebSocketAdapter", () => {
     const boardlessReconnectSocket = async (): Promise<{ subject: WebSocketAdapter; socket: MockWebSocket }> => {
       const subject = new WebSocketAdapter(
         "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
-      );
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
+    );
       subject.tryReconnect({
         gameCode: "GAME01", playerToken: "accepted-full-session-token",
         fullKey: REPLY_OWNERSHIP_FULL_KEY, serverUrl: "wss://localhost:9374/ws", timestamp: Date.now(),
@@ -2404,7 +2435,11 @@ describe("WebSocketAdapter", () => {
     it("rejects a withheld initial bootstrap as a recoverable request failure", async () => {
       const subject = new WebSocketAdapter(
         "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
-      );
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
+    );
       try {
         const initialized = trackRejection(subject.initialize());
         const socket = await completeHandshake(subject);
@@ -2601,7 +2636,11 @@ describe("WebSocketAdapter", () => {
         "join",
         { main_deck: [], sideboard: [] },
         "ABC123",
-      );
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
+    );
       const initPromise = reconnectingAdapter.initialize();
       const initialWs = await completeHandshake(reconnectingAdapter);
       initialWs.dispatchSynthetic(
@@ -2651,6 +2690,11 @@ describe("WebSocketAdapter", () => {
       "ws://localhost:9374/ws",
       "host",
       { main_deck: [], sideboard: [] },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
     );
 
     const outcome = trackRejection(hostAdapter.initialize());
@@ -2666,7 +2710,11 @@ describe("WebSocketAdapter", () => {
     beforeEach(async () => {
       subject = new WebSocketAdapter(
         "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
-      );
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
+    );
       const initialized = subject.initialize();
       socket = await completeHandshake(subject, CORRELATED_HELLO);
       acceptFullReplyOwnershipSession(subject, socket);
@@ -2816,7 +2864,11 @@ describe("WebSocketAdapter", () => {
           if (player !== 0) {
             const next = new WebSocketAdapter(
               "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
-            );
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
+    );
             initialized = next.initialize();
             seats.push({ subject: next, socket: await completeHandshake(next, CORRELATED_HELLO) });
           }
@@ -3002,7 +3054,11 @@ describe("WebSocketAdapter", () => {
       const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
       const silent = new WebSocketAdapter(
         "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
-      );
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
+    );
       const initialized = silent.initialize();
       const silentSocket = await completeHandshake(silent, CORRELATED_HELLO);
       acceptFullReplyOwnershipSession(silent, silentSocket);
@@ -3036,7 +3092,11 @@ describe("WebSocketAdapter", () => {
     beforeEach(async () => {
       subject = new WebSocketAdapter(
         "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
-      );
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
+    );
       const initialized = subject.initialize();
       socket = await completeHandshake(subject, CORRELATED_HELLO);
       acceptFullReplyOwnershipSession(subject, socket);
@@ -3114,7 +3174,11 @@ describe("WebSocketAdapter", () => {
     it("sends no command_id and keeps settling on the first completion frame", async () => {
       const legacy = new WebSocketAdapter(
         "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
-      );
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
+    );
       const initialized = legacy.initialize();
       const legacySocket = await completeHandshake(legacy, HEARTBEAT_HELLO);
       acceptFullReplyOwnershipSession(legacy, legacySocket);
@@ -3262,7 +3326,11 @@ describe("WebSocketAdapter", () => {
         "join",
         { main_deck: [], sideboard: [] },
         "ABC123",
-      );
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
+    );
       const initPromise = setupFailingAdapter.initialize();
       await Promise.resolve();
       const setupWs = MockWebSocket.last!;
@@ -3854,7 +3922,7 @@ it("waits for the first LAN capability probe before rejecting an HTTPS manual jo
   lanGate.probe.mockImplementation(() => new Promise<boolean>((resolve) => {
     release = () => { lanGate.supported = true; resolve(true); };
   }));
-  const manual = new WebSocketAdapter("ws://192.168.1.2:9374/ws", "join", { main_deck: [], sideboard: [] }, "ABC123");
+  const manual = new WebSocketAdapter("ws://192.168.1.2:9374/ws", "join", { main_deck: [], sideboard: [] }, "ABC123", undefined, undefined, undefined, { stateCodecSessionProvider: null });
   MockWebSocket.last = null;
   const initialized = manual.initialize();
   // The adapter must not reject on mixed content while capability is unknown.
@@ -3883,7 +3951,7 @@ it.each(["resolve", "reject"] as const)("disposes during a pending LAN probe bef
   });
   lanGate.probe.mockReset().mockReturnValue(probe);
   lanGate.authorize.mockReset();
-  const manual = new WebSocketAdapter("ws://192.168.1.2:9374/ws", "join", { main_deck: [], sideboard: [] }, "ABC123");
+  const manual = new WebSocketAdapter("ws://192.168.1.2:9374/ws", "join", { main_deck: [], sideboard: [] }, "ABC123", undefined, undefined, undefined, { stateCodecSessionProvider: null });
   MockWebSocket.last = null;
   const rejection = trackRejection(manual.initialize());
   manual.dispose();
@@ -3907,7 +3975,7 @@ describe("WebSocketAdapter dispose during the handshake", () => {
     "sends nothing after dispose and closes the socket (%s)",
     async (order) => {
       MockWebSocket.last = null;
-      const adapter = new WebSocketAdapter("wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01");
+      const adapter = new WebSocketAdapter("wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01", undefined, undefined, undefined, { stateCodecSessionProvider: null });
       void adapter.initialize().catch(() => {});
       await Promise.resolve();
       const socket = MockWebSocket.last!;
@@ -3926,4 +3994,549 @@ describe("WebSocketAdapter dispose during the handshake", () => {
       expect(socket.close).toHaveBeenCalledOnce();
     },
   );
+});
+
+// ── Negotiated StateCodecV1 delivery ────────────────────────────────────
+//
+// The decoder is substituted (orchestration is this file's subject); exact
+// reconstruction with the real codec lives in `stateCodec.integration.test.ts`.
+
+const CODEC_SESSION_HELLO = JSON.stringify({
+  type: "ServerHello",
+  data: {
+    server_version: "0.0.0-test",
+    build_commit: "testhash",
+    protocol_version: PROTOCOL_VERSION,
+    mode: "Full",
+    command_correlation: "CommandIdV1",
+    state_codecs: ["StateCodecV1"],
+  },
+});
+const CODEC_CONFIRMATION = JSON.stringify({
+  type: "ServerHello",
+  data: { server_version: "0.0.0-test", selected_state_codec: "StateCodecV1" },
+});
+
+type CodecDecodeResult =
+  | { kind: "decoded"; json: string }
+  | { kind: "resyncRequired" };
+
+function codecSession(handler: () => CodecDecodeResult): {
+  session: StateCodecSession;
+  decode: ReturnType<typeof vi.fn>;
+  close: ReturnType<typeof vi.fn>;
+} {
+  const decode = vi.fn(async () => handler());
+  const close = vi.fn();
+  return { session: { decode, close }, decode, close };
+}
+
+async function startCodecAdapter(session: StateCodecSession, hello = CODEC_SESSION_HELLO) {
+  MockWebSocket.last = null;
+  const adapter = new WebSocketAdapter(
+    "wss://localhost:9374/ws",
+    "join",
+    { main_deck: [], sideboard: [] },
+    "GAME01",
+    undefined,
+    undefined,
+    undefined,
+    { stateCodecSessionProvider: () => Promise.resolve(session) },
+  );
+  const init = adapter.initialize();
+  await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+  const raw = MockWebSocket.last!;
+  raw.dispatchSynthetic("message", hello);
+  await vi.waitFor(() => expect(raw.send).toHaveBeenCalledWith(
+    expect.stringContaining('"type":"JoinGameWithPassword"'),
+  ));
+  raw.dispatchSynthetic("message", CODEC_CONFIRMATION);
+  return { adapter, raw, init };
+}
+
+function fullFrame(envelope: string): string {
+  return JSON.stringify({ type: "Full", data: { state: JSON.parse(envelope), revision: 1 } });
+}
+
+function deltaFrame(envelope: string): string {
+  return JSON.stringify({ type: "Delta", data: { state: JSON.parse(envelope), revision: 2 } });
+}
+
+describe("WebSocketAdapter — negotiated StateCodecV1", () => {
+  it("checks snapshot and codec state, metadata, removals and command completion against explicit envelopes", async () => {
+    const initial = createMockState();
+    const changed = {
+      ...initial,
+      turn_number: 4,
+      objects: { "12": { name: "Éowyn 雪 🧙" } },
+      battlefield: [12],
+      derived: { marker: "old-derived" },
+    };
+    const removed = { ...initial, turn_number: 5 };
+    const started = {
+      type: "GameStarted",
+      data: { state: initial, your_player: 0, player_token: "codec-token",
+        full_key: REPLY_OWNERSHIP_FULL_KEY, state_revision: 7 },
+    };
+    const enriched = {
+      type: "StateUpdate",
+      data: {
+        state: changed, state_revision: 8, full_key: REPLY_OWNERSHIP_FULL_KEY,
+        legal_actions: [{ type: "PassPriority" }], auto_pass_recommended: true,
+        end_continuous_effect_offers: [{ marker: "offer" }],
+        mana_payment_shortcut_actions: [{ type: "PassPriority" }],
+        spell_costs: { "12": { generic: 2 } },
+        legal_actions_by_object: { "12": [{ marker: "object-action" }] },
+        activation_block_reasons: { "12": [{ marker: "block" }] },
+        viewer_interaction: { marker: "viewer" }, derived: { marker: "envelope-derived" },
+        events: [{ marker: "peer-event" }], log_entries: [{ marker: "peer-log" }],
+        rewind_targets: [{ turn_number: 2, active_player: 1 }],
+      },
+    };
+    const lean = {
+      type: "StateUpdate",
+      data: { state: removed, state_revision: 8, full_key: REPLY_OWNERSHIP_FULL_KEY,
+        events: [] },
+    };
+    const expectedLegal = {
+      actions: [], autoPassRecommended: false, endContinuousEffectOffers: [],
+      manaPaymentShortcutActions: [], spellCosts: undefined, legalActionsByObject: undefined,
+      activationBlockReasons: undefined, viewerInteraction: undefined,
+    };
+    for (const useCodec of [false, true]) {
+      MockWebSocket.last = null;
+      const decoder = codecSession(() => ({ kind: "resyncRequired" }));
+      decoder.decode.mockImplementation(async (frame: Uint8Array) => ({
+        kind: "decoded",
+        json: JSON.stringify(JSON.parse(new TextDecoder().decode(frame)).data.state),
+      }));
+      const adapter = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+        undefined, undefined, undefined,
+        { stateCodecSessionProvider: useCodec ? () => Promise.resolve(decoder.session) : null },
+      );
+      const states: unknown[] = [];
+      adapter.onEvent((event) => { if (event.type === "stateChanged") states.push(event); });
+      const init = adapter.initialize();
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      const raw = MockWebSocket.last!;
+      raw.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+      await vi.waitFor(() => expect(raw.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"JoinGameWithPassword"'),
+      ));
+      if (useCodec) raw.dispatchSynthetic("message", CODEC_CONFIRMATION);
+      const deliver = (envelope: unknown, full = false) => {
+        const json = JSON.stringify(envelope);
+        raw.dispatchSynthetic("message", useCodec ? (full ? fullFrame(json) : deltaFrame(json)) : json);
+      };
+      try {
+        deliver(started, true);
+        await init;
+        expect((await adapter.getSnapshot()).state).toEqual({ ...initial, derived: undefined });
+        expect(states).toEqual([]); // Initial state is consumed through getSnapshot.
+        deliver(enriched, true); // GameStarted is FullOnly; the first update is Full.
+        await vi.waitFor(() => expect(states).toHaveLength(1));
+        expect(states[0]).toEqual({
+          type: "stateChanged", snapshot: {
+            seq: expect.any(Number),
+            state: { ...changed, derived: enriched.data.derived },
+            legalResult: {
+              actions: enriched.data.legal_actions, autoPassRecommended: true,
+              endContinuousEffectOffers: enriched.data.end_continuous_effect_offers,
+              manaPaymentShortcutActions: enriched.data.mana_payment_shortcut_actions,
+              spellCosts: enriched.data.spell_costs,
+              legalActionsByObject: enriched.data.legal_actions_by_object,
+              activationBlockReasons: enriched.data.activation_block_reasons,
+              viewerInteraction: enriched.data.viewer_interaction,
+            },
+          },
+          events: enriched.data.events, logEntries: enriched.data.log_entries,
+          serverRevision: 8, rewindTargets: enriched.data.rewind_targets,
+        });
+        // Equal revision is accepted; absent optional fields and removed objects
+        // must disappear, rather than inheriting from the prior decoded state.
+        deliver(lean);
+        await vi.waitFor(() => expect(states).toHaveLength(2));
+        expect(states[1]).toEqual({
+          type: "stateChanged", snapshot: { seq: expect.any(Number),
+            state: { ...removed, derived: undefined }, legalResult: expectedLegal },
+          events: [], logEntries: undefined, serverRevision: 8, rewindTargets: [],
+        });
+        const pending = adapter.submitAction({ type: "PassPriority" }, 0);
+        const id = lastSubmissionCommandId(raw);
+        deliver({ ...lean, command_id: id, data: { ...lean.data, state_revision: 9,
+          events: [{ marker: "own" }], log_entries: [{ marker: "own-log" }] } });
+        await expect(pending).resolves.toEqual({
+          events: [{ marker: "own" }], log_entries: [{ marker: "own-log" }],
+        });
+        expect(states).toHaveLength(2);
+        expect((await adapter.getSnapshot()).legalResult).toEqual(expectedLegal);
+      } finally {
+        adapter.dispose();
+      }
+    }
+  });
+
+  it.each([true, false])("retains the wire baseline across a strictly stale update (own=%s)", async (own) => {
+    const session = codecSession(() => ({ kind: "resyncRequired" }));
+    session.decode.mockImplementation(async (frame: Uint8Array) => ({
+      kind: "decoded", json: JSON.stringify(JSON.parse(new TextDecoder().decode(frame)).data.state),
+    }));
+    const { adapter, raw, init } = await startCodecAdapter(session.session);
+    const events = vi.fn();
+    adapter.onEvent(events);
+    const started = { type: "GameStarted", data: { state: createMockState(),
+      state_revision: 10, your_player: 0, player_token: "codec-token", full_key: REPLY_OWNERSHIP_FULL_KEY } };
+    raw.dispatchSynthetic("message", fullFrame(JSON.stringify(started)));
+    await init;
+    const pending = adapter.submitAction({ type: "PassPriority" }, 0);
+    const settled = vi.fn();
+    void pending.then(settled);
+    const id = lastSubmissionCommandId(raw);
+    const stale = { type: "StateUpdate", ...(own ? { command_id: id } : {}),
+      data: { state: { ...createMockState(), turn_number: 9 }, state_revision: 9,
+        full_key: REPLY_OWNERSHIP_FULL_KEY, events: [{ marker: "stale-completion" }] } };
+    raw.dispatchSynthetic("message", fullFrame(JSON.stringify(stale)));
+    await vi.waitFor(() => expect(session.decode).toHaveBeenCalledTimes(2));
+    // A later queued control frame is the observable drain barrier.
+    raw.dispatchSynthetic("message", JSON.stringify({ type: "Pong", data: { timestamp: Date.now() } }));
+    await vi.waitFor(() => expect(events).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "latencyChanged" })));
+    expect((await adapter.getSnapshot()).state.turn_number).toBe(1);
+    expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
+    if (own) {
+      await expect(pending).resolves.toEqual({ events: [{ marker: "stale-completion" }], log_entries: undefined });
+      expect(settled).toHaveBeenCalledOnce();
+      expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+    } else {
+      expect(settled).not.toHaveBeenCalled();
+    }
+    const newer = { type: "StateUpdate", data: { ...stale.data,
+      state: { ...createMockState(), turn_number: 11 }, state_revision: 11 } };
+    raw.dispatchSynthetic("message", deltaFrame(JSON.stringify(newer)));
+    await vi.waitFor(() => expect(events).toHaveBeenCalledWith(expect.objectContaining({
+      type: "stateChanged", serverRevision: 11,
+    })));
+    expect((await adapter.getSnapshot()).state.turn_number).toBe(11);
+    expect(raw.close).not.toHaveBeenCalled();
+    expect(raw.send).not.toHaveBeenCalledWith('{"type":"ResyncState"}');
+    if (!own) {
+      raw.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp", command_id: id }));
+      await expect(pending).resolves.toEqual({ events: [], log_entries: [] });
+    }
+    adapter.dispose();
+  });
+
+  it.each([
+    ["wrong game", { game_code: "OTHER", generation: 1 }],
+    ["changed generation", { game_code: "GAME01", generation: 2 }],
+    ["invalid generation", { game_code: "GAME01", generation: 0 }],
+    ["missing key", undefined],
+  ] as const)("retires a successfully decoded terminal %s Full and fences the queued Delta", async (_label, key) => {
+    const session = codecSession(() => ({ kind: "resyncRequired" }));
+    session.decode.mockImplementation(async (frame: Uint8Array) => ({
+      kind: "decoded", json: JSON.stringify(JSON.parse(new TextDecoder().decode(frame)).data.state),
+    }));
+    const { adapter, raw, init } = await startCodecAdapter(session.session);
+    const started = { type: "GameStarted", data: { state: createMockState(),
+      your_player: 0, player_token: "codec-token", full_key: REPLY_OWNERSHIP_FULL_KEY } };
+    raw.dispatchSynthetic("message", fullFrame(JSON.stringify(started)));
+    await init;
+    const events = vi.fn();
+    adapter.onEvent(events);
+    const pending = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+    const rejected = { type: "StateUpdate", data: { state: { ...createMockState(), turn_number: 99 },
+      state_revision: 2, full_key: key } };
+    raw.dispatchSynthetic("message", fullFrame(JSON.stringify(rejected)));
+    raw.dispatchSynthetic("message", deltaFrame(JSON.stringify(rejected)));
+    await expect(pending()).resolves.toMatchObject({ code: "WS_CLOSED" });
+    expect(session.decode).toHaveBeenCalledTimes(2); // The rejecting Full decoded successfully.
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+    expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
+    expect((await adapter.getSnapshot()).state.turn_number).toBe(1);
+    expect(raw.send).not.toHaveBeenCalledWith('{"type":"ResyncState"}');
+    expect(session.close).toHaveBeenCalledOnce();
+    expect(raw.close).toHaveBeenCalledOnce();
+    adapter.dispose();
+  });
+
+  it.each([
+    ["Action", true], ["Interaction", true], ["Action", false], ["Interaction", false],
+  ] as const)("rejects stranded %s (correlated=%s), gates synchronous submissions, then resumes", async (kind, correlated) => {
+    const started = JSON.stringify({
+      type: "GameStarted",
+      data: {
+        state_revision: 2,
+        state: createMockState(),
+        your_player: 0,
+        player_token: "codec-token",
+        full_key: REPLY_OWNERSHIP_FULL_KEY,
+      },
+    });
+    const update = JSON.stringify({
+      type: "StateUpdate",
+      data: {
+        state_revision: 3,
+        state: { ...createMockState(), turn_number: 2 },
+        events: [{ type: "TurnStarted" }],
+        full_key: REPLY_OWNERSHIP_FULL_KEY,
+      },
+    });
+    const results: CodecDecodeResult[] = [
+      { kind: "decoded", json: started },
+      { kind: "decoded", json: update },
+      { kind: "resyncRequired" },
+      { kind: "decoded", json: update },
+      { kind: "decoded", json: update },
+    ];
+    const session = codecSession(() => results.shift() ?? { kind: "resyncRequired" });
+    const hello = correlated ? CODEC_SESSION_HELLO : JSON.stringify({
+      ...JSON.parse(CODEC_SESSION_HELLO),
+      data: { ...JSON.parse(CODEC_SESSION_HELLO).data, command_correlation: undefined },
+    });
+    const { adapter, raw, init } = await startCodecAdapter(session.session, hello);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+
+    raw.dispatchSynthetic("message", fullFrame(started));
+    await init;
+    expect((await adapter.getSnapshot()).state.turn_number).toBe(1);
+    raw.dispatchSynthetic("message", fullFrame(update));
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "stateChanged" })));
+    events.length = 0;
+    const attempted: Promise<unknown>[] = [];
+    const stopReentrant = adapter.onEvent((event) => {
+      if ((event.type === "actionPendingChanged" && !event.pending)
+        || event.type === "stateChanged") {
+        attempted.push(adapter.submitInteraction(interactionSubmission("reentrant"), 0)
+          .catch((error: unknown) => error));
+      }
+    });
+    const pending = kind === "Action"
+      ? adapter.submitAction({ type: "PassPriority" }, 0)
+      : adapter.submitInteraction(interactionSubmission("initial"), 0);
+    const observed = trackRejection(pending);
+    const commandId = lastSubmissionCommandId(raw);
+
+    raw.dispatchSynthetic("message", deltaFrame(update));
+    await expect(observed()).resolves.toMatchObject({
+      code: "WS_CLOSED",
+      message: "State delivery interrupted during action",
+      recoverable: true,
+    });
+    expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
+    expect(raw.send).toHaveBeenCalledWith('{"type":"ResyncState"}');
+
+    const sentBefore = submissionTypes(raw).length;
+    await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects
+      .toMatchObject({ code: "ACTION_NOT_SENT" });
+    expect(submissionTypes(raw)).toHaveLength(sentBefore);
+
+    raw.dispatchSynthetic("message", fullFrame(update));
+    await vi.waitFor(() => expect(events).toContainEqual(
+      expect.objectContaining({ type: "stateChanged" }),
+    ));
+    expect(await Promise.all(attempted)).toEqual([
+      expect.objectContaining({ code: "ACTION_NOT_SENT" }),
+      expect.objectContaining({ code: "ACTION_NOT_SENT" }),
+    ]);
+    stopReentrant();
+
+    const resumed = adapter.submitAction({ type: "PassPriority" } as GameAction, 0);
+    await vi.waitFor(() => expect(submissionTypes(raw)).toHaveLength(sentBefore + 1));
+    const resumedId = lastSubmissionCommandId(raw);
+    if (correlated) {
+      expect(resumedId).not.toBe(commandId);
+      const settled = vi.fn();
+      void resumed.then(settled);
+      const countStates = () => events.filter((event) =>
+        typeof event === "object" && event !== null && "type" in event && event.type === "stateChanged").length;
+      const beforeEcho = countStates();
+      raw.dispatchSynthetic("message", JSON.stringify({
+        type: "StateUpdate", command_id: commandId,
+        data: { state_revision: 3, state: createMockState(), events: [], full_key: REPLY_OWNERSHIP_FULL_KEY },
+      }));
+      await vi.waitFor(() => expect(countStates()).toBe(beforeEcho + 1));
+      expect(settled).not.toHaveBeenCalled();
+    }
+    raw.dispatchSynthetic("message", JSON.stringify({
+      type: "StateUpdate",
+      data: {
+        state_revision: 4,
+        state: { ...createMockState(), turn_number: 3 },
+        events: [],
+        full_key: REPLY_OWNERSHIP_FULL_KEY,
+      },
+      command_id: resumedId,
+    }));
+    await expect(resumed).resolves.toMatchObject({ events: [] });
+    adapter.dispose();
+  });
+
+  it("requests one resync and closes when a rejection precedes bootstrap", async () => {
+    const started = JSON.stringify({
+      type: "GameStarted",
+      data: {
+        state_revision: 1,
+        state: createMockState(),
+        your_player: 0,
+        player_token: "codec-token",
+        full_key: REPLY_OWNERSHIP_FULL_KEY,
+      },
+    });
+    const session = codecSession(() => ({ kind: "resyncRequired" }));
+    const { adapter, raw, init } = await startCodecAdapter(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    const rejection = trackRejection(init);
+
+    raw.dispatchSynthetic("message", fullFrame(started));
+    await expect(rejection()).resolves.toBeInstanceOf(AdapterError);
+    expect(raw.send).toHaveBeenCalledWith('{"type":"ResyncState"}');
+    expect(
+      raw.send.mock.calls.filter(([value]) => value === '{"type":"ResyncState"}'),
+    ).toHaveLength(1);
+    expect(events.some((event) => (event as { type?: string }).type === "playerIdentity")).toBe(false);
+    expect(raw.close).toHaveBeenCalled();
+    expect(session.close).toHaveBeenCalledOnce();
+
+    // A late, valid resync Full cannot publish state or bootstrap.
+    const late = vi.fn();
+    adapter.onEvent(late);
+    raw.dispatchSynthetic("message", fullFrame(started));
+    await Promise.resolve();
+    expect(late).not.toHaveBeenCalled();
+    expect(adapter.playerId).toBeNull();
+  });
+
+  it.each(["nativeAi", "nativePregame"] as const)("keeps %s snapshot-only with same-turn startup", async (nativeKind) => {
+    MockWebSocket.last = null;
+    const adapter = new WebSocketAdapter(
+      "native-engine",
+      "host",
+      { main_deck: [], sideboard: [] },
+      undefined,
+      undefined,
+      undefined,
+      "Player",
+      nativeKind === "nativeAi" ? {
+        nativeAi: {
+          socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+          aiSeats: [{ seatIndex: 1, difficulty: "Hard",
+            deck: { main_deck: ["Lightning Bolt"], sideboard: [] } }],
+          playerCount: 2,
+        },
+      } : {
+        nativePregame: { kind: "host", aiSeats: [], playerCount: 2,
+          socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport },
+      },
+    );
+    const init = adapter.initialize();
+    const raw = MockWebSocket.last!;
+    expect(raw).not.toBeNull();
+    raw.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+    await vi.waitFor(() => expect(raw.send).toHaveBeenCalledWith(
+      expect.stringContaining('"type":"ClientHello"'),
+    ));
+    expect(raw.send).toHaveBeenCalledWith(expect.stringContaining('"type":"ClientHello"'));
+    expect(raw.send).not.toHaveBeenCalledWith(expect.stringContaining("state_codecs"));
+    raw.dispatchSynthetic("message", JSON.stringify({
+      type: "GameStarted", data: { state: createMockState(), your_player: 0 },
+    }));
+    await init;
+    expect((await adapter.getSnapshot()).state.turn_number).toBe(1);
+    adapter.dispose();
+  });
+});
+
+/** Reading the static through a function keeps assignment narrowing out. */
+function latestSocket(): MockWebSocket {
+  const socket = MockWebSocket.last;
+  if (!socket) throw new Error("no socket was created");
+  return socket;
+}
+
+describe("WebSocketAdapter — bounded codec preparation", () => {
+  const joinArgs = (): [
+    string,
+    "join",
+    { main_deck: string[]; sideboard: string[] },
+    string,
+    string | undefined,
+    string | undefined,
+    string | undefined,
+  ] => [
+    "wss://localhost:9374/ws",
+    "join",
+    { main_deck: [], sideboard: [] },
+    "GAME01",
+    undefined,
+    undefined,
+    undefined,
+  ];
+
+  it("falls back to snapshot delivery after the preparation deadline and closes the late lease", async () => {
+    vi.useFakeTimers();
+    try {
+      MockWebSocket.last = null;
+      const late = codecSession(() => ({ kind: "decoded", json: "{}" }));
+      let resolveProvider!: (session: StateCodecSession) => void;
+      const provider = () => new Promise<StateCodecSession | null>((resolve) => {
+        resolveProvider = resolve;
+      });
+      const adapter = new WebSocketAdapter(
+        ...joinArgs(),
+        { stateCodecSessionProvider: provider },
+      );
+      const init = adapter.initialize();
+
+      await vi.advanceTimersByTimeAsync(STATE_CODEC_PREPARATION_TIMEOUT_MS);
+      const raw = latestSocket();
+      raw.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect((adapter as unknown as { ws: unknown }).ws).toBe(raw);
+      expect(raw.send).toHaveBeenCalledWith(expect.stringContaining('"type":"ClientHello"'));
+      expect(raw.send).not.toHaveBeenCalledWith(expect.stringContaining("state_codecs"));
+
+      const socketBefore = MockWebSocket.last;
+      resolveProvider(late.session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(late.close).toHaveBeenCalledOnce();
+      expect(MockWebSocket.last).toBe(socketBefore);
+
+      raw.dispatchSynthetic("message", JSON.stringify({
+        type: "GameStarted",
+        data: { state: createMockState(), your_player: 0 },
+      }));
+      await init;
+      adapter.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("abandons the attachment when disposed while preparing, opening no socket", async () => {
+    MockWebSocket.last = null;
+    const adapter = new WebSocketAdapter(
+      ...joinArgs(),
+      { stateCodecSessionProvider: () => new Promise<StateCodecSession | null>(() => undefined) },
+    );
+    const outcome = trackRejection(adapter.initialize());
+    adapter.dispose();
+
+    await expect(outcome()).resolves.toMatchObject({ code: "WS_CLOSED" });
+    expect(MockWebSocket.last).toBeNull();
+  });
+
+  it("explicit null keeps the handshake in the same turn", async () => {
+    MockWebSocket.last = null;
+    const adapter = new WebSocketAdapter(
+      ...joinArgs(),
+      { stateCodecSessionProvider: null },
+    );
+    void adapter.initialize().catch(() => undefined);
+    expect(MockWebSocket.last).not.toBeNull();
+    adapter.dispose();
+  });
 });
