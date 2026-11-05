@@ -737,7 +737,8 @@ mod tests {
     /// same ones a casual `CreateGameWithSettings` is. `sticker_sheets` is not among
     /// them (a deliberate omission of the shared payload validator, not a
     /// tournament-path regression); its persistence is instead bounded in aggregate
-    /// by `tournament::MAX_AGGREGATE_DECK_NAME_BYTES`, which sums it in.
+    /// by `tournament::MAX_AGGREGATE_DECK_ENCODED_BYTES`, which counts the whole
+    /// encoded deck (every field, `sticker_sheets` included).
     #[test]
     fn submit_tournament_deck_bounds_every_supplementary_list() {
         let cases = [

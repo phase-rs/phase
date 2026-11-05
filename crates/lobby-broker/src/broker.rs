@@ -4945,6 +4945,175 @@ mod tests {
         );
     }
 
+    /// Aggregate persistence regression at the transport path — the HIGH the
+    /// name-list-only accounting missed. Decks that each pass the per-deck inbound
+    /// guard (empty name lists plus a large `printings` sidecar) but together would
+    /// push the single-key broker snapshot past
+    /// [`crate::tournament::MAX_AGGREGATE_DECK_ENCODED_BYTES`] are refused through
+    /// `Broker::handle` with a correlated `TournamentActionRejected`, leaving every
+    /// retained deck and readiness flag untouched. Replacing a heavy slot with a
+    /// modest deck then frees the budget for the previously-refused entrant,
+    /// proving the replaced slot is excluded from the retained sum. REVERT-FAIL:
+    /// restore the name-list-only accounting and both printing-heavy decks are
+    /// admitted, overflowing the snapshot the DO stores under one 2 MB key.
+    #[test]
+    fn aggregate_deck_budget_counts_printings_through_the_broker_path() {
+        // Empty name lists, `entries` printings at the per-entry caps — the
+        // review's witness: individually guard-accepted, but a large persisted
+        // contribution a name-list sum scores as zero.
+        fn printings_only_deck(entries: usize) -> engine::starter_decks::DeckData {
+            use engine::types::card_printing::{
+                CardPrinting, DeckPrinting, DeckSection, MAX_DECK_CARD_NAME_LEN,
+                MAX_PRINTING_COLLECTOR_NUMBER_LEN, MAX_PRINTING_SET_CODE_LEN,
+            };
+            engine::starter_decks::DeckData {
+                printings: (0..entries)
+                    .map(|_| DeckPrinting {
+                        section: DeckSection::MainDeck,
+                        name: "x".repeat(MAX_DECK_CARD_NAME_LEN),
+                        count: 1,
+                        printing: CardPrinting {
+                            set_code: "s".repeat(MAX_PRINTING_SET_CODE_LEN),
+                            collector_number: "c".repeat(MAX_PRINTING_COLLECTOR_NUMBER_LEN),
+                        },
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+        }
+
+        const ALICE_ID: TournamentRequestId = TournamentRequestId(71);
+        const BOB_ID: TournamentRequestId = TournamentRequestId(72);
+        const ALICE_REPLACE_ID: TournamentRequestId = TournamentRequestId(73);
+        const BOB_RETRY_ID: TournamentRequestId = TournamentRequestId(74);
+
+        let budget = crate::tournament::MAX_AGGREGATE_DECK_ENCODED_BYTES;
+        // Sized so one heavy deck fits the budget and two do not.
+        let heavy = printings_only_deck(900);
+        let encoded = serde_json::to_vec(&heavy).expect("deck serializes").len();
+        assert!(
+            encoded < budget && encoded.saturating_mul(2) > budget,
+            "witness must admit one heavy deck and refuse the second (encoded {encoded}, budget {budget})"
+        );
+        // Each heavy deck is individually accepted by the per-deck inbound guard —
+        // the precondition for "accepted production inputs" the review required.
+        assert!(
+            crate::inbound_guard::guard_inbound(&LobbyClientMessage::SubmitTournamentDeck {
+                code: "PLACEHOLDER".into(),
+                player_token: "placeholder".into(),
+                deck: heavy.clone(),
+                request_id: Some(ALICE_ID),
+            })
+            .is_ok(),
+            "the witness deck must pass the per-deck inbound bounds guard"
+        );
+
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut organizer = ConnState::default();
+        let mut alice = ConnState::default();
+        let mut bob = ConnState::default();
+
+        let (code, _org) = make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+        let alice_token = join_tournament(&mut alice, &mut broker, &env, &code, "key-a", "Alice");
+        let bob_token = join_tournament(&mut bob, &mut broker, &env, &code, "key-b", "Bob");
+
+        // Alice's heavy deck is admitted — within budget on its own.
+        let admitted = broker.handle(
+            &mut alice,
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: code.clone(),
+                player_token: alice_token.clone(),
+                deck: heavy.clone(),
+                request_id: Some(ALICE_ID),
+            },
+            &env,
+        );
+        assert_eq!(ack_of(&admitted).0, ALICE_ID);
+
+        // Bob's equally heavy deck would push the aggregate past the budget → a
+        // correlated refusal, and no broadcast.
+        let refused = broker.handle(
+            &mut bob,
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: code.clone(),
+                player_token: bob_token.clone(),
+                deck: heavy.clone(),
+                request_id: Some(BOB_ID),
+            },
+            &env,
+        );
+        let (refusal_id, reason) = rejection_of(&refused);
+        assert_eq!(refusal_id, BOB_ID);
+        assert!(
+            reason.contains("aggregate tournament deck budget"),
+            "the refusal must name the aggregate budget, got: {reason}"
+        );
+        assert!(
+            subscriber_msgs(&refused).is_empty(),
+            "a refused submission must not broadcast"
+        );
+
+        // Bob's slot stays empty; Alice's deck and both readiness flags unchanged.
+        let event = broker.tournaments().get(&code).expect("event");
+        assert_eq!(
+            event
+                .players
+                .iter()
+                .find(|player| player.player_key == "key-a")
+                .expect("Alice is registered")
+                .deck
+                .as_ref(),
+            Some(&heavy),
+            "the refused submission must leave Alice's admitted deck in place"
+        );
+        assert!(
+            event
+                .players
+                .iter()
+                .find(|player| player.player_key == "key-b")
+                .expect("Bob is registered")
+                .deck
+                .is_none(),
+            "Bob's refused deck must not be stored"
+        );
+
+        // Replacement frees the budget: Alice overwrites her heavy deck with a
+        // modest one, so Bob's heavy deck now fits — proving the replaced slot is
+        // excluded from the retained sum rather than double-counted.
+        let alice_light = engine::starter_decks::DeckData {
+            main_deck: vec!["Island".into()],
+            ..Default::default()
+        };
+        let replaced = broker.handle(
+            &mut alice,
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: code.clone(),
+                player_token: alice_token.clone(),
+                deck: alice_light,
+                request_id: Some(ALICE_REPLACE_ID),
+            },
+            &env,
+        );
+        assert_eq!(ack_of(&replaced).0, ALICE_REPLACE_ID);
+
+        let bob_retry = broker.handle(
+            &mut bob,
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: code.clone(),
+                player_token: bob_token.clone(),
+                deck: heavy.clone(),
+                request_id: Some(BOB_RETRY_ID),
+            },
+            &env,
+        );
+        assert_eq!(
+            ack_of(&bob_retry).0,
+            BOB_RETRY_ID,
+            "Bob's heavy deck fits once Alice's heavy slot is replaced by a modest deck"
+        );
+    }
+
     /// D6 — a gated frame refused at the inbound bounds guard, before any
     /// handler runs, still settles the caller's own correlator.
     ///

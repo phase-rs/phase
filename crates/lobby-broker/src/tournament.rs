@@ -2159,37 +2159,31 @@ pub enum TournamentExpiryEvent {
 /// registry plus every tournament and its retained decks — as one JSON value
 /// under a single SQLite key, and Cloudflare caps a key+value at 2 MB. The
 /// per-deck wire bounds ([`crate::inbound_guard::validate_deck_payload`])
-/// individually accept decks whose names sum far past that cap in aggregate (six
-/// maxed decks are ~2.46 MB of names alone), so a per-deck bound alone cannot
-/// bound the snapshot. This caps the summed name bytes well under 2 MB, leaving
-/// headroom for each deck's separately-bounded printings sidecar, JSON structural
-/// overhead, and the rest of the broker snapshot. A refused submission leaves
-/// every retained deck and its readiness unchanged (the check precedes the single
+/// individually accept decks whose *persisted* size sums far past that cap in
+/// aggregate: six maxed name lists are ~2.46 MB of names alone, and the
+/// separately-bounded `printings` sidecar independently admits
+/// [`MAX_DECK_PRINTING_ENTRIES`](engine::types::card_printing::MAX_DECK_PRINTING_ENTRIES)
+/// entries (~256 B name + 32 B set code + 32 B collector number each) per list
+/// with no matching name-list entry — so one empty-name deck can still serialize
+/// past 512 KiB. A per-deck bound therefore cannot bound the snapshot. This caps
+/// the summed *encoded* deck bytes (every persisted field, JSON escaping and
+/// per-entry overhead; see [`deck_encoded_bytes`]) well under 2 MB, leaving
+/// headroom for the rest of the broker snapshot. A refused submission leaves every
+/// retained deck and its readiness unchanged (the check precedes the single
 /// mutation).
-pub const MAX_AGGREGATE_DECK_NAME_BYTES: usize = 512 * 1024;
+pub const MAX_AGGREGATE_DECK_ENCODED_BYTES: usize = 512 * 1024;
 
-/// Total bytes of the card-name strings in `deck` — the attacker-controlled,
-/// persistence-dominating cost [`MAX_AGGREGATE_DECK_NAME_BYTES`] bounds. The
-/// structured `printings` sidecar is bounded separately (per-deck) by
-/// [`crate::inbound_guard::validate_deck_payload`], and the conservative aggregate
-/// budget absorbs its proportional contribution.
-fn deck_name_bytes(deck: &DeckData) -> usize {
-    [
-        &deck.main_deck,
-        &deck.sideboard,
-        &deck.commander,
-        &deck.companion,
-        &deck.attraction_deck,
-        &deck.planar_deck,
-        &deck.scheme_deck,
-        &deck.contraption_deck,
-        &deck.sticker_sheets,
-        &deck.signature_spell,
-    ]
-    .into_iter()
-    .flat_map(|list| list.iter())
-    .map(String::len)
-    .sum()
+/// The exact byte cost `deck` adds to the persisted broker snapshot: its
+/// `serde_json` encoding, the same codec the lobby Durable Object snapshots the
+/// whole broker with (`serde_json::to_string(&broker)` in `broker-wasm`). Charging
+/// the encoded form — not a hand-picked subset of fields — counts every persisted
+/// field (the `printings` sidecar included, which a name-list sum omits entirely),
+/// JSON string escaping and per-entry / collection overhead, and stays correct
+/// when `DeckData` grows a field. Serialization is infallible for `DeckData`; a
+/// hypothetical failure charges `usize::MAX`, so the aggregate check refuses rather
+/// than under-counts.
+fn deck_encoded_bytes(deck: &DeckData) -> usize {
+    serde_json::to_vec(deck).map_or(usize::MAX, |bytes| bytes.len())
 }
 
 /// The pure registry of tournaments, mirroring
@@ -2736,13 +2730,12 @@ impl TournamentManager {
         env: &impl BrokerEnv,
     ) -> Result<(), String> {
         let now = env.now_ms() / 1000;
-        let incoming_bytes = deck_name_bytes(&deck);
-        // Sum the card-name bytes of every OTHER persisted deck — all
-        // tournaments, minus the (code, player_key) slot this submission
-        // overwrites — while the shared registry is still borrowed immutably, so
-        // the aggregate budget below can be checked before any mutation. A
-        // resubmission replaces its own deck, so its old bytes are excluded here
-        // rather than double-counted.
+        let incoming_bytes = deck_encoded_bytes(&deck);
+        // Sum the encoded bytes of every OTHER persisted deck — all tournaments,
+        // minus the (code, player_key) slot this submission overwrites — while the
+        // shared registry is still borrowed immutably, so the aggregate budget
+        // below can be checked before any mutation. A resubmission replaces its own
+        // deck, so its old bytes are excluded here rather than double-counted.
         let retained_other_bytes: usize = self
             .tournaments
             .iter()
@@ -2752,7 +2745,7 @@ impl TournamentManager {
                     p.deck
                         .as_ref()
                         .filter(|_| !is_overwritten_slot)
-                        .map(deck_name_bytes)
+                        .map(deck_encoded_bytes)
                 })
             })
             .sum();
@@ -2777,14 +2770,15 @@ impl TournamentManager {
             .find(|p| p.player_key == player_key)
             .ok_or_else(|| format!("Player {player_key} is not registered in {code}"))?;
         // Aggregate persistence budget: the whole broker serializes under one
-        // 2 MB Durable Object key, so admit the deck only if the summed name
-        // bytes of all retained decks stay under the budget. Checked last, right
-        // before the single mutation, so a refusal leaves every retained deck and
-        // its readiness unchanged.
-        if retained_other_bytes + incoming_bytes > MAX_AGGREGATE_DECK_NAME_BYTES {
+        // 2 MB Durable Object key, so admit the deck only if the summed encoded
+        // bytes of all retained decks stay under the budget. `saturating_add` so a
+        // deck that failed to serialize (`usize::MAX`) refuses instead of
+        // overflowing. Checked last, right before the single mutation, so a refusal
+        // leaves every retained deck and its readiness unchanged.
+        if retained_other_bytes.saturating_add(incoming_bytes) > MAX_AGGREGATE_DECK_ENCODED_BYTES {
             return Err(format!(
                 "Deck rejected: it would exceed the server's aggregate tournament deck \
-                 budget ({MAX_AGGREGATE_DECK_NAME_BYTES} bytes of card names across all events)"
+                 budget ({MAX_AGGREGATE_DECK_ENCODED_BYTES} encoded bytes across all events)"
             ));
         }
         player.deck = Some(deck);
@@ -4237,23 +4231,56 @@ mod tests {
         }
     }
 
-    /// `submit_deck` refuses a deck whose card-name bytes would push the summed
-    /// persisted deck state across all tournaments past
-    /// [`MAX_AGGREGATE_DECK_NAME_BYTES`] — the whole broker serializes under one
-    /// 2 MB Durable Object key — and the refusal leaves the slot unchanged, so a
-    /// later within-budget deck is still admitted. REVERT-FAIL: drop the aggregate
-    /// check in `submit_deck` and the over-budget submission stores instead of
-    /// erroring.
+    /// A deck with EMPTY name lists carrying `entries` printing annotations, each
+    /// at the per-entry string caps (256 B name, 32 B set code, 32 B collector
+    /// number). Models the review's witness: individually accepted by the per-deck
+    /// printing bound ([`MAX_DECK_PRINTING_ENTRIES`]), but a large *persisted*
+    /// contribution the superseded name-list sum charged as zero bytes.
+    fn printings_only_deck(entries: usize) -> DeckData {
+        use engine::types::card_printing::{
+            CardPrinting, DeckPrinting, DeckSection, MAX_DECK_CARD_NAME_LEN,
+            MAX_PRINTING_COLLECTOR_NUMBER_LEN, MAX_PRINTING_SET_CODE_LEN,
+        };
+        DeckData {
+            printings: (0..entries)
+                .map(|_| DeckPrinting {
+                    section: DeckSection::MainDeck,
+                    name: "x".repeat(MAX_DECK_CARD_NAME_LEN),
+                    count: 1,
+                    printing: CardPrinting {
+                        set_code: "s".repeat(MAX_PRINTING_SET_CODE_LEN),
+                        collector_number: "c".repeat(MAX_PRINTING_COLLECTOR_NUMBER_LEN),
+                    },
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// `submit_deck` charges the full *encoded* deck — the `printings` sidecar
+    /// included — against the aggregate budget, so a deck with EMPTY name lists but
+    /// a large, individually-accepted printings sidecar is still refused when it
+    /// would push the single-key broker snapshot past
+    /// [`MAX_AGGREGATE_DECK_ENCODED_BYTES`]; the refusal leaves the slot unchanged,
+    /// so a later modest deck is still admitted. REVERT-FAIL: charge only the ten
+    /// name lists (the superseded `deck_name_bytes`) and this zero-name deck scores
+    /// zero bytes and stores instead of erroring.
     #[test]
-    fn submit_deck_enforces_the_aggregate_name_budget_and_refuses_cleanly() {
+    fn submit_deck_charges_the_full_encoded_deck_against_the_aggregate_budget() {
         let env = FakeEnv::new();
         let mut mgr = swiss(2, 2, &env);
         mgr.generate_pairings("T", &env).expect("round 1");
-        // A single deck whose card names alone exceed the aggregate budget.
-        let over_budget = DeckData {
-            main_deck: vec!["x".repeat(256); MAX_AGGREGATE_DECK_NAME_BYTES / 256 + 1],
-            ..Default::default()
-        };
+        // Empty name lists, but a printings sidecar whose encoded size alone clears
+        // the budget — the witness the name-only accounting scored as zero.
+        let over_budget = printings_only_deck(1600);
+        assert!(
+            over_budget.main_deck.is_empty() && over_budget.sideboard.is_empty(),
+            "witness must carry zero name-list bytes"
+        );
+        assert!(
+            deck_encoded_bytes(&over_budget) > MAX_AGGREGATE_DECK_ENCODED_BYTES,
+            "witness must exceed the budget by its encoded size alone"
+        );
         assert!(mgr.submit_deck("T", &key(0), over_budget, &env).is_err());
         // The refusal left the entrant's slot empty — state unchanged.
         let stored = mgr
