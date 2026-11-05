@@ -2979,7 +2979,7 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
         };
         if let Some((idx, counted_take)) = hit {
             let residual = crate::analysis::resource::board_delta(&priors[idx].normalized, state);
-            offer_draw_without_end(state, result, residual, counted_take);
+            offer_draw_without_end(state, result, residual, counted_take, None);
         }
     }
     // else: staggered-pod loss / non-beneficial optional loop ⇒ nothing is offered or decided.
@@ -3039,9 +3039,10 @@ fn mandatory_outcome(
         Witnessed::Offered {
             counted_take,
             residual,
+            period,
         } => {
             super::play_trace::note_offered(state, span);
-            offer_draw_without_end(state, result, residual, counted_take);
+            offer_draw_without_end(state, result, residual, counted_take, Some(*period));
             true
         }
         Witnessed::Refused => false,
@@ -3093,13 +3094,14 @@ fn decide_mandatory_span(
         };
     }
     let settle = |profile: &crate::types::game_state::LoopDecisionProfile,
-                  held: super::period_confirm::HeldPeriod| {
+                  period: super::period_confirm::ConfirmedPeriod| {
         if profile.is_forced() {
             Witnessed::Declared
         } else if profile.is_offered() {
             Witnessed::Offered {
-                counted_take: held.counted_take.naming_the_choice(profile),
+                counted_take: CountedTake::Performs.naming_the_choice(profile),
                 residual: reading.residual.clone(),
+                period: Box::new(period),
             }
         } else {
             Witnessed::Refused
@@ -3108,9 +3110,9 @@ fn decide_mandatory_span(
     let profile = reading.profile;
     let verdict = if profile.holds_unproven_option() {
         // An option tree costs more than the replay, so only a period that holds is asked it.
-        super::period_confirm::mandatory_period_holds(state, span, certificate)
-            .map_or(Witnessed::Refused, |held| {
-                settle(&profile.with_option_proof(prove), held)
+        super::period_confirm::mandatory_period_holds(state, span)
+            .map_or(Witnessed::Refused, |period| {
+                settle(&profile.with_option_proof(prove), period)
             })
     } else {
         let profile = profile.with_option_proof(prove);
@@ -3118,22 +3120,29 @@ fn decide_mandatory_span(
         if !profile.is_forced() && !profile.is_offered() {
             return MandatoryDecision::Keep(Witnessed::Refused);
         }
-        super::period_confirm::mandatory_period_holds(state, span, certificate)
-            .map_or(Witnessed::Refused, |held| settle(&profile, held))
+        super::period_confirm::mandatory_period_holds(state, span)
+            .map_or(Witnessed::Refused, |period| settle(&profile, period))
     };
     MandatoryDecision::Keep(verdict)
 }
 
 /// CR 732.2a + CR 732.5: offers the priority holder a draw for a recurring period whose only
-/// non-mandatory member is an out; nobody is forced to use it.
+/// non-mandatory member is an out; nobody is forced to use it. A carried `period` is the one its
+/// take performs; without one the take is the ring drain.
 fn offer_draw_without_end(
     state: &mut GameState,
     result: &mut ActionResult,
     residual: crate::analysis::resource::BoardDelta,
     counted_take: crate::analysis::loop_check::CountedTake,
+    period: Option<super::period_confirm::ConfirmedPeriod>,
 ) {
+    use crate::analysis::loop_check::OfferRoad;
     let WaitingFor::Priority { player: proposer } = state.waiting_for else {
         unreachable!("interactive bridge only runs during priority")
+    };
+    let (road, period) = match period {
+        Some(period) => (OfferRoad::RecordedPeriod, period),
+        None => (OfferRoad::Ring, Default::default()),
     };
     state.waiting_for = WaitingFor::LoopShortcut {
         proposer,
@@ -3153,9 +3162,9 @@ fn offer_draw_without_end(
             None,
         ),
         declaration: None,
-        road: crate::analysis::loop_check::OfferRoad::Ring,
+        road,
         counted_take,
-        period: Default::default(),
+        period,
     };
     result.waiting_for = state.waiting_for.clone();
 }
@@ -6649,7 +6658,7 @@ fn published_period_elapsed(frames_this_cycle: u32, frames_per_period: Option<u3
 
 /// The board a shortcut take compares its settle frames against: `state` seeded to its active
 /// player's priority and normalized.
-pub(crate) fn take_boundary(state: &GameState) -> GameState {
+fn take_boundary(state: &GameState) -> GameState {
     let mut seed = state.clone();
     priority::reset_priority(&mut seed);
     seed.waiting_for = WaitingFor::Priority {
@@ -6661,7 +6670,7 @@ pub(crate) fn take_boundary(state: &GameState) -> GameState {
 /// Whether a settle frame recurs against `boundary` on the take's board predicates: equal, covered
 /// by growth, or covered by the history arm, which admits the unread last-known records of objects
 /// that ceased to exist (CR 732.2a + CR 608.2h).
-pub(crate) fn settle_recurs(boundary: &GameState, settled: &GameState) -> bool {
+fn settle_recurs(boundary: &GameState, settled: &GameState) -> bool {
     crate::analysis::resource::loop_states_equal_modulo_resources(boundary, settled)
         || crate::analysis::resource::loop_states_cover_modulo_growth(boundary, settled)
         || crate::analysis::resource::history_covers(boundary, settled)

@@ -25,7 +25,8 @@ use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
     AutoMayChoice, AutoPassRequest, CastPaymentMode, GameEnd, GameState, LoopDetectionMode,
-    MayTriggerAutoChoiceScope, PersistedGameState, StackEntryKind, WaitingFor, YieldScope,
+    MayTriggerAutoChoiceScope, PersistedGameState, RandomDraw, StackEntryKind, WaitingFor,
+    YieldScope,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{
@@ -37,6 +38,7 @@ use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::zones::Zone;
+use rand::Rng;
 
 use crate::support::shared_card_db;
 
@@ -3251,6 +3253,32 @@ fn repetitions(events: &[GameEvent]) -> u32 {
         .unwrap_or(0)
 }
 
+/// P0's `Fixed(n)` declaration at `offered`, accepted by P1: the board after the take and its
+/// events, after asserting the take performed `n` repetitions and gave P0 priority (CR 732.2a).
+fn accepted_take(offered: &GameState, n: u32, leg: &str) -> (GameState, Vec<GameEvent>) {
+    assert_eq!(counted_take(offered), CountedTake::Performs, "{leg}");
+    let (proposed, _) = admitted(offered, P0, declare(IterationCount::Fixed(n)), leg);
+    let (taken, events) = admitted(
+        &proposed,
+        P1,
+        GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        },
+        leg,
+    );
+    assert_eq!(repetitions(&events), n, "{leg}");
+    assert!(priority_to(&taken, P0), "{leg}: {:?}", taken.waiting_for);
+    (taken, events)
+}
+
+/// The Goblin tokens `events` created.
+fn goblin_tokens_created(events: &[GameEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::TokenCreated { name, .. } if name == "Goblin"))
+        .count()
+}
+
 const NO_WINNER: &str = "naming no winner";
 
 /// Asserts each player's view of the offer at `offered` carries the engine's counted take.
@@ -3763,24 +3791,34 @@ fn a_die_roll_another_players_trigger_reads_is_offered() {
     }
 }
 
-/// CR 706.1 + CR 732.5: beside P1's Lightning Bolt and untapped Mountain the die-roll loop is
-/// offered; its offer frame holds live Goblin tokens, and each cycle's tokens are new objects no
-/// settle of the take matches, so no counted take performs.
+/// CR 706.1 + CR 732.5 + CR 732.2a: beside P1's Lightning Bolt and untapped Mountain the die-roll
+/// loop is offered, and on every drive P0's accepted `Fixed(3)` performs three cycles, each
+/// resolving Swarming Goblins' trigger once, so it rolls exactly three d20s.
 #[test]
 fn a_die_roll_beside_an_out_is_offered() {
-    a_random_outcome_is_offered(
-        Board {
-            optional: true,
-            ..GOBLINS
-        },
-        CountedTake::Unperformable(UnperformableCause::UndelimitedCover),
-        1,
-    );
+    let board = Board {
+        optional: true,
+        ..GOBLINS
+    };
+    a_random_outcome_is_offered(board, CountedTake::Performs, 1);
+    for drive in EVERY_DRIVE {
+        let leg = format!("{drive:?}");
+        let Some(offered) = run(board, LoopDetectionMode::Interactive, drive, 60) else {
+            return;
+        };
+        assert_out_offer(&offered, &leg);
+        let (taken, _) = accepted_take(offered.state(), 3, &leg);
+        assert_eq!(
+            taken.rng.outcome_draws() - offered.state().rng.outcome_draws(),
+            3,
+            "{leg}"
+        );
+    }
 }
 
 /// CR 732.2a + CR 705.1: at the coin-flip loop's offer beside P1's Lightning Bolt on every drive,
-/// P0's accepted `Fixed(3)` performs three cycles by play, each resolving the Firecat's trigger,
-/// which flips until it loses one flip, and returns priority to P0.
+/// P0's accepted `Fixed(3)` performs three cycles, each resolving the Firecat's trigger once, which
+/// flips until it loses one flip, so the take draws exactly the flips up to the third lost one.
 #[test]
 fn a_counted_take_of_a_coin_flip_loop_performs_its_count() {
     let board = Board {
@@ -3793,33 +3831,16 @@ fn a_counted_take_of_a_coin_flip_loop_performs_its_count() {
             return;
         };
         assert_out_offer(&offered, &leg);
+        let mut rng = offered.state().rng.clone();
+        let (mut flips, mut lost) = (0, 0);
+        while lost < 3 {
+            flips += 1;
+            lost += u64::from(!rng.draw(RandomDraw::Outcome).random_bool(0.5));
+        }
+        let (taken, _) = accepted_take(offered.state(), 3, &leg);
         assert_eq!(
-            counted_take(offered.state()),
-            CountedTake::Performs,
-            "{leg}"
-        );
-        let rolled = offered.state().rng.outcome_draws();
-        let (proposed, _) = admitted(offered.state(), P0, declare(IterationCount::Fixed(3)), &leg);
-        let (taken, events) = admitted(
-            &proposed,
-            P1,
-            GameAction::RespondToShortcut {
-                response: ShortcutResponse::Accept,
-            },
-            &leg,
-        );
-        assert!(priority_to(&taken, P0), "{leg}: {:?}", taken.waiting_for);
-        let flips: Vec<bool> = events
-            .iter()
-            .filter_map(|event| match event {
-                GameEvent::CoinFlipped { won, .. } => Some(*won),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(flips.iter().filter(|won| !**won).count(), 3, "{leg}");
-        assert_eq!(
-            taken.rng.outcome_draws(),
-            rolled + flips.len() as u64,
+            taken.rng.outcome_draws() - offered.state().rng.outcome_draws(),
+            flips,
             "{leg}"
         );
     }
@@ -3849,21 +3870,30 @@ fn a_token_made_and_exiled_every_cycle_is_a_draw() {
     }
 }
 
-/// CR 732.5: beside P1's Lightning Bolt and untapped Mountain, an out, the token loop is offered
-/// with no predicted winner; its offer frame holds a live Goblin token no settle of the take
-/// matches, so no counted take performs.
+/// CR 732.5 + CR 732.2a: beside P1's Lightning Bolt and untapped Mountain, an out, the token loop
+/// is offered with no predicted winner, and on every drive P0's accepted `Fixed(2)` performs two
+/// cycles, each resolving Goblin Instigator's trigger once, so it creates exactly two Goblins.
 #[test]
 fn a_token_made_and_exiled_every_cycle_beside_an_out_is_offered() {
+    let board = Board {
+        optional: true,
+        ..INSTIGATOR
+    };
     offered_on_every_drive(
-        Board {
-            optional: true,
-            ..INSTIGATOR
-        },
+        board,
         &[Pick::First],
         "OrderTriggers",
         1,
-        CountedTake::Unperformable(UnperformableCause::UndelimitedCover),
+        CountedTake::Performs,
     );
+    for drive in EVERY_DRIVE {
+        let leg = format!("{drive:?}");
+        let Some(offered) = run(board, LoopDetectionMode::Interactive, drive, 60) else {
+            return;
+        };
+        let (_, events) = accepted_take(offered.state(), 2, &leg);
+        assert_eq!(goblin_tokens_created(&events), 2, "{leg}");
+    }
 }
 
 const LIFE_REPLACEMENTS: &[&str] = &["Boon Reflection", "Angel of Vitality"];
@@ -4193,10 +4223,11 @@ fn a_shuffle_beside_counter_growth_nothing_reads_until_stack_empty_is_offered() 
     shuffle_beside_counter_growth_is_offered(Drive::UntilStackEmpty);
 }
 
-/// Board B with an out on either seat recurs only on its token growth, which the ring drain does
-/// not delimit, so on every drive no count above zero is taken.
+/// CR 732.2a: Board B with an out on either seat is offered, and on every drive P0's accepted
+/// `Fixed(3)` performs three cycles, each making one Polyraptor copy that Marauding Raptor's 2
+/// damage does not kill, so three more Polyraptors stand on the battlefield.
 #[test]
-fn a_token_copy_offer_beside_an_out_refuses_every_counted_take() {
+fn a_counted_take_of_a_token_copy_loop_beside_an_out_performs_its_count() {
     for board in [
         Board {
             optional: true,
@@ -4217,10 +4248,18 @@ fn a_token_copy_offer_beside_an_out_refuses_every_counted_take() {
                 offered.on_battlefield("Polyraptor").len() >= 2,
                 "{leg}: reach: a copy entered"
             );
-            assert_no_counted_take(
-                offered.state(),
-                CountedTake::Unperformable(UnperformableCause::UndelimitedCover),
-                &leg,
+            let (taken, _) = accepted_take(offered.state(), 3, &leg);
+            let polyraptors = |state: &GameState| {
+                state
+                    .battlefield
+                    .iter()
+                    .filter(|id| state.objects[id].name == "Polyraptor")
+                    .count()
+            };
+            assert_eq!(
+                polyraptors(&taken),
+                polyraptors(offered.state()) + 3,
+                "{leg}"
             );
         }
     }
@@ -4280,14 +4319,11 @@ fn a_restored_counted_proposal_over_a_choice_refuses_a_later_place() {
 
 /// CR 701.24a + CR 732.2a: beside Soul Warden on either seat, the period the play trace names
 /// holds no shuffle while its replay shuffles P0's library, so the period is offered, never
-/// declared, and every player accepting it draws the game; Off runs on. The ring drain's
-/// delimiter fires in the replay beside P1's Soul Warden, so a count is taken, and fires nowhere
-/// beside P0's, so no count above zero is taken.
+/// declared, and every player accepting it draws the game; Off runs on. P0's accepted `Fixed(3)`
+/// performs three cycles, in each of which Wood Elves and Worldgorger Dragon enter, so Soul
+/// Warden's controller gains exactly 6 life (CR 603.2).
 fn shuffle_only_the_replay_draws_is_offered(drive: Drive) {
-    for (seat, p1_cards, refused) in [
-        (P1, P1_SHORTENER, None),
-        (P0, &[][..], Some(UnperformableCause::UndelimitedCover)),
-    ] {
+    for (seat, p1_cards) in [(P1, P1_SHORTENER), (P0, &[][..])] {
         let board = Board {
             soul_warden: Some(seat),
             p1_cards,
@@ -4308,12 +4344,15 @@ fn shuffle_only_the_replay_draws_is_offered(drive: Drive) {
             offered.state().rng.get_word_pos() > 0,
             "{leg}: reach: the shuffles drew randomness"
         );
-        match refused {
-            None => assert_counted_take_performs(offered.state(), &leg),
-            Some(cause) => {
-                assert_no_counted_take(offered.state(), CountedTake::Unperformable(cause), &leg)
-            }
+        if seat == P1 {
+            assert_counted_take_performs(offered.state(), &leg);
         }
+        let (taken, _) = accepted_take(offered.state(), 3, &leg);
+        assert_eq!(
+            taken.players[seat.0 as usize].life,
+            offered.life(seat) + 6,
+            "{leg}"
+        );
         offer_accepted_is_a_draw(offered);
         run_off(board, drive, 60);
     }

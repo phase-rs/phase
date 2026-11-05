@@ -1890,11 +1890,12 @@ fn trigger_top_cause(trace: &PlayTrace, node: usize) -> Option<(usize, NamingCau
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Witnessed {
     Declared,
-    /// Offered, with the counted take and the board residual the replay that read it minted;
-    /// the residual is empty when that replay kept a random outcome.
+    /// Offered, with the counted take, the board residual the replay that read it minted, and
+    /// the period its take performs; the residual is empty when that replay kept a random outcome.
     Offered {
         counted_take: crate::analysis::loop_check::CountedTake,
         residual: crate::analysis::resource::BoardDelta,
+        period: Box<crate::game::period_confirm::ConfirmedPeriod>,
     },
     Refused,
 }
@@ -2416,6 +2417,7 @@ mod tests {
                 crate::analysis::loop_check::UnperformableCause::UndelimitedCover,
             ),
             residual: Default::default(),
+            period: Default::default(),
         };
         note_witnessed(&mut state, 3, Held, offered.clone());
         assert_eq!(witnessed(&state, 3, Held), Some(offered));
