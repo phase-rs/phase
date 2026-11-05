@@ -2265,6 +2265,39 @@ pub fn mark_simultaneous_departures(events: &mut [GameEvent], group: &[ObjectId]
     }
 }
 
+/// CR 603.10a: Stamp one simultaneous departure on both views of it: the
+/// event records `events` carries (`mark_simultaneous_departures`) and the
+/// per-turn ledger rows those records were committed as
+/// (`mark_simultaneous_departure_records`), matched by each record's own
+/// per-turn index. The ledger is what a departed source's later look-back
+/// reads (`GameState::incarnation_departure_record`), so a producer that
+/// stamps only the events leaves those reads without the group.
+pub fn stamp_simultaneous_departures(
+    state: &mut GameState,
+    events: &mut [GameEvent],
+    group: &[ObjectId],
+) {
+    mark_simultaneous_departures(events, group);
+    let turn = state.turn_number;
+    let record_indices: Vec<usize> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                record,
+                ..
+            } if group.contains(object_id) && record.recorded_turn_number == turn => state
+                .zone_changes_this_turn
+                .get(record.turn_zone_change_index)
+                .filter(|row| row.object_id == *object_id)
+                .map(|_| record.turn_zone_change_index),
+            _ => None,
+        })
+        .collect();
+    mark_simultaneous_departure_records(state, &record_indices, group);
+}
+
 /// CR 603.10a: Mirror a simultaneous-departure stamp into the authoritative
 /// per-turn LKI records. A replacement-choice pause can split one logical
 /// simultaneous action across two action-result event buffers; the prior
@@ -2435,7 +2468,7 @@ pub fn departed_subset(state: &GameState, ids: &[ObjectId]) -> Vec<ObjectId> {
 /// *assigns* `co_departed` rather than merging, under-counting here *overwrites*
 /// correct groups stamped by earlier sub-sweeps, breaking the mutual-record
 /// relation the CR 603.10a observer arm requires.
-pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent]) {
+pub fn stamp_simultaneous_from_slice(state: &mut GameState, slice: &mut [GameEvent]) {
     let departed: Vec<ObjectId> = slice
         .iter()
         .filter_map(|event| match event {
@@ -2447,7 +2480,7 @@ pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent])
             _ => None,
         })
         .collect();
-    mark_simultaneous_departures(slice, &departed);
+    stamp_simultaneous_departures(state, slice, &departed);
 }
 
 /// CR 406.6 + CR 607.2a (issue #6437): Snapshot `source_id`'s linked exiles at

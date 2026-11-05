@@ -8021,9 +8021,11 @@ pub(super) fn handle_resolution_choice(
                     // sub-slice this handler produced — never the whole events vector —
                     // so earlier sequential departures in this resolution aren't grouped
                     // with these.
-                    super::zones::mark_simultaneous_departures(
+                    let departed = super::zones::departed_subset(state, &chosen);
+                    super::zones::stamp_simultaneous_departures(
+                        state,
                         &mut events[events_before_effect..events_after_move],
-                        &super::zones::departed_subset(state, &chosen),
+                        &departed,
                     );
                 }
                 if let Some(outcome) = batch_or_drain_observer_triggers(

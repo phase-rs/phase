@@ -18,6 +18,7 @@ use engine::game::effects::attach::attach_to;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -33,6 +34,8 @@ const SOLEMN_SIMULACRUM_ORACLE: &str = "When this creature enters, you may searc
 const MURDER_ORACLE: &str = "Destroy target creature.";
 const WRATH_OF_GOD_ORACLE: &str = "Destroy all creatures. They can't be regenerated.";
 const PYROCLASM_ORACLE: &str = "Pyroclasm deals 2 damage to each creature.";
+const KORVOLD_ORACLE: &str = "Flying\nWhenever Korvold enters or attacks, sacrifice another permanent.\nWhenever you sacrifice a permanent, put a +1/+1 counter on Korvold and draw a card.";
+const BARTER_IN_BLOOD_ORACLE: &str = "Each player sacrifices two creatures of their choice.";
 const HARMONIC_PRODIGY_ORACLE: &str = "Prowess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn.)\nIf a triggered ability of a Shaman or another Wizard you control triggers, that ability triggers an additional time.";
 const SHOCK_ORACLE: &str = "Shock deals 2 damage to any target.";
 
@@ -223,12 +226,12 @@ fn a_copied_activation_is_a_second_independent_doubling_effect() {
     assert_eq!(attack_with_both(&mut board), 4);
 }
 
-/// Which of Lwaxana and Solemn Simulacrum comes first on the battlefield —
-/// the order a sweeper moves them in.
+/// Whether Lwaxana comes before or after the creature she chose on the
+/// battlefield — the order a sweeper or sacrifice moves them in.
 #[derive(Clone, Copy)]
 enum BattlefieldOrder {
     LwaxanaFirst,
-    SolemnFirst,
+    LwaxanaLast,
 }
 
 struct SolemnBoard {
@@ -266,7 +269,7 @@ fn solemn_board(
             let lwaxana = add_lwaxana(&mut scenario);
             (lwaxana, add_solemn(&mut scenario))
         }
-        BattlefieldOrder::SolemnFirst => {
+        BattlefieldOrder::LwaxanaLast => {
             let solemn = add_solemn(&mut scenario);
             (add_lwaxana(&mut scenario), solemn)
         }
@@ -298,13 +301,14 @@ fn solemn_board(
     }
 }
 
-fn solemn_dies_triggers(runner: &GameRunner, solemn: ObjectId) -> usize {
+/// Triggered abilities of `source` on the stack.
+fn triggered_abilities_of(runner: &GameRunner, source: ObjectId) -> usize {
     runner
         .state()
         .stack
         .iter()
         .filter(|entry| {
-            entry.source_id == solemn
+            entry.source_id == source
                 && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
         })
         .count()
@@ -315,7 +319,7 @@ fn solemn_dies_triggers(runner: &GameRunner, solemn: ObjectId) -> usize {
 fn assert_solemn_dies_twice(board: &mut SolemnBoard) {
     let library_before = board.runner.state().players[0].library.len();
     for _ in 0..16 {
-        if solemn_dies_triggers(&board.runner, board.solemn) > 0
+        if triggered_abilities_of(&board.runner, board.solemn) > 0
             || matches!(
                 board.runner.state().waiting_for,
                 WaitingFor::OrderTriggers { .. }
@@ -337,7 +341,7 @@ fn assert_solemn_dies_twice(board: &mut SolemnBoard) {
         drain_order_triggers_with_identity(board.runner.state_mut());
     }
     assert_eq!(
-        solemn_dies_triggers(&board.runner, board.solemn),
+        triggered_abilities_of(&board.runner, board.solemn),
         2,
         "Solemn's dies trigger triggers an additional time"
     );
@@ -396,7 +400,7 @@ fn wrath_of_god_lwaxana_first_still_doubles_the_dies_trigger() {
 
 #[test]
 fn wrath_of_god_solemn_first_still_doubles_the_dies_trigger() {
-    wrath_kills_both(BattlefieldOrder::SolemnFirst);
+    wrath_kills_both(BattlefieldOrder::LwaxanaLast);
 }
 
 /// CR 704.3 + CR 603.10a: the same look-back for a state-based-action death
@@ -425,7 +429,117 @@ fn pyroclasm_lwaxana_first_still_doubles_the_dies_trigger() {
 
 #[test]
 fn pyroclasm_solemn_first_still_doubles_the_dies_trigger() {
-    pyroclasm_kills_both(BattlefieldOrder::SolemnFirst);
+    pyroclasm_kills_both(BattlefieldOrder::LwaxanaLast);
+}
+
+/// CR 603.10a: "abilities that trigger when a player sacrifices a permanent"
+/// look back in time. Barter in Blood sacrifices Lwaxana and Korvold, Fae-
+/// Cursed King together. Korvold's trigger for its own sacrifice fires on the
+/// sacrifice event, not a zone change, and Lwaxana's effect, which applied to
+/// Korvold immediately before, still doubles it — whichever of the two is
+/// sacrificed first.
+fn barter_sacrifices_both(order: BattlefieldOrder) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let add_korvold = |scenario: &mut GameScenario| {
+        scenario
+            .add_creature(P0, "Korvold, Fae-Cursed King", 4, 4)
+            .with_subtypes(vec!["Dragon", "Noble"])
+            .from_oracle_text_with_keywords(&["Flying"], KORVOLD_ORACLE)
+            .id()
+    };
+    let add_lwaxana = |scenario: &mut GameScenario| {
+        scenario
+            .add_creature_from_oracle(P0, LWAXANA, 2, 2, LWAXANA_ORACLE)
+            .id()
+    };
+    let (lwaxana, korvold) = match order {
+        BattlefieldOrder::LwaxanaFirst => {
+            let lwaxana = add_lwaxana(&mut scenario);
+            (lwaxana, add_korvold(&mut scenario))
+        }
+        BattlefieldOrder::LwaxanaLast => {
+            let korvold = add_korvold(&mut scenario);
+            (add_lwaxana(&mut scenario), korvold)
+        }
+    };
+    let barter = scenario
+        .add_spell_to_hand_from_oracle(P0, "Barter in Blood", false, BARTER_IN_BLOOD_ORACLE)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        std::iter::repeat_n(ManaType::Black, 6)
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    scenario.with_library_top(P0, &["Plains"; 8]);
+    scenario.with_library_top(P1, &["Plains"; 5]);
+    let mut runner = scenario.build();
+    runner
+        .activate(lwaxana, 0)
+        .target_objects(&[korvold])
+        .resolve();
+    assert!(runner.state().objects[&lwaxana].tapped, "Lwaxana taps");
+    let library_before = runner.state().players[0].library.len();
+
+    runner.cast(barter).commit();
+    for _ in 0..16 {
+        if triggered_abilities_of(&runner, korvold) > 0
+            || !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass");
+    }
+    if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+        drain_order_triggers_with_identity(runner.state_mut());
+    }
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&lwaxana].zone,
+        Zone::Graveyard,
+        "Lwaxana sacrificed"
+    );
+    assert_eq!(
+        state.objects[&korvold].zone,
+        Zone::Graveyard,
+        "Korvold sacrificed"
+    );
+    let for_own_sacrifice = state
+        .stack
+        .iter()
+        .filter(|entry| {
+            entry.source_id == korvold
+                && matches!(
+                    &entry.kind,
+                    StackEntryKind::TriggeredAbility {
+                        trigger_event: Some(GameEvent::PermanentSacrificed { object_id, .. }),
+                        ..
+                    } if *object_id == korvold
+                )
+        })
+        .count();
+    assert_eq!(
+        for_own_sacrifice, 2,
+        "Korvold's trigger for its own sacrifice is doubled by Lwaxana"
+    );
+    let korvold_triggers = triggered_abilities_of(&runner, korvold);
+    resolve_all(&mut runner);
+    assert_eq!(
+        library_before - runner.state().players[0].library.len(),
+        korvold_triggers,
+        "each of Korvold's triggers draws a card"
+    );
+}
+
+#[test]
+fn barter_in_blood_lwaxana_first_doubles_korvolds_sacrifice_triggers() {
+    barter_sacrifices_both(BattlefieldOrder::LwaxanaFirst);
+}
+
+#[test]
+fn barter_in_blood_korvold_first_doubles_korvolds_sacrifice_triggers() {
+    barter_sacrifices_both(BattlefieldOrder::LwaxanaLast);
 }
 
 /// CR 611.2b + CR 603.10a: Lwaxana dying in an EARLIER event ended the
@@ -455,14 +569,14 @@ fn lwaxana_dying_first_in_a_separate_event_ends_the_doubling() {
 
     runner.cast(second).target_object(solemn).commit();
     for _ in 0..16 {
-        if solemn_dies_triggers(&runner, solemn) > 0 {
+        if triggered_abilities_of(&runner, solemn) > 0 {
             break;
         }
         runner.act(GameAction::PassPriority).expect("pass");
     }
     assert_eq!(runner.state().objects[&solemn].zone, Zone::Graveyard);
     assert_eq!(
-        solemn_dies_triggers(&runner, solemn),
+        triggered_abilities_of(&runner, solemn),
         1,
         "the effect ended with Lwaxana's earlier death"
     );

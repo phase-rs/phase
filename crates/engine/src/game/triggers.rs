@@ -13229,14 +13229,15 @@ fn trigger_is_ability_of_incarnation(
 /// departed trigger source immediately before it left the battlefield.
 ///
 /// Such an effect ends with its object (CR 400.7) or with its source's
-/// duration, before the leaves-the-battlefield abilities that look back to it
+/// duration, before the look-back abilities that trigger on that departure
 /// are put on the stack, so every battlefield departure latches the effects it
 /// was involved in (`ZoneChangeRecord::trigger_doublers`). A simultaneous
-/// batch (one Wrath of God, one state-based-action pass) still moves its
-/// members one at a time, so the effect was live when whichever of the bound
-/// object and the effect's source moved first: the latches of every member of
-/// the source's simultaneous departure (`co_departed`, read off the triggering
-/// event when it is that departure) are consulted, deduplicated by effect.
+/// batch (one Wrath of God, one state-based-action pass, one Barter in Blood)
+/// still moves its members one at a time, so the effect was live when
+/// whichever of the bound object and the effect's source moved first. The
+/// source's own departure record is the group authority, whatever event the
+/// trigger fired on (a dies trigger, or a sacrifice trigger, CR 603.10a): its
+/// latch and those of its `co_departed` members are consulted, one per effect.
 fn departure_latched_doublers(
     state: &GameState,
     trigger: &PendingTrigger,
@@ -13253,50 +13254,15 @@ fn departure_latched_doublers(
     let Some(own_record) = state.incarnation_departure_record(departed) else {
         return Vec::new();
     };
-    // CR 603.10a: the members that left the battlefield together with the
-    // source, as stamped on the triggering departure's own record.
-    let co_departed: &[ObjectId] = match trigger.trigger_event.as_ref() {
-        Some(GameEvent::ZoneChanged {
-            object_id,
-            from: Some(Zone::Battlefield),
-            record,
-            ..
-        }) if *object_id == departed.object_id => &record.co_departed,
-        Some(GameEvent::ZoneChanged {
-            object_id,
-            from: Some(Zone::Battlefield),
-            record,
-            ..
-        }) if record.co_departed.contains(&departed.object_id) => {
-            // An observer that left with the event's object: the group is that
-            // object plus its co-departed members.
-            return group_latched_doublers(
-                state,
-                departed,
-                own_record,
-                std::iter::once(*object_id).chain(record.co_departed.iter().copied()),
-            );
-        }
-        _ => &[],
-    };
-    group_latched_doublers(state, departed, own_record, co_departed.iter().copied())
-}
-
-/// The doublers bound to `departed` among its own departure latch and those of
-/// `members` (their latest battlefield departures this turn), one per effect.
-fn group_latched_doublers(
-    state: &GameState,
-    departed: ObjectIncarnationRef,
-    own_record: &crate::types::game_state::ZoneChangeRecord,
-    members: impl Iterator<Item = ObjectId>,
-) -> Vec<crate::types::events::LatchedTriggerDoubler> {
-    let member_records = members
-        .filter(|&member| member != departed.object_id)
-        .filter_map(|member| {
-            state.zone_changes_this_turn.iter().rev().find(|record| {
-                record.object_id == member && record.from_zone == Some(Zone::Battlefield)
-            })
-        });
+    // CR 603.10a: each co-departed member's record of THIS departure — the
+    // battlefield departure whose own group names the source.
+    let member_records = own_record.co_departed.iter().filter_map(|&member| {
+        state.zone_changes_this_turn.iter().find(|record| {
+            record.object_id == member
+                && record.from_zone == Some(Zone::Battlefield)
+                && record.co_departed.contains(&departed.object_id)
+        })
+    });
     let mut seen: HashSet<u64> = HashSet::new();
     std::iter::once(own_record)
         .chain(member_records)
@@ -13336,18 +13302,25 @@ fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTriggerCon
     }
     // CR 603.10a + CR 603.2d: a departed source's look-back trigger also counts
     // the resolved effects bound to it as it left. Each effect counts once: one
-    // the live board still holds was already counted above.
-    for trigger_context in pending.iter() {
-        if control_change_doubling_authority(state, &trigger_context.pending).is_some() {
-            continue;
-        }
-        for doubler in &departure_latched_doublers(state, &trigger_context.pending) {
-            let counted_live = doubler.resolved_effect_id().is_some_and(|effect_id| {
-                live.iter()
-                    .any(|live| live.resolved_effect_id() == Some(effect_id))
-            });
-            if !counted_live && doubler_applies(state, trigger_context, doubler, None) {
-                extra.push(trigger_context.clone());
+    // the live board still holds was already counted above. Nothing is latched
+    // unless some departure this turn latched a doubler.
+    let any_departure_latch = state
+        .zone_changes_this_turn
+        .iter()
+        .any(|record| !record.trigger_doublers.is_empty());
+    if any_departure_latch {
+        for trigger_context in pending.iter() {
+            if control_change_doubling_authority(state, &trigger_context.pending).is_some() {
+                continue;
+            }
+            for doubler in &departure_latched_doublers(state, &trigger_context.pending) {
+                let counted_live = doubler.resolved_effect_id().is_some_and(|effect_id| {
+                    live.iter()
+                        .any(|live| live.resolved_effect_id() == Some(effect_id))
+                });
+                if !counted_live && doubler_applies(state, trigger_context, doubler, None) {
+                    extra.push(trigger_context.clone());
+                }
             }
         }
     }
