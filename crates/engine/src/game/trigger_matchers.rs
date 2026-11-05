@@ -2275,9 +2275,12 @@ fn attack_declaration_attacker_matches(
 /// per-attacker checks [`matching_attack_events`] applies to each declared
 /// attacker (its attacker-side filter, then its attack-target restriction such
 /// as "attacks a player"), for a caller weighing an attack before it is
-/// declared. A player-scope subject ("whenever you attack", CR 508.3d) or a
-/// "whenever [player] is attacked" filter answers once per declaration rather
-/// than per attacker, so such a trigger answers false.
+/// declared. A player-scope subject ("whenever you attack", CR 508.3d) or the
+/// "whenever [player] is attacked" shape — a `valid_target` with no
+/// attacker-side filter, CR 508.3b — answers once per declaration rather than
+/// per attacker, so such a trigger answers false. A `valid_target` beside an
+/// attacker-side filter ("whenever this creature attacks the player with the
+/// most life") is checked per attacker like any other.
 pub fn attack_trigger_matches_attack(
     state: &GameState,
     source: &crate::game::game_object::GameObject,
@@ -2289,7 +2292,9 @@ pub fn attack_trigger_matches_attack(
         .valid_source
         .as_ref()
         .is_some_and(|filter| filter.is_player_scope())
-        || trigger.valid_target.is_some()
+        || (trigger.valid_target.is_some()
+            && trigger.valid_card.is_none()
+            && trigger.valid_source.is_none())
     {
         return false;
     }

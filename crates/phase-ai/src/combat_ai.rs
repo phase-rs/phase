@@ -11085,6 +11085,44 @@ mod tests {
         );
     }
 
+    /// CR 508.3a + CR 603.2: a self attack trigger restricted to whom it
+    /// attacks is weighed per proposed attack. Preacher of the Schism's token
+    /// trigger matches an attack on the player with the most life, and not one
+    /// on a player with less.
+    #[test]
+    fn attack_trigger_with_a_target_restriction_matches_per_attack() {
+        // Verbatim local MTGJSON Oracle.
+        let mut scenario = GameScenario::new();
+        let preacher = scenario
+            .add_creature_from_oracle(P0, "Preacher of the Schism", 2, 4, "Deathtouch
+Whenever this creature attacks the player with the most life or tied for most life, create a 1/1 white Vampire creature token with lifelink.
+Whenever this creature attacks while you have the most life or are tied for most life, you draw a card and you lose 1 life.")
+            .with_keyword(Keyword::Deathtouch)
+            .id();
+        let mut state = ready_two_player_state(scenario, &[preacher]);
+        let source = state.objects[&preacher].clone();
+        let restricted = source
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| entry.definition.clone())
+            .find(|trigger| trigger.valid_target.is_some())
+            .expect("the most-life trigger carries a target restriction");
+        let matches = |state: &GameState| {
+            engine::game::triggers::attack_trigger_matches_attack(
+                state,
+                &source,
+                &restricted,
+                preacher,
+                AttackTarget::Player(PlayerId(1)),
+            )
+        };
+
+        state.players[1].life = 30;
+        assert!(matches(&state), "P1 has the most life");
+        state.players[1].life = 10;
+        assert!(!matches(&state), "P1 has less life than P0");
+    }
+
     /// CR 603.2 + CR 702.16j: in a free-for-all where every opponent is
     /// protected, the per-defender comparison and the rollout path both carry
     /// a friendly observer's payoff and a self trigger's harm. Grizzly Bears

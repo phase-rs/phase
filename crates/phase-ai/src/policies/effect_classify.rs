@@ -242,9 +242,10 @@ fn resolved_effect_value(
 /// The acting player is the controller, or inside a per-player iteration the
 /// iterated player (CR 109.5 + CR 608.2c). A targetless instruction lands on
 /// them, and so do the controller roles and a "you control" population.
-/// - A sacrifice is always the acting player's own (CR 701.21a): its filter
-///   narrows which permanents, never whose, unless it names the defending
-///   player or an opponent (annihilator, CR 702.86a).
+/// - A sacrifice is the acting player's own (CR 701.21a): its filter narrows
+///   which permanents, not whose, unless it names the defending player or an
+///   opponent (annihilator, CR 702.86a). A parent-target sacrifice is made by
+///   that object's controller, unknown until resolution.
 /// - A mass effect's population (`DamageAll`, `DestroyAll`, `PumpAll`) is read
 ///   by whose permanents it covers; one covering everyone's names no side.
 /// - Otherwise the recipient is the engine's own `Effect::target_filter`, read
@@ -253,6 +254,10 @@ fn resolved_effect_value(
 fn resolved_recipient_side(effect: &Effect, scope: Option<&PlayerFilter>) -> BoonTargetSide {
     let actor = scope.map_or(BoonTargetSide::Holder, boon_player_filter_side);
     match effect {
+        Effect::Sacrifice {
+            target: TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. },
+            ..
+        } => return BoonTargetSide::Unknown,
         Effect::Sacrifice { target, .. } => {
             return population_side(target, actor).unwrap_or(actor);
         }
