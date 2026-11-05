@@ -3732,17 +3732,26 @@ pub(super) fn parse_search_and_creation_ast(
             // face down" (Vulcan Mind-Meld) — the subject's own continuation —
             // fuse into ExileTop so the card leaves the library and the trailing
             // play grant can bind to the tracked set.
-            if nom_primitives::scan_at_word_boundaries(rest_lower, |i| {
-                (
-                    alt((tag::<_, _, OracleError<'_>>("and "), tag("then "))),
-                    tag("exiles "),
-                    alt((tag("it"), tag("them"))),
-                    tag(" face down"),
+            if let Some(tail) = nom_primitives::scan_at_word_boundaries(rest_lower, |i| {
+                preceded(
+                    (
+                        alt((tag::<_, _, OracleError<'_>>("and "), tag("then "))),
+                        tag("exiles "),
+                        alt((tag("it"), tag("them"))),
+                        tag(" face down"),
+                    ),
+                    nom::combinator::rest,
                 )
-                    .parse(i)
-            })
-            .is_some()
-            {
+                .parse(i)
+            }) {
+                // CR 608.2c: a fused instruction cannot discard a later rider.
+                // Claim the gap here so it cannot fall through to generic Dig.
+                if !terminal_punctuation_only(tail) {
+                    return Some(SearchCreationImperativeAst::Unimplemented {
+                        gap: "look_exile_tail",
+                        fragment: text.to_string(),
+                    });
+                }
                 return Some(SearchCreationImperativeAst::ExileTopLookedAt {
                     player,
                     count,

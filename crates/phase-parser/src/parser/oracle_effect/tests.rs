@@ -96025,3 +96025,52 @@ fn vulcan_mind_meld_parses_subject_exiles_and_exiler_grant() {
         .and_then(|sub| sub.sub_ability.as_deref())
         .is_some_and(|grant| grant.repeat_for.is_none()));
 }
+
+/// SHAPE: CR 608.2c requires the whole fused look/exile instruction to be
+/// represented. Mind-Meld supplies the printed suffix-free sentence. No verified
+/// printed card combines that exact grammar with the synthetic hatching rider;
+/// the nearest printed forms are Mind-Meld and The Dragon-Kami Reborn's different
+/// "Exile one of them face down with a hatching counter on it" instruction.
+#[test]
+fn fused_subject_look_exile_preserves_or_rejects_the_complete_instruction() {
+    let printed = parse_effect_chain(
+        "Target opponent looks at the top card of your library, then exiles it face down.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        printed.effect.as_ref(),
+        Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+            face_down: true,
+            actor: crate::types::ability::LibraryInstructionActor::Player {
+                player: TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::Opponent),
+                    ..
+                })
+            },
+            ..
+        }
+    ));
+    assert!(printed.sub_ability.is_none());
+
+    // Structural synthetic fixture, not a claimed printed card or counter feature.
+    let fragment = "looks at the top card of your library, then exiles it face down with a hatching counter on it";
+    let ast = super::imperative::parse_search_and_creation_ast(
+        fragment,
+        fragment,
+        &mut ParseContext::default(),
+    )
+    .expect("the fused recognizer must claim even an unsupported tail");
+    let gap = super::imperative::lower_search_and_creation_ast(ast);
+    assert_eq!(gap.unimplemented_description(), Some(fragment));
+
+    let unsupported =
+        parse_effect_chain(&format!("Target opponent {fragment}."), AbilityKind::Spell);
+    assert!(
+        collect_chain_effects(&unsupported).iter().any(|effect| {
+            matches!(effect, Effect::Unimplemented { name, .. } if name == "look_exile_tail")
+        }),
+        "the public chain must retain the honest gap, not fall back to Dig: {unsupported:?}"
+    );
+}

@@ -24,7 +24,9 @@ use engine::game::visibility::filter_state_for_viewer;
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{
+    parse_mtgjson_mana_cost, ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit,
+};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -99,6 +101,8 @@ struct Melded {
     p1_land: ObjectId,
     /// P1's third card, which the spell does not reach.
     p1_deep: ObjectId,
+    /// A normally permitted {R} hand spell, independent of exile permissions.
+    p1_cast_control: ObjectId,
 }
 
 /// P0 casts Vulcan Mind-Meld targeting P1. P0 holds one blue mana and no red,
@@ -127,6 +131,17 @@ fn cast_mind_meld() -> Melded {
         P0,
         vec![ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![])],
     );
+    scenario.add_basic_land(P1, ManaColor::Red);
+    let p1_cast_control = scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Strike It Rich",
+            false,
+            "Create a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")\n\
+             Flashback {2}{R} (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
+        )
+        .with_mana_cost(parse_mtgjson_mana_cost("{R}"))
+        .id();
     let mut runner = scenario.build();
 
     runner.cast(mind_meld).target_player(P1).resolve();
@@ -143,6 +158,7 @@ fn cast_mind_meld() -> Melded {
         p1_sorcery,
         p1_land,
         p1_deep,
+        p1_cast_control,
     }
 }
 
@@ -158,6 +174,7 @@ fn mind_meld_each_player_exiles_face_down_and_sees_only_their_own_exiles() {
         p1_sorcery,
         p1_land,
         p1_deep,
+        ..
     } = cast_mind_meld();
 
     for exiled in [p0_land, p1_sorcery, p1_land] {
@@ -239,6 +256,7 @@ fn mind_meld_opponent_plays_only_the_card_they_exiled() {
         p0_land,
         p1_land,
         p1_sorcery,
+        p1_cast_control,
         ..
     } = cast_mind_meld();
 
@@ -251,6 +269,12 @@ fn mind_meld_opponent_plays_only_the_card_they_exiled() {
     assert!(
         !can_play_land(&runner, p1_land),
         "P1 owns this land but P0 exiled it"
+    );
+    // CR 601.2f-h: the ordinary {R} hand spell positively reaches affordability
+    // with P1's untapped Mountain. Merely checking its offer spends no mana.
+    assert!(
+        can_cast(&runner, p1_cast_control),
+        "P1 can afford the same-cost normally permitted Strike It Rich"
     );
     assert!(!can_cast(&runner, p1_sorcery), "P0 exiled P1's sorcery");
     runner
