@@ -1768,6 +1768,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         Some(viewer) => identity_projection_for_viewer(state, viewer),
         None => identity_projection_for_unseated_viewer(state),
     };
+    // CR 400.2 + CR 701.9c + CR 723.4: the cards whose stored `Discarded` link this
+    // audience may not keep (see `concealed_discard_ids`).
+    let concealed_discards = concealed_discard_ids(state, viewer, &identity_projection);
     let mut hidden_zone_change_ids = HashSet::new();
     let mut hidden_library_ids = HashSet::new();
     for (obj_id, projection) in identity_projection {
@@ -1855,19 +1858,19 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             ..
         } = &mut entry.kind
         {
-            redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
+            redact_hidden_zone_change_event(event, &hidden_zone_change_ids, &concealed_discards);
         }
     }
     for events in filtered.stack_trigger_event_batches.values_mut() {
         for event in events {
-            redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
+            redact_hidden_zone_change_event(event, &hidden_zone_change_ids, &concealed_discards);
         }
     }
     if let Some(event) = filtered.current_trigger_event.as_mut() {
-        redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
+        redact_hidden_zone_change_event(event, &hidden_zone_change_ids, &concealed_discards);
     }
     for event in &mut filtered.current_trigger_events {
-        redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
+        redact_hidden_zone_change_event(event, &hidden_zone_change_ids, &concealed_discards);
     }
     // CR 601.2h + CR 603.3b + CR 400.2: the same event shapes wait in the trigger
     // collection carriers. A carrier whose trigger controller is not this viewer is
@@ -1898,7 +1901,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 .flat_map(|choice| choice.completion.deferred_events.iter_mut()),
         )
     {
-        redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
+        redact_hidden_zone_change_event(event, &hidden_zone_change_ids, &concealed_discards);
     }
     for context in filtered.deferred_triggers.iter_mut().chain(
         filtered
@@ -1913,7 +1916,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             .iter_mut()
             .chain(context.trigger_events.iter_mut())
         {
-            redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
+            redact_hidden_zone_change_event(event, &hidden_zone_change_ids, &concealed_discards);
         }
     }
     match &mut filtered.waiting_for {
@@ -1923,7 +1926,11 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             ..
         } => {
             for event in trigger_event.iter_mut().chain(trigger_events.iter_mut()) {
-                redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
+                redact_hidden_zone_change_event(
+                    event,
+                    &hidden_zone_change_ids,
+                    &concealed_discards,
+                );
             }
         }
         WaitingFor::UnlessPayment {
@@ -1941,7 +1948,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         | WaitingFor::EachPlayerCopyChosenSelection {
             trigger_event: Some(event),
             ..
-        } => redact_hidden_zone_change_event(event, &hidden_zone_change_ids),
+        } => redact_hidden_zone_change_event(event, &hidden_zone_change_ids, &concealed_discards),
         _ => {}
     }
     // CR 611.2a + CR 601.2h + CR 406.3: an until-event effect latches its source's context,
@@ -1998,8 +2005,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // CR 601.2h + CR 113.7a: the same carriers latch their source's payment snapshots in
     // `ResolvedAbility::trigger_source`; a hidden mana source's entry is blanked there too,
     // and a hidden linked-exile member's mana value is zeroed (CR 406.3).
-    let mut redact_lookback =
-        |event: &mut GameEvent| redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
+    let mut redact_lookback = |event: &mut GameEvent| {
+        redact_hidden_zone_change_event(event, &hidden_zone_change_ids, &concealed_discards)
+    };
     for trigger in &mut filtered.delayed_triggers {
         trigger
             .ability
@@ -3333,7 +3341,11 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // after every `waiting_for` rebuild
     // above (`PayCost`, `CostTypeChoice`, ...), which re-clone the authoritative prompt and
     // would otherwise restore an unredacted ability.
-    redact_waiting_for_payment(&mut filtered.waiting_for, &hidden_zone_change_ids);
+    redact_waiting_for_payment(
+        &mut filtered.waiting_for,
+        &hidden_zone_change_ids,
+        &concealed_discards,
+    );
     redact_paused_ability_payment(&mut filtered, &hidden_zone_change_ids);
 
     // This is the single display-identity authority sent to every client. The
@@ -3482,6 +3494,11 @@ fn hidden_search_audiences(state: &GameState, events: &[GameEvent]) -> Vec<Hidde
     snapshots
 }
 
+/// Projects an event batch for one audience (an id with no seat is a spectator).
+/// Events the viewer may not receive are dropped; the rest are copied, with the identity
+/// carried by `SpellCast` (card id), `CardsRevealed` / `EffectResolved` (hidden library
+/// occurrences) and `Discarded` (CR 400.2 + CR 701.9c: a card now hidden from the viewer,
+/// unless the viewer has private access to its owner, CR 723.4) withheld.
 pub fn filter_events_for_viewer(
     events: &[GameEvent],
     state: &GameState,
@@ -3495,16 +3512,21 @@ pub fn filter_events_for_viewer(
         matches!(
             event,
             GameEvent::CardsRevealed { .. }
+                | GameEvent::Discarded { .. }
                 | GameEvent::EffectResolved {
                     subject: Some(_),
                     ..
                 }
         )
     });
-    let hidden_library = if carries_identity {
-        hidden_library_ids(state, (!spectator).then_some(viewer))
+    let (hidden_library, concealed_discards) = if carries_identity {
+        let audience = (!spectator).then_some(viewer);
+        let projection = audience_identity_projection(state, audience);
+        let hidden_library = hidden_library_ids(state, &projection);
+        let concealed_discards = concealed_discard_ids(state, audience, &projection);
+        (hidden_library, concealed_discards)
     } else {
-        HashSet::new()
+        (HashSet::new(), HashSet::new())
     };
     events
         .iter()
@@ -3556,6 +3578,18 @@ pub fn filter_events_for_viewer(
                 redact_hidden_library_event(&mut event, &hidden_library);
                 event
             }
+            // CR 400.2 + CR 701.9c: a card discarded into a zone this viewer cannot see
+            // keeps the discard (count, discarder, cause) but not the id that would link
+            // it to an identity the viewer learned while it was public.
+            GameEvent::Discarded {
+                player_id,
+                object_id,
+                source_id,
+            } if concealed_discards.contains(object_id) => GameEvent::Discarded {
+                player_id: *player_id,
+                object_id: ObjectId(0),
+                source_id: *source_id,
+            },
             other => other.clone(),
         })
         .collect()
@@ -3938,18 +3972,56 @@ fn stack_bound_reveal_unhides(state: &GameState, obj_id: ObjectId) -> bool {
 }
 
 /// CR 400.2 + CR 401.2: the library occurrences whose identity this audience's
-/// projection hides. An object id in this set is a bare position handle, so no
-/// viewer-copy carrier may pair it with that card's identity (name, last-known
-/// snapshot, or reveal order). `None` is the unseated audience.
-pub(crate) fn hidden_library_ids(state: &GameState, viewer: Option<PlayerId>) -> HashSet<ObjectId> {
-    let projection = match viewer {
+/// `projection` (see `audience_identity_projection`) hides. An object id in this set is
+/// a bare position handle, so no viewer-copy carrier may pair it with that card's
+/// identity (name, last-known snapshot, or reveal order).
+fn hidden_library_ids(
+    state: &GameState,
+    projection: &BTreeMap<ObjectId, IdentityProjection>,
+) -> HashSet<ObjectId> {
+    projection
+        .iter()
+        .filter(|(id, projection)| hides_library_occurrence(state, **id, **projection))
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// The identity decision for one audience: `Some` is a seated viewer, `None` the unseated one.
+fn audience_identity_projection(
+    state: &GameState,
+    viewer: Option<PlayerId>,
+) -> BTreeMap<ObjectId, IdentityProjection> {
+    match viewer {
         Some(viewer) => identity_projection_for_viewer(state, viewer),
         None => identity_projection_for_unseated_viewer(state),
-    };
+    }
+}
+
+/// CR 400.2 + CR 701.9c + CR 723.4: the cards whose `Discarded` link this audience may
+/// not receive: every card the audience's projection hides wherever it now sits, unless
+/// the audience has private access to its owner (who also receives the named
+/// hand -> library record).
+fn concealed_discard_ids(
+    state: &GameState,
+    viewer: Option<PlayerId>,
+    projection: &BTreeMap<ObjectId, IdentityProjection>,
+) -> HashSet<ObjectId> {
     projection
-        .into_iter()
-        .filter(|(id, projection)| hides_library_occurrence(state, *id, *projection))
-        .map(|(id, _)| id)
+        .iter()
+        .filter(|(_, projection)| match projection {
+            IdentityProjection::Hidden => true,
+            // Face-down permanents, stack and command objects: their ids are positional
+            // and public, and no discard redirect lands there.
+            IdentityProjection::FaceDownRedacted | IdentityProjection::FaceDownRevealed => false,
+        })
+        .filter(|(id, _)| {
+            !state.objects.get(id).is_some_and(|obj| {
+                viewer.is_some_and(|viewer| {
+                    viewer_has_private_access_to_player(state, viewer, obj.owner)
+                })
+            })
+        })
+        .map(|(id, _)| *id)
         .collect()
 }
 
@@ -4010,13 +4082,19 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     obj.base_printing = DisplayOnly::default();
 }
 
-/// The retained event shapes that carry a `ZoneChangeRecord` or a `TriggerSourceContext`:
-/// `ZoneChanged`, `CreatureExploited` (the sacrificed victim's record) and
-/// `SagaChapterAbilityResolved` (the Saga's latched trigger-source context). A record whose
-/// object is hidden is redacted whole; otherwise only hidden-source payment entries and hidden
-/// linked-exile members' mana values are. The Saga context is never redacted whole here;
-/// only those are.
-fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<ObjectId>) {
+/// The retained event shapes that carry a `ZoneChangeRecord`, a `TriggerSourceContext`, or a
+/// discarded card's id: `ZoneChanged`, `CreatureExploited` (the sacrificed victim's record),
+/// `SagaChapterAbilityResolved` (the Saga's latched trigger-source context) and `Discarded`
+/// (a trigger's stored `trigger_event`). A record whose object is hidden is redacted whole;
+/// otherwise only hidden-source payment entries and hidden linked-exile members' mana values
+/// are. The Saga context is never redacted whole here; only those are. A `Discarded` id is
+/// keyed on the concealed set (`concealed_discard_ids`), not on `hidden_ids`, so the owner and
+/// a CR 723.4 controller keep it.
+fn redact_hidden_zone_change_event(
+    event: &mut GameEvent,
+    hidden_ids: &HashSet<ObjectId>,
+    concealed_discard_ids: &HashSet<ObjectId>,
+) {
     match event {
         GameEvent::ZoneChanged {
             object_id,
@@ -4049,6 +4127,18 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
             final_chapter: _,
         } => {
             redact_source_context_hidden_members(saga, hidden_ids);
+        }
+        // CR 400.2 + CR 701.9c + CR 723.4: a stored discard event (a trigger's
+        // `trigger_event`) must not pair a hidden card's handle with the discard for an
+        // audience without private access to the card's owner.
+        GameEvent::Discarded {
+            object_id,
+            player_id: _,
+            source_id: _,
+        } => {
+            if concealed_discard_ids.contains(object_id) {
+                *object_id = ObjectId(0);
+            }
         }
         _ => {}
     }
@@ -4260,10 +4350,11 @@ fn redact_pending_cast_payment(
 fn redact_pending_mana_ability_payment(
     pending: &mut crate::types::game_state::PendingManaAbility,
     hidden_ids: &HashSet<ObjectId>,
+    concealed_discard_ids: &HashSet<ObjectId>,
 ) {
-    redact_mana_ability_resume_payment(&mut pending.resume, hidden_ids);
+    redact_mana_ability_resume_payment(&mut pending.resume, hidden_ids, concealed_discard_ids);
     if let Some(resume) = pending.cost_move_resume.as_mut() {
-        redact_mana_ability_resume_payment(resume, hidden_ids);
+        redact_mana_ability_resume_payment(resume, hidden_ids, concealed_discard_ids);
     }
 }
 
@@ -4274,6 +4365,7 @@ fn redact_pending_mana_ability_payment(
 fn redact_mana_ability_resume_payment(
     resume: &mut crate::types::game_state::ManaAbilityResume,
     hidden_ids: &HashSet<ObjectId>,
+    concealed_discard_ids: &HashSet<ObjectId>,
 ) {
     use crate::types::game_state::ManaAbilityResume;
     match resume {
@@ -4284,7 +4376,7 @@ fn redact_mana_ability_resume_payment(
         } => {
             redact_ability_payment(pending_effect, hidden_ids);
             if let Some(event) = trigger_event.as_mut() {
-                redact_hidden_zone_change_event(event, hidden_ids);
+                redact_hidden_zone_change_event(event, hidden_ids, concealed_discard_ids);
             }
         }
         ManaAbilityResume::EffectPayCost { ability, .. } => {
@@ -4293,7 +4385,11 @@ fn redact_mana_ability_resume_payment(
         // CR 605.3a: the outer mana ability whose payment window this one was activated in.
         ManaAbilityResume::ManaAbilityManaPayment {
             pending_mana_ability,
-        } => redact_pending_mana_ability_payment(pending_mana_ability, hidden_ids),
+        } => redact_pending_mana_ability_payment(
+            pending_mana_ability,
+            hidden_ids,
+            concealed_discard_ids,
+        ),
         // CR 400.2 + CR 702.143a: a foretell card in hand is in a hidden zone,
         // and its effective foretell cast cost is not public information. Zero
         // it for viewers who cannot see the card; the {2} payment cost is public.
@@ -4323,11 +4419,12 @@ fn redact_mana_ability_resume_payment(
 fn redact_mana_choice_context_payment(
     context: &mut crate::types::game_state::ManaChoiceContext,
     hidden_ids: &HashSet<ObjectId>,
+    concealed_discard_ids: &HashSet<ObjectId>,
 ) {
     use crate::types::game_state::ManaChoiceContext;
     match context {
         ManaChoiceContext::ManaAbility(pending) => {
-            redact_pending_mana_ability_payment(pending, hidden_ids);
+            redact_pending_mana_ability_payment(pending, hidden_ids, concealed_discard_ids);
         }
         ManaChoiceContext::ResolvingEffect(ability) => redact_ability_payment(ability, hidden_ids),
     }
@@ -4352,7 +4449,11 @@ fn redact_mana_choice_context_payment(
 /// `PendingManaAbility`, `ManaAbilityResume`, `CostResume`, `CollectEvidenceResume` or
 /// `ManaChoiceContext` must be listed here or in `pending_cast_mut`; the compiler does not
 /// enforce it.
-fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet<ObjectId>) {
+fn redact_waiting_for_payment(
+    waiting_for: &mut WaitingFor,
+    hidden_ids: &HashSet<ObjectId>,
+    concealed_discard_ids: &HashSet<ObjectId>,
+) {
     use crate::types::game_state::{CollectEvidenceResume, CostResume};
     // Every casting prompt that holds a `PendingCast` (including a `PayCost` spell resume
     // and a casting `CollectEvidenceChoice`); the match below covers only the rest.
@@ -4397,21 +4498,25 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
         | WaitingFor::ManaAbilityManaPayment {
             pending_mana_ability,
             ..
-        } => redact_pending_mana_ability_payment(pending_mana_ability, hidden_ids),
+        } => redact_pending_mana_ability_payment(
+            pending_mana_ability,
+            hidden_ids,
+            concealed_discard_ids,
+        ),
         WaitingFor::PayAmountChoice {
             pending_mana_ability,
             ..
         } => {
             if let Some(pending) = pending_mana_ability.as_deref_mut() {
-                redact_pending_mana_ability_payment(pending, hidden_ids);
+                redact_pending_mana_ability_payment(pending, hidden_ids, concealed_discard_ids);
             }
         }
         WaitingFor::ChooseManaColor { context, .. } => {
-            redact_mana_choice_context_payment(context, hidden_ids);
+            redact_mana_choice_context_payment(context, hidden_ids, concealed_discard_ids);
         }
         WaitingFor::PayCost { resume, .. } => match resume {
             CostResume::ManaAbility { mana_ability } => {
-                redact_pending_mana_ability_payment(mana_ability, hidden_ids);
+                redact_pending_mana_ability_payment(mana_ability, hidden_ids, concealed_discard_ids);
             }
             // The spell resumes are the `pending_cast_mut()` call above.
             // `TeamTapPayment`'s creature ids are public board state (already
@@ -4433,7 +4538,11 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
             }
             CollectEvidenceResume::ManaAbility {
                 pending_mana_ability,
-            } => redact_pending_mana_ability_payment(pending_mana_ability, hidden_ids),
+            } => redact_pending_mana_ability_payment(
+            pending_mana_ability,
+            hidden_ids,
+            concealed_discard_ids,
+        ),
             // The casting resume is the `pending_cast_mut()` call above.
             CollectEvidenceResume::Casting { .. } => {}
         },
@@ -14976,6 +15085,203 @@ mod tests {
                 "viewer {viewer:?}"
             );
         }
+    }
+
+    fn discarded(object_id: ObjectId) -> GameEvent {
+        GameEvent::Discarded {
+            player_id: PlayerId(0),
+            object_id,
+            source_id: ObjectId(900),
+        }
+    }
+
+    fn discarded_object(event: &GameEvent) -> ObjectId {
+        match event {
+            GameEvent::Discarded { object_id, .. } => *object_id,
+            other => panic!("expected Discarded, got {other:?}"),
+        }
+    }
+
+    /// The seats under test for the discard rows: owner, opponent, spectator.
+    const DISCARD_VIEWERS: [PlayerId; 3] = [PlayerId(0), PlayerId(1), PlayerId(99)];
+
+    /// Hand-built state standing in for the board shapes the rows below name: P0
+    /// owns a library card, a hand card, a graveyard card, and a library card that
+    /// is revealed where it sits (as Future Sight's "Play with the top card of your
+    /// library revealed." does, `issue_2918_future_sight_reveal.rs`).
+    fn discard_projection_board() -> (GameState, [ObjectId; 4]) {
+        let mut state = GameState::new_two_player(42);
+        let mut make = |card: u64, zone: Zone| {
+            create_object(
+                &mut state,
+                CardId(card),
+                PlayerId(0),
+                format!("Card {card}"),
+                zone,
+            )
+        };
+        let library = make(1, Zone::Library);
+        let hand = make(2, Zone::Hand);
+        let graveyard = make(3, Zone::Graveyard);
+        let revealed_library = make(4, Zone::Library);
+        state.revealed_cards.insert(revealed_library);
+        (state, [library, hand, graveyard, revealed_library])
+    }
+
+    /// CR 400.2 + CR 701.9c + CR 723.4: a `Discarded` id is withheld only from a
+    /// viewer to whom the card is hidden and who has no private access to its
+    /// owner. Library and hand cards are concealed from the opponent and a
+    /// spectator; the owner, a graveyard card (public), a card revealed where it
+    /// sits (CR 400.2: the zone stays hidden but this card is revealed) and the
+    /// turn controller of the owner (CR 723.4, Emrakul, the Promised End) keep it.
+    /// Discarder, source and event count are preserved in every case.
+    #[test]
+    fn discarded_id_is_withheld_only_where_the_card_is_hidden_from_the_viewer() {
+        let (state, [library, hand, graveyard, revealed_library]) = discard_projection_board();
+        let cards = [library, hand, graveyard, revealed_library];
+        let events: Vec<GameEvent> = cards.iter().map(|id| discarded(*id)).collect();
+
+        for viewer in DISCARD_VIEWERS {
+            let filtered = filter_events_for_viewer(&events, &state, viewer);
+            assert_eq!(
+                filtered.len(),
+                events.len(),
+                "viewer {viewer:?}: count kept"
+            );
+            let owner = viewer == PlayerId(0);
+            let expected = [
+                if owner { library } else { ObjectId(0) },
+                if owner { hand } else { ObjectId(0) },
+                graveyard,
+                revealed_library,
+            ];
+            let seen: Vec<ObjectId> = filtered.iter().map(discarded_object).collect();
+            assert_eq!(seen, expected, "viewer {viewer:?}");
+            for event in &filtered {
+                assert!(matches!(
+                    event,
+                    GameEvent::Discarded {
+                        player_id: PlayerId(0),
+                        source_id: ObjectId(900),
+                        ..
+                    }
+                ));
+            }
+        }
+
+        // CR 723.4: P1 controls P0's turn, so information visible to P0 is
+        // visible to P1 as well.
+        let mut controlled = state.clone();
+        controlled.active_player = PlayerId(0);
+        controlled.turn_decision_controller = Some(PlayerId(1));
+        let seen: Vec<ObjectId> = filter_events_for_viewer(&events, &controlled, PlayerId(1))
+            .iter()
+            .map(discarded_object)
+            .collect();
+        assert_eq!(seen, cards, "the turn controller keeps every real id");
+        // The spectator is still an unauthorized viewer on the same state.
+        let seen: Vec<ObjectId> = filter_events_for_viewer(&events, &controlled, PlayerId(99))
+            .iter()
+            .map(discarded_object)
+            .collect();
+        assert_eq!(
+            seen,
+            [ObjectId(0), ObjectId(0), graveyard, revealed_library]
+        );
+    }
+
+    /// CR 400.2 + CR 701.9c + CR 723.4: a trigger's stored `trigger_event` (stack
+    /// entry and `current_trigger_event(s)`) takes the same redaction as the live
+    /// stream, for the same audience; the authoritative state is untouched.
+    #[test]
+    fn discarded_trigger_event_is_redacted_in_projected_carriers() {
+        use crate::types::game_state::StackEntry;
+        let (mut state, [library, _hand, graveyard, _revealed]) = discard_projection_board();
+        for (id, object) in [(ObjectId(800), library), (ObjectId(801), graveyard)] {
+            state.stack.push_back(StackEntry {
+                id,
+                source_id: ObjectId(900),
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: ObjectId(900),
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::NoOp,
+                        Vec::new(),
+                        ObjectId(900),
+                        PlayerId(0),
+                    )),
+                    condition: None,
+                    trigger_event: Some(discarded(object)),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            state.current_trigger_events.push(discarded(object));
+        }
+        state.current_trigger_event = Some(discarded(library));
+
+        let carried = |state: &GameState| -> (Vec<ObjectId>, Vec<ObjectId>, Option<ObjectId>) {
+            let stack = state
+                .stack
+                .iter()
+                .map(|entry| match &entry.kind {
+                    StackEntryKind::TriggeredAbility {
+                        trigger_event: Some(event),
+                        ..
+                    } => discarded_object(event),
+                    other => panic!("expected a trigger with an event, got {other:?}"),
+                })
+                .collect();
+            let current = state
+                .current_trigger_events
+                .iter()
+                .map(discarded_object)
+                .collect();
+            (
+                stack,
+                current,
+                state.current_trigger_event.as_ref().map(discarded_object),
+            )
+        };
+        let real = (
+            vec![library, graveyard],
+            vec![library, graveyard],
+            Some(library),
+        );
+        let concealed = (
+            vec![ObjectId(0), graveyard],
+            vec![ObjectId(0), graveyard],
+            Some(ObjectId(0)),
+        );
+
+        // Reach guard: the authoritative state holds the real id in every carrier.
+        assert_eq!(carried(&state), real);
+        assert_eq!(carried(&filter_state_for_viewer(&state, PlayerId(0))), real);
+        assert_eq!(
+            carried(&filter_state_for_viewer(&state, PlayerId(1))),
+            concealed
+        );
+        assert_eq!(
+            carried(&filter_state_for_unseated_viewer(&state)),
+            concealed
+        );
+
+        // CR 723.4: the controller of P0's turn keeps the real id.
+        let mut controlled = state.clone();
+        controlled.active_player = PlayerId(0);
+        controlled.turn_decision_controller = Some(PlayerId(1));
+        assert_eq!(
+            carried(&filter_state_for_viewer(&controlled, PlayerId(1))),
+            real
+        );
+        assert_eq!(
+            carried(&state),
+            real,
+            "the authoritative state is untouched"
+        );
     }
 
     #[test]

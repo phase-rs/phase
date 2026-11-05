@@ -1,6 +1,6 @@
 //! Library of Leng sends a batch of discarded cards straight to the library
 //! (CR 614.6 + CR 701.9c): nothing passes through the graveyard, no viewer
-//! other than the owner learns the cards' names from the discard, and Rest in
+//! other than the owner learns the cards' names or ids from the discard, and Rest in
 //! Peace's graveyard replacement has nothing to apply to.
 //!
 //! Verbatim Oracle text, as the committed fixture stores it:
@@ -33,7 +33,7 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-use crate::support::shared_card_db as load_db;
+use crate::support::{identifying_object_ids, shared_card_db as load_db, viewer_event_ids};
 
 const BEARS: &str = "Grizzly Bears";
 const SHOCK: &str = "Shock";
@@ -167,24 +167,48 @@ fn zone_of(runner: &GameRunner, id: ObjectId) -> Zone {
 }
 
 /// CR 400.2 + CR 701.9c: for P1 and a spectator, the whole filtered event
-/// stream and the public log of `results` contain none of `names`. Reach
-/// guard: each viewer's filtered stream still carries every `Discarded` event.
-fn assert_no_hand_names(runner: &GameRunner, results: &[&ActionResult], names: &[&str]) {
+/// stream and the public log of `results` contain none of `names` or `ids`.
+/// Reach guard: each viewer's filtered stream still carries every `Discarded`
+/// event, each with the placeholder `ObjectId(0)`. The owner keeps the real ids.
+fn assert_no_hand_identities(
+    runner: &GameRunner,
+    results: &[&ActionResult],
+    names: &[&str],
+    ids: &[ObjectId],
+) {
     let events: Vec<GameEvent> = events_of(results).into_iter().cloned().collect();
     let discards = discarded_count(results);
     for viewer in [P1, SPECTATOR] {
         let filtered =
             engine::game::visibility::filter_events_for_viewer(&events, runner.state(), viewer);
-        let seen = filtered
+        let seen: Vec<ObjectId> = filtered
             .iter()
-            .filter(|event| matches!(event, GameEvent::Discarded { .. }))
-            .count();
-        assert_eq!(seen, discards, "viewer {viewer:?} receives every Discarded");
+            .filter_map(|event| match event {
+                GameEvent::Discarded { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            seen.len(),
+            discards,
+            "viewer {viewer:?} receives every Discarded"
+        );
+        assert!(
+            seen.iter().all(|id| *id == ObjectId(0)),
+            "viewer {viewer:?}: Discarded carries a real id: {seen:?}"
+        );
         let wire = serde_json::to_string(&filtered).expect("serialize filtered events");
         for name in names {
             assert!(
                 !wire.contains(name),
                 "viewer {viewer:?}: filtered events name {name}: {wire}"
+            );
+        }
+        let viewer_ids = viewer_event_ids(&events, runner.state(), viewer);
+        for id in ids {
+            assert!(
+                !viewer_ids.contains(&id.0),
+                "viewer {viewer:?}: filtered events carry the id of {id:?}"
             );
         }
     }
@@ -196,6 +220,36 @@ fn assert_no_hand_names(runner: &GameRunner, results: &[&ActionResult], names: &
             "public log names {name}: {rendered}"
         );
     }
+    let log_ids = identifying_object_ids(&serde_json::to_value(&entries).expect("log value"));
+    for id in ids {
+        assert!(
+            !log_ids.contains(&id.0),
+            "public log carries the id of {id:?}"
+        );
+    }
+
+    // Owner positive: P0's filtered `Discarded` events equal the authoritative ones.
+    let authoritative: BTreeSet<(PlayerId, ObjectId)> = discarded_pairs(&events);
+    let owner = engine::game::visibility::filter_events_for_viewer(&events, runner.state(), P0);
+    assert_eq!(discarded_pairs(&owner), authoritative);
+    let expected: BTreeSet<(PlayerId, ObjectId)> = ids.iter().map(|id| (P0, *id)).collect();
+    assert_eq!(authoritative, expected, "reach: every discard is P0's");
+    let owner_ids = viewer_event_ids(&events, runner.state(), P0);
+    assert!(ids.iter().all(|id| owner_ids.contains(&id.0)));
+}
+
+fn discarded_pairs(events: &[GameEvent]) -> BTreeSet<(PlayerId, ObjectId)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::Discarded {
+                player_id,
+                object_id,
+                ..
+            } => Some((*player_id, *object_id)),
+            _ => None,
+        })
+        .collect()
 }
 
 fn concealed_discard_lines(results: &[&ActionResult]) -> usize {
@@ -313,7 +367,7 @@ fn assert_accepted_batch(board: &Board, results: &[ActionResult]) {
         1,
         "the hand is reduced by two"
     );
-    assert_no_hand_names(&board.runner, &all, &[BEARS, SHOCK]);
+    assert_no_hand_identities(&board.runner, &all, &[BEARS, SHOCK], &cards);
     assert_eq!(
         concealed_discard_lines(&all),
         2,
@@ -349,6 +403,26 @@ fn m1_declined_batch_discard_goes_to_the_graveyard_and_is_named() {
         assert_eq!(named_discard_lines(&all, card), 1, "{card:?} is named");
     }
     assert_eq!(concealed_discard_lines(&all), 0);
+
+    // Public destination: the real ids stay on the wire for P1 and a spectator.
+    let events: Vec<GameEvent> = events_of(&all).into_iter().cloned().collect();
+    let expected = BTreeSet::from([(P0, board.bears), (P0, board.shock)]);
+    for viewer in [P1, SPECTATOR] {
+        let filtered = engine::game::visibility::filter_events_for_viewer(
+            &events,
+            board.runner.state(),
+            viewer,
+        );
+        assert_eq!(
+            discarded_pairs(&filtered),
+            expected,
+            "viewer {viewer:?}: a graveyard discard keeps its ids"
+        );
+    }
+    // Positive control for the log walk: it finds the named cards' ids.
+    let entries: Vec<_> = all.iter().flat_map(|r| r.log_entries.iter()).collect();
+    let log_ids = identifying_object_ids(&serde_json::to_value(&entries).expect("log value"));
+    assert!(log_ids.contains(&board.bears.0) && log_ids.contains(&board.shock.0));
 }
 
 /// M2: the same batch with Telepathy revealing P0's hand to P1. The log is one

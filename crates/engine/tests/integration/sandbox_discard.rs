@@ -37,7 +37,7 @@ use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::EffectKind;
 use engine::types::actions::{DebugAction, GameAction, ReplacementAutoChoice};
 use engine::types::events::{GameEvent, PlayerActionKind};
-use engine::types::game_state::{ActionResult, CastOfferKind, WaitingFor};
+use engine::types::game_state::{ActionResult, CastOfferKind, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::log::LogSegment;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -45,7 +45,7 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-use crate::support::shared_card_db as load_db;
+use crate::support::{identifying_object_ids, shared_card_db as load_db, viewer_event_ids};
 
 /// Library cards per seat, so no row can end on a draw from an empty library.
 const LIBRARY_PER_SEAT: usize = 4;
@@ -706,6 +706,60 @@ fn assert_owner_sees_the_card(runner: &GameRunner, results: &[&ActionResult], ca
     );
 }
 
+fn flat_events(results: &[&ActionResult]) -> Vec<GameEvent> {
+    all_events(results).into_iter().cloned().collect()
+}
+
+/// CR 400.2 + CR 701.9c: for P1 and a spectator, no id of `card` survives in the
+/// filtered event stream or the public log of `results`, while every `Discarded`
+/// is still delivered (count, discarder) with the placeholder `ObjectId(0)`.
+fn assert_no_card_id(runner: &GameRunner, results: &[&ActionResult], card: ObjectId) {
+    let events = flat_events(results);
+    let authoritative = discarded_events(&events);
+    for viewer in [P1, SPECTATOR] {
+        assert!(
+            !viewer_event_ids(&events, runner.state(), viewer).contains(&card.0),
+            "viewer {viewer:?}: the filtered stream still carries the card's id"
+        );
+        let filtered =
+            engine::game::visibility::filter_events_for_viewer(&events, runner.state(), viewer);
+        let seen = discarded_events(&filtered);
+        assert_eq!(
+            seen.len(),
+            authoritative.len(),
+            "viewer {viewer:?} receives every Discarded"
+        );
+        assert!(
+            seen.iter().all(|pair| *pair == (P0, ObjectId(0))),
+            "viewer {viewer:?}: Discarded keeps the discarder but not the id: {seen:?}"
+        );
+    }
+    let entries: Vec<_> = results
+        .iter()
+        .flat_map(|result| result.log_entries.iter())
+        .collect();
+    let log = serde_json::to_value(&entries).expect("serialize log entries");
+    assert!(
+        !identifying_object_ids(&log).contains(&card.0),
+        "public log carries the card's id: {log}"
+    );
+}
+
+/// The owner keeps the real id: P0's filtered `Discarded` events equal the
+/// authoritative ones, `[(P0, card)]`, and the id is on the wire.
+fn assert_owner_keeps_card_id(runner: &GameRunner, results: &[&ActionResult], card: ObjectId) {
+    let events = flat_events(results);
+    let authoritative = discarded_events(&events);
+    assert_eq!(
+        authoritative,
+        vec![(P0, card)],
+        "reach: the discard happened"
+    );
+    let owner = engine::game::visibility::filter_events_for_viewer(&events, runner.state(), P0);
+    assert_eq!(discarded_events(&owner), authoritative);
+    assert!(viewer_event_ids(&events, runner.state(), P0).contains(&card.0));
+}
+
 fn library_top(runner: &GameRunner, count: usize) -> Vec<ObjectId> {
     runner
         .state()
@@ -784,6 +838,8 @@ fn r12_library_answer_discard_description_does_not_name_the_hand_card() {
     assert_eq!(library_top(&runner, 1), vec![card]);
     assert_owner_sees_the_card(&runner, &[&parked, &answered], card);
     assert_no_card_identity(&runner, &[&parked, &answered]);
+    assert_no_card_id(&runner, &[&parked, &answered], card);
+    assert_owner_keeps_card_id(&runner, &[&parked, &answered], card);
     assert_eq!(
         concealed_discard_lines(&[&parked, &answered]),
         1,
@@ -825,6 +881,8 @@ fn r13_currently_revealed_card_discarded_into_the_library_is_not_named() {
     assert_eq!(library_top(&runner, 1), vec![card]);
     assert_owner_sees_the_card(&runner, &[&parked, &answered], card);
     assert_no_card_identity(&runner, &[&parked, &answered]);
+    assert_no_card_id(&runner, &[&parked, &answered], card);
+    assert_owner_keeps_card_id(&runner, &[&parked, &answered], card);
     assert_eq!(concealed_discard_lines(&[&parked, &answered]), 1);
 }
 
@@ -838,10 +896,15 @@ fn floating_mana(n: usize, ty: ManaType) -> Vec<ManaUnit> {
 /// hand by Macabre Waltz in an earlier action) and sits unrevealed in hand when
 /// it is discarded into the library. The discard step does not name it.
 ///
-/// Residual, not covered (D5): P1 learned the card's ObjectId while it was
-/// public, so `Discarded { object_id }` reaching P1 is the model-wide stable-id
-/// property shared by every hand -> library move. The whole check here is
-/// name-based.
+/// P1 learned the card's ObjectId while it was public, so the discard step must
+/// not re-link it: P1 and a spectator receive the `Discarded` with `ObjectId(0)`,
+/// and no id of the card appears in their filtered stream or the public log.
+///
+/// CR 400.2 + CR 401.2: the projected state keeps the card's storage id as a
+/// nameless hidden-zone handle (library order, hand membership, the blanked
+/// zone-change journal), the engine-wide stable-id property tracked as #9377
+/// section 1 and shared by every hand -> library move (Brainstorm). This row pins
+/// the viewer event channel and the projected event carriers.
 #[test]
 fn r15_previously_public_card_discarded_into_the_library_is_not_named() {
     let Some(db) = load_db() else { return };
@@ -850,6 +913,7 @@ fn r15_previously_public_card_discarded_into_the_library_is_not_named() {
         s.add_real_card(P0, "Library of Leng", Zone::Battlefield, db);
         let waltz = s.add_real_card(P0, "Macabre Waltz", Zone::Hand, db);
         let swamp = s.add_real_card(P0, "Swamp", Zone::Hand, db);
+        s.add_real_card(P0, "Shock", Zone::Hand, db);
         let bears = s.add_real_card(P0, SECRET_NAME, Zone::Graveyard, db);
         s.with_mana_pool(
             P0,
@@ -878,7 +942,7 @@ fn r15_previously_public_card_discarded_into_the_library_is_not_named() {
     }
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::DiscardChoice { .. }),
-        "Waltz's discard has two cards to choose from: {:?}",
+        "Waltz's discard has three cards to choose from: {:?}",
         runner.state().waiting_for
     );
     assert_eq!(zone_of(&runner, bears), Zone::Hand);
@@ -915,6 +979,20 @@ fn r15_previously_public_card_discarded_into_the_library_is_not_named() {
         )),
         "fixture: P1 saw Bears return from the graveyard"
     );
+    // Reach guard: P1 and a spectator really learned Bears' id in step one, and
+    // the Swamp's public graveyard destination keeps its id for P1.
+    for viewer in [P1, SPECTATOR] {
+        assert!(
+            viewer_event_ids(&step_one_events, runner.state(), viewer).contains(&bears.0),
+            "fixture: viewer {viewer:?} learned Bears' id while it was public"
+        );
+    }
+    let p1_step_one = discarded_events(&p1_events);
+    assert_eq!(
+        p1_step_one,
+        vec![(P0, swamp)],
+        "the declined Swamp discard (graveyard) keeps its id for P1"
+    );
 
     // Step 2: discard it into the library.
     let parked = runner.act(discard(bears)).expect("discard parks a choice");
@@ -929,6 +1007,8 @@ fn r15_previously_public_card_discarded_into_the_library_is_not_named() {
     assert_eq!(library_top(&runner, 1), vec![bears]);
     assert_owner_sees_the_card(&runner, &[&parked, &answered], bears);
     assert_no_card_identity(&runner, &[&parked, &answered]);
+    assert_no_card_id(&runner, &[&parked, &answered], bears);
+    assert_owner_keeps_card_id(&runner, &[&parked, &answered], bears);
     assert_eq!(concealed_discard_lines(&[&parked, &answered]), 1);
 }
 
@@ -979,5 +1059,102 @@ fn r16_remembered_leng_accept_discards_directly_to_the_library_top() {
     );
     assert_eq!(library_top(&runner, 2), vec![bears, shock]);
     assert_no_card_identity(&runner, &[&second]);
+    assert_no_card_id(&runner, &[&second], bears);
+    assert_owner_keeps_card_id(&runner, &[&second], bears);
     assert_eq!(concealed_discard_lines(&[&second]), 1);
+}
+
+/// The `Discarded` a triggered stack entry stores as its `trigger_event`.
+fn stored_discard(state: &engine::types::game_state::GameState) -> Option<(PlayerId, ObjectId)> {
+    state.stack.iter().find_map(|entry| match &entry.kind {
+        StackEntryKind::TriggeredAbility {
+            trigger_event:
+                Some(GameEvent::Discarded {
+                    player_id,
+                    object_id,
+                    ..
+                }),
+            ..
+        } => Some((*player_id, *object_id)),
+        _ => None,
+    })
+}
+
+fn discard_grimoire_board(db: &CardDatabase) -> (GameRunner, ObjectId, ObjectId) {
+    let mut ids = None;
+    let runner = table(db, |s, db| {
+        s.add_real_card(P0, "Library of Leng", Zone::Battlefield, db);
+        let grimoire = s.add_real_card(P1, "Geth's Grimoire", Zone::Battlefield, db);
+        let bears = s.add_real_card(P0, SECRET_NAME, Zone::Hand, db);
+        s.add_real_card(P0, "Shock", Zone::Hand, db);
+        ids = Some((grimoire, bears));
+    });
+    let (grimoire, bears) = ids.unwrap();
+    (runner, grimoire, bears)
+}
+
+/// R17 (CR 603.2 + CR 400.2 + CR 701.9c + CR 723.4): Geth's Grimoire's stack entry
+/// stores the discard as its `trigger_event`. When the card went into the library
+/// unrevealed, the projected stack carries `ObjectId(0)` for P1 and the unseated
+/// viewer, while the authoritative state and the owner keep the real id.
+#[test]
+fn r17_stored_discard_trigger_event_is_redacted_for_unauthorized_viewers() {
+    let Some(db) = load_db() else { return };
+    let (mut runner, grimoire, bears) = discard_grimoire_board(db);
+
+    runner.act(discard(bears)).expect("discard parks a choice");
+    let accept = choice_index(&runner, P0, "Library of Leng prompt", |d| d != "Decline");
+    runner
+        .act(GameAction::ChooseReplacement { index: accept })
+        .expect("choosing the library option succeeds");
+    assert_eq!(zone_of(&runner, bears), Zone::Library);
+
+    // Reach guard: the trigger fired and the authoritative entry stores the real id.
+    let state = runner.state();
+    assert_eq!(state.stack.len(), 1, "one Grimoire trigger");
+    assert_eq!(state.stack[0].source_id, grimoire);
+    assert_eq!(stored_discard(state), Some((P0, bears)));
+
+    let p1 = engine::game::visibility::filter_state_for_viewer(state, P1);
+    let unseated = engine::game::visibility::filter_state_for_unseated_viewer(state);
+    for (label, projected) in [("P1", &p1), ("unseated", &unseated)] {
+        assert_eq!(
+            stored_discard(projected),
+            Some((P0, ObjectId(0))),
+            "{label}: the stored discard keeps the discarder but not the id"
+        );
+        let stack = serde_json::to_value(&projected.stack).expect("serialize stack");
+        assert!(
+            !identifying_object_ids(&stack).contains(&bears.0),
+            "{label}: the projected stack still carries the card's id"
+        );
+    }
+
+    // Authorized-view positive control: the owner keeps the real id.
+    let owner = engine::game::visibility::filter_state_for_viewer(state, P0);
+    assert_eq!(stored_discard(&owner), Some((P0, bears)));
+}
+
+/// R17b: declining Leng sends the card to the public graveyard, so the stored
+/// discard keeps its id for P1 and the walk over the projected stack finds it.
+#[test]
+fn r17b_public_destination_discard_trigger_event_keeps_its_id() {
+    let Some(db) = load_db() else { return };
+    let (mut runner, _grimoire, bears) = discard_grimoire_board(db);
+
+    runner.act(discard(bears)).expect("discard parks a choice");
+    let decline = choice_index(&runner, P0, "Library of Leng prompt", |d| d == "Decline");
+    runner
+        .act(GameAction::ChooseReplacement { index: decline })
+        .expect("choosing the graveyard option succeeds");
+    assert_eq!(zone_of(&runner, bears), Zone::Graveyard);
+    assert_eq!(stored_discard(runner.state()), Some((P0, bears)));
+
+    let p1 = engine::game::visibility::filter_state_for_viewer(runner.state(), P1);
+    assert_eq!(stored_discard(&p1), Some((P0, bears)));
+    let stack = serde_json::to_value(&p1.stack).expect("serialize stack");
+    assert!(
+        identifying_object_ids(&stack).contains(&bears.0),
+        "positive control: the walk finds the trigger carrier's id"
+    );
 }
