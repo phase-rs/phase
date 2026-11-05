@@ -102,7 +102,13 @@ describe("DebugCardContextMenu discard item", () => {
             .named("Grizzly Bears")
             .build(),
         )
-        .build({ derived: {} }),
+        .build({
+          waiting_for: {
+            type: "ReplacementChoice",
+            data: { player: 0, candidate_count: 2 },
+          },
+          derived: {},
+        }),
     });
     render(<DebugCardContextMenu surface="game" />);
     openMenuFor(11);

@@ -555,23 +555,45 @@ fn assert_no_card_identity(runner: &GameRunner, results: &[&ActionResult]) {
     );
 }
 
+/// P0's engine-projected `debug_discardable_hand_cards`, read through the
+/// public filtered-view path the client receives.
+fn projected_discardable(runner: &GameRunner) -> Vec<ObjectId> {
+    let state = runner.state();
+    let filtered = engine::game::visibility::filter_state_for_viewer(state, P0);
+    engine::game::derived_views::derive_filtered_views(state, &filtered, Some(P0))
+        .debug_discardable_hand_cards
+}
+
 /// R11 (CR 400.2): a parked Library of Leng prompt has not revealed the hand
 /// card, so the broadcast debug description must not name it.
 #[test]
 fn r11_parked_discard_description_does_not_name_the_hand_card() {
     let Some(db) = load_db() else { return };
-    let mut card = None;
+    let mut ids = None;
     let mut runner = table(db, |s, db| {
         s.add_real_card(P0, "Library of Leng", Zone::Battlefield, db);
-        card = Some(s.add_real_card(P0, SECRET_NAME, Zone::Hand, db));
+        let card = s.add_real_card(P0, SECRET_NAME, Zone::Hand, db);
+        let other = s.add_real_card(P0, "Shock", Zone::Hand, db);
+        ids = Some((card, other));
     });
-    let card = card.unwrap();
+    let (card, other) = ids.unwrap();
+    assert_eq!(
+        projected_discardable(&runner),
+        vec![card, other],
+        "both hand cards are discardable at a settled Priority window"
+    );
 
     let parked = runner.act(discard(card)).expect("discard parks a choice");
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { player: P0, .. }
     ));
+
+    assert_eq!(zone_of(&runner, other), Zone::Hand);
+    assert!(
+        projected_discardable(&runner).is_empty(),
+        "the parked Leng choice withdraws discard availability for the other hand card"
+    );
 
     assert_no_card_identity(&runner, &[&parked]);
 }
