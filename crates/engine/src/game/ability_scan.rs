@@ -5078,6 +5078,9 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
+        // CR 106.3 + CR 601.2h: a payment fact is not a resource read or write. Explicit
+        // so a future field forces re-audit.
+        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }

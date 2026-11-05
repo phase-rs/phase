@@ -12942,6 +12942,9 @@ fn latched_property_kind(
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
+        // CR 106.3 + CR 601.2h: a payment snapshot is a LEDGER entry, which the
+        // group's own contract lists as not judgeable against a latched doubler.
+        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }
@@ -14910,6 +14913,8 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         // both legs read the same turn's record.
         | FilterProp::WasPlayed
         | FilterProp::WasKicked
+        // CR 106.3 + CR 601.2h: both legs read the same payment record.
+        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
@@ -16784,15 +16789,18 @@ fn check_trigger_constraint_with_ref(
                 _ => return false,
             };
             let spells = state.spells_cast_this_turn_by_player.get(&caster);
+            // CR 603.2 + CR 604.1: the record read needs the state and a context.
+            // A trigger that holds a source context passes it; one with nothing in
+            // scope passes the neutral context — the same construction
+            // `TriggerCondition::ControlCount` uses in `check_trigger_condition`.
+            let filter_ctx = source_context.map_or_else(FilterContext::neutral, |source| {
+                FilterContext::from_trigger_source_with_controller(source, controller)
+            });
             if let (Some(filter), Some(current_record)) =
                 (filter.as_ref(), spells.and_then(|spells| spells.back()))
             {
-                if !spell_record_matches_filter(
-                    current_record,
-                    filter,
-                    caster,
-                    &state.all_creature_types,
-                ) {
+                if !spell_record_matches_filter(current_record, filter, caster, state, &filter_ctx)
+                {
                     return false;
                 }
             }
@@ -16801,12 +16809,7 @@ fn check_trigger_constraint_with_ref(
                 Some(filter) => spells
                     .iter()
                     .filter(|record| {
-                        spell_record_matches_filter(
-                            record,
-                            filter,
-                            caster,
-                            &state.all_creature_types,
-                        )
+                        spell_record_matches_filter(record, filter, caster, state, &filter_ctx)
                     })
                     .count() as u32,
             });
@@ -18009,19 +18012,26 @@ fn evaluate_trigger_condition_with_source(
                 .spells_cast_this_turn_by_player
                 .get(&controller)
                 .is_some_and(|spells| !spells.is_empty()),
-            Some(filter) => state
-                .spells_cast_this_turn_by_player
-                .get(&controller)
-                .is_some_and(|spells| {
-                    spells.iter().any(|record| {
-                        spell_record_matches_filter(
-                            record,
-                            filter,
-                            controller,
-                            &state.all_creature_types,
-                        )
+            Some(filter) => {
+                // CR 603.4 + CR 604.1: same construction as the sibling arms above.
+                let filter_ctx = source_context.map_or_else(FilterContext::neutral, |source| {
+                    FilterContext::from_trigger_source_with_controller(source, controller)
+                });
+                state
+                    .spells_cast_this_turn_by_player
+                    .get(&controller)
+                    .is_some_and(|spells| {
+                        spells.iter().any(|record| {
+                            spell_record_matches_filter(
+                                record,
+                                filter,
+                                controller,
+                                state,
+                                &filter_ctx,
+                            )
+                        })
                     })
-                }),
+            }
         },
         TriggerCondition::QuantityComparison {
             lhs,
@@ -24712,6 +24722,7 @@ pub mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Vec::new(),
         };
         let current_record = SpellCastRecord {
             name: String::new(),
@@ -24728,6 +24739,7 @@ pub mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Vec::new(),
         };
         state.spells_cast_this_turn_by_player.insert(
             player,
@@ -33091,6 +33103,7 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Vec::new(),
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -33107,6 +33120,7 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Vec::new(),
                 },
             ]),
         );
@@ -39708,6 +39722,7 @@ pub mod tests {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
+                mana_spent_source_snapshots: Vec::new(),
             }]),
         );
         assert!(
@@ -39733,6 +39748,7 @@ pub mod tests {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
+                mana_spent_source_snapshots: Vec::new(),
             }]),
         );
         assert!(
@@ -39759,6 +39775,7 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Vec::new(),
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -39775,6 +39792,7 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Vec::new(),
                 },
             ]),
         );
@@ -39804,6 +39822,7 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Vec::new(),
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -39820,6 +39839,7 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Vec::new(),
                 },
             ]),
         );
@@ -39847,6 +39867,7 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Vec::new(),
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -39863,6 +39884,7 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Vec::new(),
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -39879,6 +39901,7 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Vec::new(),
                 },
             ]),
         );
@@ -39906,6 +39929,7 @@ pub mod tests {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
+                mana_spent_source_snapshots: Vec::new(),
             }
         }
 

@@ -374,8 +374,12 @@ const ORDINARY_READINGS: [bool; 4] = [false, true, true, false];
 /// Evaluate every `prepare_history_filters` query against one cast-history
 /// record through the public spell-record filter authority.
 fn prepare_readings(state: &GameState, record: &SpellCastRecord) -> [bool; 4] {
-    prepare_history_filters()
-        .map(|filter| spell_record_matches_filter(record, &filter, P0, &state.all_creature_types))
+    // CR 106.3 + CR 601.2h: a pure test helper with no ability or trigger source
+    // in scope, so it passes the neutral filter context; the filters under test are
+    // printed object qualities.
+    prepare_history_filters().map(|filter| {
+        spell_record_matches_filter(record, &filter, P0, state, &FilterContext::neutral())
+    })
 }
 
 /// P0's "spells you've cast this turn" count, optionally filtered,

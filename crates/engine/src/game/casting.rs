@@ -33114,6 +33114,8 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
+        // CR 106.3 + CR 601.2h: a payment fact reads no chosen target.
+        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }
@@ -36077,6 +36079,15 @@ fn is_blocked_by_per_turn_cast_limit_for(
             // If a spell filter is set, first check if the spell being cast matches.
             // E.g., Deafening Silence only limits noncreature spells — creature spells
             // are unaffected regardless of how many noncreature spells were cast.
+            // CR 101.2 + CR 106.3: the prohibiting static's own source object is the
+            // only source in scope for a record read here. The live projection is
+            // PRE-payment by construction (CR 601.2f precedes CR 601.2h), so a
+            // `ManaSpentFromSource` in a `PerTurnCastLimit` filter answers false
+            // honestly; no printed card does this.
+            let filter_ctx = super::filter::FilterContext::from_source_with_controller(
+                bf_obj.id,
+                bf_obj.controller,
+            );
             if let Some(filter) = spell_filter {
                 // CR 202.3d + CR 702.102b: project the spell being cast through the
                 // shared cast-record authority so a fused split spell's mana value /
@@ -36094,7 +36105,8 @@ fn is_blocked_by_per_turn_cast_limit_for(
                     &current_record,
                     filter,
                     bf_obj.controller,
-                    &state.all_creature_types,
+                    state,
+                    &filter_ctx,
                 ) {
                     continue;
                 }
@@ -36115,7 +36127,8 @@ fn is_blocked_by_per_turn_cast_limit_for(
                                 r,
                                 filter,
                                 bf_obj.controller,
-                                &state.all_creature_types,
+                                state,
+                                &filter_ctx,
                             )
                         })
                         .count(),

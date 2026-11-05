@@ -33,7 +33,8 @@ use crate::types::counter::CounterMatch;
 use crate::types::events::EventObjectSnapshot;
 use crate::types::game_state::{
     AttackDeclarationRecord, CounterAddedRecord, DamageRecord, GameState, LKISnapshot,
-    SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
+    ManaSpentSourceSnapshot, SpellCastRecord, StackEntryKind, TriggerSourceContext,
+    ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggeringObjectRef};
 use crate::types::keywords::Keyword;
@@ -378,6 +379,9 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::Transformed
         | FilterProp::HasXInManaCost
         | FilterProp::WasKicked
+        // CR 106.3 + CR 601.2h: a latched payment record cannot be flipped by an
+        // entry or an exit — the snapshot set is fixed at payment.
+        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::HasXInActivationCost
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
@@ -907,6 +911,15 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
             _ => CharacteristicKinds::ALL,
         },
 
+        // CR 106.3 + CR 601.2h: a payment snapshot reads the SOURCE's type line
+        // (the payment-time snapshot of e.g. an artifact token) on top of whatever
+        // its nested source filter reads — a fail-closed union, the shape
+        // `CanEnchant` uses.
+        FilterProp::ManaSpentFromSource { source_filter } => {
+            CharacteristicKinds::CARD_TYPES
+                .union(target_filter_characteristic_reads_at(source_filter, depth))
+        }
+
         // ---- Reads no layer-writable characteristic. ----
         // Token identity, zone, combat state, per-object designations, per-turn
         // ledgers, stack shape, and the fail-closed unparsed leaf. Enumerated
@@ -1214,6 +1227,8 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::Transformed
         | FilterProp::HasXInManaCost
         | FilterProp::WasKicked
+        // CR 106.3 + CR 601.2h: a latched payment record; an entry cannot perturb it.
+        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::HasXInActivationCost
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
@@ -2954,6 +2969,17 @@ fn filter_prop_contains_input(
                     slot_context,
                 )
             }
+            // CR 106.3 + CR 601.2h: the payment-time source filter nests its own
+            // `TargetFilter`; route it exactly like the sibling nested filters.
+            FilterProp::ManaSpentFromSource { source_filter } => filter_contains_input(
+                source_filter,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                object_information_available,
+                slot_context,
+            ),
             FilterProp::Not { prop } => filter_prop_contains_input(
                 prop,
                 predicate,
@@ -3791,6 +3817,9 @@ fn declared_group_controller(prop: &mut FilterProp) -> Option<&mut ControllerRef
         // The reader matches only `You` / `Opponent`, so a declared group never resolves.
         FilterProp::ProtectorMatches { .. }
         // Properties without a `ControllerRef`.
+        // CR 106.3 + CR 601.2h: the payment-source filter carries no
+        // `ControllerRef` of its own — same group as `Targets`/`TargetsOnly`.
+        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::Token
         | FilterProp::NonToken
         | FilterProp::RepresentedByCard
@@ -4467,6 +4496,9 @@ fn absent_search_property_truth(prop: &FilterProp) -> Option<bool> {
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
+        // CR 106.3 + CR 601.2h: a payment fact is not made true or false by an
+        // empty search result — the value `Targets`/`TargetsOnly` take here.
+        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }
@@ -6198,6 +6230,39 @@ pub fn matches_target_filter_on_lki_snapshot(
     matches_target_filter_on_lki_snapshot_with_incarnation(
         state, object_id, lki, filter, ctx, None, None,
     )
+}
+
+/// CR 106.3 + CR 601.2h: does the source of ONE spent mana unit match the
+/// filter, as that source was when the mana was paid? The single predicate
+/// both folds of this question share — the existential property below and
+/// `quantity::resolve_mana_spent_to_cast_metric`'s `FromSource` count.
+pub(crate) fn mana_spent_source_matches(
+    state: &GameState,
+    snapshot: &ManaSpentSourceSnapshot,
+    source_filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    matches_target_filter_on_lki_snapshot(
+        state,
+        snapshot.source_id,
+        &snapshot.lki,
+        source_filter,
+        ctx,
+    )
+}
+
+/// CR 106.3 + CR 601.2h + CR 400.7d: existential over the payment — one or more
+/// spent units whose source matched is sufficient, and any number of matching
+/// units never multiplies the answer.
+pub(crate) fn mana_spent_from_source(
+    state: &GameState,
+    snapshots: &[ManaSpentSourceSnapshot],
+    source_filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    snapshots
+        .iter()
+        .any(|snapshot| mana_spent_source_matches(state, snapshot, source_filter, ctx))
 }
 
 /// CR 113.7 + CR 113.7a + CR 400.7: Evaluate a target filter against the last known
@@ -8171,12 +8236,21 @@ fn zone_change_record_matches_type_filter(
 /// Evaluates the subset of `TargetFilter` that is meaningful for spell snapshots.
 /// Variants that only make sense for on-battlefield objects (e.g. `AttachedTo`,
 /// `SpecificObject`) explicitly return `false` — no catch-all fall-through.
+///
+/// CR 106.3 + CR 601.2h: the record matcher now receives the game state and a
+/// filter context, because a state-dependent record property
+/// (`FilterProp::ManaSpentFromSource`) evaluates its latched
+/// `ManaSpentSourceSnapshot` LKI through the module's single LKI authority. The
+/// creature-type universe comes from that state, not from a caller-supplied
+/// slice. Every record-only property ignores the two new arguments, so no
+/// existing answer changes.
 #[allow(clippy::only_used_in_recursion)] // controller is checked in Typed branch for Opponent
 pub fn spell_record_matches_filter(
     record: &SpellCastRecord,
     filter: &TargetFilter,
     controller: PlayerId,
-    all_creature_types: &[String],
+    state: &GameState,
+    ctx: &FilterContext<'_>,
 ) -> bool {
     match filter {
         TargetFilter::Any => true,
@@ -8239,19 +8313,19 @@ pub fn spell_record_matches_filter(
             // the invariant on `TypedFilter::type_filters` for why the empty case is
             // load-bearing on both the object and the player axis (#8508).
             type_filters.iter().all(|type_filter| {
-                spell_record_matches_type_filter(record, type_filter, all_creature_types)
+                spell_record_matches_type_filter(record, type_filter, &state.all_creature_types)
             }) && properties
                 .iter()
-                .all(|prop| spell_record_matches_property(record, prop))
+                .all(|prop| spell_record_matches_property(record, prop, state, ctx))
         }
-        TargetFilter::Or { filters } => filters.iter().any(|inner| {
-            spell_record_matches_filter(record, inner, controller, all_creature_types)
-        }),
-        TargetFilter::And { filters } => filters.iter().all(|inner| {
-            spell_record_matches_filter(record, inner, controller, all_creature_types)
-        }),
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|inner| spell_record_matches_filter(record, inner, controller, state, ctx)),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .all(|inner| spell_record_matches_filter(record, inner, controller, state, ctx)),
         TargetFilter::Not { filter: inner } => {
-            !spell_record_matches_filter(record, inner, controller, all_creature_types)
+            !spell_record_matches_filter(record, inner, controller, state, ctx)
         }
         // CR 201.2: name filter over spell history — the recorded card name (captured
         // at cast time) must equal `name`. Mirrors the object matcher (`obj.name`) and
@@ -8336,6 +8410,7 @@ pub fn spell_record_matches_filter(
 /// [`spell_object_matches_filter_from`]; this no-override helper falls back to
 /// the object's current zone for legacy call sites that aren't mid-cast-aware.
 pub fn spell_object_matches_filter(
+    state: &GameState,
     spell_obj: &GameObject,
     caster: PlayerId,
     filter: &TargetFilter,
@@ -8343,6 +8418,7 @@ pub fn spell_object_matches_filter(
     all_creature_types: &[String],
 ) -> bool {
     spell_object_matches_filter_from(
+        state,
         spell_obj,
         spell_obj.zone,
         caster,
@@ -8357,6 +8433,7 @@ pub fn spell_object_matches_filter(
 /// the object has already physically moved to `Zone::Stack` at announcement
 /// (CR 601.2a) but filters must still see the pre-announcement zone.
 pub fn spell_object_matches_filter_from(
+    state: &GameState,
     spell_obj: &GameObject,
     origin_zone: Zone,
     caster: PlayerId,
@@ -8365,6 +8442,7 @@ pub fn spell_object_matches_filter_from(
     all_creature_types: &[String],
 ) -> bool {
     spell_object_matches_filter_from_for(
+        state,
         spell_obj,
         origin_zone,
         caster,
@@ -8381,6 +8459,7 @@ pub fn spell_object_matches_filter_from(
 /// entry delegates with `fused = false` so existing callers stay byte-identical.
 #[allow(clippy::too_many_arguments)]
 pub fn spell_object_matches_filter_from_for(
+    state: &GameState,
     spell_obj: &GameObject,
     origin_zone: Zone,
     caster: PlayerId,
@@ -8397,6 +8476,7 @@ pub fn spell_object_matches_filter_from_for(
         filter,
         source_controller,
         all_creature_types,
+        state,
         None,
     )
 }
@@ -8485,6 +8565,7 @@ pub(crate) fn spell_object_matches_filter_with_announced_x(
         filter,
         source_obj.controller,
         all_creature_types,
+        state,
         Some(SpellFilterContext {
             state,
             source_id,
@@ -8542,6 +8623,7 @@ struct SpellFilterContext<'a> {
     spell_object_id: Option<ObjectId>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spell_object_matches_filter_inner(
     record: &SpellCastRecord,
     zone: Zone,
@@ -8549,6 +8631,7 @@ fn spell_object_matches_filter_inner(
     filter: &TargetFilter,
     source_controller: PlayerId,
     all_creature_types: &[String],
+    state: &GameState,
     context: Option<SpellFilterContext<'_>>,
 ) -> bool {
     match filter {
@@ -8587,7 +8670,14 @@ fn spell_object_matches_filter_inner(
             type_filters.iter().all(|type_filter| {
                 spell_record_matches_type_filter(record, type_filter, all_creature_types)
             }) && properties.iter().all(|prop| {
-                spell_object_matches_property(record, zone, prop, all_creature_types, context)
+                spell_object_matches_property(
+                    record,
+                    zone,
+                    prop,
+                    all_creature_types,
+                    state,
+                    context,
+                )
             })
         }
         TargetFilter::Or { filters } => filters.iter().any(|inner| {
@@ -8598,6 +8688,7 @@ fn spell_object_matches_filter_inner(
                 inner,
                 source_controller,
                 all_creature_types,
+                state,
                 context,
             )
         }),
@@ -8609,6 +8700,7 @@ fn spell_object_matches_filter_inner(
                 inner,
                 source_controller,
                 all_creature_types,
+                state,
                 context,
             )
         }),
@@ -8619,6 +8711,7 @@ fn spell_object_matches_filter_inner(
             inner,
             source_controller,
             all_creature_types,
+            state,
             context,
         ),
         TargetFilter::None
@@ -8690,6 +8783,7 @@ fn spell_object_matches_property(
     zone: Zone,
     prop: &FilterProp,
     all_creature_types: &[String],
+    state: &GameState,
     context: Option<SpellFilterContext<'_>>,
 ) -> bool {
     match prop {
@@ -8820,7 +8914,24 @@ fn spell_object_matches_property(
                 .get(&spell_id)
                 .is_some_and(|obj| !obj.kickers_paid.is_empty())
         }),
-        _ => spell_record_matches_property(record, prop),
+        // CR 106.3 + CR 601.2h: every record-only property answers from the record
+        // alone, so the delegation serves them all — including
+        // `FilterProp::ManaSpentFromSource`, the one record arm that also reads
+        // state (the single LKI filter authority). Failing this branch closed when no
+        // `SpellFilterContext` is held would answer false for every one of them on a
+        // `pub` path with no compiler signal; `spell_object_matches_filter_from_for`
+        // is the only producer of that `None`, and threading `&GameState` into the
+        // state-free entry-point family is what lets the delegation answer instead.
+        // `FilterContext::neutral()` is the honest context for the `None` branch: no
+        // ability, trigger or source object is in scope at that entry point.
+        _ => spell_record_matches_property(
+            record,
+            prop,
+            context.map_or(state, |c| c.state),
+            &context.map_or_else(FilterContext::neutral, |c| {
+                FilterContext::from_source_with_controller(c.source_id, c.source_controller)
+            }),
+        ),
     }
 }
 
@@ -8869,7 +8980,12 @@ fn spell_record_matches_type_filter(
     }
 }
 
-fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) -> bool {
+fn spell_record_matches_property(
+    record: &SpellCastRecord,
+    prop: &FilterProp,
+    state: &GameState,
+    ctx: &FilterContext<'_>,
+) -> bool {
     match prop {
         FilterProp::WithKeyword { value } => record.keywords.iter().any(|k| k == value),
         FilterProp::HasKeywordKind { value } => record.keywords.iter().any(|k| k.kind() == *value),
@@ -8894,7 +9010,9 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
                 || record.core_types.contains(&CoreType::Artifact)
                 || record.subtypes.iter().any(|s| s == "Saga")
         }
-        FilterProp::NotHistoric => !spell_record_matches_property(record, &FilterProp::Historic),
+        FilterProp::NotHistoric => {
+            !spell_record_matches_property(record, &FilterProp::Historic, state, ctx)
+        }
         FilterProp::ColorCount { comparator, count } => {
             comparator.evaluate(record.colors.len() as i32, i32::from(*count))
         }
@@ -8925,6 +9043,12 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // the stack; this is distinct from casting the Adventure face.
         FilterProp::HasAdventure => record.has_adventure,
         FilterProp::WasKicked => record.was_kicked,
+        // CR 106.3 + CR 601.2h + CR 400.7d: the record persists the payment-time
+        // source snapshots, so this answers exactly as the live object did. An empty
+        // vector cannot prove a source-qualified payment and answers false.
+        FilterProp::ManaSpentFromSource { source_filter } => {
+            mana_spent_from_source(state, &record.mana_spent_source_snapshots, source_filter, ctx)
+        }
         // CR 708.4: A face-down spell is a real spell on the stack, not a
         // battlefield-only state — a morph/megamorph/disguise card cast face down
         // IS a face-down 2/2 creature spell (CR 702.37c / CR 702.168b). The record
@@ -8949,9 +9073,9 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // Disjunctive composite: recurse into inner props under the same snapshot.
         FilterProp::AnyOf { props } => props
             .iter()
-            .any(|p| spell_record_matches_property(record, p)),
+            .any(|p| spell_record_matches_property(record, p, state, ctx)),
         // CR 608.2c: Logical negation — recurse under the same snapshot and invert.
-        FilterProp::Not { prop } => !spell_record_matches_property(record, prop),
+        FilterProp::Not { prop } => !spell_record_matches_property(record, prop, state, ctx),
         // CR 111.1: Spell-cast records only track cast spells. Tokens are
         // permanents, so token identity is false and nontoken identity is true
         // for this snapshot shape.
@@ -10303,6 +10427,12 @@ fn matches_filter_prop(
                 }
             }
             !obj.kickers_paid.is_empty()
+        }
+        // CR 106.3 + CR 601.2h: the payment stamps are on the cast object from
+        // CR 601.2h until the object leaves the Stack/Battlefield (CR 400.7).
+        FilterProp::ManaSpentFromSource { source_filter } => {
+            let ctx = FilterContext::from_source_context(source);
+            mana_spent_from_source(state, &obj.mana_spent_source_snapshots, source_filter, &ctx)
         }
         // CR 605.1: Delegate to the single mana-ability classifier instead of
         // duplicating the definition at the filter layer.
@@ -11736,6 +11866,9 @@ fn zone_change_record_matches_property(
         // or never was a spell). Fail closed — the snapshot carries no such info.
         | FilterProp::HasXInManaCost
         | FilterProp::WasKicked
+        // CR 106.3 + CR 601.2h: a zone-change record latches no payment
+        // provenance, so it cannot prove a source-qualified payment. Fail closed.
+        | FilterProp::ManaSpentFromSource { .. }
         // CR 602.1a: a fact of an activation, not of an object. An activation
         // trigger's matcher binds it from its `AbilityActivated` event before
         // the departed-source branch (`bind_activation_cost_x`), so this record
@@ -14342,29 +14475,25 @@ mod tests {
             })
         };
 
-        assert!(spell_record_matches_filter(
+        assert!(record_matches_no_state(
             &record,
             &typed(vec![]),
-            PlayerId(0),
-            &[]
+            PlayerId(0)
         ));
-        assert!(spell_record_matches_filter(
+        assert!(record_matches_no_state(
             &record,
             &typed(vec![TypeFilter::Creature]),
-            PlayerId(0),
-            &[]
+            PlayerId(0)
         ));
-        assert!(!spell_record_matches_filter(
+        assert!(!record_matches_no_state(
             &record,
             &typed(vec![TypeFilter::Land]),
-            PlayerId(0),
-            &[]
+            PlayerId(0)
         ));
-        assert!(!spell_record_matches_filter(
+        assert!(!record_matches_no_state(
             &record,
             &typed(vec![TypeFilter::Creature, TypeFilter::Land]),
-            PlayerId(0),
-            &[]
+            PlayerId(0)
         ));
     }
 
@@ -16029,6 +16158,7 @@ mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Vec::new(),
         };
         let filter = TargetFilter::Typed(
             TypedFilter::creature()
@@ -16045,12 +16175,7 @@ mod tests {
                     },
                 ]),
         );
-        assert!(spell_record_matches_filter(
-            &record,
-            &filter,
-            PlayerId(0),
-            &[]
-        ));
+        assert!(record_matches_no_state(&record, &filter, PlayerId(0)));
     }
 
     /// CR 202.3d + CR 702.102b + CR 709.4d: A FUSED split spell is projected into
@@ -16097,8 +16222,8 @@ mod tests {
             !unfused.colors.contains(&ManaColor::Red),
             "the front half Breaking {{U}}{{B}} carries no red"
         );
-        assert!(!spell_record_matches_filter(&unfused, &cmc_ge_5, P0, &[]));
-        assert!(!spell_record_matches_filter(&unfused, &has_red, P0, &[]));
+        assert!(!record_matches_no_state(&unfused, &cmc_ge_5, P0));
+        assert!(!record_matches_no_state(&unfused, &has_red, P0));
 
         // Fused: both halves combined — MV 8, colors {U, B, R}. Both filters match.
         sc.state
@@ -16116,11 +16241,11 @@ mod tests {
             "the fused spell's combined colors include Entering's red"
         );
         assert!(
-            spell_record_matches_filter(&fused, &cmc_ge_5, P0, &[]),
+            record_matches_no_state(&fused, &cmc_ge_5, P0),
             "a `Cmc >= 5` spell filter must match the fused spell (combined MV 8), not just the front half (2)"
         );
         assert!(
-            spell_record_matches_filter(&fused, &has_red, P0, &[]),
+            record_matches_no_state(&fused, &has_red, P0),
             "a `HasColor {{ Red }}` spell filter must match the fused spell's combined colors"
         );
     }
@@ -16146,6 +16271,7 @@ mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Vec::new(),
         };
         let non_x_record = SpellCastRecord {
             has_x_in_cost: false,
@@ -16157,11 +16283,11 @@ mod tests {
             TypedFilter::default().properties(vec![FilterProp::HasXInManaCost]),
         );
         assert!(
-            spell_record_matches_filter(&x_record, &filter, PlayerId(0), &[]),
+            record_matches_no_state(&x_record, &filter, PlayerId(0)),
             "record with X in cost must match HasXInManaCost filter"
         );
         assert!(
-            !spell_record_matches_filter(&non_x_record, &filter, PlayerId(0), &[]),
+            !record_matches_no_state(&non_x_record, &filter, PlayerId(0)),
             "record without X in cost must NOT match HasXInManaCost filter"
         );
     }
@@ -16324,6 +16450,7 @@ mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Vec::new(),
         };
         let exile_record = SpellCastRecord {
             from_zone: Zone::Exile,
@@ -16332,17 +16459,11 @@ mod tests {
         let filter = TargetFilter::Typed(
             TypedFilter::default().properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
         );
-        assert!(spell_record_matches_filter(
-            &hand_record,
-            &filter,
-            PlayerId(0),
-            &[]
-        ));
-        assert!(!spell_record_matches_filter(
+        assert!(record_matches_no_state(&hand_record, &filter, PlayerId(0)));
+        assert!(!record_matches_no_state(
             &exile_record,
             &filter,
-            PlayerId(0),
-            &[]
+            PlayerId(0)
         ));
     }
 
@@ -21819,8 +21940,15 @@ mod tests {
             "Borrowed Spell".to_string(),
             Zone::Exile,
         );
-        let spell = state.objects.get_mut(&spell_id).unwrap();
-        spell.card_types.core_types.push(CoreType::Sorcery);
+        {
+            let spell = state.objects.get_mut(&spell_id).unwrap();
+            spell.card_types.core_types.push(CoreType::Sorcery);
+        }
+        // CR 106.3 + CR 601.2h: the state-free entry-point family now takes
+        // `&GameState` (the record matcher reads state for state-dependent record
+        // properties), so the object must be re-borrowed IMMUTABLY — a `&mut` from
+        // the same map cannot coexist with `&state`.
+        let spell = state.objects.get(&spell_id).unwrap();
 
         let filter = TargetFilter::Typed(
             TypedFilter::new(TypeFilter::Sorcery)
@@ -21829,6 +21957,7 @@ mod tests {
         );
 
         assert!(spell_object_matches_filter(
+            &state,
             spell,
             PlayerId(0),
             &filter,
@@ -21836,12 +21965,56 @@ mod tests {
             &[],
         ));
         assert!(!spell_object_matches_filter(
+            &state,
             spell,
             PlayerId(1),
             &filter,
             PlayerId(0),
             &[],
         ));
+
+        // CR 601.2i: the family's final `_ =>` delegates to the record matcher, so
+        // a record-only property must still answer here. The filter carries no
+        // `controller`, so no `ControllerRef` gate can dominate the verdict.
+        let named = |name: &str| {
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Any).properties(vec![
+                FilterProp::Named {
+                    name: name.to_string(),
+                },
+            ]))
+        };
+        assert!(
+            spell_object_matches_filter(
+                &state,
+                spell,
+                PlayerId(0),
+                &named("Borrowed Spell"),
+                PlayerId(0),
+                &[]
+            ),
+            "the threaded delegation answers a record-only name property"
+        );
+        assert!(
+            !spell_object_matches_filter(
+                &state,
+                spell,
+                PlayerId(0),
+                &named("Some Other Spell"),
+                PlayerId(0),
+                &[]
+            ),
+            "and answers false for a different name (the comparison is live)"
+        );
+        // Reach guard: `InZone` has its own explicit arm, so a `true` here proves the
+        // entry point reached the property loop rather than short-circuiting.
+        let in_exile = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Any)
+                .properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+        );
+        assert!(
+            spell_object_matches_filter(&state, spell, PlayerId(0), &in_exile, PlayerId(0), &[]),
+            "reach guard: an explicit-arm property answers through the same entry point"
+        );
     }
 
     #[test]
@@ -23890,20 +24063,21 @@ mod tests {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
+                mana_spent_source_snapshots: Vec::new(),
             }
         };
 
         // Leg 1: legendary creature spell.
         let legendary_record =
             make_record(vec![CoreType::Creature], vec![Supertype::Legendary], vec![]);
-        assert!(spell_record_matches_property(
+        assert!(record_property_no_state(
             &legendary_record,
             &FilterProp::Historic,
         ));
 
         // Leg 2: non-legendary artifact spell.
         let artifact_record = make_record(vec![CoreType::Artifact], vec![], vec![]);
-        assert!(spell_record_matches_property(
+        assert!(record_property_no_state(
             &artifact_record,
             &FilterProp::Historic,
         ));
@@ -23914,14 +24088,14 @@ mod tests {
             vec![Supertype::Legendary],
             vec!["Saga".into()],
         );
-        assert!(spell_record_matches_property(
+        assert!(record_property_no_state(
             &saga_record,
-            &FilterProp::Historic,
+            &FilterProp::Historic
         ));
 
         // Negative: vanilla creature spell.
         let vanilla_record = make_record(vec![CoreType::Creature], vec![], vec![]);
-        assert!(!spell_record_matches_property(
+        assert!(!record_property_no_state(
             &vanilla_record,
             &FilterProp::Historic,
         ));
@@ -23949,17 +24123,15 @@ mod tests {
             ..SpellCastRecord::default()
         };
 
-        assert!(spell_record_matches_filter(
+        assert!(record_matches_no_state(
             &adventure_record,
             &filter,
-            PlayerId(0),
-            &[],
+            PlayerId(0)
         ));
-        assert!(!spell_record_matches_filter(
+        assert!(!record_matches_no_state(
             &ordinary_record,
             &filter,
-            PlayerId(0),
-            &[],
+            PlayerId(0)
         ));
     }
 
@@ -24265,6 +24437,34 @@ mod tests {
         TargetFilter::Typed(TypedFilter::card().with_type(TypeFilter::Subtype(subtype.to_string())))
     }
 
+    /// CR 106.3 + CR 601.2h: the spell-record matcher now takes the game state and
+    /// a filter context. These history-only tests assert record snapshots, so they
+    /// pass an empty state (no creature-type catalog) and the neutral context.
+    fn record_matches_no_state(
+        record: &SpellCastRecord,
+        filter: &TargetFilter,
+        controller: PlayerId,
+    ) -> bool {
+        spell_record_matches_filter(
+            record,
+            filter,
+            controller,
+            &GameState::default(),
+            &FilterContext::neutral(),
+        )
+    }
+
+    /// Property-level twin of [`record_matches_no_state`]: the property matcher now
+    /// takes the same state and context, and a record-only property ignores both.
+    fn record_property_no_state(record: &SpellCastRecord, prop: &FilterProp) -> bool {
+        spell_record_matches_property(
+            record,
+            prop,
+            &GameState::default(),
+            &FilterContext::neutral(),
+        )
+    }
+
     /// CR 702.73a: A Changeling object on the battlefield matches every
     /// creature-subtype filter in `state.all_creature_types` — covers
     /// target-legality and static-affected cascade for tribal lords
@@ -24435,6 +24635,10 @@ mod tests {
     #[test]
     fn changeling_spell_record_matches_subtype_filter() {
         let all_creature_types = vec!["Dragon".to_string(), "Goblin".to_string()];
+        let catalog_state = GameState {
+            all_creature_types: all_creature_types.clone(),
+            ..Default::default()
+        };
         let record = SpellCastRecord {
             name: String::new(),
             core_types: vec![CoreType::Creature],
@@ -24450,6 +24654,7 @@ mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Vec::new(),
         };
         let dragon_filter = make_subtype_filter("Dragon");
         let plains_filter = make_subtype_filter("Plains");
@@ -24458,21 +24663,22 @@ mod tests {
             &record,
             &dragon_filter,
             PlayerId(0),
-            &all_creature_types,
+            &catalog_state,
+            &FilterContext::neutral(),
         ));
         // CR 205.3m gate: non-creature subtype must NOT match.
         assert!(!spell_record_matches_filter(
             &record,
             &plains_filter,
             PlayerId(0),
-            &all_creature_types,
+            &catalog_state,
+            &FilterContext::neutral(),
         ));
         // No catalog ⇒ no expansion (still falls back to printed subtypes).
-        assert!(!spell_record_matches_filter(
+        assert!(!record_matches_no_state(
             &record,
             &dragon_filter,
-            PlayerId(0),
-            &[],
+            PlayerId(0)
         ));
     }
 
@@ -25003,7 +25209,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            spell_record_matches_filter(&from_graveyard, &filter, controller, &[]),
+            record_matches_no_state(&from_graveyard, &filter, controller),
             "a spell cast from the graveyard must satisfy InAnyZone[everything except hand]"
         );
 
@@ -25013,7 +25219,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            !spell_record_matches_filter(&from_hand, &filter, controller, &[]),
+            !record_matches_no_state(&from_hand, &filter, controller),
             "a spell cast from hand must NOT satisfy InAnyZone[everything except hand]"
         );
     }
@@ -26028,6 +26234,9 @@ mod characteristic_read_classification_tests {
             | FilterProp::HasXInManaCost
             | FilterProp::HasXInActivationCost
             | FilterProp::WasKicked
+            // CR 106.3 + CR 601.2h: the payment-source filter carries no
+            // `ControllerRef` field of its own.
+            | FilterProp::ManaSpentFromSource { .. }
             | FilterProp::HasManaAbility
             | FilterProp::HasNoAbilities
             | FilterProp::Named { .. }

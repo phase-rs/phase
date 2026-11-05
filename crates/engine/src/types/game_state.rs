@@ -1528,6 +1528,13 @@ pub struct SpellCastRecord {
     /// pre-cast probes and the recorded cast agree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepared_copy_source: Option<ObjectId>,
+    /// CR 106.3 + CR 601.2h + CR 400.7d: the per-mana-unit payment sources, as they
+    /// were when each unit was paid. Latched so a source-qualified cast predicate
+    /// survives the spell's resolution and the source's departure (CR 400.7).
+    /// `#[serde(default)]`: a record predating this field deserializes to empty,
+    /// which honestly means it cannot prove a source-qualified payment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mana_spent_source_snapshots: Vec<ManaSpentSourceSnapshot>,
 }
 
 /// Snapshot of a land play's cast-capable origin for per-turn history queries.
@@ -1563,6 +1570,7 @@ impl Default for SpellCastRecord {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Vec::new(),
         }
     }
 }
@@ -55312,6 +55320,7 @@ mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: vec![],
         };
         let json = serde_json::to_string(&original).unwrap();
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();

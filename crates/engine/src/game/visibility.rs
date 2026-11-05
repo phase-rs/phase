@@ -4629,6 +4629,10 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
         }
     }
 
+    // Two branches, mirroring the `redact_zone_change_record` / `redact_record_payment`
+    // twins in the same pass. The record's own name and id are blanked only when the
+    // SPELL is hidden; a PUBLIC cast paid from a now-hidden source keeps them and has
+    // only the hidden source's snapshot slot blanked (CR 601.2h + CR 106.3 + CR 400.2).
     for records in state
         .spells_cast_this_turn_by_player
         .values_mut()
@@ -4639,7 +4643,12 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
                 .spell_object_id
                 .is_some_and(|id| hidden_ids.contains(&id))
             {
-                redact_spell_cast_record(record);
+                redact_spell_cast_record(record, hidden_ids);
+            } else if payment_names_hidden_source(&record.mana_spent_source_snapshots, hidden_ids) {
+                redact_payment_source_snapshots(
+                    &mut record.mana_spent_source_snapshots,
+                    hidden_ids,
+                );
             }
         }
     }
@@ -4728,7 +4737,16 @@ fn redact_linked_exile_snapshot(member: &mut crate::types::game_state::LinkedExi
 /// for a hidden object denotes a prior object, so clearing the link never changes an
 /// own-cast exclusion for a spell still on the stack. `prepared_copy_source` is an id-only
 /// link (no name, characteristics or LKI) and is kept; stable-id tracking is out of scope.
-fn redact_spell_cast_record(record: &mut crate::types::game_state::SpellCastRecord) {
+///
+/// CR 601.2h + CR 106.3 + CR 400.2 + CR 601.2i: the record also carries the payment-time
+/// mana-source snapshots, which must not disclose a source that has since moved to a
+/// hidden zone (CR 400.2). The slots are kept (counts are preserved) and only the hidden
+/// source's snapshot is blanked, through the single authority that already does this for
+/// every other payment carrier.
+fn redact_spell_cast_record(
+    record: &mut crate::types::game_state::SpellCastRecord,
+    hidden_ids: &HashSet<ObjectId>,
+) {
     let crate::types::game_state::SpellCastRecord {
         name,
         core_types: _,
@@ -4745,7 +4763,9 @@ fn redact_spell_cast_record(record: &mut crate::types::game_state::SpellCastReco
         spell_object_id,
         // An id-only link kept as-is; stable-id tracking is out of scope.
         prepared_copy_source: _,
+        mana_spent_source_snapshots,
     } = record;
+    redact_payment_source_snapshots(mana_spent_source_snapshots, hidden_ids);
     *name = HIDDEN_CARD_NAME.to_string();
     *spell_object_id = None;
 }
@@ -5229,8 +5249,8 @@ mod tests {
     use crate::types::game_state::{
         ActiveLibrarySearch, AutoMayChoice, BattlefieldEntryRecord, CastPaymentMode,
         CastingVariant, CostResume, CounterAddedRecord, DamageRecord, DelayedTrigger,
-        DepartedStackSpell, DistributionUnit, FrozenScopedSearchFoundDisposition, LinkedExileLki,
-        LinkedExileSnapshot, ManaAbilityCostCursor, ManaAbilityCostResolutionMode,
+        DepartedStackSpell, DistributionUnit, FrozenScopedSearchFoundDisposition, LKISnapshot,
+        LinkedExileLki, LinkedExileSnapshot, ManaAbilityCostCursor, ManaAbilityCostResolutionMode,
         ManaAbilityResume, ManaSpentSourceSnapshot, MayTriggerAutoChoiceKey, MayTriggerOrigin,
         PendingBeginGameAbility, PendingCast, PendingCostMoveCompletion, PendingCostMoveResume,
         PendingManaAbility, PendingSacrificeCostCompletion, PendingScopedLibrarySearch,
@@ -5245,6 +5265,194 @@ mod tests {
     use crate::types::zones::{ExileCostSourceZone, Zone};
     use rand::RngCore;
     use std::collections::BTreeSet;
+
+    /// CR 601.2h + CR 106.3 + CR 400.2 + CR 601.2i: a cast record's payment-time
+    /// mana-source snapshots must not disclose a source that has since moved to a
+    /// hidden zone. The slots are KEPT (the per-source counts stay correct) and only
+    /// the hidden source's snapshot is blanked, through the single payment-redaction
+    /// authority. A public cast's own recorded name and id survive: routing it
+    /// through the hidden-spell branch would blank a public spell's identity, which
+    /// the wire payment census cannot see because it walks only
+    /// `mana_spent_source_snapshots` arrays.
+    #[test]
+    fn cast_record_payment_snapshots_blank_only_hidden_sources() {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(0);
+        let viewer = PlayerId(1);
+
+        // A mana source the viewer cannot see: a card in the owner's hand.
+        let hidden_source = create_object(
+            &mut state,
+            CardId(11),
+            owner,
+            "Island".to_string(),
+            Zone::Hand,
+        );
+        // A mana source the viewer can see: an artifact token on the battlefield.
+        let public_source = create_object(
+            &mut state,
+            CardId(12),
+            owner,
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&public_source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Treasure".to_string());
+            obj.is_token = true;
+            obj.base_card_types = obj.card_types.clone();
+        }
+        // The public cast object (on the stack) and the hidden cast object (in hand).
+        let public_spell = create_object(
+            &mut state,
+            CardId(13),
+            owner,
+            "Grizzly Bears".to_string(),
+            Zone::Stack,
+        );
+        let hidden_spell = create_object(
+            &mut state,
+            CardId(14),
+            owner,
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+
+        let hidden_lki = state.objects[&hidden_source].snapshot_for_mana_spent();
+        let public_lki = state.objects[&public_source].snapshot_for_mana_spent();
+        let snapshot = |source_id: ObjectId, lki: &LKISnapshot| ManaSpentSourceSnapshot {
+            source_id,
+            lki: lki.clone(),
+        };
+
+        // A fully-hidden cast: the spell object and the only mana source are both hidden.
+        let hidden_cast = SpellCastRecord {
+            name: "Grizzly Bears".to_string(),
+            core_types: vec![CoreType::Creature],
+            mana_value: 2,
+            spell_object_id: Some(hidden_spell),
+            mana_spent_source_snapshots: vec![snapshot(hidden_source, &hidden_lki)],
+            ..Default::default()
+        };
+        // A PUBLIC cast paid from a hidden source plus a public one.
+        let public_cast = SpellCastRecord {
+            name: "Grizzly Bears".to_string(),
+            core_types: vec![CoreType::Creature],
+            mana_value: 2,
+            spell_object_id: Some(public_spell),
+            mana_spent_source_snapshots: vec![
+                snapshot(public_source, &public_lki),
+                snapshot(hidden_source, &hidden_lki),
+            ],
+            ..Default::default()
+        };
+        // A public cast paid only from a public source (reach guard (i)).
+        let public_only_cast = SpellCastRecord {
+            name: "Grizzly Bears".to_string(),
+            core_types: vec![CoreType::Creature],
+            mana_value: 2,
+            spell_object_id: Some(public_spell),
+            mana_spent_source_snapshots: vec![snapshot(public_source, &public_lki)],
+            ..Default::default()
+        };
+        state
+            .spells_cast_this_turn_by_player
+            .entry(owner)
+            .or_default()
+            .push_back(hidden_cast.clone());
+        state
+            .spells_cast_this_turn_by_player
+            .entry(owner)
+            .or_default()
+            .push_back(public_cast.clone());
+        state
+            .spells_cast_this_turn_by_player
+            .entry(owner)
+            .or_default()
+            .push_back(public_only_cast.clone());
+
+        // Reach guards on the raw state: every slot is present and names its source.
+        assert_eq!(
+            state.spells_cast_this_turn_by_player[&owner][0]
+                .mana_spent_source_snapshots
+                .len(),
+            1
+        );
+        assert_eq!(
+            state.spells_cast_this_turn_by_player[&owner][1]
+                .mana_spent_source_snapshots
+                .len(),
+            2
+        );
+        assert_eq!(
+            state.spells_cast_this_turn_by_player[&owner][1].mana_spent_source_snapshots[1]
+                .lki
+                .name,
+            "Island"
+        );
+
+        let projected = filter_state_for_viewer(&state, viewer);
+        // Reach guard: the projection really hid the hand card.
+        assert_eq!(projected.objects[&hidden_source].name, HIDDEN_CARD_NAME);
+
+        let records = &projected.spells_cast_this_turn_by_player[&owner];
+        assert_eq!(records.len(), 3, "every record is kept (counts unchanged)");
+
+        // (a) The fully-hidden cast: name and id cleared, slots kept, hidden source blanked.
+        let hidden = &records[0];
+        assert_eq!(hidden.name, HIDDEN_CARD_NAME);
+        assert_eq!(hidden.spell_object_id, None);
+        assert_eq!(
+            hidden.mana_spent_source_snapshots.len(),
+            1,
+            "the slot is kept so the per-source count stays correct"
+        );
+        assert_eq!(
+            hidden.mana_spent_source_snapshots[0].lki.name, HIDDEN_CARD_NAME,
+            "the hidden source's snapshot is blanked"
+        );
+
+        // (b) The public cast paid from a hidden source: its OWN name and id survive,
+        // and only the hidden slot is blanked.
+        let public = &records[1];
+        assert_eq!(
+            public.name, "Grizzly Bears",
+            "a public cast keeps its recorded name"
+        );
+        assert_eq!(
+            public.spell_object_id,
+            Some(public_spell),
+            "a public cast keeps its id link"
+        );
+        assert_eq!(public.mana_spent_source_snapshots.len(), 2);
+        assert_eq!(
+            public.mana_spent_source_snapshots[0].lki.name, "Treasure",
+            "the public source's snapshot is untouched"
+        );
+        assert_eq!(
+            public.mana_spent_source_snapshots[1].lki.name, HIDDEN_CARD_NAME,
+            "only the hidden source's snapshot is blanked"
+        );
+
+        // (c) Reach guard (i): a public cast paid from a public source keeps its
+        // snapshot unredacted, so the pass did not blank everything.
+        let public_only = &records[2];
+        assert_eq!(public_only.name, "Grizzly Bears");
+        assert_eq!(public_only.mana_spent_source_snapshots.len(), 1);
+        assert_eq!(
+            public_only.mana_spent_source_snapshots[0].lki.name,
+            "Treasure"
+        );
+
+        // The hidden source's name never reaches the viewer's wire form.
+        let json = serde_json::to_string(&projected.spells_cast_this_turn_by_player[&owner])
+            .expect("cast history serializes");
+        assert!(
+            !json.contains("Island"),
+            "no hidden mana source on the wire"
+        );
+    }
 
     /// U4 — CR 708.5: the battlefield-entry observation table is engine-internal (a face-down
     /// entrant's projection carries its card identity), so every viewer projection strips it.

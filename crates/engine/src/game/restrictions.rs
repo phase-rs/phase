@@ -387,6 +387,10 @@ pub(crate) fn spell_cast_record_for(
         // live candidate seam projects the linked copy while it still waits in
         // exile, and that object can only be cast as a prepare spell.
         prepared_copy_source: obj.prepared_copy_source,
+        // CR 106.3 + CR 601.2h: persist the payment-time source snapshots so a
+        // source-qualified cast predicate survives resolution (CR 400.7d) and the
+        // source's departure (CR 400.7).
+        mana_spent_source_snapshots: obj.mana_spent_source_snapshots.clone(),
     }
 }
 
@@ -1869,21 +1873,31 @@ fn evaluate_condition_for_granter(
             .players
             .get(usize::from(player.0))
             .is_some_and(|player| player.lands_played_this_turn > 0),
-        ParsedCondition::YouCastSpellThisTurn { filter } => state
-            .spells_cast_this_turn_by_player
-            .get(&player)
-            .is_some_and(|spells| {
-                spells.iter().any(|record| {
-                    filter.as_ref().is_none_or(|filter| {
-                        crate::game::filter::spell_record_matches_filter(
-                            record,
-                            filter,
-                            player,
-                            &state.all_creature_types,
-                        )
+        ParsedCondition::YouCastSpellThisTurn { filter } => {
+            // CR 601.2i + CR 106.3: a source-qualified cast-payment read needs the
+            // state and a source context. Build the same context the sibling
+            // `YouAttackedWithAtLeast` arm above builds, so the two record reads in
+            // one condition evaluator cannot diverge.
+            let filter_ctx =
+                crate::game::filter::FilterContext::from_source_with_controller(source_id, player)
+                    .with_granting_object(granting_object);
+            state
+                .spells_cast_this_turn_by_player
+                .get(&player)
+                .is_some_and(|spells| {
+                    spells.iter().any(|record| {
+                        filter.as_ref().is_none_or(|filter| {
+                            crate::game::filter::spell_record_matches_filter(
+                                record,
+                                filter,
+                                player,
+                                state,
+                                &filter_ctx,
+                            )
+                        })
                     })
                 })
-            }),
+        }
         ParsedCondition::YouCastNoncreatureSpellThisTurn => state
             .spells_cast_this_turn_by_player
             .get(&player)
@@ -4324,6 +4338,7 @@ mod tests {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
+                mana_spent_source_snapshots: Vec::new(),
             }]),
         );
 
@@ -4362,6 +4377,7 @@ mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Vec::new(),
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -4378,6 +4394,7 @@ mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Vec::new(),
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -4394,6 +4411,7 @@ mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Vec::new(),
                 },
             ]),
         );

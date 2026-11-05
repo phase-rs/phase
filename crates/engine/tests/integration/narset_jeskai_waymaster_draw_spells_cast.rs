@@ -51,6 +51,7 @@ fn spell_record(name: &str) -> SpellCastRecord {
         was_kicked: false,
         spell_object_id: None,
         prepared_copy_source: None,
+        mana_spent_source_snapshots: Vec::new(),
     }
 }
 

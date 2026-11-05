@@ -762,10 +762,7 @@ fn visit_characteristic_leaf<'s>(
                         let matches = match &record_filter {
                             None => true,
                             Some(filter) => spell_record_matches_filter(
-                                record,
-                                filter,
-                                controller,
-                                &state.all_creature_types,
+                                record, filter, controller, state, filter_ctx,
                             ),
                         };
                         if matches {
@@ -3923,14 +3920,16 @@ pub(crate) fn resolve_mana_spent_to_cast_metric(
         // CR 106.3 + CR 601.2h: how much mana of exactly this color paid the
         // cost, read off the same per-color payment tally.
         CastManaSpentMetric::OfColor { color } => u32_to_i32_saturating(spent_colors.get(*color)),
+        // CR 106.3 + CR 601.2h: the count folds the same per-unit predicate the
+        // existential property uses (`filter::mana_spent_source_matches`), so the
+        // quantity and the membership question can never drift apart.
         CastManaSpentMetric::FromSource { source_filter } => usize_to_i32_saturating(
             source_snapshots
                 .iter()
                 .filter(|snapshot| {
-                    crate::game::filter::matches_target_filter_on_lki_snapshot(
+                    crate::game::filter::mana_spent_source_matches(
                         state,
-                        snapshot.source_id,
-                        &snapshot.lki,
+                        snapshot,
                         source_filter,
                         filter_ctx,
                     )
@@ -6221,12 +6220,9 @@ fn resolve_ref(
                 let matches =
                     |record: &crate::types::game_state::SpellCastRecord| match peeled.as_ref() {
                         None => true,
-                        Some(f) => spell_record_matches_filter(
-                            record,
-                            f,
-                            controller,
-                            &state.all_creature_types,
-                        ),
+                        Some(f) => {
+                            spell_record_matches_filter(record, f, controller, state, &filter_ctx)
+                        }
                     };
                 let total: usize = scoped_players(state, scope, ctx, controller)
                     .filter_map(|player| state.spells_cast_this_turn_by_player.get(&player.id))
@@ -6263,7 +6259,8 @@ fn resolve_ref(
                                         record,
                                         filter,
                                         controller,
-                                        &state.all_creature_types,
+                                        state,
+                                        &filter_ctx,
                                     )
                                 })
                                 .count(),
@@ -6306,7 +6303,8 @@ fn resolve_ref(
                                 record,
                                 filter,
                                 controller,
-                                &state.all_creature_types,
+                                state,
+                                &filter_ctx,
                             )
                         })
                     })
@@ -6652,7 +6650,8 @@ fn resolve_ref(
                                     record,
                                     filter,
                                     controller,
-                                    &state.all_creature_types,
+                                    state,
+                                    &filter_ctx,
                                 )
                             })
                             .count()
@@ -19539,6 +19538,7 @@ mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Vec::new(),
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -19555,6 +19555,7 @@ mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
+                    mana_spent_source_snapshots: Vec::new(),
                 },
             ]),
         );
@@ -19667,6 +19668,7 @@ mod tests {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
+                mana_spent_source_snapshots: Vec::new(),
             }
         }
 

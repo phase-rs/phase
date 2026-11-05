@@ -2739,6 +2739,9 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
+        // CR 106.3 + CR 601.2h: a latched payment snapshot, not per-source bound
+        // storage (CR 603.10a) — the same profile as `WasKicked`.
+        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }
@@ -3070,6 +3073,9 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
+        // CR 106.3 + CR 601.2h: a latched payment snapshot, not per-source bound
+        // storage (CR 603.10a) — the same profile as `WasKicked`.
+        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }

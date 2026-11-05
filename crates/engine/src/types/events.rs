@@ -927,6 +927,9 @@ impl EventObjectSnapshot {
             | FilterProp::HasXInManaCost
             | FilterProp::HasXInActivationCost
             | FilterProp::WasKicked
+            // CR 106.3 + CR 601.2h: the event-subject snapshot carries no payment
+            // provenance, so this fails the reach gate rather than answering.
+            | FilterProp::ManaSpentFromSource { .. }
             | FilterProp::HasManaAbility
             // CR 903.3: needs the live deck-pool commander registry (owner-scoped),
             // not the subject snapshot. Parsed only inside mana-spend SPELL filters

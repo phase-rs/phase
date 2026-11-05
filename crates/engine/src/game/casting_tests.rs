@@ -4925,6 +4925,7 @@ fn record_one_spell_cast_this_turn(state: &mut GameState, player: PlayerId) {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Vec::new(),
         }]),
     );
 }
@@ -13073,6 +13074,7 @@ fn self_cost_reduction_applies_from_graveyard() {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
+                mana_spent_source_snapshots: Vec::new(),
             },
             crate::types::SpellCastRecord {
                 name: "Opt".to_string(),
@@ -13089,6 +13091,7 @@ fn self_cost_reduction_applies_from_graveyard() {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
+                mana_spent_source_snapshots: Vec::new(),
             },
         ]),
     );
@@ -31889,6 +31892,7 @@ fn first_qualified_spell_reducer_only_applies_to_first_matching_spell() {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Vec::new(),
         }]),
     );
 
@@ -32009,6 +32013,7 @@ fn first_x_spell_reducer_uses_x_filter_dynamic_counter_count_and_first_gate() {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Vec::new(),
         }]),
     );
 
@@ -32089,6 +32094,7 @@ fn opponent_first_noncreature_tax_uses_caster_history() {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Vec::new(),
         }]),
     );
 
@@ -53771,6 +53777,7 @@ fn convoke_query_before_record_unaffected_by_snapshot() {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Vec::new(),
         }]
         .into(),
     );

@@ -1319,6 +1319,11 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
             FilterProp::HasAdventure => parts.push("with an Adventure".into()),
             FilterProp::WasKicked => parts.push("kicked".into()),
+            // CR 106.3 + CR 601.2h: the payment-time source filter, rendered
+            // through the shared `fmt_target` recursion.
+            FilterProp::ManaSpentFromSource { source_filter } => {
+                parts.push(format!("cast with mana from {}", fmt_target(source_filter)))
+            }
             FilterProp::HasXInActivationCost => parts.push("with {X} in activation cost".into()),
             FilterProp::HasManaAbility => parts.push("with a mana ability".into()),
             FilterProp::HasNoAbilities => parts.push("with no abilities".into()),
@@ -16400,6 +16405,34 @@ mod tests {
             gaps.iter().any(|gap| gap.contains("you pay {1}")),
             "card_face_gaps must name the deferred payment clause, got {gaps:?}"
         );
+    }
+
+    /// CR 106.3 + CR 601.2h: the display arm for the payment-time source filter
+    /// renders through the shared `fmt_target` recursion — no second mechanism, and
+    /// no lowercasing (`fmt_type_filter` returns a subtype verbatim) and no article.
+    #[test]
+    fn fmt_typed_filter_renders_mana_spent_from_source() {
+        use crate::types::ability::{FilterProp, TargetFilter, TypeFilter, TypedFilter};
+
+        let tf = TypedFilter::default().properties(vec![FilterProp::ManaSpentFromSource {
+            source_filter: Box::new(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Subtype("Treasure".to_string())],
+                controller: None,
+                properties: vec![],
+            })),
+        }]);
+        assert_eq!(super::fmt_typed_filter(&tf), "cast with mana from Treasure");
+
+        // Sibling check: the same recursion renders the existing nested-filter
+        // property, so the new arm is not a second mechanism.
+        let sibling = TypedFilter::default().properties(vec![FilterProp::Targets {
+            filter: Box::new(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Subtype("Treasure".to_string())],
+                controller: None,
+                properties: vec![],
+            })),
+        }]);
+        assert_eq!(super::fmt_typed_filter(&sibling), "targets Treasure");
     }
 
     /// CR 113.3b / CR 113.3c + CR 109.4: the ability-kind and controller axes
