@@ -923,6 +923,14 @@ fn apply_granted_dredge_replacement(
 }
 
 /// CR 614.1: Replacement effects modify events as they would occur.
+///
+/// `Execute` carries the full `ProposedEvent` inline. The pipeline matches and
+/// consumes each result by value at its hot boundary and retains none, so
+/// boxing would add an allocation per applied replacement plus a dereference
+/// at every applier for no retained-state saving. R4a's `ProposedEvent` growth
+/// (per-move tracking/mod context) is what pushed the variant delta past
+/// clippy's threshold; the inline shape stays deliberate.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReplacementResult {
     Execute(ProposedEvent),
@@ -930,6 +938,11 @@ pub enum ReplacementResult {
     NeedsChoice(PlayerId),
 }
 
+/// CR 614.1: the applier's post-replacement verdict for one event.
+///
+/// Same shape and same reasoning as [`ReplacementResult`]: `Modified` carries
+/// the event inline and every applier returns it by value.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ApplyResult {
     Modified(ProposedEvent),
@@ -2174,6 +2187,7 @@ fn discard_applier(
             applied,
             ..
         } => ApplyResult::Modified(ProposedEvent::ZoneChange {
+            library_placement: None,
             object_id,
             from: Zone::Hand,
             to: Zone::Graveyard,
@@ -3528,6 +3542,7 @@ fn apply_finality_counter_replacement(
         object_id,
         from,
         to,
+        library_placement,
         applied,
         ..
     } = &mut event
@@ -3547,6 +3562,7 @@ fn apply_finality_counter_replacement(
             })
         {
             *to = Zone::Exile;
+            *library_placement = None;
             applied.insert(AppliedReplacementKey::object(rid.source, rid.index));
             events.push(GameEvent::ReplacementApplied {
                 source_id: rid.source,
@@ -3574,12 +3590,14 @@ fn apply_commander_hand_or_library_return_replacement(
         if let ProposedEvent::ZoneChange {
             object_id,
             to,
+            library_placement,
             applied,
             ..
         } = &mut event
         {
             if *object_id == rid.source {
                 *to = Zone::Command;
+                *library_placement = None;
                 applied.insert(AppliedReplacementKey::object(rid.source, rid.index));
                 events.push(GameEvent::ReplacementApplied {
                     source_id: rid.source,
@@ -10837,10 +10855,14 @@ fn apply_single_replacement(
                     if let ProposedEvent::ZoneChange {
                         ref mut to,
                         ref mut cause,
+                        ref mut library_placement,
                         ..
                     } = new_event
                     {
                         *to = zone;
+                        // CR 614.6: the replacement destination supersedes the
+                        // original placement, even when both name Library.
+                        *library_placement = None;
                         // CR 607.2b: the redirecting replacement's own source is
                         // the "exiled with [this object]" linked-ability
                         // authority for whatever this event ultimately
@@ -14046,8 +14068,8 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, CastManaObjectScope, CastManaSpentMetric,
         ChooseOneOfKind, ChosenAttribute, Comparator, ContinuousModification, ControllerRef,
-        Effect, EffectScope, FilterProp, OriginConstraint, PlayerFilter, PtValue, QuantityExpr,
-        QuantityModification, QuantityRef, ReplacementDefinition, ReplacementMode,
+        Effect, EffectScope, FilterProp, LibraryPosition, OriginConstraint, PlayerFilter, PtValue,
+        QuantityExpr, QuantityModification, QuantityRef, ReplacementDefinition, ReplacementMode,
         ReplacementPlayerScope, SourceExclusion, TapStateChange, TargetFilter, TargetRef,
         TriggerDefinition, TypeFilter, TypedFilter,
     };
@@ -15880,6 +15902,7 @@ mod tests {
 
         let mut events = Vec::new();
         let proposed = ProposedEvent::ZoneChange {
+            library_placement: None,
             object_id: ObjectId(30),
             from: Zone::Battlefield,
             to: Zone::Graveyard,
@@ -19717,27 +19740,32 @@ mod tests {
             .insert(CounterType::Finality, 1);
         let mut events = Vec::new();
 
+        let mut proposed = ProposedEvent::zone_change(
+            finality_id,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Some(cause),
+        );
+        if let ProposedEvent::ZoneChange {
+            library_placement, ..
+        } = &mut proposed
+        {
+            *library_placement = Some(crate::types::ability::LibraryPosition::Top);
+        }
         let ReplacementResult::Execute(ProposedEvent::ZoneChange {
             from,
             to,
             cause: actual_cause,
+            library_placement,
             applied,
             ..
-        }) = replace_event(
-            &mut battlefield,
-            ProposedEvent::zone_change(
-                finality_id,
-                Zone::Battlefield,
-                Zone::Graveyard,
-                Some(cause),
-            ),
-            &mut events,
-        )
+        }) = replace_event(&mut battlefield, proposed, &mut events)
         else {
             panic!("a battlefield finality permanent must redirect its graveyard move");
         };
         assert_eq!(from, Zone::Battlefield);
         assert_eq!(to, Zone::Exile, "CR 122.1h redirects only this move");
+        assert_eq!(library_placement, None);
         assert_eq!(
             actual_cause,
             Some(cause),
@@ -19935,6 +19963,7 @@ mod tests {
         let mut events = Vec::new();
 
         let proposed = ProposedEvent::ZoneChange {
+            library_placement: None,
             object_id: ObjectId(99),
             from: Zone::Battlefield,
             to: Zone::Graveyard,
@@ -21410,6 +21439,7 @@ mod tests {
         let mut events = Vec::new();
 
         let proposed = ProposedEvent::ZoneChange {
+            library_placement: None,
             object_id: ObjectId(20),
             from: Zone::Hand,
             to: Zone::Battlefield,
@@ -21626,6 +21656,167 @@ mod tests {
                 assert_eq!(to, Zone::Exile, "RIP should redirect graveyard → exile");
             }
             other => panic!("expected Execute with ZoneChange, got {:?}", other),
+        }
+    }
+
+    // Infrastructure-only disposition contracts. Rest in Peace is the nearest
+    // printed redirect; these typed fixtures also exercise Library-to-Library
+    // overwrites that no printed-card support claim is being made for here.
+    #[test]
+    fn canonical_library_placement_clears_on_every_destination_write() {
+        for destination in [Zone::Exile, Zone::Library] {
+            let source = ObjectId(10);
+            let mut state =
+                test_state_with_object(source, Zone::Battlefield, vec![redirect_repl(destination)]);
+            let mut proposed =
+                ProposedEvent::zone_change(source, Zone::Battlefield, Zone::Library, None);
+            if let ProposedEvent::ZoneChange {
+                library_placement, ..
+            } = &mut proposed
+            {
+                *library_placement = Some(LibraryPosition::Top);
+            }
+            let mut events = Vec::new();
+            let ReplacementResult::Execute(ProposedEvent::ZoneChange {
+                object_id,
+                to,
+                library_placement,
+                cause,
+                applied,
+                ..
+            }) = replace_event(&mut state, proposed, &mut events)
+            else {
+                panic!("single redirect must finish consultation");
+            };
+            assert_eq!(object_id, source);
+            assert_eq!(to, destination);
+            assert_eq!(library_placement, None);
+            assert_eq!(cause, Some(source));
+            assert_eq!(
+                applied,
+                HashSet::from([AppliedReplacementKey::object(source, 0)])
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event,
+                        GameEvent::ReplacementApplied { source_id, .. } if *source_id == source
+                    ))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_library_placement_survives_non_destination_modifier_and_decline() {
+        let source = ObjectId(10);
+        let mut state =
+            test_state_with_object(source, Zone::Hand, vec![tap_self_moved_replacement()]);
+        let mut proposed = ProposedEvent::zone_change(source, Zone::Hand, Zone::Battlefield, None);
+        if let ProposedEvent::ZoneChange {
+            library_placement, ..
+        } = &mut proposed
+        {
+            *library_placement = Some(LibraryPosition::Bottom);
+        }
+        // Synthetic non-Library placement isolates preservation by the modifier;
+        // terminal delivery independently ignores placement outside Library.
+        let mut events = Vec::new();
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange {
+            library_placement,
+            enter_tapped,
+            applied,
+            ..
+        }) = replace_event(&mut state, proposed, &mut events)
+        else {
+            panic!("tap modifier must execute");
+        };
+        assert_eq!(library_placement, Some(LibraryPosition::Bottom));
+        assert!(enter_tapped.resolve(false));
+        assert!(applied.contains(&AppliedReplacementKey::object(source, 0)));
+
+        let mut state = test_state_with_object(
+            source,
+            Zone::Battlefield,
+            vec![redirect_repl(Zone::Exile).mode(ReplacementMode::Optional { decline: None })],
+        );
+        let mut proposed =
+            ProposedEvent::zone_change(source, Zone::Battlefield, Zone::Library, None);
+        if let ProposedEvent::ZoneChange {
+            library_placement, ..
+        } = &mut proposed
+        {
+            *library_placement = Some(LibraryPosition::Top);
+        }
+        assert_eq!(
+            replace_event(&mut state, proposed, &mut events),
+            ReplacementResult::NeedsChoice(PlayerId(0))
+        );
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange {
+            to,
+            library_placement,
+            applied,
+            ..
+        }) = continue_replacement(&mut state, 1, &mut events)
+        else {
+            panic!("decline must complete consultation");
+        };
+        assert_eq!(to, Zone::Library);
+        assert_eq!(library_placement, Some(LibraryPosition::Top));
+        assert_eq!(
+            applied,
+            HashSet::from([AppliedReplacementKey::object(source, 0)])
+        );
+    }
+
+    #[test]
+    fn canonical_library_placement_commander_accept_clears_decline_preserves() {
+        let commander = ObjectId(10);
+        for (choice, expected_zone, expected_placement) in [
+            (0, Zone::Command, None),
+            (1, Zone::Library, Some(LibraryPosition::Top)),
+        ] {
+            let mut state = test_state_with_object(commander, Zone::Battlefield, vec![]);
+            state.format_config.command_zone = true;
+            state.objects.get_mut(&commander).unwrap().is_commander = true;
+            let mut proposed =
+                ProposedEvent::zone_change(commander, Zone::Battlefield, Zone::Library, None);
+            if let ProposedEvent::ZoneChange {
+                library_placement, ..
+            } = &mut proposed
+            {
+                *library_placement = Some(LibraryPosition::Top);
+            }
+            let mut events = Vec::new();
+            assert_eq!(
+                replace_event(&mut state, proposed, &mut events),
+                ReplacementResult::NeedsChoice(PlayerId(0))
+            );
+            assert_eq!(
+                state.pending_replacement.as_ref().unwrap().candidates,
+                vec![commander_hand_or_library_return_replacement_id(commander)]
+            );
+            let ReplacementResult::Execute(ProposedEvent::ZoneChange {
+                object_id,
+                to,
+                library_placement,
+                applied,
+                ..
+            }) = continue_replacement(&mut state, choice, &mut events)
+            else {
+                panic!("commander election must complete consultation");
+            };
+            assert_eq!(object_id, commander);
+            assert_eq!(to, expected_zone);
+            assert_eq!(library_placement, expected_placement);
+            assert_eq!(
+                applied,
+                HashSet::from([AppliedReplacementKey::object(
+                    commander,
+                    commander_hand_or_library_return_replacement_id(commander).index,
+                )])
+            );
         }
     }
 
@@ -24819,6 +25010,7 @@ mod tests {
         state.objects.insert(cast_creature, creature);
 
         let cast_event = ProposedEvent::ZoneChange {
+            library_placement: None,
             object_id: cast_creature,
             from: Zone::Hand,
             to: Zone::Battlefield,
@@ -24871,6 +25063,7 @@ mod tests {
         state.objects.insert(put_creature, put_obj);
 
         let put_event = ProposedEvent::ZoneChange {
+            library_placement: None,
             object_id: put_creature,
             from: Zone::Hand,
             to: Zone::Battlefield,

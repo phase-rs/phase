@@ -1126,6 +1126,7 @@ fn enter_battlefield_with_etb(
     }
 
     let mut proposed = ProposedEvent::ZoneChange {
+        library_placement: None,
         object_id,
         from,
         to: Zone::Battlefield,

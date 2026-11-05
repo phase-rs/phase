@@ -7,7 +7,8 @@ use crate::game::game_object::{AttachTarget, DisplayIdentity};
 use super::counter::CounterType;
 
 use super::ability::{
-    ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile, TargetRef,
+    ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile,
+    LibraryPosition, TargetRef,
 };
 use super::events::EventObjectSnapshot;
 use super::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -429,6 +430,10 @@ pub enum ProposedEvent {
         object_id: ObjectId,
         from: Zone,
         to: Zone,
+        /// Final placement carried by this proposal. Explicit null is authoritative;
+        /// only save migration may import a missing field from a legacy carrier.
+        #[serde(default)]
+        library_placement: Option<LibraryPosition>,
         cause: Option<ObjectId>,
         /// CR 303.4f: When an Aura enters the battlefield by a non-spell
         /// effect and the effect does not specify what it enchants, the
@@ -908,6 +913,7 @@ impl ProposedEvent {
             object_id,
             from,
             to,
+            library_placement: None,
             cause,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
@@ -1463,6 +1469,43 @@ mod tests {
     use crate::types::attack_target::AttackTarget;
     use crate::types::card_type::CoreType;
     use crate::types::mana::ManaColor;
+
+    #[test]
+    fn zone_change_library_placement_wire_preserves_presence_and_values() {
+        let event = ProposedEvent::zone_change(ObjectId(7), Zone::Hand, Zone::Library, None);
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            wire["ZoneChange"]["library_placement"],
+            serde_json::Value::Null
+        );
+        assert!(wire["ZoneChange"].get("library_placement").is_some());
+        let mut legacy = wire.clone();
+        legacy["ZoneChange"]
+            .as_object_mut()
+            .unwrap()
+            .remove("library_placement");
+        assert_eq!(
+            serde_json::from_value::<ProposedEvent>(legacy).unwrap(),
+            event
+        );
+        for position in [
+            LibraryPosition::Top,
+            LibraryPosition::Bottom,
+            LibraryPosition::NthFromTop { n: 3 },
+        ] {
+            let mut positioned = wire.clone();
+            positioned["ZoneChange"]["library_placement"] =
+                serde_json::to_value(&position).unwrap();
+            let decoded: ProposedEvent = serde_json::from_value(positioned.clone()).unwrap();
+            assert!(
+                matches!(&decoded, ProposedEvent::ZoneChange { library_placement: Some(actual), .. } if actual == &position)
+            );
+            assert_eq!(serde_json::to_value(decoded).unwrap(), positioned);
+        }
+        let mut malformed = wire;
+        malformed["ZoneChange"]["library_placement"] = serde_json::json!({"type": "NotAPosition"});
+        assert!(serde_json::from_value::<ProposedEvent>(malformed).is_err());
+    }
 
     #[test]
     fn replacement_id_equality_and_hash() {

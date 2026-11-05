@@ -1837,7 +1837,40 @@ fn try_parse_source_and_other_restriction_clause(
         return None;
     }
 
-    // The subject must be a two-part conjunction "<primary> and <secondary>".
+    let mut tentative = ctx.clone();
+    let (primary_application, secondary_application) =
+        parse_source_and_target_subjects(subject, &mut tentative)?;
+    let secondary_multi = secondary_application.multi_target.clone();
+
+    let primary_clause = build_restriction_clause(primary_application.clone(), predicate)?;
+    let mut secondary_clause = build_restriction_clause(secondary_application, predicate)?;
+    secondary_clause.multi_target = secondary_multi;
+    let secondary_def = super::ability_definition_from_clause(AbilityKind::Spell, secondary_clause);
+    *ctx = tentative;
+
+    Some(ClauseAst::SubjectPredicate {
+        subject: Box::new(SubjectPhraseAst {
+            affected: Some(primary_application.affected),
+            target: primary_application.target,
+            multi_target: None,
+            inherits_parent: primary_application.inherits_parent,
+            is_optional: primary_application.is_optional,
+            player_anaphor: primary_application.player_anaphor,
+        }),
+        predicate: Box::new(PredicateAst::Restriction {
+            effect: primary_clause.effect,
+            duration: primary_clause.duration,
+            sub_ability: Some(Box::new(secondary_def)),
+        }),
+    })
+}
+
+/// Two independently bound conjuncts: an untargeted subject and an announced
+/// object. Callers commit their tentative context only after the predicate fits.
+fn parse_source_and_target_subjects(
+    subject: &str,
+    ctx: &mut ParseContext,
+) -> Option<(SubjectApplication, SubjectApplication)> {
     let subject_lower = subject.to_lowercase();
     let subject_pair = TextPair::new(subject, &subject_lower);
     let (primary_tp, secondary_tp) = subject_pair.split_around(" and ")?;
@@ -1860,28 +1893,53 @@ fn try_parse_source_and_other_restriction_clause(
     if primary_application.target.is_some() || primary_application.multi_target.is_some() {
         return None;
     }
-    let secondary_multi = secondary_application.multi_target.clone();
+    Some((primary_application, secondary_application))
+}
 
-    let primary_clause = build_restriction_clause(primary_application.clone(), predicate)?;
-    let mut secondary_clause = build_restriction_clause(secondary_application, predicate)?;
-    secondary_clause.multi_target = secondary_multi;
-    let secondary_def = super::ability_definition_from_clause(AbilityKind::Spell, secondary_clause);
-
-    Some(ClauseAst::SubjectPredicate {
-        subject: Box::new(SubjectPhraseAst {
-            affected: Some(primary_application.affected),
-            target: primary_application.target,
-            multi_target: None,
-            inherits_parent: primary_application.inherits_parent,
-            is_optional: primary_application.is_optional,
-            player_anaphor: primary_application.player_anaphor,
-        }),
-        predicate: Box::new(PredicateAst::Restriction {
-            effect: primary_clause.effect,
-            duration: primary_clause.duration,
-            sub_ability: Some(Box::new(secondary_def)),
-        }),
-    })
+/// CR 702.26b + CR 702.26h: both subjects change to phased-out status in one
+/// phasing batch, and an object that would phase out both directly and
+/// indirectly resolves as indirect (CR 702.26h). Only the second conjunct is
+/// targeted (CR 115.1), even if the source has shroud.
+pub(super) fn try_parse_source_and_target_phase_out(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let predicate_start = find_predicate_start(text)?;
+    let predicate = text[predicate_start..].trim();
+    let lower = predicate.to_lowercase();
+    all_consuming(terminated(
+        alt((tag::<_, _, OracleError<'_>>("phase out"), tag("phases out"))),
+        opt(tag(".")),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    let mut tentative = ctx.clone();
+    let (source, selected) =
+        parse_source_and_target_subjects(text[..predicate_start].trim(), &mut tentative)?;
+    if source.affected != TargetFilter::SelfRef
+        || super::target_filter_can_target_player(&selected.affected)
+    {
+        return None;
+    }
+    let ImperativeFamilyAst::GainKeyword(Effect::PhaseOut { .. }) =
+        imperative::parse_imperative_family_ast(predicate, &lower, &mut tentative)?
+    else {
+        return None;
+    };
+    let mut clause = super::parsed_clause(Effect::TargetOnly {
+        target: selected.target?,
+    });
+    clause.multi_target = selected.multi_target;
+    clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PhaseOut {
+            target: TargetFilter::Or {
+                filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+            },
+        },
+    )));
+    *ctx = tentative;
+    Some(clause)
 }
 
 /// CR 611.2 + CR 201.2a + CR 115.1: "target &lt;T&gt; and all other &lt;T&gt;s with the same
@@ -2891,6 +2949,13 @@ pub(super) fn chosen_player_anaphor_filter(scope: Option<&ControllerRef>) -> Opt
 /// player: each member is the antecedent in turn, so no declared slot can stand
 /// for it.
 pub(super) fn subject_player_antecedent(subject: &SubjectPhraseAst) -> Option<ControllerRef> {
+    if let Some((actor, _)) = declared_owner_subject_seed(
+        subject.affected.as_ref(),
+        subject.target.as_ref(),
+        subject.multi_target.as_ref(),
+    ) {
+        return Some(actor);
+    }
     if subject.multi_target.is_some() {
         return None;
     }
@@ -2948,6 +3013,11 @@ pub(super) fn subject_player_antecedent(subject: &SubjectPhraseAst) -> Option<Co
 /// the actor filters this grammar's possessor produces, so the pronoun names
 /// `ParentTarget` — the same referent those two actors resolve through at
 /// runtime (`ability_utils::parent_target_controller` / `parent_target_owner`).
+///
+/// An explicitly declared single-object owner subject is projected first by
+/// `declared_owner_subject_seed`. Its declared slot proves the pin, including
+/// zero-to-one cardinality; it does not need the controller-anaphor proxy below.
+/// The following conditions govern every other possessive route.
 ///
 /// # Two conditions, and the second is a safety property, not a nicety
 ///
@@ -3040,7 +3110,7 @@ pub(super) fn subject_player_antecedent(subject: &SubjectPhraseAst) -> Option<Co
 /// `ParentTargetOwner` stays in the accepted set because it is the same printed
 /// grammar, and a future card arriving with the discriminant should bind.
 ///
-/// Declines a multi-target subject for the same reason
+/// Outside the declared-owner projection, declines a multi-target subject for the same reason
 /// [`subject_player_antecedent`] does: each announced object is the antecedent
 /// in turn, so no single `ParentTarget` can stand for them. No route that
 /// yields either actor filter builds a `multi_target` today, so that guard
@@ -3054,6 +3124,13 @@ pub(super) fn subject_player_antecedent(subject: &SubjectPhraseAst) -> Option<Co
 pub(super) fn subject_possessive_object_antecedent(
     subject: &SubjectPhraseAst,
 ) -> Option<TargetFilter> {
+    if let Some((_, object)) = declared_owner_subject_seed(
+        subject.affected.as_ref(),
+        subject.target.as_ref(),
+        subject.multi_target.as_ref(),
+    ) {
+        return Some(object);
+    }
     if subject.multi_target.is_some() {
         return None;
     }
@@ -3065,6 +3142,60 @@ pub(super) fn subject_possessive_object_antecedent(
         Some(TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner)
     )
     .then_some(TargetFilter::ParentTarget)
+}
+
+/// CR 108.3 + CR 608.2c: an explicitly declared single object's owner is the
+/// actor, and that same object is the predicate's object antecedent. Optional
+/// one still declares a slot; plural and unpinned possessors do not prove one.
+pub(super) fn declared_owner_subject_seed(
+    affected: Option<&TargetFilter>,
+    target: Option<&TargetFilter>,
+    multi_target: Option<&MultiTargetSpec>,
+) -> Option<(ControllerRef, TargetFilter)> {
+    if affected != Some(&TargetFilter::ParentTargetOwner) {
+        return None;
+    }
+    let target = target?;
+    if super::target_filter_can_target_player(target) || matches!(target, TargetFilter::Any) {
+        return None;
+    }
+    if let Some(multi) = multi_target {
+        if !matches!(multi.min, QuantityExpr::Fixed { value: 0 | 1 })
+            || !matches!(multi.max, Some(QuantityExpr::Fixed { value: 1 }))
+        {
+            return None;
+        }
+    }
+    Some((ControllerRef::ParentTargetOwner, TargetFilter::ParentTarget))
+}
+
+/// CR 115.1 + CR 608.2c: an owner anaphor can also name the object declared
+/// by the preceding instruction. Owner wording alone is not an object pin.
+pub(super) fn owner_subject_seed(
+    subject: &SubjectPhraseAst,
+    ctx: &ParseContext,
+) -> Option<(ControllerRef, TargetFilter)> {
+    declared_owner_subject_seed(
+        subject.affected.as_ref(),
+        subject.target.as_ref(),
+        subject.multi_target.as_ref(),
+    )
+    .or_else(|| {
+        if subject.affected != Some(TargetFilter::ParentTargetOwner)
+            || subject.target.is_some()
+            || subject.multi_target.is_some()
+            || ctx.token_created_in_chain
+        {
+            return None;
+        }
+        let target = ctx.chain_declared_object_target.as_ref()?;
+        if !matches!(target, TargetFilter::Typed(_))
+            || super::target_filter_can_target_player(target)
+        {
+            return None;
+        }
+        Some((ControllerRef::ParentTargetOwner, TargetFilter::ParentTarget))
+    })
 }
 
 /// Which player-subject anaphor a standalone "that/the player" clause names.
@@ -3098,6 +3229,20 @@ enum AnaphorConsumer {
     /// Every other reader (the imperative fallback, damage source and recipient
     /// stamps): keeps the trigger-source stamp.
     Other,
+}
+
+/// CR 303.4 + CR 301.5: the attached-host possessors ("enchanted creature",
+/// "enchanted permanent", "equipped creature") name a contextual object, not a
+/// declared target. Shared with the owner-shuffle possessor classification so
+/// the tag list lives once.
+pub(super) fn is_contextual_attachment_host(lower: &str) -> bool {
+    alt((
+        tag::<_, _, OracleError<'_>>("enchanted creature"),
+        tag("enchanted permanent"),
+        tag("equipped creature"),
+    ))
+    .parse(lower)
+    .is_ok()
 }
 
 pub(super) fn parse_subject_application(
@@ -3135,6 +3280,35 @@ fn parse_subject_application_for(
     }
 
     let lower = subject.to_lowercase();
+
+    // CR 108.3 + CR 115.1: the owner is the actor, while the printed object
+    // (including its optional cardinality) is the only announced target.
+    if let Some(((), object_text)) = nom_on_lower(subject, &lower, |i| {
+        value((), tag::<_, _, OracleError<'_>>("the owner of ")).parse(i)
+    }) {
+        let (object_text, multi_target) = super::strip_optional_target_prefix(object_text);
+        let object_lower = object_text.to_lowercase();
+        tag::<_, _, OracleError<'_>>("target ")
+            .parse(object_lower.as_str())
+            .ok()?;
+        let mut trial = ctx.clone();
+        let (filter, remainder) = parse_target_with_ctx(object_text, &mut trial);
+        if !remainder.trim().is_empty()
+            || super::target_filter_can_target_player(&filter)
+            || matches!(filter, TargetFilter::Any)
+        {
+            return None;
+        }
+        *ctx = trial;
+        return Some(SubjectApplication {
+            affected: TargetFilter::ParentTargetOwner,
+            target: Some(filter),
+            multi_target,
+            inherits_parent: false,
+            is_optional: false,
+            player_anaphor: None,
+        });
+    }
 
     // NOTE (issue #6965): the literal `"you" + " and " + "permanents you
     // control"` arm that used to sit here is now handled by the general
@@ -3438,14 +3612,7 @@ fn parse_subject_application_for(
         }
         return subject_filter_application(filter, false);
     }
-    if alt((
-        tag::<_, _, OracleError<'_>>("enchanted creature"),
-        tag("enchanted permanent"),
-        tag("equipped creature"),
-    ))
-    .parse(lower.as_str())
-    .is_ok()
-    {
+    if is_contextual_attachment_host(lower.as_str()) {
         let (filter, _) =
             ctx.with_player_antecedents(|scoped| parse_target_with_ctx(subject, scoped));
         return Some(SubjectApplication {
@@ -8872,6 +9039,7 @@ pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
             // before the bare "the player " arm.
             value((), tag("the attacking player ")),
             value((), tag("the player ")),
+            value((), tag("the owner of ")),
             // CR 102.2 + CR 608.2c: "the opponent with/who has the most
             // <property>" as an effect subject — the sibling of the "the
             // player " superlative arm above, routed through the same
@@ -9146,6 +9314,108 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r2_owner_anaphor_requires_prior_object_declaration() {
+        let app = parse_subject_application("its owner", &mut ParseContext::default())
+            .expect("owner subject");
+        let subject = subject_phrase_ast(Some(app));
+        let mut ctx = ParseContext::default();
+        assert_eq!(owner_subject_seed(&subject, &ctx), None);
+        ctx.chain_declared_object_target = Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Card],
+            ..Default::default()
+        }));
+        assert_eq!(
+            owner_subject_seed(&subject, &ctx),
+            Some((ControllerRef::ParentTargetOwner, TargetFilter::ParentTarget))
+        );
+        ctx.token_created_in_chain = true;
+        assert_eq!(owner_subject_seed(&subject, &ctx), None);
+        ctx.token_created_in_chain = false;
+        ctx.chain_declared_object_target = Some(TargetFilter::Player);
+        assert_eq!(owner_subject_seed(&subject, &ctx), None);
+    }
+
+    #[test]
+    fn declared_owner_subject_seed_accepts_only_one_pinned_object() {
+        for phrase in [
+            "the owner of target creature",
+            "the owner of up to one target creature",
+            "target creature's owner",
+        ] {
+            let app =
+                parse_subject_application(phrase, &mut ParseContext::default()).expect(phrase);
+            assert_eq!(app.affected, TargetFilter::ParentTargetOwner);
+            assert_eq!(app.player_anaphor, None);
+            let mut subject = subject_phrase_ast(Some(app));
+            assert_eq!(
+                subject_player_antecedent(&subject),
+                Some(ControllerRef::ParentTargetOwner)
+            );
+            assert_eq!(
+                subject_possessive_object_antecedent(&subject),
+                Some(TargetFilter::ParentTarget)
+            );
+            for multi in [
+                MultiTargetSpec::fixed(0, 0),
+                MultiTargetSpec::fixed(0, 2),
+                MultiTargetSpec::fixed(2, 1),
+                MultiTargetSpec::unlimited(0),
+                MultiTargetSpec::up_to(QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::Power {
+                        scope: ObjectScope::Source,
+                    },
+                }),
+            ] {
+                subject.multi_target = Some(multi);
+                assert_eq!(subject_player_antecedent(&subject), None);
+                assert_eq!(subject_possessive_object_antecedent(&subject), None);
+            }
+        }
+        assert!(parse_subject_application(
+            "the owner of target player",
+            &mut ParseContext::default()
+        )
+        .is_none());
+        assert!(parse_subject_application(
+            "the owner of target creature nonsense",
+            &mut ParseContext::default()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn compound_phase_out_has_one_target_slot_and_one_batch() {
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_source_and_target_phase_out(
+            "~ and up to one target creature you control phase out.",
+            &mut ctx,
+        )
+        .expect("compound subject");
+        assert!(matches!(clause.effect, Effect::TargetOnly { .. }));
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+        let child = clause.sub_ability.expect("one phasing batch");
+        assert_eq!(
+            *child.effect,
+            Effect::PhaseOut {
+                target: TargetFilter::Or {
+                    filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget]
+                }
+            }
+        );
+        assert!(child.multi_target.is_none() && child.sub_ability.is_none());
+        for text in [
+            "~ and target creature phase out and draw a card",
+            "target creature and target creature phase out",
+            "~ and target player phase out",
+        ] {
+            assert!(
+                try_parse_source_and_target_phase_out(text, &mut ctx).is_none(),
+                "{text}"
+            );
+        }
+    }
     use crate::types::ability::{
         AbilityKind, BasicLandType, ChoiceType, Comparator, ContinuousModification, ControllerRef,
         Effect, PtStat, PtValueScope, QuantityRef, TypeFilter,
