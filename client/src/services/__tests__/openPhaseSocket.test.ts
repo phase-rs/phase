@@ -1405,6 +1405,45 @@ describe("openPhaseSocket — codec stream, recovery and teardown", () => {
     expect(fake.close).toHaveBeenCalledOnce();
   });
 
+  // A decoder/RPC failure is a transport failure, not codec integrity: the
+  // socket must terminate (one close, one lease release) and must not ask the
+  // server for a resync it could never decode.
+  it.each([
+    "State codec decode timed out after 60000ms",
+    "State codec session is closed",
+  ])("terminates the socket once when the decoder rejects (%s)", async (failure) => {
+    const fake = fakeSession();
+    fake.decode.mockImplementationOnce(async () => { throw new Error(failure); });
+    const { raw, socket, received } = await negotiated(fake);
+    const closed = vi.fn();
+    socket.ws.onclose = closed;
+    // Reach guard: a frame delivered before the failure reaches the handler,
+    // so a later "nothing delivered" assertion is not a dead receive path.
+    raw.deliverMessage(JSON.stringify({ type: "Pong", data: { timestamp: 1 } }));
+    await vi.waitFor(() => expect(received).toHaveBeenCalledOnce());
+
+    raw.deliverMessage(codecFrame("Full"));
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    expect(fake.decode).toHaveBeenCalledOnce();
+    expect(fake.close).toHaveBeenCalledOnce();
+    expect(raw.close).toHaveBeenCalledOnce();
+    expect(raw.send).not.toHaveBeenCalledWith('{"type":"ResyncState"}');
+
+    // Later frames reach the terminated wrapper (the default decoder WOULD
+    // accept them); the queue is microtask-only, so a macrotask boundary proves
+    // they were drained without being decoded or delivered.
+    raw.deliverMessage(codecFrame("Full"));
+    raw.deliverMessage(codecFrame("Delta"));
+    raw.deliverMessage(JSON.stringify({ type: "Pong", data: { timestamp: 2 } }));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(fake.decode).toHaveBeenCalledOnce();
+    expect(received).toHaveBeenCalledOnce();
+    expect(closed).toHaveBeenCalledOnce();
+    expect(fake.close).toHaveBeenCalledOnce();
+    expect(raw.close).toHaveBeenCalledOnce();
+    expect(raw.send).not.toHaveBeenCalledWith('{"type":"ResyncState"}');
+  });
+
   it("publishes ready even when the recovery handler throws", async () => {
     const frames: Uint8Array[] = [];
     const fake = fakeSession((frame) => {

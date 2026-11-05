@@ -3084,6 +3084,100 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
     adapter.dispose();
   });
 
+  // A pending preview is owned by the socket it was sent on: a retired socket's
+  // close can no longer be answered for its own previews, and must not touch the
+  // replacement's.
+  const PREVIEW_KINDS = {
+    "mana-payment": {
+      frameType: "PreviewManaPayment",
+      closedMessage: "Connection closed during mana-payment preview",
+      start: (adapter: ServerDraftAdapter, _tag: string) =>
+        adapter.previewManaPayment({ type: "PassPriority" } as GameAction, 0),
+      answer: (target: MockWebSocket, _tag: string) => {
+        const calls = target.send.mock.calls
+          .map(([raw]) => JSON.parse(raw as string) as { type?: string; data?: { request_id: number } })
+          .filter((frame) => frame.type === "PreviewManaPayment");
+        receive(target, "ManaPaymentPreview", {
+          request_id: calls[calls.length - 1].data!.request_id,
+          source_ids: [7],
+        });
+        return [7];
+      },
+    },
+    interaction: {
+      frameType: "PreviewInteraction",
+      closedMessage: "Connection closed during interaction preview",
+      start: (adapter: ServerDraftAdapter, tag: string) =>
+        adapter.previewInteraction({
+          requestId: tag as PreviewRequestId,
+          interactionId: "interaction-1" as InteractionId,
+          response: {
+            type: "shortcut",
+            data: { decision: { type: "fixed", data: { iterations: 6 } }, pins: [] },
+          },
+        } satisfies InteractionPreviewRequest, 0),
+      answer: (target: MockWebSocket, tag: string) => {
+        receive(target, "InteractionPreview", { preview: { requestId: tag } });
+        return { requestId: tag };
+      },
+    },
+  } as const;
+
+  it.each(Object.keys(PREVIEW_KINDS) as (keyof typeof PREVIEW_KINDS)[])(
+    "rejects the %s preview sent on the retired socket when that socket closes after reconnectDraft",
+    async (kind) => {
+      const spec = PREVIEW_KINDS[kind];
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+      const retiredPreview = trackRejection(spec.start(adapter, "preview-retired"));
+      // Reach guard: the preview really went out on the soon-to-be-retired socket.
+      expect(ws.send.mock.calls.map(([raw]) => (JSON.parse(raw as string) as { type?: string }).type))
+        .toContain(spec.frameType);
+
+      await replaceSocket(adapter, provider, ws);
+      // Adopting the replacement does not settle it; only the retired close does.
+      await expect(retiredPreview()).resolves.toBe("never settled");
+
+      ws.dispatchSynthetic("close");
+      await expect(retiredPreview()).resolves.toMatchObject({
+        code: "WS_CLOSED", message: spec.closedMessage, recoverable: true,
+      });
+      adapter.dispose();
+    },
+  );
+
+  it.each(Object.keys(PREVIEW_KINDS) as (keyof typeof PREVIEW_KINDS)[])(
+    "leaves the %s preview sent on the replacement pending when the retired socket closes",
+    async (kind) => {
+      const spec = PREVIEW_KINDS[kind];
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+      const retiredPreview = trackRejection(spec.start(adapter, "preview-retired"));
+      const { replacement } = await replaceSocket(adapter, provider, ws);
+      await enterCodecMatch(replacement, events);
+      const ownPreview = trackRejection(spec.start(adapter, "preview-own"));
+      expect(replacement.send.mock.calls.map(([raw]) => (JSON.parse(raw as string) as { type?: string }).type))
+        .toContain(spec.frameType);
+
+      ws.dispatchSynthetic("close");
+      // Reach guard: the retired close was processed and rejected its own preview.
+      await expect(retiredPreview()).resolves.toMatchObject({
+        code: "WS_CLOSED", message: spec.closedMessage,
+      });
+      // The replacement's own preview is untouched, and still resolves.
+      await expect(ownPreview()).resolves.toBe("never settled");
+      const answer = spec.answer(replacement, "preview-own");
+      await expect(ownPreview()).resolves.toMatchObject({ resolvedWith: answer });
+      adapter.dispose();
+    },
+  );
+
   it("keeps the still-current socket on the recovery path while a replacement attachment starts", async () => {
     const session = draftCodecSession(decodeEnvelope);
     const { adapter, ws, provider } = await startCodecDraft(session.session);

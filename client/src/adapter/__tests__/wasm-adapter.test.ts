@@ -1736,6 +1736,59 @@ describe("WasmAdapter state-codec sessions", () => {
       .toBeInstanceOf(StateCodecLifecycleError);
   });
 
+  // A worker decode in flight when the lease is released must not emit: the late
+  // result is converted to a lifecycle rejection, the lease is released once,
+  // and the rejection is observed by the caller (no unhandled rejection).
+  async function pendingWorkerDecode() {
+    mockWorkerClient.openStateCodec.mockResolvedValueOnce(41);
+    let finishDecode!: (result: { kind: "decoded"; json: string }) => void;
+    mockWorkerClient.decodeStateCodec.mockReturnValueOnce(
+      new Promise((resolve) => { finishDecode = resolve; }),
+    );
+    await subject.initialize();
+    const session = await subject.openStateCodecSession();
+    expect(session).not.toBeNull();
+    const outcome = session!.decode(new Uint8Array([1])).then(
+      (value) => ({ resolvedWith: value }),
+      (error: unknown) => error,
+    );
+    await vi.waitFor(() => expect(mockWorkerClient.decodeStateCodec).toHaveBeenCalledOnce());
+    return { session: session!, finishDecode, outcome };
+  }
+
+  it("emits a worker decode that completes while the lease is still held", async () => {
+    // Positive control: the same pending decode DOES emit when nothing released
+    // the lease, so the rejection rows below are not a dead path.
+    const { session, finishDecode, outcome } = await pendingWorkerDecode();
+    finishDecode({ kind: "decoded", json: '{"type":"Pong"}' });
+    await expect(outcome).resolves.toEqual({
+      resolvedWith: { kind: "decoded", json: '{"type":"Pong"}' },
+    });
+    expect(mockWorkerClient.closeStateCodec).not.toHaveBeenCalled();
+    session.close();
+    expect(mockWorkerClient.closeStateCodec).toHaveBeenCalledOnce();
+  });
+
+  it.each(["session close", "adapter dispose"] as const)(
+    "rejects a worker decode that is pending when the %s releases the lease",
+    async (how) => {
+      const { session, finishDecode, outcome } = await pendingWorkerDecode();
+
+      if (how === "session close") session.close();
+      else subject.dispose();
+      expect(mockWorkerClient.closeStateCodec).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.closeStateCodec).toHaveBeenCalledWith(41);
+
+      finishDecode({ kind: "decoded", json: '{"type":"Pong"}' });
+      const settled = await outcome;
+      expect(settled).toBeInstanceOf(StateCodecLifecycleError);
+      expect(settled).not.toHaveProperty("resolvedWith");
+      // The release stays single even after the late result and a repeat close.
+      session.close();
+      expect(mockWorkerClient.closeStateCodec).toHaveBeenCalledOnce();
+    },
+  );
+
   it("disposing fallback facade A preserves facade B's retained baseline", async () => {
     const sibling = new WasmAdapter();
     mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));

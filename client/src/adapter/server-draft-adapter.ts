@@ -209,13 +209,23 @@ export class ServerDraftAdapter implements EngineAdapter {
   private ws: PhaseSocketTransport | null = null;
   private readonly submission = new SubmissionSlot();
   private nextManaPaymentPreviewRequestId = 1;
+  // Each pending preview records the socket it was sent on, so a retired
+  // socket's close settles only its own previews.
   private pendingManaPaymentPreviews = new Map<
     number,
-    { resolve: (sourceIds: ObjectId[]) => void; reject: (error: Error) => void }
+    {
+      socket: PhaseSocketTransport;
+      resolve: (sourceIds: ObjectId[]) => void;
+      reject: (error: Error) => void;
+    }
   >();
   private pendingInteractionPreviews = new Map<
     string,
-    { resolve: (preview: InteractionPreview) => void; reject: (error: Error) => void }
+    {
+      socket: PhaseSocketTransport;
+      resolve: (preview: InteractionPreview) => void;
+      reject: (error: Error) => void;
+    }
   >();
   private draftResolve: ((view: DraftPlayerView) => void) | null = null;
   private draftReject: ((error: Error) => void) | null = null;
@@ -384,13 +394,14 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (this.phase !== "match") {
       throw new AdapterError("PHASE_ERROR", "Not in a match phase", false);
     }
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+    const socket = this.ws;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }
 
     const requestId = this.nextManaPaymentPreviewRequestId++;
     return new Promise<ObjectId[]>((resolve, reject) => {
-      this.pendingManaPaymentPreviews.set(requestId, { resolve, reject });
+      this.pendingManaPaymentPreviews.set(requestId, { socket, resolve, reject });
       if (!this.send({ type: "PreviewManaPayment", data: { request_id: requestId, action } })) {
         this.pendingManaPaymentPreviews.delete(requestId);
         reject(new AdapterError("WS_CLOSED", "Failed to send mana-payment preview", true));
@@ -405,12 +416,13 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (this.phase !== "match") {
       throw new AdapterError("PHASE_ERROR", "Not in a match phase", false);
     }
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+    const socket = this.ws;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }
 
     return new Promise<InteractionPreview>((resolve, reject) => {
-      this.pendingInteractionPreviews.set(request.requestId, { resolve, reject });
+      this.pendingInteractionPreviews.set(request.requestId, { socket, resolve, reject });
       // `request` is forwarded VERBATIM — no field is read, reshaped or rebuilt.
       if (!this.send({ type: "PreviewInteraction", data: { request } })) {
         this.pendingInteractionPreviews.delete(request.requestId);
@@ -752,6 +764,16 @@ export class ServerDraftAdapter implements EngineAdapter {
    * the slot. A command claimed on the replacement is left untouched.
    */
   private settleRetiredClose(retired: PhaseSocketTransport): void {
+    // Previews sent on the retired socket can no longer be answered; previews
+    // sent on the current socket are not its to reject.
+    this.rejectPendingManaPaymentPreviews(
+      new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
+      retired,
+    );
+    this.rejectPendingInteractionPreviews(
+      new AdapterError("WS_CLOSED", "Connection closed during interaction preview", true),
+      retired,
+    );
     if (this.submissionSocket !== retired) return;
     const dropped = this.submission.drop();
     if (!dropped) return;
@@ -880,8 +902,8 @@ export class ServerDraftAdapter implements EngineAdapter {
       sourceSocket.onclose = () => {
         // A retired transport (a superseded attachment whose replacement is
         // already current) owns no state or promise, and a command claimed on
-        // the replacement is not its to drop; it settles only a command that
-        // was claimed on itself. `this.ws === null` still means this is the
+        // the replacement is not its to drop; it settles only a command and
+        // previews that were sent on itself. `this.ws === null` still means this is the
         // unfinished attachment's own close.
         if (this.ws !== null && this.ws !== sourceSocket) {
           this.settleRetiredClose(sourceSocket);
@@ -1479,18 +1501,21 @@ export class ServerDraftAdapter implements EngineAdapter {
     }
   }
 
-  private rejectPendingManaPaymentPreviews(error: Error): void {
-    for (const { reject } of this.pendingManaPaymentPreviews.values()) {
+  /** Rejects every pending preview, or only those sent on `onlySocket` when given. */
+  private rejectPendingManaPaymentPreviews(error: Error, onlySocket?: PhaseSocketTransport): void {
+    for (const [requestId, { socket, reject }] of this.pendingManaPaymentPreviews) {
+      if (onlySocket && socket !== onlySocket) continue;
+      this.pendingManaPaymentPreviews.delete(requestId);
       reject(error);
     }
-    this.pendingManaPaymentPreviews.clear();
   }
 
-  private rejectPendingInteractionPreviews(error: Error): void {
-    for (const { reject } of this.pendingInteractionPreviews.values()) {
+  private rejectPendingInteractionPreviews(error: Error, onlySocket?: PhaseSocketTransport): void {
+    for (const [requestId, { socket, reject }] of this.pendingInteractionPreviews) {
+      if (onlySocket && socket !== onlySocket) continue;
+      this.pendingInteractionPreviews.delete(requestId);
       reject(error);
     }
-    this.pendingInteractionPreviews.clear();
   }
 
   dispose(): void {
