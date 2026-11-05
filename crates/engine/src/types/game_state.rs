@@ -14035,13 +14035,8 @@ pub(crate) fn has_return_result_metadata(ability: &ResolvedAbility) -> bool {
     ability.declares_return_result.is_some()
         || ability.reads_return_result.is_some()
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(has_return_result_metadata)
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(has_return_result_metadata)
+            .child_links()
+            .any(|(_, child)| has_return_result_metadata(child))
 }
 
 pub(crate) fn reads_return_result_id(ability: &ResolvedAbility, result_id: ReturnResultId) -> bool {
@@ -14050,13 +14045,8 @@ pub(crate) fn reads_return_result_id(ability: &ResolvedAbility, result_id: Retur
         .as_ref()
         .is_some_and(|(id, _)| *id == result_id)
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(|sub| reads_return_result_id(sub, result_id))
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(|branch| reads_return_result_id(branch, result_id))
+            .child_links()
+            .any(|(_, child)| reads_return_result_id(child, result_id))
 }
 
 pub(crate) fn live_return_result_occurrences(
@@ -16382,11 +16372,8 @@ impl GameState {
                     return Err(format!("root {label} {:?} is not a seat", player));
                 }
             }
-            if let Some(sub) = ability.sub_ability.as_deref() {
-                validate_ability(sub, valid)?;
-            }
-            if let Some(otherwise) = ability.else_ability.as_deref() {
-                validate_ability(otherwise, valid)?;
+            for (_, child) in ability.child_links() {
+                validate_ability(child, valid)?;
             }
             Ok(())
         }
@@ -17425,6 +17412,18 @@ pub enum WaitingFor {
         emit_reveal_until_resolved: Option<ObjectId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reveal_until_hit_snapshot: Option<Box<EventObjectSnapshot>>,
+    },
+    /// CR 701.20e + CR 401.4 + CR 608.2d: In a `Dig` resolution (PriorLook source) where
+    /// all looked-at cards are put on the bottom of the library "in any order"
+    /// (`DigRestOrder::PlayerChoice`), the controller announces the order for
+    /// the cards. The response is `GameAction::SelectCards { cards }` carrying
+    /// a permutation of `cards`; the engine places them on the library bottom in
+    /// that submitted order. Raised only when 2+ cards are bottomed — a single
+    /// card has no ordering choice.
+    DigBottomOrder {
+        player: PlayerId,
+        source_id: ObjectId,
+        cards: Vec<ObjectId>,
     },
     /// CR 901.15 + CR 701.22a analogue: Arrange the top N cards of the planar
     /// deck — put exactly `keep_on_top` on top in the submitted order and the
@@ -19133,6 +19132,14 @@ pub enum WaitingFor {
         #[serde(default = "default_pile_source_battlefield")]
         pile_source: PileSource,
     },
+    /// CR 702.106a / CR 702.106f: As a face-down agenda conspiracy is put into the
+    /// command zone, its owner secretly chooses `name_count` card names.
+    /// `name_count` is shown only to `player`; viewer projections report 1.
+    SecretAgendaChoice {
+        player: PlayerId,
+        object_id: ObjectId,
+        name_count: u8,
+    },
     /// CR 702.139a: Before the game begins, reveal companion from outside the game.
     CompanionReveal {
         player: PlayerId,
@@ -19934,17 +19941,17 @@ impl LoopCollapseAxis {
 /// CR 601.2c: one descent step from a stack entry's root `ResolvedAbility`
 /// toward a node that owns declared targets.
 ///
-/// Two variants because `ResolvedAbility` has exactly two child links. The
-/// enumerator (`ability_utils::chain_retarget_slots`) emits only `SubAbility`
-/// today, because `assign_targets_recursive` never descends into
-/// `else_ability` — read-verified; only `stamp_other_batch_source_targets`
-/// visits that branch, and its writes are synthesized rather than declared.
-/// `ElseAbility` exists so that a future else-branch owner is addressed
-/// correctly instead of being silently mis-addressed as a sub-branch one.
+/// Announcement addresses include independently declaring coin outcomes before
+/// the sequential sub-chain. Ordinary else edges remain addressable for
+/// declared-view readers but are not announcement routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChainStep {
     SubAbility,
     ElseAbility,
+    /// CR 705.2: The instructions selected by winning or losing the flip.
+    CoinFlipBranch {
+        result: CoinFlipResult,
+    },
 }
 
 /// CR 115.7d: the address of ONE declared-target slot inside a resolved chain.
@@ -20111,6 +20118,7 @@ impl WaitingFor {
             WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
             WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
             WaitingFor::RevealUntilBottomOrder { .. } => "RevealUntilBottomOrder",
+            WaitingFor::DigBottomOrder { .. } => "DigBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
@@ -20198,6 +20206,7 @@ impl WaitingFor {
             WaitingFor::SeparatePilesChooseOpponent { .. } => "SeparatePilesChooseOpponent",
             WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
             WaitingFor::SeparatePilesChoice { .. } => "SeparatePilesChoice",
+            WaitingFor::SecretAgendaChoice { .. } => "SecretAgendaChoice",
             WaitingFor::CompanionReveal { .. } => "CompanionReveal",
             WaitingFor::ChooseLegend { .. } => "ChooseLegend",
             WaitingFor::CommanderZoneChoice { .. } => "CommanderZoneChoice",
@@ -20279,6 +20288,7 @@ impl WaitingFor {
             | WaitingFor::RippleRevealChoice { player, .. }
             | WaitingFor::RippleBottomOrder { player, .. }
             | WaitingFor::RevealUntilBottomOrder { player, .. }
+            | WaitingFor::DigBottomOrder { player, .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { player, .. }
             | WaitingFor::RedistributeLifeTotals { player, .. }
             | WaitingFor::CoinFlipKeepChoice { player, .. }
@@ -20353,6 +20363,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneOpponentChooser { player, .. }
             | WaitingFor::ChooseAnnouncingOpponent { player, .. }
             | WaitingFor::ClashCardPlacement { player, .. }
+            | WaitingFor::SecretAgendaChoice { player, .. }
             | WaitingFor::CompanionReveal { player, .. }
             | WaitingFor::ChooseLegend { player, .. }
             | WaitingFor::BattleProtectorChoice { player, .. }
@@ -20643,6 +20654,7 @@ impl WaitingFor {
             | WaitingFor::RippleRevealChoice { .. }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::DigBottomOrder { .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
@@ -20719,6 +20731,7 @@ impl WaitingFor {
             | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
             | WaitingFor::SeparatePilesChoice { .. }
+            | WaitingFor::SecretAgendaChoice { .. }
             | WaitingFor::CompanionReveal { .. }
             | WaitingFor::ChooseLegend { .. }
             | WaitingFor::CommanderZoneChoice { .. }
@@ -20847,6 +20860,7 @@ impl WaitingFor {
             | WaitingFor::RippleRevealChoice { .. }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::DigBottomOrder { .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
@@ -20929,6 +20943,7 @@ impl WaitingFor {
             | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
             | WaitingFor::SeparatePilesChoice { .. }
+            | WaitingFor::SecretAgendaChoice { .. }
             | WaitingFor::CompanionReveal { .. }
             | WaitingFor::ChooseLegend { .. }
             | WaitingFor::CommanderZoneChoice { .. }
@@ -21186,6 +21201,7 @@ impl WaitingFor {
                 // only lists {identity}, so `apply()` is the real validator.
                 | WaitingFor::RippleBottomOrder { .. }
                 | WaitingFor::RevealUntilBottomOrder { .. }
+                | WaitingFor::DigBottomOrder { .. }
         )
     }
 
@@ -27659,6 +27675,7 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::RevealUntilBottomOrder { .. }
+        | WaitingFor::DigBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::CoinFlipKeepChoice { .. }
@@ -27719,6 +27736,7 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesPartition { .. }
         | WaitingFor::SeparatePilesChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
         | WaitingFor::CommanderZoneChoice { .. }
@@ -49780,7 +49798,6 @@ mod tests {
                         source_id: ObjectId(5),
                         controller: PlayerId(0),
                         flipper: PlayerId(0),
-                        targets: vec![],
                         win_effect: None,
                         lose_effect: None,
                         kind: PendingCoinFlipKind::Exactly { remaining: 0 },

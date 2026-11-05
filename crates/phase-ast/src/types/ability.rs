@@ -7463,10 +7463,16 @@ pub enum FilterProp {
     /// Differs from `SameName` (which reads the source object's name): this
     /// reads from `ability.targets[0]` when that target is `TargetRef::Object`,
     /// looking up the name from `state.objects` (or `lki_cache` if the target
-    /// has already left its zone).
+    /// has already left its zone). A nameless object (a face-down permanent,
+    /// CR 708.2a) shares no name — not with another nameless object and not with
+    /// itself (CR 201.2a); the evaluator compares through the shared
+    /// `names_shared` rule.
     SameNameAsParentTarget,
     /// CR 607.2a + CR 201.2: Matches an object whose name equals a card durably
     /// exiled by this ability's source. Used by the Extraplanar Lens class.
+    /// A nameless object (a face-down permanent, CR 708.2a) shares no name —
+    /// not with another nameless object and not with itself (CR 201.2a); the
+    /// evaluator compares through the shared `names_shared` rule.
     SameNameAsExiledBySource,
     /// CR 201.2 + CR 201.2a: Matches objects whose name equals the name of any
     /// permanent currently on the battlefield. `controller` optionally narrows
@@ -7474,6 +7480,9 @@ pub enum FilterProp {
     /// i.e. "shares a name with a permanent" unqualified). Used by "put a card
     /// onto the battlefield if it has the same name as a permanent" patterns
     /// (Mitotic Manipulation, and any analogous dig-with-name-match effect).
+    /// A nameless object (a face-down permanent, CR 708.2a) shares no name —
+    /// not with another nameless object and not with itself (CR 201.2a); the
+    /// evaluator compares through the shared `names_shared` rule.
     NameMatchesAnyPermanent {
         controller: Option<ControllerRef>,
     },
@@ -10594,8 +10603,8 @@ pub fn names_resolution_chosen_recipient(target: &TargetFilter) -> bool {
     }
 }
 
-/// Recurse into compound filters so a wrapped `ParentTargetController` is
-/// detected wherever it appears (`Or { filters: [..., ParentTargetController, ...] }`).
+/// Recurse into compound filters so parent-object, controller, and owner
+/// dependencies remain visible to inheritance and delayed snapshotting.
 pub fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
     match filter {
         // CR 603.7c + CR 608.2c: a `ParentTargetSlot { index }` delayed effect
@@ -10607,7 +10616,10 @@ pub fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. } => true,
         TargetFilter::Typed(typed) => {
-            matches!(typed.controller, Some(ControllerRef::ParentTargetController))
+            matches!(
+                typed.controller,
+                Some(ControllerRef::ParentTargetController | ControllerRef::ParentTargetOwner)
+            )
                 // CR 608.2c + CR 109.1: a `DistinctFrom { reference: ParentTarget }`
                 // property (Jodah's "put the rest ..." exclusion of the declined
                 // hit, Radiance's "each OTHER creature that shares a color with it")
@@ -11137,7 +11149,7 @@ pub fn effect_requires_parent_target_object(effect: &Effect) -> bool {
 
 /// CR 608.2c + CR 608.2h: Recursively identify the filter forms that require
 /// the parent's object referent rather than its last-known identity metadata.
-fn filter_requires_parent_target_object(filter: &TargetFilter) -> bool {
+pub fn filter_requires_parent_target_object(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => true,
         TargetFilter::Typed(typed) => typed.properties.iter().any(|property| {
@@ -29470,6 +29482,18 @@ impl TargetFilter {
         // chosen_players`), never declared as a target — so it is a context
         // ref and surfaces no target slot.
         if self.chosen_player_index().is_some() {
+            return true;
+        }
+        // CR 603.2 + CR 701.23a: a contentless player-scoped filter controlled by the
+        // triggering player ("search that player's library") reads the player from the
+        // trigger event at resolution; it is never announced as a target.
+        if matches!(
+            self,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.is_empty()
+                    && tf.properties.is_empty()
+                    && matches!(tf.controller, Some(ControllerRef::TriggeringPlayer))
+        ) {
             return true;
         }
         matches!(

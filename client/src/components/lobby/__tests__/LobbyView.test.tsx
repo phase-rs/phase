@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { LobbyGame } from "../../../adapter/types";
@@ -451,12 +451,31 @@ describe("LobbyView", () => {
     return ambient;
   }
 
+  /**
+   * Assert the broker's population badge against a node freshly queried from
+   * the CURRENT document on every tick.
+   *
+   * `await screen.findByText("4 online")` hands back a node, and the `await`
+   * leaves a gap before `toBeInTheDocument()` runs. If a pending state flush
+   * re-renders that subtree (or the environment detaches the previous
+   * container) in that gap, jest-dom reports "element could not be found in
+   * the document" for a node it found moments earlier — an assertion about a
+   * stale reference, not about the rendered lobby. Re-querying inside
+   * `waitFor` asserts exactly the same thing about the live DOM, so a detach
+   * mid-test cannot turn a correct render into a failure.
+   */
+  async function expectLobbyCount(text: string) {
+    await waitFor(() => {
+      expect(within(document.body).getByText(text)).toBeInTheDocument();
+    });
+  }
+
   it("uses the lobby broker as the online-population authority", async () => {
     renderTwoSources();
 
     // The broker reports 4 while dedicated sources report 3 and 5. Neither
     // summing (12) nor taking the largest local count (5) is the lobby total.
-    expect(await screen.findByText("4 online")).toBeInTheDocument();
+    await expectLobbyCount("4 online");
     expect(screen.queryByText("5 online")).not.toBeInTheDocument();
     expect(screen.queryByText("12 online")).not.toBeInTheDocument();
   });
@@ -464,19 +483,19 @@ describe("LobbyView", () => {
   it("does not change the lobby count when a dedicated source is removed", async () => {
     renderTwoSources();
 
-    expect(await screen.findByText("4 online")).toBeInTheDocument();
+    await expectLobbyCount("4 online");
 
     act(() => {
       useMultiplayerStore.setState({ userLobbySources: [SOURCE_A] });
     });
 
-    expect(await screen.findByText("4 online")).toBeInTheDocument();
+    await expectLobbyCount("4 online");
   });
 
   it("hides the count when the lobby broker goes offline", async () => {
     renderTwoSources();
 
-    expect(await screen.findByText("4 online")).toBeInTheDocument();
+    await expectLobbyCount("4 online");
 
     act(() => {
       useMultiplayerStore.setState({
@@ -494,7 +513,7 @@ describe("LobbyView", () => {
   it("does not re-admit the broker's old count when it reconnects without reporting", async () => {
     renderTwoSources();
 
-    expect(await screen.findByText("4 online")).toBeInTheDocument();
+    await expectLobbyCount("4 online");
 
     act(() => {
       useMultiplayerStore.setState({

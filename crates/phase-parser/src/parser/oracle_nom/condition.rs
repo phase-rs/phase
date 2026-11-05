@@ -24,8 +24,9 @@ use super::quantity as nom_quantity;
 use super::target as nom_target;
 use super::target::{controller_phrase_among, ControllerPhrase};
 use crate::parser::oracle_target::{
-    cast_capable_zones_except, parse_shared_quality, parse_type_phrase_folding, parse_zone_suffix,
-    parse_zone_word, peek_zone_boundary, superlative_property_filter_prop,
+    cast_capable_zones_except, parse_shared_quality, parse_source_anaphoric_pronoun,
+    parse_type_phrase_folding, parse_zone_suffix, parse_zone_word, peek_zone_boundary,
+    superlative_property_filter_prop,
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
@@ -628,6 +629,10 @@ fn parse_remaining_state_presence_conditions_tail(
         parse_no_cards_in_your_zone,
         parse_no_cards_in_that_graveyard,
         parse_card_exiled_with_source_condition,
+        // CR 205.2a + CR 607.2a: "all cards exiled with ~ share a <quality>" —
+        // anchored on the literal "all cards exiled with " head, disjoint from
+        // every other arm in this group.
+        parse_all_cards_exiled_with_source_share_quality,
         parse_there_are_conditions,
         parse_there_exists_compound_zone_condition,
         parse_there_exists_condition,
@@ -1273,12 +1278,8 @@ fn parse_put_onto_battlefield_this_way(input: &str) -> OracleResult<'_, StaticCo
 /// The noun ("card[s]") only consumes text; the count is unfiltered.
 fn parse_exiled_this_way_count(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you exiled ").parse(input)?;
-    let (rest, n) = parse_number(rest)?;
-    let (rest, comparator) = alt((
-        value(Comparator::GE, tag(" or more ")),
-        value(Comparator::LE, tag(" or fewer ")),
-    ))
-    .parse(rest)?;
+    // The shared comparator-aware threshold authority; its comparator is kept.
+    let (rest, (n, comparator)) = parse_count_threshold(rest)?;
     let (rest, _) = alt((tag("cards this way"), tag("card this way"))).parse(rest)?;
     Ok((
         rest,
@@ -5054,12 +5055,20 @@ pub(crate) fn parse_otherwise_branch_connector(input: &str) -> OracleResult<'_, 
 /// `QuantityComparison { ObjectCountDistinct[quality](filter) >= N }`.
 ///
 /// Field of the Dead: "if you control seven or more lands with different
-/// names". Coven cards: "if you control three or more creatures with different
-/// powers". The quality axis is shared with search selection constraints and
+/// names". Seven of Nine, Unassimilated: "unless you control five or more
+/// differently named lands" (prefix-adjective spelling). Coven cards: "if you
+/// control three or more creatures with different powers". The quality axis is shared with search selection constraints and
 /// `QuantityRef::ObjectCountDistinct`.
 fn parse_control_count_ge_distinct_quality(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you control ").parse(input)?;
     let (rest, n) = parse_ge_threshold(rest)?;
+    // CR 201.2b: the distinct-name quality is printed either as the prefix
+    // adjective "differently named <type>" (Seven of Nine, Unassimilated) or as
+    // the suffix "<type> with different names" (Field of the Dead). Both are the
+    // same `ObjectCountDistinct[Name]` count; the prefix form owns its quality,
+    // so it must not also carry a "with different ..." suffix.
+    let (rest, prefix_quality) =
+        opt(value(SharedQuality::Name, tag("differently named "))).parse(rest)?;
     let type_text = rest.trim_end_matches('.');
     let (filter, remainder) = parse_type_phrase_folding(type_text);
     if matches!(filter, TargetFilter::Any) {
@@ -5068,15 +5077,17 @@ fn parse_control_count_ge_distinct_quality(input: &str) -> OracleResult<'_, Stat
             nom::error::ErrorKind::Fail,
         )));
     }
-    let trimmed = remainder.trim_start();
-    let (after_suffix, quality) = preceded(
-        tag("with different "),
-        alt((
-            value(SharedQuality::Name, tag("names")),
-            value(SharedQuality::Power, tag("powers")),
-        )),
-    )
-    .parse(trimmed)?;
+    let (after_suffix, quality) = match prefix_quality {
+        Some(quality) => (remainder, quality),
+        None => preceded(
+            tag("with different "),
+            alt((
+                value(SharedQuality::Name, tag("names")),
+                value(SharedQuality::Power, tag("powers")),
+            )),
+        )
+        .parse(remainder.trim_start())?,
+    };
     let filter = inject_controller_you(filter);
     let consumed = after_suffix.as_ptr() as usize - input.as_ptr() as usize;
     Ok((
@@ -7390,13 +7401,20 @@ fn parse_subtype_cards_in_your_graveyard(input: &str) -> OracleResult<'_, Quanti
     ))
 }
 
+/// CR 400.7 + CR 400.3 + CR 603.4: "a[n] <type> was put into | returned to your
+/// hand from the battlefield this turn" — a per-turn battlefield-to-hand
+/// zone-change count over objects you OWN (a card can only go to its owner's
+/// hand, CR 400.3), so "your hand" binds the owner, not the controller.
+/// "Returned to" (Miles O'Brien, Transporter Ops) and "put into" (Barrin,
+/// Tolarian Archmage) are the same zone change; only the verb differs.
 fn parse_permanent_put_into_your_hand_from_battlefield_this_turn(
     input: &str,
 ) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_article(input)?;
-    let (rest, type_text) =
-        take_until(" was put into your hand from the battlefield this turn").parse(rest)?;
-    let (rest, _) = tag(" was put into your hand from the battlefield this turn").parse(rest)?;
+    let (rest, type_text) = take_until(" was ").parse(rest)?;
+    let (rest, _) = tag(" was ").parse(rest)?;
+    let (rest, _) = alt((tag("put into"), tag("returned to"))).parse(rest)?;
+    let (rest, _) = tag(" your hand from the battlefield this turn").parse(rest)?;
     let (filter, leftover) = parse_type_phrase_folding(type_text.trim());
     if !leftover.trim().is_empty() || filter == TargetFilter::Any {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -10605,6 +10623,58 @@ fn parse_card_exiled_with_source_condition(input: &str) -> OracleResult<'_, Stat
     ))
 }
 
+/// CR 205.2a + CR 607.2a + CR 603.4: "all cards exiled with [source] share a
+/// <quality>" — a universal shared-characteristic gate over the source's
+/// linked-exile pool (All Good Things...: "If all cards exiled with this Saga
+/// share a card type, you gain 10 life").
+///
+/// The pool shares a quality exactly when one quality value is held by EVERY
+/// card in it, i.e. when the largest same-value bucket
+/// (`ObjectCountBySharedQuality { aggregate: Max }`) is as large as the pool
+/// itself (`CardsExiledBySource`). The bucket can never exceed the pool, so the
+/// GE comparison is the equality test. The pool must also be non-empty: an
+/// empty set of cards has no card type to share, so "all cards exiled with ~
+/// share a card type" is false when nothing was exiled with it (the vacuous
+/// reading would award the life for exiling nothing).
+///
+/// The quality axis reuses `parse_shared_quality` (card type, color, creature
+/// type, mana value, name, ...), so every "share a <quality>" wording over the
+/// linked pool lowers through this one production.
+fn parse_all_cards_exiled_with_source_share_quality(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("all cards exiled with ").parse(input)?;
+    let (rest, _) = parse_exiled_with_source_self_ref(rest)?;
+    let (rest, _) = tag(" share a ").parse(rest)?;
+    let (rest, quality) = parse_shared_quality(rest)?;
+    let pool = || QuantityExpr::Ref {
+        qty: QuantityRef::CardsExiledBySource,
+    };
+    Ok((
+        rest,
+        StaticCondition::And {
+            conditions: vec![
+                StaticCondition::QuantityComparison {
+                    lhs: pool(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                },
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCountBySharedQuality {
+                            filter: TargetFilter::ExiledBySource,
+                            quality,
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: pool(),
+                },
+            ],
+        },
+    ))
+}
+
 /// CR 202.3 + CR 607.2a: Parse
 /// "cards with N or more different <quality> are exiled with [source]" →
 /// `QuantityComparison { ObjectCountDistinct[quality](ExiledBySource) >= N }`.
@@ -10842,9 +10912,14 @@ fn parse_there_are_counters_on_source(input: &str) -> OracleResult<'_, StaticCon
 /// SELF_REF normalization set: `~` plus the long-form noun phrases that survive
 /// normalization in some Oracle prints. Bare `"it"` is included for the
 /// continuation form ("Then if there are N or more counters on it") used by
-/// Brass's Tunnel-Grinder and similar.
+/// Brass's Tunnel-Grinder and similar. CR 201.5: a gendered pronoun ("him" /
+/// "her") on a personified card is that card's printed-name self-reference
+/// (Beckett Mariner, Impetuous Ensign: "if there are three or more promotion
+/// counters on her"), so it names the source exactly as "~" does — routed
+/// through the shared `parse_source_anaphoric_pronoun` authority.
 fn parse_counter_on_source_subject(input: &str) -> OracleResult<'_, &str> {
     alt((
+        recognize(parse_source_anaphoric_pronoun),
         tag("~"),
         tag("this creature"),
         tag("this permanent"),
@@ -12528,14 +12603,18 @@ pub fn parse_you_control_or_returned_this_way_condition(
     ))
 }
 
-/// CR 121 + CR 608.2c: Parse "you draw [one or more] card[s] this
-/// way" — the active-voice draw-count gate (Transcendent Archaic: "you may draw
-/// X cards … If you draw one or more cards this way, discard two cards"). Reads
-/// the amount moved by the immediately preceding draw effect in the sub-ability
-/// chain via `QuantityRef::PreviousEffectAmount`.
+/// CR 121 + CR 608.2c: Parse "you draw <threshold> card[s] this way", with the
+/// threshold read by the shared `parse_count_threshold`: the active-voice
+/// draw-count gate (Transcendent Archaic: "If you draw one or more cards this way, discard
+/// two cards"; Sarek, Federation Ambassador: "If you draw three or more cards
+/// this way, put two +1/+1 counters …"). Reads the amount moved by the
+/// immediately preceding draw effect in the sub-ability chain via
+/// `QuantityRef::PreviousEffectAmount`, compared against the printed threshold.
 pub fn parse_you_draw_this_way_condition(input: &str) -> OracleResult<'_, AbilityCondition> {
     let (rest, _) = tag("you draw ").parse(input)?;
-    let (rest, _) = alt((tag("one or more "), tag("at least one "))).parse(rest)?;
+    // The shared comparator-aware threshold authority ("one or more", "at
+    // least one", "three or more", "two or fewer", …); its comparator is kept.
+    let (rest, (threshold, comparator)) = parse_count_threshold(rest)?;
     let (rest, _) = alt((tag("cards this way"), tag("card this way"))).parse(rest)?;
     Ok((
         rest,
@@ -12546,8 +12625,10 @@ pub fn parse_you_draw_this_way_condition(input: &str) -> OracleResult<'_, Abilit
                     aggregate: AggregateFunction::Sum,
                 },
             },
-            comparator: Comparator::GE,
-            rhs: QuantityExpr::Fixed { value: 1 },
+            comparator,
+            rhs: QuantityExpr::Fixed {
+                value: i32::try_from(threshold).unwrap_or(i32::MAX),
+            },
         },
     ))
 }
@@ -15584,6 +15665,31 @@ mod tests {
             }
             _ => panic!("expected QuantityComparison, got {:?}", c),
         }
+    }
+
+    #[test]
+    fn test_you_control_n_or_more_differently_named_matches_suffix_spelling() {
+        // CR 201.2b: "differently named <type>" (prefix adjective) and "<type>
+        // with different names" (suffix) are one distinct-name threshold.
+        for (n, word) in [(5, "five"), (7, "seven")] {
+            let prefix_text = format!("you control {word} or more differently named lands");
+            let suffix_text = format!("you control {word} or more lands with different names");
+            let (rest, prefix) = parse_inner_condition(&prefix_text).unwrap();
+            assert_eq!(rest, "");
+            let (_, suffix) = parse_inner_condition(&suffix_text).unwrap();
+            assert_eq!(prefix, suffix);
+            let StaticCondition::QuantityComparison { rhs, .. } = prefix else {
+                panic!("expected QuantityComparison, got {prefix:?}");
+            };
+            assert_eq!(rhs, QuantityExpr::Fixed { value: n });
+        }
+        // The prefix form owns its quality: a second "with different ..."
+        // suffix is not consumed into the condition.
+        let (rest, _) = parse_inner_condition(
+            "you control five or more differently named lands with different powers",
+        )
+        .unwrap();
+        assert_ne!(rest, "", "doubled quality must not be all-consumed");
     }
 
     #[test]
@@ -22299,11 +22405,18 @@ mod tests {
 
     #[test]
     fn test_permanent_put_into_your_hand_from_battlefield_this_turn() {
-        let (rest, c) = parse_inner_condition(
+        // "put into" (Barrin) and "returned to" (Miles O'Brien) are one verb axis.
+        for text in [
             "a permanent was put into your hand from the battlefield this turn",
-        )
-        .unwrap();
-        assert_eq!(rest, "");
+            "a permanent was returned to your hand from the battlefield this turn",
+        ] {
+            assert_owned_permanent_battlefield_to_hand_count(text);
+        }
+    }
+
+    fn assert_owned_permanent_battlefield_to_hand_count(text: &str) {
+        let (rest, c) = parse_inner_condition(text).unwrap();
+        assert_eq!(rest, "", "{text}");
         match c {
             StaticCondition::QuantityComparison {
                 lhs:
@@ -22327,6 +22440,61 @@ mod tests {
                 )));
             }
             other => panic!("expected owned permanent battlefield-to-hand count, got {other:?}"),
+        }
+    }
+
+    /// CR 205.2a + CR 607.2a: "all cards exiled with ~ share a <quality>" is a
+    /// non-empty linked pool whose largest same-quality bucket covers the whole
+    /// pool, across every `parse_shared_quality` axis.
+    #[test]
+    fn all_cards_exiled_with_source_share_quality() {
+        for (text, expected) in [
+            (
+                "all cards exiled with ~ share a card type",
+                SharedQuality::CardType,
+            ),
+            (
+                "all cards exiled with ~ share a color",
+                SharedQuality::Color,
+            ),
+            (
+                "all cards exiled with it share a creature type",
+                SharedQuality::CreatureType,
+            ),
+            (
+                "all cards exiled with ~ share a mana value",
+                SharedQuality::ManaValue,
+            ),
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "{text}");
+            let pool = QuantityExpr::Ref {
+                qty: QuantityRef::CardsExiledBySource,
+            };
+            assert_eq!(
+                c,
+                StaticCondition::And {
+                    conditions: vec![
+                        StaticCondition::QuantityComparison {
+                            lhs: pool.clone(),
+                            comparator: Comparator::GE,
+                            rhs: QuantityExpr::Fixed { value: 1 },
+                        },
+                        StaticCondition::QuantityComparison {
+                            lhs: QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCountBySharedQuality {
+                                    filter: TargetFilter::ExiledBySource,
+                                    quality: expected,
+                                    aggregate: AggregateFunction::Max,
+                                },
+                            },
+                            comparator: Comparator::GE,
+                            rhs: pool,
+                        },
+                    ],
+                },
+                "{text}"
+            );
         }
     }
 
@@ -26044,6 +26212,71 @@ mod tests {
             ),
             "got {c:?}"
         );
+    }
+
+    /// CR 121 + CR 608.2c: the draw-count gate reads the printed threshold and
+    /// comparator, not a fixed "one or more" — Sarek ("three or more"), the
+    /// "or fewer" mirror, and the legacy "one or more" / "at least one" forms.
+    #[test]
+    fn parse_you_draw_this_way_condition_reads_threshold_and_comparator() {
+        let previous = QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: crate::types::ability::DamageChannel::Total,
+                aggregate: AggregateFunction::Sum,
+            },
+        };
+        for (text, comparator, value) in [
+            ("you draw three or more cards this way", Comparator::GE, 3),
+            ("you draw two or fewer cards this way", Comparator::LE, 2),
+            ("you draw one or more cards this way", Comparator::GE, 1),
+            ("you draw at least one card this way", Comparator::GE, 1),
+            ("you draw at least two cards this way", Comparator::GE, 2),
+            ("you draw exactly two cards this way", Comparator::EQ, 2),
+            (
+                "you draw fewer than three cards this way",
+                Comparator::LT,
+                3,
+            ),
+        ] {
+            let (rest, condition) = parse_you_draw_this_way_condition(text).unwrap();
+            assert!(rest.is_empty(), "{text}: leftover {rest:?}");
+            assert_eq!(
+                condition,
+                AbilityCondition::QuantityCheck {
+                    lhs: previous.clone(),
+                    comparator,
+                    rhs: QuantityExpr::Fixed { value },
+                },
+                "{text}"
+            );
+        }
+        assert!(parse_you_draw_this_way_condition("you draw three cards this way").is_err());
+    }
+
+    /// The exiled-this-way gate reads its threshold through the shared
+    /// `parse_count_threshold` authority, so every threshold idiom keeps its
+    /// printed comparator.
+    #[test]
+    fn parse_inner_condition_exiled_this_way_reads_shared_threshold() {
+        for (text, comparator, value) in [
+            ("you exiled at least four cards this way", Comparator::GE, 4),
+            ("you exiled exactly one card this way", Comparator::EQ, 1),
+            ("you exiled more than two cards this way", Comparator::GT, 2),
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert!(rest.is_empty(), "{text}: leftover {rest:?}");
+            assert_eq!(
+                c,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize
+                    },
+                    comparator,
+                    rhs: QuantityExpr::Fixed { value },
+                },
+                "{text}"
+            );
+        }
     }
 
     /// The mirror "or fewer" form maps to the `LE` comparator (class coverage —

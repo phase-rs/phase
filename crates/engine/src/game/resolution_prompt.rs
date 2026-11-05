@@ -565,6 +565,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
     // where it is a pure AST walk costing nothing, and dropped from the probe below.
     node_modifiers_offer_choice(a)
         || effect_offers_choice(&a.effect)
+        || a.coin_branches.is_some()
         || a.sub_ability.as_deref().is_some_and(chain_offers_choice)
         || a.else_ability.as_deref().is_some_and(chain_offers_choice)
 }
@@ -584,6 +585,7 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
         effect: _,
         sub_ability: _,
         else_ability: _,
+        coin_branches: _, // CR 705.1 + CR 601.2c: announced outcome carriers, classified by chain_offers_choice
         // ---- choice-bearing: folded into the verdict below ----
         optional,
         optional_player: _, // selects the optional actor; `optional` already records the choice

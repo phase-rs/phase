@@ -1857,6 +1857,15 @@ fn quantity_expr_is_source_context_previewable(
         QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
         } => target_filter_is_source_context_free(filter),
+        // CR 119: the source's controller's current life total is bound by
+        // the source alone. Other players' totals need a recipient or an
+        // iteration the preview doesn't have.
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+        } => true,
         QuantityExpr::Ref { .. } => false,
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
@@ -28213,8 +28222,13 @@ mod tests {
             source_id: spell,
             controller: root.controller,
             flipper: root.controller,
-            targets: Vec::new(),
-            win_effect: Some(Box::new(win_effect)),
+            win_effect: Some(Box::new(
+                crate::game::ability_utils::build_resolved_from_def(
+                    &win_effect,
+                    spell,
+                    root.controller,
+                ),
+            )),
             lose_effect: None,
             kind: crate::types::resolution::PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: root.context.chain_root_targets.clone(),

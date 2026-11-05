@@ -681,6 +681,9 @@
   },
   "zone": {
     "commandZone": "統率領域",
+    "conspiracy": "謀略",
+    "conspiracyTitle": "謀略: {{name}}",
+    "turnFaceUp": "{{name}}を表向きにする",
     "emblem": "紋章",
     "emblemFallback": "紋章",
     "commander": "統率者",
@@ -2170,13 +2173,18 @@
   "freeCastWindow": {
     "eyebrow": "無料で唱える",
     "title": "呪文を無料で唱える",
+    "titlePlay": "カードを無料でプレイする",
     "subtitle": "マナ・コストを支払わずに唱える呪文を選択（残り{{remaining}}回）。残りのマナ総量：{{budget}}。",
     "subtitleNoBudget": "マナ・コストを支払わずに唱える呪文を選択（残り{{remaining}}回）。",
+    "subtitlePlay": "プレイする土地か、マナ・コストを支払わずに唱える呪文を選択（残り{{remaining}}回）。残りのマナ総量：{{budget}}。",
+    "subtitleNoBudgetPlay": "プレイする土地か、マナ・コストを支払わずに唱える呪文を選択（残り{{remaining}}回）。",
     "remainingAny": "任意の数",
     "castNamed": "{{name}}を唱える",
+    "playNamed": "{{name}}をプレイする",
     "castSuffix": "（マナ・コストを支払わずに）",
     "done": "完了",
-    "doneSuffix": "（この方法で呪文を唱えるのを停止）"
+    "doneSuffix": "（この方法で呪文を唱えるのを停止）",
+    "doneSuffixPlay": "（この方法でカードをプレイするのを停止）"
   },
   "castingVariant": {
     "eyebrow": "唱える",
@@ -2346,6 +2354,8 @@
       "fallback": "選択する"
     },
     "searchSubtitle": "入力してすべてのカードを検索",
+    "secretAgendaTitle": "カード名を秘密裏に選ぶ（{{current}}/{{total}}）",
+    "secretAgendaSubtitle": "この策略を表向きにするまで非公開です",
     "searchPlaceholder": "名前で検索…",
     "noCardsFound": "カードが見つかりません",
     "buttonSubtitle": "選択肢を1つ選択",
