@@ -2085,8 +2085,12 @@ mod tests {
     }
 
     /// Hammer Jammer revealed from the top of P0's library under Barbarian
-    /// Class, with the optional kept card's route ("You may put that card onto
-    /// the battlefield"); the runner is at the kept choice.
+    /// Class, through Genesis Storm's optional kept-card route ("Reveal cards from
+    /// the top of your library until you reveal a nonland permanent card. You may
+    /// put that card onto the battlefield."); the runner is at the kept choice.
+    /// The ability is built by hand (creature filter, preserved rest order; neither
+    /// changes the route) because the parsed Genesis Storm carries a stray
+    /// bottom-placement sub-ability, a known parser defect.
     fn accepted_jammer_board(seed: u64) -> (crate::game::scenario::GameRunner, ObjectId) {
         const HAMMER_JAMMER: &str = "As this creature enters, roll a six-sided die. This creature enters with a number of +1/+1 counters on it equal to the result.\nWhenever you roll a die, remove all +1/+1 counters from this creature, then put a number of +1/+1 counters on it equal to the result.";
         const BARBARIAN_CLASS_L1: &str = "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.";

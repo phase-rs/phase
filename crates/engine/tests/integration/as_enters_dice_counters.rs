@@ -6791,7 +6791,7 @@ fn reveal_until_resolved_for(events: &[GameEvent], source: ObjectId) -> usize {
 
 /// R18 (Unit E's sibling, the simultaneous mover). Polymorph destroys P0's
 /// vanilla creature and puts Hammer Jammer, revealed from the top of P0's
-/// library, onto the battlefield under Barbarian Class + CR 706.6 +
+/// library, onto the battlefield under Barbarian Class. CR 706.6 +
 /// CR 614.12a: a tie for the lowest asks which die to ignore before Hammer
 /// Jammer enters, so the reveal-until's rest waits on the batch's own owner,
 /// beneath Hammer Jammer's whole child stack, and the frame that owns the choice
