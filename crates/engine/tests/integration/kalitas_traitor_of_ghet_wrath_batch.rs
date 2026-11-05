@@ -560,3 +560,229 @@ fn jinnie_token_choice_mid_state_based_death_batch_resumes_the_batch() {
     assert!(state.stack.is_empty());
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
+
+/// Answer every CR 616.1 ordering prompt with Kalitas's replacement, collecting
+/// the events, until the game is back at priority.
+fn answer_orderings_with(
+    runner: &mut GameRunner,
+    source: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> usize {
+    let mut prompts = 0;
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ) {
+        prompts += 1;
+        assert!(prompts <= 8, "runaway ordering prompts");
+        events.extend(choose_replacement_from(runner, source));
+    }
+    prompts
+}
+
+/// CR 608.2c + CR 616.1 + CR 701.8a: Fumigate ("Destroy all creatures. You
+/// gain 1 life for each creature destroyed this way.") with Kalitas and an
+/// opponent's Rest in Peace. Each opposing creature's death needs an ordering
+/// choice. The life gain is Fumigate's later instruction: it waits for the
+/// whole destruction, so it happens after every creature is destroyed and
+/// counts every creature destroyed this way, including those delivered after
+/// the prompts.
+#[test]
+fn fumigate_gains_life_for_every_creature_after_the_whole_paused_destruction() {
+    const FUMIGATE: &str =
+        "Destroy all creatures. You gain 1 life for each creature destroyed this way.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let kalitas = scenario
+        .add_creature_from_oracle(P0, "Kalitas, Traitor of Ghet", 3, 4, KALITAS)
+        .id();
+    let bears: Vec<ObjectId> = (0..2)
+        .map(|_| scenario.add_creature(P1, "Grizzly Bears", 2, 2).id())
+        .collect();
+    scenario.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE);
+    let fumigate = scenario
+        .add_spell_to_hand_from_oracle(P0, "Fumigate", false, FUMIGATE)
+        .id();
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[0].life;
+
+    let outcome = runner.cast(fumigate).commit().resolve();
+    let mut events = outcome.events().to_vec();
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the first opposing death asks for an ordering, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        life_before,
+        "no life is gained while the destruction is paused"
+    );
+    let prompts = answer_orderings_with(&mut runner, kalitas, &mut events);
+    assert_eq!(prompts, bears.len(), "one ordering per opposing creature");
+    runner.advance_until_stack_empty();
+
+    let state = runner.state();
+    for bear in &bears {
+        assert_eq!(state.objects[bear].zone, Zone::Exile, "{bear:?}: exiled");
+        assert_eq!(zone_changes_of(&events, *bear), 1, "{bear:?}: moved once");
+    }
+    assert_eq!(
+        state.objects[&kalitas].zone,
+        Zone::Exile,
+        "Kalitas is destroyed too, and Rest in Peace exiles him"
+    );
+    assert_eq!(state.objects[&fumigate].zone, Zone::Exile);
+    assert_eq!(zombies(&events), bears.len());
+    let destroyed: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, GameEvent::CreatureDestroyed { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(destroyed.len(), bears.len() + 1, "Kalitas and both Bears");
+    assert_eq!(
+        state.players[0].life,
+        life_before + destroyed.len() as i32,
+        "1 life for each creature destroyed this way"
+    );
+    let gain = events
+        .iter()
+        .position(|e| matches!(e, GameEvent::LifeChanged { player_id, amount, .. } if *player_id == P0 && *amount > 0))
+        .expect("the life gain happened");
+    assert!(
+        destroyed.iter().all(|&i| i < gain),
+        "CR 608.2c: the gain follows every destruction"
+    );
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
+/// CR 704.3 + CR 616.1: the consult-time ordering choice in a state-based
+/// death batch. Pyroclasm leaves Kalitas and the opposing creatures with lethal
+/// damage; Rest in Peace and Kalitas both apply to each opposing death. The
+/// answers resume the same batch, so Kalitas is still a candidate for every
+/// opposing death even though he dies with them.
+#[test]
+fn state_based_death_batch_resumes_after_consult_time_ordering_choices() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let kalitas = scenario.add_real_card(P0, "Kalitas, Traitor of Ghet", Zone::Battlefield, db);
+    let bears: Vec<ObjectId> = (0..2)
+        .map(|_| scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db))
+        .collect();
+    scenario.add_real_card(P1, "Rest in Peace", Zone::Battlefield, db);
+    let pyroclasm = scenario.add_real_card(P0, "Pyroclasm", Zone::Hand, db);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&kalitas)
+        .unwrap()
+        .damage_marked = 2;
+
+    let outcome = runner.cast(pyroclasm).commit().resolve();
+    let mut events = outcome.events().to_vec();
+    match outcome.final_waiting_for() {
+        WaitingFor::ReplacementChoice { candidates, .. } => assert!(
+            candidates.iter().any(|c| c.source_id == kalitas),
+            "Kalitas is a candidate while the batch is consulted"
+        ),
+        other => panic!("expected an ordering choice, got {other:?}"),
+    }
+    let prompts = answer_orderings_with(&mut runner, kalitas, &mut events);
+    assert_eq!(prompts, bears.len());
+    runner.advance_until_stack_empty();
+
+    let state = runner.state();
+    for bear in &bears {
+        assert_eq!(state.objects[bear].zone, Zone::Exile, "{bear:?}: exiled");
+        assert_eq!(zone_changes_of(&events, *bear), 1, "{bear:?}: moved once");
+    }
+    assert_eq!(state.objects[&kalitas].zone, Zone::Exile);
+    assert_eq!(state.objects[&pyroclasm].zone, Zone::Exile);
+    assert_eq!(
+        zombies(&events),
+        bears.len(),
+        "Kalitas's replacement each time"
+    );
+    assert_eq!(zombies_on_battlefield(state).len(), bears.len());
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
+/// CR 701.8a + CR 616.1: Decimate ("Destroy target artifact, target creature,
+/// target enchantment, and target land.") destroys its targets at once. The
+/// opposing artifact creature's death needs an ordering choice between Kalitas
+/// (also a target) and Rest in Peace; answering it must not abandon the other
+/// three targets.
+#[test]
+fn decimate_destroys_every_target_after_an_ordering_choice() {
+    const DECIMATE: &str =
+        "Destroy target artifact, target creature, target enchantment, and target land.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let golem = scenario
+        .add_creature(P0, "Test Golem", 2, 2)
+        .as_artifact_creature()
+        .id();
+    let land = scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green);
+    let kalitas = scenario
+        .add_creature_from_oracle(P1, "Kalitas, Traitor of Ghet", 3, 4, KALITAS)
+        .id();
+    let enchantment = scenario
+        .add_enchantment_from_oracle(P1, "Test Enchantment", "")
+        .id();
+    scenario.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE);
+    let decimate = scenario
+        .add_spell_to_hand_from_oracle(P0, "Decimate", false, DECIMATE)
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner
+        .cast(decimate)
+        .target_objects(&[golem, kalitas, enchantment, land])
+        .commit()
+        .resolve();
+    let mut events = outcome.events().to_vec();
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::ReplacementChoice { player, .. } if *player == P0
+        ),
+        "the artifact creature's controller orders the replacements, got {:?}",
+        outcome.final_waiting_for()
+    );
+    events.extend(choose_replacement_from(&mut runner, kalitas));
+    runner.advance_until_stack_empty();
+
+    let state = runner.state();
+    for target in [golem, kalitas, enchantment, land] {
+        assert_eq!(
+            state.objects[&target].zone,
+            Zone::Exile,
+            "{target:?}: destroyed and exiled by Rest in Peace"
+        );
+        assert_eq!(
+            zone_changes_of(&events, target),
+            1,
+            "{target:?}: moved once"
+        );
+    }
+    assert_eq!(zombies(&events), 1, "Kalitas replaced the Golem's death");
+    let zombie_tokens = zombies_on_battlefield(state);
+    assert_eq!(zombie_tokens.len(), 1);
+    assert_eq!(state.objects[&zombie_tokens[0]].controller, P1);
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}

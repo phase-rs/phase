@@ -3121,6 +3121,9 @@ fn active_frame_requires_ability_continuation_parent(state: &GameState) -> bool 
         || state.active_counter_additions().is_some()
         || state.active_copy_token().is_some()
         || state.active_multi_draw_frame().is_some()
+        // CR 608.2c + CR 701.8a: a parked destruction batch is one instruction
+        // still in progress; the instructions after it wait beneath it.
+        || state.active_simultaneous_departure().is_some()
 }
 
 pub(crate) fn append_to_pending_continuation(
@@ -25429,7 +25432,15 @@ fn resolve_chain_body(
                 || sub_clone.reads_return_result.is_some()
                 || state
                     .resolution_stack
-                    .copy_token_at_child_boundary(child_stack_start))
+                    .copy_token_at_child_boundary(child_stack_start)
+                // CR 608.2c + CR 701.8a: a destroy instruction parked its
+                // simultaneous departure at this boundary (whether on a
+                // consult's prompt or beneath a delivery's child work). Its
+                // later instructions ("You gain 1 life for each creature
+                // destroyed this way") follow the whole departure.
+                || state
+                    .resolution_stack
+                    .simultaneous_departure_at_child_boundary(child_stack_start))
                 && state.resolution_stack.capture_child_boundary() > child_stack_start
             {
                 // CR 608.2c: the rest of the chain follows the complete producer action,

@@ -1114,6 +1114,19 @@ impl ResolutionStack {
             .is_some_and(|frame| matches!(frame, ResolutionFrame::CopyToken(_)))
     }
 
+    /// Whether the frame at the captured `child_stack_start` is a parked
+    /// simultaneous departure: the producer's own batch owner, beneath which
+    /// the producer's later instructions belong.
+    pub fn simultaneous_departure_at_child_boundary(
+        &self,
+        child_stack_start: ChildStackDepth,
+    ) -> bool {
+        self.frames
+            .slot_at_captured_depth(child_stack_start)
+            .and_then(|slot| self.frames.get(slot))
+            .is_some_and(|frame| matches!(frame, ResolutionFrame::SimultaneousDeparture(_)))
+    }
+
     pub fn last(&self) -> Option<&ResolutionFrame> {
         self.frames.last()
     }

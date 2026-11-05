@@ -5044,16 +5044,40 @@ pub struct SimultaneousDepartureMember {
     pub departure: SimultaneousDeparture,
 }
 
+/// What a consulted member's departure turned out to be, once its
+/// replacements applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DepartureCause {
+    /// CR 701.8a: the member is destroyed; its delivery publishes
+    /// `CreatureDestroyed`.
+    Destruction,
+    /// CR 704.5f: put into the graveyard without being destroyed, or CR 614.6:
+    /// a destruction replaced outright by a move elsewhere. Not a destruction.
+    Move,
+}
+
+/// Who holds the replacing instructions a member's consult stashes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DepartureRiderCustody {
+    /// CR 614.6: each member's stashed instructions are detached and run with
+    /// that member's own delivery.
+    #[default]
+    PerMember,
+    /// A rider was already pending for an outer event when the batch began. The
+    /// batch leaves the pending drain in place: it neither detaches it nor runs
+    /// it out of turn.
+    OuterPending,
+}
+
 /// Which replacement consult of a member is in flight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SimultaneousDepartureConsultStep {
     /// CR 701.8a + CR 614.6: the destruction itself.
     Destruction,
-    /// CR 614.6: the graveyard move. `destroyed` records whether it is the
-    /// move of an executed destruction (which emits `CreatureDestroyed`).
+    /// CR 614.6: the graveyard move, of a destruction or of a CR 704.5f death.
     GraveyardMove {
         source: Option<ObjectId>,
-        destroyed: bool,
+        cause: DepartureCause,
     },
 }
 
@@ -5071,9 +5095,8 @@ pub struct QueuedSimultaneousDeparture {
     /// The approved zone change, or `None` when the graveyard move was
     /// prevented.
     pub zone_event: Option<ProposedEvent>,
-    /// Whether the departure is a destruction (emits `CreatureDestroyed`)
-    /// rather than an outer redirect or a CR 704.5f move.
-    pub destroyed: bool,
+    /// Whether the departure is a destruction (emits `CreatureDestroyed`).
+    pub cause: DepartureCause,
     /// CR 614.6: the replacing instructions the consult stashed for this
     /// member (Kalitas's "create a 2/2 black Zombie"), run as part of its own
     /// delivery. Held here because the pipeline keeps one pending rider: a
@@ -5097,24 +5120,18 @@ pub enum SimultaneousDepartureStage {
     /// CR 614.6 + CR 608.2c: a member's delivery (its move, or the replacing
     /// instructions run with it) surfaced a choice. The delivery itself
     /// finishes through that choice's own owner; the batch then records the
-    /// member and delivers the rest.
-    Delivering {
-        object_id: ObjectId,
-        source: Option<ObjectId>,
-        destroyed: bool,
-        moved: bool,
-    },
+    /// member and delivers the rest. Its rider has been handed to the delivery.
+    Delivering { member: QueuedSimultaneousDeparture },
 }
 
 /// The logical owner whose completion a simultaneous departure finishes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SimultaneousDepartureOwner {
-    /// CR 701.8a: a "destroy all" instruction. Completion stamps its
-    /// co-departures and publishes the instruction's `EffectResolved`.
-    DestroyAll {
-        source_id: ObjectId,
-        kind: EffectKind,
-    },
+    /// CR 701.8a: a destroy instruction ("destroy all creatures", "destroy
+    /// them"). Completion stamps its co-departures, publishes what it destroyed
+    /// as the "destroyed this way" set for the instructions after it
+    /// (CR 608.2c), and publishes the instruction's `EffectResolved`.
+    Destruction { producer: Box<ResolvedAbility> },
     /// CR 704.3 + CR 704.5f / CR 704.5g / CR 704.5h: one state-based-action
     /// death batch. Completion
     /// settles a death redirected back to the battlefield and stamps the
@@ -5150,10 +5167,9 @@ pub struct PendingSimultaneousDeparture {
     /// Members whose (possibly redirected) zone change was carried out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delivered: Vec<ObjectId>,
-    /// A rider already pending before the batch belongs to an outer event; the
-    /// batch neither detaches it nor runs it out of turn.
+    /// Who holds the replacing instructions each consult stashes.
     #[serde(default)]
-    pub outer_rider_pending: bool,
+    pub rider_custody: DepartureRiderCustody,
     /// Events the batch produced before it paused. They stay hidden until the
     /// whole departure settles, so one co-departure batch is observable
     /// (CR 603.10a).
