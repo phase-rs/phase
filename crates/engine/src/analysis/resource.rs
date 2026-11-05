@@ -3464,8 +3464,12 @@ pub(crate) fn loop_states_equal_modulo_resources_side<'a, C: CurrentSide<'a>>(
     // CR 601.2f + CR 732.2a: a live cost modifier that reads a projected journal (Blaster
     // Hulk's `EnergyPaidOrLostThisTurn`) prices the next repeat differently even when the
     // projected-out reserve is restored, so the recurrence is not constant. Reject before
-    // projecting — `a` carries the same statics as any state this comparison could accept.
-    if cost_modifier_reads_projected_resource(a) {
+    // projecting. Check BOTH the prior state and the current state, because a cost modifier
+    // (e.g., a spell on the stack) may only be live in the current state at the priority
+    // window sample point, not in the prior state.
+    if cost_modifier_reads_projected_resource(a)
+        || cost_modifier_reads_projected_resource(b.state())
+    {
         return false;
     }
     let pa = project_out_resources(a);
@@ -14673,6 +14677,62 @@ mod tests {
         assert!(
             !loop_states_equal_modulo_resources(&projected, &paid_two(&projected)),
             "a cost modifier reading the projected journal changes price every repeat ⇒ REJECT"
+        );
+    }
+
+    /// CR 113.6: the veto reads only a cost modifier that FUNCTIONS in its source's zone. The
+    /// SAME projected-journal `ModifyCost` on a hand card — `StaticDefinition::new` leaves
+    /// `active_zones` empty, i.e. "battlefield only" — prices nothing, so it must not veto a
+    /// recurrence it cannot price. Precision control for
+    /// `constant_depth_projected_cost_modifier_rejects`, which pins the battlefield half: both
+    /// halves carry the identical static and the identical journal delta.
+    #[test]
+    fn constant_depth_inert_projected_cost_modifier_does_not_reject() {
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+        let board = |zone: Zone| {
+            let oid = ObjectId(600);
+            let mut object =
+                GameObject::new(oid, CardId(600), PlayerId(0), "StaticSource".into(), zone);
+            object
+                .static_definitions
+                .push(StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::default(),
+                    spell_filter: None,
+                    dynamic_count: Some(QuantityRef::EnergyPaidOrLostThisTurn),
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+                }));
+            let mut state = GameState::new_two_player(7);
+            state.objects.insert(oid, object);
+            if zone == Zone::Battlefield {
+                state.battlefield.push_back(oid);
+            }
+            state
+        };
+        let paid_two = |state: &GameState| {
+            let mut next = state.clone();
+            next.players[0].energy_paid_or_lost_this_turn = 2;
+            next
+        };
+        let hand = board(Zone::Hand);
+        assert!(
+            !cost_modifier_reads_projected_resource(&hand),
+            "CR 113.6: a battlefield-only static on a hand card is not a live cost modifier"
+        );
+        assert!(
+            loop_states_equal_modulo_resources(&hand, &paid_two(&hand)),
+            "an inert modifier prices nothing ⇒ the projected journal stays pure history"
+        );
+        // Reach guard: the identical static on the battlefield IS live and vetoes.
+        let battlefield = board(Zone::Battlefield);
+        assert!(
+            cost_modifier_reads_projected_resource(&battlefield),
+            "reach guard: the identical static on the battlefield must be live"
+        );
+        assert!(
+            !loop_states_equal_modulo_resources(&battlefield, &paid_two(&battlefield)),
+            "reach guard: a live modifier reading the projected journal ⇒ REJECT"
         );
     }
 
