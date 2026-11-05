@@ -175,10 +175,15 @@ fn explicit_target_spell_prompts_at_cast_and_excludes_shroud() {
     assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
 }
 
-/// Synthetic Oracle: no printed card pairs a mid-chain bare choose with a distinct
-/// later printed target through this path; there is no printed analogue.
+/// Synthetic Oracle: no printed card pairs a bare choose in a later chunk with a
+/// distinct later printed target through this path; there is no printed analogue.
+/// Pins two facts: a bare choose in a LATER chunk keeps its legacy Stack timing
+/// (it is announced as a cast-time target slot), and the later printed target is
+/// still announced after it. The engine exemption for a Resolution `TargetOnly`
+/// sub-ability is covered by the modal row
+/// `modal_bare_choose_mode_does_not_hide_later_mode_target`, not by this row.
 #[test]
-fn mid_chain_bare_choose_does_not_hide_later_cast_time_target() {
+fn later_chunk_bare_choose_keeps_stack_timing_and_later_printed_target_is_announced() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let own = scenario.add_creature(P0, "Own creature", 2, 2).id();
@@ -207,23 +212,31 @@ fn mid_chain_bare_choose_does_not_hide_later_cast_time_target() {
             payment_mode: CastPaymentMode::Auto,
         })
         .unwrap();
-    // Mid-chain bare choices retain their legacy Stack timing. Answer that
-    // slot, if offered first, to inspect the later printed target itself.
-    if let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for {
-        if selection
-            .current_legal_targets
-            .contains(&TargetRef::Object(own))
-            && !selection
-                .current_legal_targets
-                .contains(&TargetRef::Object(opposing))
-        {
-            runner
-                .act(GameAction::ChooseTarget {
-                    target: Some(TargetRef::Object(own)),
-                })
-                .unwrap();
-        }
-    }
+    // A bare choose in a later chunk retains its legacy Stack timing, so the
+    // first cast-time prompt is its slot: the controller's creatures only.
+    let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+        panic!(
+            "expected the legacy Stack-timed bare-choose slot while casting: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(selection
+        .current_legal_targets
+        .contains(&TargetRef::Object(own)));
+    assert!(selection
+        .current_legal_targets
+        .contains(&TargetRef::Object(other_own)));
+    assert!(!selection
+        .current_legal_targets
+        .contains(&TargetRef::Object(opposing)));
+    assert!(!selection
+        .current_legal_targets
+        .contains(&TargetRef::Object(other_opposing)));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(own)),
+        })
+        .unwrap();
     let WaitingFor::TargetSelection {
         player, selection, ..
     } = &runner.state().waiting_for

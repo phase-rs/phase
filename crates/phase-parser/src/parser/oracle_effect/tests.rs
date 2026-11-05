@@ -78925,14 +78925,19 @@ fn bare_choose_chain_head_scope_limit_keeps_later_choice_and_printed_target_at_s
     }
 }
 
-/// SHAPE: stripping a targeted opponent subject must not retime its player slot.
+/// SHAPE: regression pins for the printed "they control" class (Imperial Edict,
+/// Sakashima's Will mode 1). These rows parse to a non-You controller
+/// ("they control" -> `TargetOpponent`), so the producer's controller gate
+/// rejects them before any third-party guard runs. They do not cover the
+/// subject-layer withdrawal; the synthetic rows of
+/// `bare_choose_non_controller_subject_keeps_stack_timing` do.
 #[test]
 fn bare_choose_third_party_printed_choices_keep_stack_timing() {
     let target =
         TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetOpponent));
     for (name, text) in [
         (
-            "Imperial Edict",
+            "Imperial Edict (first sentence)",
             "Target opponent chooses a creature they control.",
         ),
         (
