@@ -37,7 +37,9 @@
     "approve": "Approva",
     "decline": "Rifiuta",
     "cancel": "Annulla richiesta",
-    "declinedToast": "Richiesta di ripristino rifiutata"
+    "declinedToast": "Richiesta di ripristino rifiutata",
+    "cancelledToast": "Richiesta di ripristino annullata",
+    "withdrawnToast": "Richiesta di ripristino ritirata: un giocatore ha lasciato la partita"
   },
   "connectionDot": {
     "connected": "Connesso",
@@ -353,7 +355,7 @@
     "gameInProgressTitle": "Partita in corso",
     "gameInProgressBody": "Termina o abbandona la partita in corso, poi riapri il link."
   },
-  "p2pStateWithheld": "Lo stato della partita dopo questa azione è troppo grande per essere inviato, quindi questo tabellone non è aggiornato. Le partite peer-to-peer non hanno ripristino; il tabellone si aggiornerà quando uno stato successivo sarà abbastanza piccolo da essere inviato.",
+  "p2pStateWithheld": "Lo stato della partita dopo questa azione è troppo grande per essere inviato, quindi questo tabellone non è aggiornato. Un giocatore può richiedere un ripristino dell'ultima azione dal menu di gioco per continuare (per un ciclo, eseguilo con un numero minore).",
   "terminalRecovery": {
     "finalViewsUnpublished": "La concessione ha raggiunto uno stato finale Full, ma non è stato possibile pubblicare le viste finali native.",
     "concedeUnreconciled": "Impossibile riconciliare l'esito della concessione; il posto resta bloccato.",

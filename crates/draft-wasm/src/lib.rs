@@ -687,6 +687,7 @@ fn apply_human_pick_and_resolve_bots_with_overrides(
             // rather than by coincidence.
             let cards_per_pick =
                 usize::from(draft_session.config.kind.procedure().cards_per_pick).min(pack.0.len());
+            let pack_shape = bot_ai::PackShape::current(draft_session);
             let chosen = overrides
                 .get(&seat)
                 .filter(|ids| {
@@ -706,6 +707,7 @@ fn apply_human_pick_and_resolve_bots_with_overrides(
                     &draft_session.pools[seat as usize],
                     card_db,
                     PICK_ENHANCEMENT.with(|cell| cell.get()),
+                    pack_shape,
                     &mut rng,
                 );
                 // Map indices to ids BEFORE applying — the apply mutates the pack
@@ -791,6 +793,7 @@ pub fn auto_pick() -> Result<JsValue, JsValue> {
         let mut rng = RNG
             .with(|cell| cell.take())
             .ok_or_else(|| JsValue::from_str("RNG not initialized"))?;
+        let pack_shape = bot_ai::PackShape::current(draft_session);
         let card_id = CARD_DB.with(|cell| {
             let db_borrow = cell.borrow();
             let pick_idx = bot_ai::bot_pick(
@@ -799,6 +802,7 @@ pub fn auto_pick() -> Result<JsValue, JsValue> {
                 &draft_session.pools[0],
                 db_borrow.as_ref(),
                 PICK_ENHANCEMENT.with(|cell| cell.get()),
+                pack_shape,
                 &mut rng,
             );
             pack.0[pick_idx].instance_id.clone()
@@ -1147,6 +1151,8 @@ fn submit_deck_inner(
                 seat: 0,
                 main_deck,
                 commanders,
+                // Dedicated local/P2P wrappers remain name-only.
+                printings: Vec::new(),
             },
             None,
         )
@@ -1380,6 +1386,7 @@ fn submit_deck_for_seat_inner(
                 seat,
                 main_deck,
                 commanders,
+                printings: Vec::new(),
             },
             None,
         )
@@ -2837,6 +2844,146 @@ mod llm_draft_resolution_tests {
         });
         session_cell::clear();
     }
+
+    struct MixedBoosterPackSource;
+
+    impl draft_core::pack_source::PackSource for MixedBoosterPackSource {
+        fn generate_pack(
+            &self,
+            _rng: &mut dyn rand::RngCore,
+            seat: u8,
+            pack_number: u8,
+        ) -> draft_core::types::DraftPack {
+            let size = match pack_number {
+                0 => 2,
+                1 => 3,
+                _ => 2,
+            };
+            let cards = (0..size)
+                .map(|i| DraftCardInstance {
+                    instance_id: format!("card-{seat}-{pack_number}-{i}"),
+                    name: format!("Card {i}"),
+                    set_code: "TST".to_string(),
+                    collector_number: format!("{i}"),
+                    rarity: "common".to_string(),
+                    colors: Vec::new(),
+                    cmc: 1,
+                    type_line: String::new(),
+                    draft_effect: None,
+                })
+                .collect();
+            draft_core::types::DraftPack(cards)
+        }
+    }
+
+    #[test]
+    fn session_with_mixed_booster_sizes_wires_cards_in_pack_through_bot_resolution() {
+        let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Quick,
+            pod_size: 8,
+            cards_per_pack: 15, // uniform default overridden by pack source
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 20_261_004,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats: Vec<DraftSeat> = (0..8)
+            .map(|i| {
+                if i == 0 {
+                    DraftSeat::Human {
+                        player_id: PlayerId(0),
+                        display_name: "Player".to_string(),
+                    }
+                } else {
+                    DraftSeat::Bot {
+                        name: format!("Bot {i}"),
+                    }
+                }
+            })
+            .collect();
+        let mut session = DraftSession::new(config, seats, "MIXED-SIZES".to_string());
+        session::apply(
+            &mut session,
+            DraftAction::StartDraft,
+            Some(&MixedBoosterPackSource),
+        )
+        .expect("mixed-size Quick pod starts");
+
+        assert_eq!(session.pack_sizes, vec![2, 3, 2]);
+        assert_eq!(session.current_pack_number, 0);
+        assert_eq!(session.cards_in_pack(0), 2);
+
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(42))));
+
+        // The shape every pick site builds, and the pick-in-pack it yields for
+        // the pack seat 0 is holding. The uniform `cards_per_pack` (15) would put
+        // these picks deep in the late stage; the recorded sizes must win.
+        let shape_and_pick = |session: &DraftSession| {
+            let shape = bot_ai::PackShape::current(session);
+            let remaining = session.current_pack[0].as_ref().unwrap().0.len();
+            (shape, shape.position(remaining))
+        };
+        let expect = |pack_number: u8, cards_in_pack: u8, pick_in_pack: usize| {
+            (
+                bot_ai::PackShape {
+                    pack_number,
+                    cards_in_pack,
+                },
+                phase_ai::draft_profile::PackPosition {
+                    pack_number: usize::from(pack_number),
+                    pick_in_pack,
+                },
+            )
+        };
+
+        // Pack 0, pick 1 of 2.
+        assert_eq!(shape_and_pick(&session), expect(0, 2, 1));
+        let human_card_0 = session.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        apply_human_pick_and_resolve_bots(&mut session, human_card_0).unwrap();
+        assert_eq!(session.current_pack_number, 0);
+        assert_eq!(session.current_pack[0].as_ref().unwrap().0.len(), 1);
+        assert_eq!(shape_and_pick(&session), expect(0, 2, 2));
+
+        // Pack 0, pick 2 of 2. Exhausts pack 0 and transitions to pack 1.
+        let human_card_1 = session.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        apply_human_pick_and_resolve_bots(&mut session, human_card_1).unwrap();
+
+        // Now in pack 1: size is 3, cards_in_pack(1) is 3.
+        assert_eq!(session.current_pack_number, 1);
+        assert_eq!(session.cards_in_pack(session.current_pack_number), 3);
+        assert_eq!(session.current_pack[0].as_ref().unwrap().0.len(), 3);
+        assert_eq!(shape_and_pick(&session), expect(1, 3, 1));
+
+        // Pack 1, pick 1 of 3: bots resolve using PackShape with cards_in_pack = 3.
+        let human_card_2 = session.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        apply_human_pick_and_resolve_bots(&mut session, human_card_2).unwrap();
+
+        for seat in 0..8 {
+            assert_eq!(
+                session.pools[seat].len(),
+                3,
+                "seat {seat} took 2 cards from pack 0 and 1 from pack 1"
+            );
+        }
+        assert_eq!(session.current_pack[0].as_ref().unwrap().0.len(), 2);
+        assert_eq!(shape_and_pick(&session), expect(1, 3, 2));
+    }
 }
 
 #[cfg(test)]
@@ -4227,6 +4374,125 @@ mod create_multiplayer_draft_tests {
         clear_state();
     }
 
+    #[test]
+    fn unglued_set_pool_loads_ten_cards_per_pack_for_draft_and_sealed() {
+        let set_pool_json = r#"{
+            "code": "UGL",
+            "name": "Unglued",
+            "release_date": null,
+            "pack_variants": [
+                {
+                    "contents": [
+                        { "slot": "basic", "count": 1, "choices": [{ "sheet": "basic", "weight": 1 }] },
+                        { "slot": "common", "count": 6, "choices": [{ "sheet": "common", "weight": 1 }] },
+                        { "slot": "rare", "count": 1, "choices": [{ "sheet": "rare", "weight": 1 }] },
+                        { "slot": "uncommon", "count": 2, "choices": [{ "sheet": "uncommon", "weight": 1 }] }
+                    ],
+                    "weight": 3
+                },
+                {
+                    "contents": [
+                        { "slot": "basic", "count": 1, "choices": [{ "sheet": "basic", "weight": 1 }] },
+                        { "slot": "common", "count": 6, "choices": [{ "sheet": "common", "weight": 1 }] },
+                        { "slot": "rare", "count": 1, "choices": [{ "sheet": "rare", "weight": 1 }] },
+                        { "slot": "uncommon", "count": 1, "choices": [{ "sheet": "uncommon", "weight": 1 }] }
+                    ],
+                    "weight": 2
+                }
+            ],
+            "pack_variants_total_weight": 5,
+            "sheets": {
+                "basic": {
+                    "cards": [
+                        { "name": "Forest", "set_code": "UGL", "collector_number": "1", "rarity": "common", "weight": 1 }
+                    ],
+                    "total_weight": 1,
+                    "foil": false,
+                    "balance_colors": false
+                },
+                "common": {
+                    "cards": [
+                        { "name": "C1", "set_code": "UGL", "collector_number": "2", "rarity": "common", "weight": 1 },
+                        { "name": "C2", "set_code": "UGL", "collector_number": "3", "rarity": "common", "weight": 1 },
+                        { "name": "C3", "set_code": "UGL", "collector_number": "4", "rarity": "common", "weight": 1 },
+                        { "name": "C4", "set_code": "UGL", "collector_number": "5", "rarity": "common", "weight": 1 },
+                        { "name": "C5", "set_code": "UGL", "collector_number": "6", "rarity": "common", "weight": 1 },
+                        { "name": "C6", "set_code": "UGL", "collector_number": "7", "rarity": "common", "weight": 1 }
+                    ],
+                    "total_weight": 6,
+                    "foil": false,
+                    "balance_colors": false
+                },
+                "uncommon": {
+                    "cards": [
+                        { "name": "U1", "set_code": "UGL", "collector_number": "8", "rarity": "uncommon", "weight": 1 },
+                        { "name": "U2", "set_code": "UGL", "collector_number": "9", "rarity": "uncommon", "weight": 1 }
+                    ],
+                    "total_weight": 2,
+                    "foil": false,
+                    "balance_colors": false
+                },
+                "rare": {
+                    "cards": [
+                        { "name": "R1", "set_code": "UGL", "collector_number": "10", "rarity": "rare", "weight": 1 }
+                    ],
+                    "total_weight": 1,
+                    "foil": false,
+                    "balance_colors": false
+                }
+            },
+            "prints": [],
+            "basic_lands": ["Forest"]
+        }"#;
+
+        let pool_input_json = serde_json::json!({
+            "type": "Set",
+            "data": { "set_pool_json": set_pool_json }
+        })
+        .to_string();
+        let seats_json = r#"[
+            { "type": "Human", "player_id": 0, "display_name": "Host" },
+            { "type": "Human", "player_id": 1, "display_name": "Guest" }
+        ]"#;
+
+        clear_state();
+        let draft_view = create_multiplayer_draft_inner(
+            &pool_input_json,
+            seats_json,
+            1,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2,
+        )
+        .expect("Unglued draft should start");
+        assert_eq!(draft_view.cards_per_pack, 10);
+        assert_eq!(draft_view.current_pack.expect("current pack").len(), 10);
+
+        clear_state();
+        let sealed_view = create_multiplayer_draft_inner(
+            &pool_input_json,
+            seats_json,
+            3,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2,
+        )
+        .expect("Unglued sealed should start");
+        assert_eq!(sealed_view.cards_per_pack, 10);
+        assert_eq!(sealed_view.pool.len(), 60);
+        assert!(sealed_view
+            .sealed_packs
+            .expect("sealed pack boundaries")
+            .iter()
+            .all(|pack| pack.len() == 10));
+
+        clear_state();
+    }
+
     /// One set pool with `code`, three commons, a fixed 3-card booster.
     fn pod_pool_json(code: &str) -> String {
         format!(
@@ -5034,6 +5300,11 @@ mod create_multiplayer_draft_tests {
                 submission.commanders, commanders,
                 "CR 903.3: the designation arrives verbatim and in order"
             );
+            assert!(submission.printings.is_empty());
+            assert!(serde_json::to_value(submission)
+                .unwrap()
+                .get("printings")
+                .is_none());
         });
 
         clear_state();
@@ -5304,6 +5575,11 @@ mod create_multiplayer_draft_tests {
                 .expect("seat 2's submission is keyed by its own player id");
             assert_eq!(seat2.seat, 2);
             assert_eq!(seat2.commanders, seat2_commanders);
+            assert!(seat2.printings.is_empty());
+            assert!(serde_json::to_value(seat2)
+                .unwrap()
+                .get("printings")
+                .is_none());
 
             let seat0 = session
                 .submitted_decks
@@ -5314,6 +5590,11 @@ mod create_multiplayer_draft_tests {
                 seat0.commanders, seat0_commanders,
                 "a later seat's designation must not be attributed to an earlier one"
             );
+            assert!(seat0.printings.is_empty());
+            assert!(serde_json::to_value(seat0)
+                .unwrap()
+                .get("printings")
+                .is_none());
         });
 
         clear_state();

@@ -27,10 +27,10 @@ use crate::parser::oracle_nom::target::chain_text_mentions_chosen_object;
 use crate::types::ability::{
     effect_variant_name, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
     AggregateFunction, CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId,
-    Comparator, ControllerRef, DamageChannel, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId,
-    SharedQuality, SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink,
-    TapStateChange, TargetFilter, TypedFilter,
+    Comparator, ControllerRef, DamageChannel, Duration, Effect, EffectOutcomeSignal, EffectScope,
+    FilterProp, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation,
+    ReturnResultId, SharedQuality, SharedQualityRelation, SiblingCondition, StaticCondition,
+    SubAbilityLink, TapStateChange, TargetFilter, TypedFilter,
 };
 use crate::types::game_state_kinds::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -86,13 +86,14 @@ use super::{
     mark_uses_tracked_set, nearest_self_move_destination, parse_spell_graveyard_replacement_rider,
     parse_spells_cast_this_way_graveyard_replacement_rider, plural_library_shuffle_recall,
     publishes_aggregate_set_from_resolution, publishes_exiled_cause_at_resolution,
-    publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
-    release_iteration_destination, resolve_difference_anaphor_in_ability,
-    retarget_counter_additional_cost_to_target, rewrite_delayed_singular_recall_to_self,
-    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set,
-    rewrite_plural_library_recall_to_tracked_set, rewrite_rounding_mode,
-    rewrite_singular_battlefield_recall_to_self, rewrite_that_type_mana_instead,
-    singular_battlefield_recall, stamp_delayed_returns, starts_with_plural_subject_anaphor,
+    publishes_tracked_set_from_resolution, rebind_plural_recall_delayed_payload_to_tracked_set,
+    rebind_tracked_aggregate_to_chain_set, release_iteration_destination,
+    resolve_difference_anaphor_in_ability, retarget_counter_additional_cost_to_target,
+    rewrite_delayed_singular_recall_to_self, rewrite_grant_parent_to_filter,
+    rewrite_parent_targets_to_tracked_set, rewrite_plural_library_recall_to_tracked_set,
+    rewrite_rounding_mode, rewrite_singular_battlefield_recall_to_self,
+    rewrite_that_type_mana_instead, singular_battlefield_recall, stamp_delayed_returns,
+    starts_with_plural_recall_anaphor, starts_with_plural_subject_anaphor,
     starts_with_singular_subject_anaphor, try_fold_token_repeat_into_count,
     wire_optional_cast_decline_fallback, PrintedColorCarrier, PrintedColorCarrierScope,
 };
@@ -863,7 +864,7 @@ pub(super) enum AntecedentRole {
     DamageDealer,
     /// A `Dig` — the "look at the top N" anchor that BOTH private-look riders bind
     /// back to: `ExileLookedAtCard` (the Gonti impulse idiom, CR 608.2c) rewrites it
-    /// into an `ExileTop`, and `ExileOneOfThemFaceDown` (Hideaway, CR 702.75a)
+    /// into an `ExileTop`, and `ExileLookedAtCardsFaceDown` (Hideaway, CR 702.75a)
     /// patches it into the choose-one-and-exile shape. One role, because the two
     /// scans it replaces had BYTE-IDENTICAL predicates — they are the same
     /// antecedent, named twice.
@@ -938,7 +939,7 @@ fn live_role_predicate(role: AntecedentRole) -> Option<fn(&AbilityDefinition) ->
         // LIVE, for the same reason as `DigOrMill` — and it is the SAME rewrite that
         // forces it: `ExileLookedAtCard` does `*previous.effect = Effect::ExileTop`,
         // turning a `Dig` into a non-`Dig` with NO length change, so `observe` never
-        // fires and a cached registry would go on naming it. `ExileOneOfThemFaceDown`
+        // fires and a cached registry would go on naming it. `ExileLookedAtCardsFaceDown`
         // nests a `sub_ability` in place — also length-preserving. Live, the role is
         // EXACTLY the scan it replaces.
         AntecedentRole::DigLook => Some(def_is_dig_look),
@@ -1825,6 +1826,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::TriggeringSpellController
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringSource
+            | TargetFilter::CastingSpell
             | TargetFilter::EventTarget
             | TargetFilter::ParentTarget
             | TargetFilter::ParentTargetSlot { .. }
@@ -1966,6 +1968,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::ExiledBySource
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSource
+            | TargetFilter::CastingSpell
             | TargetFilter::EventTarget
             | TargetFilter::ParentTarget
             | TargetFilter::ParentTargetSlot { .. }
@@ -2135,6 +2138,17 @@ fn mark_independent_mana_spent_gates(defs: &mut [AbilityDefinition]) {
     }
 }
 
+/// CR 608.2c: whether the clause after `prev_boundary` is a coordinated predicate
+/// of the SAME printed sentence. A `Comma`/`Then` boundary continues it; a
+/// `Sentence` boundary, or none at all (the chain root), starts a new one. The
+/// single test for sentence-scoped duration distribution in `assemble_effect_chain`.
+fn boundary_continues_sentence(prev_boundary: Option<ClauseBoundary>) -> bool {
+    matches!(
+        prev_boundary,
+        Some(ClauseBoundary::Comma) | Some(ClauseBoundary::Then)
+    )
+}
+
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     let _chain = tracing::debug_span!(target: "engine::parser::binding", "chain", kind = ?ir.kind, clauses = ir.clauses.len()).entered();
     let kind = ir.kind;
@@ -2152,6 +2166,26 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // makes it a `SequentialSibling` (independent following instruction); a
     // `Comma`/`Then`/no boundary makes it a within-clause `ContinuationStep`.
     let mut prev_boundary: Option<ClauseBoundary> = None;
+    // CR 611.2a + CR 608.2c: the window stated by the sentence currently being
+    // assembled. A duration printed at the head of a sentence scopes every
+    // coordinated predicate of THAT sentence — "Until your next turn, your life total
+    // can't change and you gain protection from everything" is one window over two
+    // predicates — so a later clause of the same sentence that states no window of
+    // its own takes this one. Reset at every `Sentence` boundary, which is the
+    // printed end of the sentence (`sub_link_after_boundary`'s other side).
+    //
+    // This is the seam the #7923 work left open: `with_clause_chain_duration` walks
+    // only a SINGLE clause's `sub_ability` chain, so a coordinated clause that the
+    // clause splitter minted as its own `ClauseIr` (Dovin Baan's "and its activated
+    // abilities can't be activated") was never reached, and its carrier stayed unset
+    // while the head printed `UntilNextTurnOf`. Measured on the corpus at #7962: the
+    // four cards in that gap (Dovin Baan, Edifice of Authority, Mythos of Vadrok,
+    // Teferi's Protection) expire a full turn early without this stamp.
+    //
+    // Scope is `duration_governs`-shaped and sentinel-gated inside
+    // `stamp_governed_chain_duration`, so one-shot instructions are never stamped and
+    // a clause that printed its own window keeps it (CR 608.2c — read the whole text).
+    let mut sentence_duration: Option<Duration> = None;
     // CR 603.7 + CR 608.2c: record delayed-payload relocations during the clause
     // loop and execute them only after every later clause has performed its
     // top-level binding work against today's unchanged `defs` shape.
@@ -2167,6 +2201,15 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             previous_clause_start = this_clause_start;
         }
         this_clause_start = defs.len();
+        // CR 608.2c: a clause that does not continue the previous clause's sentence
+        // starts a new one, so the old sentence's window ends here. Cleared at the
+        // loop top rather than only on the emitting path, because special and
+        // absorbed clauses advance `prev_boundary` too: a new sentence opened by
+        // one of them must not hand the previous sentence's window to a following
+        // comma-linked clause.
+        if !boundary_continues_sentence(prev_boundary) {
+            sentence_duration = None;
+        }
         // "The arena mirrors `defs`" is load-bearing for every binding below, and it
         // is asserted HERE, at the one point every clause path must pass through.
         //
@@ -3087,7 +3130,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // pushing then wrapping each unit would yield CDT{ChangeZone} +
         // CDT{Attach} instead of CDT{ChangeZone[+Attach]}. TargetOnly already
         // nests before wrap; mirror that for this attach-on-return shape.
-        let clause_sub = if is_target_only {
+        let mut clause_sub = if is_target_only {
             def.sub_ability = timed_clause_sub_chain(clause_ir);
             // CR 701.3a + CR 303.4f: TargetOnly → ChangeZone[+Attach] (Necrotic
             // Plague) must stamp `forward_result` on the nested return so the
@@ -3382,6 +3425,53 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         }
         if let Some(ref duration) = clause_ir.parsed.duration {
             def = def.duration(duration.clone());
+        }
+        // CR 611.2a + CR 608.2c: distribute the sentence's stated window onto this
+        // clause, or record this clause's window as the sentence's.
+        //
+        // A `Comma`/`Then` boundary after the previous clause means this clause is a
+        // coordinated predicate of the SAME printed sentence; a `Sentence` boundary
+        // (or no boundary at all — the chain root) starts a new one. The two cases
+        // mirror `sub_link_after_boundary`, so duration scoping and link semantics
+        // agree on what "the same sentence" means.
+        if boundary_continues_sentence(prev_boundary) {
+            if let Some(duration) = sentence_duration.clone() {
+                // Both carriers travel through the one authority; a clause whose
+                // recognizer stated its own window keeps it. The clause's own sub
+                // chain is still detached here on the sibling path (`clause_sub`), so
+                // it is stamped separately; it belongs to the same sentence.
+                //
+                // MEASURED during #7962 review: the second stamp is DEFENSIVE today.
+                // Removing it leaves the duration-distribution parser rows and all 23
+                // tests of `tests/integration/leading_duration_distribution_7923.rs`
+                // green, because every probed shape that builds a recognizer-owned sub
+                // chain also carries the window on its own clause — one clause absorbs
+                // the whole sentence — so that clause's leading-duration walk reaches
+                // the chain first. It stays for the recognizer that peels its own
+                // leading window and builds a chain: the sentence is then the only
+                // authority left to reach it.
+                stamp_governed_chain_duration(&mut def, &duration);
+                if let Some(sub) = clause_sub.as_deref_mut() {
+                    stamp_governed_chain_duration(sub, &duration);
+                }
+            }
+        } else {
+            // A new sentence: only a window that HEADS it scopes its coordinated
+            // predicates ("Until your next turn, X and Y"). A trailing window
+            // ("X until end of turn, then Y") belongs to its own clause, so it is not
+            // distributed — mirrors `compute_sentence_leading_duration`. Whether the
+            // window heads the clause is the clause parser's own reading
+            // (`ClauseIr::head_window`), taken on the text it lowered after the
+            // chunk loop lifted every leading guard — a general conditional
+            // ("If {W}{U} was spent to cast this spell, until your next turn, …" —
+            // Mythos of Vadrok) or a reflexive head ("If you do, until your next
+            // turn, …") — so it is not re-derived from the printed fragment here.
+            // A sentinel (`None` = nothing stated, `Some(Permanent)` = the
+            // sub-parser's "no window" marker) states nothing to distribute.
+            let heads_sentence = clause_ir.head_window.is_some();
+            sentence_duration = (heads_sentence && !duration_is_unset_sentinel(&def.duration))
+                .then(|| def.duration.clone())
+                .flatten();
         }
         // CR 608.2c: Apply condition — chain-level takes priority over clause-level.
         let effective_condition = clause_ir
@@ -3784,6 +3874,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             let any_prior_publishes = defs
                 .iter()
                 .any(|d| publishes_tracked_set_from_resolution(&d.effect));
+            // CR 608.2c + CR 603.7c: a clause whose own head is the PLURAL recall
+            // anaphor ("Return them …", Golden Argosy) names the set this chain
+            // published. Applied AFTER the origin stamp below, so the CR 400.7 zone
+            // guard that stamp establishes rides along with the set binding;
+            // changing the referent must not drop the zone the referent is in.
+            let plural_recall_delayed_payload =
+                any_prior_publishes && starts_with_plural_recall_anaphor(&source_text_lower);
             if any_prior_publishes {
                 let has_tracked_ref = contains_explicit_tracked_set_pronoun(&source_text_lower)
                     || contains_implicit_tracked_set_pronoun(&source_text_lower);
@@ -3987,6 +4084,18 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     for current in &mut current_defs {
                         stamp_delayed_returns(&mut current.effect, zone);
                     }
+                }
+            }
+
+            // CR 608.2c + CR 603.7c: the delayed wrapper was built above, and
+            // `rewrite_parent_targets_to_tracked_set` does not descend into
+            // `CreateDelayedTrigger` — a SINGULAR recall inside a payload ("Return
+            // it …") names the parent's chosen object or the creating event's
+            // source and must keep that binding. Bind only a payload whose own
+            // clause head is the PLURAL anaphor, and only after the origin stamp.
+            if plural_recall_delayed_payload {
+                for current in &mut current_defs {
+                    rebind_plural_recall_delayed_payload_to_tracked_set(&mut current.effect);
                 }
             }
         }
@@ -4362,7 +4471,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // could not be modelled.
     //
     // CENSUS, re-measured 2026-08-29 against the pool whose tracked vintage
-    // sidecar `crates/engine/data/mtgjson-vintage` reads 2026-08-28: the printed
+    // sidecar `crates/phase-ast/data/mtgjson-vintage` reads 2026-08-28: the printed
     // form appears on 4 card faces (Avacyn, Guardian Angel / Prismatic Strands /
     // Root Greevil / Wash Out) and NO ability line prints it twice — Avacyn's
     // two occurrences sit in two SEPARATE activated abilities, i.e. two chains

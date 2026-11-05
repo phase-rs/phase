@@ -34,9 +34,9 @@
 //! global one is dominated by the ordinary-move `TurnRecordIndexMismatch` invariant in `zones.rs`
 //! and panics before any assertion here.
 //!
-//! **Filter trap:** `cargo test --test integration <bare_fn_name> -- --exact` runs ZERO tests and
+//! **Filter trap:** `cargo test --test integration_5 <bare_fn_name> -- --exact` runs ZERO tests and
 //! exits `0`. The module path is mandatory:
-//! `cargo test -p phase-engine --test integration token_zone_change_index::<fn> -- --exact`.
+//! `cargo test -p phase-engine --test integration_5 token_zone_change_index::<fn> -- --exact`.
 //! Always check the `N passed` count — a vacuous filter reports `ok. 0 passed`.
 //!
 //! MEASURED at this tip: `second_same_turn_token_batch_still_triggers`,

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "InteractionResponse::Text carries values and InteractionResponseSpec::Text a count, so a secret agenda's names arrive as one typed answer; SecretAgendaChoice moves from an exact-candidate list to the text schema"
+}

@@ -12666,6 +12666,66 @@ fn return_each_card_they_exiled_this_way_uses_exiled_tracked_set() {
 /// `ExiledBySource` (resolved at runtime via `exile_links`), not the chain-local
 /// `TrackedSet(0)` sentinel that is empty at LTB time. Third emission site of the
 /// #5571 cross-resolution fix (after the Copy verb and `try_parse_cast_effect`).
+/// CR 603.7 + CR 608.2c: the plural-recall rebind is itself the act of making
+/// the delayed payload read the chain's published set, so it must also mark the
+/// wrapper as a tracked-set consumer. The generic "those cards" / battlefield
+/// gates do not recognize "Put them into their owners' hands", and an unbound
+/// `TrackedSet` sentinel would resolve against whatever set happens to be
+/// latest when the trigger fires instead of the set this chain published.
+#[test]
+fn plural_recall_rebind_marks_the_delayed_payload_as_a_tracked_set_consumer() {
+    let mut effect = Effect::CreateDelayedTrigger {
+        condition: crate::types::ability::DelayedTriggerCondition::AtNextPhase {
+            phase: crate::types::phase::Phase::End,
+        },
+        effect: Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )),
+        uses_tracked_set: false,
+    };
+
+    rebind_plural_recall_delayed_payload_to_tracked_set(&mut effect);
+
+    let Effect::CreateDelayedTrigger {
+        effect: payload,
+        uses_tracked_set,
+        ..
+    } = &effect
+    else {
+        panic!("expected the delayed wrapper to survive the rebind");
+    };
+    assert!(
+        *uses_tracked_set,
+        "the rebind must mark the delayed trigger as reading the published set"
+    );
+    assert!(
+        matches!(
+            &*payload.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::TrackedSet { id },
+                ..
+            } if *id == crate::types::identifiers::TrackedSetId(0)
+        ),
+        "the plural recall must bind the tracked-set sentinel: {:?}",
+        payload.effect
+    );
+}
+
 #[test]
 fn hideaway_ltb_put_exiled_card_binds_exiled_by_source() {
     let parsed = parse_oracle_text(
@@ -28449,6 +28509,143 @@ fn cant_be_activated_effect_typographic_apostrophe_preserves_mana_exemption() {
     );
 }
 
+/// CR 611.2a + CR 608.2c: a window printed as a clause's TRAILING suffix belongs to
+/// that clause alone; only a window that heads the sentence is distributed over its
+/// coordinated predicates (#7962).
+#[test]
+fn trailing_clause_window_is_not_distributed_to_later_clause() {
+    let def = parse_effect_chain(
+        "target creature gains flying until your next turn, then it gains reach",
+        AbilityKind::Spell,
+    );
+    let own = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    assert_eq!(def.duration, Some(own), "the clause keeps its own window");
+    let later = def.sub_ability.as_deref().expect("later clause");
+    assert_eq!(
+        later.duration, None,
+        "a trailing window must not scope the coordinated later clause"
+    );
+}
+
+/// CR 611.2a + CR 608.2c: the review's counterexample — a TRAILING window on the
+/// head clause must not be distributed onto a following type-change clause just
+/// because the boundary is `then`. The later clause states no window of its own,
+/// so the printed window stays with the clause that printed it (#7962 review).
+#[test]
+fn trailing_clause_window_does_not_reach_a_following_type_change() {
+    let def = parse_effect_chain(
+        "Target creature gains flying until end of turn, then it becomes a Dragon",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        def.duration,
+        Some(Duration::UntilEndOfTurn),
+        "the head clause keeps its own printed window: {def:#?}"
+    );
+    let later = def
+        .sub_ability
+        .as_deref()
+        .expect("the type-change clause must be built as the coordinated sibling");
+    assert_ne!(
+        later.duration,
+        Some(Duration::UntilEndOfTurn),
+        "a trailing window belongs to its own clause and must not be distributed: {later:#?}"
+    );
+}
+
+/// CR 611.2a + CR 608.2c: a leading window still heads its sentence when a leading
+/// guard precedes it — Mythos of Vadrok's "If {W}{U} was spent to cast this spell,
+/// until your next turn, …" scopes both coordinated predicates (#7962).
+#[test]
+fn guarded_leading_window_is_distributed_to_coordinated_clause() {
+    let def = parse_effect_chain(
+        "Mythos of Vadrok deals 5 damage divided as you choose among any number of target creatures and/or planeswalkers. If {W}{U} was spent to cast this spell, until your next turn, those permanents can't attack or block and their activated abilities can't be activated.",
+        AbilityKind::Spell,
+    );
+    let printed = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    assert_eq!(def.duration, None, "the damage sentence states no window");
+    let mut guarded = Vec::new();
+    let mut link = def.sub_ability.as_deref();
+    while let Some(d) = link {
+        guarded.push(d);
+        link = d.sub_ability.as_deref();
+    }
+    assert!(
+        guarded.len() >= 2,
+        "both coordinated predicates must be built: {guarded:#?}"
+    );
+    for d in &guarded {
+        assert_eq!(
+            d.duration.as_ref(),
+            Some(&printed),
+            "every predicate of the guarded sentence carries its window: {d:#?}"
+        );
+    }
+}
+
+/// CR 611.2a + CR 608.2c: a leading window behind a reflexive "If you do," head
+/// still scopes both coordinated predicates of its sentence (#7962). Building-block
+/// shape: no printed card pairs a reflexive head with this coordinated predicate.
+#[test]
+fn reflexive_guarded_leading_window_is_distributed_to_coordinated_clause() {
+    let def = parse_effect_chain(
+        "Tap target creature. If you do, until your next turn, that creature can't attack or block and its activated abilities can't be activated.",
+        AbilityKind::Spell,
+    );
+    let printed = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    let mut windowed = 0;
+    let mut link = def.sub_ability.as_deref();
+    while let Some(d) = link {
+        if d.duration.as_ref() == Some(&printed) {
+            windowed += 1;
+        }
+        link = d.sub_ability.as_deref();
+    }
+    assert!(windowed >= 2, "both predicates carry the window: {def:#?}");
+}
+
+/// CR 611.2a + CR 608.2c: the clause parser, not a re-peel of the printed
+/// fragment, declares which window heads a clause (`ClauseIr::head_window`). A
+/// window behind a lifted guard — general or reflexive — is still the head
+/// window; a trailing window is not, so it is never distributed (#7962).
+#[test]
+fn clause_ir_declares_head_window_past_lifted_guards_only() {
+    let next_turn = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    for (text, expected) in [
+        (
+            "Tap target creature. If you do, until your next turn, that creature can't attack or block.",
+            Some(next_turn.clone()),
+        ),
+        (
+            "Tap target creature. If you control an artifact, until your next turn, that creature can't attack or block.",
+            Some(next_turn.clone()),
+        ),
+        (
+            "Tap target creature. If you do, that creature can't attack or block until your next turn.",
+            None,
+        ),
+    ] {
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        assert!(
+            ir.clauses.first().is_some_and(|c| c.head_window.is_none()),
+            "the unwindowed head sentence declares no head window: {text}"
+        );
+        let guarded = ir
+            .clauses
+            .get(1)
+            .unwrap_or_else(|| panic!("the guarded sentence must lower to a clause: {text}"));
+        assert_eq!(guarded.head_window, expected, "{text}");
+    }
+}
+
 /// CR 602.5 + CR 603.2a + CR 608.2c: Dovin Baan's +1 — "up to one target
 /// creature gets -3/-0 and its activated abilities can't be activated."
 /// The compound splits into a Pump primary and a CantBeActivated conjunct
@@ -32639,6 +32836,7 @@ fn parse_aether_gust_effect_chain() {
             Effect::PutOnTopOrBottom {
                 target: TargetFilter::ParentTarget,
                 chooser: TargetFilter::ParentTargetOwner,
+                ..
             }
         ),
         "Expected ParentTarget PutOnTopOrBottom continuation, got {:?}",
@@ -48220,6 +48418,46 @@ fn perpetual_grant_ability_multi_quote_partial_failure_stays_closed() {
     );
 }
 
+/// CR 401.7: Calim, Djinn Emperor's "conjure a card named X into your library
+/// seventh from the top" must keep its position (it used to parse to a plain
+/// library conjure that placed the card at a random/default slot).
+#[test]
+fn conjure_into_library_nth_from_top_keeps_position() {
+    let def = parse_effect_chain(
+        "conjure a card named Calim, Djinn Emperor into your library seventh from the top",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::Conjure {
+                destination: Zone::Library,
+                library_position: Some(LibraryPosition::NthFromTop { n: 7 }),
+                ..
+            }
+        ),
+        "got {:?}",
+        def.effect
+    );
+    // Reach-guard: the plain (unpositioned) library conjure is unchanged.
+    let plain = parse_effect_chain(
+        "conjure a card named Lightning Bolt into your library",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            plain.effect.as_ref(),
+            Effect::Conjure {
+                destination: Zone::Library,
+                library_position: None,
+                ..
+            }
+        ),
+        "got {:?}",
+        plain.effect
+    );
+}
+
 /// SHAPE (V1): Indris's "They perpetually gain storm" rider binds the
 /// chain-conjured Bolts (`LastCreated`) and installs Storm on each.
 #[test]
@@ -50277,9 +50515,64 @@ fn parse_owner_of_target_puts_second_from_top() {
             "The owner of target nonland permanent puts it into their library second from the top or on the bottom",
             AbilityKind::Spell,
         );
+    // CR 401.7: the "second from the top" position must survive parsing.
     assert!(
-        matches!(*def.effect, Effect::PutOnTopOrBottom { .. }),
-        "Expected PutOnTopOrBottom, got {:?}",
+        matches!(
+            *def.effect,
+            Effect::PutOnTopOrBottom {
+                chooser: TargetFilter::ParentTargetOwner,
+                top_position: LibraryPosition::NthFromTop { n: 2 },
+                ..
+            }
+        ),
+        "Expected owner-chosen PutOnTopOrBottom with NthFromTop(2), got {:?}",
+        def.effect
+    );
+}
+
+/// Ordinal-generality probe for the shared `parse_nth_from_top` combinator.
+/// NOT printed text: the printed subjects are "creature an opponent controls",
+/// "nonland permanent" and "creature or enchantment", and only "second" exists
+/// in the corpus (nearest printed cards: Deem Inferior, Trickster's Stratagem).
+/// Third/fourth rows exist solely to prove the ordinal is parsed, not matched.
+#[test]
+fn parse_owner_puts_nth_from_top_or_bottom_is_ordinal_generic() {
+    for (ordinal, n) in [("second", 2), ("third", 3), ("fourth", 4)] {
+        let def = parse_effect_chain(
+            &format!(
+                "The owner of target creature puts it into their library {ordinal} from the top or on the bottom"
+            ),
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::PutOnTopOrBottom {
+                    top_position: LibraryPosition::NthFromTop { n: got },
+                    ..
+                } if got == n
+            ),
+            "{ordinal}: got {:?}",
+            def.effect
+        );
+    }
+}
+
+#[test]
+fn parse_plain_top_or_bottom_keeps_top_position() {
+    let def = parse_effect_chain(
+        "The owner of target nonland permanent puts it on their choice of the top or bottom of their library",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            *def.effect,
+            Effect::PutOnTopOrBottom {
+                top_position: LibraryPosition::Top,
+                ..
+            }
+        ),
+        "got {:?}",
         def.effect
     );
 }
@@ -55292,6 +55585,59 @@ fn cast_from_among_the_cards_exiled_this_way_binds_to_exiled_by_source() {
     assert_eq!(target, TargetFilter::ExiledBySource);
 }
 
+/// CR 712.8a + CR 712.11c: a type printed on BOTH sides of the anchor ("cast
+/// enchantment spells from among the creature cards exiled this way") gates
+/// two different things at two different stages — the suffix the card pool,
+/// judged on the card where it is (CR 712.8a), the prefix the spell, judged on
+/// the face being cast (CR 712.11c). One cast filter cannot carry both, so the
+/// clause is refused: it lowers to the `from_among_pool_and_spell_gate` gap,
+/// never to a cast grant, for both the "exiled this way" anchor and the
+/// "those nonland cards" anchor, with counted ("up to two") and uncounted
+/// wording. (The "up to two artifact spells" row reaches the generic anchor
+/// arm, not the counted free-cast helper, which needs the bare "spells" noun
+/// right after the count.)
+///
+/// Shape-only hardening, not a card test: no printed card carries a type gate
+/// on both sides of the anchor. The nearest printed cards each carry one side —
+/// Wand of Wonder the prefix gate ("instant and/or sorcery spells from among
+/// cards exiled this way"), Etali, Primal Conqueror the suffix gate ("from
+/// among the nonland cards exiled this way"). Positive controls: Etali's
+/// printed one-sided clause, and the "those nonland cards" clause without a
+/// prefix type (Fevered Suspicion's shape), still lower to cast grants.
+#[test]
+fn cast_from_among_exiled_this_way_refuses_a_prefix_and_a_suffix_type_gate() {
+    let lowered: Vec<_> = [
+        "cast any number of enchantment spells from among the creature cards exiled this way without paying their mana costs",
+        "cast up to two artifact spells from among the instant or sorcery cards exiled this way without paying their mana costs",
+        "cast any number of enchantment spells from among those nonland cards exiled this way without paying their mana costs",
+        "cast up to two enchantment spells from among those nonland cards exiled this way without paying their mana costs",
+    ]
+    .into_iter()
+    .map(|combined| (combined, parse_effect(combined)))
+    .filter(|(_, e)| {
+        !matches!(e, Effect::Unimplemented { name, .. } if name == FROM_AMONG_POOL_AND_SPELL_GATE_GAP)
+    })
+    .collect();
+    assert!(
+        lowered.is_empty(),
+        "a type on both sides of the anchor is refused, not lowered: {lowered:#?}"
+    );
+
+    for one_sided in [
+        "cast any number of spells from among the nonland cards exiled this way without paying their mana costs",
+        "cast any number of spells from among those nonland cards exiled this way without paying their mana costs",
+    ] {
+        let e = parse_effect(one_sided);
+        let Effect::CastFromZone { target, .. } = &e else {
+            panic!("positive control: a one-sided clause lowers to CastFromZone: {one_sided:?} -> {e:?}");
+        };
+        assert!(
+            target.references_exiled_by_source(),
+            "positive control: the grant binds the exile anaphor: {one_sided:?} -> {target:?}"
+        );
+    }
+}
+
 /// CR 610.3 + CR 608.2c: Disjunctive typed leg via
 /// `parse_cast_type_list` — "from among the instant or sorcery
 /// cards exiled this way" must bind to `And { ExiledBySource, Typed(...) }`
@@ -57601,6 +57947,32 @@ fn cast_this_way_enters_with_counter_rider_is_counter_generic() {
         clause.sub_ability.is_none(),
         "bare counter rider has no sub-ability"
     );
+}
+
+/// CR 205.2b: the anaphoric subject is "that" + the permission's printed type
+/// noun phrase, which may stack card types ("that artifact creature": Overflow
+/// Submatrix) or name "permanent". A non-type word after "that" is refused.
+#[test]
+fn cast_this_way_enters_with_counter_accepts_stacked_type_anaphor() {
+    for subject in [
+        "that creature",
+        "that artifact",
+        "that permanent",
+        "that artifact creature",
+        "that enchantment creature",
+    ] {
+        let text = format!(
+            "if you cast a spell this way, {subject} enters with a finality counter on it."
+        );
+        let (counter, rest) = parse_cast_this_way_enters_with_counter(&text)
+            .unwrap_or_else(|| panic!("{subject:?} anaphor should parse"));
+        assert_eq!(counter, CounterType::Finality, "{subject:?}");
+        assert_eq!(rest, ".", "{subject:?}");
+    }
+    assert!(parse_cast_this_way_enters_with_counter(
+        "if you cast a spell this way, that card enters with a finality counter on it."
+    )
+    .is_none());
 }
 
 /// Whole-card production-path parse: Osteomancer Adept's residual rider
@@ -63584,9 +63956,60 @@ fn discover_the_impossible_cast_target_stays_parent_target_after_exiled_by_sourc
     let target = parsed.abilities.iter().find_map(find_cast_from_zone_target);
     assert!(
         matches!(target, Some(TargetFilter::ParentTarget)),
-        "Discover the Impossible's same-chain exile (via the ExileOneOfThemFaceDown \
+        "Discover the Impossible's same-chain exile (via the ExileLookedAtCardsFaceDown \
          continuation) must keep CastFromZone{{ParentTarget}}, got {target:?}"
     );
+}
+
+/// Black Cat, Cunning Thief: the whole look/exile/rest chain is one `Dig` that keeps TWO
+/// cards (exile, face down via the chained conceal) and sends the remainder to the library
+/// bottom in a random order — with no sibling `ChangeZone`/`PutAtLibraryPosition` left over
+/// (the pre-fix `count: 1` "rest" placement). CR 401.4 + CR 701.20e.
+#[test]
+fn black_cat_exile_two_face_down_fuses_into_one_dig_with_random_rest() {
+    let parsed = parse_oracle_text(
+        "When Black Cat enters, look at the top nine cards of target opponent's library, exile two of them face down, then put the rest on the bottom of their library in a random order. You may play the exiled cards for as long as they remain exiled. Mana of any type can be spent to cast spells this way.",
+        "Black Cat, Cunning Thief",
+        &[],
+        &["Creature".to_string()],
+        &["Insect".to_string()],
+    );
+    let execute = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("Black Cat has an ETB trigger body");
+    let Effect::Dig {
+        count,
+        keep_count,
+        up_to,
+        destination,
+        rest_destination,
+        rest_order,
+        ..
+    } = &*execute.effect
+    else {
+        panic!("expected Dig head, got {:?}", execute.effect);
+    };
+    assert_eq!(*count, QuantityExpr::Fixed { value: 9 });
+    assert_eq!(*keep_count, Some(2));
+    assert!(!*up_to);
+    assert_eq!(*destination, Some(Zone::Exile));
+    assert_eq!(*rest_destination, Some(Zone::Library));
+    assert_eq!(*rest_order, DigRestOrder::Random);
+    let conceal = execute.sub_ability.as_deref().expect("conceal sub-ability");
+    assert!(matches!(&*conceal.effect, Effect::HideawayConceal { .. }));
+    let mut cursor = execute;
+    while let Some(next) = cursor.sub_ability.as_deref() {
+        assert!(
+            !matches!(
+                &*next.effect,
+                Effect::ChangeZone { .. } | Effect::PutAtLibraryPosition { .. }
+            ),
+            "no sibling exile/placement may remain after the fusion, got {:?}",
+            next.effect
+        );
+        cursor = next;
+    }
 }
 
 /// Structural cascade traversal: assert `effect` is the named `Effect::Token`,
@@ -69332,6 +69755,7 @@ fn filter_has_chosen_color(f: &TargetFilter) -> bool {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -69711,7 +70135,7 @@ fn nested_chosen_color_is_seen_at_every_depth_of_the_filter_closure() {
 /// `GainControlAll`, `PutCounterAll`, `CounterAll` and `GoadAll` all carry an
 /// object filter built by that same parser and all sit in the `false` list
 /// below. They answer `false` because on the 2026-08-28 pool (the vintage in
-/// `crates/engine/data/mtgjson-vintage`) no card reaches them with the printed
+/// `crates/phase-ast/data/mtgjson-vintage`) no card reaches them with the printed
 /// qualifier — the same dated-census idiom used for the 4-face card list on
 /// `inject_printed_color_choice_filter` — NOT because the compiler proved they
 /// cannot. Re-measure rather than trusting it.

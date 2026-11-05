@@ -794,8 +794,38 @@ fn codec_player_resync_preserves_elimination_and_rewinds() {
                 .game_executor
                 .with_session(session, |session| {
                     // Match the existing SingleUser takeback fixture: stamp the
-                    // deployment policy, then capture a real action's boundary.
-                    session.hosting = server_core::session::HostingMode::SingleUser;
+                    // deployment policy before any action.
+                    session.set_hosting(server_core::session::HostingMode::SingleUser);
+                })
+                .await;
+            drop(lease);
+
+            let viewer = PlayerId(0);
+            let eliminated = PlayerId(2);
+            let mut peer = codec_seat(&table, viewer, false).await;
+            let mut conceding = codec_seat(&table, eliminated, false).await;
+            peer.fence(true).await;
+            conceding.fence(true).await;
+            conceding.send(&ClientMessage::Concede).await;
+            let publication = peer.state().await;
+            assert_eq!(
+                publication.value["data"]["eliminated_players"],
+                serde_json::json!([eliminated]),
+                "the real concession must publish before recovery"
+            );
+            peer.fence(false).await;
+            conceding.fence(true).await;
+
+            // A real concession retires takeback history, so capture the
+            // turn boundary after it.
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            let (lease, ()) = table
+                .app
+                .context
+                .game_executor
+                .with_session(session, |session| {
                     let starting_turn = session.state.turn_number;
                     for _ in 0..400 {
                         if session.state.turn_number > starting_turn {
@@ -822,22 +852,6 @@ fn codec_player_resync_preserves_elimination_and_rewinds() {
                 })
                 .await;
             drop(lease);
-
-            let viewer = PlayerId(0);
-            let eliminated = PlayerId(2);
-            let mut peer = codec_seat(&table, viewer, false).await;
-            let mut conceding = codec_seat(&table, eliminated, false).await;
-            peer.fence(true).await;
-            conceding.fence(true).await;
-            conceding.send(&ClientMessage::Concede).await;
-            let publication = peer.state().await;
-            assert_eq!(
-                publication.value["data"]["eliminated_players"],
-                serde_json::json!([eliminated]),
-                "the real concession must publish before recovery"
-            );
-            peer.fence(false).await;
-            conceding.fence(true).await;
 
             let (reference, state_before, revision) = resync_reference(&table, Some(viewer)).await;
             assert!(
@@ -3875,9 +3889,8 @@ fn codec_lifecycle_approved_takeback_is_automatic() {
             let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
                 .await
                 .unwrap();
-            assert_eq!(session.hosting, server_core::session::HostingMode::Shared);
-            let (requester, recorded_before) = session.takeback_history.back().unwrap();
-            let requester = *requester;
+            assert_eq!(session.hosting(), server_core::session::HostingMode::Shared);
+            let (requester, recorded_before) = session.takeback.history().next_back().unwrap();
             assert_eq!(
                 requester, actor,
                 "requester comes from actual recorded action"
@@ -3905,12 +3918,18 @@ fn codec_lifecycle_approved_takeback_is_automatic() {
             let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
                 .await
                 .unwrap();
-            let pending = session.pending_takeback.as_ref().unwrap();
-            assert_eq!(pending.requested_by, requester);
-            assert_eq!(pending.approvals.len(), 1);
-            assert!(pending.approvals.contains(&requester));
-            drop(session);
             let approvals: Vec<_> = voters.iter().copied().filter(|p| *p != requester).collect();
+            let ai_seats: Vec<_> = session.ai_seats.iter().copied().collect();
+            let vote = session
+                .takeback
+                .pending_vote(&session.state, &ai_seats)
+                .unwrap();
+            assert_eq!(vote.requester, requester);
+            assert_eq!(vote.voters, approvals);
+            let approved = session.takeback.approvals().unwrap();
+            assert_eq!(approved.len(), 1);
+            assert!(approved.contains(&requester));
+            drop(session);
             for (index, voter) in approvals.iter().enumerate() {
                 peers[usize::from(voter.0)]
                     .send(&ClientMessage::RespondTakeback { approve: true })
@@ -3920,10 +3939,7 @@ fn codec_lifecycle_approved_takeback_is_automatic() {
                     let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
                         .await
                         .unwrap();
-                    assert_eq!(
-                        session.pending_takeback.as_ref().unwrap().approvals.len(),
-                        index + 2
-                    );
+                    assert_eq!(session.takeback.approvals().unwrap().len(), index + 2);
                 }
             }
             let mut approved_frames = Vec::new();
@@ -3931,7 +3947,7 @@ fn codec_lifecycle_approved_takeback_is_automatic() {
                 let approved = peer.state().await;
                 let resolved = peer.next().await;
                 assert_eq!(resolved.value["type"], "TakebackResolved");
-                assert_eq!(resolved.value["data"]["approved"], true);
+                assert_eq!(resolved.value["data"]["resolution"], "approved");
                 approved_frames.push(approved);
             }
             let approved = &approved_frames[usize::from(requester.0)];
@@ -3948,11 +3964,11 @@ fn codec_lifecycle_approved_takeback_is_automatic() {
                 "takeback receipt: recorded_action={action:?} requester={requester:?} \
                  voters={voters:?} approvals={approvals:?} pending_then_resolved={} \
                  revisions={preapproval_revision}->{} codec_alone={selection:?} delivered={:?}",
-                session.pending_takeback.is_none(),
+                !session.takeback.is_pending(),
                 session.state_revision,
                 approved.kind
             );
-            assert!(session.pending_takeback.is_none());
+            assert!(!session.takeback.is_pending());
             assert!(session.state_revision > preapproval_revision);
             assert_eq!(selection, state_codec::FrameKind::Delta);
             assert_eq!(approved.kind, Some(state_codec::FrameKind::Delta));
@@ -6225,7 +6241,7 @@ mod oversized_publication {
             .context
             .game_executor
             .with_session(session, |session| {
-                session.hosting = server_core::session::HostingMode::SingleUser;
+                session.set_hosting(server_core::session::HostingMode::SingleUser);
             })
             .await;
         drop(lease);
@@ -6468,9 +6484,10 @@ mod oversized_publication {
         .await;
     }
 
-    async fn assert_requested(socket: &mut ClientSocket, requester: PlayerId) {
+    async fn assert_requested(socket: &mut ClientSocket, requester: PlayerId) -> serde_json::Value {
         let requested = until_type(socket, "TakebackRequested").await;
         assert_eq!(requested["data"]["requester"], requester.0, "{requested}");
+        requested
     }
 
     /// Plain text length and value of the next application frame.
@@ -6557,7 +6574,7 @@ mod oversized_publication {
             let table = NativeTable::capped_duel(CAP).await;
             install(&table, smaug_offer(), &[]).await;
             session_read(&table, |session| {
-                session.hosting = server_core::session::HostingMode::SingleUser;
+                session.set_hosting(server_core::session::HostingMode::SingleUser);
             })
             .await;
             let outcome = tokio::time::timeout(Duration::from_secs(120), async {
@@ -6794,7 +6811,7 @@ mod oversized_publication {
                     let resolved = until_type(socket, "TakebackResolved").await;
                     assert_eq!(
                         resolved["data"],
-                        serde_json::json!({ "approved": true, "resolved_by": 0 })
+                        serde_json::json!({ "resolution": "approved", "resolved_by": 0 })
                     );
                 }
                 assert_eq!(server_smaug_damage(&table).await, pre);
@@ -6833,5 +6850,424 @@ mod oversized_publication {
             table.server.abort();
             outcome.expect("the takeback did not recover the withheld game");
         });
+    }
+
+    /// Concessions while a takeback vote is open, through real sockets.
+    mod concession_takeback {
+        use super::*;
+        use engine::types::mana::ManaColor;
+        use engine::types::match_config::MatchType;
+
+        const P2: PlayerId = PlayerId(2);
+        const LIGHTNING_BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
+
+        fn add_bolt(scenario: &mut GameScenario, owner: PlayerId) -> ObjectId {
+            scenario
+                .add_spell_to_hand_from_oracle(owner, "Lightning Bolt", true, LIGHTNING_BOLT)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Red],
+                    generic: 0,
+                })
+                .id()
+        }
+
+        fn cast_bolt(runner: &mut GameRunner, bolt: ObjectId, target: PlayerId) {
+            let card_id = runner.state().objects[&bolt].card_id;
+            act(
+                runner,
+                GameAction::CastSpell {
+                    object_id: bolt,
+                    card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::Auto,
+                },
+            );
+            act(
+                runner,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Player(target)),
+                },
+            );
+        }
+
+        /// Three seats at P0's precombat main: P0 passed, P1 cast Lightning Bolt
+        /// at P0, and P1 and P2 passed, so P0 holds priority with the Bolt on
+        /// the stack.
+        fn bolt_at_p0() -> GameState {
+            let mut scenario = GameScenario::new_n_player(3, 29);
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.add_basic_land(P1, ManaColor::Red);
+            let bolt = add_bolt(&mut scenario, P1);
+            let mut runner = scenario.build();
+            act(&mut runner, GameAction::PassPriority);
+            cast_bolt(&mut runner, bolt, P0);
+            act(&mut runner, GameAction::PassPriority);
+            act(&mut runner, GameAction::PassPriority);
+            assert_eq!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { player: P0 }
+            );
+            assert_eq!(runner.state().stack.len(), 1);
+            runner.state().clone()
+        }
+
+        /// Bolt-AI: three seats at P0's precombat main. P0 holds a Mountain on
+        /// the battlefield and one in hand and has cast Lightning Bolt at P2 (3
+        /// life); P1 is to be an AI seat. P0 holds priority with the Bolt on
+        /// the stack.
+        fn bolt_ai() -> GameState {
+            let mut scenario = GameScenario::new_n_player(3, 31);
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_life(P2, 3);
+            scenario.add_basic_land(P0, ManaColor::Red);
+            scenario.add_land_to_hand(P0, "Mountain");
+            let bolt = add_bolt(&mut scenario, P0);
+            let mut runner = scenario.build();
+            cast_bolt(&mut runner, bolt, P2);
+            assert_eq!(runner.state().stack.len(), 1);
+            runner.state().clone()
+        }
+
+        /// A two-seat Bo3 game 1 at P0's precombat main, P0 holding priority.
+        fn bo3_duel() -> GameState {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let mut state = scenario.build().state().clone();
+            state.match_config.match_type = MatchType::Bo3;
+            state.game_number = 1;
+            state
+        }
+
+        /// Reads `socket` until the takeback withdrawal attributed to
+        /// `conceding`, refusing a concession `StateUpdate` before it, then
+        /// reads and returns the concession's `StateUpdate`.
+        async fn withdrawal_then_state(
+            socket: &mut ClientSocket,
+            conceding: PlayerId,
+        ) -> serde_json::Value {
+            loop {
+                let frame = receive_command_frame(socket).await;
+                match frame["type"].as_str() {
+                    Some("TakebackResolved") => {
+                        assert_eq!(
+                            frame["data"],
+                            serde_json::json!({ "resolution": "withdrawn", "resolved_by": conceding.0 })
+                        );
+                        break;
+                    }
+                    Some("StateUpdate") | Some("ActionRejected") | Some("RequestRejected") => {
+                        panic!("expected the withdrawal first, got {frame}")
+                    }
+                    _ => {}
+                }
+            }
+            let update = until_type(socket, "StateUpdate").await;
+            assert_eq!(
+                update["data"]["eliminated_players"],
+                serde_json::json!([conceding.0]),
+                "{update}"
+            );
+            update
+        }
+
+        async fn three_human_vote(table: &NativeTable) -> [ClientSocket; 3] {
+            let mut p0 = table.connect(P0).await;
+            let mut p1 = table.connect(P1).await;
+            let mut p2 = table.connect(P2).await;
+            send_command_frame(&mut p0, &GameAction::PassPriority, 1).await;
+            completion(&mut p0, 1).await;
+            request_takeback(&mut p0).await;
+            for socket in [&mut p0, &mut p1, &mut p2] {
+                assert_requested(socket, P0).await;
+            }
+            [p0, p1, p2]
+        }
+
+        async fn three_human_table() -> NativeTable {
+            let table = NativeTable::seated(
+                GameExecutor::new(NonZeroUsize::MIN),
+                3,
+                FormatConfig::free_for_all(),
+            )
+            .await;
+            install(&table, bolt_at_p0(), &[]).await;
+            table
+        }
+
+        /// N1. `ClientMessage::Concede` during a vote: every seat gets the
+        /// withdrawal before the concession's state.
+        #[test]
+        fn a_concede_message_during_a_vote_reaches_every_seat_after_the_withdrawal() {
+            run_async_test(|| async {
+                let table = three_human_table().await;
+                let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+                    let [mut p0, mut p1, mut p2] = three_human_vote(&table).await;
+                    send_test_message(&mut p2, &ClientMessage::Concede, false).await;
+                    for socket in [&mut p2, &mut p0, &mut p1] {
+                        withdrawal_then_state(socket, P2).await;
+                    }
+                })
+                .await;
+                table.server.abort();
+                outcome.expect("the withdrawal or the concession never arrived");
+            });
+        }
+
+        /// N2. The same through a `GameAction::Concede` command frame.
+        #[test]
+        fn a_concede_action_during_a_vote_reaches_every_seat_after_the_withdrawal() {
+            run_async_test(|| async {
+                let table = three_human_table().await;
+                let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+                    let [mut p0, mut p1, mut p2] = three_human_vote(&table).await;
+                    send_command_frame(&mut p2, &GameAction::Concede { player_id: P2 }, 2).await;
+                    for socket in [&mut p2, &mut p0, &mut p1] {
+                        withdrawal_then_state(socket, P2).await;
+                    }
+                })
+                .await;
+                table.server.abort();
+                outcome.expect("the withdrawal or the concession never arrived");
+            });
+        }
+
+        /// N3. `ConcedeMatch` during a vote: the withdrawal precedes the
+        /// concession's state.
+        #[test]
+        fn a_match_concession_during_a_vote_follows_the_withdrawal() {
+            run_async_test(|| async {
+                let table = NativeTable::duel().await;
+                install(&table, bo3_duel(), &[]).await;
+                let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+                    let mut p0 = table.connect(P0).await;
+                    let mut p1 = table.connect(P1).await;
+                    send_command_frame(&mut p0, &GameAction::PassPriority, 1).await;
+                    completion(&mut p0, 1).await;
+                    request_takeback(&mut p0).await;
+                    assert_requested(&mut p0, P0).await;
+                    assert_requested(&mut p1, P0).await;
+                    send_test_message(&mut p1, &ClientMessage::ConcedeMatch, false).await;
+                    for socket in [&mut p1, &mut p0] {
+                        loop {
+                            let frame = receive_command_frame(socket).await;
+                            match frame["type"].as_str() {
+                                Some("TakebackResolved") => {
+                                    assert_eq!(
+                                        frame["data"],
+                                        serde_json::json!({ "resolution": "withdrawn", "resolved_by": 1 })
+                                    );
+                                    break;
+                                }
+                                Some("StateUpdate") | Some("RequestRejected") => {
+                                    panic!("expected the withdrawal first, got {frame}")
+                                }
+                                _ => {}
+                            }
+                        }
+                        let update = until_type(socket, "StateUpdate").await;
+                        assert_eq!(
+                            update["data"]["state"]["waiting_for"],
+                            serde_json::json!({ "type": "GameOver", "data": { "winner": 0 } }),
+                            "{update}"
+                        );
+                    }
+                })
+                .await;
+                table.server.abort();
+                outcome.expect("the withdrawal or the match concession never arrived");
+            });
+        }
+
+        /// N4. A target-branch voter's `ClientMessage::Concede` approves the
+        /// vote: the restored state, then the approval.
+        #[test]
+        fn a_voters_concede_message_publishes_the_restored_state_then_the_approval() {
+            run_async_test(|| async {
+                let table = NativeTable::seated(
+                    GameExecutor::new(NonZeroUsize::MIN),
+                    3,
+                    FormatConfig::free_for_all(),
+                )
+                .await;
+                install(&table, bolt_ai(), &[P1]).await;
+                let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+                    let mut p0 = table.connect(P0).await;
+                    let mut p2 = table.connect(P2).await;
+                    send_command_frame(&mut p0, &GameAction::PassPriority, 1).await;
+                    completion(&mut p0, 1).await;
+                    send_command_frame(&mut p2, &GameAction::PassPriority, 2).await;
+                    completion(&mut p2, 2).await;
+                    assert_eq!(
+                        session_read(&table, |session| session.state.eliminated_players.clone())
+                            .await,
+                        vec![P2]
+                    );
+                    request_takeback(&mut p0).await;
+                    for socket in [&mut p0, &mut p2] {
+                        let requested = assert_requested(socket, P0).await;
+                        assert_eq!(requested["data"]["voters"], serde_json::json!([2]));
+                    }
+                    send_test_message(&mut p2, &ClientMessage::Concede, false).await;
+                    for (seat, socket) in [(P2, &mut p2), (P0, &mut p0)] {
+                        let restored = loop {
+                            let frame = receive_command_frame(socket).await;
+                            match frame["type"].as_str() {
+                                Some("StateUpdate") => break frame,
+                                Some("TakebackResolved") | Some("ActionRejected") => {
+                                    panic!("expected the restored state first, got {frame}")
+                                }
+                                _ => {}
+                            }
+                        };
+                        assert_eq!(
+                            restored["data"]["state"]["stack"].as_array().map(Vec::len),
+                            Some(1),
+                            "the Bolt is back on the stack: {restored}"
+                        );
+                        assert_eq!(
+                            restored["data"]["eliminated_players"],
+                            serde_json::json!([])
+                        );
+                        if seat == P0 {
+                            let actions = restored["data"]["legal_actions"]
+                                .as_array()
+                                .expect("legal actions");
+                            assert!(!actions.is_empty(), "{restored}");
+                            assert!(
+                                actions.iter().all(|action| action["type"] != "PlayLand"),
+                                "{restored}"
+                            );
+                        }
+                        let resolved = until_type(socket, "TakebackResolved").await;
+                        assert_eq!(
+                            resolved["data"],
+                            serde_json::json!({ "resolution": "approved", "resolved_by": 2 })
+                        );
+                    }
+                })
+                .await;
+                table.server.abort();
+                outcome.expect("the restored state or the approval never arrived");
+            });
+        }
+
+        /// N5. A spectator receives the concession's state.
+        #[test]
+        fn a_spectator_receives_the_concessions_state() {
+            run_async_test(|| async {
+                let table = three_human_table().await;
+                let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+                    let mut p0 = table.connect(P0).await;
+                    let mut p2 = table.connect(P2).await;
+                    let mut spectator = connect_and_hello(table.url.clone()).await;
+                    send_test_message(
+                        &mut spectator,
+                        &ClientMessage::SpectatorJoin {
+                            game_code: table.key.game_code.clone(),
+                        },
+                        false,
+                    )
+                    .await;
+                    until_type(&mut spectator, "GameStarted").await;
+                    send_test_message(&mut p2, &ClientMessage::Concede, false).await;
+                    for socket in [&mut p0, &mut spectator] {
+                        loop {
+                            let update = until_type(socket, "StateUpdate").await;
+                            if update["data"]["eliminated_players"] == serde_json::json!([2]) {
+                                break;
+                            }
+                        }
+                    }
+                })
+                .await;
+                table.server.abort();
+                outcome.expect("the concession's state never reached the spectator");
+            });
+        }
+
+        /// N6. A `ClientMessage::Concede` that hands priority to an AI seat
+        /// runs that seat's decision.
+        #[test]
+        fn a_concede_message_that_passes_priority_to_an_ai_seat_runs_the_ai() {
+            run_async_test(|| async {
+                let table = NativeTable::seated(
+                    GameExecutor::new(NonZeroUsize::MIN),
+                    3,
+                    FormatConfig::free_for_all(),
+                )
+                .await;
+                let mut scenario = GameScenario::new_n_player(3, 37);
+                scenario.at_phase(Phase::PreCombatMain);
+                install(&table, scenario.build().state().clone(), &[P1]).await;
+                let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+                    let mut p0 = table.connect(P0).await;
+                    let mut p2 = table.connect(P2).await;
+                    send_test_message(&mut p0, &ClientMessage::Concede, false).await;
+                    loop {
+                        let update = until_type(&mut p2, "StateUpdate").await;
+                        if update["data"]["state"]["waiting_for"]
+                            == serde_json::json!({ "type": "Priority", "data": { "player": 2 } })
+                        {
+                            assert_eq!(
+                                update["data"]["eliminated_players"],
+                                serde_json::json!([0]),
+                                "{update}"
+                            );
+                            break;
+                        }
+                    }
+                })
+                .await;
+                table.server.abort();
+                outcome.expect("the AI seat never acted after the concession");
+            });
+        }
+
+        /// N7. A voter's `ClientMessage::Concede` that hands priority to an AI
+        /// seat: every human gets the withdrawal, then the concession's state,
+        /// then the AI's decision.
+        #[test]
+        fn a_voters_concede_message_that_passes_priority_to_an_ai_seat_follows_the_withdrawal() {
+            run_async_test(|| async {
+                let table = NativeTable::seated(
+                    GameExecutor::new(NonZeroUsize::MIN),
+                    3,
+                    FormatConfig::free_for_all(),
+                )
+                .await;
+                let mut scenario = GameScenario::new_n_player(3, 41);
+                scenario.at_phase(Phase::PreCombatMain);
+                install(&table, scenario.build().state().clone(), &[P2]).await;
+                let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+                    let mut p0 = table.connect(P0).await;
+                    let mut p1 = table.connect(P1).await;
+                    send_command_frame(&mut p0, &GameAction::PassPriority, 1).await;
+                    completion(&mut p0, 1).await;
+                    request_takeback(&mut p0).await;
+                    assert_requested(&mut p0, P0).await;
+                    assert_requested(&mut p1, P0).await;
+                    send_test_message(&mut p1, &ClientMessage::Concede, false).await;
+                    let ai_priority =
+                        serde_json::json!({ "type": "Priority", "data": { "player": 2 } });
+                    for socket in [&mut p1, &mut p0] {
+                        // CR 800.4a: P1 left while holding priority, so it passes to P2.
+                        let conceded = withdrawal_then_state(socket, P1).await;
+                        assert_eq!(
+                            conceded["data"]["state"]["waiting_for"], ai_priority,
+                            "{conceded}"
+                        );
+                        let acted = until_type(socket, "StateUpdate").await;
+                        assert_ne!(
+                            acted["data"]["state"]["waiting_for"], ai_priority,
+                            "{acted}"
+                        );
+                        assert_eq!(acted["data"]["eliminated_players"], serde_json::json!([1]));
+                    }
+                })
+                .await;
+                table.server.abort();
+                outcome.expect("the withdrawal, the concession, or the AI decision never arrived");
+            });
+        }
     }
 }

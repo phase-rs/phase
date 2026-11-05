@@ -681,6 +681,9 @@
   },
   "zone": {
     "commandZone": "Command Zone",
+    "conspiracy": "Conspiracy",
+    "conspiracyTitle": "Conspiracy: {{name}}",
+    "turnFaceUp": "Turn {{name}} face up",
     "emblem": "Emblem",
     "emblemFallback": "Emblem",
     "commander": "Commander",
@@ -2170,13 +2173,18 @@
   "freeCastWindow": {
     "eyebrow": "Free Cast",
     "title": "Cast a spell for free",
+    "titlePlay": "Play cards for free",
     "subtitle": "Choose a spell to cast without paying its mana cost ({{remaining}} remaining). Total mana value left: {{budget}}.",
     "subtitleNoBudget": "Choose a spell to cast without paying its mana cost ({{remaining}} remaining).",
+    "subtitlePlay": "Choose a land to play or a spell to cast without paying its mana cost ({{remaining}} remaining). Total mana value left: {{budget}}.",
+    "subtitleNoBudgetPlay": "Choose a land to play or a spell to cast without paying its mana cost ({{remaining}} remaining).",
     "remainingAny": "any number",
     "castNamed": "Cast {{name}}",
+    "playNamed": "Play {{name}}",
     "castSuffix": "(without paying its mana cost)",
     "done": "Done",
-    "doneSuffix": "(stop casting spells this way)"
+    "doneSuffix": "(stop casting spells this way)",
+    "doneSuffixPlay": "(stop playing cards this way)"
   },
   "castingVariant": {
     "eyebrow": "Cast",
@@ -2259,7 +2267,8 @@
     "unitDamage": "damage",
     "unitLife": "life",
     "title": "Distribute {{total}} {{unit}}",
-    "subtitle": "Assign at least 1 {{unit}} to each target. Remaining: {{remaining}}"
+    "subtitle": "Assign at least 1 {{unit}} to each target. Remaining: {{remaining}}",
+    "subtitleAnyNumber": "Assign at least 1 {{unit}} to each one you choose, among any number of them. Remaining: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Choose a Dungeon",
@@ -2345,6 +2354,8 @@
       "fallback": "Make a Choice"
     },
     "searchSubtitle": "Type to search all cards",
+    "secretAgendaTitle": "Secretly Name a Card ({{current}} of {{total}})",
+    "secretAgendaSubtitle": "Hidden until you turn this conspiracy face up",
     "searchPlaceholder": "Search by name...",
     "noCardsFound": "No cards found",
     "buttonSubtitle": "Select one option",
@@ -2443,6 +2454,7 @@
     "cardFallback": "Card",
     "title": "Put {{name}} on top or bottom of library",
     "top": "Top of library",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "Bottom of library"
   },
   "mutateMerge": {

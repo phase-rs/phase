@@ -648,6 +648,9 @@
   },
   "zone": {
     "commandZone": "Strefa dowodzenia",
+    "conspiracy": "Spisek",
+    "conspiracyTitle": "Spisek: {{name}}",
+    "turnFaceUp": "Obróć {{name}} odkrytą stroną do góry",
     "emblem": "Emblemat",
     "emblemFallback": "Emblemat",
     "commander": "Dowódca",
@@ -2132,13 +2135,18 @@
   "freeCastWindow": {
     "eyebrow": "Darmowe rzucenie",
     "title": "Rzuć czar za darmo",
+    "titlePlay": "Zagraj karty za darmo",
     "subtitle": "Wybierz czar do rzucenia bez płacenia jego kosztu many (pozostało: {{remaining}}). Pozostała łączna wartość many: {{budget}}.",
     "subtitleNoBudget": "Wybierz czar do rzucenia bez płacenia jego kosztu many (pozostało: {{remaining}}).",
+    "subtitlePlay": "Wybierz ląd do zagrania lub czar do rzucenia bez płacenia jego kosztu many (pozostało: {{remaining}}). Pozostała łączna wartość many: {{budget}}.",
+    "subtitleNoBudgetPlay": "Wybierz ląd do zagrania lub czar do rzucenia bez płacenia jego kosztu many (pozostało: {{remaining}}).",
     "remainingAny": "dowolna liczba",
     "castNamed": "Rzuć {{name}}",
+    "playNamed": "Zagraj {{name}}",
     "castSuffix": "(bez płacenia jego kosztu many)",
     "done": "Gotowe",
-    "doneSuffix": "(przestań rzucać czary w ten sposób)"
+    "doneSuffix": "(przestań rzucać czary w ten sposób)",
+    "doneSuffixPlay": "(przestań zagrywać karty w ten sposób)"
   },
   "castingVariant": {
     "eyebrow": "Rzuć",
@@ -2221,7 +2229,8 @@
     "unitDamage": "obrażeń",
     "unitLife": "życia",
     "title": "Rozdziel {{total}} {{unit}}",
-    "subtitle": "Przydziel co najmniej 1 {{unit}} każdemu celowi. Pozostało: {{remaining}}"
+    "subtitle": "Przydziel co najmniej 1 {{unit}} każdemu celowi. Pozostało: {{remaining}}",
+    "subtitleAnyNumber": "Przydziel co najmniej 1 {{unit}} każdemu wybranemu, spośród dowolnej ich liczby. Pozostało: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Wybierz loch",
@@ -2307,6 +2316,8 @@
       "fallback": "Dokonaj wyboru"
     },
     "searchSubtitle": "Pisz, aby przeszukać wszystkie karty",
+    "secretAgendaTitle": "Potajemnie nazwij kartę ({{current}} z {{total}})",
+    "secretAgendaSubtitle": "Ukryte, dopóki nie odwrócisz tego spisku awersem do góry",
     "searchPlaceholder": "Szukaj po nazwie...",
     "noCardsFound": "Nie znaleziono kart",
     "buttonSubtitle": "Wybierz jedną opcję",
@@ -2405,6 +2416,7 @@
     "cardFallback": "Karta",
     "title": "Umieść {{name}} na wierzchu lub spodzie biblioteki",
     "top": "Wierzch biblioteki",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "Spód biblioteki"
   },
   "mutateMerge": {

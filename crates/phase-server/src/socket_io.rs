@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use server_core::game_state_snapshot_wire_guard::guard_frame_bytes;
@@ -935,25 +936,23 @@ impl ConnectionEncoder {
         // A mailbox-local resync response forces FULL.
         let resync = envelope.state_encoding.resync();
         let is_server_hello = matches!(&envelope.message, ServerMessage::ServerHello { .. });
-        let legacy_frame_type = match &envelope.message {
-            ServerMessage::GameStarted { .. } => WsFrameType::GameStarted,
-            ServerMessage::StateUpdate { .. } => WsFrameType::StateUpdate,
-            _ => WsFrameType::Other,
+        let legacy_frame_type = match state_frame(&envelope.message) {
+            StateFrame::GameStarted { .. } => WsFrameType::GameStarted,
+            StateFrame::StateUpdate { .. } => WsFrameType::StateUpdate,
+            StateFrame::Export | StateFrame::NonState => WsFrameType::Other,
         };
         let projected = match self {
             Self::Legacy => None,
-            Self::Codec(delivered) => match &envelope.message {
-                ServerMessage::GameStarted {
+            Self::Codec(delivered) => match state_frame(&envelope.message) {
+                StateFrame::GameStarted {
                     full_key,
                     state_revision,
                     state,
-                    ..
                 }
-                | ServerMessage::StateUpdate {
+                | StateFrame::StateUpdate {
                     full_key,
                     state_revision,
                     state,
-                    ..
                 } => {
                     let full_key = full_key.as_ref().ok_or_else(|| {
                         EncodingFailure::Transport("codec state is missing FullSessionKey".into())
@@ -963,9 +962,9 @@ impl ConnectionEncoder {
                             "codec state is missing viewer_projection".into(),
                         )
                     })?;
-                    Some((delivered, full_key, viewer, *state_revision))
+                    Some((delivered, full_key, viewer, state_revision))
                 }
-                _ => None,
+                StateFrame::Export | StateFrame::NonState => None,
             },
         };
         let json = serde_json::to_string(envelope).map_err(|error| {
@@ -1040,6 +1039,107 @@ enum EncodingFailure {
     OverBound(String),
 }
 
+/// Every `ServerMessage` variant, classified once.
+///
+/// Exhaustive on purpose: a new state-bearing variant fails to compile here
+/// instead of silently taking the legacy/JSON path. `Export` is state-bearing for
+/// the executor's CPU lane but is not codec-eligible (module contract above).
+enum StateFrame<'a> {
+    GameStarted {
+        full_key: &'a Option<FullSessionKey>,
+        state_revision: u64,
+        state: &'a GameState,
+    },
+    StateUpdate {
+        full_key: &'a Option<FullSessionKey>,
+        state_revision: u64,
+        state: &'a GameState,
+    },
+    Export,
+    NonState,
+}
+
+fn state_frame(message: &ServerMessage) -> StateFrame<'_> {
+    match message {
+        ServerMessage::GameStarted {
+            full_key,
+            state_revision,
+            state,
+            ..
+        } => StateFrame::GameStarted {
+            full_key,
+            state_revision: *state_revision,
+            state,
+        },
+        ServerMessage::StateUpdate {
+            full_key,
+            state_revision,
+            state,
+            ..
+        } => StateFrame::StateUpdate {
+            full_key,
+            state_revision: *state_revision,
+            state,
+        },
+        ServerMessage::AuthoritativeStateExport { .. } => StateFrame::Export,
+        ServerMessage::ManaPaymentPreview { .. } => StateFrame::NonState,
+        ServerMessage::InteractionPreview { .. } => StateFrame::NonState,
+        ServerMessage::ServerHello { .. }
+        | ServerMessage::GameCreated { .. }
+        | ServerMessage::SessionAttached { .. }
+        | ServerMessage::ActionRejected { .. }
+        | ServerMessage::ActionFailed { .. }
+        | ServerMessage::RequestRejected { .. }
+        | ServerMessage::ActionNoOp
+        | ServerMessage::StateWithheld { .. }
+        | ServerMessage::GameAbandoned { .. }
+        | ServerMessage::ManaPaymentPreviewRejected { .. }
+        | ServerMessage::ManaPaymentPreviewFailed { .. }
+        | ServerMessage::AuthoritativeStateExportFailed { .. }
+        | ServerMessage::InteractionPreviewFailed { .. }
+        | ServerMessage::OpponentDisconnected { .. }
+        | ServerMessage::OpponentReconnected { .. }
+        | ServerMessage::GameOver { .. }
+        | ServerMessage::AiDriverFault { .. }
+        | ServerMessage::TerminalBootstrapResult { .. }
+        | ServerMessage::TerminalResult { .. }
+        | ServerMessage::TerminalDeliveryAcknowledged { .. }
+        | ServerMessage::Error { .. }
+        | ServerMessage::LobbyUpdate { .. }
+        | ServerMessage::LobbyGameAdded { .. }
+        | ServerMessage::LobbyGameUpdated { .. }
+        | ServerMessage::LobbyGameRemoved { .. }
+        | ServerMessage::PlayerCount { .. }
+        | ServerMessage::PasswordRequired { .. }
+        | ServerMessage::JoinTargetInfo { .. }
+        | ServerMessage::PlayerSlotsUpdate { .. }
+        | ServerMessage::Conceded { .. }
+        | ServerMessage::Emote { .. }
+        | ServerMessage::ContestProgress { .. }
+        | ServerMessage::TimerUpdate { .. }
+        | ServerMessage::Pong { .. }
+        | ServerMessage::PeerInfo { .. }
+        | ServerMessage::DraftCreated { .. }
+        | ServerMessage::DraftJoined { .. }
+        | ServerMessage::DraftStateUpdate { .. }
+        | ServerMessage::DraftMatchStart { .. }
+        | ServerMessage::DraftTimerSync { .. }
+        | ServerMessage::DraftActionRejected { .. }
+        | ServerMessage::DraftOver { .. }
+        | ServerMessage::DraftSpectatorView { .. }
+        | ServerMessage::TakebackRequested { .. }
+        | ServerMessage::TakebackResolved { .. }
+        | ServerMessage::TournamentCreated { .. }
+        | ServerMessage::TournamentJoined { .. }
+        | ServerMessage::TournamentUpdate { .. }
+        | ServerMessage::TournamentRemoved { .. }
+        | ServerMessage::TournamentListUpdate { .. }
+        | ServerMessage::TournamentActionAck { .. }
+        | ServerMessage::TournamentActionRejected { .. }
+        | ServerMessage::TournamentCredentialRenewed { .. } => StateFrame::NonState,
+    }
+}
+
 /// Encodes one envelope, replacing it while its frame exceeds `max_frame_bytes`;
 /// the first over-bound reason comes back with the frame actually sent.
 async fn encode_application(
@@ -1049,12 +1149,7 @@ async fn encode_application(
     encoding: Encoding,
     max_frame_bytes: usize,
 ) -> Result<EncodingOutcome, tokio::task::JoinError> {
-    let state_bearing = matches!(
-        &message.message,
-        ServerMessage::StateUpdate { .. }
-            | ServerMessage::GameStarted { .. }
-            | ServerMessage::AuthoritativeStateExport { .. }
-    );
+    let state_bearing = !matches!(state_frame(&message.message), StateFrame::NonState);
     let encode = move || {
         let prepared = encoder.prepare_bounded(message, encoding, max_frame_bytes);
         EncodingOutcome { encoder, prepared }

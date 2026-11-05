@@ -56,6 +56,7 @@ use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
+use std::sync::LazyLock;
 use strum::IntoEnumIterator;
 
 const TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL: &str =
@@ -803,6 +804,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::TriggeringSourceController => "triggering source's controller".into(),
         TargetFilter::TriggeringPlayer => "triggering player".into(),
         TargetFilter::TriggeringSource => "triggering source".into(),
+        TargetFilter::CastingSpell => "the spell being cast".into(),
         TargetFilter::EventTarget => "object targeted by the triggering event".into(),
         TargetFilter::EventTargetController => {
             "controller of the object targeted by the triggering event".into()
@@ -993,7 +995,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     crate::types::ability::ParitySource::Fixed(parity) => {
                         format!("{parity:?} mana value").to_lowercase()
                     }
-                    crate::types::ability::ParitySource::LastNamedChoice => {
+                    crate::types::ability::ParitySource::LastNamedChoice
+                    | crate::types::ability::ParitySource::SourceChosen => {
                         "chosen odd/even mana value".to_string()
                     }
                 };
@@ -2803,6 +2806,7 @@ fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
                             "designated for an owner-library shuffle"
                         }
                         ThisWayCause::Discarded => "discarded",
+                        ThisWayCause::Tapped => "tapped",
                         ThisWayCause::Exiled => "exiled",
                         ThisWayCause::Milled => "milled",
                         ThisWayCause::Destroyed => "destroyed",
@@ -4281,9 +4285,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("arranger".into(), fmt_target(arranger)));
             }
         }
-        Effect::PutOnTopOrBottom { target, chooser } => {
+        Effect::PutOnTopOrBottom {
+            target,
+            chooser,
+            top_position,
+        } => {
             d.push(("target".into(), fmt_target(target)));
             d.push(("chooser".into(), fmt_target(chooser)));
+            if !top_position.is_top() {
+                d.push(("top_position".into(), format!("{top_position:?}")));
+            }
         }
         Effect::Amass {
             subtype,
@@ -5264,6 +5275,9 @@ fn fmt_attack_target_filter(filter: &crate::types::triggers::AttackTargetFilter)
         // CR 725.1: the monarch is a player designation, and no player is the
         // monarch until an effect creates one.
         ATF::Monarch => "the monarch",
+        // CR 508.6: the source's own attack history, so the label names the
+        // history rather than a player class the card does not print.
+        ATF::PlayerAttackedBySourceThisTurn => "a player it has already attacked this turn",
     }
 }
 
@@ -6905,6 +6919,17 @@ fn token_pt_provenance_has_no_materialization_gap(
     ) && !token_rules_text_unparsed_gap(preset, materialized)
 }
 
+/// The token-catalog coverage summary, computed once per process.
+///
+/// Its only inputs are the compiled-in token catalog ([`known_token_presets`])
+/// and the pure Oracle parser, so the summary is a process-wide constant that
+/// does not depend on the `CardDatabase` being analyzed. Deriving it re-parses
+/// every catalog preset's rules text (~1.5k lines), which dominated each
+/// [`analyze_coverage`] call: ~20s per call in an unoptimized build against
+/// microseconds for a one-card database, so a test that analyzes N one-card
+/// databases paid the catalog parse N times.
+static TOKEN_COVERAGE: LazyLock<TokenCoverageSummary> = LazyLock::new(analyze_token_coverage);
+
 fn analyze_token_coverage() -> TokenCoverageSummary {
     let mut summary = TokenCoverageSummary::default();
     let mut gap_accumulators: BTreeMap<String, (usize, usize, Vec<String>)> = BTreeMap::new();
@@ -7597,7 +7622,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         supported_cards,
         coverage_pct,
         keyword_count,
-        token_coverage: analyze_token_coverage(),
+        token_coverage: TOKEN_COVERAGE.clone(),
         coverage_by_format,
         coverage_by_set,
         cards,
@@ -12772,6 +12797,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("losing unspent mana")
                     && effective_lower.contains("causes that player to lose that much life")
             }
+            // CR 705.3: Edgar's Two-Headed Coin. Anchor on both the window and
+            // the indicated result so an unrelated flip line can't false-match.
+            StaticMode::WinFirstCoinFlipSetEachTurn => {
+                effective_lower.contains("the first time you flip one or more coins each turn")
+                    && effective_lower.contains("come up heads and you win those flips")
+            }
             StaticMode::CanAttackWithDefender => {
                 effective_lower.contains("as though it didn't have defender")
             }
@@ -16623,13 +16654,14 @@ mod tests {
             AttackTargetFilter::OwnerOrPlaneswalker,
             AttackTargetFilter::PlayerOrPermanents,
             AttackTargetFilter::Monarch,
+            AttackTargetFilter::PlayerAttackedBySourceThisTurn,
         ]
         .iter()
         .map(fmt_attack_target_filter)
         .collect();
         assert_eq!(
             labels.len(),
-            8,
+            9,
             "every AttackTargetFilter variant must map to a distinct label: {labels:?}"
         );
     }
@@ -17991,7 +18023,7 @@ mod tests {
         //
         //     ./scripts/fetch-token-sets.sh   # populates the gitignored input
         //     cargo run --bin tokens-gen -- --input data/mtgjson/sets --output /tmp/kt.toml
-        //     cmp /tmp/kt.toml crates/engine/data/known-tokens.toml
+        //     cmp /tmp/kt.toml crates/phase-ast/data/known-tokens.toml
         assert_eq!(summary.supported_tokens, summary.total_tokens);
         assert_eq!(summary.parsed_rules_text_tokens, summary.rules_text_tokens);
         assert!(

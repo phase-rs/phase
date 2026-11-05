@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PersistedGameState } from "../../adapter/types";
-import { persistedGameStateView, supportsServerRewind } from "../../adapter/types";
+import { persistedGameStateView, supportsTurnRewind } from "../../adapter/types";
 import { audioManager } from "../../audio/AudioManager";
 import { restoreGameState } from "../../game/dispatch";
 import { usePlayerId } from "../../hooks/usePlayerId";
@@ -76,7 +76,7 @@ export function DebugPanel({
     && adapter?.exportPersistenceState !== undefined;
   // The transport, not the mode, decides whether a rollback request can be
   // bound to an authenticated session — same idiom as `supportsMatchConcede`.
-  const rewindAdapter = supportsServerRewind(adapter) ? adapter : null;
+  const rewindAdapter = supportsTurnRewind(adapter) ? adapter : null;
   const localPlayerId = usePlayerId();
   const [importText, setImportText] = useState("");
   const [status, setStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);

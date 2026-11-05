@@ -194,6 +194,7 @@ pub mod stickers;
 #[cfg(test)]
 #[path = "stickers_tests.rs"]
 mod stickers_tests;
+pub mod takeback;
 pub mod target_occurrences;
 pub mod targeting;
 pub mod text_substitution;

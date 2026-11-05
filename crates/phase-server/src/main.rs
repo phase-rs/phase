@@ -1,3 +1,6 @@
+// The auto-trait proof for im-backed game state held across the nested
+// Full-socket handler futures exceeds the default limit of 128.
+#![recursion_limit = "256"]
 mod admin;
 mod data_bootstrap;
 mod draft_pools;
@@ -104,13 +107,13 @@ use server_core::seat_mutation_wire_guard::guard_seat_mutation;
 use server_core::session::ActionResult;
 use server_core::session::{
     AiRunOutcome, AiTransition, CreateGameError, DecisionSnapshot, FullRuntime, GameSession,
-    HostingMode, PreviewRefusal, SessionActionError, SessionManager,
+    HandledAction, HostingMode, PreviewRefusal, SessionActionError, SessionManager,
 };
 use server_core::spectator_wire_guard::{
     guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,
     guard_spectator_join,
 };
-use server_core::takeback::RewindOption;
+use server_core::takeback::{RewindOption, TakebackOutcome, TakebackResolution};
 use std::borrow::Cow;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -7756,19 +7759,7 @@ impl DeckResolver for ServerDeckResolver<'_> {
         // that caused it. Validating here causes the reducer to return `Err`,
         // which phase-server then surfaces to the client.
         server_core::resolve_deck(self.db, &deck)?;
-        Ok(engine::game::deck_loading::PlayerDeckList {
-            main_deck: deck.main_deck,
-            sideboard: deck.sideboard,
-            commander: deck.commander,
-            companion: deck.companion,
-            planar_deck: deck.planar_deck,
-            scheme_deck: deck.scheme_deck,
-            attraction_deck: deck.attraction_deck,
-            contraption_deck: deck.contraption_deck,
-            sticker_sheets: deck.sticker_sheets,
-            signature_spell: deck.signature_spell,
-            bracket_tier: deck.bracket_tier,
-        })
+        Ok(engine::game::deck_loading::PlayerDeckList::from(deck))
     }
 }
 
@@ -8340,7 +8331,7 @@ async fn handle_contest_click(
 
 /// Broadcasts the result of an approved takeback (GH #1507): a `StateUpdate`
 /// carrying the rolled-back state to every seat, filtered per-player exactly
-/// like a normal action result, followed by `TakebackResolved { approved: true, .. }`.
+/// like a normal action result, followed by `TakebackResolved { resolution: approved, .. }`.
 /// `resolved_by` is the player whose response concluded the request, or
 /// `None` when it resolved naturally (e.g. the requester was the sole human).
 // Same shape as the sibling transport fan-outs at `:2010`/`:3767`/`:4071`:
@@ -8383,14 +8374,41 @@ async fn broadcast_takeback_approved(
                 }),
             };
             publisher.publish(&source);
-            publisher.notify_players(ServerMessage::TakebackResolved {
-                approved: true,
+            publisher.notify_players(takeback_resolved_message(
+                TakebackResolution::Approved,
                 resolved_by,
-            });
+            ));
             publisher
         })
         .await;
     publisher.finish(executor).await;
+}
+
+/// The wire notice for a resolved takeback vote.
+fn takeback_resolved_message(
+    resolution: TakebackResolution,
+    resolved_by: Option<PlayerId>,
+) -> ServerMessage {
+    ServerMessage::TakebackResolved {
+        resolution,
+        resolved_by,
+    }
+}
+
+/// A concession's takeback notice as `(before, after)` its state delivery: an
+/// approval follows the restored state it installed, as
+/// [`broadcast_takeback_approved`] orders it; any other resolution precedes
+/// the concession's state.
+fn concession_takeback_notices(
+    takeback: Option<TakebackResolution>,
+    conceding: PlayerId,
+) -> (Option<ServerMessage>, Option<ServerMessage>) {
+    let notice = takeback.map(|resolution| takeback_resolved_message(resolution, Some(conceding)));
+    if takeback == Some(TakebackResolution::Approved) {
+        (None, notice)
+    } else {
+        (notice, None)
+    }
 }
 
 /// What a Full-mode game socket submitted: a client-materialized `GameAction`,
@@ -8409,6 +8427,8 @@ enum GameSubmission {
 struct AppliedHumanSubmission {
     revision: u64,
     unpublished: Option<ActionResult>,
+    /// The takeback approval notice still owed after the unpublished result.
+    takeback_after: Option<ServerMessage>,
     publisher: game_executor::StateUpdatePublisher,
     ai: std::ops::ControlFlow<AiRunOutcome, server_core::session::AiRunCursor>,
 }
@@ -8659,6 +8679,7 @@ async fn handle_full_concession(
     context: &ServerContext,
     state: &SharedState,
     connections: &SharedConnections,
+    game_spectators: &SharedGameSpectators,
     draft_state: &SharedDraftState,
     game_db: &SharedGameDb,
     identity: &SocketIdentity,
@@ -8678,6 +8699,7 @@ async fn handle_full_concession(
         let _ = tx.send(message);
         return;
     };
+    let lock_start = Instant::now();
     let session = lock_session(state, &game_code).await.ok();
     let current = match session.as_deref() {
         Some(session) => {
@@ -8693,14 +8715,14 @@ async fn handle_full_concession(
         let (session, result) = context
             .game_executor
             .with_session(session, move |session| {
-                let (revision, result) = match scope {
+                let (revision, HandledAction { result, takeback }) = match scope {
                     ConcessionScope::Game => {
-                        let result = session.handle_action_with_card_db_outcome(
+                        let handled = session.handle_action_with_card_db_outcome(
                             &player_token,
                             GameAction::Concede { player_id: player },
                             None,
                         )?;
-                        (session.advance_state_revision(), result)
+                        (session.advance_state_revision(), handled)
                     }
                     ConcessionScope::Match => {
                         session.handle_match_concede_outcome(&player_token)?
@@ -8748,14 +8770,17 @@ async fn handle_full_concession(
                     .expect("authenticated concession retains its runtime")
                     .key
                     .clone();
+                let ai = (!ended).then(|| session.begin_ai_run());
                 Ok::<_, SessionActionError>((
                     revision,
                     result,
+                    takeback,
                     winner,
                     terminal,
                     session.rewind_options(),
                     full_key,
                     session.player_count,
+                    ai,
                 ))
             })
             .await;
@@ -8765,20 +8790,64 @@ async fn handle_full_concession(
             FULL_SOCKET_AUTHORITY_REJECTION.to_string(),
         ))
     };
-    let (lease, (revision, result, winner, terminal, rewinds, full_key, player_count)) =
-        match result {
-            Ok(result) => result,
-            Err(error) => {
-                let message = match (scope, error) {
-                    (ConcessionScope::Game, SessionActionError::Operational(message)) => {
-                        ServerMessage::ActionFailed { message }
-                    }
-                    (_, error) => session_action_error_message(error),
-                };
-                let _ = tx.send(message);
-                return;
+    let (
+        lease,
+        (revision, result, takeback, winner, terminal, rewinds, full_key, player_count, ai),
+    ) = match result {
+        Ok(result) => result,
+        Err(error) => {
+            let message = match (scope, error) {
+                (ConcessionScope::Game, SessionActionError::Operational(message)) => {
+                    ServerMessage::ActionFailed { message }
+                }
+                (_, error) => session_action_error_message(error),
+            };
+            let _ = tx.send(message);
+            return;
+        }
+    };
+    let ai_fault = match ai {
+        Some(ControlFlow::Continue(cursor)) => {
+            let publisher = game_executor::StateUpdatePublisher::capture(
+                connections,
+                Some(game_spectators),
+                full_key,
+                player_count,
+                Vec::new(),
+                Vec::new(),
+            )
+            .await;
+            let (takeback_before, takeback_after) = concession_takeback_notices(takeback, player);
+            if let Some(notice) = takeback_before {
+                publisher.notify_players(notice);
             }
-        };
+            let after_human = takeback_after
+                .into_iter()
+                .chain([ServerMessage::Conceded { player }])
+                .collect();
+            finish_full_ai_continuation(
+                lease,
+                ControlFlow::Continue(cursor),
+                result,
+                revision,
+                publisher,
+                after_human,
+                &tx.for_completion(None),
+                &context.game_executor,
+                state,
+                draft_state,
+                connections,
+                game_db,
+                game_code,
+                "concede",
+                lock_start,
+            )
+            .await;
+            return;
+        }
+        Some(ControlFlow::Break(outcome)) => outcome.fault,
+        None => None,
+    };
     // Terminal persistence is leaf I/O. Retain this game's publication lease
     // through retirement and fan-out, but release it before draft reporting.
     #[cfg(test)]
@@ -8800,7 +8869,7 @@ async fn handle_full_concession(
     let retire = !deliveries.is_empty() || matches!(scope, ConcessionScope::Match);
     let mut publisher = game_executor::StateUpdatePublisher::capture(
         connections,
-        None,
+        Some(game_spectators),
         full_key,
         player_count,
         result.0.eliminated_players.clone(),
@@ -8808,9 +8877,13 @@ async fn handle_full_concession(
     )
     .await;
     let code = game_code.clone();
+    let (takeback_before, takeback_after) = concession_takeback_notices(takeback, player);
     publisher = context
         .game_executor
         .run(move || {
+            if let Some(notice) = takeback_before {
+                publisher.notify_players(notice);
+            }
             let source = game_executor::StateUpdateSource::from_result(&result, revision);
             match source.guarded(&code) {
                 Ok(source) => publisher.publish(&source),
@@ -8823,6 +8896,9 @@ async fn handle_full_concession(
                     );
                 }
             }
+            if let Some(notice) = takeback_after {
+                publisher.notify_players(notice);
+            }
             if matches!(scope, ConcessionScope::Game) {
                 publisher.notify_players(ServerMessage::Conceded { player });
             }
@@ -8831,6 +8907,7 @@ async fn handle_full_concession(
         })
         .await;
     publisher.finish(&context.game_executor).await;
+    broadcast_ai_failure(connections, &game_code, ai_fault).await;
     drop(lease);
     if retire {
         report_draft_game_over(draft_state, connections, &game_code, winner).await;
@@ -8924,19 +9001,25 @@ async fn handle_full_game_submission(
     let persistence = game_db.clone();
     let persistence_executor = executor.clone();
     let code = game_code.clone();
+    let seat = identity
+        .player_id
+        .expect("the authority gate proved this seat");
     // The owned game guard spans admission waits, AI continuations and all
     // publication. Other games can use the CPU between these work units.
     let (session, applied) = executor
         .with_session(session, move |session| {
-            let result = match submission {
+            let HandledAction { result, takeback } = match submission {
                 GameSubmission::Action(action) => session.handle_action_with_card_db_outcome(
                     &player_token,
                     action,
                     Some(card_db.as_ref()),
                 ),
-                GameSubmission::Interaction(submission) => {
-                    session.handle_interaction_with_rejection(&player_token, submission)
-                }
+                GameSubmission::Interaction(submission) => session
+                    .handle_interaction_with_rejection(&player_token, submission)
+                    .map(|result| HandledAction {
+                        result,
+                        takeback: None,
+                    }),
             }?;
             if is_zero_count_debug_create {
                 return Ok(None);
@@ -8944,11 +9027,15 @@ async fn handle_full_game_submission(
             let revision = session.advance_state_revision();
             let ai = session.begin_ai_run();
             let mut publisher = publisher.expect("a non-noop submission captures its routes");
+            let (takeback_before, takeback_after) = concession_takeback_notices(takeback, seat);
+            if let Some(notice) = takeback_before {
+                publisher.notify_players(notice);
+            }
             let terminal = matches!(
                 &session.state.waiting_for,
                 engine::types::game_state::WaitingFor::GameOver { .. }
             );
-            let unpublished = if ai.is_break() && !terminal {
+            let (unpublished, takeback_after) = if ai.is_break() && !terminal {
                 // A short human-only transition and its projection share one CPU
                 // unit; an unrelated AI sequence cannot queue between them.
                 persist_full_session_async(&persistence_executor, &persistence, session);
@@ -8968,13 +9055,17 @@ async fn handle_full_game_submission(
                     session.rewind_options(),
                 );
                 publisher.publish(&source);
-                None
+                if let Some(notice) = takeback_after {
+                    publisher.notify_players(notice);
+                }
+                (None, None)
             } else {
-                Some(result)
+                (Some(result), takeback_after)
             };
             Ok::<_, SessionActionError>(Some(AppliedHumanSubmission {
                 revision,
                 unpublished,
+                takeback_after,
                 publisher,
                 ai,
             }))
@@ -8999,7 +9090,8 @@ async fn handle_full_game_submission(
     let AppliedHumanSubmission {
         revision,
         unpublished,
-        mut publisher,
+        takeback_after,
+        publisher,
         ai,
     } = applied;
     let Some(human_result) = unpublished else {
@@ -9012,6 +9104,47 @@ async fn handle_full_game_submission(
         drop(session);
         return;
     };
+    finish_full_ai_continuation(
+        session,
+        ai,
+        human_result,
+        revision,
+        publisher,
+        takeback_after.into_iter().collect(),
+        &reply,
+        executor,
+        state,
+        draft_state,
+        connections,
+        game_db,
+        game_code,
+        kind,
+        lock_start,
+    )
+    .await;
+}
+
+/// Runs the AI continuation of a human transition whose publication waited on
+/// it, then publishes the human result, `after_human`, the AI transitions and
+/// any terminal delivery under the same game lease.
+#[allow(clippy::too_many_arguments)]
+async fn finish_full_ai_continuation(
+    session: OwnedMutexGuard<GameSession>,
+    ai: ControlFlow<AiRunOutcome, server_core::session::AiRunCursor>,
+    human_result: ActionResult,
+    revision: u64,
+    mut publisher: game_executor::StateUpdatePublisher,
+    after_human: Vec<ServerMessage>,
+    reply: &crate::socket_mailbox::Completion<'_>,
+    executor: &game_executor::GameExecutor,
+    state: &SharedState,
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    game_db: &SharedGameDb,
+    game_code: String,
+    kind: &'static str,
+    lock_start: Instant,
+) {
     let (session, ai) = match ai {
         std::ops::ControlFlow::Break(outcome) => (session, outcome),
         std::ops::ControlFlow::Continue(cursor) => executor.continue_ai(session, cursor).await,
@@ -9094,6 +9227,9 @@ async fn handle_full_game_submission(
                         "action snapshot exceeds broadcast bounds; not published"
                     );
                 }
+            }
+            for notice in after_human {
+                publisher.notify_players(notice);
             }
             publisher
         })
@@ -10285,7 +10421,7 @@ async fn handle_client_message(
                     // An absent game keeps this arm's own message, so
                     // `lock_session`'s refusal is discarded.
                     match lock_session(state, game_code).await.ok() {
-                        Some(session) if session.hosting == HostingMode::SingleUser => {
+                        Some(session) if session.hosting() == HostingMode::SingleUser => {
                             context
                                 .game_executor
                                 .with_session(session, |session| {
@@ -11666,6 +11802,7 @@ async fn handle_client_message(
                 context,
                 state,
                 connections,
+                game_spectators,
                 draft_state,
                 game_db,
                 identity,
@@ -11680,6 +11817,7 @@ async fn handle_client_message(
                 context,
                 state,
                 connections,
+                game_spectators,
                 draft_state,
                 game_db,
                 identity,
@@ -11727,13 +11865,16 @@ async fn handle_client_message(
                 .with_session(guard, move |session| {
                     let outcome = session.request_takeback(player_id, target.unwrap_or_default());
                     let requested = session.pending_takeback_message();
-                    let snapshot = matches!(outcome, Ok(server_core::TakebackOutcome::Approved))
-                        .then(|| {
-                            (
-                                session.advance_state_revision(),
-                                session.current_broadcast_snapshot(),
-                            )
-                        });
+                    let snapshot = matches!(
+                        outcome,
+                        Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
+                    )
+                    .then(|| {
+                        (
+                            session.advance_state_revision(),
+                            session.current_broadcast_snapshot(),
+                        )
+                    });
                     (outcome, requested, session.player_count, snapshot)
                 })
                 .await;
@@ -11784,7 +11925,7 @@ async fn handle_client_message(
                     let msg = ServerMessage::RequestRejected { reason };
                     let _ = socket.enqueue_reply(msg);
                 }
-                Ok(server_core::TakebackOutcome::Pending) => {
+                Ok(TakebackOutcome::Pending) => {
                     info!(game = %game_code, player = ?player_id, "takeback requested");
                     if let Some(msg) = requested_msg {
                         let conns = connections.lock().await;
@@ -11795,8 +11936,8 @@ async fn handle_client_message(
                         }
                     }
                 }
-                Ok(server_core::TakebackOutcome::Approved) => {
-                    info!(game = %game_code, player = ?player_id, "takeback auto-approved (sole human seat)");
+                Ok(TakebackOutcome::Resolved(TakebackResolution::Approved)) => {
+                    info!(game = %game_code, player = ?player_id, "takeback auto-approved (no voter to ask)");
                     let (state_revision, snapshot) =
                         approved_snapshot.expect("Approved outcome always computes a snapshot");
                     broadcast_takeback_approved(
@@ -11824,8 +11965,14 @@ async fn handle_client_message(
                     .await;
                     broadcast_ai_failure(connections, &game_code, ai_failure).await;
                 }
-                Ok(server_core::TakebackOutcome::Rejected) => {
-                    // request_takeback never returns Rejected — only respond_takeback does.
+                Ok(TakebackOutcome::Resolved(other)) => {
+                    let conns = connections.lock().await;
+                    if let Some(players) = conns.get(&game_code) {
+                        let msg = takeback_resolved_message(other, Some(player_id));
+                        for sender in players.values() {
+                            let _ = sender.send(msg.clone());
+                        }
+                    }
                 }
             }
             drop(guard);
@@ -11864,13 +12011,16 @@ async fn handle_client_message(
                 .game_executor
                 .with_session(guard, move |session| {
                     let outcome = session.respond_takeback(player_id, approve);
-                    let snapshot = matches!(outcome, Ok(server_core::TakebackOutcome::Approved))
-                        .then(|| {
-                            (
-                                session.advance_state_revision(),
-                                session.current_broadcast_snapshot(),
-                            )
-                        });
+                    let snapshot = matches!(
+                        outcome,
+                        Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
+                    )
+                    .then(|| {
+                        (
+                            session.advance_state_revision(),
+                            session.current_broadcast_snapshot(),
+                        )
+                    });
                     (outcome, session.player_count, snapshot)
                 })
                 .await;
@@ -11911,10 +12061,10 @@ async fn handle_client_message(
                     let msg = ServerMessage::RequestRejected { reason };
                     let _ = socket.enqueue_reply(msg);
                 }
-                Ok(server_core::TakebackOutcome::Pending) => {
+                Ok(TakebackOutcome::Pending) => {
                     info!(game = %game_code, player = ?player_id, approve, "takeback approval recorded");
                 }
-                Ok(server_core::TakebackOutcome::Approved) => {
+                Ok(TakebackOutcome::Resolved(TakebackResolution::Approved)) => {
                     info!(game = %game_code, player = ?player_id, "takeback unanimously approved");
                     let (state_revision, snapshot) =
                         approved_snapshot.expect("Approved outcome always computes a snapshot");
@@ -11943,14 +12093,11 @@ async fn handle_client_message(
                     .await;
                     broadcast_ai_failure(connections, &game_code, ai_failure).await;
                 }
-                Ok(server_core::TakebackOutcome::Rejected) => {
-                    info!(game = %game_code, player = ?player_id, "takeback declined");
+                Ok(TakebackOutcome::Resolved(other)) => {
+                    info!(game = %game_code, player = ?player_id, ?other, "takeback declined");
                     let conns = connections.lock().await;
                     if let Some(players) = conns.get(&game_code) {
-                        let msg = ServerMessage::TakebackResolved {
-                            approved: false,
-                            resolved_by: Some(player_id),
-                        };
+                        let msg = takeback_resolved_message(other, Some(player_id));
                         for sender in players.values() {
                             let _ = sender.send(msg.clone());
                         }
@@ -12009,10 +12156,10 @@ async fn handle_client_message(
                     info!(game = %game_code, player = ?player_id, "takeback request cancelled");
                     let conns = connections.lock().await;
                     if let Some(players) = conns.get(&game_code) {
-                        let msg = ServerMessage::TakebackResolved {
-                            approved: false,
-                            resolved_by: Some(player_id),
-                        };
+                        let msg = takeback_resolved_message(
+                            TakebackResolution::Cancelled,
+                            Some(player_id),
+                        );
                         for sender in players.values() {
                             let _ = sender.send(msg.clone());
                         }
@@ -16899,6 +17046,127 @@ mod issue_4548_full_create_tests {
         );
     }
 
+    /// Sends the Dandan empty-host-deck create of
+    /// `full_mode_create_accepts_an_empty_host_deck_for_dandan`, with
+    /// `data.deck.printings` replaced by `printings`, as one text frame through a real
+    /// socket to a Full-mode server, and returns the server's reply.
+    async fn create_with_printings(printings: serde_json::Value) -> ServerMessage {
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("connect");
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::ServerHello { .. }
+            ));
+            let hello = ClientMessage::ClientHello {
+                client_version: env!("CARGO_PKG_VERSION").to_string(),
+                build_commit: build_commit().to_string(),
+                protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
+            };
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&hello).expect("hello json").into(),
+                ))
+                .await
+                .expect("send hello");
+            let create = ClientMessage::CreateGameWithSettings {
+                deck: empty_deck(),
+                display_name: "Alice".to_string(),
+                public: true,
+                password: None,
+                timer_seconds: None,
+                player_count: 2,
+                match_config: Default::default(),
+                ai_seats: Vec::new(),
+                format_config: Some(engine::types::format::FormatConfig::dandan()),
+                room_name: None,
+                host_peer_id: None,
+                draft_metadata: None,
+                start_when_full: true,
+                ranked: false,
+                requested_code: None,
+                booster_pack_pool: None,
+            };
+            let mut frame = serde_json::to_value(&create).expect("create value");
+            frame["data"]["deck"]["printings"] = printings;
+            let frame = frame.to_string();
+            assert!(frame.len() <= MAX_WS_MESSAGE_BYTES);
+            socket
+                .send(WsMessage::Text(frame.into()))
+                .await
+                .expect("send create");
+            recv_server_message(&mut socket).await
+        })
+        .await;
+        server.abort();
+        result.expect("full-mode create with printings timed out")
+    }
+
+    /// P2-V5 (N1): more than the entry cap of raw elements, all of them malformed
+    /// (so lenient decoding would drop every one), is refused at decode time through
+    /// the native `#[serde(flatten)]` envelope, with the reply naming the field.
+    #[tokio::test]
+    async fn full_mode_create_refuses_a_sidecar_over_the_entry_cap() {
+        let reply = create_with_printings(serde_json::json!(vec![0; 2049])).await;
+        let ServerMessage::Error { message, .. } = reply else {
+            panic!("expected an error, got {reply:?}");
+        };
+        assert!(
+            message.contains("printings must contain at most 2048 entries"),
+            "{message}"
+        );
+    }
+
+    /// P2-V5 (N2): an in-count sidecar with an oversized string is refused by the
+    /// server guard, naming the field.
+    #[tokio::test]
+    async fn full_mode_create_refuses_an_oversized_sidecar_name() {
+        let printings = serde_json::json!([{
+            "section": "main_deck",
+            "name": "x".repeat(257),
+            "count": 1,
+            "printing": { "set_code": "M21", "collector_number": "1" },
+        }]);
+        let reply = create_with_printings(printings).await;
+        let ServerMessage::Error { message, .. } = reply else {
+            panic!("expected an error, got {reply:?}");
+        };
+        assert!(message.contains("deck.printings[0].name"), "{message}");
+    }
+
+    /// P2-V5 (N3): a sidecar of merely invalid annotations plus one valid element
+    /// is admitted; the same create without the sidecar is accepted at base.
+    #[tokio::test]
+    async fn full_mode_create_admits_a_sidecar_of_invalid_annotations() {
+        let printings = serde_json::json!([
+            { "section": "main_deck", "name": "Plains", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "mystery_zone", "name": "Plains", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            0,
+            { "section": "main_deck", "name": "Plains", "count": "one",
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "", "count": 1,
+              "printing": { "set_code": "", "collector_number": "" } },
+            { "section": "main_deck", "name": "Bad\nName", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "No Such Card Anywhere", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "Plains", "count": 0,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+        ]);
+        let reply = create_with_printings(printings).await;
+        assert!(
+            matches!(reply, ServerMessage::GameCreated { .. }),
+            "expected GameCreated, got {reply:?}"
+        );
+    }
+
     #[tokio::test]
     async fn full_mode_accepts_native_multi_ai_setup_larger_than_eight_kib() {
         let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
@@ -20458,7 +20726,7 @@ mod game_submission_tests {
 
     fn oversized_submission() -> InteractionSubmission {
         submission(InteractionResponse::Text {
-            value: "x".repeat(MAX_INTERACTION_STRING_LEN + 1),
+            values: vec!["x".repeat(MAX_INTERACTION_STRING_LEN + 1)],
         })
     }
 
@@ -22120,6 +22388,7 @@ mod handshake_tests {
                 seat: 0,
                 main_deck: vec![],
                 commanders: vec![],
+                printings: vec![],
             },
             draft_core::types::DraftAction::ReportMatchResult {
                 match_id: "m1".into(),
