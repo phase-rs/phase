@@ -4525,11 +4525,26 @@ pub(crate) fn parse_cast_this_way_enters_with_counter(lower: &str) -> Option<(Co
     .parse(lower)
     .map(|(rest, _)| rest)
     .unwrap_or(lower);
-    // Anaphoric subject for the spell just granted casting permission.
+    // Anaphoric subject for the spell just granted casting permission: "that"
+    // + the permission's printed type noun phrase, which may stack several
+    // card types (CR 205.2b, "that artifact creature enters with …": Overflow
+    // Submatrix) or name the generic "permanent".
+    let anaphoric_type_noun = separated_list1(
+        tag::<_, _, OracleError<'_>>(" "),
+        alt((
+            value((), nom_primitives::parse_core_type),
+            value((), tag("permanent")),
+        )),
+    );
     let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("that creature enters with "),
-        tag("that permanent enters with "),
-        tag("that artifact enters with "),
+        value(
+            (),
+            (
+                tag::<_, _, OracleError<'_>>("that "),
+                anaphoric_type_noun,
+                tag(" enters with "),
+            ),
+        ),
         // Self-granting permission (Undead Sprinter) refers to itself as "this
         // creature" in the printed Oracle text. The main parse pipeline
         // normalizes that phrase to the `~` self-reference token upstream
@@ -4540,11 +4555,11 @@ pub(crate) fn parse_cast_this_way_enters_with_counter(lower: &str) -> Option<(Co
         // the normalized and literal CR 201.5 self-reference forms must be
         // accepted here — distinct from the anaphoric "that creature" a
         // separate-source grant uses.
-        tag("~ enters with "),
-        tag("it enters with "),
-        tag("this creature enters with "),
-        tag("this permanent enters with "),
-        tag("this artifact enters with "),
+        value((), tag("~ enters with ")),
+        value((), tag("it enters with ")),
+        value((), tag("this creature enters with ")),
+        value((), tag("this permanent enters with ")),
+        value((), tag("this artifact enters with ")),
     ))
     .parse(lower)
     .ok()?;

@@ -57889,6 +57889,32 @@ fn cast_this_way_enters_with_counter_rider_is_counter_generic() {
     );
 }
 
+/// CR 205.2b: the anaphoric subject is "that" + the permission's printed type
+/// noun phrase, which may stack card types ("that artifact creature": Overflow
+/// Submatrix) or name "permanent". A non-type word after "that" is refused.
+#[test]
+fn cast_this_way_enters_with_counter_accepts_stacked_type_anaphor() {
+    for subject in [
+        "that creature",
+        "that artifact",
+        "that permanent",
+        "that artifact creature",
+        "that enchantment creature",
+    ] {
+        let text = format!(
+            "if you cast a spell this way, {subject} enters with a finality counter on it."
+        );
+        let (counter, rest) = parse_cast_this_way_enters_with_counter(&text)
+            .unwrap_or_else(|| panic!("{subject:?} anaphor should parse"));
+        assert_eq!(counter, CounterType::Finality, "{subject:?}");
+        assert_eq!(rest, ".", "{subject:?}");
+    }
+    assert!(parse_cast_this_way_enters_with_counter(
+        "if you cast a spell this way, that card enters with a finality counter on it."
+    )
+    .is_none());
+}
+
 /// Whole-card production-path parse: Osteomancer Adept's residual rider
 /// sentence must surface as an `AddPendingETBCounters { finality }`
 /// sub-ability on the activated `CastFromZone`, not `Unimplemented`.
