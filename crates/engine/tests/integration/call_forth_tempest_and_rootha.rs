@@ -307,6 +307,9 @@ fn call_forth_each_opponent_fanout_uses_original_controller_journal() {
             &object,
             Zone::Hand,
             CastingVariant::Normal,
+            // A hand-built case object carries no announced ability, so it declares no
+            // target.
+            &[],
         )
         .expect("seed a hostile opponent journal through the ledger authority");
     }

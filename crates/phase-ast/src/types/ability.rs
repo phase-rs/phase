@@ -7409,9 +7409,15 @@ pub enum FilterProp {
     TargetsOnly {
         filter: Box<TargetFilter>,
     },
-    /// CR 115.9b: Matches stack entries that have at least one target satisfying the filter.
-    /// Used for "that targets ~", "that targets you", etc. (.any() semantics).
-    /// Contrast with TargetsOnly (CR 115.9c) which requires ALL targets to match (.all()).
+    /// CR 115.9 + CR 601.2c: Matches an object that has at least one declared target
+    /// satisfying the filter (.any() semantics). Read from a live stack entry's targets
+    /// in `filter::stack_entry_targets_satisfy` (CR 115.9b, the targets' current state)
+    /// and from a spell-cast record's committed targets in
+    /// `filter::spell_record_matches_property` (CR 115.9 selection-time, latched per
+    /// CR 400.7; CR 115.9b's current-state reading governs the live reader alone).
+    /// An empty declared list never matches on either path.
+    /// Contrast with TargetsOnly (CR 115.9c), which requires ALL targets to match
+    /// (.all()) and remains fail-closed on a spell-cast record.
     Targets {
         filter: Box<TargetFilter>,
     },

@@ -15743,6 +15743,9 @@ mod tests {
             PlayerId(0),
             &spell_obj,
             crate::types::game_state::CastingVariant::Normal,
+            // A hand-built case object carries no announced ability, so it declares no
+            // target.
+            &[],
         )
         .expect("test spell-cast ledger is valid");
 

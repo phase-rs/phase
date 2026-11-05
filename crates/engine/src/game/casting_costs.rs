@@ -121,6 +121,28 @@ pub(crate) fn commit_copy_cast(
     let origin = copy
         .cast_from_zone
         .unwrap_or(crate::types::zones::Zone::Exile);
+    // CR 707.12 + CR 601.2c: a cast copy's declared targets are the ones its
+    // announcement walk announced, and that walk's result is the copy's own
+    // stack entry — written by `finalize_copy_walk` / `open_copy_target_selection`
+    // before this call. No copy-cast caller holds the list directly; the entry
+    // is the only authority.
+    let entry = state
+        .stack
+        .iter()
+        .find(|entry| entry.id == copy_id)
+        .ok_or_else(|| {
+            EngineError::InvalidAction(format!("cast copy {copy_id:?} has no stack entry"))
+        })?;
+    // The empty below is provable, not a default: on this route the entry's ability is
+    // written from the copy's own spell ability (`effects::cast_copy_of_card::cast_one_copy`,
+    // and `finalize_copy_walk` for a walked announcement), so an entry whose `ability()` is
+    // `None` is a copy of a card with no spell ability — a cast that declared nothing,
+    // because the same ability is what a target walk reads a slot from. A *missing* entry is
+    // refused above, because no walk could have declared anything for it.
+    let declared = entry
+        .ability()
+        .map(declared_targets_in_chain)
+        .unwrap_or_default();
     events.push(GameEvent::SpellCast {
         card_id: copy.card_id,
         controller,
@@ -133,6 +155,7 @@ pub(crate) fn commit_copy_cast(
         &copy,
         origin,
         crate::types::game_state::CastingVariant::Normal,
+        &declared,
     )
     .map_err(finalized_spell_cast_ledger_error)?;
     // CR 707.12: a cast copy is a new object created for this cast, not the
@@ -14653,6 +14676,11 @@ fn finalize_cast_with_phyrexian_choices_inner(
         &obj,
         source_zone,
         casting_variant,
+        // CR 115.1 + CR 601.2c: `announced_targets` is `declared_targets_in_chain(&ability)`
+        // captured above, before `ability` moved into `stack_ability`; a placeholder
+        // cast (no ability) necessarily declares none, which is what
+        // `is_placeholder`'s `ability.targets.is_empty()` conjunct already encodes.
+        &announced_targets,
     )
     .map_err(finalized_spell_cast_ledger_error)?;
     stamp_cast_occurrence_on_stack_spell(state, object_id, occurrence, cast_card)?;

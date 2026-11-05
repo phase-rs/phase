@@ -3327,3 +3327,128 @@ fn mana_spent_source_snapshots_round_trip_and_stay_backward_compatible() {
     assert!(record.mana_spent_source_snapshots.is_empty());
     assert_eq!(record.name, "Grizzly Bears");
 }
+
+/// CR 115.1 + CR 601.2c + CR 400.7: `SpellCastRecord::targets` is the cast-history
+/// carrier for "a spell that targets [something]" answered after the spell left the
+/// stack. It is additive on the wire: a record that carries committed targets
+/// round-trips them intact, a record with none emits no key, and a payload that
+/// predates the field (no key) deserializes to an empty vector — which honestly
+/// means "cannot prove which targets were declared", never a vacuous match.
+#[test]
+fn cast_record_targets_round_trip_and_stay_backward_compatible() {
+    let target_id = ObjectId(78);
+    let populated = SpellCastRecord {
+        name: "Giant Growth".to_string(),
+        mana_value: 1,
+        targets: vec![
+            ActivationTargetFact::Object {
+                id: target_id,
+                lki: Box::new(LKISnapshot {
+                    name: "Grizzly Bears".to_string(),
+                    token_image_ref: None,
+                    power: Some(2),
+                    toughness: Some(2),
+                    base_power: Some(2),
+                    base_toughness: Some(2),
+                    mana_value: 2,
+                    controller: PlayerId(0),
+                    owner: PlayerId(0),
+                    card_types: vec![CoreType::Creature],
+                    subtypes: vec!["Bear".to_string()],
+                    supertypes: vec![],
+                    keywords: vec![],
+                    colors: vec![ManaColor::Green],
+                    chosen_attributes: vec![],
+                    counters: Default::default(),
+                    tapped: false,
+                    is_suspected: false,
+                    was_prepared: false,
+                    attachments: Vec::new(),
+                    intensity: 0,
+                }),
+            },
+            // The player axis carries no snapshot at all.
+            ActivationTargetFact::Player(PlayerId(1)),
+        ],
+        ..Default::default()
+    };
+
+    // (1) The populated record round-trips byte-stably through BOTH axes.
+    let populated_json = serde_json::to_string(&populated).expect("record serializes");
+    assert!(
+        populated_json.contains("targets"),
+        "a populated record emits the key"
+    );
+    let restored: SpellCastRecord =
+        serde_json::from_str(&populated_json).expect("populated record deserializes");
+    assert_eq!(
+        restored, populated,
+        "the committed targets survive the round-trip"
+    );
+    assert_eq!(restored.targets.len(), 2);
+    let ActivationTargetFact::Object { id, lki } = &restored.targets[0] else {
+        panic!("index 0 is an object fact");
+    };
+    assert_eq!(*id, target_id, "the object fact keeps its stable id");
+    assert_eq!(lki.name, "Grizzly Bears", "the latched snapshot survives");
+    assert_eq!(lki.power, Some(2));
+    assert_eq!(
+        restored.targets[1],
+        ActivationTargetFact::Player(PlayerId(1))
+    );
+    assert_eq!(
+        serde_json::to_string(&restored).expect("restored record reserializes"),
+        populated_json,
+        "reserialization is byte-identical"
+    );
+
+    // (2) An empty vector emits NO key (`skip_serializing_if = "Vec::is_empty"`).
+    let empty = SpellCastRecord {
+        name: "Grizzly Bears".to_string(),
+        ..Default::default()
+    };
+    let empty_json = serde_json::to_string(&empty).expect("empty record serializes");
+    assert!(
+        !empty_json.contains("\"targets\""),
+        "an empty committed-target vector is omitted from the wire"
+    );
+    // Positive reach guard: a sibling `skip_serializing_if` field on the SAME record
+    // still emits its key when set, so the omission above is attributable to
+    // `Vec::is_empty`, not to a serializer that dropped this record's keys.
+    let kicked_json = serde_json::to_string(&SpellCastRecord {
+        was_kicked: true,
+        ..Default::default()
+    })
+    .expect("kicked record serializes");
+    assert!(
+        kicked_json.contains("was_kicked"),
+        "the sibling cast-fact key is still emitted when set"
+    );
+
+    // (3) A payload that predates the field (no key at all) deserializes to an
+    // empty vector — the honest "cannot prove" reading, not a hard error.
+    let legacy: SpellCastRecord =
+        serde_json::from_str(&empty_json).expect("keyless payload deserializes");
+    assert!(
+        legacy.targets.is_empty(),
+        "a record predating the field carries no committed-target provenance"
+    );
+    // The same reading survives the full-game-state persistence path: a real
+    // `GameState` whose cast history holds a keyless record serializes and restores.
+    let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+    state.spells_cast_this_turn_by_player =
+        HashMap::from([(PlayerId(0), im::Vector::from(vec![empty.clone()]))]);
+    let persisted = PersistedGameState::capture(state);
+    let bytes = serde_json::to_string(&persisted).expect("persisted state serializes");
+    assert!(
+        !bytes.contains("\"targets\""),
+        "the empty vector is omitted from the persisted game state too"
+    );
+    let restored_state = serde_json::from_str::<PersistedGameState>(&bytes)
+        .expect("persisted state deserializes")
+        .into_game_state()
+        .expect("persisted state finalizes");
+    let record = &restored_state.spells_cast_this_turn_by_player[&PlayerId(0)][0];
+    assert!(record.targets.is_empty());
+    assert_eq!(record.name, "Grizzly Bears");
+}

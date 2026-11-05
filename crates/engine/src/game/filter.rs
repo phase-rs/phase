@@ -32,8 +32,8 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
 use crate::types::events::EventObjectSnapshot;
 use crate::types::game_state::{
-    AttackDeclarationRecord, CounterAddedRecord, DamageRecord, GameState, LKISnapshot,
-    ManaSpentSourceSnapshot, SpellCastRecord, StackEntryKind, TriggerSourceContext,
+    ActivationTargetFact, AttackDeclarationRecord, CounterAddedRecord, DamageRecord, GameState,
+    LKISnapshot, ManaSpentSourceSnapshot, SpellCastRecord, StackEntryKind, TriggerSourceContext,
     ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggeringObjectRef};
@@ -6265,6 +6265,48 @@ pub(crate) fn mana_spent_from_source(
         .any(|snapshot| mana_spent_source_matches(state, snapshot, source_filter, ctx))
 }
 
+/// CR 115.9 + CR 601.2c + CR 400.7: does ONE committed declared-target fact
+/// match `filter`, as that target was when it was committed? The single
+/// predicate both folds of this question share — the record matcher's `Targets`
+/// arm and the activation-side history reader — answered at CR 115.9's
+/// selection-time option and latched per CR 400.7.
+pub(crate) fn declared_target_fact_matches(
+    state: &GameState,
+    fact: &ActivationTargetFact,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    match fact {
+        ActivationTargetFact::Object { id, lki } => {
+            matches_target_filter_on_lki_snapshot(state, *id, lki, filter, ctx)
+        }
+        // CR 115.9b: a targeted player is still in the game unless they left it;
+        // the player axis has no snapshot to read.
+        ActivationTargetFact::Player(player) => player_matches_target_filter_in_state(
+            state,
+            filter,
+            *player,
+            ctx.source_controller,
+            Some(ctx.source_id),
+        ),
+    }
+}
+
+/// CR 115.9 + CR 601.2c + CR 400.7: existential over the committed declared
+/// targets — one matching target is sufficient, and any number of matching
+/// targets never multiplies the answer. An empty list declared nothing and
+/// cannot satisfy "targets [something]".
+pub(crate) fn declared_target_facts_match(
+    state: &GameState,
+    facts: &[ActivationTargetFact],
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    facts
+        .iter()
+        .any(|fact| declared_target_fact_matches(state, fact, filter, ctx))
+}
+
 /// CR 113.7 + CR 113.7a + CR 400.7: Evaluate a target filter against the last known
 /// information of an object that LEFT THE BATTLEFIELD, as the object it was
 /// there. Differs from [`matches_target_filter_on_lki_snapshot`] only in that
@@ -8243,7 +8285,9 @@ fn zone_change_record_matches_type_filter(
 /// `ManaSpentSourceSnapshot` LKI through the module's single LKI authority. The
 /// creature-type universe comes from that state, not from a caller-supplied
 /// slice. Every record-only property ignores the two new arguments, so no
-/// existing answer changes.
+/// existing answer changes. Threading that state and context is also what lets
+/// `FilterProp::Targets` answer from `SpellCastRecord::targets` (CR 115.1 +
+/// CR 601.2c) through the module's single LKI authority.
 #[allow(clippy::only_used_in_recursion)] // controller is checked in Typed branch for Opponent
 pub fn spell_record_matches_filter(
     record: &SpellCastRecord,
@@ -9049,6 +9093,13 @@ fn spell_record_matches_property(
         FilterProp::ManaSpentFromSource { source_filter } => {
             mana_spent_from_source(state, &record.mana_spent_source_snapshots, source_filter, ctx)
         }
+        // CR 115.1 + CR 601.2c: the record carries the cast's declared targets as the
+        // cast committed them, so "the first spell you cast … that targets [something]"
+        // is answered from that latched set (CR 115.9 selection-time reading), never by
+        // rescanning. CR 115.9b governs the live per-spell reader, not this one.
+        FilterProp::Targets { filter } => {
+            declared_target_facts_match(state, &record.targets, filter, ctx)
+        }
         // CR 708.4: A face-down spell is a real spell on the stack, not a
         // battlefield-only state — a morph/megamorph/disguise card cast face down
         // IS a face-down 2/2 creature spell (CR 702.37c / CR 702.168b). The record
@@ -9179,8 +9230,17 @@ fn spell_record_matches_property(
         // permanent — fail closed against the spell-cast snapshot.
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::Transformed
+        // CR 115.9c: "targets only" counts the number of DIFFERENT objects or
+        // players chosen when the spell was put on the stack, so a flat
+        // `record.targets` list cannot answer it: `.all()` over an empty list is
+        // vacuously true (the vacuous gate this module forbids on every path),
+        // and `.all()` over a non-empty list is the wrong predicate even with a
+        // non-empty guard — two distinct matching targets satisfy `.all()` yet
+        // are not "targets only", while the same target twice is "targets only"
+        // under CR 115.9c and satisfies `.all()` only by accident of repetition.
+        // A correct arm needs its own empty-list rule, its own distinct-count
+        // rule and a printed card proving both. Fail closed until then.
         | FilterProp::TargetsOnly { .. }
-        | FilterProp::Targets { .. }
         // CR 201.2: Source-/target-relative name predicates require
         // resolution context the spell-history scan doesn't currently plumb
         // — fail closed until a card forces that plumbing.
@@ -16159,6 +16219,8 @@ mod tests {
             spell_object_id: None,
             prepared_copy_source: None,
             mana_spent_source_snapshots: Vec::new(),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Vec::new(),
         };
         let filter = TargetFilter::Typed(
             TypedFilter::creature()
@@ -16272,6 +16334,8 @@ mod tests {
             spell_object_id: None,
             prepared_copy_source: None,
             mana_spent_source_snapshots: Vec::new(),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Vec::new(),
         };
         let non_x_record = SpellCastRecord {
             has_x_in_cost: false,
@@ -16451,6 +16515,8 @@ mod tests {
             spell_object_id: None,
             prepared_copy_source: None,
             mana_spent_source_snapshots: Vec::new(),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Vec::new(),
         };
         let exile_record = SpellCastRecord {
             from_zone: Zone::Exile,
@@ -24064,6 +24130,8 @@ mod tests {
                 spell_object_id: None,
                 prepared_copy_source: None,
                 mana_spent_source_snapshots: Vec::new(),
+                // A hand-built case record carries no announced cast, so it declares no target.
+                targets: Vec::new(),
             }
         };
 
@@ -24655,6 +24723,8 @@ mod tests {
             spell_object_id: None,
             prepared_copy_source: None,
             mana_spent_source_snapshots: Vec::new(),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Vec::new(),
         };
         let dragon_filter = make_subtype_filter("Dragon");
         let plains_filter = make_subtype_filter("Plains");

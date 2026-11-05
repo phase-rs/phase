@@ -4926,6 +4926,8 @@ fn record_one_spell_cast_this_turn(state: &mut GameState, player: PlayerId) {
             spell_object_id: None,
             prepared_copy_source: None,
             mana_spent_source_snapshots: Vec::new(),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Vec::new(),
         }]),
     );
 }
@@ -13075,6 +13077,8 @@ fn self_cost_reduction_applies_from_graveyard() {
                 spell_object_id: None,
                 prepared_copy_source: None,
                 mana_spent_source_snapshots: Vec::new(),
+                // A hand-built case record carries no announced cast, so it declares no target.
+                targets: Vec::new(),
             },
             crate::types::SpellCastRecord {
                 name: "Opt".to_string(),
@@ -13092,6 +13096,8 @@ fn self_cost_reduction_applies_from_graveyard() {
                 spell_object_id: None,
                 prepared_copy_source: None,
                 mana_spent_source_snapshots: Vec::new(),
+                // A hand-built case record carries no announced cast, so it declares no target.
+                targets: Vec::new(),
             },
         ]),
     );
@@ -31078,8 +31084,15 @@ fn per_turn_limit_all_players_blocks_after_one_cast() {
 
     // Record one spell cast (clone to avoid borrow conflict)
     let obj_clone = state.objects.get(&spell_id).unwrap().clone();
-    restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(0),
+        &obj_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
 
     // Now should be blocked
     let obj = state.objects.get(&spell_id).unwrap();
@@ -31099,10 +31112,24 @@ fn per_turn_limit_controller_scope_blocks_only_controller() {
     let spell_id = make_spell_obj(&mut state, PlayerId(0), false);
 
     let obj_clone = state.objects.get(&spell_id).unwrap().clone();
-    restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
-    restrictions::record_spell_cast(&mut state, PlayerId(1), &obj_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(0),
+        &obj_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(1),
+        &obj_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
 
     let obj = state.objects.get(&spell_id).unwrap();
     // Controller (P0) should be blocked
@@ -31124,10 +31151,24 @@ fn per_turn_limit_opponents_scope_blocks_only_opponents() {
     let spell_id = make_spell_obj(&mut state, PlayerId(0), false);
 
     let obj_clone = state.objects.get(&spell_id).unwrap().clone();
-    restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
-    restrictions::record_spell_cast(&mut state, PlayerId(1), &obj_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(0),
+        &obj_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(1),
+        &obj_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
 
     let obj = state.objects.get(&spell_id).unwrap();
     // Controller (P0) should NOT be blocked by their own "opponents" restriction
@@ -31154,8 +31195,15 @@ fn per_turn_limit_noncreature_filter_allows_creature_spells() {
     // Cast a noncreature spell first
     let nc_id = make_spell_obj(&mut state, PlayerId(0), false);
     let nc_clone = state.objects.get(&nc_id).unwrap().clone();
-    restrictions::record_spell_cast(&mut state, PlayerId(0), &nc_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(0),
+        &nc_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
 
     // Trying to cast another noncreature → blocked
     let nc_obj = state.objects.get(&nc_id).unwrap();
@@ -31189,14 +31237,28 @@ fn per_turn_limit_max_two_allows_second_cast() {
 
     // First cast OK
     let obj_clone = state.objects.get(&spell_id).unwrap().clone();
-    restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(0),
+        &obj_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
     let obj = state.objects.get(&spell_id).unwrap();
     assert!(!is_blocked_by_per_turn_cast_limit(&state, PlayerId(0), obj));
 
     // Second cast OK
-    restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(0),
+        &obj_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
 
     // Third cast → blocked
     let obj = state.objects.get(&spell_id).unwrap();
@@ -31226,8 +31288,15 @@ fn per_turn_limit_multiple_sources_strictest_wins() {
 
     // Record one spell cast
     let obj_clone = state.objects.get(&spell_id).unwrap().clone();
-    restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone, CastingVariant::Normal)
-        .expect("test spell-cast ledger is valid");
+    // A hand-built case object carries no announced ability, so it declares no target.
+    restrictions::record_spell_cast(
+        &mut state,
+        PlayerId(0),
+        &obj_clone,
+        CastingVariant::Normal,
+        &[],
+    )
+    .expect("test spell-cast ledger is valid");
 
     // Blocked: B's limit of 1 applies
     let obj = state.objects.get(&spell_id).unwrap();
@@ -31893,6 +31962,8 @@ fn first_qualified_spell_reducer_only_applies_to_first_matching_spell() {
             spell_object_id: None,
             prepared_copy_source: None,
             mana_spent_source_snapshots: Vec::new(),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Vec::new(),
         }]),
     );
 
@@ -32014,6 +32085,8 @@ fn first_x_spell_reducer_uses_x_filter_dynamic_counter_count_and_first_gate() {
             spell_object_id: None,
             prepared_copy_source: None,
             mana_spent_source_snapshots: Vec::new(),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Vec::new(),
         }]),
     );
 
@@ -32095,6 +32168,8 @@ fn opponent_first_noncreature_tax_uses_caster_history() {
             spell_object_id: None,
             prepared_copy_source: None,
             mana_spent_source_snapshots: Vec::new(),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Vec::new(),
         }]),
     );
 
@@ -53778,6 +53853,8 @@ fn convoke_query_before_record_unaffected_by_snapshot() {
             spell_object_id: None,
             prepared_copy_source: None,
             mana_spent_source_snapshots: Vec::new(),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Vec::new(),
         }]
         .into(),
     );
@@ -63162,5 +63239,672 @@ fn void_winnower_runtime_does_not_block_its_own_controller() {
     assert!(
         can_cast_object_now(&scenario.state, P0, even),
         "\"Your opponents can't cast\" never restricts the controller (CR 109.5)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cast-history declared-target provenance (CR 115.1 + CR 601.2c + CR 115.9).
+//
+// `SpellCastRecord::targets` carries the cast's committed declared targets, and
+// `filter::spell_record_matches_property`'s `FilterProp::Targets` arm answers them
+// through the module's single LKI authority. The record read is CR 115.9's
+// SELECTION-TIME option, latched per CR 400.7; CR 115.9b's current-state reading
+// governs the live per-spell reader alone.
+// ---------------------------------------------------------------------------
+
+/// `Typed(Creature)` — the inner filter a `FilterProp::Targets` qualifier carries
+/// (Head of the Class's "that targets a creature").
+fn a_creature_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::creature())
+}
+
+/// `FilterProp::Targets { Typed(Creature) }` as a property-bearing filter: an empty
+/// type-line constraint plus the property, which is exactly the filter shape a
+/// turn-history gate carries.
+fn targets_a_creature_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Targets {
+        filter: Box::new(a_creature_filter()),
+    }]))
+}
+
+/// The property-free control: `Typed(Card)`. Answers `true` for every real cast, so a
+/// `false` from the property above is attributable to the property and not to a
+/// rejected filter shape.
+fn any_card_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::card())
+}
+
+/// The recorded cast of `spell`, found by the stable id link.
+fn recorded_cast(state: &GameState, spell: ObjectId) -> &SpellCastRecord {
+    state
+        .spells_cast_this_turn_by_player
+        .values()
+        .flat_map(|records| records.iter())
+        .find(|record| record.spell_object_id == Some(spell))
+        .expect("reach: the committed cast is recorded in the turn history")
+}
+
+/// Pass priority until a non-priority prompt opens (the CR 707.12 copy walks).
+fn pass_to_next_prompt(runner: &mut crate::game::scenario::GameRunner) {
+    for _ in 0..32 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            return;
+        }
+        assert!(
+            !runner.state().stack.is_empty(),
+            "reach: the stack drained before a prompt opened"
+        );
+        runner
+            .act(crate::types::actions::GameAction::PassPriority)
+            .expect("pass priority");
+    }
+    panic!("no prompt opened");
+}
+
+/// R1 — CR 115.1 + CR 601.2c + CR 115.9: a cast that declared a MATCHING target is
+/// answered `true` by the record matcher from the latched fact set. Reverting the arm
+/// to the fail-closed group flips this assertion `true` → `false`.
+#[test]
+fn record_answers_declared_creature_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let growth = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Giant Growth",
+            true,
+            "Target creature gets +3/+3 until end of turn.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(growth).target_objects(&[bear]).commit();
+    let state = runner.state();
+
+    let record = recorded_cast(state, growth);
+    // Reach guard 1: the committed fact list is non-empty and names the bear.
+    assert_eq!(
+        record.targets.len(),
+        1,
+        "the cast recorded exactly one declared target"
+    );
+    assert!(
+        matches!(
+            &record.targets[0],
+            crate::types::game_state::ActivationTargetFact::Object { id, .. } if *id == bear
+        ),
+        "the recorded fact names the declared target"
+    );
+    // Reach guard 2: the property-free control answers true on the same record.
+    let ctx = crate::game::filter::FilterContext::neutral();
+    assert!(
+        crate::game::filter::spell_record_matches_filter(
+            record,
+            &any_card_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "reach: the record matches a property-free filter, so the matcher accepted the record"
+    );
+    assert!(
+        crate::game::filter::spell_record_matches_filter(
+            record,
+            &targets_a_creature_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "CR 115.9 selection-time: the record answers `targets a creature` from its latched set"
+    );
+}
+
+/// R2 — a cast that declared ONLY non-matching targets answers `false`, with a
+/// non-empty reach guard so the `false` is the matcher's and not the empty-vector
+/// degenerate case. The `Player` fact axis is reached here.
+#[test]
+fn record_answers_false_for_only_non_matching_targets() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Lightning Bolt",
+            true,
+            "Lightning Bolt deals 3 damage to any target.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(bolt).target_player(P1).commit();
+    let state = runner.state();
+
+    let record = recorded_cast(state, bolt);
+    // Reach guard: exactly one fact, and it is the targeted PLAYER — so the answer
+    // below is the player branch's, not an empty list's.
+    assert_eq!(record.targets.len(), 1, "exactly one declared target");
+    assert_eq!(
+        record.targets[0],
+        crate::types::game_state::ActivationTargetFact::Player(P1),
+        "the recorded fact is the targeted player"
+    );
+    let ctx = crate::game::filter::FilterContext::neutral();
+    assert!(
+        crate::game::filter::spell_record_matches_filter(
+            record,
+            &any_card_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "reach: the record itself is found and accepted"
+    );
+    assert!(
+        !crate::game::filter::spell_record_matches_filter(
+            record,
+            &targets_a_creature_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "a spell that targeted only a player does not target a creature"
+    );
+}
+
+/// R3 — a cast that declared NO target answers `false`, with the record found and a
+/// property-free control answering `true`.
+#[test]
+fn record_answers_false_for_a_cast_that_declared_no_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_card_to_library_top(P0, "Forest");
+    scenario.add_card_to_library_top(P0, "Forest");
+    let divination = scenario
+        .add_spell_to_hand_from_oracle(P0, "Divination", false, "Draw two cards.")
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(divination).commit();
+    let state = runner.state();
+
+    let record = recorded_cast(state, divination);
+    // Reach guard: the record is real and its list is honestly empty.
+    assert!(
+        record.targets.is_empty(),
+        "a non-targeting cast declared nothing"
+    );
+    let ctx = crate::game::filter::FilterContext::neutral();
+    assert!(
+        crate::game::filter::spell_record_matches_filter(
+            record,
+            &any_card_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "reach: the record is found and accepted, so the empty list is real"
+    );
+    assert!(
+        !crate::game::filter::spell_record_matches_filter(
+            record,
+            &targets_a_creature_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "CR 115.9: an empty declared list never satisfies `targets [something]`"
+    );
+}
+
+/// R4 — the fold is EXISTENTIAL (CR 115.9 + CR 601.2c): one matching fact among
+/// several is sufficient, an empty list never matches, and a repeated matching target
+/// never multiplies the answer.
+#[test]
+fn declared_target_facts_fold_is_existential() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let growth = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Giant Growth",
+            true,
+            "Target creature gets +3/+3 until end of turn.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(growth).target_objects(&[bear]).commit();
+    let state = runner.state();
+
+    let bear_fact = recorded_cast(state, growth).targets[0].clone();
+    let non_matching_player = crate::types::game_state::ActivationTargetFact::Player(P1);
+    let filter = a_creature_filter();
+    let ctx = crate::game::filter::FilterContext::neutral();
+
+    // Leg 1: one matching object fact beside a non-matching player fact → true.
+    let mixed = vec![bear_fact.clone(), non_matching_player.clone()];
+    assert_eq!(
+        mixed.len(),
+        2,
+        "reach guard: the mixed list has two facts, exactly one of which names the creature"
+    );
+    assert!(
+        crate::game::filter::declared_target_facts_match(state, &mixed, &filter, &ctx),
+        "one matching fact among several is sufficient (existential, CR 115.9)"
+    );
+    // Leg 2: only the non-matching fact → false.
+    assert!(
+        !crate::game::filter::declared_target_facts_match(
+            state,
+            std::slice::from_ref(&non_matching_player),
+            &filter,
+            &ctx
+        ),
+        "a list of only non-matching facts does not match"
+    );
+    // Leg 3: the empty list → false (it declared nothing).
+    assert!(
+        !crate::game::filter::declared_target_facts_match(state, &[], &filter, &ctx),
+        "an empty declared list never matches"
+    );
+    // Repeated-target leg: the same object twice still answers once.
+    let repeated = vec![bear_fact.clone(), bear_fact];
+    assert_eq!(repeated.len(), 2, "reach guard: two facts, same object");
+    assert!(
+        crate::game::filter::declared_target_facts_match(state, &repeated, &filter, &ctx),
+        "a repeated declared target does not multiply the answer"
+    );
+}
+
+/// R5 — the two LIVE readers and the HISTORY reader agree on one board, and no reader
+/// consults another's storage. Re-routing either live reader to the record (or the
+/// record reader to the stack) makes one leg disagree.
+#[test]
+fn live_and_history_readers_agree_on_one_board() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let growth = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Giant Growth",
+            true,
+            "Target creature gets +3/+3 until end of turn.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Lightning Bolt",
+            true,
+            "Lightning Bolt deals 3 damage to any target.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    // One board, two spells on the stack: the creature-targeting one and the
+    // player-targeting one.
+    runner.cast(growth).target_objects(&[bear]).commit();
+    runner.cast(bolt).target_player(P1).commit();
+    let state = runner.state();
+    assert!(
+        state.stack.iter().any(|entry| entry.id == growth)
+            && state.stack.iter().any(|entry| entry.id == bolt),
+        "reach: both spells are on the stack"
+    );
+
+    let creature_filter = a_creature_filter();
+    let ctx = crate::game::filter::FilterContext::neutral();
+    let ability_of = |spell: ObjectId| {
+        state
+            .stack
+            .iter()
+            .find(|entry| entry.id == spell)
+            .and_then(|entry| entry.ability())
+            .expect("reach: the announced spell carries its ability on the stack")
+    };
+
+    for (spell, expected, label) in [
+        (growth, true, "Giant Growth on a Grizzly Bears"),
+        (bolt, false, "Lightning Bolt aimed at a player"),
+    ] {
+        // (i) the live object reader: `matches_filter_prop` → `stack_entry_targets_satisfy`
+        // (reads the stack entry's ability, CR 115.9b's current state).
+        assert_eq!(
+            crate::game::filter::matches_target_filter(
+                state,
+                spell,
+                &targets_a_creature_filter(),
+                &ctx
+            ),
+            expected,
+            "live object reader on {label}"
+        );
+        // (ii) the live cost-modifier reader: reads the same announced ability.
+        assert_eq!(
+            selected_targets_match_filter(
+                state,
+                spell,
+                P0,
+                ability_of(spell),
+                &creature_filter,
+                false
+            ),
+            expected,
+            "live declared-target reader on {label}"
+        );
+        // (iii) the history reader: reads `spells_cast_this_turn_by_player[..].targets`.
+        let record = recorded_cast(state, spell);
+        assert_eq!(
+            crate::game::filter::spell_record_matches_filter(
+                record,
+                &targets_a_creature_filter(),
+                P0,
+                state,
+                &ctx
+            ),
+            expected,
+            "history record reader on {label}"
+        );
+        // Reach guard: the history reader's own input was non-empty for the matching
+        // case, so the `true` is the fact set's and not a permissive fallback.
+        if expected {
+            assert_eq!(record.targets.len(), 1);
+        }
+    }
+}
+
+/// R6 — the live-projected record path's `Targets` answer is UNCHANGED (it carries no
+/// declared-target facts, so it cannot satisfy "targets [something]"). The guard is
+/// that the same entry answers `true` for a property-free filter and `true` through
+/// the live object reader, so the `false` is the projection's and not the board's.
+#[test]
+fn live_projected_record_still_answers_targets_false() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let growth = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Giant Growth",
+            true,
+            "Target creature gets +3/+3 until end of turn.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(growth).target_objects(&[bear]).commit();
+    let state = runner.state();
+    let spell_obj = state.objects[&growth].clone();
+
+    assert!(
+        crate::game::filter::spell_object_matches_filter_from_state(
+            state,
+            &spell_obj,
+            Zone::Hand,
+            P0,
+            &any_card_filter(),
+            bear,
+            &state.all_creature_types,
+        ),
+        "reach: the live projection accepts the record and a property-free filter"
+    );
+    assert!(
+        !crate::game::filter::spell_object_matches_filter_from_state(
+            state,
+            &spell_obj,
+            Zone::Hand,
+            P0,
+            &targets_a_creature_filter(),
+            bear,
+            &state.all_creature_types,
+        ),
+        "decision 6: the live projection carries no declared-target facts"
+    );
+    // And the live object reader on the same spell DOES answer true (R5 leg i), so the
+    // `false` above is the projection's, not the board's.
+    assert!(
+        crate::game::filter::matches_target_filter(
+            state,
+            growth,
+            &targets_a_creature_filter(),
+            &crate::game::filter::FilterContext::neutral(),
+        ),
+        "reach: the live reader answers true on this board"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CR 707.12 + CR 601.2c: the copy-cast write's declared-target derivation.
+// `commit_copy_cast` reads the copy's own `StackEntryKind::Spell` ability — the
+// only authority a cast copy has — and refuses a missing entry rather than
+// recording an empty list. Oracle text verbatim (Mizzix's Mastery, Frost Breath,
+// Baron Helmut Zemo).
+// ---------------------------------------------------------------------------
+
+const MIZZIXS_MASTERY: &str = "Exile target card that's an instant or sorcery from your graveyard. For each card exiled this way, copy it, and you may cast the copy without paying its mana cost. Exile Mizzix's Mastery.\nOverload {5}{R}{R}{R} (You may cast this spell for its overload cost. If you do, change \"target\" in its text to \"each.\")";
+const FROST_BREATH: &str =
+    "Tap up to two target creatures. Those creatures don't untap during their controller's next untap step.";
+const BARON_HELMUT_ZEMO: &str = "Whenever you cast a black spell from your hand, Baron Helmut Zemo connives.\nBoast \u{2014} Exile any number of black cards from your graveyard with fifteen or more black mana symbols among their mana costs: Copy those exiled cards. You may cast up to three of the copies without paying their mana costs. (Activate only if this creature attacked this turn and only once each turn.)";
+
+/// R10 (positive) — CR 707.12 + CR 601.2c: a cast copy's record carries the targets
+/// its announcement walk announced. Reverting the copy-side derivation leaves the
+/// record with no facts, flipping this assertion `true` → `false`.
+#[test]
+fn copy_cast_records_its_announced_declared_targets() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let a = scenario.add_creature(P1, "Creature A", 2, 9).id();
+    scenario.add_creature(P1, "Creature B", 2, 9).id();
+    let frost = scenario
+        .add_spell_to_graveyard(P0, "Frost Breath", true)
+        .from_oracle_text(FROST_BREATH)
+        .id();
+    let mastery = scenario
+        .add_spell_to_hand(P0, "Mizzix's Mastery", false)
+        .from_oracle_text_with_keywords(&["Overload"], MIZZIXS_MASTERY)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(mastery).target_object(frost).commit();
+    pass_to_next_prompt(&mut runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseFromZoneChoice { .. }
+        ),
+        "reach: Mizzix offers the copy, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards { cards: vec![frost] })
+        .expect("cast the copy");
+    let WaitingFor::CopyRetarget { copy_id, mode, .. } = runner.state().waiting_for else {
+        panic!(
+            "expected the copy's announcement, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        mode,
+        Some(crate::types::game_state::CopyChoiceMode::Announce),
+        "reach: the prompt is the copy's announcement"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(a)),
+        })
+        .expect("announce Creature A");
+    // CR 115.6: declining the second "up to two" slot completes the announcement,
+    // which is where `commit_copy_cast` runs.
+    runner
+        .act(GameAction::ChooseTarget { target: None })
+        .expect("decline the second optional slot");
+
+    let state = runner.state();
+    // Reach guard on the write's own input, while the copy is still on the stack: the
+    // copy's own spell entry exists and carries an ability, so the facts came from that
+    // ability rather than from the ability-less arm.
+    let entry = state
+        .stack
+        .iter()
+        .find(|entry| entry.id == copy_id)
+        .expect("reach: the announced copy is on the stack");
+    let ability = entry
+        .ability()
+        .expect("reach: an ability-bearing copy keeps its own spell ability");
+    let announced = crate::game::ability_utils::declared_targets_in_chain(ability);
+    assert_eq!(
+        announced,
+        vec![TargetRef::Object(a)],
+        "reach: the copy announced exactly the chosen creature"
+    );
+
+    let record = recorded_cast(state, copy_id);
+    assert_eq!(
+        record.targets.len(),
+        1,
+        "the copy's cast recorded its one announced target"
+    );
+    assert!(
+        matches!(
+            &record.targets[0],
+            crate::types::game_state::ActivationTargetFact::Object { id, .. } if *id == a
+        ),
+        "the recorded fact names the announced creature"
+    );
+    let ctx = crate::game::filter::FilterContext::neutral();
+    assert!(
+        crate::game::filter::spell_record_matches_filter(
+            record,
+            &targets_a_creature_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "the copy's cast-history record answers `targets a creature`"
+    );
+}
+
+/// R10 (negative) — CR 707.12: a copy of a card with no spell ability declares nothing
+/// and is still recorded, with an HONEST empty list (the record is found; the entry
+/// exists and its `ability()` is `None`). This is the branch an `.unwrap_or_default()`
+/// over the whole lookup would blur into "no entry at all".
+#[test]
+fn copy_cast_with_no_spell_ability_records_no_targets() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PostCombatMain);
+    scenario.with_library_top(P0, &["Draw A", "Draw B", "Draw C", "Draw D"]);
+    let zemo = scenario
+        .add_creature_from_oracle(P0, "Baron Helmut Zemo", 3, 3, BARON_HELMUT_ZEMO)
+        .id();
+    // Fixture: fifteen black symbols per card meets the Boast cost.
+    let black = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black; 15],
+        generic: 0,
+    };
+    let draw = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    // The ability-less copy: a vanilla creature with no Oracle text and therefore no
+    // spell ability (Grizzly Bears, the same vanilla R3's board measures).
+    let vanilla = scenario
+        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .from_oracle_text("")
+        .with_mana_cost(black.clone())
+        .id();
+    let instant = scenario
+        .add_spell_to_graveyard(P0, "Draw Instant B", true)
+        .with_ability_definition(draw)
+        .with_mana_cost(black)
+        .id();
+    let mut runner = scenario.build();
+    assert!(
+        runner.state().objects[&vanilla].abilities.is_empty(),
+        "reach: the vanilla creature has no spell ability"
+    );
+    runner.state_mut().creatures_attacked_this_turn.insert(zemo);
+    let index = runner.state().objects[&zemo]
+        .abilities
+        .iter()
+        .position(|a| matches!(a.effect.as_ref(), Effect::CastCopyOfCard { .. }))
+        .expect("reach: Zemo's Boast");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: zemo,
+            ability_index: index,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("activate Boast");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![vanilla, instant],
+        })
+        .expect("pay the exile cost");
+    pass_to_next_prompt(&mut runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseFromZoneChoice { .. }
+        ),
+        "reach: Zemo offers the copies, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![vanilla, instant],
+        })
+        .expect("CR 707.12: both copies are cast");
+
+    let state = runner.state();
+    let bear_copy = state
+        .objects
+        .values()
+        .find(|object| object.is_copy && object.name == "Grizzly Bears")
+        .expect("reach: the vanilla card's copy was cast");
+    let copy_id = bear_copy.id;
+    // Reach guard: the copy's own entry exists and carries NO spell ability, so the
+    // empty fact list below is the ability-less arm's, not a missing-entry default.
+    let entry = state
+        .stack
+        .iter()
+        .find(|entry| entry.id == copy_id)
+        .expect("reach: the ability-less copy is on the stack");
+    assert!(
+        entry.ability().is_none(),
+        "reach: a vanilla permanent spell's copy carries no spell ability"
+    );
+    let record = recorded_cast(state, copy_id);
+    assert!(
+        record.targets.is_empty(),
+        "an ability-less copy declared nothing and honestly records nothing"
+    );
+    let ctx = crate::game::filter::FilterContext::neutral();
+    assert!(
+        crate::game::filter::spell_record_matches_filter(
+            record,
+            &any_card_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "reach: the copy IS recorded, so the empty list is real"
+    );
+    assert!(
+        !crate::game::filter::spell_record_matches_filter(
+            record,
+            &targets_a_creature_filter(),
+            P0,
+            state,
+            &ctx
+        ),
+        "an empty declared list never satisfies `targets [something]`"
     );
 }

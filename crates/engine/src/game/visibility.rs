@@ -4546,7 +4546,10 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
 ///   loses its mana value, and the same rule applies to the `linked_exile_snapshot` vectors
 ///   nested in zone-change records and source contexts;
 /// - cast-history records keep every characteristic the cast-history cost and count readers
-///   filter on, and lose only the name and the id link (`redact_spell_cast_record`);
+///   filter on, and lose only the name and the id link (`redact_spell_cast_record`); a
+///   declared target of such a record that has since moved to a hidden zone also loses its
+///   last-known characteristics, keeping the slot and the stable id
+///   (`redact_target_facts`);
 /// - the turn's entry, sacrifice, damage, attack-declaration and counter-added ledgers keep
 ///   every record (counts are preserved) with the hidden object's identifying fields blanked;
 /// - a public departed stack spell keeps its entry; only the payment snapshots naming a
@@ -4631,8 +4634,9 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
 
     // Two branches, mirroring the `redact_zone_change_record` / `redact_record_payment`
     // twins in the same pass. The record's own name and id are blanked only when the
-    // SPELL is hidden; a PUBLIC cast paid from a now-hidden source keeps them and has
-    // only the hidden source's snapshot slot blanked (CR 601.2h + CR 106.3 + CR 400.2).
+    // SPELL is hidden; a PUBLIC cast that paid with a now-hidden source, or that declared
+    // a target that has since moved to a hidden zone, keeps them and has only the hidden
+    // carrier's snapshot slot blanked (CR 601.2h + CR 106.3 + CR 400.2 + CR 400.7).
     for records in state
         .spells_cast_this_turn_by_player
         .values_mut()
@@ -4644,11 +4648,14 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
                 .is_some_and(|id| hidden_ids.contains(&id))
             {
                 redact_spell_cast_record(record, hidden_ids);
-            } else if payment_names_hidden_source(&record.mana_spent_source_snapshots, hidden_ids) {
+            } else if payment_names_hidden_source(&record.mana_spent_source_snapshots, hidden_ids)
+                || targets_name_hidden_fact(&record.targets, hidden_ids)
+            {
                 redact_payment_source_snapshots(
                     &mut record.mana_spent_source_snapshots,
                     hidden_ids,
                 );
+                redact_target_facts(&mut record.targets, hidden_ids);
             }
         }
     }
@@ -4743,6 +4750,10 @@ fn redact_linked_exile_snapshot(member: &mut crate::types::game_state::LinkedExi
 /// hidden zone (CR 400.2). The slots are kept (counts are preserved) and only the hidden
 /// source's snapshot is blanked, through the single authority that already does this for
 /// every other payment carrier.
+///
+/// CR 601.2c + CR 400.7: the same rule governs the record's committed declared targets —
+/// a target that has since moved to a hidden zone loses its cast-time characteristics
+/// while keeping its slot and its stable id (`redact_target_facts`).
 fn redact_spell_cast_record(
     record: &mut crate::types::game_state::SpellCastRecord,
     hidden_ids: &HashSet<ObjectId>,
@@ -4764,10 +4775,50 @@ fn redact_spell_cast_record(
         // An id-only link kept as-is; stable-id tracking is out of scope.
         prepared_copy_source: _,
         mana_spent_source_snapshots,
+        targets,
     } = record;
     redact_payment_source_snapshots(mana_spent_source_snapshots, hidden_ids);
+    redact_target_facts(targets, hidden_ids);
     *name = HIDDEN_CARD_NAME.to_string();
     *spell_object_id = None;
+}
+
+/// CR 400.7 + CR 601.2c: a declared target that has since moved to a hidden zone
+/// must not disclose its cast-time characteristics through the cast-history
+/// record. The slots are kept (a count is preserved) and only the hidden
+/// target's snapshot is blanked, through the single authority every other
+/// latched-snapshot carrier uses. A player fact carries no characteristics and
+/// is left untouched.
+///
+/// Documented carve-out, not a defect: the fact keeps the hidden target's `id`
+/// and clears only its snapshot, exactly as `redact_payment_source_snapshots`
+/// keeps a hidden source's `source_id`. Stable-id tracking is out of scope.
+fn redact_target_facts(
+    facts: &mut [crate::types::game_state::ActivationTargetFact],
+    hidden_ids: &HashSet<ObjectId>,
+) {
+    for fact in facts.iter_mut() {
+        if let crate::types::game_state::ActivationTargetFact::Object { id, lki } = fact {
+            if hidden_ids.contains(id) {
+                redact_lki_snapshot(lki);
+            }
+        }
+    }
+}
+
+/// Read-only twin of `redact_target_facts`: does any declared target fact name a
+/// hidden object? The projection's branch condition asks this; a writer with no
+/// twin is how a redaction ends up never running on the production path.
+fn targets_name_hidden_fact(
+    facts: &[crate::types::game_state::ActivationTargetFact],
+    hidden_ids: &HashSet<ObjectId>,
+) -> bool {
+    facts.iter().any(|fact| match fact {
+        crate::types::game_state::ActivationTargetFact::Object { id, .. } => {
+            hidden_ids.contains(id)
+        }
+        crate::types::game_state::ActivationTargetFact::Player(_) => false,
+    })
 }
 
 /// The entry ledger's id is a non-optional key, so the record keeps its id and controller
@@ -5451,6 +5502,199 @@ mod tests {
         assert!(
             !json.contains("Island"),
             "no hidden mana source on the wire"
+        );
+    }
+
+    /// CR 400.7 + CR 601.2c + CR 400.2: a declared target that has since moved to a
+    /// hidden zone must not disclose its cast-time characteristics through the
+    /// cast-history record. The slots are KEPT (counts stay correct) and only the
+    /// hidden target's snapshot is blanked. Driven through the PRODUCTION projection
+    /// (`filter_state_for_viewer`): a direct call on the redactor would pass while the
+    /// caller's branch condition left the redaction never running.
+    #[test]
+    fn hidden_target_fact_is_blanked_in_the_viewer_projection() {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(0);
+        let viewer = PlayerId(1);
+
+        // The target the viewer cannot see: a card in the owner's hand.
+        let hidden_target = create_object(
+            &mut state,
+            CardId(21),
+            owner,
+            "Serra Angel".to_string(),
+            Zone::Hand,
+        );
+        // The target the viewer can see: a creature on the battlefield.
+        let public_target = create_object(
+            &mut state,
+            CardId(22),
+            owner,
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&public_target).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        // The two spell objects: one hidden (in hand), one public (on the battlefield).
+        let hidden_spell = create_object(
+            &mut state,
+            CardId(23),
+            owner,
+            "Doom Blade".to_string(),
+            Zone::Hand,
+        );
+        let public_spell = create_object(
+            &mut state,
+            CardId(24),
+            owner,
+            "Doom Blade".to_string(),
+            Zone::Battlefield,
+        );
+
+        let fact = |id: ObjectId| crate::types::game_state::ActivationTargetFact::Object {
+            id,
+            lki: Box::new(state.objects[&id].snapshot_public_characteristics()),
+        };
+
+        // (1) A fully-hidden cast naming a hidden target.
+        let hidden_cast = SpellCastRecord {
+            name: "Doom Blade".to_string(),
+            mana_value: 2,
+            spell_object_id: Some(hidden_spell),
+            targets: vec![fact(hidden_target)],
+            ..Default::default()
+        };
+        // (2) A PUBLIC cast naming one public target and one hidden target — the
+        // case the pre-existing branch condition could not see (a public cast whose
+        // TARGET moved to a hidden zone).
+        let public_cast = SpellCastRecord {
+            name: "Doom Blade".to_string(),
+            mana_value: 2,
+            spell_object_id: Some(public_spell),
+            targets: vec![fact(public_target), fact(hidden_target)],
+            ..Default::default()
+        };
+        // (3) A public cast naming only public targets (the negative control).
+        let public_only_cast = SpellCastRecord {
+            name: "Doom Blade".to_string(),
+            mana_value: 2,
+            spell_object_id: Some(public_spell),
+            targets: vec![fact(public_target)],
+            ..Default::default()
+        };
+        state
+            .spells_cast_this_turn_by_player
+            .entry(owner)
+            .or_default()
+            .push_back(hidden_cast.clone());
+        state
+            .spells_cast_this_turn_by_player
+            .entry(owner)
+            .or_default()
+            .push_back(public_cast.clone());
+        state
+            .spells_cast_this_turn_by_player
+            .entry(owner)
+            .or_default()
+            .push_back(public_only_cast.clone());
+
+        // Reach guards on the authoritative state: every slot is present and every
+        // fact still names its target's real characteristics.
+        assert_eq!(
+            state.spells_cast_this_turn_by_player[&owner][0]
+                .targets
+                .len(),
+            1
+        );
+        assert_eq!(
+            state.spells_cast_this_turn_by_player[&owner][1]
+                .targets
+                .len(),
+            2
+        );
+        assert_eq!(
+            state.spells_cast_this_turn_by_player[&owner][1].targets[1],
+            crate::types::game_state::ActivationTargetFact::Object {
+                id: hidden_target,
+                lki: Box::new(state.objects[&hidden_target].snapshot_public_characteristics()),
+            },
+            "reach: the authoritative record still carries the hidden target's snapshot"
+        );
+
+        let projected = filter_state_for_viewer(&state, viewer);
+        // Reach guard (a): the projection really hid the hand card.
+        assert_eq!(projected.objects[&hidden_target].name, HIDDEN_CARD_NAME);
+
+        let records = &projected.spells_cast_this_turn_by_player[&owner];
+        assert_eq!(records.len(), 3, "every record is kept (counts unchanged)");
+
+        // (1) The fully-hidden cast: name and id cleared; the hidden target's slot is
+        // kept with its snapshot blanked, and the stable id survives.
+        let hidden = &records[0];
+        assert_eq!(hidden.name, HIDDEN_CARD_NAME);
+        assert_eq!(hidden.spell_object_id, None);
+        assert_eq!(
+            hidden.targets.len(),
+            1,
+            "the slot is kept so a count stays correct"
+        );
+        let crate::types::game_state::ActivationTargetFact::Object { id, lki } = &hidden.targets[0]
+        else {
+            panic!("the hidden target is an object fact");
+        };
+        assert_eq!(
+            *id, hidden_target,
+            "the stable id is kept (documented carve-out)"
+        );
+        assert_eq!(lki.name, HIDDEN_CARD_NAME, "the hidden target is blanked");
+
+        // (2) The public cast naming a hidden target: its OWN name and id survive, the
+        // public fact is untouched, and only the hidden fact is blanked.
+        let public = &records[1];
+        assert_eq!(
+            public.name, "Doom Blade",
+            "a public cast keeps its recorded name"
+        );
+        assert_eq!(
+            public.spell_object_id,
+            Some(public_spell),
+            "a public cast keeps its id link"
+        );
+        assert_eq!(public.targets.len(), 2, "the slot count is unchanged");
+        let crate::types::game_state::ActivationTargetFact::Object { id, lki } = &public.targets[0]
+        else {
+            panic!("the public target is an object fact");
+        };
+        assert_eq!(*id, public_target, "the public target keeps its id");
+        assert_eq!(
+            lki.name, "Grizzly Bears",
+            "reach guard (b): the public target's snapshot is untouched"
+        );
+        let crate::types::game_state::ActivationTargetFact::Object { id, lki } = &public.targets[1]
+        else {
+            panic!("the hidden target is an object fact");
+        };
+        assert_eq!(*id, hidden_target);
+        assert_eq!(
+            lki.name, HIDDEN_CARD_NAME,
+            "only the hidden target's snapshot is blanked"
+        );
+
+        // (3) Reach guard (d): a public cast naming only public targets is untouched.
+        assert_eq!(
+            records[2], public_only_cast,
+            "a public cast with only public targets is byte-for-byte unchanged"
+        );
+
+        // The hidden target's name never reaches the viewer's wire form.
+        let json = serde_json::to_string(&projected.spells_cast_this_turn_by_player[&owner])
+            .expect("cast history serializes");
+        assert!(
+            !json.contains("Serra Angel"),
+            "no hidden declared target's identity on the wire"
         );
     }
 

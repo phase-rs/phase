@@ -1433,8 +1433,10 @@ fn is_battlefield_zone(zone: &Zone) -> bool {
     *zone == Zone::Battlefield
 }
 
-/// One committed target of an activation, as it was when the ability was
-/// activated.
+/// CR 115.1 + CR 400.7: one committed target of a spell or ability, as it was
+/// when the target was committed (CR 601.2c). Carried by
+/// `AbilityActivationRecord.targets` for an activated ability and by
+/// `SpellCastRecord.targets` for a cast spell.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ActivationTargetFact {
@@ -1535,6 +1537,19 @@ pub struct SpellCastRecord {
     /// which honestly means it cannot prove a source-qualified payment.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mana_spent_source_snapshots: Vec<ManaSpentSourceSnapshot>,
+    /// CR 115.1 + CR 601.2c: the spell's declared targets as the cast committed
+    /// them — each object target's public characteristics snapshotted as they
+    /// were then — so a turn-history predicate such as "the first spell you cast
+    /// during each of your turns that targets a creature" can be counted after
+    /// the spell has left the stack (CR 400.7). Answered under CR 115.9's
+    /// selection-time reading; CR 115.9b's current-state reading governs the
+    /// live per-spell reader instead.
+    ///
+    /// `#[serde(default)]`: a record predating this field deserializes to empty,
+    /// which honestly means it cannot prove which targets the spell declared.
+    /// An empty list never satisfies "targets [something]" (CR 115.9).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<ActivationTargetFact>,
 }
 
 /// Snapshot of a land play's cast-capable origin for per-turn history queries.
@@ -1571,6 +1586,7 @@ impl Default for SpellCastRecord {
             spell_object_id: None,
             prepared_copy_source: None,
             mana_spent_source_snapshots: Vec::new(),
+            targets: Vec::new(),
         }
     }
 }
@@ -55321,6 +55337,8 @@ mod tests {
             spell_object_id: None,
             prepared_copy_source: None,
             mana_spent_source_snapshots: vec![],
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Vec::new(),
         };
         let json = serde_json::to_string(&original).unwrap();
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();

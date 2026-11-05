@@ -31673,6 +31673,35 @@ pub(crate) fn record_activation_announcement(
     }
 }
 
+/// CR 115.1 + CR 601.2c + CR 400.7: snapshot one committed target list into the
+/// repo's typed "one committed target, as it was when committed" vocabulary. A
+/// player fact needs no snapshot; an object fact carries the target's public
+/// characteristics as they were at commitment. An id absent from `state.objects`
+/// (a target that has ceased — only reachable for a token) is dropped: a fact
+/// that cannot be snapshotted is not invented. CR 115.9b's "a departed target is
+/// ignored" rule belongs to the live reader in
+/// `filter::stack_entry_targets_satisfy`, not to this capture.
+pub(crate) fn capture_target_facts(
+    state: &GameState,
+    targets: &[TargetRef],
+) -> Vec<ActivationTargetFact> {
+    targets
+        .iter()
+        .filter_map(|target| match target {
+            TargetRef::Player(player) => Some(ActivationTargetFact::Player(*player)),
+            TargetRef::Object(id) => {
+                state
+                    .objects
+                    .get(id)
+                    .map(|obj| ActivationTargetFact::Object {
+                        id: *id,
+                        lki: Box::new(obj.snapshot_public_characteristics()),
+                    })
+            }
+        })
+        .collect()
+}
+
 /// [`capture_activation_record`] from an ability definition and its committed
 /// targets.
 pub(crate) fn capture_activation_record_from(
@@ -31687,21 +31716,7 @@ pub(crate) fn capture_activation_record_from(
     let source = state.objects.get(&source_id)?;
     let source_lki = source.snapshot_public_characteristics();
     let source_zone = source.zone;
-    let targets = targets
-        .iter()
-        .filter_map(|target| match target {
-            TargetRef::Player(player) => Some(ActivationTargetFact::Player(*player)),
-            TargetRef::Object(id) => {
-                state
-                    .objects
-                    .get(id)
-                    .map(|obj| ActivationTargetFact::Object {
-                        id: *id,
-                        lki: Box::new(obj.snapshot_public_characteristics()),
-                    })
-            }
-        })
-        .collect();
+    let targets = capture_target_facts(state, targets);
     Some(AbilityActivationRecord {
         activator: player,
         source: source_id,
@@ -34814,7 +34829,9 @@ fn reduce_ability_cost_non_target_gates_admit(
 }
 
 /// CR 601.2c + CR 115.1: whether any committed target of a recorded activation
-/// matched `filter` as it was when the ability was activated.
+/// matched `filter` as it was when the ability was activated. Delegates to
+/// `filter::declared_target_facts_match`, the single fold for this question
+/// (shared with the spell-cast record's `FilterProp::Targets` arm).
 fn recorded_targets_match_filter(
     state: &GameState,
     record: &AbilityActivationRecord,
@@ -34826,18 +34843,7 @@ fn recorded_targets_match_filter(
         static_source_id,
         static_controller,
     );
-    record.targets.iter().any(|fact| match fact {
-        ActivationTargetFact::Object { id, lki } => {
-            super::filter::matches_target_filter_on_lki_snapshot(state, *id, lki, filter, &ctx)
-        }
-        ActivationTargetFact::Player(player) => target_ref_matches_cost_filter(
-            state,
-            static_source_id,
-            static_controller,
-            &TargetRef::Player(*player),
-            filter,
-        ),
-    })
+    super::filter::declared_target_facts_match(state, &record.targets, filter, &ctx)
 }
 
 /// CR 611.3a + CR 602.2: "the first activated ability … you activate each
