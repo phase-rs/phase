@@ -1,5 +1,8 @@
 use super::super::engine::apply_as_current;
 use super::*;
+use crate::game::restrictions::spell_confined_to_sorcery_timing;
+use crate::game::scenario::{GameScenario, P0, P1};
+use crate::game::scenario_db::GameScenarioDbExt;
 use crate::game::zones;
 use crate::game::zones::create_object;
 use crate::parser::oracle::parse_oracle_text;
@@ -32,7 +35,7 @@ use crate::types::mana::{
 };
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{CastFrequency, CostModifyMode, StaticMode};
 use std::sync::Arc;
 
 fn setup_game_at_main_phase() -> GameState {
@@ -50777,6 +50780,55 @@ fn azula_exile_static_grants_flash_timing() {
     );
 }
 
+/// CR 601.3b: Azula's exile-cast flash grant reaches
+/// `restrictions::spell_confined_to_sorcery_timing` through
+/// `spell_has_effective_flash`; without the grant, the same exiled sorcery is
+/// confined.
+#[test]
+fn exile_flash_permission_lifts_sorcery_timing_confinement() {
+    let player = PlayerId(0);
+    for grants_flash in [true, false] {
+        let mut state = setup_game_at_main_phase();
+        let source = add_azula_exile_cast_source(&mut state, player);
+        if !grants_flash {
+            let definition = state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .static_definitions
+                .get_mut(0)
+                .unwrap();
+            let StaticMode::ExileCastPermission { grants_flash, .. } = &mut definition.mode else {
+                panic!("the helper pushes an ExileCastPermission");
+            };
+            *grants_flash = false;
+        }
+        let spell = add_linked_blue_sorcery(&mut state, player, source, "Exiled Blue Bolt");
+        add_mana(&mut state, player, ManaType::Red, 1);
+
+        // Reach: castable in the own main with or without the grant.
+        assert!(can_cast_object_now(&state, player, spell));
+        assert_eq!(
+            spell_confined_to_sorcery_timing(&state, player, spell),
+            !grants_flash,
+            "own main"
+        );
+
+        // "During your turn": P0's upkeep is during P0's turn.
+        state.phase = Phase::Upkeep;
+        assert_eq!(
+            spell_confined_to_sorcery_timing(&state, player, spell),
+            !grants_flash,
+            "own upkeep"
+        );
+        assert_eq!(
+            !can_cast_object_now(&state, player, spell),
+            !grants_flash,
+            "parity with can_cast_object_now, own upkeep"
+        );
+    }
+}
+
 /// Add a {2}-generic (mana value 2) sorcery linked to `source_id` in the
 /// persistent `exile_links` pool. Returns the exiled spell's object id.
 fn add_linked_two_generic_sorcery(
@@ -52138,6 +52190,33 @@ fn skyseer_increases_chosen_name_activated_ability_cost() {
         generic_of(&def_other),
         3,
         "a source without the chosen name must not be taxed"
+    );
+
+    // CR 109.2c: "source" means a source of an ability in ANY zone, so the
+    // chosen-name description is NOT battlefield-denoting and keeps taxing an
+    // activation whose source is a card in a graveyard. This pins the CR 109.2
+    // gate's scope test: a gate keyed on "has any source filter" instead of
+    // `filter_denotes_battlefield_permanent` fails here.
+    let grave_matched = create_object(
+        &mut state,
+        CardId(4),
+        PlayerId(1),
+        "Targeted Source".to_string(),
+        Zone::Graveyard,
+    );
+    state
+        .objects
+        .get_mut(&grave_matched)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(crate::types::card_type::CoreType::Creature);
+    let mut def_grave = make_def();
+    apply_cost_reduction(&state, &mut def_grave, PlayerId(1), grave_matched);
+    assert_eq!(
+        generic_of(&def_grave),
+        5,
+        "CR 109.2c: a chosen-name source is taxed in every zone, graveyard included"
     );
 }
 
@@ -57090,6 +57169,80 @@ fn resolution_face_legality_admits_the_land_face_only_under_a_play_policy() {
     );
 }
 
+/// CR 712.12: a Play policy's filter judges the land face being played, on the
+/// projection that elects it — not the card's front. Bala Ged Recovery //
+/// Bala Ged Sanctuary in exile: a Land filter admits Sanctuary even though the
+/// card's front is a sorcery, and a Sorcery filter rejects the land face even
+/// though the front is a sorcery. Ownership is still the card's own: a Land
+/// filter limited to an opponent's cards rejects P0's Sanctuary. The
+/// structural land leg (`resolution_land_card_admission`) and the face
+/// legality the window and election read agree.
+#[test]
+fn resolution_land_back_face_admission_reads_the_policy_filter_on_the_played_face() {
+    let db = crate::test_support::shared_card_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let card = scenario.add_real_card(P0, "Bala Ged Recovery", Zone::Exile, db);
+    let state = scenario.state.clone();
+    assert!(
+        state.objects[&card]
+            .card_types
+            .core_types
+            .contains(&CoreType::Sorcery),
+        "reach-guard: in exile the card has its sorcery front's characteristics"
+    );
+    let policy = |filter: TargetFilter| {
+        crate::types::ability::ResolutionCastFacePolicy::new(
+            filter,
+            ObjectId(83_021),
+            PlayerId(0),
+            None,
+        )
+        .with_play_mode(CardPlayMode::Play)
+    };
+    let back_legality = |policy: &crate::types::ability::ResolutionCastFacePolicy| {
+        let mut request = resolution_test_play_request(CardPlayMode::Play, None);
+        request.face_policy = policy.clone();
+        request.cleanup.face_policy = policy.clone();
+        resolution_test_face_legality(&state, card, &request).back
+    };
+
+    let land = policy(TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)));
+    assert!(
+        resolution_land_face_admission(&state, P0, card, &land),
+        "a Land filter admits the Sanctuary face"
+    );
+    assert!(resolution_land_card_admission(&state, card, &land));
+    assert!(
+        !resolution_land_front_card_admission(&state, card, &land),
+        "a route without the frozen face policy admits only a land card as it is"
+    );
+    assert_eq!(back_legality(&land), Some(ResolutionFaceAction::PlayLand));
+
+    let sorcery = policy(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)));
+    assert!(
+        !resolution_land_face_admission(&state, P0, card, &sorcery),
+        "a Sorcery filter rejects the land face"
+    );
+    assert!(!resolution_land_card_admission(&state, card, &sorcery));
+    assert_eq!(back_legality(&sorcery), None);
+
+    let opponents_land = policy(TargetFilter::Typed(
+        TypedFilter::new(TypeFilter::Land).properties(vec![FilterProp::Owned {
+            controller: crate::types::ability::ControllerRef::Opponent,
+        }]),
+    ));
+    assert!(
+        !resolution_land_face_admission(&state, P0, card, &opponents_land),
+        "ownership is read on the card"
+    );
+    assert!(!resolution_land_card_admission(
+        &state,
+        card,
+        &opponents_land
+    ));
+}
+
 /// CR 712.12 + CR 305.2a: when the land face is a Play election's only legal
 /// face, it is returned for the caller to play and no temporary permission
 /// remains. The same card under a Cast policy is rejected outright: a Cast
@@ -57110,8 +57263,14 @@ fn resolution_play_election_plays_the_only_legal_land_face_and_leaves_no_permiss
     )
     .expect("the Play election initiates");
     assert!(
-        matches!(initiation, ResolutionElectionInitiation::PlayLandFace(_)),
-        "the only legal face is the land face"
+        matches!(
+            initiation,
+            ResolutionElectionInitiation::PlayLandFace {
+                face: ModalCardFace::Back,
+                ..
+            }
+        ),
+        "the only legal face is the land (back) face"
     );
     assert!(play_state.objects[&spell].casting_permissions.is_empty());
 
@@ -62355,6 +62514,119 @@ fn an_activation_journal_row_round_trips() {
     assert_eq!(back, row, "{json}");
 }
 
+/// CR 109.2 + CR 110.1 + CR 602.2a: MECHANISM ROW, not a printed-card row.
+///
+/// Tezzeret, Betrayer of Flesh ("The first activated ability of an artifact you
+/// activate each turn costs {2} less to activate.") is the nearest printed card,
+/// but its line is a strict parse failure today (`dispatch.rs` declines it; see
+/// `professor_hojo_activation_cost.rs::
+/// once_per_turn_discount_without_a_target_restriction_stays_unsupported`), so
+/// no supported card reaches this arm. The journal arm is therefore pinned with
+/// a hand-built definition: a once-per-turn reducer whose scope is "a creature
+/// you control" must not count an activation announced from a graveyard as its
+/// qualifying first activation, while a battlefield activation of the same shape
+/// must. Both rows come from `capture_activation_record_from`, the real
+/// announcement capturer, so the recorded `source_zone` is what the gate reads.
+///
+/// Reverting the gate's zone predicate makes the graveyard row qualify (the
+/// creature CARD still matches "creature you control" through its at-departure
+/// controller), flipping the first assertion.
+#[test]
+fn a_graveyard_activation_does_not_consume_a_battlefield_scoped_first_activation_discount() {
+    let mut state = GameState::new_two_player(7);
+    let reducer = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "First Activation Reducer".to_string(),
+        Zone::Battlefield,
+    );
+    let grave_source = create_object(
+        &mut state,
+        CardId(2),
+        PlayerId(0),
+        "Graveyard Creature".to_string(),
+        Zone::Graveyard,
+    );
+    let field_source = create_object(
+        &mut state,
+        CardId(3),
+        PlayerId(0),
+        "Battlefield Creature".to_string(),
+        Zone::Battlefield,
+    );
+    for id in [grave_source, field_source] {
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+    }
+
+    let definition = StaticDefinition::new(StaticMode::ReduceAbilityCost {
+        mode: CostModifyMode::Reduce,
+        keyword: "activated".to_string(),
+        amount: 1,
+        minimum_mana: None,
+        dynamic_count: None,
+        exemption: crate::types::statics::ActivationExemption::None,
+        activator: None,
+        targets: None,
+        frequency: Some(CastFrequency::OncePerTurn),
+    })
+    .affected(TargetFilter::Typed(
+        TypedFilter::creature().controller(ControllerRef::You),
+    ));
+    // Reach guard: this definition is the journal-path shape under test.
+    assert!(super::is_first_activation_modifier(&definition.mode));
+
+    let filter = definition.affected.as_ref().unwrap();
+    let ctx = crate::game::filter::FilterContext::from_source_with_controller(reducer, PlayerId(0));
+    let qualifies = |state: &GameState| {
+        super::earlier_activation_this_turn_qualified(
+            state,
+            "activated",
+            crate::types::statics::ActivationExemption::None,
+            None,
+            Some(filter),
+            None,
+            reducer,
+            PlayerId(0),
+            &ctx,
+        )
+    };
+
+    let grave_row =
+        super::capture_activation_record_from(&state, PlayerId(0), grave_source, None, &[])
+            .expect("a graveyard source yields a record");
+    assert_eq!(grave_row.source_zone, Zone::Graveyard);
+    state
+        .abilities_activated_this_turn_by_player
+        .entry(PlayerId(0))
+        .or_default()
+        .push_back(grave_row);
+    assert!(
+        !qualifies(&state),
+        "an activation announced from a graveyard is not a \"creature you control\" activation"
+    );
+
+    let field_row =
+        super::capture_activation_record_from(&state, PlayerId(0), field_source, None, &[])
+            .expect("a battlefield source yields a record");
+    assert_eq!(field_row.source_zone, Zone::Battlefield);
+    state
+        .abilities_activated_this_turn_by_player
+        .entry(PlayerId(0))
+        .or_default()
+        .push_back(field_row);
+    assert!(
+        qualifies(&state),
+        "a battlefield activation of the same shape is the qualifying first activation"
+    );
+}
+
 /// CR 102.2 + CR 102.3 + CR 800.4a: "each opponent" is each opponent still in
 /// the game. Both per-opponent evaluators, the target-free one and the one
 /// that prices a rider with the committed targets, skip a player who left.
@@ -62762,4 +63034,126 @@ fn split_source_tap_cost_legs_takes_every_tap_and_untap_leg_in_order() {
         (Some(AbilityCost::Tap), None)
     );
     assert_eq!(split_source_tap_cost_legs(life(3)), (None, Some(life(3))));
+}
+
+// ---- Void Winnower: parity cast-lock, driven through the real casting gate ----
+
+/// CR 601.3a + CR 202.3 + CR 101.2: RUNTIME proof for Void Winnower, driven
+/// through `can_cast_object_now` — the same gate priority uses to decide which
+/// casts are legal — rather than through a parser assertion.
+///
+/// This is the test shape the defect needed. The parser-side anchor
+/// (`cant_cast_spells_with_even_mana_values`) asserted only `def.mode` and
+/// passed while `affected` was `None`; `is_blocked_by_cant_be_cast_for` SKIPS
+/// its filter test on a `None` filter and falls through to PROHIBITED, so Void
+/// Winnower locked opponents out of casting ANY spell. A shape assertion cannot
+/// see that, because the shape it asserted was correct — the gap was between the
+/// shape and the gate. So this drives the gate.
+///
+/// The static comes from the LIVE PARSE of the printed line
+/// (`add_creature_from_oracle`), not from the card-data export, so the test
+/// fails if the parser stops attaching the filter.
+///
+/// CR 601.3a is the authorizing rule and its own example is this card. Both
+/// directions are asserted: the odd-mana-value spell must stay castable (the
+/// prohibition is half the curve, not all of it) and the even one must not.
+#[test]
+fn void_winnower_runtime_blocks_only_even_mana_value_opponent_spells() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // P1 holds priority so the gate is evaluating a real decision point for the
+    // affected opponent, not the Winnower's controller.
+    scenario.state.active_player = P1;
+    scenario.state.priority_player = P1;
+    scenario.state.waiting_for = crate::types::game_state::WaitingFor::Priority { player: P1 };
+
+    // P0 controls Void Winnower; its statics are parsed from the printed text.
+    scenario.add_creature_from_oracle(
+        P0,
+        "Void Winnower",
+        11,
+        9,
+        "Your opponents can't cast spells with even mana values. (Zero is even.)\n\
+         Your opponents can't block with creatures with even mana values.",
+    );
+
+    // Two targetless sorceries in the OPPONENT's hand, differing only in mana
+    // value parity: {2}{B} is 3 (odd), {1}{B} is 2 (even). CR 202.3.
+    let odd = scenario
+        .add_spell_to_hand_from_oracle(P1, "Odd Curve Spell", false, "Draw two cards.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Black],
+        })
+        .id();
+    let even = scenario
+        .add_spell_to_hand_from_oracle(P1, "Even Curve Spell", false, "Draw a card.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Black],
+        })
+        .id();
+    add_mana(&mut scenario.state, P1, ManaType::Black, 6);
+
+    assert_eq!(
+        scenario
+            .state
+            .objects
+            .get(&odd)
+            .unwrap()
+            .mana_cost
+            .mana_value(),
+        3,
+        "fixture guard: the odd spell must actually have an odd mana value"
+    );
+    assert_eq!(
+        scenario
+            .state
+            .objects
+            .get(&even)
+            .unwrap()
+            .mana_cost
+            .mana_value(),
+        2,
+        "fixture guard: the even spell must actually have an even mana value"
+    );
+
+    assert!(
+        can_cast_object_now(&scenario.state, P1, odd),
+        "Void Winnower prohibits only EVEN mana values (CR 601.3a); an odd-mana-value \
+         spell must remain castable. A blanket block here is the unfiltered cast-lock."
+    );
+    assert!(
+        !can_cast_object_now(&scenario.state, P1, even),
+        "Void Winnower must prohibit the opponent's even-mana-value spell (CR 601.3a)"
+    );
+}
+
+/// CR 109.5 + CR 601.3a: the prohibition is scoped to OPPONENTS, so the
+/// Winnower's own controller keeps casting even-mana-value spells. Guard against
+/// a filter attached with the player axis dropped.
+#[test]
+fn void_winnower_runtime_does_not_block_its_own_controller() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Void Winnower",
+        11,
+        9,
+        "Your opponents can't cast spells with even mana values. (Zero is even.)",
+    );
+    let even = scenario
+        .add_spell_to_hand_from_oracle(P0, "Even Curve Spell", false, "Draw a card.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Black],
+        })
+        .id();
+    add_mana(&mut scenario.state, P0, ManaType::Black, 6);
+
+    assert!(
+        can_cast_object_now(&scenario.state, P0, even),
+        "\"Your opponents can't cast\" never restricts the controller (CR 109.5)"
+    );
 }

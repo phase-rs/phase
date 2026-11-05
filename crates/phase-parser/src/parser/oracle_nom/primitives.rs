@@ -1391,6 +1391,23 @@ pub(crate) fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProp
     .parse(input)
 }
 
+/// CR 401.7: "<ordinal> from the top" — the library slot named by a
+/// positional library instruction ("second from the top", "seventh from the
+/// top"). Yields the 1-based slot `n`; the caller wraps it in
+/// `LibraryPosition::NthFromTop`. The text before " from the top" must be
+/// exactly one ordinal word. Single authority shared by the search-result
+/// restatement, the owner top-or-bottom choice and the conjure destination.
+pub(crate) fn parse_nth_from_top(input: &str) -> OracleResult<'_, u32> {
+    nom::combinator::map_opt(
+        terminated(take_until(" from the top"), tag(" from the top")),
+        |ordinal_text| match crate::parser::oracle_util::parse_ordinal(ordinal_text) {
+            Some((n, tail)) if tail.trim().is_empty() => Some(n),
+            _ => None,
+        },
+    )
+    .parse(input)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

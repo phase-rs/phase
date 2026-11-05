@@ -16,22 +16,20 @@ use engine::ai_support::{
 };
 use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, ContinuousModification, Duration, Effect, ResolvedAbility,
-    StaticDefinition, TargetFilter, TargetRef,
+    AbilityCost, AbilityDefinition, Effect, ResolvedAbility, TargetFilter, TargetRef,
 };
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
-    CastOfferKind, CompanionDeclaration, CostResume, DistributionUnit, GameState, ManaChoice,
-    ManaChoiceContext, ManaChoicePrompt, MulliganDecisionPhase, PendingMulliganAction,
-    StackEntryKind, WaitingFor,
+    CastOfferKind, CompanionDeclaration, CostResume, DistributionScope, DistributionUnit,
+    GameState, ManaChoice, ManaChoiceContext, ManaChoicePrompt, MulliganDecisionPhase,
+    PendingMulliganAction, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::{ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
 use crate::card_value::{cmp_keep, intrinsic_value, keep_key};
@@ -42,15 +40,20 @@ use crate::combat_ai::{
 };
 use crate::config::{AiConfig, PlannerMode, ThreatAwareness};
 use crate::context::AiContext;
+use crate::eval;
 use crate::features::DeckFeatures;
 use crate::plan::{PlanSnapshot, PlanState};
 use crate::planner::{
-    prepare_payment_candidates, BeamContinuationPlanner, PlannerServices, PreparedCandidate,
-    PromptAnswerValidation, RankedCandidate, RungStat, SearchBudget,
+    prepare_payment_candidates, BeamContinuationPlanner, Deferral, PlannerServices,
+    PreparedCandidate, PromptAnswerValidation, RankedCandidate, RootTacticalScore, RungStat,
+    SearchBudget,
 };
+use crate::policies::activation_patience::HeldLine;
 use crate::policies::context::{PolicyContext, SearchDepth};
 use crate::policies::copy_value::score_legend_rule_keep;
-use crate::policies::effect_classify::{aura_polarity, EffectPolarity};
+use crate::policies::effect_classify::{
+    ability_is_temporary_combat_modifier, aura_polarity, EffectPolarity,
+};
 use crate::policies::strategy_helpers::{cmp_sacrifice, sacrifice_key};
 
 use crate::policies::tutor::score_search_choice_selection;
@@ -1256,61 +1259,6 @@ fn target_filter_interacts_with_stack(filter: &TargetFilter) -> bool {
     ) || filter.extract_zones().contains(&Zone::Stack)
 }
 
-pub(crate) fn ability_is_temporary_combat_modifier(ability: &AbilityDefinition) -> bool {
-    ability_effect_is_temporary_combat_modifier(ability)
-        && ability
-            .sub_ability
-            .as_deref()
-            .is_none_or(ability_is_temporary_combat_modifier)
-        && ability
-            .else_ability
-            .as_deref()
-            .is_none_or(ability_is_temporary_combat_modifier)
-        && ability
-            .mode_abilities
-            .iter()
-            .all(ability_is_temporary_combat_modifier)
-}
-
-fn ability_effect_is_temporary_combat_modifier(ability: &AbilityDefinition) -> bool {
-    match &*ability.effect {
-        Effect::Pump { .. } => matches!(ability.duration, Some(Duration::UntilEndOfTurn)),
-        effect => effect_is_temporary_combat_modifier(effect),
-    }
-}
-
-fn effect_is_temporary_combat_modifier(effect: &Effect) -> bool {
-    match effect {
-        Effect::GenericEffect {
-            static_abilities,
-            duration: Some(Duration::UntilEndOfTurn),
-            ..
-        } => static_abilities
-            .iter()
-            .all(static_definition_is_temporary_combat_modifier),
-        _ => false,
-    }
-}
-
-fn static_definition_is_temporary_combat_modifier(static_def: &StaticDefinition) -> bool {
-    matches!(static_def.mode, StaticMode::Continuous)
-        && static_def
-            .modifications
-            .iter()
-            .all(continuous_modification_is_temporary_combat_modifier)
-}
-
-fn continuous_modification_is_temporary_combat_modifier(
-    modification: &ContinuousModification,
-) -> bool {
-    matches!(
-        modification,
-        ContinuousModification::AddPower { .. }
-            | ContinuousModification::AddToughness { .. }
-            | ContinuousModification::AddKeyword { .. }
-    )
-}
-
 fn low_value_empty_stack_phase(phase: Phase) -> bool {
     matches!(
         phase,
@@ -2339,7 +2287,8 @@ pub fn fallback_action(
         // revealed order (any permutation is legal; order at the bottom of the
         // library carries no tactical weight).
         WaitingFor::RippleBottomOrder { cards, .. }
-        | WaitingFor::RevealUntilBottomOrder { cards, .. } => Some(GameAction::SelectCards {
+        | WaitingFor::RevealUntilBottomOrder { cards, .. }
+        | WaitingFor::DigBottomOrder { cards, .. } => Some(GameAction::SelectCards {
             cards: cards.clone(),
         }),
         // CR 608.2g + CR 601.2: Invoke Calamity's free-cast window — finish the
@@ -2731,6 +2680,11 @@ pub fn fallback_action(
         )
         .into_iter()
         .next(),
+
+        // CR 702.106a: the agenda names are a required answer, offered as one action.
+        WaitingFor::SecretAgendaChoice { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .next(),
 
         // Companion reveal: decline.
         WaitingFor::CompanionReveal { .. } => Some(GameAction::DeclareCompanion {
@@ -3581,15 +3535,16 @@ fn rank_root_payment_candidates(
                 })
                 .and_then(|prepared_candidate| prepared_candidate.payment_successor.clone())
                 .map_or_else(
-                    || RankedCandidate::new(gated_candidate.candidate.clone(), direct),
+                    || RankedCandidate::new(gated_candidate.candidate.clone(), direct.weighted),
                     |successor| {
                         RankedCandidate::with_payment_successor(
                             gated_candidate.candidate.clone(),
-                            direct,
+                            direct.weighted,
                             successor,
                         )
                     },
-                );
+                )
+                .with_deferral(direct.deferral);
             if let Some((_, witness)) = continuation_witnesses
                 .iter()
                 .find(|(action, _)| action == &gated_candidate.candidate.action)
@@ -3620,14 +3575,13 @@ fn score_existing_root_candidate(
     decision: &engine::ai_support::AiDecisionContext,
     candidate: &crate::tactical_gate::GatedCandidate,
     services: &PlannerServices<'_>,
-) -> f64 {
-    services.tactical_score(
-        state,
-        decision,
-        &candidate.candidate,
-        services.ai_player,
-        SearchDepth::Root,
-    ) + candidate.penalty
+) -> RootTacticalScore {
+    let score =
+        services.root_tactical_score(state, decision, &candidate.candidate, services.ai_player);
+    RootTacticalScore {
+        weighted: score.weighted + candidate.penalty,
+        deferral: score.deferral,
+    }
 }
 
 /// Add only reducer-certified fetch-then-cast terminal value to a current root
@@ -4201,6 +4155,85 @@ fn score_candidates_core_for_root(
     }
 }
 
+/// One root candidate's line in a rung: a searched continuation, or a fixed score for a
+/// rejected or unsimulatable candidate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RootLine {
+    Searched { continuation: f64 },
+    Unsearched { score: f64 },
+}
+
+/// One root candidate's entry in a rung, before it is flattened to `(action, score)`.
+#[derive(Debug, Clone)]
+struct RootRungScore {
+    action: GameAction,
+    line: RootLine,
+    /// `RankedCandidate::root_tactical` at the rung's tactical weight.
+    tactical: f64,
+    /// `RankedCandidate::deferral`.
+    deferral: Option<Deferral>,
+}
+
+impl RootRungScore {
+    fn score(&self) -> f64 {
+        match self.line {
+            RootLine::Searched { continuation } => continuation + self.tactical,
+            RootLine::Unsearched { score } => score,
+        }
+    }
+}
+
+/// The continuation a line can lend or receive: finite, and not a finished game.
+fn open_continuation(line: &RootLine) -> Option<f64> {
+    match *line {
+        RootLine::Searched { continuation }
+            if continuation.is_finite() && eval::terminal_outcome(continuation).is_none() =>
+        {
+            Some(continuation)
+        }
+        RootLine::Searched { .. } | RootLine::Unsearched { .. } => None,
+    }
+}
+
+/// CR 117.1b: an activated ability can be activated whenever its controller has priority, and
+/// CR 117.3a gives the active player priority again as the main phase begins. So when
+/// ActivationPatience holds an activation whose line a later activation reproduces
+/// (`HeldLine::Reproducible`), passing now keeps that activation on offer:
+/// PassPriority's continuation is at least the best continuation among
+/// the held siblings in the same rung. That holds only between unfinished lines. CR 104.1: a
+/// game ends immediately when a player wins, so a held line that wins does not wait — passing
+/// hands the opponents priority (CR 117.3d) before it recurs — and a pass whose own line loses
+/// never reaches the window the activation was held for. The lent value is exactly a
+/// sibling's own continuation; every non-Pass score is untouched.
+///
+/// A hold's line is its root's answer, so a rung's holds are all lent from or none are: filtering
+/// donors by their own action can't work, because a donor's line can contain the sibling passing
+/// can't reach. `activation_patience::root_held_line` gives the shape of that bar and its limits.
+fn lend_deferral_witness(rung: &mut [RootRungScore]) {
+    let Some(best) = rung
+        .iter()
+        .filter(|entry| {
+            entry
+                .deferral
+                .is_some_and(|deferral| deferral.line == HeldLine::Reproducible)
+        })
+        .filter_map(|entry| open_continuation(&entry.line))
+        .reduce(f64::max)
+    else {
+        return;
+    };
+    for entry in rung
+        .iter_mut()
+        .filter(|entry| matches!(entry.action, GameAction::PassPriority))
+    {
+        if let Some(own) = open_continuation(&entry.line) {
+            if own < best {
+                entry.line = RootLine::Searched { continuation: best };
+            }
+        }
+    }
+}
+
 /// A root search's report that an answer the legality gate admitted without
 /// simulating it (`PromptAnswerValidation::AtSubmission`) failed its simulation
 /// on the search's first rung. Its beam is then not the one `EachCandidate`, the
@@ -4220,6 +4253,9 @@ struct FailedAdmittedAnswer(Box<GameAction>);
 /// After each searched rung it accepts, the loop moves that rung's best
 /// candidate to the front of the beam for the next rung (PV threading, D2),
 /// and it records every rung it runs in `rung_stats` (the rung witness, D3).
+/// Each rung that completes lends a held activation's continuation to
+/// PassPriority before it is scored (the deferral witness,
+/// [`lend_deferral_witness`]), a no-op when no candidate carries a reproducible hold.
 ///
 /// `state` becomes one tracked search root for the whole call, shared by every
 /// rung, so a rung reuses the root successors and the positions below them
@@ -4279,7 +4315,7 @@ fn run_iterative_deepening(
             rollout_depth: config.search.rollout_depth,
         };
 
-        let mut rung_scored = Vec::with_capacity(ranked.len());
+        let mut rung_lines = Vec::with_capacity(ranked.len());
         let mut completed = true;
         for r in &ranked {
             // Rungs >= 1 may bail mid-rung (interior search is expensive) and
@@ -4297,10 +4333,12 @@ fn run_iterative_deepening(
                 && services
                     .prompt_answers
                     .admits_without_simulation(state, &r.candidate.action);
-            let score = if r.score == f64::NEG_INFINITY && !unverified {
+            let line = if r.score == f64::NEG_INFINITY && !unverified {
                 // A policy Reject: `continuation + score * tactical_weight` is −∞
                 // for every finite continuation, so the simulation cannot change it.
-                f64::NEG_INFINITY
+                RootLine::Unsearched {
+                    score: f64::NEG_INFINITY,
+                }
             } else {
                 match services.successor_edge(
                     Some(root),
@@ -4310,7 +4348,9 @@ fn run_iterative_deepening(
                 ) {
                     // An unverified Reject that applies: the simulation was its
                     // legality check, and its score stands.
-                    Some(_) if r.score == f64::NEG_INFINITY => f64::NEG_INFINITY,
+                    Some(_) if r.score == f64::NEG_INFINITY => RootLine::Unsearched {
+                        score: f64::NEG_INFINITY,
+                    },
                     Some((child, sim)) => {
                         let cont =
                             planner.evaluate_after_action_at(child, &sim, services, &mut budget);
@@ -4318,7 +4358,7 @@ fn run_iterative_deepening(
                             .continuation_witness
                             .filter(|witness| witness.is_finite())
                             .map_or(cont, |witness| cont.max(witness));
-                        continuation + (r.score * tactical_weight)
+                        RootLine::Searched { continuation }
                     }
                     None => {
                         if unverified {
@@ -4332,12 +4372,29 @@ fn run_iterative_deepening(
                         }
                         // Action failed simulation — same penalty as origin/main so the
                         // AI prefers any valid alternative.
-                        r.score - 1000.0
+                        RootLine::Unsearched {
+                            score: r.tactical_total() - 1000.0,
+                        }
                     }
                 }
             };
-            rung_scored.push((r.candidate.action.clone(), score));
+            rung_lines.push(RootRungScore {
+                action: r.candidate.action.clone(),
+                line,
+                tactical: r.root_tactical(tactical_weight),
+                deferral: r.deferral,
+            });
         }
+        if completed {
+            lend_deferral_witness(&mut rung_lines);
+        }
+        let rung_scored: Vec<(GameAction, f64)> = rung_lines
+            .into_iter()
+            .map(|entry| {
+                let score = entry.score();
+                (entry.action, score)
+            })
+            .collect();
 
         // "Fully completed" also requires the deadline to be live after the
         // LAST candidate: expiry mid-final-evaluation is invisible to the
@@ -4537,13 +4594,15 @@ pub(crate) fn deterministic_choice(
         return Some(action);
     }
 
-    // CR 601.2d + CR 704.5g: divided-damage split. `WaitingFor::DistributeAmong`
-    // is the tail of a target-selection sequence the AI has already committed
-    // to, and the engine offers at most two shapes for it (the even split and
-    // `ai_support`'s lethal-first split). Deciding it here on kill count keeps
-    // `quiesce` — which calls `deterministic_choice` with `context: None` —
-    // seeing through the trigger to the board that results, instead of stalling
-    // the rollout on two near-identical distribution vectors. This is the same
+    // CR 601.2d + CR 608.2d + CR 704.5g: divided-damage split.
+    // `WaitingFor::DistributeAmong` is either the tail of a target-selection
+    // sequence the AI has already committed to (CR 601.2d) or a choice made
+    // while an effect resolves (CR 608.2d), and the engine offers a bounded
+    // family of legal alternatives for it (`ai_support`'s even, lethal-first,
+    // greedy, survivable, and all-on-one shapes). Deciding it here on the kill
+    // score keeps `quiesce` — which calls `deterministic_choice` with
+    // `context: None` — seeing through the trigger to the board that results,
+    // instead of stalling the rollout on near-identical distribution vectors. This is the same
     // call that decides the ROOT prompt (the pre-search early return in
     // `score_candidates_with_session`), so the arm is context-free by
     // construction: it reads only `state` and `actions`.
@@ -5369,8 +5428,14 @@ fn validated_declare_attackers(
 /// CR 702.12b: an indestructible creature ignores the lethal-damage
 /// state-based action, so no share kills it. A body already at 0 or less
 /// toughness is dying to CR 704.5f regardless, and a player or planeswalker is
-/// not a kill at all.
-fn share_is_lethal(state: &GameState, target: &TargetRef, share: u32) -> bool {
+/// not a kill at all. CR 702.2b + CR 704.5h: from a deathtouch source any
+/// nonzero share is lethal.
+fn share_is_lethal(
+    state: &GameState,
+    target: &TargetRef,
+    share: u32,
+    source_has_deathtouch: bool,
+) -> bool {
     let TargetRef::Object(id) = target else {
         return false;
     };
@@ -5381,30 +5446,47 @@ fn share_is_lethal(state: &GameState, target: &TargetRef, share: u32) -> bool {
             // The threshold comes from `combat_damage::lethal_damage_needed`,
             // the documented single authority for how much a body absorbs; it
             // already accounts for damage already marked.
-            && share >= engine::game::combat_damage::lethal_damage_needed(state, *id, false)
+            && share
+                >= engine::game::combat_damage::lethal_damage_needed(
+                    state,
+                    *id,
+                    source_has_deathtouch,
+                )
     })
 }
 
-/// CR 601.2d: pick the offered damage division that destroys the most creature
-/// targets, keeping the engine's emission order on a tie so the even split —
-/// emitted first by `ai_support::candidate_actions` — stands when no split
-/// kills more.
+/// Strict-improvement margin for summed division scores: equal kill sets summed
+/// in a different entry order may differ by an ulp, and must still tie.
+const DIVISION_SCORE_EPSILON: f64 = 1e-9;
+
+/// CR 601.2d + CR 608.2d: pick the offered damage division with the best kill
+/// score, keeping the earlier division on a tie (the root re-sorts candidates by
+/// `cmp_stable` before this runs; unsorted callers such as quiescence keep the
+/// engine's emission order).
 ///
+/// The kill score depends on the division's scope:
+/// - `AnnouncedTargets` (CR 601.2d): each destroyed creature target counts
+///   +1 — the chooser announced those targets to destroy them.
+/// - `ResolutionCandidates` (CR 608.2d): the recipients are whoever the effect
+///   names, so each destroyed creature scores its intrinsic value, positive
+///   when an opponent of the chooser controls it and negative otherwise. A
+///   division that destroys nothing (0) beats any that destroys a friendly
+///   body, and among opposed bodies the most valuable is preferred.
+///
+/// Lethality reads the dividing source's deathtouch through the engine's
+/// `deal_damage::division_source_has_deathtouch` (CR 702.2b + CR 704.5h).
 /// Only `DistributionUnit::Damage` has a lethality notion; counter and life
-/// divisions fall through to the ordinary scoring path. Deathtouch is not
-/// modelled: `WaitingFor::DistributeAmong` carries no source id, and with a
-/// deathtouch source every share of one or more is lethal (CR 702.2b), so both
-/// offered splits tie and the even split stands anyway.
+/// divisions fall through to the ordinary scoring path.
 fn most_lethal_distribution(state: &GameState, actions: &[GameAction]) -> Option<GameAction> {
-    if !matches!(
-        state.waiting_for,
-        WaitingFor::DistributeAmong {
-            unit: DistributionUnit::Damage,
-            ..
-        }
-    ) {
+    let WaitingFor::DistributeAmong {
+        player: chooser,
+        unit: DistributionUnit::Damage,
+        scope,
+        ..
+    } = &state.waiting_for
+    else {
         return None;
-    }
+    };
     let divisions: Vec<&GameAction> = actions
         .iter()
         .filter(|action| matches!(action, GameAction::DistributeAmong { .. }))
@@ -5417,21 +5499,43 @@ fn most_lethal_distribution(state: &GameState, actions: &[GameAction]) -> Option
     if divisions.len() < 2 {
         return None;
     }
-    let mut best: Option<(usize, &GameAction)> = None;
+    let source_has_deathtouch =
+        engine::game::effects::deal_damage::division_source_has_deathtouch(state, scope);
+    let kill_score = |target: &TargetRef| -> f64 {
+        match scope {
+            DistributionScope::AnnouncedTargets => 1.0,
+            DistributionScope::ResolutionCandidates { .. } => {
+                let TargetRef::Object(id) = target else {
+                    return 0.0;
+                };
+                let Some(object) = state.objects.get(id) else {
+                    return 0.0;
+                };
+                let value = crate::eval::evaluate_creature_intrinsic(state, *id);
+                if engine::game::players::is_opponent(state, *chooser, object.controller) {
+                    value
+                } else {
+                    -value
+                }
+            }
+        }
+    };
+    let mut best: Option<(f64, &GameAction)> = None;
     for action in divisions {
         let GameAction::DistributeAmong { distribution } = action else {
             continue;
         };
-        let kills = distribution
+        let score: f64 = distribution
             .iter()
-            .filter(|(target, share)| share_is_lethal(state, target, *share))
-            .count();
+            .filter(|(target, share)| share_is_lethal(state, target, *share, source_has_deathtouch))
+            .map(|(target, _)| kill_score(target))
+            .sum();
         let is_better = match best {
-            Some((most, _)) => kills > most,
+            Some((best_score, _)) => score > best_score + DIVISION_SCORE_EPSILON,
             None => true,
         };
         if is_better {
-            best = Some((kills, action));
+            best = Some((score, action));
         }
     }
     best.map(|(_, action)| action.clone())
@@ -5674,9 +5778,13 @@ mod tests {
     use engine::types::actions::ResolveAllScope;
     use std::path::Path;
 
+    use super::RootLine::{Searched, Unsearched};
     use super::*;
     use crate::planner::apply_candidate;
+    use crate::policies::activation_patience::ActivationPatiencePolicy;
     use crate::policies::mulligan::{registry_keeps, FREE_REVEAL_BOUND};
+    use crate::policies::registry::NUDGE_MAX;
+    use crate::policies::tests::activation_patience_repro::add_instant_face;
     use engine::ai_support::{
         ActionMetadata, AiDecisionContext, CandidateAction, CertifiedPactPlan, TacticalClass,
     };
@@ -5685,20 +5793,22 @@ mod tests {
         load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
     };
     use engine::game::engine::start_game_with_starting_player;
+    use engine::game::game_object::PreparedState;
     use engine::game::mulligan::free_reveal_futile_for;
     use engine::game::rehydrate_game_from_card_db;
     use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::game::scenario_db::GameScenarioDbExt;
     use engine::game::zones::{add_to_zone, create_object, remove_from_zone};
     use engine::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, CategoryChooserScope, CommanderOwnership,
-        ContinuousModification, ControllerRef, Duration, Effect, EffectKind, ManaProduction,
-        ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, PlayerFilter, PtValue,
-        QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, StaticCondition,
-        StaticDefinition, TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition,
-        TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, CategoryChooserScope,
+        CommanderOwnership, ContinuousModification, ControllerRef, CostCategory, Duration, Effect,
+        EffectKind, ManaProduction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
+        PlayerFilter, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility,
+        StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TargetRef,
+        TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
     };
     use engine::types::ability::{ChoiceType, ChosenAttribute};
+    use engine::types::card::LayoutKind;
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
     use engine::types::format::FormatConfig;
@@ -5708,9 +5818,13 @@ mod tests {
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::{EvokeCost, Keyword};
-    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use engine::types::mana::{
+        AbilityActivationScope, ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaType,
+        ManaUnit,
+    };
     use engine::types::phase::Phase;
     use engine::types::replacements::ReplacementEvent;
+    use engine::types::statics::{CostModifyMode, StaticMode};
     use engine::types::triggers::TriggerMode;
     use engine::types::zones::Zone;
     use rand::rngs::SmallRng;
@@ -15854,6 +15968,41 @@ mod tests {
         assert_eq!(out, vec![(cast.action, f64::NEG_INFINITY)]);
     }
 
+    /// A held activation whose successor simulation fails keeps its deferral under the
+    /// failed-simulation penalty: its unsearched score is `tactical_total() - 1000.0`, so the
+    /// patience hold still orders it among the other failed candidates.
+    #[test]
+    fn unsimulated_held_root_candidate_keeps_its_deferral() {
+        let state = searchable_state();
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        config.search.planner_mode = PlannerMode::BeamOnly; // rung 0 only
+        let missing_source = ObjectId(u64::MAX);
+        assert!(
+            !state.objects.contains_key(&missing_source),
+            "premise: the activation's source does not exist, so its simulation fails"
+        );
+        let held = CandidateAction {
+            action: activate(missing_source, 0),
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Ability),
+        };
+        let (score, penalty) = (0.5, -1.5);
+        let deferral = Deferral {
+            penalty,
+            line: HeldLine::Reproducible,
+        };
+
+        let mut services =
+            PlannerServices::new_default(PlayerId(0), &config, PolicyRegistry::shared());
+        let ranked = vec![RankedCandidate::new(held.clone(), score).with_deferral(Some(deferral))];
+        let out = run_iterative_deepening(&state, ranked, 0.1, &config, &mut services)
+            .expect("services that simulate every answer admit none unsimulated");
+        assert!(
+            services.memo_witness.successor_simulations > 0,
+            "reach: the held candidate requests its successor simulation"
+        );
+        assert_eq!(out, vec![(held.action, score + penalty - 1000.0)]);
+    }
+
     /// Under `PromptAnswerValidation::AtSubmission`, rung 0 stops at the first
     /// beam answer the legality gate admitted without simulating it whose
     /// simulation fails: it returns that answer, simulates (and so evaluates)
@@ -17312,6 +17461,7 @@ mod tests {
             total: 5,
             targets: targets.clone(),
             unit: DistributionUnit::Damage,
+            scope: engine::types::game_state::DistributionScope::AnnouncedTargets,
         };
 
         let even = GameAction::DistributeAmong {
@@ -17345,6 +17495,255 @@ mod tests {
             deterministic_choice(&state, P0, &config, &[tie_a.clone(), tie_b], None),
             Some(tie_a),
             "an equal kill count must keep the engine's emission order"
+        );
+    }
+
+    /// Park `state` at a CR 608.2d resolution-time damage division of `total`
+    /// among `targets`, chosen by `chooser`, whose paused node's damage source
+    /// is `source` (`damage_source: None` reads the ability's own source).
+    fn park_resolution_division(
+        state: &mut GameState,
+        chooser: PlayerId,
+        total: u32,
+        targets: &[TargetRef],
+        source: ObjectId,
+    ) {
+        let pending = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: engine::types::ability::QuantityExpr::Fixed {
+                    value: total as i32,
+                },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            source,
+            chooser,
+        );
+        state.waiting_for = WaitingFor::DistributeAmong {
+            player: chooser,
+            total,
+            targets: targets.to_vec(),
+            unit: DistributionUnit::Damage,
+            scope: DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            },
+        };
+    }
+
+    fn division(entries: &[(ObjectId, u32)]) -> GameAction {
+        GameAction::DistributeAmong {
+            distribution: entries
+                .iter()
+                .map(|(id, share)| (TargetRef::Object(*id), *share))
+                .collect(),
+        }
+    }
+
+    /// CR 608.2d + CR 704.5g: dividing among the chooser's OWN bodies, each
+    /// destroyed body is a loss weighted by its value — losing only the cheaper
+    /// body beats the kill-both split, and a division that destroys nothing
+    /// beats any loss.
+    #[test]
+    fn resolution_division_choice_minimises_friendly_losses() {
+        let config = AiConfig::default();
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, P1, 4, 5);
+        let timber = add_creature(&mut state, P0, 1, 1);
+        let watch = add_creature(&mut state, P0, 3, 3);
+        let (timber_value, watch_value) = (
+            crate::eval::evaluate_creature_intrinsic(&state, timber),
+            crate::eval::evaluate_creature_intrinsic(&state, watch),
+        );
+        assert!(
+            0.0 < timber_value && timber_value < watch_value,
+            "fixture premise: a 1/1 is worth less than a 3/3"
+        );
+        park_resolution_division(
+            &mut state,
+            P0,
+            4,
+            &[TargetRef::Object(timber), TargetRef::Object(watch)],
+            source,
+        );
+        let both_die = division(&[(timber, 1), (watch, 3)]);
+        let timber_dies = division(&[(timber, 4)]);
+        let watch_dies = division(&[(watch, 4)]);
+        assert_eq!(
+            deterministic_choice(
+                &state,
+                P0,
+                &config,
+                &[both_die, watch_dies, timber_dies.clone()],
+                None
+            ),
+            Some(timber_dies),
+            "the single cheaper loss wins"
+        );
+
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, P0, 4, 7);
+        let a = add_creature(&mut state, P0, 3, 3);
+        let b = add_creature(&mut state, P0, 3, 3);
+        park_resolution_division(
+            &mut state,
+            P0,
+            4,
+            &[TargetRef::Object(a), TargetRef::Object(b)],
+            source,
+        );
+        let one_dies = division(&[(a, 4)]);
+        let spread = division(&[(a, 2), (b, 2)]);
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &[one_dies, spread.clone()], None),
+            Some(spread),
+            "a no-kill division beats any friendly loss"
+        );
+    }
+
+    /// CR 608.2d: among opposed recipients the most valuable destroyed body
+    /// wins, and two divisions destroying the same set (entries in a different
+    /// order) tie — the earlier one stands.
+    #[test]
+    fn resolution_division_choice_values_opposed_kills_and_keeps_ties_stable() {
+        let config = AiConfig::default();
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, P1, 3, 3);
+        let timber = add_creature(&mut state, P0, 1, 1);
+        let watch = add_creature(&mut state, P0, 3, 3);
+        park_resolution_division(
+            &mut state,
+            P1,
+            3,
+            &[TargetRef::Object(timber), TargetRef::Object(watch)],
+            source,
+        );
+        let timber_dies = division(&[(timber, 3)]);
+        let watch_dies = division(&[(watch, 3)]);
+        assert_eq!(
+            deterministic_choice(
+                &state,
+                P1,
+                &config,
+                &[timber_dies, watch_dies.clone()],
+                None
+            ),
+            Some(watch_dies),
+            "the opposing chooser destroys the more valuable body"
+        );
+
+        park_resolution_division(
+            &mut state,
+            P1,
+            4,
+            &[TargetRef::Object(timber), TargetRef::Object(watch)],
+            source,
+        );
+        let forward = division(&[(timber, 1), (watch, 3)]);
+        let reversed = division(&[(watch, 3), (timber, 1)]);
+        assert_eq!(
+            deterministic_choice(
+                &state,
+                P1,
+                &config,
+                &[forward.clone(), reversed.clone()],
+                None
+            ),
+            Some(forward.clone()),
+            "an equal kill set keeps the earlier division"
+        );
+        assert_eq!(
+            deterministic_choice(&state, P1, &config, &[reversed.clone(), forward], None),
+            Some(reversed),
+            "an equal kill set keeps the earlier division in either order"
+        );
+    }
+
+    /// CR 702.2b + CR 704.5h: a resolution-time division whose damage source
+    /// has deathtouch makes one-point shares lethal; the same prompt without
+    /// deathtouch scores both divisions 0 and keeps the first.
+    #[test]
+    fn resolution_division_choice_reads_the_sources_deathtouch() {
+        let config = AiConfig::default();
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, P1, 2, 3);
+        let a = add_creature(&mut state, P0, 3, 3);
+        let b = add_creature(&mut state, P0, 3, 3);
+        park_resolution_division(
+            &mut state,
+            P1,
+            2,
+            &[TargetRef::Object(a), TargetRef::Object(b)],
+            source,
+        );
+        let all_on_a = division(&[(a, 2)]);
+        let spread = division(&[(a, 1), (b, 1)]);
+        assert_eq!(
+            deterministic_choice(
+                &state,
+                P1,
+                &config,
+                &[all_on_a.clone(), spread.clone()],
+                None
+            ),
+            Some(all_on_a.clone()),
+            "control: without deathtouch neither division destroys a 3/3"
+        );
+
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .keywords
+            .push(Keyword::Deathtouch);
+        assert_eq!(
+            deterministic_choice(&state, P1, &config, &[all_on_a, spread.clone()], None),
+            Some(spread),
+            "one deathtouch point destroys each 3/3"
+        );
+    }
+
+    /// CR 601.2d: announce-time divisions keep the kill-count metric — the
+    /// recipients' controller does not matter, a 2-kill beats a 1-kill, and an
+    /// equal count keeps the earlier division.
+    #[test]
+    fn announced_division_choice_keeps_kill_count() {
+        let config = AiConfig::default();
+        let mut state = GameState::new_two_player(42);
+        let frail = add_creature(&mut state, P0, 1, 1);
+        let tough = add_creature(&mut state, P0, 1, 3);
+        state.waiting_for = WaitingFor::DistributeAmong {
+            player: P0,
+            total: 4,
+            targets: vec![TargetRef::Object(frail), TargetRef::Object(tough)],
+            unit: DistributionUnit::Damage,
+            scope: DistributionScope::AnnouncedTargets,
+        };
+        let one_kill = division(&[(frail, 2), (tough, 2)]);
+        let two_kills = division(&[(frail, 1), (tough, 3)]);
+        assert_eq!(
+            deterministic_choice(
+                &state,
+                P0,
+                &config,
+                &[one_kill.clone(), two_kills.clone()],
+                None
+            ),
+            Some(two_kills),
+            "two kills beat one even when the chooser controls both bodies"
+        );
+        let other_one_kill = division(&[(frail, 3), (tough, 1)]);
+        assert_eq!(
+            deterministic_choice(
+                &state,
+                P0,
+                &config,
+                &[one_kill.clone(), other_one_kill],
+                None
+            ),
+            Some(one_kill),
+            "an equal kill count keeps the earlier division"
         );
     }
 
@@ -20367,7 +20766,25 @@ one on the bottom of your library.";
         for player in &mut state.players {
             player.life = 20;
         }
+        add_libraries(&mut state, 5);
         (state, pinger)
+    }
+
+    /// `count` vanilla cards in every player's library, so a line that reaches a draw draws
+    /// instead of decking (CR 704.5b).
+    fn add_libraries(state: &mut GameState, count: usize) {
+        let players: Vec<PlayerId> = state.players.iter().map(|player| player.id).collect();
+        for player in players {
+            for _ in 0..count {
+                create_object(
+                    state,
+                    CardId(state.next_object_id),
+                    player,
+                    "Library Card".to_string(),
+                    Zone::Library,
+                );
+            }
+        }
     }
 
     /// Hard, measurement mode, rung 0 only (BeamOnly): each root candidate's
@@ -20386,8 +20803,16 @@ one on the bottom of your library.";
         policies: Vec<Box<dyn TacticalPolicy>>,
         config: &AiConfig,
     ) -> Vec<(GameAction, f64)> {
+        score_with_registry(state, PolicyRegistry::for_tests(policies), config)
+    }
+
+    fn score_with_registry(
+        state: &GameState,
+        registry: PolicyRegistry,
+        config: &AiConfig,
+    ) -> Vec<(GameAction, f64)> {
         let mut session = AiSession::from_game(state);
-        session.policy_registry_override = Some(Arc::new(PolicyRegistry::for_tests(policies)));
+        session.policy_registry_override = Some(Arc::new(registry));
         score_candidates_with_session(state, P0, config, &Arc::new(session))
     }
 
@@ -20400,16 +20825,18 @@ one on the bottom of your library.";
     }
 
     /// Root-only timing verdict on one source's activations: it cannot fire in
-    /// the continuation, so a paired run isolates the root weight.
+    /// the continuation, so a paired run isolates the root weight. `id` is the
+    /// policy it reports as.
     struct RootTimingStub {
         source: ObjectId,
+        id: PolicyId,
     }
 
     const ROOT_TIMING_STUB_DELTA: f64 = 1.2;
 
     impl TacticalPolicy for RootTimingStub {
         fn id(&self) -> PolicyId {
-            PolicyId::ActivationPatience
+            self.id
         }
 
         fn decision_kinds(&self) -> &'static [DecisionKind] {
@@ -20457,9 +20884,13 @@ one on the bottom of your library.";
             let ping = ping_action(pinger);
             let pass = GameAction::PassPriority;
             let control = score_with(&state, vec![], &cfg);
+            // Any policy except `DEFERRAL_POLICY`, whose root verdict is unweighted.
             let timed = score_with(
                 &state,
-                vec![Box::new(RootTimingStub { source: pinger })],
+                vec![Box::new(RootTimingStub {
+                    source: pinger,
+                    id: PolicyId::EffectTiming,
+                })],
                 &cfg,
             );
             for scored in [&control, &timed] {
@@ -20482,41 +20913,3549 @@ one on the bottom of your library.";
         }
     }
 
-    /// phase-rs/phase#10334: the real `ActivationPatiencePolicy` verdict in the
-    /// AI's own Upkeep reaches the searched root score at 0.35 of its raw
-    /// (heuristic-branch, unweighted) contribution.
+    // ---- Deferral witness and full-strength patience at the own Upkeep/Draw root ----
+
+    const WELLWISHER: &str = "{T}: You gain 1 life for each Elf on the battlefield.";
+    const LOBBER_CREW: &str = "Defender\n{T}: This creature deals 1 damage to each opponent.\nWhenever you cast a multicolored spell, untap this creature.";
+    const BALDUVIAN_HYDRA: &str = "This creature enters with X +1/+0 counters on it.\nRemove a +1/+0 counter from this creature: Prevent the next 1 damage that would be dealt to it this turn.\n{R}{R}{R}: Put a +1/+0 counter on this creature. Activate only during your upkeep.";
+    const COORDINATED_ASSAULT: &str = "Up to two target creatures each get +1/+0 and gain first strike until end of turn. (They deal combat damage before creatures without first strike.)";
+
+    fn activate(source_id: ObjectId, ability_index: usize) -> GameAction {
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        }
+    }
+
+    /// An AI enchantment with the Saga subtype and no chapter abilities. Its presence is what
+    /// `activation_patience::main_phase_opens_with_events` reads: that predicate stands the
+    /// patience window down for any Saga its player controls, whatever its chapter abilities.
+    fn add_saga(state: &mut GameState, controller: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            "Saga".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Saga".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        id
+    }
+
+    /// `timing_window_board`'s shape with Wellwisher ("{T}: You gain 1 life for each Elf on the
+    /// battlefield.", an Elf 1/1, not summoning sick) in place of the pinger.
+    fn wellwisher_board(phase: Phase) -> (GameState, ObjectId) {
+        let mut state = make_state();
+        state.phase = phase;
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        let wellwisher = add_creature(&mut state, P0, 1, 1);
+        let abilities = engine::parser::oracle::parse_oracle_text(
+            WELLWISHER,
+            "Wellwisher",
+            &[],
+            &["Creature".to_string()],
+            &["Elf".to_string()],
+        )
+        .abilities;
+        let obj = state.objects.get_mut(&wellwisher).unwrap();
+        obj.summoning_sick = false;
+        obj.card_types.subtypes.push("Elf".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        *Arc::make_mut(&mut obj.abilities) = abilities;
+        // U1 fallback: more Elves, so the activation gains more life than tapping its source
+        // costs and the held line beats Pass's own in the Draw step too.
+        for _ in 0..WELLWISHER_EXTRA_ELVES {
+            let elf = add_creature(&mut state, P0, 1, 1);
+            let obj = state.objects.get_mut(&elf).unwrap();
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+        add_creature(&mut state, P1, 1, 5);
+        for player in &mut state.players {
+            player.life = 20;
+        }
+        add_libraries(&mut state, 5);
+        (state, wellwisher)
+    }
+
+    /// Vanilla Elves beside Wellwisher in [`wellwisher_board`].
+    const WELLWISHER_EXTRA_ELVES: usize = 5;
+
+    /// The four root scorings the patience rows compare: searched (`s`) and heuristic (`h`),
+    /// without (`0`) and with (`1`) `ActivationPatiencePolicy`, at the board's own root weight.
+    struct PatienceRoots {
+        s0: Vec<(GameAction, f64)>,
+        s1: Vec<(GameAction, f64)>,
+        h0: Vec<(GameAction, f64)>,
+        h1: Vec<(GameAction, f64)>,
+        tw: f64,
+    }
+
+    impl PatienceRoots {
+        fn score(state: &GameState, config: &AiConfig) -> Self {
+            let with =
+                || -> Vec<Box<dyn TacticalPolicy>> { vec![Box::new(ActivationPatiencePolicy)] };
+            let mut heuristic = config.clone();
+            heuristic.search.enabled = false;
+            Self {
+                s0: score_with(state, vec![], config),
+                s1: score_with(state, with(), config),
+                h0: score_with(state, vec![], &heuristic),
+                h1: score_with(state, with(), &heuristic),
+                tw: RootDecisionContext::classify(state, P0).tactical_weight(),
+            }
+        }
+
+        /// Reach guard: every run scored every action in `actions`.
+        fn assert_scored(&self, label: &str, actions: &[&GameAction]) {
+            for scored in [&self.s0, &self.s1, &self.h0, &self.h1] {
+                for action in actions {
+                    assert!(
+                        scored
+                            .iter()
+                            .any(|(scored_action, _)| scored_action == *action),
+                        "{label}: reach: {action:?} scored, got {scored:?}"
+                    );
+                }
+            }
+        }
+
+        /// Rung 0's continuation for `action` without the policy (V1: the override registry
+        /// does not reach it): the searched score minus its weighted tactical term.
+        fn cont(&self, action: &GameAction) -> f64 {
+            score_of(&self.s0, action) - score_of(&self.h0, action) * self.tw
+        }
+
+        /// The policy's raw (heuristic-branch) contribution to `action`.
+        fn ap(&self, action: &GameAction) -> f64 {
+            score_of(&self.h1, action) - score_of(&self.h0, action)
+        }
+    }
+
+    /// The searched root in the AI's own Upkeep and Draw step on an empty stack applies
+    /// `ActivationPatiencePolicy`'s verdict at full strength (`RankedCandidate::root_tactical`):
+    /// the root margin moves by exactly the heuristic branch's raw delta. Outside the policy's
+    /// window (the main phase; an upkeep in which the AI controls a Saga, where the policy
+    /// stands down) the verdict is silent and nothing moves.
     #[test]
-    fn own_upkeep_root_carries_activation_patience_at_0_35() {
-        use crate::policies::activation_patience::ActivationPatiencePolicy;
-        use crate::policies::registry::NUDGE_MAX;
+    fn own_upkeep_and_draw_root_carry_activation_patience_at_full_strength() {
+        let cfg = hard_rung0_config();
+        for (label, phase, saga, held) in [
+            ("own Upkeep", Phase::Upkeep, false, true),
+            ("own Draw", Phase::Draw, false, true),
+            ("own PreCombatMain", Phase::PreCombatMain, false, false),
+            ("own Upkeep with a Saga", Phase::Upkeep, true, false),
+        ] {
+            let (mut state, pinger) = timing_window_board(phase, P0);
+            if saga {
+                add_saga(&mut state, P0);
+            }
+            let ping = ping_action(pinger);
+            let pass = GameAction::PassPriority;
+            let roots = PatienceRoots::score(&state, &cfg);
+            roots.assert_scored(label, &[&ping, &pass]);
+            let d_h = score_of(&roots.h0, &ping) - score_of(&roots.h1, &ping);
+            let d_s = score_of(&roots.s0, &ping) - score_of(&roots.s1, &ping);
+            if held {
+                assert!(
+                    d_h > NUDGE_MAX,
+                    "{label}: reach: activation patience holds the ping at preference band or higher, got {d_h}"
+                );
+                assert!(
+                    (d_s - d_h).abs() < 1e-9,
+                    "{label}: the root margin {d_s} must be the full raw patience {d_h}"
+                );
+            } else {
+                assert_eq!(d_h, 0.0, "{label}: patience is silent outside its window");
+                assert_eq!(d_s, 0.0, "{label}: the root does not move the ping");
+                assert_eq!(
+                    score_of(&roots.s0, &pass),
+                    score_of(&roots.s1, &pass),
+                    "{label}: the root does not move Pass"
+                );
+            }
+        }
+    }
 
-        let (state, pinger) = timing_window_board(Phase::Upkeep, P0);
-        let ping = ping_action(pinger);
+    /// CR 117.1b: when ActivationPatience holds Wellwisher's activation in the AI's own Upkeep
+    /// or Draw step, passing keeps that activation on offer, so PassPriority's continuation is
+    /// at least the held line's (`lend_deferral_witness`). Every non-Pass score is untouched:
+    /// Wellwisher keeps its own continuation, with the hold at full strength.
+    #[test]
+    fn pass_inherits_a_held_activations_continuation_in_own_upkeep_and_draw() {
+        let cfg = hard_rung0_config();
+        for phase in [Phase::Upkeep, Phase::Draw] {
+            let (state, wellwisher) = wellwisher_board(phase);
+            let held = activate(wellwisher, 0);
+            let pass = GameAction::PassPriority;
+            let roots = PatienceRoots::score(&state, &cfg);
+            roots.assert_scored(&format!("{phase:?}"), &[&held, &pass]);
+            assert_eq!(
+                roots.tw, 0.35,
+                "{phase:?}: premise: the own Upkeep/Draw weight"
+            );
+
+            let (cont_held, cont_pass) = (roots.cont(&held), roots.cont(&pass));
+            assert!(
+                cont_held - cont_pass > 1e-6,
+                "{phase:?}: reach: the held line {cont_held} beats Pass's own {cont_pass}"
+            );
+            let ap_held = roots.ap(&held);
+            assert!(
+                ap_held < -NUDGE_MAX,
+                "{phase:?}: reach: patience holds Wellwisher, got {ap_held}"
+            );
+            assert_eq!(
+                roots.ap(&pass),
+                0.0,
+                "{phase:?}: patience never scores Pass itself"
+            );
+
+            let pass_tactical = score_of(&roots.h0, &pass) * roots.tw;
+            let s1_pass = score_of(&roots.s1, &pass);
+            assert!(
+                (s1_pass - (cont_held.max(cont_pass) + pass_tactical)).abs() < 1e-9,
+                "{phase:?}: Pass {s1_pass} inherits the held continuation {cont_held}"
+            );
+            let s1_held = score_of(&roots.s1, &held);
+            let own = cont_held + score_of(&roots.h0, &held) * roots.tw + ap_held;
+            assert!(
+                (s1_held - own).abs() < 1e-9,
+                "{phase:?}: Wellwisher {s1_held} keeps its own line, hold at full strength ({own})"
+            );
+        }
+    }
+
+    /// Only an open line that ActivationPatience holds lends Pass its continuation. A better
+    /// line the policy does not hold lends nothing: an upkeep-only ability (CR 602.5, Balduvian
+    /// Hydra), a Draw step in which the AI controls a Saga (the policy stands down), and the
+    /// main phase. A held line that wins the game lends nothing either: Lobber Crew's 1 damage
+    /// to each opponent at 1 life ends the game (CR 704.5a + CR 104.2a), which waiting cannot
+    /// inherit, because passing hands the opponents priority first (CR 117.3d).
+    #[test]
+    fn pass_inherits_nothing_from_a_line_activation_patience_does_not_hold_or_that_ends_the_game() {
         let pass = GameAction::PassPriority;
-        let with = || -> Vec<Box<dyn TacticalPolicy>> { vec![Box::new(ActivationPatiencePolicy)] };
+        let cfg = hard_rung0_config();
 
-        let mut heur = hard_rung0_config();
-        heur.search.enabled = false;
-        let heur_without = score_with(&state, vec![], &heur);
-        let heur_with = score_with(&state, with(), &heur);
-        let d_h = score_of(&heur_without, &ping) - score_of(&heur_with, &ping);
+        // (a) Balduvian Hydra's {R}{R}{R}: Put a +1/+0 counter on this creature. Activate only
+        // during your upkeep.
+        let hydra_board = || {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::Upkeep);
+            let hydra = scenario
+                .add_creature_from_oracle(P0, "Balduvian Hydra", 0, 1, BALDUVIAN_HYDRA)
+                .id();
+            for _ in 0..3 {
+                scenario.add_basic_land(P0, ManaColor::Red);
+            }
+            scenario.add_creature(P1, "Wall", 1, 5);
+            let mut runner = scenario.build();
+            add_libraries(runner.state_mut(), 5);
+            let state = runner.state().clone();
+            let index = state.objects[&hydra]
+                .abilities
+                .iter()
+                .position(|ability| {
+                    ability
+                        .activation_restrictions
+                        .contains(&ActivationRestriction::DuringYourUpkeep)
+                })
+                .expect("premise: Balduvian Hydra parses an upkeep-only ability");
+            (state, activate(hydra, index))
+        };
+        let wellwisher_with_saga = || {
+            let (mut state, wellwisher) = wellwisher_board(Phase::Draw);
+            add_saga(&mut state, P0);
+            (state, activate(wellwisher, 0))
+        };
+        let wellwisher_in_main = || {
+            let (state, wellwisher) = wellwisher_board(Phase::PreCombatMain);
+            (state, activate(wellwisher, 0))
+        };
+        let open_rows: [(&str, (GameState, GameAction)); 3] = [
+            ("(a) Balduvian Hydra, own Upkeep", hydra_board()),
+            ("(b) Wellwisher + Saga, own Draw", wellwisher_with_saga()),
+            ("(c) Wellwisher, own PreCombatMain", wellwisher_in_main()),
+        ];
+        for (label, (state, line)) in open_rows {
+            let roots = PatienceRoots::score(&state, &cfg);
+            roots.assert_scored(label, &[&line, &pass]);
+            assert!(
+                roots.cont(&line) - roots.cont(&pass) > 1e-6,
+                "{label}: reach: the line {} beats Pass's own {}",
+                roots.cont(&line),
+                roots.cont(&pass)
+            );
+            assert_eq!(
+                roots.ap(&line),
+                0.0,
+                "{label}: reach: patience does not hold it"
+            );
+            assert_eq!(
+                score_of(&roots.s1, &pass),
+                score_of(&roots.s0, &pass),
+                "{label}: Pass inherits nothing"
+            );
+        }
+
+        // (d) Lobber Crew, three players, both opponents at 1 life.
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::Upkeep;
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        let crew = add_creature(&mut state, P0, 0, 4);
+        let abilities = engine::parser::oracle::parse_oracle_text(
+            LOBBER_CREW,
+            "Lobber Crew",
+            &["Defender".to_string()],
+            &["Creature".to_string()],
+            &["Goblin".to_string(), "Warrior".to_string()],
+        )
+        .abilities;
+        let index = abilities
+            .iter()
+            .position(|ability| matches!(*ability.effect, Effect::DamageEachPlayer { .. }))
+            .expect("premise: Lobber Crew parses its damage-each-opponent activation");
+        let obj = state.objects.get_mut(&crew).unwrap();
+        obj.summoning_sick = false;
+        *Arc::make_mut(&mut obj.abilities) = abilities;
+        for opponent in [PlayerId(1), PlayerId(2)] {
+            add_creature(&mut state, opponent, 1, 5);
+            state.players[opponent.0 as usize].life = 1;
+        }
+        add_libraries(&mut state, 5);
+        let mut cfg3 =
+            create_config_for_players(AiDifficulty::Hard, Platform::Native, 3).into_measurement(7);
+        cfg3.search.planner_mode = PlannerMode::BeamOnly;
+        cfg3.search.determinization_samples = 0;
+        let lob = activate(crew, index);
+        let roots = PatienceRoots::score(&state, &cfg3);
+        let label = "(d) Lobber Crew, both opponents at 1";
         assert!(
-            d_h > NUDGE_MAX,
-            "reach-guard: activation patience must fire at preference band or higher, got {d_h}"
+            roots.s0.len() >= 2 && roots.s1.len() >= 2,
+            "{label}: reach: certified lethal did not pre-empt root scoring, got {:?}",
+            roots.s1
+        );
+        roots.assert_scored(label, &[&lob, &pass]);
+        assert!(
+            roots.ap(&lob) < -NUDGE_MAX,
+            "{label}: reach: patience holds Lobber Crew, got {}",
+            roots.ap(&lob)
+        );
+        assert_eq!(
+            eval::terminal_outcome(roots.cont(&lob)),
+            Some(eval::TerminalOutcome::Won),
+            "{label}: reach: the held line wins the game (continuation {})",
+            roots.cont(&lob)
+        );
+        assert!(
+            score_of(&roots.s1, &lob) > score_of(&roots.s1, &pass),
+            "{label}: the winning line still outranks Pass"
+        );
+        assert_eq!(
+            score_of(&roots.s1, &pass),
+            score_of(&roots.s0, &pass),
+            "{label}: Pass inherits nothing from a won line"
+        );
+    }
+
+    /// The witness also holds on a searched rung. Two `run_iterative_deepening` runs with
+    /// ceiling 1 over the same empty registry search identical trees (V5): R1's beam is R0's in
+    /// R0's order and differs only in Wellwisher's `deferral`, taken from a root-only
+    /// `RootTimingStub` reporting as ActivationPatience. At rung 1 Pass inherits Wellwisher's
+    /// continuation, and Wellwisher moves by the deferral alone.
+    #[test]
+    fn deferral_witness_holds_on_a_searched_rung() {
+        let (state, wellwisher) = wellwisher_board(Phase::Upkeep);
+        let held = activate(wellwisher, 0);
+        let pass = GameAction::PassPriority;
+        let tw = 0.35;
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        config.search.planner_mode = PlannerMode::BeamPlusRollout;
+        config.search.max_depth = 2;
+        config.search.determinization_samples = 0;
+
+        let empty = PolicyRegistry::for_tests(vec![]);
+        let stub = PolicyRegistry::for_tests(vec![Box::new(RootTimingStub {
+            source: wellwisher,
+            id: PolicyId::ActivationPatience,
+        })]);
+        let r0 = build_root_beam(&state, &PlannerServices::new_default(P0, &config, &empty));
+        let r1_ranked = build_root_beam(&state, &PlannerServices::new_default(P0, &config, &stub));
+        assert_eq!(
+            r0.len(),
+            r1_ranked.len(),
+            "both beams hold the same candidates"
+        );
+        let r1: Vec<RankedCandidate> = r0
+            .iter()
+            .map(|r| {
+                r1_ranked
+                    .iter()
+                    .find(|candidate| candidate.candidate.action == r.candidate.action)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{:?} absent from R1's beam", r.candidate.action))
+            })
+            .collect();
+        for (left, right) in r0.iter().zip(&r1) {
+            assert_eq!(left.candidate.action, right.candidate.action);
+            assert_eq!(left.score.to_bits(), right.score.to_bits());
+            assert_eq!(left.deferral, None);
+            let expected = (left.candidate.action == held).then_some(Deferral {
+                penalty: -ROOT_TIMING_STUB_DELTA,
+                line: HeldLine::Reproducible,
+            });
+            assert_eq!(right.deferral, expected, "{:?}", right.candidate.action);
+        }
+        let tactical = |action: &GameAction| {
+            r0.iter()
+                .find(|r| &r.candidate.action == action)
+                .map(|r| r.score)
+                .unwrap_or_else(|| panic!("reach: {action:?} in the beam"))
+        };
+        let (tactical_held, tactical_pass) = (tactical(&held), tactical(&pass));
+
+        let mut services0 = PlannerServices::new_default(P0, &config, &empty);
+        let s0 = run_iterative_deepening(&state, r0, tw, &config, &mut services0)
+            .expect("services that simulate every answer admit none unsimulated");
+        let mut services1 = PlannerServices::new_default(P0, &config, &empty);
+        let s1 = run_iterative_deepening(&state, r1, tw, &config, &mut services1)
+            .expect("services that simulate every answer admit none unsimulated");
+        for services in [&services0, &services1] {
+            assert_eq!(services.rung_stats.len(), 2, "rungs 0 and 1 ran");
+            assert!(
+                services.rung_stats.iter().all(|r| r.completed),
+                "every rung completed"
+            );
+            let rung1 = &services.rung_stats[1];
+            assert!(
+                rung1.nodes_used > 0 && rung1.nodes_used < rung1.max_nodes,
+                "rung 1 searched within its budget: {rung1:?}"
+            );
+        }
+
+        let cont = |action: &GameAction, tactical: f64| score_of(&s0, action) - tactical * tw;
+        let (cont_held, cont_pass) = (cont(&held, tactical_held), cont(&pass, tactical_pass));
+        assert!(
+            cont_held - cont_pass > 1e-6,
+            "reach: at rung 1 the held line {cont_held} beats Pass's own {cont_pass}"
+        );
+        assert!(
+            (score_of(&s1, &held) - score_of(&s0, &held) + ROOT_TIMING_STUB_DELTA).abs() < 1e-9,
+            "Wellwisher moves by its deferral alone"
+        );
+        assert!(
+            (score_of(&s1, &pass) - (cont_held + tactical_pass * tw)).abs() < 1e-9,
+            "Pass inherits the held continuation at rung 1"
+        );
+    }
+
+    fn line_entry(
+        action: GameAction,
+        line: RootLine,
+        tactical: f64,
+        deferral: Option<Deferral>,
+    ) -> RootRungScore {
+        RootRungScore {
+            action,
+            line,
+            tactical,
+            deferral,
+        }
+    }
+
+    /// The rung's scores after `lend_deferral_witness`, as bits so NaN compares.
+    fn lent_bits(mut rung: Vec<RootRungScore>) -> Vec<u64> {
+        lend_deferral_witness(&mut rung);
+        rung.iter().map(|entry| entry.score().to_bits()).collect()
+    }
+
+    fn unlent_bits(rung: &[RootRungScore]) -> Vec<u64> {
+        rung.iter().map(|entry| entry.score().to_bits()).collect()
+    }
+
+    /// `lend_deferral_witness` lends Pass the best continuation among reproducible holds, and
+    /// only between open lines: finite, searched, and not a finished game
+    /// (`eval::terminal_outcome`). An irreproducible hold donates nothing, whatever its line.
+    #[test]
+    fn lend_deferral_witness_lends_only_between_open_lines() {
+        let pass = |line| line_entry(GameAction::PassPriority, line, 0.2, None);
+        let held_as = |held_line, id, line| {
+            let deferral = Deferral {
+                penalty: -1.0,
+                line: held_line,
+            };
+            line_entry(activate(ObjectId(id), 0), line, 0.5, Some(deferral))
+        };
+        let holder = |id, line| held_as(HeldLine::Reproducible, id, line);
+        let unlent_holder = |id, line| held_as(HeldLine::Irreproducible, id, line);
+        let plain = |line| line_entry(activate(ObjectId(30), 0), line, 0.5, None);
+        let searched = |continuation| Searched { continuation };
+
+        let unchanged: Vec<(&str, Vec<RootRungScore>)> = vec![
+            (
+                "(i) no holder",
+                vec![pass(searched(1.0)), plain(searched(9.0))],
+            ),
+            (
+                "(ii) holder below Pass",
+                vec![pass(searched(5.0)), holder(10, searched(3.0))],
+            ),
+            (
+                "(v) rejected holder",
+                vec![
+                    pass(searched(1.0)),
+                    holder(
+                        10,
+                        Unsearched {
+                            score: f64::NEG_INFINITY,
+                        },
+                    ),
+                ],
+            ),
+            (
+                "(vi) unsimulated holder",
+                vec![
+                    pass(searched(1.0)),
+                    holder(10, Unsearched { score: -999.5 }),
+                ],
+            ),
+            (
+                "(vii) rejected Pass",
+                vec![
+                    pass(Unsearched {
+                        score: f64::NEG_INFINITY,
+                    }),
+                    holder(10, searched(4.0)),
+                ],
+            ),
+            (
+                "(viii) no Pass",
+                vec![holder(10, searched(4.0)), plain(searched(1.0))],
+            ),
+            (
+                "(x) lost Pass",
+                vec![pass(searched(eval::LOSS_SCORE)), holder(10, searched(4.0))],
+            ),
+            (
+                "(xi) won Pass",
+                vec![pass(searched(eval::WIN_SCORE)), holder(10, searched(4.0))],
+            ),
+            (
+                "(xii) NaN holder",
+                vec![pass(searched(1.0)), holder(10, searched(f64::NAN))],
+            ),
+            (
+                "(ix') only a won holder",
+                vec![pass(searched(1.0)), holder(10, searched(eval::WIN_SCORE))],
+            ),
+            (
+                "(xiii) an irreproducible holder above Pass",
+                vec![pass(searched(1.0)), unlent_holder(10, searched(4.0))],
+            ),
+            // A hold's line is its root's (`root_held_line`), so a rung's holds agree. The
+            // searched rows at `own_upkeep_root_lends_nothing_beside_an_irreproducible_activation`
+            // pin a reproducible activation reading this way beside an irreproducible one.
+            (
+                "(xiv) every hold at the root irreproducible",
+                vec![
+                    pass(searched(1.0)),
+                    unlent_holder(10, searched(3.0)),
+                    unlent_holder(11, searched(9.0)),
+                ],
+            ),
+        ];
+        for (label, rung) in unchanged {
+            let before = unlent_bits(&rung);
+            assert_eq!(lent_bits(rung), before, "{label}: nothing is lent");
+        }
+
+        let lifted = [
+            (
+                "(iii) holder above Pass",
+                vec![pass(searched(1.0)), holder(10, searched(4.0))],
+                4.0,
+            ),
+            (
+                "(iv) two holders: the max",
+                vec![
+                    pass(searched(1.0)),
+                    holder(10, searched(4.0)),
+                    holder(11, searched(6.0)),
+                ],
+                6.0,
+            ),
+            (
+                "(ix) a won holder and an open one: the open one",
+                vec![
+                    pass(searched(1.0)),
+                    holder(10, searched(eval::WIN_SCORE)),
+                    holder(11, searched(5.0)),
+                ],
+                5.0,
+            ),
+        ];
+        for (label, rung, lent) in lifted {
+            let others = unlent_bits(&rung[1..]);
+            let mut after = rung;
+            lend_deferral_witness(&mut after);
+            assert_eq!(
+                after[0].score(),
+                lent + 0.2,
+                "{label}: Pass gets {lent} + its tactical"
+            );
+            assert_eq!(
+                unlent_bits(&after[1..]),
+                others,
+                "{label}: non-Pass untouched"
+            );
+        }
+    }
+
+    /// The P1 hatch at the root: Sensei's Divining Top's "{1}: Look at the top three cards of
+    /// your library, then put them back in any order." in the AI's own Upkeep chooses the card
+    /// the draw step's draw takes (CR 504.1 + CR 121.1), so patience does not hold it: no
+    /// full-strength term and no lending. Top is tapped, so its "{T}: Draw a card" ability
+    /// cannot be paid and no other held donor exists. In the Draw step the draw is behind and
+    /// the same activation is held at full strength.
+    #[test]
+    fn own_upkeep_root_neither_holds_nor_lends_a_library_top_arrangement() {
+        let top_board = |phase: Phase| {
+            let db = shared_integration_card_db();
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(phase);
+            let top = scenario.add_real_card(P0, "Sensei's Divining Top", Zone::Battlefield, db);
+            scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+            let mut runner = scenario.build();
+            rehydrate_game_from_card_db(runner.state_mut(), db);
+            let state = runner.state_mut();
+            state.objects.get_mut(&top).unwrap().tapped = true;
+            add_libraries(state, 5);
+            assert!(
+                matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+                    && state.active_player == P0
+                    && state.stack.is_empty(),
+                "reach: P0 holds priority in its own {phase:?} on an empty stack"
+            );
+            (runner.state().clone(), top)
+        };
+        let cfg = hard_rung0_config();
+        let pass = GameAction::PassPriority;
+        for phase in [Phase::Upkeep, Phase::Draw] {
+            let (state, top) = top_board(phase);
+            let arrange = activate(top, 0);
+            let roots = PatienceRoots::score(&state, &cfg);
+            roots.assert_scored(&format!("{phase:?}"), &[&arrange, &pass]);
+            for scored in [&roots.s0, &roots.s1] {
+                assert!(
+                    !scored.iter().any(|(action, _)| matches!(
+                        action,
+                        GameAction::ActivateAbility { source_id, ability_index: 1, .. }
+                            if *source_id == top
+                    )),
+                    "{phase:?}: reach: tapped Top's draw ability is not on offer, got {scored:?}"
+                );
+            }
+            if phase == Phase::Upkeep {
+                assert_eq!(
+                    roots.ap(&arrange),
+                    0.0,
+                    "the upkeep arrangement is not held"
+                );
+                assert_eq!(score_of(&roots.s1, &arrange), score_of(&roots.s0, &arrange));
+                assert_eq!(
+                    score_of(&roots.s1, &pass),
+                    score_of(&roots.s0, &pass),
+                    "nothing is lent to Pass"
+                );
+            } else {
+                let d_h = -roots.ap(&arrange);
+                assert!(
+                    d_h > NUDGE_MAX,
+                    "reach: in the Draw step the arrangement is held, got {d_h}"
+                );
+                let d_s = score_of(&roots.s0, &arrange) - score_of(&roots.s1, &arrange);
+                assert!(
+                    (d_s - d_h).abs() < 1e-9,
+                    "the Draw-step hold applies at full strength: {d_s} vs {d_h}"
+                );
+            }
+        }
+    }
+
+    /// Crystal Ball, verbatim: a library-top arrangement that taps its source.
+    const CRYSTAL_BALL: &str = "{1}, {T}: Scry 2. (Look at the top two cards of your library, then put any number of them on the bottom and the rest on top in any order.)";
+
+    /// The tap-limited sibling of the Divining Top row: Crystal Ball's "{1}, {T}: Scry 2." in
+    /// the AI's own Upkeep, with a Lightning Bolt buried under a card that has no types and no
+    /// abilities. The scry chooses the card the draw step's draw takes (CR 504.1 + CR 121.1,
+    /// CR 701.22a), and by the main phase that draw has happened, so passing cannot reproduce
+    /// the arrangement's line: patience does not hold it and Pass is not lent its continuation,
+    /// though that continuation is above Pass's own. The ActivationPatience-only root's choice
+    /// (`roots.s1`) is then driven through the draw step with the scry keeping the Bolt on top,
+    /// and the Bolt is the card drawn. The default registry's choice on this board is a
+    /// valuation question and is not asserted here.
+    #[test]
+    fn own_upkeep_root_does_not_lend_a_tap_limited_arrangement_and_its_choice_is_drawn() {
+        let db = shared_integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let ball = scenario
+            .add_artifact_from_oracle(P0, "Crystal Ball", CRYSTAL_BALL)
+            .id();
+        for _ in 0..2 {
+            scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+        }
+        let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Library, db);
+        let blank = scenario.add_card_to_library_top(P0, "Blank Card");
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), db);
+        add_libraries(runner.state_mut(), 5);
+        {
+            let library = &mut runner
+                .state_mut()
+                .players
+                .iter_mut()
+                .find(|player| player.id == P0)
+                .unwrap()
+                .library;
+            library.retain(|id| *id != blank && *id != bolt);
+            library.insert(0, bolt);
+            library.insert(0, blank);
+        }
+        let state = runner.state().clone();
+        let p0_library = &state.players.iter().find(|p| p.id == P0).unwrap().library;
+        assert_eq!(
+            (p0_library[0], p0_library[1]),
+            (blank, bolt),
+            "premise: the blank card is on top of the AI's library, the Bolt beneath it"
+        );
+        let ability = &state.objects[&ball].abilities[0];
+        assert!(
+            matches!(
+                *ability.effect,
+                Effect::Scry {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                }
+            ),
+            "premise: Crystal Ball scries 2 on its controller's library, got {:?}",
+            ability.effect
+        );
+        assert_eq!(
+            ability.cost_categories(),
+            [CostCategory::ManaOnly, CostCategory::TapsSelf],
+            "premise: Crystal Ball's cost taps its source"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+                && state.active_player == P0
+                && state.phase == Phase::Upkeep
+                && state.stack.is_empty()
+                && !state.objects[&ball].tapped,
+            "reach: P0 holds priority in its own Upkeep on an empty stack with Crystal Ball untapped"
         );
 
         let cfg = hard_rung0_config();
-        let search_without = score_with(&state, vec![], &cfg);
-        let search_with = score_with(&state, with(), &cfg);
-        assert_eq!(
-            score_of(&search_without, &pass),
-            score_of(&search_with, &pass),
-            "pairing control: patience must not move Pass"
-        );
-        let d_s = score_of(&search_without, &ping) - score_of(&search_with, &ping);
+        let pass = GameAction::PassPriority;
+        let arrange = activate(ball, 0);
+        let roots = PatienceRoots::score(&state, &cfg);
+        roots.assert_scored("Crystal Ball upkeep", &[&arrange, &pass]);
         assert!(
-            (d_s - 0.35 * d_h).abs() < 1e-9,
-            "own-upkeep root margin {d_s} must be 0.35 x raw patience {d_h}"
+            roots.cont(&arrange) > roots.cont(&pass),
+            "reach: the arrangement's continuation {} is above Pass's {}, so a lend would move Pass",
+            roots.cont(&arrange),
+            roots.cont(&pass)
         );
+        assert_eq!(
+            roots.ap(&arrange),
+            0.0,
+            "the upkeep arrangement is not held"
+        );
+        assert_eq!(
+            score_of(&roots.s1, &pass),
+            score_of(&roots.s0, &pass),
+            "Pass is not lent the arrangement's continuation"
+        );
+
+        // Drive the root's choice through the draw step (CR 504.1).
+        let chosen = roots
+            .s1
+            .iter()
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(action, _)| action.clone())
+            .expect("the root scored at least one action");
+        runner
+            .act(chosen.clone())
+            .expect("the root's choice applies");
+        for _ in 0..32 {
+            let state = runner.state();
+            if state.phase == Phase::Draw
+                && matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+            {
+                break;
+            }
+            match state.waiting_for.clone() {
+                // CR 701.22a: keep the Bolt on top; the blank card goes to the bottom.
+                WaitingFor::ScryChoice { player, cards } => {
+                    assert_eq!(player, P0);
+                    assert!(
+                        cards.len() == 2 && cards.contains(&blank) && cards.contains(&bolt),
+                        "the scry looks at the top two cards, got {cards:?}"
+                    );
+                    runner
+                        .act(GameAction::SelectCards { cards: vec![bolt] })
+                        .expect("the scry choice applies");
+                }
+                WaitingFor::Priority { .. } => {
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("priority passes toward the draw step");
+                }
+                other => panic!("unexpected prompt before the draw step: {other:?}"),
+            }
+        }
+        let state = runner.state();
+        assert_eq!(
+            state.phase,
+            Phase::Draw,
+            "reach: the game reached the draw step"
+        );
+        let hand = &state.players.iter().find(|p| p.id == P0).unwrap().hand;
+        assert!(
+            hand.contains(&bolt) && !hand.contains(&blank),
+            "the draw step's draw takes the card the arrangement selected (root chose {chosen:?}), \
+             hand {hand:?}"
+        );
+    }
+
+    /// Elemental Augury, verbatim: a library-top arrangement of a targeted player's library.
+    const ELEMENTAL_AUGURY: &str = "{3}: Look at the top three cards of target player's library, then put them back in any order.";
+
+    /// The targeted-player sibling of the Crystal Ball row: Elemental Augury's "{3}: Look at the
+    /// top three cards of target player's library, then put them back in any order." in the AI's
+    /// own Upkeep, with a Lightning Bolt buried under a card that has no types and no abilities.
+    /// The AI may name itself as the target (CR 115.1), and that line chooses the card the draw
+    /// step's draw takes (CR 504.1 + CR 121.1, CR 701.20e), which passing cannot reproduce: by the
+    /// main phase that draw has happened. So patience does not hold the activation, and Pass is
+    /// not lent its continuation.
+    ///
+    /// Unlike Crystal Ball's, this arrangement's rung-0 continuation is not above Pass's, so on
+    /// this board a lend would not move Pass and the `ap` assertion is the one that pins the
+    /// hold. Measured on this board: the activation's first decision is its target, where naming
+    /// the AI and naming the opponent score alike, and the dig's `DigChoice` candidates enumerate
+    /// which cards are kept, not their order, so keeping all three leaves the blank card on top.
+    #[test]
+    fn own_upkeep_root_does_not_hold_a_targeted_player_arrangement() {
+        let db = shared_integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let augury = scenario
+            .add_enchantment_from_oracle(P0, "Elemental Augury", ELEMENTAL_AUGURY)
+            .id();
+        for _ in 0..3 {
+            scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+        }
+        let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Library, db);
+        let blank = scenario.add_card_to_library_top(P0, "Blank Card");
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), db);
+        add_libraries(runner.state_mut(), 5);
+        {
+            let library = &mut runner
+                .state_mut()
+                .players
+                .iter_mut()
+                .find(|player| player.id == P0)
+                .unwrap()
+                .library;
+            library.retain(|id| *id != blank && *id != bolt);
+            library.insert(0, bolt);
+            library.insert(0, blank);
+        }
+        let state = runner.state().clone();
+        let p0_library = &state.players.iter().find(|p| p.id == P0).unwrap().library;
+        assert_eq!(
+            (p0_library[0], p0_library[1]),
+            (blank, bolt),
+            "premise: the blank card is on top of the AI's library, the Bolt beneath it"
+        );
+        let ability = &state.objects[&augury].abilities[0];
+        assert!(
+            matches!(
+                *ability.effect,
+                Effect::Dig {
+                    player: TargetFilter::Player,
+                    count: QuantityExpr::Fixed { value: 3 },
+                    destination: Some(Zone::Library),
+                    rest_destination: Some(Zone::Library),
+                    keep_count: None,
+                    keep_count_expr: None,
+                    ..
+                }
+            ),
+            "premise: Elemental Augury looks at and reorders the top three of target player's \
+             library, got {:?}",
+            ability.effect
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+                && state.active_player == P0
+                && state.phase == Phase::Upkeep
+                && state.stack.is_empty(),
+            "reach: P0 holds priority in its own Upkeep on an empty stack"
+        );
+
+        let cfg = hard_rung0_config();
+        let pass = GameAction::PassPriority;
+        let arrange = activate(augury, 0);
+        let roots = PatienceRoots::score(&state, &cfg);
+        roots.assert_scored("Elemental Augury upkeep", &[&arrange, &pass]);
+        assert_eq!(
+            roots.ap(&arrange),
+            0.0,
+            "the upkeep arrangement is not held"
+        );
+        assert_eq!(
+            score_of(&roots.s1, &pass),
+            score_of(&roots.s0, &pass),
+            "Pass is not lent the arrangement's continuation"
+        );
+    }
+
+    /// Voltaic Key, verbatim.
+    const VOLTAIC_KEY: &str = "{1}, {T}: Untap target artifact.";
+    /// Howling Mine, verbatim (the integration fixture holds the same card).
+    const HOWLING_MINE: &str = "At the beginning of each player's draw step, if this artifact is untapped, that player draws an additional card.";
+
+    /// The tapped artifact beside Voltaic Key on [`key_board`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum UntapTarget {
+        /// Howling Mine, from the integration card database.
+        HowlingMine,
+        /// An artifact with no abilities and no triggers.
+        Blank,
+    }
+
+    /// P0's own Upkeep, empty stack: Voltaic Key, one Mountain for its {1}, the tapped
+    /// `target` artifact, and five library cards per player. Returns the runner, the Key, and
+    /// the tapped artifact.
+    fn key_board(target: UntapTarget) -> (GameRunner, ObjectId, ObjectId) {
+        let db = shared_integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let key = scenario
+            .add_artifact_from_oracle(P0, "Voltaic Key", VOLTAIC_KEY)
+            .id();
+        scenario.add_basic_land(P0, ManaColor::Red);
+        let mine = match target {
+            UntapTarget::HowlingMine => {
+                Some(scenario.add_real_card(P0, "Howling Mine", Zone::Battlefield, db))
+            }
+            UntapTarget::Blank => None,
+        };
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), db);
+        let state = runner.state_mut();
+        let tapped = mine.unwrap_or_else(|| {
+            let id = create_object(
+                state,
+                CardId(state.next_object_id),
+                P0,
+                "Blank Artifact".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            id
+        });
+        state.objects.get_mut(&tapped).unwrap().tapped = true;
+        add_libraries(state, 5);
+        (runner, key, tapped)
+    }
+
+    /// P0's hand size.
+    fn p0_hand(state: &GameState) -> usize {
+        state
+            .players
+            .iter()
+            .find(|player| player.id == P0)
+            .unwrap()
+            .hand
+            .len()
+    }
+
+    /// Activates Voltaic Key on `target` through the activation pipeline, answering its target
+    /// prompt, then passes priority until the ability has resolved and P0 again holds priority
+    /// on an empty stack in the same step. Any other prompt panics.
+    fn untap_with_key(runner: &mut GameRunner, key: ObjectId, target: ObjectId) {
+        let phase = runner.state().phase;
+        runner
+            .act(activate(key, 0))
+            .expect("Voltaic Key's activation is accepted");
+        let WaitingFor::TargetSelection { target_slots, .. } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "the activation asks for its target first, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert!(
+            target_slots.len() == 1
+                && target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(target)),
+            "one target slot, and the tapped artifact is a legal target: {target_slots:?}"
+        );
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .expect("the target is accepted");
+        assert!(
+            !runner.state().stack.is_empty(),
+            "the untap is on the stack, got {:?}",
+            runner.state().waiting_for
+        );
+        for _ in 0..8 {
+            let state = runner.state();
+            if state.stack.is_empty()
+                && matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+            {
+                break;
+            }
+            match state.waiting_for.clone() {
+                WaitingFor::Priority { .. } => {
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("priority passes to resolve the untap");
+                }
+                other => panic!("unexpected prompt while resolving the untap: {other:?}"),
+            }
+        }
+        let state = runner.state();
+        assert!(
+            state.phase == phase
+                && state.stack.is_empty()
+                && matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "the untap resolved within {phase:?} and P0 holds priority on an empty stack"
+        );
+    }
+
+    /// Passes priority until P0 holds priority in `phase` on an empty stack. Any other prompt
+    /// panics.
+    fn pass_to_priority_in(runner: &mut GameRunner, phase: Phase) {
+        for _ in 0..32 {
+            let state = runner.state();
+            if state.phase == phase
+                && state.stack.is_empty()
+                && matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+            {
+                return;
+            }
+            match state.waiting_for.clone() {
+                WaitingFor::Priority { .. } => {
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("priority passes");
+                }
+                other => panic!("unexpected prompt before {phase:?}: {other:?}"),
+            }
+        }
+        panic!(
+            "P0 did not reach priority in {phase:?} on an empty stack, at {:?} / {:?}",
+            runner.state().phase,
+            runner.state().waiting_for
+        );
+    }
+
+    /// Maintainer review 3, item 2: Voltaic Key ("{1}, {T}: Untap target artifact.") beside a
+    /// tapped Howling Mine ("At the beginning of each player's draw step, if this artifact is
+    /// untapped, that player draws an additional card.") in the AI's own Upkeep. The Key line
+    /// untaps the Mine before the draw step, whose trigger checks its intervening-if as the step
+    /// begins (CR 117.3a + CR 603.4), and so draws the extra card; activating the Key in the
+    /// main phase cannot, because the draw step is behind it (CR 504.1). Waiting does not
+    /// reproduce the line, so ActivationPatience does not hold the activation and Pass is not
+    /// lent its continuation, at rung 0 and on a searched rung.
+    ///
+    /// The paired control replaces the Mine with a tapped artifact that has no abilities: the
+    /// Key is then held at full strength, so the zeros on the Mine board come from the
+    /// draw-step guard and not from a candidate the root dropped. The two driven lines show
+    /// the Mine's trigger wired with its condition: the Upkeep untap draws two cards in the
+    /// draw step, and passing draws one, with the main-phase untap adding none.
+    ///
+    /// Like the Elemental Augury row's, the Key line's continuation is not above Pass's on this
+    /// board, at rung 0 or at rung 1: the root does not see the extra card. So on this board a
+    /// lend would not move Pass, and the "Pass is not lent" rows are observables, not the pin.
+    /// The pin is the Key's `deferral == None` in both beams: `lend_deferral_witness` takes its
+    /// donors from exactly the entries with a reproducible hold (as
+    /// `lend_deferral_witness_lends_only_between_open_lines` pins), so with none there is no
+    /// donor.
+    ///
+    /// Every observable is printed; regenerate them with
+    /// `cargo test -p phase-ai own_upkeep_root_does_not_lend_a_line_a_draw_step_trigger_reads -- --nocapture`.
+    #[test]
+    fn own_upkeep_root_does_not_lend_a_line_a_draw_step_trigger_reads() {
+        let (runner, key, mine) = key_board(UntapTarget::HowlingMine);
+        let state = runner.state().clone();
+
+        // Premises.
+        assert_eq!(
+            shared_integration_card_db()
+                .get_face_by_name("Howling Mine")
+                .and_then(|face| face.oracle_text.as_deref()),
+            Some(HOWLING_MINE),
+            "premise: the fixture's Howling Mine is the card, verbatim"
+        );
+        let ability = &state.objects[&key].abilities[0];
+        assert!(
+            matches!(
+                &*ability.effect,
+                Effect::SetTapState {
+                    state: TapStateChange::Untap,
+                    target: TargetFilter::Typed(typed),
+                    ..
+                } if typed.type_filters.contains(&TypeFilter::Artifact)
+            ),
+            "premise: Voltaic Key untaps target artifact, got {:?}",
+            ability.effect
+        );
+        let mine_triggers: Vec<&TriggerDefinition> = state.objects[&mine]
+            .trigger_definitions
+            .iter_unchecked()
+            .map(|entry| entry.definition())
+            .collect();
+        assert!(
+            matches!(
+                mine_triggers.as_slice(),
+                [trigger] if trigger.mode == TriggerMode::Phase
+                    && trigger.phase == Some(Phase::Draw)
+                    && matches!(
+                        &trigger.condition,
+                        Some(TriggerCondition::Not { condition })
+                            if **condition == TriggerCondition::SourceIsTapped
+                    )
+            ),
+            "premise: Howling Mine's one trigger is a draw-step trigger gated on the Mine being \
+             untapped, got {mine_triggers:?}"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+                && state.active_player == P0
+                && state.phase == Phase::Upkeep
+                && state.stack.is_empty()
+                && state.objects[&mine].tapped
+                && !state.objects[&key].tapped,
+            "premise: P0 holds priority in its own Upkeep on an empty stack, the Mine tapped and \
+             the Key untapped"
+        );
+        let tw = RootDecisionContext::classify(&state, P0).tactical_weight();
+        assert_eq!(tw, 0.35, "premise: the own Upkeep root weight");
+
+        let pass = GameAction::PassPriority;
+        let untap = activate(key, 0);
+        let patience_registry = PolicyRegistry::for_tests(vec![Box::new(ActivationPatiencePolicy)]);
+        let empty = PolicyRegistry::for_tests(vec![]);
+        let beam_deferral = |beam: &[RankedCandidate]| {
+            beam.iter()
+                .find(|ranked| ranked.candidate.action == untap)
+                .map(|ranked| ranked.deferral)
+        };
+
+        // Observables, all computed before the first non-premise assertion so that one run
+        // records every value.
+        let cfg = hard_rung0_config();
+        let roots = PatienceRoots::score(&state, &cfg);
+        let beam0 = build_root_beam(
+            &state,
+            &PlannerServices::new_default(P0, &cfg, &patience_registry),
+        );
+        let beam0_deferral = beam_deferral(&beam0);
+
+        let mut searched = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        searched.search.planner_mode = PlannerMode::BeamPlusRollout;
+        searched.search.max_depth = 2;
+        searched.search.determinization_samples = 0;
+        let r0 = build_root_beam(&state, &PlannerServices::new_default(P0, &searched, &empty));
+        let r1_ranked = build_root_beam(
+            &state,
+            &PlannerServices::new_default(P0, &searched, &patience_registry),
+        );
+        let r1_deferral = beam_deferral(&r1_ranked);
+        let r1: Vec<RankedCandidate> = r0
+            .iter()
+            .map(|r| {
+                r1_ranked
+                    .iter()
+                    .find(|candidate| candidate.candidate.action == r.candidate.action)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{:?} absent from R1's beam", r.candidate.action))
+            })
+            .collect();
+        let rung1_tactical = |action: &GameAction| {
+            r0.iter()
+                .find(|r| &r.candidate.action == action)
+                .map(|r| r.score)
+                .unwrap_or_else(|| panic!("reach: {action:?} in the beam"))
+        };
+        let mut services0 = PlannerServices::new_default(P0, &searched, &empty);
+        let s0 = run_iterative_deepening(&state, r0.clone(), tw, &searched, &mut services0)
+            .expect("services that simulate every answer admit none unsimulated");
+        let mut services1 = PlannerServices::new_default(P0, &searched, &empty);
+        let s1 = run_iterative_deepening(&state, r1.clone(), tw, &searched, &mut services1)
+            .expect("services that simulate every answer admit none unsimulated");
+        let rung1_cont = |action: &GameAction| score_of(&s0, action) - rung1_tactical(action) * tw;
+
+        let (control_runner, control_key, blank) = key_board(UntapTarget::Blank);
+        let control_state = control_runner.state().clone();
+        let control_untap = activate(control_key, 0);
+        let control = PatienceRoots::score(&control_state, &cfg);
+        let control_beam = build_root_beam(
+            &control_state,
+            &PlannerServices::new_default(P0, &cfg, &patience_registry),
+        );
+        let control_deferral = control_beam
+            .iter()
+            .find(|ranked| ranked.candidate.action == control_untap)
+            .map(|ranked| ranked.deferral);
+
+        eprintln!("K-1 Mine board, rung 0 (PatienceRoots, tw {}):", roots.tw);
+        eprintln!("  s0 = {:?}", roots.s0);
+        eprintln!("  s1 = {:?}", roots.s1);
+        eprintln!("  h0 = {:?}", roots.h0);
+        eprintln!("  h1 = {:?}", roots.h1);
+        eprintln!(
+            "  ap(key) = {}, ap(pass) = {}",
+            roots.ap(&untap),
+            roots.ap(&pass)
+        );
+        eprintln!(
+            "  cont(key) = {}, cont(pass) = {}",
+            roots.cont(&untap),
+            roots.cont(&pass)
+        );
+        eprintln!("K-1 beams, Key deferral: rung-0 beam {beam0_deferral:?}, R1 {r1_deferral:?}");
+        eprintln!("K-1 rung 1 (empty-registry services):");
+        eprintln!("  R0 run = {s0:?}");
+        eprintln!("  R1 run = {s1:?}");
+        eprintln!("  rung stats R0 {:?}", services0.rung_stats);
+        eprintln!("  rung stats R1 {:?}", services1.rung_stats);
+        eprintln!(
+            "  cont(key) = {}, cont(pass) = {}",
+            rung1_cont(&untap),
+            rung1_cont(&pass)
+        );
+        eprintln!(
+            "K-1 control (blank artifact): ap(key) = {}, s0(key) = {}, s1(key) = {}, beam deferral {:?}",
+            control.ap(&control_untap),
+            score_of(&control.s0, &control_untap),
+            score_of(&control.s1, &control_untap),
+            control_deferral
+        );
+
+        // Reach.
+        roots.assert_scored("Voltaic Key + Howling Mine upkeep", &[&untap, &pass]);
+        assert!(
+            beam0_deferral.is_some() && r1_deferral.is_some(),
+            "reach: the Key's activation is in both beams"
+        );
+        for services in [&services0, &services1] {
+            assert_eq!(services.rung_stats.len(), 2, "rungs 0 and 1 ran");
+            assert!(
+                services.rung_stats.iter().all(|r| r.completed),
+                "every rung completed"
+            );
+            let rung1 = &services.rung_stats[1];
+            assert!(
+                rung1.nodes_used > 0 && rung1.nodes_used < rung1.max_nodes,
+                "rung 1 searched within its budget: {rung1:?}"
+            );
+        }
+
+        // Rung 0.
+        assert_eq!(roots.ap(&untap), 0.0, "the Key's untap is not held");
+        assert_eq!(
+            score_of(&roots.s1, &untap),
+            score_of(&roots.s0, &untap),
+            "the root does not move the Key"
+        );
+        assert_eq!(
+            score_of(&roots.s1, &pass),
+            score_of(&roots.s0, &pass),
+            "Pass is not lent the Key line's continuation"
+        );
+
+        // The beams: no deferral, so `lend_deferral_witness` has no donor.
+        assert_eq!(
+            beam0_deferral,
+            Some(None),
+            "the Key carries no deferral in the root beam"
+        );
+
+        // Rung 1.
+        assert_eq!(r1_deferral, Some(None), "the Key carries no deferral in R1");
+        for (left, right) in r0.iter().zip(&r1) {
+            assert_eq!(left.candidate.action, right.candidate.action);
+            assert_eq!(left.score.to_bits(), right.score.to_bits());
+        }
+        assert_eq!(s0.len(), s1.len(), "both runs score the same actions");
+        for (action, score) in &s0 {
+            assert_eq!(
+                score.to_bits(),
+                score_of(&s1, action).to_bits(),
+                "rung 1 moves nothing: {action:?}"
+            );
+        }
+        assert_eq!(
+            score_of(&s1, &pass),
+            score_of(&s0, &pass),
+            "Pass is not lent the Key line's continuation at rung 1"
+        );
+
+        // Paired positive control: with a blank artifact in the Mine's place the Key is held at
+        // full strength, so the zeros above come from the draw-step guard.
+        control.assert_scored(
+            "Voltaic Key + blank artifact upkeep",
+            &[&control_untap, &pass],
+        );
+        let control_ap = control.ap(&control_untap);
+        assert!(
+            control_ap < -NUDGE_MAX,
+            "control: patience holds the Key, got {control_ap}"
+        );
+        assert!(
+            matches!(control_deferral, Some(Some(_))),
+            "control: the Key carries a deferral in the root beam, got {control_deferral:?}"
+        );
+        let control_margin =
+            score_of(&control.s0, &control_untap) - score_of(&control.s1, &control_untap);
+        assert!(
+            (control_margin + control_ap).abs() < 1e-9,
+            "control: the root margin {control_margin} is the full hold {control_ap}"
+        );
+        assert!(
+            control_state.objects[&blank].tapped,
+            "control premise: the blank artifact is tapped"
+        );
+
+        // Line K (CR 504.1 + CR 117.3a + CR 603.4): untap the Mine in the Upkeep, then reach
+        // the draw step's priority.
+        let (mut line_k, key_k, mine_k) = key_board(UntapTarget::HowlingMine);
+        let hand0 = p0_hand(line_k.state());
+        untap_with_key(&mut line_k, key_k, mine_k);
+        assert!(
+            !line_k.state().objects[&mine_k].tapped,
+            "line K: the Key untapped the Mine in the Upkeep"
+        );
+        pass_to_priority_in(&mut line_k, Phase::Draw);
+        assert!(
+            !line_k.state().objects[&mine_k].tapped,
+            "line K: the Mine is untapped as the draw step begins"
+        );
+        assert_eq!(
+            p0_hand(line_k.state()),
+            hand0 + 2,
+            "line K: the draw step's draw and the Mine's additional card"
+        );
+
+        // Line P: pass to the draw step, then untap the Mine in the main phase.
+        let (mut line_p, key_p, mine_p) = key_board(UntapTarget::HowlingMine);
+        assert_eq!(
+            p0_hand(line_p.state()),
+            hand0,
+            "line P starts from the same hand"
+        );
+        pass_to_priority_in(&mut line_p, Phase::Draw);
+        assert!(
+            line_p.state().objects[&mine_p].tapped,
+            "line P: the Mine is still tapped in the draw step"
+        );
+        assert_eq!(
+            p0_hand(line_p.state()),
+            hand0 + 1,
+            "line P: the draw step ran, and the tapped Mine added nothing"
+        );
+        pass_to_priority_in(&mut line_p, Phase::PreCombatMain);
+        untap_with_key(&mut line_p, key_p, mine_p);
+        assert!(
+            !line_p.state().objects[&mine_p].tapped,
+            "line P: the Key untapped the Mine in the main phase"
+        );
+        assert_eq!(
+            p0_hand(line_p.state()),
+            hand0 + 1,
+            "line P: untapping the Mine in the main phase draws nothing this turn"
+        );
+    }
+
+    /// Academy Ruins, verbatim: a card put on top of the AI's library.
+    const ACADEMY_RUINS: &str = "{T}: Add {C}.\n{1}{U}, {T}: Put target artifact card from your graveyard on top of your library.";
+    /// Excavated Wall, verbatim: a mill of the AI's library.
+    const EXCAVATED_WALL: &str =
+        "Defender\n{1}, {T}: Mill a card. (Put the top card of your library into your graveyard.)";
+
+    fn p0_player(state: &GameState) -> &engine::types::player::Player {
+        state.players.iter().find(|player| player.id == P0).unwrap()
+    }
+
+    fn p0_tapped_permanents(state: &GameState) -> usize {
+        state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[*id].controller == P0 && state.objects[*id].tapped)
+            .count()
+    }
+
+    /// Whether the card named `name` is in P0's hand.
+    fn p0_hand_holds(state: &GameState, name: &str) -> bool {
+        p0_player(state)
+            .hand
+            .iter()
+            .any(|id| state.objects[id].name == name)
+    }
+
+    /// Puts `top` on top of P0's library, `next` (if any) beneath it.
+    fn stack_p0_library(state: &mut GameState, top: ObjectId, next: Option<ObjectId>) {
+        let library = &mut state
+            .players
+            .iter_mut()
+            .find(|player| player.id == P0)
+            .unwrap()
+            .library;
+        library.retain(|id| *id != top && Some(*id) != next);
+        if let Some(next) = next {
+            library.insert(0, next);
+        }
+        library.insert(0, top);
+    }
+
+    /// The ActivationPatience-only root beam's deferral for `donor`, `None` if it is absent.
+    fn patience_beam_deferral(
+        state: &GameState,
+        donor: &GameAction,
+        config: &AiConfig,
+    ) -> Option<Option<f64>> {
+        let registry = PolicyRegistry::for_tests(vec![Box::new(ActivationPatiencePolicy)]);
+        let beam = build_root_beam(state, &PlannerServices::new_default(P0, config, &registry));
+        beam.iter()
+            .find(|ranked| ranked.candidate.action == *donor)
+            .map(|ranked| ranked.deferral.map(|deferral| deferral.penalty))
+    }
+
+    /// One own-library donor at the root: its Upkeep board, and the same board in the Draw step,
+    /// where the draw is behind and it must be held. Printed as it is built, so one run records
+    /// every row's values before the first assertion.
+    struct UpkeepDonorRow {
+        label: &'static str,
+        donor: GameAction,
+        roots: PatienceRoots,
+        deferral: Option<Option<f64>>,
+        control_donor: GameAction,
+        control: PatienceRoots,
+        control_deferral: Option<Option<f64>>,
+    }
+
+    impl UpkeepDonorRow {
+        fn score(
+            label: &'static str,
+            upkeep: (&GameState, GameAction),
+            draw_step: (&GameState, GameAction),
+            config: &AiConfig,
+        ) -> Self {
+            let (upkeep, donor) = upkeep;
+            let (draw_step, control_donor) = draw_step;
+            let pass = GameAction::PassPriority;
+            let roots = PatienceRoots::score(upkeep, config);
+            let deferral = patience_beam_deferral(upkeep, &donor, config);
+            let control = PatienceRoots::score(draw_step, config);
+            let control_deferral = patience_beam_deferral(draw_step, &control_donor, config);
+            let top_scored = roots
+                .s1
+                .iter()
+                .max_by(|(_, a), (_, b)| a.total_cmp(b))
+                .map(|(action, _)| action);
+            eprintln!("{label} upkeep root (PatienceRoots, tw {}):", roots.tw);
+            eprintln!("  s0 = {:?}", roots.s0);
+            eprintln!("  s1 = {:?}", roots.s1);
+            eprintln!("  h0 = {:?}", roots.h0);
+            eprintln!("  h1 = {:?}", roots.h1);
+            eprintln!(
+                "  ap(donor) = {}, ap(pass) = {}",
+                roots.ap(&donor),
+                roots.ap(&pass)
+            );
+            eprintln!(
+                "  cont(donor) = {}, cont(pass) = {}",
+                roots.cont(&donor),
+                roots.cont(&pass)
+            );
+            eprintln!(
+                "  s0(pass) = {}, s1(pass) = {}, lift {}",
+                score_of(&roots.s0, &pass),
+                score_of(&roots.s1, &pass),
+                score_of(&roots.s1, &pass) - score_of(&roots.s0, &pass)
+            );
+            eprintln!(
+                "  s0(donor) = {}, s1(donor) = {}",
+                score_of(&roots.s0, &donor),
+                score_of(&roots.s1, &donor)
+            );
+            eprintln!("  beam deferral = {deferral:?}, top of s1 = {top_scored:?}");
+            eprintln!(
+                "{label} draw-step control: ap(donor) = {}, beam deferral = {control_deferral:?}",
+                control.ap(&control_donor)
+            );
+            Self {
+                label,
+                donor,
+                roots,
+                deferral,
+                control_donor,
+                control,
+                control_deferral,
+            }
+        }
+
+        /// The donor is neither held nor lent, though a lend would move Pass: nothing moves from
+        /// the no-policy root, and the beam gives `lend_deferral_witness` no donor. The paired
+        /// Draw-step control is held, so these zeros come from the upkeep hatch and not from a
+        /// candidate the root dropped.
+        fn assert_not_held_or_lent(&self) {
+            let Self {
+                label,
+                donor,
+                roots,
+                ..
+            } = self;
+            let pass = GameAction::PassPriority;
+            roots.assert_scored(label, &[donor, &pass]);
+            assert!(
+                roots.cont(donor) > roots.cont(&pass),
+                "{label}: reach: the donor's continuation {} is above Pass's {}, so a lend would \
+                 move Pass",
+                roots.cont(donor),
+                roots.cont(&pass)
+            );
+            assert_eq!(roots.ap(donor), 0.0, "{label}: the donor is not held");
+            assert_eq!(
+                score_of(&roots.s1, donor),
+                score_of(&roots.s0, donor),
+                "{label}: the root does not move the donor"
+            );
+            assert_eq!(
+                score_of(&roots.s1, &pass),
+                score_of(&roots.s0, &pass),
+                "{label}: Pass is not lent the donor's continuation"
+            );
+            assert_eq!(
+                self.deferral,
+                Some(None),
+                "{label}: the donor carries no deferral in the root beam"
+            );
+
+            self.control
+                .assert_scored(label, &[&self.control_donor, &pass]);
+            let control_ap = self.control.ap(&self.control_donor);
+            assert!(
+                control_ap < -NUDGE_MAX,
+                "{label}: control: the draw step holds the donor, got {control_ap}"
+            );
+            assert!(
+                matches!(self.control_deferral, Some(Some(_))),
+                "{label}: control: the donor carries a deferral in the root beam, got {:?}",
+                self.control_deferral
+            );
+        }
+    }
+
+    /// P0's `phase`, empty stack: Academy Ruins, three Islands, a Sol Ring as the graveyard's only
+    /// artifact, and Darksteel Colossus on top of the library. Returns the runner and Ruins.
+    fn ruins_board(phase: Phase) -> (GameRunner, ObjectId) {
+        let db = shared_integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(phase);
+        let ruins = scenario
+            .add_land_from_oracle(P0, "Academy Ruins", ACADEMY_RUINS)
+            .id();
+        for _ in 0..3 {
+            scenario.add_basic_land(P0, ManaColor::Blue);
+        }
+        scenario.add_real_card(P0, "Sol Ring", Zone::Graveyard, db);
+        let colossus = scenario.add_real_card(P0, "Darksteel Colossus", Zone::Library, db);
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), db);
+        add_libraries(runner.state_mut(), 5);
+        stack_p0_library(runner.state_mut(), colossus, None);
+        (runner, ruins)
+    }
+
+    /// P0's `phase`, empty stack: Sensei's Divining Top, no land on the battlefield (so its {1}
+    /// ability is unaffordable while its draw is on the stack, and no second candidate stops the
+    /// quiesce there), an Island in hand (so the main phase does), and a blank card on top of
+    /// the library. Returns the runner and the Top.
+    fn divining_top_board(phase: Phase) -> (GameRunner, ObjectId) {
+        let db = shared_integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(phase);
+        let top = scenario.add_real_card(P0, "Sensei's Divining Top", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Island", Zone::Hand, db);
+        let blank = scenario.add_card_to_library_top(P0, "Blank Card");
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), db);
+        add_libraries(runner.state_mut(), 5);
+        stack_p0_library(runner.state_mut(), blank, None);
+        (runner, top)
+    }
+
+    /// P0's `phase`, empty stack: the Crystal Ball board with Excavated Wall in Ball's place.
+    /// Returns the runner, the Wall, the blank card on top and the Lightning Bolt beneath it.
+    fn wall_board(phase: Phase) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+        let db = shared_integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(phase);
+        let wall = scenario
+            .add_artifact_from_oracle(P0, "Excavated Wall", EXCAVATED_WALL)
+            .id();
+        for _ in 0..2 {
+            scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+        }
+        let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Library, db);
+        let blank = scenario.add_card_to_library_top(P0, "Blank Card");
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), db);
+        add_libraries(runner.state_mut(), 5);
+        stack_p0_library(runner.state_mut(), blank, Some(bolt));
+        (runner, wall, blank, bolt)
+    }
+
+    /// Maintainer review 4, item 2: a change to the AI's own library in its own Upkeep changes
+    /// what the draw step's draw takes (CR 504.1 + CR 121.1), so activating in the main phase
+    /// does not reproduce it. Patience does not hold the activation and Pass is not lent its
+    /// continuation, though that continuation is above Pass's own, so a lend would move Pass.
+    /// The rows are Academy Ruins (a card put on top), Sensei's Divining Top (a draw, then the
+    /// Top put back), and Excavated Wall (a self-mill). Each row's Draw-step control is held, and
+    /// each row's driven lines show the draws differ.
+    ///
+    /// Ruins needs exactly one legal target: the target is then auto-selected, the activation
+    /// reaches the stack, and the quiesce carries the line through the draw step to the main
+    /// phase. With two, the donor would be scored at its target prompt, before the draw.
+    ///
+    /// Two limits on what these values show. Nearly all of `cont(donor) - cont(pass)` is the
+    /// forward quiesce: the donor's line sees a drawn card, and Pass's static eval doesn't. The
+    /// Wall and Top rows compare no main-phase positions, so their gap shows only that a lend
+    /// would move Pass. And
+    /// `zone_eval::hand_quality` reads mana value against available mana, not card identity. So
+    /// the Ruins row also drives both lines to the main phase and compares their values: Sol Ring
+    /// is castable with the Island left, Darksteel Colossus is not, and `v_r > v_p` is the
+    /// invariant itself, a position passing can't reach. With a castable top card that gap is
+    /// zero. The printed `q_r` is the donor's quiesced line on `v_r`'s services: equal to `v_r`,
+    /// it shows the root's quiesce stops at that position. `cont` is on the session's services,
+    /// a different scale, so it isn't compared with either.
+    ///
+    /// Every observable is printed; regenerate them with
+    /// `cargo test -p phase-ai own_upkeep_root_does_not_lend_an_own_library_change -- --nocapture`.
+    #[test]
+    fn own_upkeep_root_does_not_lend_an_own_library_change_and_the_draw_differs() {
+        let db = shared_integration_card_db();
+        let cfg = hard_rung0_config();
+        let pass = GameAction::PassPriority;
+        let in_own_upkeep = |state: &GameState| {
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+                && state.active_player == P0
+                && state.phase == Phase::Upkeep
+                && state.stack.is_empty()
+        };
+
+        // Premises and boards. Ruins' card is absent from the fixture, so its text is the
+        // constant above; the other two fixture cards' abilities are read through the database.
+        let (ruins_runner, ruins) = ruins_board(Phase::Upkeep);
+        let ruins_state = ruins_runner.state().clone();
+        assert!(
+            in_own_upkeep(&ruins_state),
+            "premise: P0 holds priority in its own Upkeep on an empty stack"
+        );
+        let ability = &ruins_state.objects[&ruins].abilities[1];
+        assert!(
+            matches!(
+                *ability.effect,
+                Effect::PutAtLibraryPosition {
+                    position: engine::types::ability::LibraryPosition::Top,
+                    ..
+                }
+            ) && ability.condition.is_none(),
+            "premise: Academy Ruins puts a card on top with no condition, got {ability:?}"
+        );
+        let graveyard_artifacts = p0_player(&ruins_state)
+            .graveyard
+            .iter()
+            .filter(|id| {
+                ruins_state.objects[*id]
+                    .card_types
+                    .core_types
+                    .contains(&CoreType::Artifact)
+            })
+            .count();
+        assert_eq!(
+            graveyard_artifacts, 1,
+            "premise: exactly one legal target, so the activation reaches the stack"
+        );
+        let ring = p0_player(&ruins_state).graveyard[0];
+        let colossus = p0_player(&ruins_state).library[0];
+        assert_eq!(
+            (
+                ruins_state.objects[&ring].name.as_str(),
+                ruins_state.objects[&colossus].name.as_str()
+            ),
+            ("Sol Ring", "Darksteel Colossus"),
+            "premise: the Ring in the graveyard, the Colossus on top"
+        );
+
+        let (top_runner, top) = divining_top_board(Phase::Upkeep);
+        let top_state = top_runner.state().clone();
+        assert!(
+            in_own_upkeep(&top_state),
+            "premise: P0 holds priority in its own Upkeep on an empty stack"
+        );
+        assert_eq!(
+            db.get_face_by_name("Sensei's Divining Top")
+                .and_then(|face| face.oracle_text.as_deref()),
+            Some(
+                "{1}: Look at the top three cards of your library, then put them back in any \
+                 order.\n{T}: Draw a card, then put this artifact on top of its owner's library."
+            ),
+            "premise: the fixture's Top is the card, verbatim"
+        );
+        let draws_then_puts_back =
+            crate::ability_chain::collect_chain_effects(&top_state.objects[&top].abilities[1]);
+        assert!(
+            matches!(
+                draws_then_puts_back.as_slice(),
+                [
+                    Effect::Draw { .. },
+                    Effect::PutAtLibraryPosition {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                ]
+            ),
+            "premise: the Top's ability 1 draws, then puts it back, got {draws_then_puts_back:?}"
+        );
+
+        let (wall_runner, wall, wall_blank, bolt) = wall_board(Phase::Upkeep);
+        let wall_state = wall_runner.state().clone();
+        assert!(
+            in_own_upkeep(&wall_state),
+            "premise: P0 holds priority in its own Upkeep on an empty stack"
+        );
+        assert!(
+            matches!(
+                *wall_state.objects[&wall].abilities[0].effect,
+                Effect::Mill {
+                    target: TargetFilter::Controller,
+                    ..
+                }
+            ),
+            "premise: the Wall mills its controller, got {:?}",
+            wall_state.objects[&wall].abilities[0]
+        );
+        assert_eq!(
+            (
+                p0_player(&wall_state).library[0],
+                p0_player(&wall_state).library[1]
+            ),
+            (wall_blank, bolt),
+            "premise: the blank card is on top of the AI's library, the Bolt beneath it"
+        );
+
+        let empty = PolicyRegistry::for_tests(vec![]);
+
+        // Line R (CR 504.1 + CR 121.1): Ruins in the Upkeep, so the draw takes the Ring.
+        let (mut line_r, ruins_r) = ruins_board(Phase::Upkeep);
+        line_r
+            .act(activate(ruins_r, 1))
+            .expect("Ruins' activation is accepted");
+        assert!(
+            !line_r.state().stack.is_empty(),
+            "line R: the one legal target is auto-selected and Ruins' ability is on the stack, \
+             got {:?}",
+            line_r.state().waiting_for
+        );
+        // Before the first pass: the donor's line as the root's quiesce carries it, on `v_r`'s
+        // services, to read beside `v_r`.
+        let q_r =
+            PlannerServices::new_default(P0, &cfg, &empty).evaluate_state_quiesced(line_r.state());
+        pass_to_priority_in(&mut line_r, Phase::Draw);
+        let hand_r = &p0_player(line_r.state()).hand;
+        assert!(
+            hand_r.contains(&ring) && !hand_r.contains(&colossus),
+            "line R: the draw takes the Ring, hand {hand_r:?}"
+        );
+        assert_eq!(
+            p0_player(line_r.state()).library[0],
+            colossus,
+            "line R: the Colossus is the next card"
+        );
+        pass_to_priority_in(&mut line_r, Phase::PreCombatMain);
+
+        // Line P: pass, so the draw takes the Colossus, then activate Ruins in the main phase.
+        let (mut line_p, ruins_p) = ruins_board(Phase::Upkeep);
+        pass_to_priority_in(&mut line_p, Phase::Draw);
+        let hand_p = &p0_player(line_p.state()).hand;
+        assert!(
+            hand_p.contains(&colossus) && !hand_p.contains(&ring),
+            "line P: the draw takes the Colossus, hand {hand_p:?}"
+        );
+        pass_to_priority_in(&mut line_p, Phase::PreCombatMain);
+        let hand_before = p0_player(line_p.state()).hand.clone();
+        line_p
+            .act(activate(ruins_p, 1))
+            .expect("Ruins' activation is accepted");
+        pass_to_priority_in(&mut line_p, Phase::PreCombatMain);
+        assert_eq!(
+            p0_player(line_p.state()).library[0],
+            ring,
+            "line P: the Ring is on top of the library, too late for this draw"
+        );
+        assert_eq!(
+            p0_player(line_p.state()).hand,
+            hand_before,
+            "line P: the main-phase activation adds nothing to the hand"
+        );
+        assert_eq!(
+            p0_tapped_permanents(line_r.state()),
+            p0_tapped_permanents(line_p.state()),
+            "premise: both lines spent the same mana sources"
+        );
+        // Each on its own services instance: the eval cache is keyed by state hash.
+        let v_r =
+            PlannerServices::new_default(P0, &cfg, &empty).evaluate_state_cached(line_r.state());
+        let v_p =
+            PlannerServices::new_default(P0, &cfg, &empty).evaluate_state_cached(line_p.state());
+
+        // Line T: the Top's draw takes the blank, the Top goes back, and the draw step redraws it.
+        let (mut line_t, top_t) = divining_top_board(Phase::Upkeep);
+        line_t
+            .act(activate(top_t, 1))
+            .expect("the Top's activation is accepted");
+        pass_to_priority_in(&mut line_t, Phase::Draw);
+        assert!(
+            p0_hand_holds(line_t.state(), "Sensei's Divining Top")
+                && p0_hand_holds(line_t.state(), "Blank Card"),
+            "line T: the blank, then the Top, are drawn"
+        );
+        // Line P: pass, and the Top stays on the battlefield with the blank drawn.
+        let (mut line_top_p, top_p) = divining_top_board(Phase::Upkeep);
+        pass_to_priority_in(&mut line_top_p, Phase::Draw);
+        assert!(
+            line_top_p.state().battlefield.contains(&top_p)
+                && p0_hand_holds(line_top_p.state(), "Blank Card")
+                && !p0_hand_holds(line_top_p.state(), "Sensei's Divining Top"),
+            "line P: the Top is still on the battlefield"
+        );
+
+        // Line M: the mill takes the blank, so the draw takes the Bolt.
+        let (mut line_m, wall_m, blank_m, bolt_m) = wall_board(Phase::Upkeep);
+        line_m
+            .act(activate(wall_m, 0))
+            .expect("the Wall's activation is accepted");
+        pass_to_priority_in(&mut line_m, Phase::Draw);
+        assert!(
+            p0_player(line_m.state()).hand.contains(&bolt_m)
+                && p0_player(line_m.state()).graveyard.contains(&blank_m),
+            "line M: the Bolt is drawn, the blank milled"
+        );
+        // Line P: pass, and the draw takes the blank.
+        let (mut line_wall_p, _, blank_p, bolt_p) = wall_board(Phase::Upkeep);
+        pass_to_priority_in(&mut line_wall_p, Phase::Draw);
+        assert!(
+            p0_player(line_wall_p.state()).hand.contains(&blank_p)
+                && !p0_player(line_wall_p.state()).hand.contains(&bolt_p),
+            "line P: the blank is drawn"
+        );
+
+        let (ruins_control, ruins_c) = ruins_board(Phase::Draw);
+        let (top_control, top_c) = divining_top_board(Phase::Draw);
+        let (wall_control, wall_c, ..) = wall_board(Phase::Draw);
+        let rows = [
+            UpkeepDonorRow::score(
+                "Academy Ruins",
+                (&ruins_state, activate(ruins, 1)),
+                (ruins_control.state(), activate(ruins_c, 1)),
+                &cfg,
+            ),
+            UpkeepDonorRow::score(
+                "Sensei's Divining Top",
+                (&top_state, activate(top, 1)),
+                (top_control.state(), activate(top_c, 1)),
+                &cfg,
+            ),
+            UpkeepDonorRow::score(
+                "Excavated Wall",
+                (&wall_state, activate(wall, 0)),
+                (wall_control.state(), activate(wall_c, 0)),
+                &cfg,
+            ),
+        ];
+        let ruins_row = &rows[0];
+        eprintln!(
+            "Academy Ruins lines: v_r = {v_r}, q_r = {q_r}, v_p = {v_p}, cont(donor) = {}, \
+             cont(pass) = {}",
+            ruins_row.roots.cont(&ruins_row.donor),
+            ruins_row.roots.cont(&pass)
+        );
+
+        for row in &rows {
+            row.assert_not_held_or_lent();
+        }
+        assert!(
+            v_r > v_p,
+            "the main-phase position the Ruins line reaches is one passing can't: {v_r} vs {v_p}"
+        );
+    }
+
+    /// Flooded Strand, verbatim. Absent from the integration fixture.
+    const FLOODED_STRAND: &str = "{T}, Pay 1 life, Sacrifice this land: Search your library for a Plains or Island card, put it onto the battlefield, then shuffle.";
+    /// Vinelasher Kudzu, verbatim.
+    const VINELASHER_KUDZU: &str =
+        "Landfall — Whenever a land you control enters, put a +1/+1 counter on this creature.";
+
+    /// P0's `phase`, empty stack: Flooded Strand, two Forests, and a library of one Island and
+    /// four Grizzly Bears. Returns the scenario, Strand, the Island and one Bears. P0's library
+    /// gets no filler, so the Island is the library's only Plains or Island card.
+    fn strand_scenario(phase: Phase) -> (GameScenario, ObjectId, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(phase);
+        strand_scenario_on(scenario)
+    }
+
+    /// [`strand_scenario`] onto `scenario`, whose earlier objects order first at the root.
+    fn strand_scenario_on(
+        mut scenario: GameScenario,
+    ) -> (GameScenario, ObjectId, ObjectId, ObjectId) {
+        let db = shared_integration_card_db();
+        let strand = scenario
+            .add_land_from_oracle(P0, "Flooded Strand", FLOODED_STRAND)
+            .id();
+        for _ in 0..2 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let island = scenario.add_real_card(P0, "Island", Zone::Library, db);
+        let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Library, db);
+        for _ in 0..3 {
+            scenario.add_real_card(P0, "Grizzly Bears", Zone::Library, db);
+        }
+        (scenario, strand, island, bears)
+    }
+
+    /// Builds `scenario` with `top` on top of P0's library and `next` beneath it. Only P1's
+    /// library gets filler.
+    fn build_strand_scenario(
+        scenario: GameScenario,
+        top: ObjectId,
+        next: Option<ObjectId>,
+    ) -> GameRunner {
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), shared_integration_card_db());
+        let state = runner.state_mut();
+        for _ in 0..5 {
+            create_object(
+                state,
+                CardId(state.next_object_id),
+                P1,
+                "Library Card".to_string(),
+                Zone::Library,
+            );
+        }
+        stack_p0_library(state, top, next);
+        runner
+    }
+
+    /// The known-top board: [`strand_scenario`] with Vinelasher Kudzu on the battlefield, a
+    /// Mountain in hand, and the Island on top. Returns the runner, Strand, the Island and Kudzu.
+    ///
+    /// Kudzu gives the Draw-step fetch a gap for a lend to move: without it that fetch sits about
+    /// 1 life below Pass. The Mountain gives both lines a land drop and stops the quiesce at the
+    /// main phase. Every other library card being a Bears makes every shuffle's draw the same
+    /// known card, so nothing here fixes the RNG.
+    fn strand_board(phase: Phase) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(phase);
+        strand_board_on(scenario)
+    }
+
+    /// [`strand_board`] onto `scenario`.
+    fn strand_board_on(scenario: GameScenario) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+        let (mut scenario, strand, island, _) = strand_scenario_on(scenario);
+        let kudzu = scenario
+            .add_creature_from_oracle(P0, "Vinelasher Kudzu", 1, 1, VINELASHER_KUDZU)
+            .id();
+        scenario.add_real_card(P0, "Mountain", Zone::Hand, shared_integration_card_db());
+        (
+            build_strand_scenario(scenario, island, None),
+            strand,
+            island,
+            kudzu,
+        )
+    }
+
+    /// Passes priority until P0's search prompt opens, then selects `card`.
+    fn answer_search(runner: &mut GameRunner, card: ObjectId) {
+        for _ in 0..8 {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::SearchChoice { player, cards, .. } => {
+                    assert_eq!(player, P0, "the search is P0's");
+                    assert!(cards.contains(&card), "{card:?} is on offer, got {cards:?}");
+                    runner
+                        .act(GameAction::SelectCards { cards: vec![card] })
+                        .expect("the selection is accepted");
+                    return;
+                }
+                WaitingFor::Priority { .. } => {
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("priority passes");
+                }
+                other => panic!("unexpected prompt before the search: {other:?}"),
+            }
+        }
+        panic!("the search prompt never opened");
+    }
+
+    /// Plays the land named `name` from P0's hand.
+    fn play_p0_land(runner: &mut GameRunner, name: &str) {
+        let state = runner.state();
+        let land = *p0_player(state)
+            .hand
+            .iter()
+            .find(|id| state.objects[*id].name == name)
+            .unwrap_or_else(|| panic!("{name} is in P0's hand"));
+        let card_id = state.objects[&land].card_id;
+        runner
+            .act(GameAction::PlayLand {
+                object_id: land,
+                card_id,
+            })
+            .expect("the land drop is accepted");
+    }
+
+    /// The cards among P0's library that a Flooded Strand can find.
+    fn p0_strand_matches(state: &GameState) -> usize {
+        p0_player(state)
+            .library
+            .iter()
+            .filter(|id| {
+                let subtypes = &state.objects[*id].card_types.subtypes;
+                subtypes.iter().any(|s| s == "Plains" || s == "Island")
+            })
+            .count()
+    }
+
+    /// Maintainer review 5: a search of the AI's own library in its own Upkeep does not commute
+    /// with the draw step's draw (CR 121.1, CR 701.23a, CR 701.24a). With an Island on top as the
+    /// library's only match, Flooded Strand in the Upkeep ends with the Island in play and a
+    /// different card drawn. Passing draws the Island, and a main-phase fetch finds nothing. So
+    /// the hold stays, at full strength, and Pass does not inherit the fetch's continuation.
+    ///
+    /// In the Draw step the draw is behind (CR 504.2): a main-phase fetch reaches the line, with
+    /// only the shuffle's order differing, and Pass inherits it.
+    ///
+    /// Three limits on what these values show. Most of the lift is the forward quiesce: the
+    /// donor's line sees a drawn card, and Pass's static eval doesn't. Only `v_x > v_p` shows a
+    /// position Pass can't reach, and the printed `q_x` is the donor's quiesced line beside it.
+    /// The search reads the real library, so nothing here distinguishes a known top from an
+    /// unknown one: the fix is structural, every search that can reach the AI's library stands
+    /// out of lending. And the Draw control shows a lend on a line that reproduces, with only the
+    /// shuffle's order differing.
+    ///
+    /// Why `v_x > v_p` is built this way: `zone_eval::is_intrinsic_mana_source` counts Strand as
+    /// a source, so with no land in hand line P's drawn Island would be a land drop ahead of X.
+    /// The Mountain equalises sources at 4, and X's lead is then a Bears on board and a second
+    /// counter, less P's extra card and X's 1 life. P's other lines don't beat `v_p`: playing the
+    /// Island instead of the Mountain is equal on the eval, and cracking Strand finds nothing.
+    ///
+    /// Every observable is printed before the first assertion; regenerate them with
+    /// `cargo test -p phase-ai own_upkeep_root_does_not_lend_a_search -- --nocapture`.
+    #[test]
+    fn own_upkeep_root_does_not_lend_a_search_and_the_draw_differs() {
+        let cfg = hard_rung0_config();
+        let pass = GameAction::PassPriority;
+        let empty = PolicyRegistry::for_tests(vec![]);
+
+        let (upkeep_runner, strand, island, kudzu) = strand_board(Phase::Upkeep);
+        let state = upkeep_runner.state().clone();
+        let (draw_runner, strand_c, _, _) = strand_board(Phase::Draw);
+        let row = UpkeepDonorRow::score(
+            "Flooded Strand",
+            (&state, activate(strand, 0)),
+            (draw_runner.state(), activate(strand_c, 0)),
+            &cfg,
+        );
+        let donor = &row.donor;
+        let control_donor = &row.control_donor;
+        let control = &row.control;
+        eprintln!(
+            "Flooded Strand draw-step control: cont(donor) = {}, cont(pass) = {}, s1(pass) = {}, \
+             h0(pass) = {}, tw = {}",
+            control.cont(control_donor),
+            control.cont(&pass),
+            score_of(&control.s1, &pass),
+            score_of(&control.h0, &pass),
+            control.tw
+        );
+
+        // Line X (CR 701.23a): fetch the Island in the Upkeep, so the draw takes a Bears.
+        let (mut line_x, strand_x, island_x, kudzu_x) = strand_board(Phase::Upkeep);
+        line_x
+            .act(activate(strand_x, 0))
+            .expect("Strand's activation is accepted");
+        let q_x =
+            PlannerServices::new_default(P0, &cfg, &empty).evaluate_state_quiesced(line_x.state());
+        answer_search(&mut line_x, island_x);
+        pass_to_priority_in(&mut line_x, Phase::Draw);
+        let x_on_battlefield = line_x.state().battlefield.contains(&island_x);
+        let x_strand_gone = p0_player(line_x.state()).graveyard.contains(&strand_x);
+        let x_life = p0_player(line_x.state()).life;
+        let x_drew_bears = p0_hand_holds(line_x.state(), "Grizzly Bears");
+        let x_matches = p0_strand_matches(line_x.state());
+        let x_counters = line_x.state().objects[&kudzu_x]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied();
+        eprintln!(
+            "line X in the draw step: Island on the battlefield {x_on_battlefield}, Strand in \
+             the graveyard {x_strand_gone}, life {x_life}, a Bears drawn {x_drew_bears}, matches \
+             left {x_matches}, Kudzu counters {x_counters:?}"
+        );
+        pass_to_priority_in(&mut line_x, Phase::PreCombatMain);
+        play_p0_land(&mut line_x, "Mountain");
+        pass_to_priority_in(&mut line_x, Phase::PreCombatMain);
+        let bears_x = *p0_player(line_x.state())
+            .hand
+            .iter()
+            .find(|id| line_x.state().objects[*id].name == "Grizzly Bears")
+            .expect("line X: a Bears is in hand");
+        line_x.cast(bears_x).resolve();
+        pass_to_priority_in(&mut line_x, Phase::PreCombatMain);
+
+        // Line P: pass, so the draw takes the Island, and no match is left for a main-phase fetch.
+        let (mut line_p, _, island_p, _) = strand_board(Phase::Upkeep);
+        pass_to_priority_in(&mut line_p, Phase::Draw);
+        let p_drew_island = p0_player(line_p.state()).hand.contains(&island_p);
+        let p_matches = p0_strand_matches(line_p.state());
+        eprintln!("line P in the draw step: the Island drawn {p_drew_island}, matches {p_matches}");
+        pass_to_priority_in(&mut line_p, Phase::PreCombatMain);
+        play_p0_land(&mut line_p, "Mountain");
+        pass_to_priority_in(&mut line_p, Phase::PreCombatMain);
+
+        // Each on its own services instance: the eval cache is keyed by state hash.
+        let v_x =
+            PlannerServices::new_default(P0, &cfg, &empty).evaluate_state_cached(line_x.state());
+        let v_p =
+            PlannerServices::new_default(P0, &cfg, &empty).evaluate_state_cached(line_p.state());
+        eprintln!(
+            "Flooded Strand lines: v_x = {v_x}, q_x = {q_x}, v_p = {v_p}, cont(donor) = {}, \
+             cont(pass) = {}",
+            row.roots.cont(donor),
+            row.roots.cont(&pass)
+        );
+
+        // A quiet board: nothing else is legal on either side, so the quiesce resolves the fetch.
+        // These gaps are printed only. The registry here holds one policy, so the gap is the one
+        // production number; the PR's margin is computed from it with real tacticals.
+        let medium = create_config(AiDifficulty::Medium, Platform::Native).into_measurement(7);
+        let mut medium_rung0 = medium.clone();
+        medium_rung0.search.planner_mode = PlannerMode::BeamOnly;
+        let mut hard = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        hard.search.determinization_samples = 0;
+        for (label, config) in [
+            ("Hard rung 0", &cfg),
+            ("Medium rung 0", &medium_rung0),
+            ("Medium", &medium),
+            ("Hard searched", &hard),
+        ] {
+            let (scenario, strand_q, island_q, bears_q) = strand_scenario(Phase::Upkeep);
+            let quiet = build_strand_scenario(scenario, bears_q, Some(island_q));
+            let roots = PatienceRoots::score(quiet.state(), config);
+            let quiet_donor = activate(strand_q, 0);
+            eprintln!(
+                "plain row, {label} ({:?}, max_depth {}, samples {}): cont(donor) - cont(pass) = \
+                 {}",
+                config.search.planner_mode,
+                config.search.max_depth,
+                config.search.determinization_samples,
+                roots.cont(&quiet_donor) - roots.cont(&pass)
+            );
+        }
+
+        // Premises.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+                && state.active_player == P0
+                && state.phase == Phase::Upkeep
+                && state.stack.is_empty(),
+            "premise: P0 holds priority in its own Upkeep on an empty stack"
+        );
+        let chain =
+            crate::ability_chain::collect_chain_effects(&state.objects[&strand].abilities[0]);
+        assert!(
+            matches!(
+                chain.as_slice(),
+                [
+                    Effect::SearchLibrary { .. },
+                    Effect::ChangeZone {
+                        origin: Some(Zone::Library),
+                        ..
+                    },
+                    Effect::Shuffle { .. }
+                ]
+            ),
+            "premise: Strand searches, moves the card and shuffles, got {chain:?}"
+        );
+        assert_eq!(
+            state.objects[&kudzu]
+                .trigger_definitions
+                .iter_unchecked()
+                .count(),
+            1,
+            "premise: Kudzu's landfall parsed"
+        );
+        assert_eq!(p0_strand_matches(&state), 1, "premise: the only match");
+        assert_eq!(
+            p0_player(&state).library[0],
+            island,
+            "premise: the Island is on top"
+        );
+
+        // The Upkeep root: held at full strength, and not lent.
+        let roots = &row.roots;
+        roots.assert_scored("Flooded Strand", &[donor, &pass]);
+        assert!(
+            roots.cont(donor) > roots.cont(&pass),
+            "reach: the donor's continuation {} is above Pass's {}, so a lend would move Pass",
+            roots.cont(donor),
+            roots.cont(&pass)
+        );
+        let held = roots.ap(donor);
+        assert!(held < -NUDGE_MAX, "the Upkeep holds the fetch, got {held}");
+        assert_eq!(roots.ap(&pass), 0.0, "Pass carries no hold");
+        assert!(
+            (score_of(&roots.s1, donor) - score_of(&roots.s0, donor) - held).abs() < 1e-9,
+            "the fetch moves by the full hold {held}"
+        );
+        assert!(
+            matches!(row.deferral, Some(Some(penalty)) if (penalty - held).abs() < 1e-9),
+            "the beam carries the hold {held}, got {:?}",
+            row.deferral
+        );
+        assert_eq!(
+            score_of(&roots.s1, &pass),
+            score_of(&roots.s0, &pass),
+            "Pass is not lent the fetch's continuation"
+        );
+
+        // The draws differ, and X's position is one passing can't reach.
+        assert!(
+            x_on_battlefield && x_strand_gone,
+            "line X: the Island is on the battlefield, Strand in the graveyard"
+        );
+        assert_eq!(x_life, 19, "line X: Strand's 1 life is paid");
+        assert!(x_drew_bears, "line X: the draw takes a Bears");
+        assert_eq!(x_matches, 0, "line X: the library holds no Island");
+        assert_eq!(x_counters, Some(1), "line X: Kudzu's landfall fired");
+        assert!(p_drew_island, "line P: the draw takes the Island");
+        assert_eq!(p_matches, 0, "line P: a main-phase fetch finds nothing");
+        assert!(
+            v_x > v_p,
+            "the main-phase position the fetch reaches is one passing can't: {v_x} vs {v_p}"
+        );
+
+        // The Draw control: the draw is behind, so the fetch stays lent.
+        control.assert_scored("Flooded Strand control", &[control_donor, &pass]);
+        let control_ap = control.ap(control_donor);
+        assert!(
+            control_ap < -NUDGE_MAX,
+            "control: the draw step holds the fetch, got {control_ap}"
+        );
+        assert!(
+            control.cont(control_donor) > control.cont(&pass),
+            "control reach: the donor's continuation {} is above Pass's {}",
+            control.cont(control_donor),
+            control.cont(&pass)
+        );
+        assert!(
+            (score_of(&control.s1, &pass)
+                - (control.cont(control_donor) + score_of(&control.h0, &pass) * control.tw))
+                .abs()
+                < 1e-9,
+            "control: Pass inherits the fetch's continuation"
+        );
+        assert!(
+            matches!(row.control_deferral, Some(Some(_))),
+            "control: the fetch carries a deferral in the root beam, got {:?}",
+            row.control_deferral
+        );
+    }
+
+    /// Loreseeker's Stone, verbatim.
+    const LORESEEKERS_STONE: &str = "{3}, {T}: Draw three cards. This ability costs {1} more to activate for each card in your hand.";
+
+    /// P0's `phase`, empty stack: Loreseeker's Stone, `islands` Islands and `bears` Grizzly Bears
+    /// in hand, which the Islands can't cast. Returns the runner and the Stone.
+    fn loreseekers_stone_board(
+        phase: Phase,
+        islands: usize,
+        bears: usize,
+    ) -> (GameRunner, ObjectId) {
+        let db = shared_integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(phase);
+        let stone = scenario
+            .add_artifact_from_oracle(P0, "Loreseeker's Stone", LORESEEKERS_STONE)
+            .id();
+        for _ in 0..islands {
+            scenario.add_basic_land(P0, ManaColor::Blue);
+        }
+        for _ in 0..bears {
+            scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
+        }
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), db);
+        add_libraries(runner.state_mut(), 10);
+        (runner, stone)
+    }
+
+    /// Whether the engine offers `action` at `state`'s root.
+    fn offered(state: &GameState, action: &GameAction) -> bool {
+        build_decision_context(state)
+            .candidates
+            .iter()
+            .any(|candidate| candidate.action == *action)
+    }
+
+    /// Maintainer review 6: an activation whose own cost the hand sizes costs more after the draw
+    /// step's draw (CR 504.1 + CR 602.2b + CR 601.2f), so the main phase can't reproduce its
+    /// line. Loreseeker's Stone with one card in hand and four Islands is affordable in the
+    /// upkeep; after the draw it costs {5}, and the main phase can't activate it at all. Patience
+    /// holds it, and Pass is not lent its continuation, though that continuation is above Pass's
+    /// own, so a lend would move Pass.
+    ///
+    /// The control is the same Stone in the draw step, with the drawn card already in hand and
+    /// five Islands: affordable there and in the main phase at the same cost, because the draw is
+    /// behind (CR 504.2). It's held and lent. With a fifth Island in the upkeep the main phase can
+    /// pay {5}, but the line is still not lent: it leaves a land fewer than the upkeep line does.
+    ///
+    /// Every observable is printed before the first assertion; regenerate them with
+    /// `cargo test -p phase-ai own_upkeep_root_does_not_lend_a_cost_the_draw_raises -- --nocapture`.
+    #[test]
+    fn own_upkeep_root_does_not_lend_a_cost_the_draw_raises() {
+        let cfg = hard_rung0_config();
+        let pass = GameAction::PassPriority;
+
+        let (upkeep_runner, stone) = loreseekers_stone_board(Phase::Upkeep, 4, 1);
+        let state = upkeep_runner.state().clone();
+        let (draw_runner, stone_c) = loreseekers_stone_board(Phase::Draw, 5, 2);
+        let control_state = draw_runner.state().clone();
+        let row = UpkeepDonorRow::score(
+            "Loreseeker's Stone",
+            (&state, activate(stone, 0)),
+            (&control_state, activate(stone_c, 0)),
+            &cfg,
+        );
+        let lines = beam_lines(&state, &cfg);
+        let control_lines = beam_lines(&control_state, &cfg);
+        // A fifth Island: main can pay {5}, but leaves a land fewer than the upkeep line does.
+        let (flush_runner, stone_f) = loreseekers_stone_board(Phase::Upkeep, 5, 1);
+        let flush_lines = beam_lines(flush_runner.state(), &cfg);
+        eprintln!(
+            "  upkeep holds = {lines:?}, draw-step holds = {control_lines:?}, upkeep holds with \
+             five Islands = {flush_lines:?}"
+        );
+
+        // Line P: pass, so the draw takes a card and the Stone costs {5} in the main phase.
+        let (mut line_p, stone_p) = loreseekers_stone_board(Phase::Upkeep, 4, 1);
+        pass_to_priority_in(&mut line_p, Phase::PreCombatMain);
+        let p_hand = p0_player(line_p.state()).hand.len();
+        let p_offered = offered(line_p.state(), &activate(stone_p, 0));
+        // The control's main phase: the same hand, so the same {5}.
+        let (mut line_c, stone_m) = loreseekers_stone_board(Phase::Draw, 5, 2);
+        pass_to_priority_in(&mut line_c, Phase::PreCombatMain);
+        let c_hand = p0_player(line_c.state()).hand.len();
+        let c_offered = offered(line_c.state(), &activate(stone_m, 0));
+        eprintln!(
+            "line P in the main phase: hand {p_hand}, Stone offered {p_offered}; control's main \
+             phase: hand {c_hand}, Stone offered {c_offered}"
+        );
+
+        // Premises.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+                && state.active_player == P0
+                && state.phase == Phase::Upkeep
+                && state.stack.is_empty(),
+            "premise: P0 holds priority in its own Upkeep on an empty stack"
+        );
+        let ability = &state.objects[&stone].abilities[0];
+        assert!(
+            matches!(*ability.effect, Effect::Draw { .. })
+                && matches!(
+                    &ability.cost_reduction,
+                    Some(rider) if rider.mode == CostModifyMode::Raise
+                        && matches!(
+                            rider.count,
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::ZoneCardCount { zone: ZoneRef::Hand, .. }
+                            }
+                        )
+                ),
+            "premise: the Stone draws, with a surcharge counted by the hand, got {ability:?}"
+        );
+        assert_eq!(p0_player(&state).hand.len(), 1, "premise: one card in hand");
+        assert!(
+            offered(&state, &activate(stone, 0)),
+            "premise: {{4}} is affordable in the upkeep"
+        );
+        assert_eq!(p_hand, 2, "line P: the draw took a card");
+        assert!(
+            !p_offered,
+            "line P: {{5}} is not affordable in the main phase, so main can't reproduce the line"
+        );
+        assert_eq!(
+            c_hand, 2,
+            "control: the draw is behind, so the hand is unchanged"
+        );
+        assert!(
+            offered(&control_state, &activate(stone_c, 0)) && c_offered,
+            "control: {{5}} is affordable in the draw step and in the main phase"
+        );
+
+        // The Upkeep root: held, and not lent.
+        let donor = &row.donor;
+        let roots = &row.roots;
+        roots.assert_scored(row.label, &[donor, &pass]);
+        assert!(
+            roots.cont(donor) > roots.cont(&pass),
+            "reach: the donor's continuation {} is above Pass's {}, so a lend would move Pass",
+            roots.cont(donor),
+            roots.cont(&pass)
+        );
+        let held = roots.ap(donor);
+        assert!(held < -NUDGE_MAX, "the Upkeep holds the Stone, got {held}");
+        assert_eq!(
+            lines,
+            [(donor.clone(), HeldLine::Irreproducible)],
+            "the hold's line is irreproducible"
+        );
+        assert_eq!(
+            flush_lines,
+            [(activate(stone_f, 0), HeldLine::Irreproducible)],
+            "with five Islands the cost still differs, so the line is still irreproducible"
+        );
+        assert_eq!(
+            score_of(&roots.s1, &pass),
+            score_of(&roots.s0, &pass),
+            "Pass is not lent the Stone's continuation"
+        );
+
+        // The draw-step control: the same cost in main, so it's held and lent.
+        let control_donor = &row.control_donor;
+        let control = &row.control;
+        control.assert_scored(row.label, &[control_donor, &pass]);
+        assert!(
+            control.ap(control_donor) < -NUDGE_MAX,
+            "control: the draw step holds the Stone, got {}",
+            control.ap(control_donor)
+        );
+        assert_eq!(
+            control_lines,
+            [(control_donor.clone(), HeldLine::Reproducible)],
+            "control: the hold's line is reproducible"
+        );
+        assert!(
+            control.cont(control_donor) > control.cont(&pass),
+            "control reach: the donor's continuation {} is above Pass's {}",
+            control.cont(control_donor),
+            control.cont(&pass)
+        );
+        assert!(
+            (score_of(&control.s1, &pass)
+                - (control.cont(control_donor) + score_of(&control.h0, &pass) * control.tw))
+                .abs()
+                < 1e-9,
+            "control: Pass inherits the Stone's continuation"
+        );
+    }
+
+    /// Magus of the Wheel, verbatim.
+    const MAGUS_OF_THE_WHEEL: &str = "{1}{R}, {T}, Sacrifice this creature: Each player discards their hand, then draws seven cards.";
+
+    /// How far a deeper rung moves Pass with no lend: the policy reaches Pass's own line too.
+    /// The barred rows below measure 0.03, and [`strand_board`] 0.02 with no donor on it at all.
+    const DEEPER_RUNG_DRIFT: f64 = 0.1;
+
+    /// Medium's searched root, as the suite plays it, with nothing sampled.
+    fn medium_searched_config() -> AiConfig {
+        let mut config = create_config(AiDifficulty::Medium, Platform::Native).into_measurement(7);
+        config.search.determinization_samples = 0;
+        assert!(
+            config.search.enabled && config.search.planner_mode == PlannerMode::BeamPlusRollout,
+            "reach-guard: Medium searches past rung 0"
+        );
+        config
+    }
+
+    /// Adds a ready Wellwisher, the only Elf on the board.
+    fn add_wellwisher(scenario: &mut GameScenario) -> ObjectId {
+        let mut wellwisher = scenario.add_creature_from_oracle(P0, "Wellwisher", 1, 1, WELLWISHER);
+        wellwisher.with_subtypes(vec!["Elf"]);
+        wellwisher.id()
+    }
+
+    /// [`strand_board`] in the Upkeep with a ready Wellwisher. Returns the runner, Wellwisher,
+    /// Strand and the Island. Wellwisher is made first, so of the two equal holds it's the one
+    /// a narrow beam keeps.
+    fn wellwisher_strand_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let wellwisher = add_wellwisher(&mut scenario);
+        let (runner, strand, island, _) = strand_board_on(scenario);
+        (runner, wellwisher, strand, island)
+    }
+
+    /// The holds in the root beam for `state`, with each one's line.
+    fn beam_lines(state: &GameState, config: &AiConfig) -> Vec<(GameAction, HeldLine)> {
+        let registry = PolicyRegistry::for_tests(vec![Box::new(ActivationPatiencePolicy)]);
+        let mut lines: Vec<_> =
+            build_root_beam(state, &PlannerServices::new_default(P0, config, &registry))
+                .into_iter()
+                .filter_map(|ranked| Some((ranked.candidate.action, ranked.deferral?.line)))
+                .collect();
+        lines.sort_by(|(left, _), (right, _)| left.cmp_stable(right));
+        lines
+    }
+
+    /// The best-scored action of a root scoring.
+    fn top_action(scored: &[(GameAction, f64)]) -> &GameAction {
+        scored
+            .iter()
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(action, _)| action)
+            .expect("the root scored at least one action")
+    }
+
+    /// Prints a sibling row's observables, before any assertion on them.
+    fn print_sibling_row(label: &str, roots: &PatienceRoots, donor: &GameAction) {
+        let pass = GameAction::PassPriority;
+        eprintln!("{label} (tw {}):", roots.tw);
+        eprintln!("  s0 = {:?}", roots.s0);
+        eprintln!("  s1 = {:?}", roots.s1);
+        eprintln!(
+            "  cont(donor) = {}, cont(pass) = {}, s1(pass) = {}, lift {}, top of s1 = {:?}",
+            roots.cont(donor),
+            roots.cont(&pass),
+            score_of(&roots.s1, &pass),
+            score_of(&roots.s1, &pass) - score_of(&roots.s0, &pass),
+            top_action(&roots.s1),
+        );
+    }
+
+    /// A continuation is a whole line, so a reproducible donor can lend what it went on to do. On
+    /// [`strand_board`]'s known top a ready Wellwisher's line goes on to crack Flooded Strand: its
+    /// continuation sits with the fetch's, and falls by the fetch's value with Strand tapped.
+    /// Passing draws the Island, and a main-phase fetch finds nothing, so Pass can't reach that
+    /// value (CR 121.1, CR 701.23a, CR 701.24a). Nothing is lent from this root, and it takes the
+    /// fetch's line.
+    ///
+    /// The tapped row is the control: the same Wellwisher, with no such line on offer, lends
+    /// (CR 117.1b).
+    ///
+    /// Medium is the tier whose beam carries the fetch in Wellwisher's line. The Hard rows are
+    /// printed only: theirs don't on this board, and the bar doesn't depend on the line a beam
+    /// takes. Every observable is printed before the first assertion; regenerate them with
+    /// `cargo test -p phase-ai own_upkeep_root_lends_nothing_beside -- --nocapture`.
+    #[test]
+    fn own_upkeep_root_lends_nothing_beside_an_irreproducible_activation() {
+        let cfg = medium_searched_config();
+        let pass = GameAction::PassPriority;
+
+        let (runner, wellwisher, strand, island) = wellwisher_strand_board();
+        let state = runner.state().clone();
+        let (donor, fetch) = (activate(wellwisher, 0), activate(strand, 0));
+        let roots = PatienceRoots::score(&state, &cfg);
+        print_sibling_row("Wellwisher beside Strand, Medium", &roots, &donor);
+        eprintln!(
+            "  cont(strand) = {}, s1(strand) = {}, holds = {:?}",
+            roots.cont(&fetch),
+            score_of(&roots.s1, &fetch),
+            beam_lines(&state, &cfg)
+        );
+
+        let mut tapped = state.clone();
+        tapped.objects.get_mut(&strand).unwrap().tapped = true;
+        let control = PatienceRoots::score(&tapped, &cfg);
+        print_sibling_row("Same, Strand tapped, Medium", &control, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&tapped, &cfg));
+
+        let mut hard = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        hard.search.determinization_samples = 0;
+        for (label, config) in [
+            ("Beside Strand, Hard rung 0", hard_rung0_config()),
+            ("Beside Strand, Hard", hard),
+        ] {
+            print_sibling_row(label, &PatienceRoots::score(&state, &config), &donor);
+        }
+
+        // Reach: both are held, and the donor's line carries the fetch past Pass's own.
+        roots.assert_scored("beside Strand", &[&donor, &fetch, &pass]);
+        assert!(
+            roots.ap(&donor) < -NUDGE_MAX && roots.ap(&fetch) < -NUDGE_MAX,
+            "reach: patience holds both, got {} and {}",
+            roots.ap(&donor),
+            roots.ap(&fetch)
+        );
+        assert_eq!(
+            p0_player(&state).library[0],
+            island,
+            "premise: the Island is on top"
+        );
+        assert_eq!(p0_strand_matches(&state), 1, "premise: the only match");
+        assert!(
+            roots.cont(&donor) > control.cont(&donor) + 1.0,
+            "reach: Wellwisher's line {} carries the fetch, above {} with Strand tapped",
+            roots.cont(&donor),
+            control.cont(&donor)
+        );
+        assert!(
+            roots.cont(&donor) > roots.cont(&pass) + 1.0,
+            "reach: the donor's line {} is above Pass's {}, so a lend would move Pass",
+            roots.cont(&donor),
+            roots.cont(&pass)
+        );
+
+        // Nothing is lent, and the root takes the fetch.
+        let lift = score_of(&roots.s1, &pass) - score_of(&roots.s0, &pass);
+        assert!(
+            lift.abs() < DEEPER_RUNG_DRIFT,
+            "Pass is not lent the line through the fetch: lift {lift}"
+        );
+        // Wellwisher ties it, its line being the fetch's.
+        assert_eq!(
+            score_of(&roots.s1, &fetch),
+            score_of(&roots.s1, top_action(&roots.s1)),
+            "the root takes the fetch, got {:?}",
+            roots.s1
+        );
+
+        // The control: with no such line on offer, Wellwisher lends.
+        control.assert_scored("Strand tapped", &[&donor, &pass]);
+        assert!(
+            !control.s1.iter().any(|(action, _)| *action == fetch),
+            "reach: a tapped Strand is not on offer"
+        );
+        assert!(
+            control.cont(&donor) > control.cont(&pass),
+            "reach: the donor's line {} is above Pass's {}",
+            control.cont(&donor),
+            control.cont(&pass)
+        );
+        let lent = control.cont(&donor) + score_of(&control.h0, &pass) * control.tw;
+        assert!(
+            (score_of(&control.s1, &pass) - lent).abs() < DEEPER_RUNG_DRIFT,
+            "Pass inherits Wellwisher's continuation: {} vs {lent}",
+            score_of(&control.s1, &pass)
+        );
+    }
+
+    /// The root's holds read its offer, not its beam. An interior node ranks the engine's list on
+    /// its own, so with the beam cut to two, Strand is off the root's beam (held equal to
+    /// Wellwisher, and made after it) and still in Wellwisher's line. A lend would put Pass above
+    /// the one hold left, and it's only the no-policy run's beam that keeps Strand, so the row
+    /// reads the policy's run alone.
+    #[test]
+    fn own_upkeep_root_reads_the_offer_past_its_beam() {
+        let mut cfg = medium_searched_config();
+        cfg.search.max_branching = 2;
+        let (runner, wellwisher, strand, _) = wellwisher_strand_board();
+        let state = runner.state().clone();
+        let (donor, fetch) = (activate(wellwisher, 0), activate(strand, 0));
+        let roots = PatienceRoots::score(&state, &cfg);
+        let mut tapped = state.clone();
+        tapped.objects.get_mut(&strand).unwrap().tapped = true;
+        let control = PatienceRoots::score(&tapped, &cfg);
+        eprintln!("Wellwisher, Strand off the beam, Medium:");
+        eprintln!("  s0 = {:?}", roots.s0);
+        eprintln!("  s1 = {:?}", roots.s1);
+        eprintln!("  holds = {:?}", beam_lines(&state, &cfg));
+        eprintln!("Same, Strand tapped: s1 = {:?}", control.s1);
+
+        assert!(
+            !roots.s1.iter().any(|(action, _)| *action == fetch),
+            "reach: the beam dropped Strand, got {:?}",
+            roots.s1
+        );
+        let (held, control_held) = (score_of(&roots.s1, &donor), score_of(&control.s1, &donor));
+        assert!(
+            held > control_held + 1.0,
+            "reach: Wellwisher's line {held} still carries the fetch, above {control_held} with \
+             Strand tapped"
+        );
+        assert_eq!(
+            top_action(&roots.s1),
+            &donor,
+            "Pass is not lent the line through the fetch, got {:?}",
+            roots.s1
+        );
+    }
+
+    /// The other two kinds of sibling, with Wellwisher held beside each. Magus of the Wheel
+    /// clears the hand, so it's held and not lent. Crystal Ball arranges the top, so it isn't
+    /// held at all, and passing can't reach it all the same. With the sibling tapped neither is
+    /// on offer, and Wellwisher's hold lends again.
+    #[test]
+    fn own_upkeep_root_lends_nothing_beside_a_hand_clear_or_an_arrangement() {
+        let cfg = medium_searched_config();
+        let pass = GameAction::PassPriority;
+        for (label, sibling_held) in [("Magus of the Wheel", true), ("Crystal Ball", false)] {
+            let db = shared_integration_card_db();
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::Upkeep);
+            let wellwisher = add_wellwisher(&mut scenario);
+            let sibling = if sibling_held {
+                scenario
+                    .add_creature_from_oracle(P0, label, 1, 1, MAGUS_OF_THE_WHEEL)
+                    .id()
+            } else {
+                scenario
+                    .add_artifact_from_oracle(P0, label, CRYSTAL_BALL)
+                    .id()
+            };
+            for _ in 0..2 {
+                scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+            }
+            for _ in 0..2 {
+                scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
+            }
+            let mut runner = scenario.build();
+            rehydrate_game_from_card_db(runner.state_mut(), db);
+            add_libraries(runner.state_mut(), 10);
+            let state = runner.state().clone();
+            let (donor, sibling_action) = (activate(wellwisher, 0), activate(sibling, 0));
+
+            let roots = PatienceRoots::score(&state, &cfg);
+            print_sibling_row(label, &roots, &donor);
+            eprintln!(
+                "  cont(sibling) = {}, holds = {:?}",
+                roots.cont(&sibling_action),
+                beam_lines(&state, &cfg)
+            );
+            let mut tapped = state.clone();
+            tapped.objects.get_mut(&sibling).unwrap().tapped = true;
+            let control = PatienceRoots::score(&tapped, &cfg);
+            print_sibling_row(&format!("{label} tapped"), &control, &donor);
+            eprintln!("  holds = {:?}", beam_lines(&tapped, &cfg));
+
+            roots.assert_scored(label, &[&donor, &sibling_action, &pass]);
+            assert!(
+                roots.ap(&donor) < -NUDGE_MAX,
+                "{label}: reach: patience holds Wellwisher, got {}",
+                roots.ap(&donor)
+            );
+            assert_eq!(
+                roots.ap(&sibling_action) < -NUDGE_MAX,
+                sibling_held,
+                "{label}: premise: whether the sibling is held, got {}",
+                roots.ap(&sibling_action)
+            );
+            let lines = beam_lines(&state, &cfg);
+            assert!(
+                lines.iter().any(|(action, _)| *action == donor)
+                    && lines
+                        .iter()
+                        .all(|(_, line)| *line == HeldLine::Irreproducible),
+                "{label}: nothing lends, got {lines:?}"
+            );
+            let lift = score_of(&roots.s1, &pass) - score_of(&roots.s0, &pass);
+            assert!(
+                lift.abs() < DEEPER_RUNG_DRIFT,
+                "{label}: Pass is not lent the line through the sibling: lift {lift}"
+            );
+            assert_eq!(
+                beam_lines(&tapped, &cfg),
+                [(donor.clone(), HeldLine::Reproducible)],
+                "{label}: tapped, the sibling isn't on offer, and the hold lends"
+            );
+        }
+    }
+
+    /// Natural Connection, verbatim.
+    const NATURAL_CONNECTION: &str =
+        "Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.";
+    /// Rock Hydra's upkeep line, verbatim. The rest of the card plays no part here.
+    const ROCK_HYDRA_UPKEEP_LINE: &str =
+        "{R}{R}{R}: Put a +1/+1 counter on this creature. Activate only during your upkeep.";
+
+    /// The cast of `object_id` the engine offers at `state`'s root, read off its own list: the
+    /// tactical gate can drop one before scoring (Giant Growth out of combat), and
+    /// `activation_patience::root_held_line` reads the list before the gate.
+    fn offered_cast(state: &GameState, object_id: ObjectId) -> GameAction {
+        build_decision_context(state)
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| {
+                matches!(
+                    action,
+                    GameAction::CastSpell { .. } | GameAction::CastPreparedCopy { .. }
+                ) && action.source_object() == Some(object_id)
+            })
+            .unwrap_or_else(|| panic!("reach: {object_id:?} is on offer at the root"))
+    }
+
+    /// [`strand_board`] in the Upkeep with Strand tapped, so no activation bars, a ready
+    /// Wellwisher and a third Forest, and Natural Connection in hand if `with_spell`. Returns the
+    /// state, Wellwisher and the spell.
+    fn natural_connection_board(with_spell: bool) -> (GameState, ObjectId, Option<ObjectId>) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let wellwisher = add_wellwisher(&mut scenario);
+        scenario.add_basic_land(P0, ManaColor::Green);
+        let spell = with_spell.then(|| {
+            let mut spell = scenario.add_spell_to_hand_from_oracle(
+                P0,
+                "Natural Connection",
+                true,
+                NATURAL_CONNECTION,
+            );
+            spell.with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 2,
+            });
+            spell.id()
+        });
+        let (runner, strand, _, _) = strand_board_on(scenario);
+        let mut state = runner.state().clone();
+        state.objects.get_mut(&strand).unwrap().tapped = true;
+        (state, wellwisher, spell)
+    }
+
+    /// The fetch's board with an instant in its place: on [`strand_board`]'s known top a
+    /// Wellwisher's line goes on to cast Natural Connection. Passing draws the Island, and a
+    /// main-phase cast finds nothing, so Pass can't reach that value (CR 121.1, CR 701.23a,
+    /// CR 701.24a). The hold on Wellwisher lends nothing, as beside Flooded Strand.
+    ///
+    /// The control has no spell, and lends. Every observable is printed before the first
+    /// assertion; regenerate them with
+    /// `cargo test -p phase-ai own_upkeep_root_lends_nothing_beside_a -- --nocapture`.
+    #[test]
+    fn own_upkeep_root_lends_nothing_beside_a_spell_over_the_draw() {
+        let cfg = medium_searched_config();
+        let pass = GameAction::PassPriority;
+        let (state, wellwisher, spell) = natural_connection_board(true);
+        let (control_state, _, _) = natural_connection_board(false);
+        let (donor, cast) = (
+            activate(wellwisher, 0),
+            offered_cast(&state, spell.unwrap()),
+        );
+        let roots = PatienceRoots::score(&state, &cfg);
+        print_sibling_row("Wellwisher beside Natural Connection", &roots, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&state, &cfg));
+        let control = PatienceRoots::score(&control_state, &cfg);
+        print_sibling_row("Same, no spell", &control, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&control_state, &cfg));
+
+        roots.assert_scored("beside the spell", &[&donor, &cast, &pass]);
+        assert!(
+            roots.ap(&donor) < -NUDGE_MAX,
+            "reach: patience holds Wellwisher, got {}",
+            roots.ap(&donor)
+        );
+        assert!(
+            roots.cont(&donor) > control.cont(&donor) + 1.0,
+            "reach: Wellwisher's line {} carries the spell, above {} with none",
+            roots.cont(&donor),
+            control.cont(&donor)
+        );
+        assert!(
+            roots.cont(&donor) > roots.cont(&pass) + 1.0,
+            "reach: the donor's line {} is above Pass's {}, so a lend would move Pass",
+            roots.cont(&donor),
+            roots.cont(&pass)
+        );
+        let lift = score_of(&roots.s1, &pass) - score_of(&roots.s0, &pass);
+        assert!(
+            lift.abs() < DEEPER_RUNG_DRIFT,
+            "Pass is not lent the line through the spell: lift {lift}"
+        );
+        assert_eq!(
+            beam_lines(&control_state, &cfg),
+            [(donor.clone(), HeldLine::Reproducible)],
+            "with no spell on offer, the hold lends"
+        );
+    }
+
+    /// [`strand_board`] in the Upkeep with Strand tapped, a ready Wellwisher, and Woodland Acolyte
+    /// in hand, a creature whose only instant is its Adventure, Mend the Wilds. `graveyard` is put
+    /// in the graveyard: with nothing there Mend the Wilds has no target and isn't on offer.
+    /// Oracle text verbatim. Returns the state, Wellwisher and Woodland Acolyte.
+    fn woodland_acolyte_board(graveyard: &[&str]) -> (GameState, ObjectId, ObjectId) {
+        let db = shared_integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let wellwisher = add_wellwisher(&mut scenario);
+        let acolyte = {
+            let mut acolyte = scenario.add_creature_to_hand_from_oracle(
+                P0,
+                "Woodland Acolyte",
+                2,
+                2,
+                "When this creature enters, draw a card.",
+            );
+            acolyte.with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 2,
+            });
+            acolyte.id()
+        };
+        for name in graveyard {
+            scenario.add_real_card(P0, name, Zone::Graveyard, db);
+        }
+        for _ in 0..6 {
+            scenario.add_real_card(P0, "Grizzly Bears", Zone::Library, db);
+        }
+        let (runner, strand, _, _) = strand_board_on(scenario);
+        let mut state = runner.state().clone();
+        state.objects.get_mut(&strand).unwrap().tapped = true;
+        add_instant_face(
+            &mut state,
+            acolyte,
+            "Mend the Wilds",
+            "Put target permanent card from your graveyard on top of your library. (Then exile this card. You may cast the creature later from exile.)",
+            LayoutKind::Adventure,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            },
+        );
+        (state, wellwisher, acolyte)
+    }
+
+    /// [`strand_board`] in the Upkeep with Strand tapped, a ready Wellwisher, three more Forests,
+    /// and a Vastlands Scavenger with Bind to Life, its prepare spell, castable if `prepared`.
+    /// Oracle text verbatim. Returns the state, Wellwisher and the Scavenger.
+    fn vastlands_scavenger_board(prepared: bool) -> (GameState, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let wellwisher = add_wellwisher(&mut scenario);
+        let scavenger = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Vastlands Scavenger",
+                4,
+                4,
+                "Deathtouch\nThis creature enters prepared. (While it's prepared, you may cast a copy of its spell. Doing so unprepares it.)",
+            )
+            .id();
+        for _ in 0..3 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let db = shared_integration_card_db();
+        for _ in 0..6 {
+            scenario.add_real_card(P0, "Grizzly Bears", Zone::Library, db);
+        }
+        let (runner, strand, _, _) = strand_board_on(scenario);
+        let mut state = runner.state().clone();
+        state.objects.get_mut(&strand).unwrap().tapped = true;
+        add_instant_face(
+            &mut state,
+            scavenger,
+            "Bind to Life",
+            "Mill seven cards. Then put a creature card from among them onto the battlefield.",
+            LayoutKind::Prepare,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 4,
+            },
+        );
+        state.objects.get_mut(&scavenger).unwrap().prepared = prepared.then_some(PreparedState);
+        (state, wellwisher, scavenger)
+    }
+
+    /// `activation_patience::held_line` reads the face a cast can take, not only the front. The
+    /// front here has no spell ability, and a Wellwisher's line goes on through the instant: Mend
+    /// the Wilds in the upkeep draws Serra Angel, where passing draws the Island (CR 121.1). So
+    /// the hold on Wellwisher lends nothing beside it.
+    ///
+    /// The control has an empty graveyard, so Mend the Wilds has no target and isn't on offer,
+    /// and it lends. Every observable is printed before the first assertion.
+    #[test]
+    fn own_upkeep_root_lends_nothing_beside_a_second_face_over_the_draw() {
+        let cfg = medium_searched_config();
+        let pass = GameAction::PassPriority;
+        let (state, wellwisher, acolyte) = woodland_acolyte_board(&["Serra Angel"]);
+        let (control_state, _, _) = woodland_acolyte_board(&[]);
+        let (donor, cast) = (activate(wellwisher, 0), offered_cast(&state, acolyte));
+        let roots = PatienceRoots::score(&state, &cfg);
+        print_sibling_row("Wellwisher beside Mend the Wilds", &roots, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&state, &cfg));
+        let control = PatienceRoots::score(&control_state, &cfg);
+        print_sibling_row("Same, empty graveyard", &control, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&control_state, &cfg));
+
+        roots.assert_scored("beside the spell", &[&donor, &cast, &pass]);
+        assert!(
+            roots.ap(&donor) < -NUDGE_MAX,
+            "reach: patience holds Wellwisher, got {}",
+            roots.ap(&donor)
+        );
+        assert!(
+            roots.cont(&donor) > control.cont(&donor) + 1.0,
+            "reach: Wellwisher's line {} carries the spell, above {} with none",
+            roots.cont(&donor),
+            control.cont(&donor)
+        );
+        assert!(
+            roots.cont(&donor) > roots.cont(&pass) + 1.0,
+            "reach: the donor's line {} is above Pass's {}, so a lend would move Pass",
+            roots.cont(&donor),
+            roots.cont(&pass)
+        );
+        let lift = score_of(&roots.s1, &pass) - score_of(&roots.s0, &pass);
+        assert!(
+            lift.abs() < DEEPER_RUNG_DRIFT,
+            "Pass is not lent the line through the spell: lift {lift}"
+        );
+        assert_eq!(
+            beam_lines(&control_state, &cfg),
+            [(donor.clone(), HeldLine::Reproducible)],
+            "with the spell not on offer, the hold lends"
+        );
+    }
+
+    /// A prepared copy is read by the source's second face, through the engine-issued list, and
+    /// Bind to Life changes the draw (CR 722.3c). Wellwisher's line doesn't need the copy here:
+    /// its continuation is level with the control's. The bar reads what's on offer, not what a
+    /// line took (`activation_patience::root_held_line`), so it holds all the same.
+    ///
+    /// The control isn't prepared, so the copy isn't on offer, and the lend moves Pass.
+    #[test]
+    fn own_upkeep_root_lends_nothing_beside_a_prepared_copy_over_the_draw() {
+        let cfg = medium_searched_config();
+        let pass = GameAction::PassPriority;
+        let (state, wellwisher, scavenger) = vastlands_scavenger_board(true);
+        let (control_state, _, _) = vastlands_scavenger_board(false);
+        let (donor, cast) = (activate(wellwisher, 0), offered_cast(&state, scavenger));
+        let roots = PatienceRoots::score(&state, &cfg);
+        print_sibling_row("Wellwisher beside Bind to Life", &roots, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&state, &cfg));
+        let control = PatienceRoots::score(&control_state, &cfg);
+        print_sibling_row("Same, not prepared", &control, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&control_state, &cfg));
+
+        roots.assert_scored("beside the copy", &[&donor, &cast, &pass]);
+        assert!(
+            roots.ap(&donor) < -NUDGE_MAX,
+            "reach: patience holds Wellwisher, got {}",
+            roots.ap(&donor)
+        );
+        let control_lift = score_of(&control.s1, &pass) - score_of(&control.s0, &pass);
+        assert!(
+            control_lift > 1.0,
+            "reach: with the copy not on offer the lend moves Pass, got {control_lift}"
+        );
+        let lift = score_of(&roots.s1, &pass) - score_of(&roots.s0, &pass);
+        assert!(
+            lift.abs() < DEEPER_RUNG_DRIFT,
+            "Pass is not lent beside the copy: lift {lift}"
+        );
+    }
+
+    /// An upkeep-only activation needs no known top: passing can't reach it at all (CR 602.5).
+    /// Wellwisher's line goes on to Rock Hydra's upkeep line with {R}{R}{R} up, so the hold on
+    /// Wellwisher lends nothing. It isn't a hold itself, and the bar reads it all the same.
+    ///
+    /// The control has the Mountains tapped, so the line isn't on offer, and it lends. The Hard
+    /// row is printed only.
+    #[test]
+    fn own_upkeep_root_lends_nothing_beside_an_upkeep_only_activation() {
+        let cfg = medium_searched_config();
+        let pass = GameAction::PassPriority;
+        let db = shared_integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let wellwisher = add_wellwisher(&mut scenario);
+        let hydra = scenario
+            .add_creature_from_oracle(P0, "Rock Hydra", 2, 2, ROCK_HYDRA_UPKEEP_LINE)
+            .id();
+        let mountains: Vec<_> = (0..3)
+            .map(|_| scenario.add_basic_land(P0, ManaColor::Red))
+            .collect();
+        for _ in 0..2 {
+            scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
+        }
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), db);
+        add_libraries(runner.state_mut(), 10);
+        let state = runner.state().clone();
+        let mut unpayable = state.clone();
+        for mountain in &mountains {
+            unpayable.objects.get_mut(mountain).unwrap().tapped = true;
+        }
+
+        let (donor, hydra_action) = (activate(wellwisher, 0), activate(hydra, 0));
+        let roots = PatienceRoots::score(&state, &cfg);
+        print_sibling_row("Wellwisher beside Rock Hydra", &roots, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&state, &cfg));
+        let control = PatienceRoots::score(&unpayable, &cfg);
+        print_sibling_row("Same, Mountains tapped", &control, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&unpayable, &cfg));
+        let mut hard = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        hard.search.determinization_samples = 0;
+        print_sibling_row(
+            "Beside Rock Hydra, Hard",
+            &PatienceRoots::score(&state, &hard),
+            &donor,
+        );
+
+        roots.assert_scored("beside Rock Hydra", &[&donor, &hydra_action, &pass]);
+        assert!(
+            roots.ap(&donor) < -NUDGE_MAX,
+            "reach: patience holds Wellwisher, got {}",
+            roots.ap(&donor)
+        );
+        assert_eq!(
+            roots.ap(&hydra_action),
+            0.0,
+            "premise: an upkeep-only activation isn't held"
+        );
+        assert!(
+            roots.cont(&donor) > control.cont(&donor) + 1.0,
+            "reach: Wellwisher's line {} carries the counter, above {} with no mana for it",
+            roots.cont(&donor),
+            control.cont(&donor)
+        );
+        let lift = score_of(&roots.s1, &pass) - score_of(&roots.s0, &pass);
+        assert!(
+            lift.abs() < DEEPER_RUNG_DRIFT,
+            "Pass is not lent the line through the upkeep-only activation: lift {lift}"
+        );
+        assert_eq!(
+            beam_lines(&unpayable, &cfg),
+            [(donor.clone(), HeldLine::Reproducible)],
+            "with the Mountains tapped, the line isn't on offer, and the hold lends"
+        );
+    }
+
+    /// What a spell on offer bars. The spell's own resolution decides, not its being a spell: a
+    /// scry cantrip changes what the draw takes, so nothing is lent beside it, and a plain instant
+    /// doesn't, so the hold lends with it on offer.
+    #[test]
+    fn own_upkeep_root_reads_a_spell_for_what_it_does_to_the_draw() {
+        let cfg = medium_searched_config();
+        let db = shared_integration_card_db();
+        for (label, text, expected) in [
+            (
+                "Opt",
+                "Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\nDraw a card.",
+                HeldLine::Irreproducible,
+            ),
+            (
+                "Giant Growth",
+                "Target creature gets +3/+3 until end of turn.",
+                HeldLine::Reproducible,
+            ),
+            (
+                "Shock",
+                "Shock deals 2 damage to any target.",
+                HeldLine::Reproducible,
+            ),
+        ] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::Upkeep);
+            let wellwisher = add_wellwisher(&mut scenario);
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(P0, label, true, text)
+                .id();
+            for color in [ManaColor::Blue, ManaColor::Green, ManaColor::Red] {
+                scenario.add_basic_land(P0, color);
+            }
+            let mut runner = scenario.build();
+            rehydrate_game_from_card_db(runner.state_mut(), db);
+            add_libraries(runner.state_mut(), 10);
+            let state = runner.state().clone();
+            let donor = activate(wellwisher, 0);
+            let cast = offered_cast(&state, spell);
+            let roots = PatienceRoots::score(&state, &cfg);
+            print_sibling_row(label, &roots, &donor);
+            eprintln!("  cast = {cast:?}, holds = {:?}", beam_lines(&state, &cfg));
+
+            assert!(
+                roots.ap(&donor) < -NUDGE_MAX,
+                "{label}: reach: patience holds Wellwisher, got {}",
+                roots.ap(&donor)
+            );
+            assert_eq!(
+                beam_lines(&state, &cfg),
+                [(donor.clone(), expected)],
+                "{label}: the spell's resolution decides the hold's line"
+            );
+        }
+    }
+
+    /// Mana only an artifact's ability may spend is gone by the main phase (CR 500.5), so a line
+    /// through Rod of Ruin on it isn't one passing keeps. Wellwisher can't spend that mana, so
+    /// it's still a hold, and it lends nothing. With the pool empty both are held and both lend.
+    #[test]
+    fn own_upkeep_root_lends_nothing_beside_an_activation_on_floating_mana() {
+        let cfg = medium_searched_config();
+        let db = shared_integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let wellwisher = add_wellwisher(&mut scenario);
+        let rod = scenario
+            .add_artifact_from_oracle(
+                P0,
+                "Rod of Ruin",
+                "{3}, {T}: This artifact deals 1 damage to any target.",
+            )
+            .id();
+        for _ in 0..3 {
+            scenario.add_basic_land(P0, ManaColor::Red);
+        }
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), db);
+        add_libraries(runner.state_mut(), 10);
+        let empty_pool = runner.state().clone();
+        let mut floating = empty_pool.clone();
+        floating.players[P0.0 as usize].mana_pool.add(ManaUnit::new(
+            ManaType::Colorless,
+            rod,
+            false,
+            vec![ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                spell_type: "Artifact".to_string(),
+                ability: AbilityActivationScope::OfSpellType,
+            }],
+        ));
+
+        let (donor, rod_action) = (activate(wellwisher, 0), activate(rod, 0));
+        assert_eq!(
+            beam_lines(&floating, &cfg),
+            [(donor.clone(), HeldLine::Irreproducible)],
+            "the floating mana stands Rod of Ruin down, and it bars the hold beside it"
+        );
+        assert_eq!(
+            beam_lines(&empty_pool, &cfg),
+            [
+                (donor, HeldLine::Reproducible),
+                (rod_action, HeldLine::Reproducible)
+            ],
+            "with the pool empty, both are held and both lend"
+        );
+    }
+
+    /// D1 at the root (the mtg-bot Coordinated Assault regression): in the AI's own Draw step
+    /// EffectTiming prices Coordinated Assault's until-end-of-turn `GenericEffect` pump as a
+    /// combat trick (CR 611.2a + CR 514.2), and the searched root carries that verdict at the
+    /// own-Draw weight 0.35. Giant Growth is no reference here: tactical_gate::assess_pre_cast
+    /// rejects a fixed-P/T Pump spell in this window before scoring, and that gate does not read
+    /// GenericEffect pumps.
+    #[test]
+    fn own_draw_root_carries_the_trick_verdict_on_a_generic_effect_pump_at_0_35() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Draw);
+        let assault = scenario
+            .add_spell_to_hand_from_oracle(P0, "Coordinated Assault", true, COORDINATED_ASSAULT)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        scenario.add_basic_land(P0, ManaColor::Red);
+        scenario.add_basic_land(P0, ManaColor::Green);
+        scenario.add_creature(P0, "Bear", 2, 2);
+        scenario.add_creature(P1, "Bear", 2, 2);
+        let mut runner = scenario.build();
+        add_libraries(runner.state_mut(), 5);
+        let state = runner.state().clone();
+        assert!(
+            matches!(
+                *state.objects[&assault].abilities[0].effect,
+                Effect::GenericEffect {
+                    duration: Some(Duration::UntilEndOfTurn),
+                    ..
+                }
+            ),
+            "premise: Coordinated Assault parses as an until-end-of-turn GenericEffect"
+        );
+
+        let effect_timing = || PolicyRegistry::default_subset_for_tests(&[PolicyId::EffectTiming]);
+        let cfg = hard_rung0_config();
+        let mut heuristic = cfg.clone();
+        heuristic.search.enabled = false;
+        let cast_score = |scored: &[(GameAction, f64)]| {
+            scored
+                .iter()
+                .find(|(action, _)| {
+                    matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == assault)
+                })
+                .map(|(_, score)| *score)
+                .unwrap_or_else(|| panic!("reach: Coordinated Assault's CastSpell is scored, got {scored:?}"))
+        };
+        let d_heuristic = cast_score(&score_with_registry(&state, effect_timing(), &heuristic))
+            - cast_score(&score_with(&state, vec![], &heuristic));
+        assert!(
+            d_heuristic < -NUDGE_MAX,
+            "EffectTiming prices Coordinated Assault as a trick in the own Draw step, got {d_heuristic}"
+        );
+        let d_searched = cast_score(&score_with_registry(&state, effect_timing(), &cfg))
+            - cast_score(&score_with(&state, vec![], &cfg));
+        assert!(
+            (d_searched - 0.35 * d_heuristic).abs() < 1e-9,
+            "the own-Draw root carries the verdict at 0.35: {d_searched} vs {d_heuristic}"
+        );
+    }
+
+    const OVERRUN: &str = "Creatures you control get +3/+3 and gain trample until end of turn. (Each of those creatures can deal excess combat damage to the player or planeswalker it's attacking.)";
+
+    /// The Overrun root beside the Coordinated Assault one: in its own precombat main, the first
+    /// main phase (CR 505.1a), a sorcery has no later window before this turn's combat (CR 307.1),
+    /// so neither EffectTiming nor the hint prices Overrun as a trick at the searched root, while
+    /// the instant on the same root carries the verdict at the ordinary weight 0.1 and the 0.3
+    /// hint. Overrun is a `GenericEffect`, so tactical_gate::assess_pre_cast's pump gate does not
+    /// read it.
+    #[test]
+    fn own_precombat_main_root_does_not_price_a_sorcery_pump_as_a_trick() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let overrun = scenario
+            .add_spell_to_hand_from_oracle(P0, "Overrun", false, OVERRUN)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::Green,
+                    ManaCostShard::Green,
+                    ManaCostShard::Green,
+                ],
+                generic: 2,
+            })
+            .id();
+        let assault = scenario
+            .add_spell_to_hand_from_oracle(P0, "Coordinated Assault", true, COORDINATED_ASSAULT)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        for _ in 0..5 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        scenario.add_basic_land(P0, ManaColor::Red);
+        scenario.add_creature(P0, "Bear", 2, 2);
+        scenario.add_creature(P1, "Bear", 2, 2);
+        let mut runner = scenario.build();
+        add_libraries(runner.state_mut(), 5);
+        let state = runner.state().clone();
+        assert!(
+            matches!(
+                *state.objects[&overrun].abilities[0].effect,
+                Effect::GenericEffect {
+                    duration: Some(Duration::UntilEndOfTurn),
+                    ..
+                }
+            ),
+            "premise: Overrun parses as an until-end-of-turn GenericEffect"
+        );
+        assert_eq!(
+            RootDecisionContext::classify(&state, P0).tactical_weight(),
+            0.1,
+            "premise: the own precombat main is an ordinary root"
+        );
+
+        let effect_timing = || PolicyRegistry::default_subset_for_tests(&[PolicyId::EffectTiming]);
+        let cfg = hard_rung0_config();
+        let mut heuristic = cfg.clone();
+        heuristic.search.enabled = false;
+        let cast_score = |scored: &[(GameAction, f64)], id: ObjectId| {
+            scored
+                .iter()
+                .find(|(action, _)| {
+                    matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == id)
+                })
+                .map(|(_, score)| *score)
+                .unwrap_or_else(|| panic!("reach: {id:?}'s CastSpell is scored, got {scored:?}"))
+        };
+        let delta = |config: &AiConfig, id: ObjectId| {
+            cast_score(&score_with_registry(&state, effect_timing(), config), id)
+                - cast_score(&score_with(&state, vec![], config), id)
+        };
+        let (d_h_assault, d_s_assault) = (delta(&heuristic, assault), delta(&cfg, assault));
+        let (d_h_overrun, d_s_overrun) = (delta(&heuristic, overrun), delta(&cfg, overrun));
+        let hint_gap = {
+            let scored = score_with(&state, vec![], &heuristic);
+            cast_score(&scored, overrun) - cast_score(&scored, assault)
+        };
+
+        assert!(
+            d_h_assault < -NUDGE_MAX,
+            "reach: EffectTiming prices Coordinated Assault as a trick here, got {d_h_assault}"
+        );
+        assert!(
+            (d_s_assault - 0.1 * d_h_assault).abs() < 1e-9,
+            "reach: the root carries the verdict at 0.1: {d_s_assault} vs {d_h_assault}"
+        );
+        assert!(
+            d_h_overrun.abs() < 1e-9,
+            "EffectTiming does not price Overrun in its last window, got {d_h_overrun}"
+        );
+        assert!(
+            d_s_overrun.abs() < 1e-9,
+            "the searched root does not price Overrun in its last window, got {d_s_overrun}"
+        );
+        assert!(
+            (hint_gap - 0.2).abs() < 1e-9,
+            "the hint does not time Overrun: default 0.5 against the instant's 0.3, got {hint_gap}"
+        );
+    }
+
+    const HEROIC_REINFORCEMENTS: &str = "Create two 1/1 white Soldier creature tokens. Until end of turn, creatures you control get +1/+1 and gain haste. (They can attack and {T} this turn.)";
+    const DEAFENING_CLARION: &str = "Choose one or both —\n• Deafening Clarion deals 3 damage to each creature.\n• Creatures you control gain lifelink until end of turn.";
+    const THE_WANDERING_EMPEROR: &str = "Flash\nAs long as The Wandering Emperor entered this turn, you may activate her loyalty abilities any time you could cast an instant.\n[+1]: Put a +1/+1 counter on up to one target creature. It gains first strike until end of turn.\n[−1]: Create a 2/2 white Samurai creature token with vigilance.\n[−2]: Exile target tapped creature. You gain 2 life.";
+
+    /// The postcombat root beside the Overrun one: the turn's combat is behind every candidate
+    /// here (CR 505.1a), and an instant's combat-window payload carries the verdict, but a
+    /// candidate with value that lands elsewhere is neither priced nor timed as a trick, so the
+    /// tokens, the damage mode and the Emperor's counter score as they would without the policy.
+    /// Clarion's child stops at its mode prompt with or without the registry, and the policy
+    /// reads every mode of a cast that has chosen none (CR 601.2b).
+    #[test]
+    fn own_postcombat_main_root_does_not_price_a_lasting_payoff_as_a_trick() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PostCombatMain);
+        let reinforcements = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Heroic Reinforcements",
+                false,
+                HEROIC_REINFORCEMENTS,
+            )
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red, ManaCostShard::White],
+                generic: 2,
+            })
+            .id();
+        let clarion = scenario
+            .add_spell_to_hand_from_oracle(P0, "Deafening Clarion", false, DEAFENING_CLARION)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red, ManaCostShard::White],
+                generic: 1,
+            })
+            .id();
+        let assault = scenario
+            .add_spell_to_hand_from_oracle(P0, "Coordinated Assault", true, COORDINATED_ASSAULT)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        let emperor = scenario
+            .add_planeswalker_from_oracle(P0, "The Wandering Emperor", "", 3, THE_WANDERING_EMPEROR)
+            .id();
+        for _ in 0..3 {
+            scenario.add_basic_land(P0, ManaColor::Red);
+            scenario.add_basic_land(P0, ManaColor::White);
+        }
+        scenario.add_creature(P0, "Bear", 2, 2);
+        scenario.add_creature(P1, "Bear", 2, 2);
+        let mut runner = scenario.build();
+        add_libraries(runner.state_mut(), 5);
+        {
+            let obj = runner.state_mut().objects.get_mut(&emperor).unwrap();
+            obj.card_types.subtypes.clear();
+            obj.base_card_types = obj.card_types.clone();
+        }
+        engine::game::layers::evaluate_layers(runner.state_mut());
+        let state = runner.state().clone();
+        assert_eq!(
+            RootDecisionContext::classify(&state, P0).tactical_weight(),
+            0.1,
+            "premise: the own postcombat main is an ordinary root"
+        );
+        let plus_one = state.objects[&emperor]
+            .abilities
+            .iter()
+            .position(|a| matches!(a.cost, Some(AbilityCost::Loyalty { amount: 1 })))
+            .expect("her +1 is printed");
+
+        let effect_timing = || PolicyRegistry::default_subset_for_tests(&[PolicyId::EffectTiming]);
+        let mut cfg = hard_rung0_config();
+        // The Emperor's −1 is a sixth candidate; every candidate here must survive the beam.
+        cfg.search.max_branching = 8;
+        let mut heuristic = cfg.clone();
+        heuristic.search.enabled = false;
+        let cast = |id: ObjectId| move |action: &GameAction| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == id);
+        let activation = |action: &GameAction| {
+            matches!(
+                action,
+                GameAction::ActivateAbility { source_id, ability_index, .. }
+                    if *source_id == emperor && *ability_index == plus_one
+            )
+        };
+        let score_of = |scored: &[(GameAction, f64)],
+                        is_candidate: &dyn Fn(&GameAction) -> bool| {
+            scored
+                .iter()
+                .find(|(action, _)| is_candidate(action))
+                .map(|(_, score)| *score)
+                .unwrap_or_else(|| panic!("reach: the candidate is scored, got {scored:?}"))
+        };
+        let delta = |config: &AiConfig, is_candidate: &dyn Fn(&GameAction) -> bool| {
+            score_of(
+                &score_with_registry(&state, effect_timing(), config),
+                is_candidate,
+            ) - score_of(&score_with(&state, vec![], config), is_candidate)
+        };
+
+        let d_h_assault = delta(&heuristic, &cast(assault));
+        let d_s_assault = delta(&cfg, &cast(assault));
+        assert!(
+            d_h_assault < -NUDGE_MAX,
+            "reach: EffectTiming prices Coordinated Assault as a trick here, got {d_h_assault}"
+        );
+        assert!(
+            (d_s_assault - 0.1 * d_h_assault).abs() < 1e-9,
+            "reach: the root carries the verdict at 0.1: {d_s_assault} vs {d_h_assault}"
+        );
+
+        for (name, is_candidate) in [
+            (
+                "Heroic Reinforcements",
+                &cast(reinforcements) as &dyn Fn(&GameAction) -> bool,
+            ),
+            ("Deafening Clarion", &cast(clarion)),
+            ("The Wandering Emperor's +1", &activation),
+        ] {
+            let (d_h, d_s) = (delta(&heuristic, is_candidate), delta(&cfg, is_candidate));
+            assert!(d_h.abs() < 1e-9, "EffectTiming prices {name}, got {d_h}");
+            assert!(d_s.abs() < 1e-9, "the root prices {name}, got {d_s}");
+        }
+
+        let scored = score_with(&state, vec![], &heuristic);
+        let assault_score = score_of(&scored, &cast(assault));
+        for (name, id, gap) in [
+            ("Heroic Reinforcements", reinforcements, 0.24),
+            ("Deafening Clarion", clarion, 0.2),
+        ] {
+            let got = score_of(&scored, &cast(id)) - assault_score;
+            assert!(
+                (got - gap).abs() < 1e-9,
+                "the hint does not time {name}: {gap} over the instant's 0.3, got {got}"
+            );
+        }
     }
 }
