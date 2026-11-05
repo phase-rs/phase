@@ -1,3 +1,4 @@
+use crate::parser::oracle_effect::lower::WhereXBinding;
 use crate::parser::oracle_nom::error::{oracle_err, OracleError};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
@@ -220,6 +221,12 @@ pub(super) fn try_parse_add_mana_effect_with_context(
     let clause_lower = clause.to_lowercase();
     let clause_tp = TextPair::new(clause, &clause_lower);
     let (without_where_x, where_x_expression) = super::strip_trailing_where_x(clause_tp);
+    // CR 608.2c: captured beside the where-X text it will be read under, so a
+    // controller anaphor in the count ("where X is the number of Islands they
+    // control") binds to the player the chain declared rather than falling to
+    // `oracle_target`'s legacy `You` seed. Empty when nothing is in scope, which
+    // `bind_controller_phrase` fails closed on — see `WhereXBinding`.
+    let mana_antecedents = ctx.player_antecedents();
     let clause = without_where_x.original.trim().trim_end_matches(['.', '"']);
     // CR 605.1a + CR 107.4a: Track whether the "an additional " prefix was present
     // so that `ChosenColor`/`AnyOneColor` variants record their contribution role
@@ -240,7 +247,10 @@ pub(super) fn try_parse_add_mana_effect_with_context(
     // `parse_mana_production_clause` so the where-X count is resolved here,
     // co-located with `apply_where_x_count_expression`.
     if let Some((count, color_options)) = parse_repeated_count_color_choice(clause) {
-        let (count, target) = apply_where_x_count_expression(count, where_x_expression.as_deref())?;
+        let (count, target) = apply_where_x_count_expression(
+            count,
+            WhereXBinding::new(where_x_expression.as_deref(), &mana_antecedents),
+        )?;
         return Some(Effect::Mana {
             produced: ManaProduction::AnyOneColor {
                 count,
@@ -319,8 +329,10 @@ pub(super) fn try_parse_add_mana_effect_with_context(
     }
 
     if let Some((count, rest)) = parse_mana_count_prefix(clause) {
-        let (count, where_x_target) =
-            apply_where_x_count_expression(count, where_x_expression.as_deref())?;
+        let (count, where_x_target) = apply_where_x_count_expression(
+            count,
+            WhereXBinding::new(where_x_expression.as_deref(), &mana_antecedents),
+        )?;
         let rest = rest.trim().trim_end_matches(['.', '"']).trim();
         let rest_lower = rest.to_lowercase();
 
@@ -685,8 +697,10 @@ pub(super) fn try_parse_add_mana_effect_with_context(
     let fallback_count = parse_mana_count_prefix(clause)
         .map(|(count, _)| count)
         .unwrap_or(QuantityExpr::Fixed { value: 1 });
-    let (fallback_count, fallback_target) =
-        apply_where_x_count_expression(fallback_count, where_x_expression.as_deref())?;
+    let (fallback_count, fallback_target) = apply_where_x_count_expression(
+        fallback_count,
+        WhereXBinding::new(where_x_expression.as_deref(), &mana_antecedents),
+    )?;
 
     // Scan for mana production type at word boundaries using nom combinators.
     let produced = scan_mana_production_type(&clause_lower, fallback_count.clone(), contribution)?;
@@ -1100,9 +1114,9 @@ pub(super) fn parse_mana_count_prefix(text: &str) -> Option<(QuantityExpr, &str)
 /// `apply_where_x_quantity_expression` for why such a node is dead at runtime.
 pub(super) fn apply_where_x_count_expression(
     count: QuantityExpr,
-    where_x_expression: Option<&str>,
+    where_x: WhereXBinding<'_>,
 ) -> Option<(QuantityExpr, Option<ManaTargetRole>)> {
-    match (&count, where_x_expression) {
+    match (&count, where_x.expression) {
         (
             QuantityExpr::Ref {
                 qty: QuantityRef::Variable { ref name },
@@ -1114,7 +1128,7 @@ pub(super) fn apply_where_x_count_expression(
             // `QuantityRef::Variable { name: "<oracle text>" }` is dead at runtime
             // (game/quantity.rs resolves a non-`X` variable name to 0), so the mana
             // clause produced ZERO mana while still reading as supported.
-            let count = super::parse_where_x_quantity_expression(expression)?;
+            let count = where_x.resolve_quantity(expression)?;
             Some((count, where_x_expression_target_filter(expression)))
         }
         _ => Some((count, None)),
