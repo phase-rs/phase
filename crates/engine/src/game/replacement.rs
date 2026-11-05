@@ -943,13 +943,12 @@ pub enum ApplyResult {
 }
 
 /// An earlier replacement's rider that paused while a later replacement applied to the same
-/// event, and the later replacement's amount (CR 615.5, CR 608.2c).
+/// event (CR 615.5, CR 608.2c). It names only where the later replacement's actions wait; the
+/// amount they read is the one their own applier stamped on their drain (`mandatory_post_drain`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PausedRider {
     /// The frame whose paused resident is the rider's unfinished work.
     pub owner: crate::types::game_state::PostReplacementFrameId,
-    /// The amount the later replacement replaced or prevented, read as its "that many".
-    pub amount: Option<u32>,
 }
 
 /// How a damage rider drain ended.
@@ -992,19 +991,15 @@ fn stash_post_replacement_continuation(
     behind: Option<PausedRider>,
 ) {
     // CR 615.5 + CR 608.2c: behind an earlier rider that paused, the replacement's actions wait
-    // for that rider's work to finish, reading the amount captured with it. A frame whose
-    // resident is no longer paused has nothing to wait behind.
+    // for that rider's work to finish. They keep the amount their own applier stamped on the
+    // drain (CR 614.6), never one read off the live state. A frame whose resident is no longer
+    // paused has nothing to wait behind.
     let drain = match behind {
-        Some(rider) => {
-            let drain = PostReplacementDrain {
-                event_amount: rider.amount,
-                ..drain
-            };
-            match state.install_post_replacement_drain_behind_paused(rider.owner, drain) {
-                None => return,
-                Some(drain) => drain,
-            }
-        }
+        Some(rider) => match state.install_post_replacement_drain_behind_paused(rider.owner, drain)
+        {
+            None => return,
+            Some(drain) => drain,
+        },
         None => drain,
     };
     state.install_post_replacement_drain(drain, ResidentDrainPolicy::KeepResident);
@@ -1062,18 +1057,13 @@ fn mandatory_post_drain(
 /// CR 615.5 + CR 608.2c: where a damage replacement's actions wait. Behind the rider this
 /// event's own substitution waited on (`ApplyResult::PreventedBehindRider`), else behind a rider
 /// of the same noncombat batch that left its prompt standing (Pyroclasm at two Bears, each under
-/// Test of Faith), reading the amount the applier just stamped. A substitution on another
-/// creature (Dralnu, Lich Lord) also waits here today, though by CR 614.6 + CR 615.5 it should
-/// come first (Command Zone #172).
+/// Test of Faith). Placement only: the actions read the amount their applier stamped on their
+/// drain. A substitution on another creature (Dralnu, Lich Lord) also waits here today, though
+/// by CR 614.6 + CR 615.5 it should come first (Command Zone #172).
 fn damage_rider_placement(state: &GameState, behind: Option<PausedRider>) -> Option<PausedRider> {
     behind.or_else(|| {
         let owner = state.damage_batch_ledger.as_ref()?.paused_rider?;
-        Some(PausedRider {
-            owner,
-            amount: state
-                .last_effect_count
-                .and_then(|count| u32::try_from(count).ok()),
-        })
+        Some(PausedRider { owner })
     })
 }
 
@@ -3041,10 +3031,7 @@ fn damage_done_applier(
             return match earlier {
                 DamageRiderDrain::Completed => ApplyResult::Prevented,
                 DamageRiderDrain::Paused { owner } => {
-                    ApplyResult::PreventedBehindRider(PausedRider {
-                        owner,
-                        amount: Some(amount),
-                    })
+                    ApplyResult::PreventedBehindRider(PausedRider { owner })
                 }
             };
         }
@@ -3334,7 +3321,7 @@ fn damage_done_applier(
     ApplyResult::Modified(event)
 }
 
-/// CR 510.2 + CR 608.2f + CR 611.3a: a shield's printed guard is read once for a simultaneous
+/// CR 608.2f + CR 700.1: a shield's printed guard is read once for a simultaneous
 /// batch, before any portion applies, because a rider draining between portions must not flip
 /// it in either direction. Undergrowth Champion ruling: "its prevention effect will apply once
 /// to all that damage." Every self-scoped shield on the board is read, not only the batch's
@@ -3428,7 +3415,7 @@ pub(crate) fn with_damage_batch<T>(
     with_settled_damage_guards(state, settled_guards, body)
 }
 
-/// CR 608.2f + CR 611.3a: run `body` under guards a batch already read. The applications
+/// CR 608.2f + CR 700.1: run `body` under guards a batch already read. The applications
 /// don't travel: consumed_replacement_applies_in_combat_batch reads them only for combat.
 /// Filed: Awe Strike on Thrashing Wumpus (CR 615.8) covers only the first portion
 /// (Command Zone #173).
@@ -8165,7 +8152,7 @@ fn object_replacement_candidate_applies(
         }
     }
     if let Some(ref cond) = repl_def.condition {
-        // CR 510.2 + CR 611.3a: a guard the current simultaneous batch already read gives
+        // CR 608.2f + CR 700.1: a guard the current simultaneous batch already read gives
         // the same answer to every portion.
         let holds = settled_damage_guard_reading(state, obj, cond, event)
             .map(|reading| reading == DamageGuardReading::Holds)
@@ -14523,8 +14510,8 @@ pub fn continue_replacement(
         .pending_replacement
         .as_ref()
         .map(|pending| pending.unrepresentable_life_change);
-    // CR 510.2 + CR 611.3a: the answer re-scans the parked portion under the guards its
-    // batch read. An open combat batch already holds them.
+    // CR 608.2f + CR 700.1: the answer re-scans the parked portion under the guards its
+    // batch read. An open combat batch (CR 510.2) already holds them.
     let parked_guards = state
         .pending_replacement
         .as_ref()
@@ -18593,7 +18580,7 @@ mod tests {
             .collect()
     }
 
-    /// CR 510.2 + CR 611.3a + CR 400.7: a batch's guard reading is found by the host's
+    /// CR 608.2f + CR 700.1 + CR 400.7: a batch's guard reading is found by the host's
     /// incarnation and the condition, not by a registry index, so a definition added
     /// ahead of the shield (as a layer pass at a CR 616.1 pause can do) doesn't lose it.
     /// The reading wins over the live state: Undergrowth Champion read with no counter

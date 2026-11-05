@@ -28994,7 +28994,7 @@ fn validate_draw_dealer(frame: &DrawSequenceFrame, dealer: &DrawDealer) -> Resul
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingReplacement {
     pub proposed: ProposedEvent,
-    /// CR 510.2 + CR 611.3a: the guards of the simultaneous damage batch this portion
+    /// CR 608.2f + CR 700.1: the guards of the simultaneous damage batch this portion
     /// belongs to, read again when the answer re-scans this portion.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub settled_damage_guards: Vec<crate::types::ability::SettledDamageGuard>,
@@ -56893,7 +56893,7 @@ mod tests {
         );
     }
 
-    /// Wire shape of the settled damage-guard carrier (CR 510.2 + CR 611.3a): omitted
+    /// Wire shape of the settled damage-guard carrier (CR 608.2f + CR 700.1): omitted
     /// when empty, absent in older payloads, and a non-empty value round-trips on both
     /// `PendingReplacement` and `SpellContext`.
     #[test]

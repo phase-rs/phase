@@ -3676,20 +3676,21 @@ pub(super) fn rebind_attach_attachment_to_forwarded_source_if_anaphor_names_move
 /// `AbilityDefinition`, and nested `sub_ability` / `else_ability`.
 fn sub_targets_moved_card(sub: &AbilityDefinition) -> bool {
     // CR 701.3a + CR 608.2c: "attach them to ~" names what the parent created as the
-    // attachment, so `~` stays the ability's source (Outfitted Jouster).
-    if matches!(
+    // attachment, so its own `~` recipient stays the ability's source (Outfitted Jouster).
+    // Only this node's recipient is exempt: a later instruction it carries is still walked.
+    let attaches_what_parent_created = matches!(
         &*sub.effect,
         Effect::Attach {
             attachment: TargetFilter::LastCreated,
             ..
         }
-    ) {
-        return false;
-    }
-    if matches!(
-        sub.effect.target_filter(),
-        Some(TargetFilter::SelfRef | TargetFilter::ParentTarget)
-    ) {
+    );
+    if !attaches_what_parent_created
+        && matches!(
+            sub.effect.target_filter(),
+            Some(TargetFilter::SelfRef | TargetFilter::ParentTarget)
+        )
+    {
         return true;
     }
     if let Effect::Conjure { cards, .. } = &*sub.effect {

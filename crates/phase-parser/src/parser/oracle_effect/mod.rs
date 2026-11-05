@@ -14669,6 +14669,32 @@ mod conjure_attach_parser_tests {
         assert!(sub.sub_ability.is_none());
     }
 
+    /// CR 400.7j + CR 608.2c: the "attach them to ~" exemption covers only the attach's
+    /// own `~` recipient. A later instruction it carries that names the conjured card is
+    /// still found, so the conjure forwards its result. No printed card has this composite
+    /// shape; the nearest is Outfitted Jouster, whose parsed body is extended here with a
+    /// `Destroy { ParentTarget }` after its attach.
+    #[test]
+    fn conjure_attach_tail_still_forwards_for_a_nested_moved_card_reader() {
+        let mut body = first_trigger_body(
+            "When Outfitted Jouster enters, conjure a card named Steelclaw Lance and a card named Brawler's Plate onto the battlefield and attach them to Outfitted Jouster.\nIf damage would be dealt to Outfitted Jouster while it's equipped, prevent that damage. When damage is prevented this way, sacrifice an Equipment attached to Outfitted Jouster.",
+            "Outfitted Jouster",
+        );
+        assert!(!body.forward_result);
+        let attach = body.sub_ability.as_deref_mut().expect("the attach clause");
+        attach.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::ParentTarget,
+                cant_regenerate: false,
+            },
+        )));
+
+        lower::rewire_result_anchored_subchain(&mut body);
+
+        assert!(body.forward_result, "got {body:?}");
+    }
+
     /// Conjures with no "and attach them to ~" tail keep no `Attach` sub. Perforator
     /// Crocodile's "for each creature your opponents control, conjure a card named Stab
     /// Wound onto the battlefield attached to that creature" is a different shape: a Stab

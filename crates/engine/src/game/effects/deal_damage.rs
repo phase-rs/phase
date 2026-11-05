@@ -1326,7 +1326,7 @@ fn keep_chain_identity(
 ) -> ResolvedAbility {
     node.context = ability.context.clone();
     node.ability_index = ability.ability_index;
-    // CR 510.2 + CR 611.3a: a remaining portion of a simultaneous batch keeps the guards
+    // CR 608.2f + CR 700.1: a remaining portion of a simultaneous batch keeps the guards
     // the batch read; nothing else is such a portion (`apply_parent_chain_context`).
     node.context.settled_damage_guards = replacement::settled_damage_guards(state);
     node
@@ -1373,7 +1373,7 @@ fn joins_next_damage_clause(node: &ResolvedAbility) -> bool {
     })
 }
 
-/// CR 510.2 + CR 608.2f + CR 611.3a: read the guards once for a joined run of damage clauses
+/// CR 608.2f + CR 700.1: read the guards once for a joined run of damage clauses
 /// and stamp every clause of the run, so each opens its batch under the same reading
 /// (Undergrowth Champion ruling: "its prevention effect will apply once to all that damage").
 /// `None` when this node starts no run, or when nothing on the board has a guard. The stamp
