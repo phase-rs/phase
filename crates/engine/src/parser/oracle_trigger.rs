@@ -318,14 +318,21 @@ fn effect_adds_mana_to_triggering_player(effect_lower: &str) -> bool {
     .is_ok()
 }
 
-/// CR 608.2d + CR 603.2: A leading "they may" in a normalized trigger body
-/// names the player recorded by that trigger event, rather than the ability's
-/// controller. Call after stripping an intervening-if wrapper so the actor is
-/// retained for both direct and conditional root modals.
+/// CR 608.2d + CR 603.2: A leading "they may" names the trigger-event player;
+/// "you may have" names the ability's controller as chooser, separately from
+/// the player instructed to act. Read this before the trigger shell peels it.
 fn optional_player_from_effect_body(effect_text: &str) -> Option<TargetFilter> {
     let lower = effect_text.to_lowercase();
-    let parsed = tag::<_, _, OracleError<'_>>("they may ").parse(lower.trim_start());
-    parsed.ok().map(|_| TargetFilter::TriggeringPlayer)
+    alt((
+        value(
+            TargetFilter::TriggeringPlayer,
+            tag::<_, _, OracleError<'_>>("they may "),
+        ),
+        value(TargetFilter::OriginalController, tag("you may have ")),
+    ))
+    .parse(lower.trim_start())
+    .ok()
+    .map(|(_, player)| player)
 }
 
 /// CR 113.6 + CR 113.6b: Collect every zone the trigger's
@@ -2152,19 +2159,12 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // damaged/attacked player rather than an absent chosen target.
     let mut execute = execute;
     // CR 608.2c + CR 608.2d — PRECEDENCE between the two `optional_player`
-    // producers. This detector reads the TRIGGER BODY's head (`tag("they may ")`,
-    // `optional_player_from_effect_body`) and can only ever say `TriggeringPlayer`.
+    // producers. This detector reads the TRIGGER BODY's head, including both
+    // an anaphoric "they may" and a controller-held "you may have" causative.
     // `oracle_effect::assembly::subject_anchored_optional_actor` reads the CLAUSE's
-    // own anaphor out of the effect's player slot and is strictly more precise, and
-    // it runs FIRST. So this writer only fills a gap it is uniquely able to fill —
-    // the shapes whose named actor never reaches `Effect::target_filter()` at all:
-    // object slots (Bow to My Command, Charismatic Conqueror, My Forces Are
-    // Innumerable), `PayCost { payer }` (Horn of Plenty, Meathook Massacre II,
-    // Wandering Archaic) and unparsed bodies (Game Knights Live). MEASURED: the two
-    // cards both producers see (Miss Highwater, Tarnation) agree on
-    // `TriggeringPlayer`, so the guard is byte-neutral on today's corpus; without
-    // it, a future "they may"-headed trigger whose clause names a DIFFERENT anaphor
-    // would have the correct stamp overwritten.
+    // own anaphor out of the effect's player slot and runs first. This writer
+    // fills gaps when the trigger shell consumed the head or the actor never
+    // reaches `Effect::target_filter()`. Preserve a more precise existing stamp.
     //
     // CR 608.2d + CR 101.4: the `optional_for` conjunct keeps this writer inside
     // the same single-announcer invariant `subject_anchored_optional_actor` now
