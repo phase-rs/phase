@@ -72,8 +72,38 @@ fn is_linked_to(runner: &GameRunner, exiled: ObjectId, source: ObjectId) -> bool
         .any(|link| link.exiled_id == exiled && link.source_id == source)
 }
 
+/// Answer each pending trigger target prompt in order from `targets` (`None`
+/// declines that up-to-one target), stopping at the first priority window.
+/// Returns how many prompts were answered.
+fn answer_trigger_targets(runner: &mut GameRunner, targets: &[Option<ObjectId>]) -> usize {
+    let mut answered = 0;
+    while let WaitingFor::TriggerTargetSelection { .. } = runner.state().waiting_for {
+        let target = *targets
+            .get(answered)
+            .expect("a trigger target prompt with no scripted answer");
+        runner
+            .act(GameAction::ChooseTarget {
+                target: target.map(engine::types::ability::TargetRef::Object),
+            })
+            .expect("trigger target choice");
+        answered += 1;
+    }
+    answered
+}
+
+/// The ability resolution completed: priority is back with an empty stack.
+fn assert_resolution_completed(runner: &GameRunner) {
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().stack.is_empty(),
+        "resolution must complete to priority on an empty stack: {:?}, stack {:?}",
+        runner.state().waiting_for,
+        runner.state().stack
+    );
+}
+
 /// Drive the stack until it empties, answering any trigger target prompt with
-/// `target` (or declining it when `None`).
+/// `target` (or declining it when `None`), and require that it completes.
 fn resolve_with_trigger_target(runner: &mut GameRunner, target: Option<ObjectId>) -> bool {
     let mut prompted = false;
     for _ in 0..40 {
@@ -93,6 +123,7 @@ fn resolve_with_trigger_target(runner: &mut GameRunner, target: Option<ObjectId>
             other => panic!("unexpected prompt while resolving: {other:?}"),
         }
     }
+    assert_resolution_completed(runner);
     prompted
 }
 
@@ -287,4 +318,83 @@ fn assimilation_assessor_assimilates_a_creature_card_from_its_linked_pile() {
     assert!(obj.card_types.core_types.contains(&CoreType::Artifact));
     assert!(obj.card_types.subtypes.iter().any(|s| s == "Borg"));
     assert!(!obj.card_types.subtypes.iter().any(|s| s == "Human"));
+}
+
+const PANHARMONICON: &str = "If an artifact or creature entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.";
+
+/// CR 603.2d + CR 607.2a + CR 608.2h: Panharmonicon doubles Borg Cube's enters
+/// trigger, and both instances are put on the stack while nothing is exiled
+/// with it. The first to resolve exiles its target through the fallback; the
+/// second must read the pile as it is when it resolves — Borg Cube is the same
+/// object (CR 400.7), so that card is now exiled with it — and assimilate it
+/// rather than exile its own, distinct fallback target.
+#[test]
+fn borg_cube_doubled_entry_assimilates_the_card_the_first_trigger_exiled() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario
+        .add_creature(P1, "First Soldier", 2, 2)
+        .with_subtypes(vec!["Human", "Soldier"])
+        .id();
+    let second = scenario
+        .add_creature(P1, "Second Knight", 3, 3)
+        .with_subtypes(vec!["Human", "Knight"])
+        .id();
+    scenario.add_artifact_from_oracle(P0, "Panharmonicon", PANHARMONICON);
+    let cube = borg_cube_in_hand(&mut scenario);
+    let mut runner = scenario.build();
+    seed_creature_types(&mut runner);
+
+    runner.cast(cube).commit();
+    // Resolve Borg Cube itself; its enters trigger fires twice.
+    for _ in 0..10 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            || runner.state().objects[&cube].zone == Zone::Battlefield
+        {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass priority");
+    }
+    assert_eq!(runner.state().objects[&cube].zone, Zone::Battlefield);
+    // Each instance chooses its own up-to-one target as it is put on the stack.
+    assert_eq!(
+        answer_trigger_targets(&mut runner, &[Some(first), Some(second)]),
+        2,
+        "Panharmonicon must put a second enters trigger on the stack"
+    );
+    assert_eq!(runner.state().stack.len(), 2);
+
+    // The top instance resolves: nothing is exiled with Borg Cube yet, so its
+    // fallback exiles its own target.
+    runner.resolve_top();
+    let (exiled, untouched) = match (
+        runner.state().objects[&first].zone,
+        runner.state().objects[&second].zone,
+    ) {
+        (Zone::Exile, Zone::Battlefield) => (first, second),
+        (Zone::Battlefield, Zone::Exile) => (second, first),
+        zones => panic!("exactly one fallback target must be exiled: {zones:?}"),
+    };
+    assert!(is_linked_to(&runner, exiled, cube));
+    assert_eq!(runner.state().stack.len(), 1);
+
+    // The second instance assimilates that card; its own target stays put.
+    runner.resolve_top();
+    assert_resolution_completed(&runner);
+    let obj = &runner.state().objects[&exiled];
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "the card the first trigger exiled is assimilated by the second"
+    );
+    assert_eq!(obj.controller, P0);
+    assert_eq!(obj.counters.get(&CounterType::Plus1Plus1).copied(), Some(1));
+    let other = &runner.state().objects[&untouched];
+    assert_eq!(
+        other.zone,
+        Zone::Battlefield,
+        "a card could be assimilated, so the fallback exile does not run"
+    );
+    assert_eq!(other.controller, P1);
+    assert!(other.counters.is_empty());
 }

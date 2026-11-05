@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIdentityBindingExt;
 use crate::types::ability::{AggregateFunction, ControllerRef, PlayerRelation, SeatDirection};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
@@ -443,14 +444,33 @@ pub fn linked_exile_cards_for_source(
 }
 
 /// CR 607.2a + CR 400.7: The cards linked to a trigger bound to `source`: its
-/// latched snapshot plus the linked-exile LKI recorded for that incarnation
-/// (its departure pile and what it exiled after departing).
+/// latched snapshot, plus — while the bound incarnation is still the current
+/// object in its observed zone — the links that object has made since, plus the
+/// linked-exile LKI recorded for that incarnation (its departure pile and what
+/// it exiled after departing).
 pub fn linked_exile_pile(
     state: &GameState,
     source: &TriggerSourceContext,
 ) -> Vec<LinkedExileSnapshot> {
     let bound = source.identity.reference;
     let mut pile = source.linked_exile_snapshot.clone();
+    // CR 608.2h + CR 607.2a: the pile is read when the effect is applied, so a
+    // card exiled with the source after the trigger latched (by an earlier
+    // instance of the same doubled trigger, CR 603.2d, or earlier in this
+    // resolution) belongs to it. CR 400.7: only while the bound incarnation is
+    // still current in the zone it was observed in; a source that changed zones
+    // is a new object whose links are not this trigger's. The re-capture is the
+    // latch's own surface (`capture_linked_exile_snapshot`), so an off-
+    // battlefield source still reads no live links.
+    let current = if source.identity.is_current(state) {
+        crate::game::zones::capture_linked_exile_snapshot(
+            state,
+            bound.object_id,
+            source.identity.expected_zone,
+        )
+    } else {
+        Vec::new()
+    };
     // `departed`, not `admits`: an entry whose successor is this incarnation
     // belongs to an earlier departure, a different object.
     let later = state
@@ -460,7 +480,7 @@ pub fn linked_exile_pile(
         .flatten()
         .filter(|lki| lki.departed == bound.incarnation)
         .flat_map(|lki| &lki.snapshot);
-    for snap in later {
+    for snap in current.iter().chain(later) {
         if !pile
             .iter()
             .any(|p| p.exiled_id == snap.exiled_id && p.incarnation == snap.incarnation)
@@ -1425,6 +1445,72 @@ mod tests {
             .map(|s| s.exiled_id)
             .collect();
         assert_eq!(ids, vec![card, later]);
+    }
+
+    /// A battlefield source and two cards in exile, neither linked yet.
+    fn live_source_with_exiles() -> (GameState, ObjectId, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let [first, second] = [CardId(2), CardId(3)].map(|card_id| {
+            create_object(
+                &mut state,
+                card_id,
+                PlayerId(1),
+                "Exiled Card".into(),
+                Zone::Exile,
+            )
+        });
+        (state, source, first, second)
+    }
+
+    fn pile_ids(state: &GameState, context: &TriggerSourceContext) -> Vec<ObjectId> {
+        linked_exile_pile(state, context)
+            .iter()
+            .map(|snapshot| snapshot.exiled_id)
+            .collect()
+    }
+
+    /// CR 608.2h + CR 607.2a: while the bound incarnation is still current, a
+    /// card linked to it after the trigger latched is in the pile, alongside
+    /// (and deduplicated against) the latched snapshot.
+    #[test]
+    fn linked_exile_pile_reads_links_made_after_the_latch_by_the_bound_incarnation() {
+        let (mut state, source, first, second) = live_source_with_exiles();
+        crate::game::exile_links::push_tracked_by_source(&mut state, first, source);
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        assert_eq!(pile_ids(&state, &context), vec![first]);
+
+        crate::game::exile_links::push_tracked_by_source(&mut state, second, source);
+        assert_eq!(pile_ids(&state, &context), vec![first, second]);
+    }
+
+    /// CR 400.7: once the bound incarnation has left, the object that later
+    /// holds the same id is a new object, and its links are not the trigger's.
+    #[test]
+    fn linked_exile_pile_ignores_links_of_a_later_incarnation() {
+        let (mut state, source, first, _) = live_source_with_exiles();
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        let mut events = Vec::new();
+        move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
+        crate::game::exile_links::push_tracked_by_source(&mut state, first, source);
+        assert!(linked_ids(&state, source).contains(&first));
+        assert!(
+            pile_ids(&state, &context).is_empty(),
+            "the departed incarnation's trigger must not read its successor's links"
+        );
     }
 
     /// CR 603.10a + CR 607.2a: a leaves record carrying a trigger source context
