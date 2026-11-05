@@ -14940,10 +14940,6 @@ fn parse_spell_designation_adjective(i: &str) -> OracleResult<'_, FilterProp> {
     .parse(i)
 }
 
-/// CR 700.2 + CR 722.3d: re-attach the optional designation adjective peeled by
-/// `parse_spell_designation_adjective` to the built spell filter (`None` leaves
-/// the filter unchanged). Every cast-trigger branch (`you cast`, `<who> casts`)
-/// attaches through here, before owner scoping, so the branches cannot drift.
 /// CR 601.2 + CR 603.2: Does a cast trigger's parsed spell filter narrow which
 /// spells qualify? A bare "a spell" folds to an unconstrained `Typed` filter and
 /// is left off `valid_card` (every spell matches). A disjunction ("instant or
@@ -14964,6 +14960,10 @@ fn spell_filter_constrains(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 700.2 + CR 722.3d: re-attach the optional designation adjective peeled by
+/// `parse_spell_designation_adjective` to the built spell filter (`None` leaves
+/// the filter unchanged). Every cast-trigger branch (`you cast`, `<who> casts`)
+/// attaches through here, before owner scoping, so the branches cannot drift.
 fn with_spell_designation(filter: TargetFilter, designation: Option<FilterProp>) -> TargetFilter {
     match designation {
         Some(prop) => conjoin_filter_property(filter, prop),

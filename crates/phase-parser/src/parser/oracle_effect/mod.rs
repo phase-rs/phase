@@ -17588,17 +17588,6 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
     }))
 }
 
-/// CR 305.2 + CR 611.2c: "You may play an additional land this turn" — a
-/// one-shot land-drop grant scoped to the current turn (Escape to the Wilds,
-/// Explore, Rampaging Baloths' landfall). Distinct from the STATIC "on each of
-/// your turns" form (Exploration/Azusa), which `should_defer_spell_to_effect`
-/// routes to the static parser; the `this turn` discriminator keeps this
-/// resolution-time `GenericEffect` from colliding with that printed static.
-/// "an additional land" => count 1 (`MayPlayAdditionalLand`); "<n> additional
-/// lands" => count n (`AdditionalLandDrop { count: n }`). The granted mode is
-/// applied to the controller for the rest of the turn via a transient
-/// continuous effect (`Duration::UntilEndOfTurn`), summed at land-drop time by
-/// `static_abilities::additional_land_drops`.
 /// CR 603.2d: "if a triggered ability of <object> triggers, that ability
 /// triggers an additional time" — the object-scoped trigger doubler a resolving
 /// ability establishes (Lwaxana Troi, Charming Guest: "Choose another target
@@ -17650,6 +17639,17 @@ fn try_parse_object_trigger_doubling(tp: TextPair) -> Option<ParsedEffectClause>
     }))
 }
 
+/// CR 305.2 + CR 611.2c: "You may play an additional land this turn" — a
+/// one-shot land-drop grant scoped to the current turn (Escape to the Wilds,
+/// Explore, Rampaging Baloths' landfall). Distinct from the STATIC "on each of
+/// your turns" form (Exploration/Azusa), which `should_defer_spell_to_effect`
+/// routes to the static parser; the `this turn` discriminator keeps this
+/// resolution-time `GenericEffect` from colliding with that printed static.
+/// "an additional land" => count 1 (`MayPlayAdditionalLand`); "<n> additional
+/// lands" => count n (`AdditionalLandDrop { count: n }`). The granted mode is
+/// applied to the controller for the rest of the turn via a transient
+/// continuous effect (`Duration::UntilEndOfTurn`), summed at land-drop time by
+/// `static_abilities::additional_land_drops`.
 fn try_parse_additional_land_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     let (count, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
         let (input, _) = opt(alt((tag("you may "), tag("may ")))).parse(input)?;
