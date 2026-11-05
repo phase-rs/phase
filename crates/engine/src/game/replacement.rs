@@ -5404,12 +5404,20 @@ fn turn_face_up_applier(
         return ApplyResult::Modified(ProposedEvent::TurnFaceUp { object_id, applied });
     };
     let controller = source.controller;
-    let execute = source
-        .replacement_definitions
-        .get(rid.index)
-        .and_then(|def| def.execute.clone());
+    let Some(definition) = source.replacement_definitions.get(rid.index) else {
+        return ApplyResult::Modified(ProposedEvent::TurnFaceUp { object_id, applied });
+    };
+    let runtime_execute = definition.runtime_execute.clone();
+    let execute = definition.execute.clone();
 
-    if let Some(execute) = execute {
+    if let Some(mut ability) = runtime_execute {
+        // CR 614.1e + CR 708.11: apply the captured replacement during the
+        // turn-up, retaining its original targets and resolution context.
+        // A captured body takes precedence over the template, as in the
+        // general replacement continuation path.
+        ability.set_replacement_applied_recursive(applied.clone());
+        let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 1);
+    } else if let Some(execute) = execute {
         // Bind only the anaphoric self-reference: the execute is resolved with the
         // turned-up permanent as its `source_id`, so "it"/`SelfRef` references the
         // permanent ("put five +1/+1 counters on it"). The permanent is NOT stuffed
@@ -10235,6 +10243,15 @@ fn apply_single_replacement(
         ))
     .then(|| proposed.clone());
 
+    // CR 614.1e + CR 708.11: declining an optional turn-up replacement must
+    // leave its execute body untouched; any decline body is owned by the
+    // optional continuation already installed by the choice handler.
+    if matches!(branch, ReplacementBranch::Decline)
+        && matches!(proposed, ProposedEvent::TurnFaceUp { .. })
+    {
+        return Ok(proposed);
+    }
+
     // CR 614.6 + CR 615.1 + CR 615.1a: An optional replacement modifies a
     // damage event only on its accepted branch. The shared damage applier reads
     // a definition's direct outcome (amount modification, prevention shield, or
@@ -12569,11 +12586,15 @@ fn continue_replacement_impl(
             // applied to ProposedEvent by event_modifiers_for_ability) to find the
             // first non-modifier as the real post-replacement work. Covers composed
             // replacements like Tap → BecomeCopy (Vesuva "enter tapped as a copy").
-            let post = if matches!(proposed, ProposedEvent::SearchFound { .. }) {
+            let post = if matches!(
+                proposed,
+                ProposedEvent::SearchFound { .. } | ProposedEvent::TurnFaceUp { .. }
+            ) {
                 // CR 614.6 + CR 611.2b: SearchFound's exact replacement tree
                 // is already bound into the modified event. Delivery owns its
                 // grant rider after the zone move, so accepting an optional
-                // replacement must not also enqueue the generic child.
+                // replacement must not also enqueue the generic child. The
+                // turn-up applier likewise executes its body inline.
                 None
             } else {
                 let real_work = accept_effect.as_deref().and_then(|def| {
@@ -13510,6 +13531,95 @@ mod tests {
             state.battlefield.push_back(obj_id);
         }
         state
+    }
+
+    #[test]
+    fn turn_face_up_applies_one_replacement_body_with_its_captured_controller() {
+        let source = ObjectId(10);
+        let gain_life = |amount| Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: amount },
+            player: TargetFilter::Controller,
+        };
+        let template = AbilityDefinition::new(AbilityKind::Spell, gain_life(2));
+        let runtime = ResolvedAbility::new(gain_life(3), vec![], ObjectId(99), PlayerId(1));
+
+        for (with_template, with_runtime, expected_life) in [
+            (true, false, [22, 20]),
+            (false, true, [20, 23]),
+            (true, true, [20, 23]),
+        ] {
+            let mut replacement = ReplacementDefinition::new(ReplacementEvent::TurnFaceUp);
+            if with_template {
+                replacement.execute = Some(Box::new(template.clone()));
+            }
+            if with_runtime {
+                replacement.runtime_execute = Some(Box::new(runtime.clone()));
+            }
+            let mut state = test_state_with_object(source, Zone::Battlefield, vec![replacement]);
+            let mut events = Vec::new();
+            let result = apply_single_replacement(
+                &mut state,
+                ProposedEvent::TurnFaceUp {
+                    object_id: source,
+                    applied: HashSet::new(),
+                },
+                ReplacementId { source, index: 0 },
+                ReplacementBranch::Execute,
+                replacement_registry(),
+                &mut events,
+            );
+            assert!(matches!(result, Ok(ProposedEvent::TurnFaceUp { .. })));
+            assert_eq!(state.players[0].life, expected_life[0]);
+            assert_eq!(state.players[1].life, expected_life[1]);
+            assert!(
+                !state.has_post_replacement_drain(),
+                "the inline replacement body must not be queued a second time"
+            );
+        }
+    }
+
+    #[test]
+    fn optional_turn_face_up_runs_only_the_accepted_body() {
+        let source = ObjectId(10);
+        let gain_life = |amount| Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: amount },
+            player: TargetFilter::Controller,
+        };
+        let template = AbilityDefinition::new(AbilityKind::Spell, gain_life(2));
+        let runtime = ResolvedAbility::new(gain_life(3), vec![], ObjectId(99), PlayerId(1));
+        for (with_runtime, choice, expected_life) in [
+            (false, 0, [22, 20]),
+            (false, 1, [20, 20]),
+            (true, 0, [20, 23]),
+            (true, 1, [20, 20]),
+        ] {
+            let mut replacement = ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
+                .execute(template.clone())
+                .mode(ReplacementMode::Optional { decline: None });
+            if with_runtime {
+                replacement.runtime_execute = Some(Box::new(runtime.clone()));
+            }
+            let mut state = test_state_with_object(source, Zone::Battlefield, vec![replacement]);
+            let mut events = Vec::new();
+            let event = ProposedEvent::TurnFaceUp {
+                object_id: source,
+                applied: HashSet::new(),
+            };
+            assert!(matches!(
+                replace_event(&mut state, event, &mut events),
+                ReplacementResult::NeedsChoice(PlayerId(0))
+            ));
+            assert!(matches!(
+                continue_replacement(&mut state, choice, &mut events),
+                ReplacementResult::Execute(ProposedEvent::TurnFaceUp { .. })
+            ));
+            assert_eq!(state.players[0].life, expected_life[0]);
+            assert_eq!(state.players[1].life, expected_life[1]);
+            assert!(
+                !state.has_post_replacement_drain(),
+                "an accepted turn-up body must not be replayed, and declining must do nothing"
+            );
+        }
     }
 
     fn reset_indexed_replacement_consults() {
