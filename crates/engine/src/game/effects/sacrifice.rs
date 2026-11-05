@@ -357,6 +357,19 @@ pub fn resolve(
         // CR 608.2k: the resolved back-reference IS the whole subject set;
         // never widen it with inherited targets.
         vec![referent]
+    } else if matches!(filter, TargetFilter::SelfRef) && !ability.targets.is_empty() {
+        // CR 608.2c: `~` is the source object itself, never an inherited target.
+        // A replacing chain whose parent target is a different permanent
+        // (Crackling Emergence: "sacrifice this Aura and that land gains
+        // indestructible") must sacrifice the source, not that permanent. With
+        // no targets at all, the pool path below already resolves `SelfRef`.
+        crate::game::targeting::resolved_targets(ability, filter, state)
+            .into_iter()
+            .filter_map(|t| match t {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .collect()
     } else if matches!(
         sacrifice_controller_scope(filter),
         Some(ControllerRef::ParentTargetController)
