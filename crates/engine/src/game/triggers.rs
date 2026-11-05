@@ -14718,7 +14718,12 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         FilterProp::CanEnchant { target } => filter_binding_diverges(target),
         FilterProp::DifferentNameFrom { filter }
         | FilterProp::TargetsOnly { filter }
-        | FilterProp::Targets { filter } => filter_binding_diverges(filter),
+        | FilterProp::Targets { filter }
+        // CR 106.3 + CR 601.2h: the paid mana source phrase nests a `TargetFilter`;
+        // it diverges exactly when that filter does.
+        | FilterProp::ManaSpentFromSource {
+            source_filter: filter,
+        } => filter_binding_diverges(filter),
         // CR 701.3a: the filter-matched host axis resolves its host set from the
         // RESOLVING ability (the parent target) or from the trigger event
         // (`TriggeringSource`), so it diverges exactly when the nested filter
@@ -14913,8 +14918,6 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         // both legs read the same turn's record.
         | FilterProp::WasPlayed
         | FilterProp::WasKicked
-        // CR 106.3 + CR 601.2h: both legs read the same payment record.
-        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn

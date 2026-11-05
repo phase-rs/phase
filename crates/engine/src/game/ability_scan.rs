@@ -5078,9 +5078,6 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
-        // CR 106.3 + CR 601.2h: a payment fact is not a resource read or write. Explicit
-        // so a future field forces re-audit.
-        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }
@@ -5117,6 +5114,11 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         }
         FilterProp::TargetsOnly { filter } => scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode),
         FilterProp::Targets { filter } => scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode),
+        // CR 106.3 + CR 601.2h: the paid mana source phrase nests a `TargetFilter`;
+        // route it like `Targets` so a projected Typed inside it is never dropped.
+        FilterProp::ManaSpentFromSource { source_filter } => {
+            scan_target_filter(source_filter, FilterReadContext::LiveBoardCensus, mode)
+        }
 
         // --- Box<PlayerFilter>-bearing: recurse (OpponentLostLife/… is projected).
         FilterProp::ControllerMatches { player } => scan_player_filter(player, mode),

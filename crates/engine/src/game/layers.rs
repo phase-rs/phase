@@ -5194,7 +5194,7 @@ fn player_filter_reads_life(pf: &PlayerFilter) -> bool {
 
 /// CR 119: Does a single `FilterProp` read the life family? EXHAUSTIVE over
 /// `FilterProp`, with NO wildcard — the divergence from `target_filter_reads_zone`
-/// that closes the six TargetFilter-bearing props the zone template drops into
+/// that closes the seven TargetFilter-bearing props the zone template drops into
 /// its `_ => false`. Every prop carrying a nested filter / player / quantity
 /// routes it; the `AnyOf` / `Not` combinators recurse.
 fn filter_prop_reads_life(prop: &FilterProp) -> bool {
@@ -5209,13 +5209,14 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         FilterProp::DealtDamageThisTurn { recipient, .. } => {
             recipient.as_ref().is_some_and(player_filter_reads_life)
         }
-        // The six TargetFilter-bearing props all route their nested filter
+        // The seven TargetFilter-bearing props all route their nested filter
         // (deref coercion → &TargetFilter). Field names differ; unified here.
         FilterProp::CanEnchant { target: f }
         | FilterProp::DifferentNameFrom { filter: f }
         | FilterProp::DistinctFrom { reference: f }
         | FilterProp::TargetsOnly { filter: f }
-        | FilterProp::Targets { filter: f } => target_filter_reads_life_total(f),
+        | FilterProp::Targets { filter: f }
+        | FilterProp::ManaSpentFromSource { source_filter: f } => target_filter_reads_life_total(f),
         // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`,
         // so a life-reading host predicate is routed the same way.
         FilterProp::AttachedTo {
@@ -5321,8 +5322,6 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
-        // CR 106.3 + CR 601.2h: a payment fact reads no life total.
-        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }

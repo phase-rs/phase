@@ -2620,7 +2620,12 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         FilterProp::CanEnchant { target } => legacy_target_filter(target),
         FilterProp::DifferentNameFrom { filter }
         | FilterProp::TargetsOnly { filter }
-        | FilterProp::Targets { filter } => legacy_target_filter(filter),
+        | FilterProp::Targets { filter }
+        // CR 106.3 + CR 601.2h: the paid mana source phrase nests a `TargetFilter`,
+        // so it carries a legacy referent exactly when that filter does.
+        | FilterProp::ManaSpentFromSource {
+            source_filter: filter,
+        } => legacy_target_filter(filter),
         FilterProp::DistinctFrom { reference } => legacy_target_filter(reference),
         FilterProp::SharesQuality { reference, .. } => {
             reference.as_deref().is_some_and(legacy_target_filter)
@@ -2739,9 +2744,6 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
-        // CR 106.3 + CR 601.2h: a latched payment snapshot, not per-source bound
-        // storage (CR 603.10a) — the same profile as `WasKicked`.
-        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }
@@ -2934,7 +2936,12 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         FilterProp::CanEnchant { target } => member_bound_target_filter(target),
         FilterProp::DifferentNameFrom { filter }
         | FilterProp::TargetsOnly { filter }
-        | FilterProp::Targets { filter } => member_bound_target_filter(filter),
+        | FilterProp::Targets { filter }
+        // CR 106.3 + CR 601.2h: the paid mana source phrase nests a `TargetFilter`,
+        // so it is member-bound exactly when that filter is.
+        | FilterProp::ManaSpentFromSource {
+            source_filter: filter,
+        } => member_bound_target_filter(filter),
         FilterProp::DistinctFrom { reference } => member_bound_target_filter(reference),
         FilterProp::SharesQuality { reference, .. } => {
             reference.as_deref().is_some_and(member_bound_target_filter)
@@ -3073,9 +3080,6 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
-        // CR 106.3 + CR 601.2h: a latched payment snapshot, not per-source bound
-        // storage (CR 603.10a) — the same profile as `WasKicked`.
-        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }

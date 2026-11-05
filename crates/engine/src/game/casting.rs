@@ -33021,7 +33021,12 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         | FilterProp::DifferentNameFrom { filter }
         | FilterProp::DistinctFrom { reference: filter }
         | FilterProp::TargetsOnly { filter }
-        | FilterProp::Targets { filter } => target_filter_reads_chosen_target(filter, read),
+        | FilterProp::Targets { filter }
+        // CR 106.3 + CR 601.2h: the paid mana source phrase is itself a
+        // `TargetFilter`, so a chosen-target read inside it must route.
+        | FilterProp::ManaSpentFromSource {
+            source_filter: filter,
+        } => target_filter_reads_chosen_target(filter, read),
         // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`, so
         // whether it reads a chosen target is exactly whether that filter does.
         FilterProp::AttachedTo {
@@ -33114,8 +33119,6 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
-        // CR 106.3 + CR 601.2h: a payment fact reads no chosen target.
-        | FilterProp::ManaSpentFromSource { .. }
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }
