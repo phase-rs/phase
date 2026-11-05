@@ -73,8 +73,7 @@ pub(super) fn handle_ability_mode_choice(
     record_modal_mode_choices(state, history_source, &modal, &indices);
     // CR 700.2a + CR 700.2b + CR 700.2e: the prompted player faces one dilemma
     // for this mode choice (face a dilemma: needs manual verification).
-    let dilemma_chooser =
-        super::ability_utils::mode_choice_dilemma_chooser(&modal, player, &indices);
+    let dilemma_chooser = super::ability_utils::mode_choice_dilemma_chooser(player, &indices);
 
     let mut resolved =
         build_chained_resolved(&mode_abilities, indices.as_slice(), source_id, player)?;
@@ -584,7 +583,9 @@ struct TriggeredModeChoice {
 /// `random_select_modal_indices` (seeded `state.rng`), then routes through the
 /// SAME finalization path the interactive controller-choice flow uses
 /// (`handle_triggered_mode_choice`) so target legality, per-mode labels, and
-/// stack-entry mutation stay identical.
+/// stack-entry mutation stay identical. The controller remains the mode chooser
+/// (CR 700.2b), so a nonempty draw faces one dilemma, emitted and recorded here
+/// exactly as the prompted path does.
 ///
 /// Preconditions (the "push first, choose second" contract — see
 /// `dispatch_pending_trigger_context`): `state.pending_trigger` is set and its
@@ -602,9 +603,6 @@ pub(super) fn resolve_random_modal_trigger(
     unavailable_modes: &[usize],
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EngineError> {
-    // CR 700.2b: modes drawn at random are not chosen by a player — no dilemma (see
-    // `ability_utils::mode_choice_dilemma_chooser`; engine policy, needs manual
-    // verification).
     // CR 603.3c + CR 700.2b: no mode can be chosen, or an "up to" draw chose
     // none. Either way the ability is removed from the stack; the caller drops
     // the pushed entry through `drop_mid_construction_pending_trigger`.
@@ -623,6 +621,10 @@ pub(super) fn resolve_random_modal_trigger(
         &modal,
         &indices,
     );
+    // CR 700.2b: the controller is still the mode chooser of a random draw, so
+    // the nonempty draw faces one dilemma (face a dilemma: needs manual
+    // verification).
+    let dilemma_chooser = super::ability_utils::mode_choice_dilemma_chooser(player, &indices);
     let mut resolved =
         build_chained_resolved(&mode_abilities, indices.as_slice(), source_id, player)?;
     resolved.selected_mode_labels = selected_mode_labels(&modal.mode_descriptions, &indices);
@@ -639,6 +641,14 @@ pub(super) fn resolve_random_modal_trigger(
         },
         events,
     )?;
+    // CR 603.3c + CR 700.2b: as on the prompted `SelectModes` path, a triggered
+    // mode choice cannot be undone once construction succeeds, so the event
+    // and the history are written together. A failed construction returned
+    // above and records nothing.
+    if let Some(chooser) = dilemma_chooser {
+        super::ability_utils::emit_face_dilemma_event(chooser, events);
+    }
+    super::ability_utils::record_face_dilemma_after_stack_placement(state, dilemma_chooser);
     Ok(Some(waiting_for))
 }
 

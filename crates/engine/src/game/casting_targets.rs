@@ -163,8 +163,7 @@ pub(crate) fn handle_select_modes(
     // dilemma as the modes are announced (face a dilemma: needs manual
     // verification). Latch it for the placement commit, and stage a spell's
     // triggers against the board now; an activation's custody is `end_action`.
-    let dilemma_chooser =
-        super::ability_utils::mode_choice_dilemma_chooser(&modal, mode_chooser, &indices);
+    let dilemma_chooser = super::ability_utils::mode_choice_dilemma_chooser(mode_chooser, &indices);
     resolved.context.mode_chooser = dilemma_chooser;
     if let Some(chooser) = dilemma_chooser {
         let event_start = events.len();

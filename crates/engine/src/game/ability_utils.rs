@@ -1485,21 +1485,19 @@ fn modal_indices_have_legal_target_assignment(
 }
 
 /// CR 700.2a + CR 700.2b + CR 700.2e: the player who faces a dilemma for this
-/// mode choice — the prompted chooser — or `None` when the choice faces none:
-/// zero modes chosen ("as you choose one or more modes"; CR 603.3c removes a
-/// zero-mode trigger) or modes the game drew at random (no player chose; engine
-/// policy). Face a dilemma: needs manual verification (TRK rulings unpublished).
+/// mode choice — the mode chooser — or `None` when zero modes are chosen ("as
+/// you choose one or more modes"; CR 603.3c removes a zero-mode trigger).
+///
+/// The selection procedure does not change the chooser: a "choose one at
+/// random" trigger (Cult of Skaro) is still the controller's mode choice under
+/// CR 700.2b — "at random" fixes how the mode is picked, not who chooses it —
+/// so a nonempty random draw faces a dilemma exactly like a prompted one. Face
+/// a dilemma: needs manual verification (TRK rulings unpublished).
 pub(crate) fn mode_choice_dilemma_chooser(
-    modal: &ModalChoice,
     chooser: PlayerId,
     indices: &[usize],
 ) -> Option<PlayerId> {
-    match modal.selection {
-        crate::types::ability::TargetSelectionMode::Chosen => {
-            (!indices.is_empty()).then_some(chooser)
-        }
-        crate::types::ability::TargetSelectionMode::Random => None,
-    }
+    (!indices.is_empty()).then_some(chooser)
 }
 
 /// CR 603.2: the dilemma is a game event as the modes are announced; abilities

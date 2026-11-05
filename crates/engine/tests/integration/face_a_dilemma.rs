@@ -8,9 +8,10 @@
 //! One dilemma is faced per mode-choice announcement, not per mode. The trigger
 //! event happens as the modes are announced (CR 603.2); the per-turn history is
 //! written once the announcement reaches the stack (CR 601.2i + CR 733.1: an
-//! undone announcement records nothing). Copies (CR 707.10, CR 700.2g) and
-//! modes drawn at random face no dilemma (engine policy, needs manual
-//! verification).
+//! undone announcement records nothing). Copies (CR 707.10, CR 700.2g) face
+//! no dilemma (engine policy, needs manual verification). Modes drawn at
+//! random are still the controller's choice (CR 700.2b), so a nonempty random
+//! draw faces one.
 //!
 //! Every card below is built from its verbatim Oracle text.
 
@@ -588,10 +589,12 @@ fn counter_creatures_grow_once_per_dilemma() {
     assert_eq!(plus_counters(&runner, melkotian), 1);
 }
 
-/// R17 — modes drawn at random are not chosen by a player: no dilemma (engine
-/// policy, needs manual verification).
+/// R17 — CR 700.2b: Cult of Skaro's controller chooses its modes even when
+/// the choice is "at random", so the nonempty random draw faces one dilemma:
+/// Seven of Nine draws once and the history records one dilemma, with no mode
+/// prompt.
 #[test]
-fn random_modes_face_no_dilemma() {
+fn random_modes_face_a_dilemma() {
     let mut scenario = board();
     let cult = scenario
         .add_creature_from_oracle(P0, "Cult of Skaro", 4, 4, CULT_OF_SKARO)
@@ -600,24 +603,30 @@ fn random_modes_face_no_dilemma() {
     let mut runner = scenario.build();
     let hand = hand_len(&runner, P0);
     let p1 = runner.life(P1);
-    let tokens = runner.state().battlefield.len();
+    let permanents = runner.state().battlefield.len();
     runner.advance_to_combat();
     runner
         .declare_attackers(&[(cult, engine::game::combat::AttackTarget::Player(P1))])
         .expect("Cult of Skaro attacks");
-    drive(&mut runner, Plan::default());
-    // Thay counters the artifact creature (Seven); Caan draws two; Sec makes
-    // a Dalek; Jast drains each opponent.
-    let resolved_a_mode = plus_counters(&runner, seven) > 0
-        || hand_len(&runner, P0) == hand + 2
-        || runner.state().battlefield.len() > tokens
-        || runner.life(P1) == p1 - 4;
-    assert!(resolved_a_mode, "REACH: one random mode resolved");
-    assert_eq!(dilemmas(&runner, P0), 0);
+    let record = drive(&mut runner, Plan::default());
     assert!(
-        hand_len(&runner, P0) == hand || hand_len(&runner, P0) == hand + 2,
-        "Seven never drew"
+        record.mode_choosers.is_empty(),
+        "no mode prompt: {record:?}"
     );
+    // Thay counters the artifact creature (Seven); Sec makes a Dalek; Jast
+    // drains each opponent. Caan, the remaining mode, draws two.
+    let thay = plus_counters(&runner, seven) > 0;
+    let sec = runner.state().battlefield.len() > permanents;
+    let jast = runner.life(P1) == p1 - 4;
+    let other_modes = [thay, sec, jast].into_iter().filter(|&m| m).count();
+    assert!(other_modes <= 1, "REACH: at most one random mode resolved");
+    let caan_draw = if other_modes == 0 { 2 } else { 0 };
+    assert_eq!(
+        hand_len(&runner, P0),
+        hand + caan_draw + 1,
+        "the random mode resolved and Seven drew exactly one"
+    );
+    assert_eq!(dilemmas(&runner, P0), 1);
 }
 
 /// R21 — Tell Me What You See: "Whenever you face a dilemma, you may return
