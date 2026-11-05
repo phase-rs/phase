@@ -221,7 +221,7 @@ jobs:
         # "the data is whole" gate. cache-hit gating skips a redundant save,
         # which would otherwise just warn that the key already exists.
         if: ${{ steps.mtgjson-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: data/mtgjson
           key: mtgjson-full-${{ steps.mtgjson-key.outputs.suffix }}
@@ -277,7 +277,7 @@ jobs:
         # file-existence-gated, so the next run fetches only the sets that are
         # still missing and regenerates a complete pool.
         if: ${{ steps.draft-pools-cache.outputs.cache-hit != 'true' && steps.draft-sets.outputs.failed == '0' }}
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: client/public/draft-pools.json
           key: mtgjson-draft-pools-${{ steps.mtgjson-key.outputs.draft_pools_suffix }}
@@ -451,7 +451,7 @@ jobs:
         # Banked the moment the maps exist, so the AllSetFiles download is never
         # paid twice for the same inputs even if a later step fails.
         if: ${{ steps.locale-images-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: client/public/scryfall-images.v2.*.json
           key: mtgjson-locale-images-v2-${{ steps.mtgjson-key.outputs.suffix }}-${{ steps.cache-keys.outputs.day }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh', 'scripts/lib/localized-image-fallback.py') }}
@@ -461,7 +461,7 @@ jobs:
         # it here keeps a later failure from re-hitting the Scryfall API on the
         # next run — the throttle flakiness this cache exists to avoid.
         if: ${{ steps.scryfall-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: data/scryfall
           key: scryfall-${{ steps.cache-keys.outputs.day }}
