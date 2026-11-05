@@ -15192,6 +15192,7 @@ mod tests {
             count: sub_count,
             keep_count: sub_keep,
             rest_destination: sub_rest,
+            rest_order: sub_rest_order,
             source: sub_src,
             ..
         } = sub.effect.as_ref()
@@ -15204,6 +15205,11 @@ mod tests {
         assert_eq!(*sub_count, QuantityExpr::Fixed { value: 0 });
         assert_eq!(*sub_keep, Some(0));
         assert_eq!(*sub_rest, Some(Zone::Library));
+        assert_eq!(
+            *sub_rest_order,
+            crate::types::ability::DigRestOrder::PlayerChoice,
+            "CR 401.4: Petals' \"in any order\" is the player's arrangement choice"
+        );
         assert_eq!(*sub_src, DigSource::PriorLook);
 
         let if_you_do = sub
