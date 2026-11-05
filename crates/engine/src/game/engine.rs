@@ -6962,12 +6962,9 @@ fn take_route(
     if proposal.period.is_empty() {
         return TakeRoute::Ring;
     }
-    // CR 732.2c: a period that SPENDS is offered at its counting replay's bound rather than as an
-    // unbounded ∞ certificate, so its `per_cycle` signature is set and it is performed here at
-    // the agreed count. The mark route is reachable only by a confirmed UNBOUNDED period, and
-    // such a period cannot move a projected per-turn journal: paying a counter is a spend, which
-    // CAPS the offer at the reserve that backs it. So no journal the mark would omit can reach
-    // the mark route, and this decision needs no journal conjunct.
+    // CR 732.2c: a net-decreasing resource bounds the counting replay and is performed here.
+    // Refunded payments can instead leave the reserve unchanged while advancing its paid
+    // journal, so an unbounded certificate still needs the observed-cost check below.
     if n == 0
         || proposal.shortened_by.is_some()
         || !state.stack.is_empty()
@@ -6979,6 +6976,17 @@ fn take_route(
     // Every accept-time derivation below reads this one driven cycle.
     let frames = drive_one_period_frames(state, &proposal.period, proposal.proposer);
     if adds_restricted_mana(frames.as_ref(), proposal.proposer) || marks_damage(frames.as_ref()) {
+        return TakeRoute::Replay;
+    }
+    // CR 601.2f + CR 107.14 + CR 732.2c: the mark materializes token/counter/life growth but
+    // advances no per-turn journal, so a period that MOVES a journal a live cost modifier
+    // prices on (Blaster Hulk's `EnergyPaidOrLostThisTurn`) would leave a later cast reading a
+    // cost the period already paid for. Perform the period instead. The authority is the same
+    // period-tied one the recurrence gate uses, so a journal NO live modifier reads stays free
+    // to mark — a drain loop's `life_gained_this_turn` is not a cost input on most boards.
+    if frames.as_ref().is_some_and(|(before, after)| {
+        crate::analysis::resource::cost_modifier_reads_changed_projected_resource(before, after)
+    }) {
         return TakeRoute::Replay;
     }
     let growth = PeriodGrowth::derive(frames.as_ref(), proposal.proposer);

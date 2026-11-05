@@ -339,13 +339,17 @@ fn real_energy_payment_through_game_runner_updates_the_journal_it_prices() {
 /// `energy_paid_or_lost_this_turn` advances once per repeat, with nothing else moving.
 const AUTOMATED_ASSEMBLY_LINE: &str = "Whenever one or more artifact creatures you control deal combat damage to a player, you get {E} (an energy counter).\nPay {E}{E}{E}: Create a tapped 3/3 colorless Robot artifact creature token.";
 
+/// Decoction Module verbatim (MTGJSON): three copies refund each Robot's three-energy payment.
+const DECOCTION_MODULE: &str = "Whenever a creature you control enters, you get {E} (an energy counter).\n{4}, {T}: Return target creature you control to its owner's hand.";
+
 /// The activation's banked energy: enough for every repetition these rows drive.
 const BANKED_ENERGY: u32 = 30;
 
 /// The 2p recorded-road board: P0 controls Automated Assembly Line with `BANKED_ENERGY` energy
 /// banked. `include_hulk` parks the REAL Blaster Hulk in P0's hand — the only variable between
-/// the runs below. Interactive mode, so the recorded road (and the `take_route` it feeds) runs.
-fn setup_energy_activation_loop(include_hulk: bool) -> (GameState, ObjectId) {
+/// the bounded runs below. Each Module refunds one energy on entry. Interactive mode, so the
+/// recorded road (and the `take_route` it feeds) runs.
+fn setup_energy_activation_loop(include_hulk: bool, module_count: usize) -> (GameState, ObjectId) {
     let mut scenario = GameScenario::new_n_player(2, 7);
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_life(P0, 40);
@@ -357,6 +361,9 @@ fn setup_energy_activation_loop(include_hulk: bool) -> (GameState, ObjectId) {
         generic: 2,
     });
     let line = builder.id();
+    for _ in 0..module_count {
+        scenario.add_artifact_from_oracle(P0, "Decoction Module", DECOCTION_MODULE);
+    }
     if include_hulk {
         add_uncast_blaster_hulk(&mut scenario);
     }
@@ -421,7 +428,7 @@ fn robots(state: &GameState) -> usize {
 /// take performs, and the journal assertions are exactly what a mark route would omit.
 #[test]
 fn printed_energy_activation_period_reaches_the_recorded_offer_and_replays_each_payment() {
-    let (mut control, line) = setup_energy_activation_loop(false);
+    let (mut control, line) = setup_energy_activation_loop(false, 0);
     let index = energy_activation_index(&control, line);
     let mut offered_after = 0;
     for cycle in 1..=3 {
@@ -461,7 +468,7 @@ fn printed_energy_activation_period_reaches_the_recorded_offer_and_replays_each_
         "each confirmed period paid {{E}}{{E}}{{E}}"
     );
 
-    let (mut refused, line) = setup_energy_activation_loop(true);
+    let (mut refused, line) = setup_energy_activation_loop(true, 0);
     let index = energy_activation_index(&refused, line);
     // Reach guard: the parsed reduction FUNCTIONS from hand — the metadata the veto prices.
     {
@@ -533,6 +540,61 @@ fn printed_energy_activation_period_reaches_the_recorded_offer_and_replays_each_
         robots(&refused) >= 4,
         "each replayed period creates its Robot"
     );
+}
+
+/// CR 107.14 + CR 601.2f + CR 732.2a/c: three printed Modules refund Assembly Line's
+/// payment, so the recorded offer is unbounded even though Hulk's cost journal keeps moving.
+/// The accepted fixed take must replay those gross payments, not merely mark token growth.
+#[test]
+fn printed_refunding_energy_period_replays_the_journal_at_the_accepted_take() {
+    let (mut state, line) = setup_energy_activation_loop(true, 3);
+    let index = energy_activation_index(&state, line);
+    for cycle in 1..=3 {
+        energy_activation_period(&mut state, line, index);
+        assert_eq!(state.players[P0.0 as usize].energy, BANKED_ENERGY);
+        assert_eq!(
+            state.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+            3 * cycle,
+            "the settled printed payment is refunded, not removed from its journal"
+        );
+        if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
+            break;
+        }
+    }
+    let WaitingFor::LoopShortcut {
+        road,
+        schema,
+        period,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "the refunding printed period must reach its offer: {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(
+        *road,
+        engine::analysis::loop_check::OfferRoad::RecordedPeriod
+    );
+    assert!(!period.is_empty());
+    assert_eq!(
+        schema.measured_repetition_bound, None,
+        "reach guard: refunds leave no net spend bound on this offer"
+    );
+    let journal = state.players[P0.0 as usize].energy_paid_or_lost_this_turn;
+    let tokens = robots(&state);
+    let take = take_recorded(&mut state, 3);
+    assert_eq!(markers(&take.events), vec![(P0, 1), (P0, 3)]);
+    assert_eq!(
+        state.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        journal + 9,
+        "Replay preserves the three payments that Mark would omit"
+    );
+    assert_eq!(state.players[P0.0 as usize].energy, BANKED_ENERGY);
+    assert_eq!(robots(&state), tokens + 3);
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
 
 /// 2p ESCALATING TARGETED drain (PR-7 gate-relax witness): Vito + Sanguine Bond (two
