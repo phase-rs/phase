@@ -5036,13 +5036,29 @@ pub(super) fn parse_copy_retarget_clause(input: &str) -> OracleResult<'_, bool> 
         (
             opt(parse_inline_copy_retarget_connector),
             opt(alt((tag(", and "), tag("and ")))),
-            opt(tag("you ")),
+            // CR 707.10c: the copy's controller decides. "Each of those players"
+            // restates the per-player copiers of a preceding "each other player
+            // copies that spell" (Hive Mind), each of whom controls their copy.
+            opt(alt((tag("you "), tag("each of those players ")))),
             tag("may choose "),
             alt((tag("a new target "), tag("new targets "))),
             tag("for "),
             alt((
                 value(true, tag("the copies")),
-                value(false, alt((tag("the copy"), tag("that copy")))),
+                value(
+                    false,
+                    alt((
+                        // CR 707.10: "the copy they control" names the copy a
+                        // preceding "each other player may copy that spell"
+                        // clause put on the stack under that player's control
+                        // (Curse of Echoes, Tempt with Mayhem).
+                        terminated(tag("the copy"), opt(tag(" they control"))),
+                        tag("that copy"),
+                        // CR 707.10: "their copy" names the copy each player
+                        // of a per-player copy effect controls (Hive Mind).
+                        tag("their copy"),
+                    )),
+                ),
             )),
             opt(alt((tag("."), tag(",")))),
         ),

@@ -3566,11 +3566,16 @@ fn prevent_damage_gendered_self_anaphor_recipient_binds_to_source() {
 
 /// Cluster 97 (CR 603.7a + CR 311.2 + CR 701.31): The Doctor's Childhood Barn —
 /// a Planechase plane — parses its "Whenever chaos ensues …" trigger chain with
-/// ZERO `Effect::Unimplemented` and ZERO `StaticCondition::Unrecognized`, and
-/// specifically produces (a) the inline delayed `PhaseIn { ParentTarget }`
-/// trigger keyed to `Planeswalked { role: Any }` (`uses_tracked_set: false`,
-/// `Persistent`) and (b) the plane-face-up `CantPhaseIn` duration
-/// `ForAsLongAs { SourceIsFaceUp }`. Regression against the two prior gaps.
+/// ZERO `StaticCondition::Unrecognized`, and specifically produces (a) the inline
+/// delayed `PhaseIn { ParentTarget }` trigger keyed to `Planeswalked { role: Any }`
+/// (`uses_tracked_set: false`, `Persistent`) and (b) the plane-face-up `CantPhaseIn`
+/// duration `ForAsLongAs { SourceIsFaceUp }`. Regression against the two prior gaps.
+///
+/// The one remaining `Effect::Unimplemented` is the opening choose clause: its
+/// "that opponent controls" restriction on the declared target is not parsed, and a
+/// choose clause with an unparsed restriction is an honest gap (CR 115.1 + CR 601.2c),
+/// not a bare `TargetOnly` that drops the controller. The rest of the chain (the
+/// untap, phase-out, `CantPhaseIn` and delayed phase-in) still lowers.
 #[test]
 fn the_doctors_childhood_barn_planechase_full_parse() {
     let parsed = parse(
@@ -3611,11 +3616,17 @@ fn the_doctors_childhood_barn_planechase_full_parse() {
         }
     }
 
-    assert!(
-        !effects
-            .iter()
-            .any(|e| matches!(e, Effect::Unimplemented { .. })),
-        "no Effect::Unimplemented in the Barn's trigger chain, got {effects:?}"
+    let gaps: Vec<&str> = effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Unimplemented { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        gaps,
+        vec!["unparsed_verb_arguments"],
+        "only the opening choose clause (unparsed \"that opponent controls\") may be a gap, got {effects:?}"
     );
     assert!(
         !durations.iter().any(|d| matches!(

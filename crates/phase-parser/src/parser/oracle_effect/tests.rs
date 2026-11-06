@@ -15150,6 +15150,97 @@ fn effect_mana_spend_trigger_copy_binds_retarget_primal_wellspring() {
     assert_eq!(retargets, vec![CopyRetargetPermission::MayChooseNewTargets]);
 }
 
+/// Counts the `ChangeTargets` effects (CR 115.7) anywhere in a parsed card's
+/// trigger and ability bodies, walking the same def tree as the retarget scan.
+fn change_targets_count_in_card(
+    text: &str,
+    name: &str,
+    types: &[&str],
+    subtypes: &[&str],
+) -> usize {
+    fn walk(def: &AbilityDefinition) -> usize {
+        usize::from(matches!(&*def.effect, Effect::ChangeTargets { .. }))
+            + def.sub_ability.as_deref().map_or(0, walk)
+    }
+    let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+    let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
+    let parsed = parse_oracle_text(text, name, &[], &types, &subtypes);
+    parsed.abilities.iter().map(walk).sum::<usize>()
+        + parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .map(walk)
+            .sum::<usize>()
+}
+
+/// CR 707.10c + CR 707.10: Hive Mind — "each other player copies that spell. Each
+/// of those players may choose new targets for their copy." The retarget sentence
+/// names the copy each copying player controls, so it binds to the preceding
+/// `CopySpell` (whose per-player scope makes every other player the copy's
+/// controller) instead of lowering to a free-standing `ChangeTargets { Any }`.
+///
+/// Before the fix "their copy" was not a copy-retarget determiner, so the sentence
+/// fell through to `try_parse_change_targets`, whose `parse_target` fallback made it
+/// `ChangeTargets { target: Any }`: a bogus any-target slot on the trigger, a
+/// mandatory retarget, and the wrong chooser.
+#[test]
+fn effect_copy_retarget_their_copy_binds_per_player_copy_hive_mind() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "Whenever a player casts an instant or sorcery spell, each other player copies that spell. \
+         Each of those players may choose new targets for their copy.",
+        "Hive Mind",
+        &["Enchantment"],
+        &[],
+    );
+    // Reach guard: the first sentence still lowers to exactly one CopySpell.
+    assert_eq!(
+        retargets,
+        vec![CopyRetargetPermission::MayChooseNewTargets],
+        "the lone CopySpell must carry the retarget permission"
+    );
+    assert_eq!(orphaned, 0, "orphaned_copy_retarget must not survive");
+    assert_eq!(
+        change_targets_count_in_card(
+            "Whenever a player casts an instant or sorcery spell, each other player copies that spell. \
+             Each of those players may choose new targets for their copy.",
+            "Hive Mind",
+            &["Enchantment"],
+            &[],
+        ),
+        0,
+        "no free-standing ChangeTargets may remain"
+    );
+}
+
+/// CR 707.10c + CR 707.10: Curse of Echoes — "each other player may copy that spell
+/// and may choose new targets for the copy they control". The "they control"
+/// qualifier names the same copy the singular "the copy" determiner does.
+#[test]
+fn effect_copy_retarget_copy_they_control_binds_curse_of_echoes() {
+    let (name, text, types, subtypes) = (
+        "Curse of Echoes",
+        "Enchant player\nWhenever enchanted player casts an instant or sorcery spell, each other player may copy that spell and may choose new targets for the copy they control.",
+        &["Enchantment"][..],
+        &["Aura", "Curse"][..],
+    );
+    let (retargets, orphaned) = copy_retarget_scan_card(text, name, types, subtypes);
+    assert_eq!(
+        retargets,
+        vec![CopyRetargetPermission::MayChooseNewTargets],
+        "{name}: the lone CopySpell must carry the retarget permission"
+    );
+    assert_eq!(
+        orphaned, 0,
+        "{name}: orphaned_copy_retarget must not survive"
+    );
+    assert_eq!(
+        change_targets_count_in_card(text, name, types, subtypes),
+        0,
+        "{name}: no free-standing ChangeTargets may remain"
+    );
+}
+
 /// CR 707.10c: COVERAGE HONESTY — a "you may choose new targets for the copy"
 /// sentence with NO preceding `CopySpell` anywhere in the chain must stay an
 /// honest `orphaned_copy_retarget` residual, never a silently-wrong retarget.
@@ -96931,8 +97022,8 @@ fn compound_phase_out_requires_a_declared_second_target_slot() {
     );
 }
 
-/// CR 608.2c: a "choose target ..." clause whose remainder holds an unparsed
-/// restriction must stay an honest `Unimplemented`, never fold into a bare
+/// CR 115.1 + CR 601.2c: a "choose target ..." clause whose remainder holds an unparsed
+/// restriction on the declared target must stay an honest `Unimplemented`, never fold into a bare
 /// `TargetOnly` that silently drops the restriction (the old gate only declined
 /// a ONE-word unparsed tail). Keeper of the Flame, verbatim Oracle (MTGJSON
 /// AtomicCards): "who has more life than you do as you activate this ability"

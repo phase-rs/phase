@@ -7516,22 +7516,21 @@ mod w3_library_placement_tests {
     }
 
     /// F-A (CR 616.1 + CR 701.24a): the library placement must survive a SECOND
-    /// sequential park on the same event. The first optional redirect parks (the
-    /// placement is stashed onto `PendingReplacement` by the W3 arm); declining
-    /// it re-enters `pipeline_loop`, which finds a SECOND optional redirect that
-    /// became applicable in the interim and re-parks a fresh `PendingReplacement`
-    /// — created with `library_placement: None`. `handle_replacement_choice` must
-    /// thread the captured placement onto that re-park so the FINAL delivery
-    /// (after declining both) still places the card at the requested index
-    /// instead of the tail auto-shuffling it away.
+    /// sequential park on the same event. The placement rides on the proposed
+    /// `ZoneChange` event through each park (no `PendingReplacement` mirror): the
+    /// first optional redirect parks, declining it re-enters `pipeline_loop`, which
+    /// finds a SECOND optional redirect that became applicable in the interim and
+    /// re-parks the same proposed event. The FINAL delivery (after declining both)
+    /// must still place the card at the requested index instead of the tail
+    /// auto-shuffling it away.
     ///
     /// Supplemental synthetic defensive fixture, not a legal public sequence:
     /// the second redirect is gated by `UnlessControlsMatching` on a sentinel
     /// creature so it is suppressed on the first scan and becomes applicable once
     /// the sentinel is manually removed between the two choices. The separate
     /// `canonical_placement_survives_public_repeated_choices` regression covers
-    /// the public sequence without post-prompt edits. Before the fix the re-park reset the
-    /// placement to `None`, so the final delivery shuffled — the order assertion
+    /// the public sequence without post-prompt edits. A re-park that lost the
+    /// placement would let the final delivery shuffle — the order assertion
     /// below fails (and the `ShuffledLibrary` absence assertion guards against a
     /// seed-identity permutation false-pass).
     #[test]

@@ -4989,10 +4989,14 @@ pub(super) fn is_standalone_object_choice_clause(fragment: &str) -> bool {
 
 /// True iff the text left after a "choose target ..." phrase carries nothing the
 /// target parser failed to consume: once structural punctuation and whitespace
-/// are skipped it is empty, is the "controlled by different players" target-set
-/// constraint (which clause assembly extracts as
-/// `TargetSelectionConstraint::DifferentObjectControllers`), or begins a
-/// recognised follow-on clause.
+/// are skipped it is empty, or is the "controlled by different players"
+/// target-set constraint (which clause assembly extracts as
+/// `TargetSelectionConstraint::DifferentObjectControllers`).
+///
+/// A remainder that merely begins another clause is NOT accepted: `parse_choose_ast`
+/// receives one already-split clause chunk and `ChooseImperativeAst::TargetOnly`
+/// carries no remainder, so nobody re-parses the leftover text and the clause would
+/// vanish while the card still counted as supported.
 fn target_remainder_is_recognised(remainder: &str) -> bool {
     fn skip_structural(input: &str) -> OracleResult<'_, &str> {
         take_while(|c: char| c.is_whitespace() || c.is_ascii_punctuation()).parse(input)
@@ -5005,9 +5009,7 @@ fn target_remainder_is_recognised(remainder: &str) -> bool {
         )),
     )
     .parse(remainder);
-    leftover.is_ok_and(|(rest, _)| {
-        rest.is_empty() || super::sequence::starts_clause_text_or_conjugated(rest)
-    })
+    leftover.is_ok_and(|(rest, _)| rest.is_empty())
 }
 
 pub(super) fn parse_choose_ast(
@@ -5169,9 +5171,10 @@ pub(super) fn parse_choose_ast(
             let diagnostic_count = ctx.diagnostics.len();
             let (target, remainder) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
-            // CR 608.2c: an unparsed remainder is a restriction or instruction the
-            // target parser did not understand; folding it into `TargetOnly` would
-            // silently drop it. Decline so the clause stays an honest `Unimplemented`.
+            // CR 115.1 + CR 601.2c: an unparsed remainder is a restriction on the
+            // declared target (or an instruction) the target parser did not
+            // understand; folding it into `TargetOnly` would silently drop it.
+            // Decline so the clause stays an honest `Unimplemented`.
             if !target_remainder_is_recognised(remainder)
                 || crate::parser::oracle_quantity::is_empty_typed_filter(&target)
             {
@@ -26352,46 +26355,64 @@ mod tests {
         }
     }
 
+    /// CR 707.10c: Hive Mind's second sentence ("Each of those players may choose new
+    /// targets for their copy.") is no longer a `choose` clause at all: it binds to the
+    /// preceding per-player `CopySpell` as a retarget permission, so the card is fully
+    /// supported with no warning and no `TargetOnly` / `ChangeTargets` residue.
+    ///
+    /// Desperate Gambit and Global Ruin used to be listed here as supported cards:
+    /// their "you control" / "they control ... of each basic land type" restrictions
+    /// were silently dropped into a bare `TargetOnly`. Both are unsupported gaps until
+    /// a follow-up parses the dropped restriction; see
+    /// `choose_target_with_unparsed_restriction_is_an_honest_gap_on_printed_cards`.
     #[test]
-    fn choose_target_only_fallback_preserves_supported_card_diagnostics() {
+    fn hive_mind_their_copy_retarget_card_is_supported_without_diagnostics() {
         use crate::parser::oracle::parse_oracle_text;
 
-        // Desperate Gambit and Global Ruin used to be listed here as supported
-        // cards: their "you control" / "they control ... of each basic land
-        // type" restrictions were silently dropped into a bare `TargetOnly`.
-        // Both are unsupported gaps until a follow-up parses the dropped
-        // restriction; see
-        // `choose_target_with_unparsed_restriction_is_an_honest_gap_on_printed_cards`.
-        {
-            let (name, text, types) = (
-                "Hive Mind",
-                "Whenever a player casts an instant or sorcery spell, each other player copies that spell. Each of those players may choose new targets for their copy.",
-                vec!["Enchantment".to_string()],
-            );
-            let parsed = parse_oracle_text(text, name, &[], &types, &[]);
-            assert!(
-                !parsed.abilities.is_empty() || !parsed.triggers.is_empty(),
-                "{name}: card must reach the parser pipeline"
-            );
-            assert!(
-                parsed.parse_warnings.is_empty(),
-                "{name}: fallback must not add a warning: {:?}",
-                parsed.parse_warnings
-            );
-            assert!(
-                !parsed
-                    .abilities
-                    .iter()
-                    .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
-                    .any(crate::parser::oracle::has_unimplemented),
-                "{name}: the recognised choose clause must stay supported: {parsed:#?}"
-            );
-        }
+        let (name, text, types) = (
+            "Hive Mind",
+            "Whenever a player casts an instant or sorcery spell, each other player copies that spell. Each of those players may choose new targets for their copy.",
+            vec!["Enchantment".to_string()],
+        );
+        let parsed = parse_oracle_text(text, name, &[], &types, &[]);
+        assert!(
+            !parsed.triggers.is_empty(),
+            "{name}: card must reach the parser pipeline"
+        );
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{name}: must not add a warning: {:?}",
+            parsed.parse_warnings
+        );
+        let executes: Vec<&AbilityDefinition> = parsed
+            .abilities
+            .iter()
+            .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+            .collect();
+        assert!(
+            !executes
+                .iter()
+                .copied()
+                .any(crate::parser::oracle::has_unimplemented),
+            "{name}: the copy and its retarget sentence must both be supported: {parsed:#?}"
+        );
+        // Positive reach guard: the retarget sentence was absorbed into the copy, not
+        // dropped, so the supported verdict above is not vacuous.
+        assert!(
+            executes.iter().any(|def| matches!(
+                &*def.effect,
+                Effect::CopySpell {
+                    retarget: CopyRetargetPermission::MayChooseNewTargets,
+                    ..
+                }
+            )),
+            "{name}: the CopySpell must carry the retarget permission: {parsed:#?}"
+        );
     }
 
-    /// CR 608.2c: a "choose ..." clause whose target phrase leaves a restriction
-    /// the target parser did not consume ("you control", "they control a land of
-    /// each basic land type") is an honest `Unimplemented`, not a bare
+    /// CR 115.1 + CR 601.2c: a "choose ..." clause whose target phrase leaves a
+    /// restriction on the declared target that the target parser did not consume
+    /// ("you control", "they control a land of each basic land type") is an honest `Unimplemented`, not a bare
     /// `TargetOnly` that silently drops the restriction. Desperate Gambit and
     /// Global Ruin were reported as supported before; each is an unsupported gap
     /// until a follow-up parses the dropped restriction.
