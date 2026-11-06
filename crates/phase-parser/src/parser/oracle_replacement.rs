@@ -10419,8 +10419,30 @@ fn take_damage_source_subject_clause(input: &str) -> OracleResult<'_, &str> {
 /// Parse the damage source filter from the subject clause before "would deal"
 /// (active voice: "<subject> would deal damage...").
 fn parse_damage_source_filter_active(norm_lower: &str) -> Option<TargetFilter> {
+    parse_damage_source_scope_active(norm_lower).and_then(DamageSourceScope::into_filter)
+}
+
+/// The subject text before the first "would deal" (active voice:
+/// "<subject> would deal damage..."). `None` when the text prints no such clause.
+fn active_damage_source_subject(norm_lower: &str) -> Option<&str> {
     let (_, (subject, _)) = nom_primitives::split_once_on(norm_lower, "would deal").ok()?;
-    finish_damage_source_subject(subject)
+    Some(subject)
+}
+
+/// CR 615.1a: the active-voice source axis of a damage clause. `None` when the
+/// text prints no "would deal" clause; otherwise the subject's scope, read
+/// through `damage_source_subject_scope` (the passive-voice mirror is
+/// `parse_damage_source_scope_passive`).
+fn parse_damage_source_scope_active(norm_lower: &str) -> Option<DamageSourceScope> {
+    active_damage_source_subject(norm_lower).map(damage_source_subject_scope)
+}
+
+/// A damage-source subject is a noun phrase and never spans a comma: a comma
+/// means an earlier clause or conditional lead-in ("if you win the flip, the
+/// next time that source …") was folded into the text before "would deal".
+fn active_damage_source_subject_spans_clauses(norm_lower: &str) -> bool {
+    active_damage_source_subject(norm_lower)
+        .is_some_and(|subject| nom_primitives::split_once_on(subject, ",").is_ok())
 }
 
 /// Parse the damage source filter from passive-voice phrasing — "...would be
@@ -14917,16 +14939,30 @@ fn parse_damage_prevention_replacement(
     // same way the recipient clause does (mirror of the recipient guard above):
     // a subject the runtime cannot evaluate must not become an unscoped shield
     // that prevents damage from every source.
-    let damage_source_filter = match parse_damage_source_filter_active(working_lower) {
-        Some(filter) => Some(filter),
-        None => match parse_damage_source_scope_passive(working_lower) {
-            Some(DamageSourceScope::Unrecognized) => {
-                return Err(PreventionDecline::FailsClosed(
-                    PreventionFailClosed::SourceScope,
-                ));
+    let damage_source_filter = match parse_damage_source_scope_active(working_lower) {
+        // CR 615.1a: a subject that swallowed an earlier clause (Desperate
+        // Gambit's "if you win the flip, the next time that source would deal
+        // damage") is not a source phrase at all, so whatever filter it happens
+        // to yield is meaningless: fail closed instead of installing a shield
+        // keyed on the debris.
+        Some(DamageSourceScope::Scoped(_) | DamageSourceScope::Unrecognized)
+            if active_damage_source_subject_spans_clauses(working_lower) =>
+        {
+            return Err(PreventionDecline::FailsClosed(
+                PreventionFailClosed::SourceScope,
+            ));
+        }
+        Some(DamageSourceScope::Scoped(filter)) => Some(filter),
+        Some(DamageSourceScope::Unrecognized | DamageSourceScope::AnySource) | None => {
+            match parse_damage_source_scope_passive(working_lower) {
+                Some(DamageSourceScope::Unrecognized) => {
+                    return Err(PreventionDecline::FailsClosed(
+                        PreventionFailClosed::SourceScope,
+                    ));
+                }
+                scope => scope.and_then(DamageSourceScope::into_filter),
             }
-            scope => scope.and_then(DamageSourceScope::into_filter),
-        },
+        }
     };
 
     // --- 5. Build the replacement definition ---
@@ -32454,6 +32490,32 @@ mod tests {
             "{:?}",
             lancer.replacements
         );
+    }
+
+    /// CR 615.1a: a damage-source subject is a noun phrase, so one that spans a
+    /// comma has swallowed an earlier clause. Desperate Gambit's "if you win the
+    /// flip, the next time that source would deal damage" once read as the
+    /// garbage filter `Subtype("You win the flip, the next time that")` and
+    /// installed a shield keyed on it; the prevention shield now fails closed,
+    /// while the bare noun phrases established cards rely on keep their reading.
+    #[test]
+    fn prevention_subject_spanning_a_clause_fails_closed() {
+        let desperate_gambit = "choose a source you control and flip a coin. if you win the flip, the next time that source would deal damage this turn, it deals double that damage instead. if you lose the flip, the next time it would deal damage this turn, prevent that damage.";
+        assert_eq!(
+            damage_prevention_fails_closed(desperate_gambit, "Desperate Gambit"),
+            Some(PreventionFailClosed::SourceScope)
+        );
+        // Reach guard: the same entry still accepts bare noun-phrase subjects,
+        // an unreadable one ("a source of your choice", "target spell") and a
+        // typed one, so the decline above is the comma rule and nothing wider.
+        for line in [
+            "The next time a source of your choice would deal damage to you this turn, prevent that damage.",
+            "Prevent all damage target spell would deal this turn. You gain life equal to the damage prevented this way.",
+            "Prevent all damage that a red source would deal to you this turn.",
+        ] {
+            assert_eq!(damage_prevention_fails_closed(line, "Card"), None, "{line}");
+            assert!(parse_replacement_line(line, "Card").is_some(), "{line}");
+        }
     }
 
     /// CR 615.1a: the coordinated-conjunct detector reads a second clause with

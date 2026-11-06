@@ -16910,7 +16910,7 @@ fn effect_shuffle_their_library() {
 #[test]
 fn compound_shuffle_it_into_library() {
     let def = parse_effect_chain("Shuffle it into its owner's library", AbilityKind::Spell);
-    // CR 608.2c + CR 400.7e: a bare "it" with no announced antecedent names the
+    // CR 608.2c + CR 108.3: a bare "it" with no announced antecedent names the
     // ability's own source, so the move is the single-object `ChangeZone` — the
     // selected-population `ChangeZoneAll` is reserved for an announced
     // antecedent (see `announced_parent_target_shuffle_keeps_the_selected_population`).
@@ -52545,11 +52545,6 @@ fn name_hate_any_number_lowers_to_interactive_search_library() {
             ControllerRef::ParentTargetController,
         ),
         (
-            "Surgical Extraction",
-            "Choose target card in a graveyard other than a basic land card. Search its owner's graveyard, hand, and library for any number of cards with the same name as that card and exile them. Then that player shuffles.",
-            ControllerRef::ParentTargetOwner,
-        ),
-        (
             "Test of Talents",
             "Counter target instant or sorcery spell. Search its controller's graveyard, hand, and library for any number of cards with the same name as that spell and exile them. That player shuffles, then draws a card for each card exiled from their hand this way.",
             ControllerRef::ParentTargetController,
@@ -52616,6 +52611,48 @@ fn name_hate_any_number_lowers_to_interactive_search_library() {
             "{label}: expected intrinsic ChangeZone{{Exile}} continuation: {def:#?}"
         );
     }
+}
+
+/// Surgical Extraction used to be a row of
+/// `name_hate_any_number_lowers_to_interactive_search_library` (the only real
+/// card on the `ParentTargetOwner` axis): its head "Choose target card in a
+/// graveyard other than a basic land card" lowered to a bare `TargetOnly` that
+/// silently dropped "other than a basic land card". The head now declines and is
+/// an unsupported gap until a follow-up parses the dropped restriction. The
+/// search tail is the positive reach guard: it still lowers to the interactive
+/// multi-zone `SearchLibrary` on the owner axis.
+#[test]
+fn surgical_extraction_choose_head_is_an_honest_gap() {
+    use crate::types::ability::ControllerRef;
+    let def = parse_effect_chain(
+        "Choose target card in a graveyard other than a basic land card. Search its owner's graveyard, hand, and library for any number of cards with the same name as that card and exile them. Then that player shuffles.",
+        AbilityKind::Spell,
+    );
+    let search = find_search_library(&def)
+        .unwrap_or_else(|| panic!("reach guard: expected SearchLibrary in chain: {def:#?}"));
+    let Effect::SearchLibrary {
+        source_zones,
+        target_player,
+        ..
+    } = search
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        *source_zones,
+        vec![Zone::Graveyard, Zone::Hand, Zone::Library]
+    );
+    assert_eq!(
+        *target_player,
+        Some(TargetFilter::Typed(
+            crate::types::ability::TypedFilter::default()
+                .controller(ControllerRef::ParentTargetOwner)
+        ))
+    );
+    assert!(
+        matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+        "the unparsed restriction must be a visible gap, not a TargetOnly: {def:#?}"
+    );
 }
 
 /// CR 400.7 + CR 608.2c: The draw rider "That player ... draws a card for each
@@ -95476,7 +95513,16 @@ fn that_player_chooser_without_a_declared_player_is_not_bound_to_one() {
         "Choose two target creatures controlled by the same opponent. That player chooses one of those creatures. Trial of Agony deals 5 damage to that creature, and the other can't block this turn.",
         AbilityKind::Spell,
     );
-    assert!(!chain_has_unimplemented(&def), "{def:?}");
+    // Trial of Agony's head "Choose two target creatures controlled by the same
+    // opponent" no longer lowers to a bare `TargetOnly` (which silently dropped
+    // "controlled by the same opponent"): it is an unsupported gap until a
+    // follow-up parses the dropped restriction, and that gap declares no player.
+    assert!(
+        matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+        "{def:?}"
+    );
+    // Reach guard: the "That player chooses one of those creatures" sentence
+    // still lowers, so the unbound-chooser assertion below is not vacuous.
     let chooser = chain_defs(&def)
         .into_iter()
         .find_map(|d| match &*d.effect {
@@ -96216,7 +96262,7 @@ fn announced_parent_target_shuffle_keeps_the_selected_population() {
     }
 }
 
-/// CR 108.3 + CR 400.7e + CR 115.10a: a source-owner possessive subject
+/// CR 108.3 + CR 115.10a: a source-owner possessive subject
 /// ("{U}: This creature's owner shuffles it into their library" — Cerulean
 /// Sphinx) moves the SOURCE. The possessor is typed on the printed subject and
 /// declares no target slot, so the movement authority stays the single-object
@@ -96254,7 +96300,7 @@ fn source_owner_possessive_shuffle_moves_the_source() {
     );
 }
 
-/// CR 108.3 + CR 400.7e + CR 115.10a: an untargeted attached-host possessive
+/// CR 108.3 + CR 115.10a: an untargeted attached-host possessive
 /// ("Enchanted creature's owner shuffles it..." — Watery Grasp) moves the host
 /// itself. The possessor declares no target slot, so the movement stays the
 /// single-object `ChangeZone` rather than the selected-population
@@ -96882,5 +96928,85 @@ fn compound_phase_out_requires_a_declared_second_target_slot() {
     assert!(
         has_unimplemented(execute),
         "the unsupported clause must stay a visible strict failure: {execute:#?}"
+    );
+}
+
+/// CR 608.2c: a "choose target ..." clause whose remainder holds an unparsed
+/// restriction must stay an honest `Unimplemented`, never fold into a bare
+/// `TargetOnly` that silently drops the restriction (the old gate only declined
+/// a ONE-word unparsed tail). Keeper of the Flame, verbatim Oracle (MTGJSON
+/// AtomicCards): "who has more life than you do as you activate this ability"
+/// is a multi-word restriction the target parser does not consume.
+///
+/// Revert-failing: restoring the one-word cutoff in `parse_choose_ast` makes
+/// the clause a `TargetOnly { opponent }` again and the first assertion fails.
+#[test]
+fn choose_target_with_unparsed_multiword_tail_stays_unimplemented() {
+    let parsed = parse_oracle_text(
+        "{R}, {T}: Choose target opponent who has more life than you do as you activate this ability. This creature deals 2 damage to that player.",
+        "Keeper of the Flame",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Wizard".to_string()],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    let ability = &parsed.abilities[0];
+    // Reach guard: the neighbouring damage clause still parses, so the
+    // activated ability reached the choose-clause path rather than failing
+    // wholesale upstream.
+    assert!(
+        chain_any(ability, &|d| matches!(
+            &*d.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        )),
+        "{ability:#?}"
+    );
+    assert!(
+        chain_any(ability, &|d| matches!(
+            &*d.effect,
+            Effect::Unimplemented { .. }
+        )),
+        "the unparsed restriction must be a visible gap: {ability:#?}"
+    );
+    assert!(
+        !chain_any(ability, &|d| matches!(
+            &*d.effect,
+            Effect::TargetOnly { .. }
+        )),
+        "the restriction must not be dropped into TargetOnly: {ability:#?}"
+    );
+}
+
+/// CR 115.1: the converse of the row above. When the target parser consumes the
+/// whole declared target (Forge of Heroes, verbatim Oracle from MTGJSON
+/// AtomicCards) the remainder is only terminal punctuation and the clause still
+/// lowers to `TargetOnly` carrying the full filter.
+#[test]
+fn choose_target_with_recognised_tail_still_parses() {
+    let parsed = parse_oracle_text(
+        "{T}: Add {C}.\n{T}: Choose target commander that entered this turn. Put a +1/+1 counter on it if it's a creature and a loyalty counter on it if it's a planeswalker.",
+        "Forge of Heroes",
+        &[],
+        &["Land".to_string()],
+        &[],
+    );
+    let target = parsed
+        .abilities
+        .iter()
+        .find_map(|ability| match &*ability.effect {
+            Effect::TargetOnly { target } => Some(target),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no TargetOnly ability: {parsed:#?}"));
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected a typed commander filter, got {target:?}");
+    };
+    assert!(
+        filter.properties.contains(&FilterProp::IsCommander)
+            && filter.properties.contains(&FilterProp::EnteredThisTurn),
+        "{filter:?}"
     );
 }

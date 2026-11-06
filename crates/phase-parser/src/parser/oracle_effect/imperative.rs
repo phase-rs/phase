@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_till, take_until, take_while1};
+use nom::bytes::complete::{tag, tag_no_case, take_till, take_until, take_while, take_while1};
 use nom::character::complete::{anychar, one_of, satisfy, space0, space1, u8 as parse_u8};
 use nom::combinator::{
     all_consuming, eof, map, map_opt, map_res, not, opt, peek, recognize, rest, success, value,
@@ -4987,6 +4987,29 @@ pub(super) fn is_standalone_object_choice_clause(fragment: &str) -> bool {
     parse_battlefield_object_choice_core(rest, rest_lower, &mut throwaway).is_some()
 }
 
+/// True iff the text left after a "choose target ..." phrase carries nothing the
+/// target parser failed to consume: once structural punctuation and whitespace
+/// are skipped it is empty, is the "controlled by different players" target-set
+/// constraint (which clause assembly extracts as
+/// `TargetSelectionConstraint::DifferentObjectControllers`), or begins a
+/// recognised follow-on clause.
+fn target_remainder_is_recognised(remainder: &str) -> bool {
+    fn skip_structural(input: &str) -> OracleResult<'_, &str> {
+        take_while(|c: char| c.is_whitespace() || c.is_ascii_punctuation()).parse(input)
+    }
+    let leftover: OracleResult<'_, Option<&str>> = preceded(
+        skip_structural,
+        opt(terminated(
+            tag_no_case(super::lower::CONTROLLED_BY_DIFFERENT_PLAYERS.trim_start()),
+            skip_structural,
+        )),
+    )
+    .parse(remainder);
+    leftover.is_ok_and(|(rest, _)| {
+        rest.is_empty() || super::sequence::starts_clause_text_or_conjugated(rest)
+    })
+}
+
 pub(super) fn parse_choose_ast(
     text: &str,
     lower: &str,
@@ -5146,10 +5169,10 @@ pub(super) fn parse_choose_ast(
             let diagnostic_count = ctx.diagnostics.len();
             let (target, remainder) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
-            let tail = remainder.trim();
-            if (tail.split_whitespace().count() == 1
-                && !tail.chars().all(|c| c.is_ascii_punctuation())
-                && !super::sequence::starts_clause_text_or_conjugated(tail))
+            // CR 608.2c: an unparsed remainder is a restriction or instruction the
+            // target parser did not understand; folding it into `TargetOnly` would
+            // silently drop it. Decline so the clause stays an honest `Unimplemented`.
+            if !target_remainder_is_recognised(remainder)
                 || crate::parser::oracle_quantity::is_empty_typed_filter(&target)
             {
                 return None;
@@ -26333,23 +26356,17 @@ mod tests {
     fn choose_target_only_fallback_preserves_supported_card_diagnostics() {
         use crate::parser::oracle::parse_oracle_text;
 
-        for (name, text, types) in [
-            (
-                "Desperate Gambit",
-                "Choose a source you control and flip a coin. If you win the flip, the next time that source would deal damage this turn, it deals double that damage instead. If you lose the flip, the next time it would deal damage this turn, prevent that damage.",
-                vec!["Instant".to_string()],
-            ),
-            (
-                "Global Ruin",
-                "Each player chooses from the lands they control a land of each basic land type, then sacrifices the rest.",
-                vec!["Sorcery".to_string()],
-            ),
-            (
-                "Hive Mind",
-                "Whenever a player casts an instant or sorcery spell, each other player copies that spell. Each of those players may choose new targets for their copy.",
-                vec!["Enchantment".to_string()],
-            ),
-        ] {
+        // Desperate Gambit and Global Ruin used to be listed here as supported
+        // cards: their "you control" / "they control ... of each basic land
+        // type" restrictions were silently dropped into a bare `TargetOnly`.
+        // Both are unsupported gaps until a follow-up parses the dropped
+        // restriction; see
+        // `choose_target_with_unparsed_restriction_is_an_honest_gap_on_printed_cards`.
+        for (name, text, types) in [(
+            "Hive Mind",
+            "Whenever a player casts an instant or sorcery spell, each other player copies that spell. Each of those players may choose new targets for their copy.",
+            vec!["Enchantment".to_string()],
+        )] {
             let parsed = parse_oracle_text(text, name, &[], &types, &[]);
             assert!(
                 !parsed.abilities.is_empty() || !parsed.triggers.is_empty(),
@@ -26359,6 +26376,78 @@ mod tests {
                 parsed.parse_warnings.is_empty(),
                 "{name}: fallback must not add a warning: {:?}",
                 parsed.parse_warnings
+            );
+            assert!(
+                !parsed
+                    .abilities
+                    .iter()
+                    .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+                    .any(crate::parser::oracle::has_unimplemented),
+                "{name}: the recognised choose clause must stay supported: {parsed:#?}"
+            );
+        }
+    }
+
+    /// CR 608.2c: a "choose ..." clause whose target phrase leaves a restriction
+    /// the target parser did not consume ("you control", "they control a land of
+    /// each basic land type") is an honest `Unimplemented`, not a bare
+    /// `TargetOnly` that silently drops the restriction. Desperate Gambit and
+    /// Global Ruin were reported as supported before; each is an unsupported gap
+    /// until a follow-up parses the dropped restriction.
+    ///
+    /// Desperate Gambit additionally pins the replacement fall-through: the
+    /// spell parse is now `Unimplemented`, so Priority 8 reads the line as a
+    /// damage-prevention replacement, whose unreadable "the next time that
+    /// source would deal damage" subject must fail closed
+    /// (`prevention_source_scope`) rather than install a shield for every source.
+    ///
+    /// Revert-failing: restoring the one-word cutoff in `parse_choose_ast`
+    /// makes both cards parse as a bare `TargetOnly` again (no `Unimplemented`).
+    #[test]
+    fn choose_target_with_unparsed_restriction_is_an_honest_gap_on_printed_cards() {
+        use crate::parser::oracle::{has_unimplemented, parse_oracle_text};
+
+        for (name, text, types, gap_name) in [
+            (
+                "Desperate Gambit",
+                "Choose a source you control and flip a coin. If you win the flip, the next time that source would deal damage this turn, it deals double that damage instead. If you lose the flip, the next time it would deal damage this turn, prevent that damage.",
+                vec!["Instant".to_string()],
+                Some("prevention_source_scope"),
+            ),
+            (
+                "Global Ruin",
+                "Each player chooses from the lands they control a land of each basic land type, then sacrifices the rest.",
+                vec!["Sorcery".to_string()],
+                None,
+            ),
+        ] {
+            let parsed = parse_oracle_text(text, name, &[], &types, &[]);
+            // Reach guard: the card produced a spell ability, so the
+            // assertions below are not vacuous over an empty parse.
+            assert!(!parsed.abilities.is_empty(), "{name}: {parsed:#?}");
+            assert!(
+                parsed.abilities.iter().any(has_unimplemented),
+                "{name}: the unparsed restriction must be a visible gap: {parsed:#?}"
+            );
+            if let Some(gap_name) = gap_name {
+                assert!(
+                    parsed.abilities.iter().any(|ability| matches!(
+                        &*ability.effect,
+                        Effect::Unimplemented { name, .. } if name == gap_name
+                    )),
+                    "{name}: expected the {gap_name} gap: {parsed:#?}"
+                );
+            }
+            assert!(
+                parsed.replacements.is_empty(),
+                "{name}: no blanket replacement may be installed: {:?}",
+                parsed.replacements
+            );
+            assert!(
+                !parsed.abilities.iter().any(|ability| {
+                    matches!(&*ability.effect, Effect::TargetOnly { .. })
+                }),
+                "{name}: the restriction must not be dropped into TargetOnly: {parsed:#?}"
             );
         }
     }
@@ -26956,27 +27045,25 @@ mod tests {
             })
     }
 
-    /// CR 609.7a + CR 608.2c + CR 615.1 (#5601): Desperate Gambit's win and lose
-    /// branches share one anaphor — "a source you control" — so both the win
-    /// branch's damage-doubling replacement and the lose branch's prevention must
-    /// bind `ChosenDamageSource`, never `SelfRef` (the Instant on the stack, which
-    /// deals no damage, so the prevention would shield nothing).
+    /// CR 615.1a: Desperate Gambit's shipped text is an honest unsupported gap.
     ///
-    /// This uses the VERBATIM shipped oracle text ("Choose a source you control
-    /// AND flip a coin" — one sentence). That form lowers the head choice to a
-    /// bare target selection rather than `Effect::ChooseDamageSource`, so the
-    /// repair pass's original `ChooseDamageSource`-keyed gate no longer fired and
-    /// the lose branch silently reverted to `SelfRef` (the pass mutated
-    /// 0/35,396 pool-wide). Reverting the flattened-head gate signal flips the
-    /// lose-branch assertion below back to `SelfRef` — this test can fail if the
-    /// fix is removed (AI-CONTRIBUTOR.md §5(i)).
+    /// This row used to pin that the win branch's damage-doubling replacement and
+    /// the lose branch's prevention both bound `ChosenDamageSource` (#5601): the
+    /// verbatim "Choose a source you control AND flip a coin" sentence lowered
+    /// its head to a bare `TargetOnly` and silently dropped "you control". The
+    /// head choice now declines (the unparsed "you control and flip a coin" tail
+    /// is not a recognised clause), so the spell parse is `Unimplemented`; the
+    /// line then falls through to the damage-prevention replacement route, whose
+    /// unreadable "the next time that source would deal damage" subject fails
+    /// closed as `prevention_source_scope`. Until a follow-up parses the chosen
+    /// source with its restriction, the whole line is one visible gap, with
+    /// neither a `CreateDamageReplacement`/`PreventDamage` effect nor a blanket
+    /// card-wide replacement standing in for it.
     ///
-    /// It drives the FULL card pipeline via `parse_oracle_text` — the exact entry
-    /// `database::synthesis` uses to generate `card-data.json` — NOT the
-    /// standalone `parse_effect_chain`, so it exercises the path the shipped card
-    /// actually takes and cannot go green while the card is broken.
+    /// It drives the FULL card pipeline via `parse_oracle_text` (the entry
+    /// `database::synthesis` uses to generate `card-data.json`).
     #[test]
-    fn desperate_gambit_shipped_text_threads_chosen_damage_source_both_branches() {
+    fn desperate_gambit_shipped_text_is_an_honest_gap_not_a_blanket_replacement() {
         use crate::parser::oracle::parse_oracle_text;
 
         let text = "Choose a source you control and flip a coin. If you win the flip, \
@@ -26985,38 +27072,28 @@ mod tests {
         let parsed =
             parse_oracle_text(text, "Desperate Gambit", &[], &["Instant".to_string()], &[]);
 
-        let win = parsed
-            .abilities
-            .iter()
-            .find_map(|d| {
-                find_effect_in_def(d, &|e| matches!(e, Effect::CreateDamageReplacement { .. }))
-            })
-            .expect("win branch must emit a CreateDamageReplacement");
+        // Reach guard: the card produced exactly the one spell ability the
+        // negative assertions below inspect.
+        assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
         assert!(
             matches!(
-                win,
-                Effect::CreateDamageReplacement {
-                    source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
-                    ..
-                }
+                &*parsed.abilities[0].effect,
+                Effect::Unimplemented { name, .. } if name == "prevention_source_scope"
             ),
-            "win branch must bind ChosenDamageSource, got {win:?}"
+            "the whole line must be the prevention_source_scope gap: {parsed:#?}"
         );
-
-        let lose = parsed
-            .abilities
-            .iter()
-            .find_map(|d| find_effect_in_def(d, &|e| matches!(e, Effect::PreventDamage { .. })))
-            .expect("lose branch must emit a PreventDamage");
         assert!(
-            matches!(
-                lose,
-                Effect::PreventDamage {
-                    damage_source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
-                    ..
-                }
-            ),
-            "lose branch prevention must thread ChosenDamageSource (not SelfRef), got {lose:?}"
+            parsed.replacements.is_empty(),
+            "no blanket replacement may stand in for the unreadable source: {:?}",
+            parsed.replacements
+        );
+        assert!(
+            find_effect_in_def(&parsed.abilities[0], &|e| matches!(
+                e,
+                Effect::CreateDamageReplacement { .. } | Effect::PreventDamage { .. }
+            ))
+            .is_none(),
+            "no damage effect may be emitted for the unparsed restriction: {parsed:#?}"
         );
     }
 

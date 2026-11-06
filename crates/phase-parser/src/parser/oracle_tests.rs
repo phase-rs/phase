@@ -33502,11 +33502,6 @@ fn printed_subject_of_a_choosing_sentence_becomes_the_target_chooser() {
             "At the beginning of each player's upkeep, that player chooses target player who controls more creatures than they do and is their opponent. The first player may reveal cards from the top of their library until they reveal a creature card.",
             TargetFilter::ScopedPlayer,
         ),
-        (
-            "Oath of Mages",
-            "At the beginning of each player's upkeep, that player chooses target player who has more life than they do and is their opponent. The first player may have this enchantment deal 1 damage to the second player.",
-            TargetFilter::ScopedPlayer,
-        ),
     ] {
         let parsed = parse(oracle, name, &[], &["Enchantment"], &[]);
         let trigger = parsed
@@ -33527,6 +33522,36 @@ fn printed_subject_of_a_choosing_sentence_becomes_the_target_chooser() {
             "{name}: the printed subject of the choosing sentence must announce the target"
         );
     }
+
+    // Oath of Mages used to be an announcer row above: its choosing sentence
+    // lowered to a bare `TargetOnly { Player }` that silently dropped "who has
+    // more life than they do and is their opponent". The restriction is not
+    // parsed, so the sentence is now an `Unimplemented` gap (and carries no
+    // announcer) until a follow-up parses the dropped restriction. The follow-on
+    // sentence is the positive reach guard: it still lowers to a damage effect.
+    let mages = parse(
+        "At the beginning of each player's upkeep, that player chooses target player who has more life than they do and is their opponent. The first player may have this enchantment deal 1 damage to the second player.",
+        "Oath of Mages",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    let mages_execute = mages
+        .triggers
+        .first()
+        .and_then(|trigger| trigger.execute.as_ref())
+        .unwrap_or_else(|| panic!("Oath of Mages must produce an upkeep trigger: {mages:#?}"));
+    assert!(
+        matches!(&*mages_execute.effect, Effect::Unimplemented { .. }),
+        "the unparsed restriction must be a visible gap, not a TargetOnly: {mages:#?}"
+    );
+    assert!(
+        matches!(
+            mages_execute.sub_ability.as_ref().map(|sub| &*sub.effect),
+            Some(Effect::DealDamage { .. })
+        ),
+        "reach guard: the follow-on damage sentence still parses: {mages:#?}"
+    );
 
     // CR 102.2 + CR 601.2c: "An opponent chooses target creature they control"
     // (Echo Chamber) — the player-shaped subject is normalized to the dedicated

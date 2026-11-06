@@ -38,6 +38,11 @@ fn source_damage_to_player(source: ObjectId, amount: i32) -> ResolvedAbility {
     )
 }
 
+// NOTE: this is the sentence-split form ("Choose a source you control. Flip a coin."), which
+// lowers to `ChooseDamageSource`. The printed Oracle text joins them ("Choose a source you
+// control and flip a coin."); that verbatim form is an unsupported gap until a follow-up parses
+// the chosen source with its restriction (see
+// `desperate_gambit_shipped_text_is_an_honest_gap_not_a_blanket_replacement` in phase-parser).
 const DESPERATE_GAMBIT: &str = "Choose a source you control. Flip a coin. If you win the flip, \
     the next time that source would deal damage this turn, it deals double that damage instead. \
     If you lose the flip, the next time it would deal damage this turn, prevent that damage.";

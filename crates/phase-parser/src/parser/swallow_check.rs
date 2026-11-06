@@ -10484,7 +10484,8 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     /// `sub_ability` / `else_ability` / `mode_abilities` — so all seven of these
     /// cards reported a swallowed `Optional_YouMay` while their branch payloads
     /// carried the choice (`CastFromZone`, `CastCopyOfCard`, `ChangeTargets`,
-    /// `GrantCastingPermission`).
+    /// `GrantCastingPermission`). Wyll's Reversal, the `ChangeTargets` card, is
+    /// covered by `wylls_reversal_head_is_an_honest_gap_and_roll_branches_stay_optional`.
     ///
     /// Every negative is preceded by the positive reach guard on the same
     /// fixture: the verbatim Oracle text (the hostile evidence tree for the
@@ -10504,15 +10505,6 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                  the copies without paying their mana costs.",
                 "Wizard's Spellbook",
                 &["Artifact"],
-            ),
-            (
-                "Choose target spell or ability with one or more targets. Roll a d20 and add \
-                 the greatest power among creatures you control.\n\
-                 1—14 | You may choose new targets for that spell or ability.\n\
-                 15+ | You may choose new targets for that spell or ability. Then copy it. \
-                 You may choose new targets for the copy.",
-                "Wyll's Reversal",
-                &["Instant"],
             ),
             (
                 "Whenever you cast an instant or sorcery spell with mana value 3 or greater, \
@@ -10576,6 +10568,48 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 parsed.parse_warnings
             );
         }
+    }
+
+    /// Wyll's Reversal used to be a `roll_die_branch_optionality_is_evidence`
+    /// case: its head "Choose target spell or ability with one or more targets"
+    /// lowered to a bare `TargetOnly` that silently dropped "with one or more
+    /// targets", so the whole card parsed supported and the detector could be
+    /// proved quiet. The head now declines and is an unsupported gap until a
+    /// follow-up parses the dropped restriction. Because the swallow check
+    /// returns early over an `Unimplemented` unit, a quiet detector would prove
+    /// nothing here, so this row asserts the structural fact instead: the d20
+    /// carrier is still present and both result branches still carry the
+    /// printed "you may" as `optional` (CR 706.3a).
+    #[test]
+    fn wylls_reversal_head_is_an_honest_gap_and_roll_branches_stay_optional() {
+        let parsed = parse_named(
+            "Choose target spell or ability with one or more targets. Roll a d20 and add \
+             the greatest power among creatures you control.\n\
+             1—14 | You may choose new targets for that spell or ability.\n\
+             15+ | You may choose new targets for that spell or ability. Then copy it. \
+             You may choose new targets for the copy.",
+            "Wyll's Reversal",
+            &["Instant"],
+        );
+        assert!(
+            any_ability_has_unimplemented(&parsed),
+            "the unparsed head restriction must be a visible gap: {parsed:#?}"
+        );
+        let mut branch_optionality = Vec::new();
+        for ability in &parsed.abilities {
+            let mut cursor = Some(ability);
+            while let Some(def) = cursor {
+                if let Effect::RollDie { results, .. } = def.effect.as_ref() {
+                    branch_optionality.extend(results.iter().map(|branch| branch.effect.optional));
+                }
+                cursor = def.sub_ability.as_deref();
+            }
+        }
+        assert_eq!(
+            branch_optionality,
+            vec![true, true],
+            "both d20 result branches must carry the printed 'you may': {parsed:#?}"
+        );
     }
 
     /// Hostile sibling of `roll_die_branch_optionality_is_evidence`: the same
@@ -13183,29 +13217,48 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 .any(def_tree_has_create_damage_replacement)
     }
 
-    /// CR 614.9 + CR 705: Desperate Gambit — flip-coin win/lose branches carry
-    /// one-shot damage replacements; the Replacement_Instead detector must walk
-    /// `FlipCoins` payloads (issue #2236).
+    /// CR 615.1a: Desperate Gambit is an unsupported gap, not a flip-coin card
+    /// with one-shot damage replacements.
+    ///
+    /// This row used to pin that the `Replacement_Instead` detector walks
+    /// `FlipCoins` win/lose payloads carrying `CreateDamageReplacement`
+    /// (issue #2236), with Desperate Gambit as the only real-card carrier. The
+    /// head sentence "Choose a source you control and flip a coin" no longer
+    /// lowers to a bare `TargetOnly` (which silently dropped "you control"), so
+    /// the card has no `FlipCoins` payload until a follow-up parses the dropped
+    /// restriction; the whole line is the `prevention_source_scope` gap. The
+    /// `FlipCoins` recursion arms stay in `def_tree_has_target_replacement`.
     #[test]
-    fn replacement_instead_accepts_desperate_gambit_flip_coin_damage_replacements() {
+    fn replacement_instead_desperate_gambit_is_an_honest_gap_until_the_chosen_source_parses() {
         let parsed = parse_named(
             "Choose a source you control and flip a coin. If you win the flip, the next time that source would deal damage this turn, it deals double that damage instead. If you lose the flip, the next time it would deal damage this turn, prevent that damage.",
             "Desperate Gambit",
             &["Instant"],
         );
+        // Reach guard: one spell ability that is the named gap, so the negative
+        // assertions below cannot pass over an empty parse.
+        assert_eq!(parsed.abilities.len(), 1, "{:#?}", parsed.abilities);
         assert!(
-            !parsed.abilities.iter().any(def_tree_has_unimplemented),
-            "Desperate Gambit must parse without Unimplemented"
+            matches!(
+                &*parsed.abilities[0].effect,
+                Effect::Unimplemented { name, .. } if name == "prevention_source_scope"
+            ),
+            "expected the prevention_source_scope gap, got {:#?}",
+            parsed.abilities
         );
         assert!(
-            parsed
+            !parsed
                 .abilities
                 .iter()
                 .any(def_tree_has_create_damage_replacement),
-            "expected CreateDamageReplacement in flip-coin branches, got {:#?}",
+            "no CreateDamageReplacement may stand in for the unparsed source: {:#?}",
             parsed.abilities
         );
-        assert!(!has_swallowed_detector(&parsed, "Replacement_Instead"));
+        assert!(
+            parsed.replacements.is_empty(),
+            "no blanket replacement may be installed: {:?}",
+            parsed.replacements
+        );
     }
 
     /// CR 614.1a: Edge of Malacol untap replacement and Jinnie Fay token

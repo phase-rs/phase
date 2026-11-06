@@ -319,43 +319,35 @@ fn the_fall_of_kroog_affects_no_one_once_the_chosen_opponent_is_gone() {
     assert_eq!(damage(&r, b.creatures[2]), 0);
 }
 
-fn keeper_row(invalidate: &[Invalidate]) -> (GameRunner, Board, Offers) {
-    let mut sc = three_player();
-    let b = board(&mut sc);
-    let keeper = sc
-        .add_creature_from_oracle(P0, "Keeper of the Dead", 1, 2, KEEPER)
-        .id();
-    let mut r = sc.build();
-    hand_cards_become_creatures(&mut r);
-    r.act(GameAction::ActivateAbility {
-        source_id: keeper,
-        ability_index: 0,
-        payment_mode: CastPaymentMode::Auto,
-    })
-    .expect("activate");
-    let offers = drive(&mut r, P1, invalidate);
-    (r, b, offers)
-}
-
-/// CR 608.2c: "that player" is the opponent the activation chose; the creature slot offers only
-/// that opponent's creatures.
+/// Keeper of the Dead used to be two runtime rows here (the chosen opponent's creature is
+/// destroyed; nothing is destroyed once that opponent left). Its head "Choose target opponent who
+/// has at least two fewer creature cards in their graveyard than you do as you activate this
+/// ability" lowered to a bare `TargetOnly { opponent }` that silently dropped the graveyard
+/// comparison, so the Keeper cycle could be activated against ANY opponent. The head is now an
+/// unsupported gap until a follow-up parses the dropped restriction; the declared-player
+/// "that player controls" mechanic stays covered by the Fall of Kroog, Down for Repairs, Yosei and
+/// Treasure rows in this file, and no supported activated ability has this shape.
 #[test]
-fn keeper_of_the_dead_destroys_the_chosen_opponents_creature() {
-    let (r, b, offers) = keeper_row(&[]);
-    offered_not_to(&r, &offers, 1, P0);
-    assert_eq!(zone_of(&r, b.creatures[1]), Zone::Graveyard);
-    assert_eq!(zone_of(&r, b.creatures[0]), Zone::Battlefield);
-    assert_eq!(zone_of(&r, b.creatures[2]), Zone::Battlefield);
-}
-
-/// CR 608.2b: the chosen opponent is gone, so "that player controls" determines nothing.
-#[test]
-fn keeper_of_the_dead_destroys_nothing_once_the_chosen_opponent_is_gone() {
-    let (r, b, offers) = keeper_row(&[Invalidate::Leave(P1)]);
-    offered_not_to(&r, &offers, 1, P0);
-    for c in b.creatures {
-        assert_eq!(zone_of(&r, c), Zone::Battlefield);
-    }
+fn keeper_of_the_dead_head_choice_is_an_honest_gap() {
+    let parsed = parse_oracle_text(
+        KEEPER,
+        "Keeper of the Dead",
+        &[],
+        &["Creature".into()],
+        &["Human".into(), "Wizard".into()],
+    );
+    // Reach guard: the activated ability parsed and its destroy half still lowers,
+    // so the gap below is the head choice and not an empty parse.
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    let json = serde_json::to_string(&parsed.abilities[0]).unwrap();
+    assert!(json.contains("\"type\":\"Destroy\""), "{json}");
+    assert!(
+        matches!(
+            parsed.abilities[0].effect.as_ref(),
+            engine::types::ability::Effect::Unimplemented { .. }
+        ),
+        "the unparsed graveyard comparison must be a visible gap, not a TargetOnly: {json}"
+    );
 }
 
 fn attraction(sc: &mut GameScenario, p: PlayerId) -> ObjectId {
