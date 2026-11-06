@@ -6009,7 +6009,7 @@ fn build_instead_def(
         &effect_text,
         kind,
         parent_target_available,
-        ctx.in_trigger || ctx.spell_anaphor_event_source,
+        ctx.effective_spell_anaphor_binding(),
     );
     let mut result = super::instead_override_definition(
         instead_def,

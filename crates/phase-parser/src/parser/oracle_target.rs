@@ -26,7 +26,9 @@ use super::oracle_effect::{
     is_bare_object_pronoun, parse_multi_target_count_expr, parse_search_name_reference_suffix,
     resolve_it_pronoun,
 };
-use super::oracle_ir::context::{bind_controller_phrase, ChosenColorQualifierScope, ParseContext};
+use super::oracle_ir::context::{
+    bind_controller_phrase, ChosenColorQualifierScope, ParseContext, SpellAnaphorBinding,
+};
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::oracle_nom::filter as nom_filter;
@@ -147,9 +149,9 @@ pub(crate) fn resolve_pronoun_target(ctx: &mut ParseContext, pronoun: &str) -> T
 /// threaded the parse context.
 ///
 /// The arm itself defaults to `TriggeringSource` because most callers parse
-/// without a context. In a NON-trigger instruction (`ctx.in_trigger == false`)
-/// the same anaphor names the spell mentioned earlier in the instruction
-/// sequence — the announced target of the resolving spell/ability ("Counter
+/// without a context. When `effective_spell_anaphor_binding()` is `ParentTarget`
+/// (a NON-trigger instruction) the same anaphor names the spell mentioned
+/// earlier in the instruction sequence — the announced target of the resolving spell/ability ("Counter
 /// target spell. … counter that spell": Denied!, Mages' Contest, the "… instead"
 /// counter bodies; "… counter the spell": Split Decision's vote outcome). Only
 /// the consumers that both thread `ctx` and can carry a bare anaphor apply this
@@ -160,11 +162,12 @@ pub(crate) fn bind_spell_anaphor_to_context(
     ctx: &ParseContext,
     filter: TargetFilter,
 ) -> TargetFilter {
-    let has_parent_antecedent = !ctx.in_trigger && !ctx.spell_anaphor_event_source;
-    if has_parent_antecedent && matches!(filter, TargetFilter::TriggeringSource) {
-        TargetFilter::ParentTarget
-    } else {
-        filter
+    if !matches!(filter, TargetFilter::TriggeringSource) {
+        return filter;
+    }
+    match ctx.effective_spell_anaphor_binding() {
+        SpellAnaphorBinding::ParentTarget => TargetFilter::ParentTarget,
+        SpellAnaphorBinding::EventSource => TargetFilter::TriggeringSource,
     }
 }
 
@@ -16169,7 +16172,7 @@ mod tests {
             "CR 608.2k: a triggered ability names the event's spell object"
         );
         let delayed_ctx = ParseContext {
-            spell_anaphor_event_source: true,
+            spell_anaphor_binding: SpellAnaphorBinding::EventSource,
             ..ParseContext::default()
         };
         assert_eq!(

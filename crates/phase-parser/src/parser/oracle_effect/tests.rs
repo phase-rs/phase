@@ -96359,51 +96359,71 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
 // triggering event's spell object inside a triggered ability.
 // ---------------------------------------------------------------------------
 
-/// Collect every `Counter`/`CopySpell` target that is a spell-anaphor context
-/// reference (`ParentTarget` or `TriggeringSource`) from a serialized parse.
-fn spell_anaphor_targets(value: &serde_json::Value, out: &mut Vec<String>) {
+/// Collect the top-level target `type` of every `Counter`/`CopySpell` node in a
+/// serialized parse (`"<none>"` when the node carries no target), so an
+/// unbound or wrongly-typed consumer is visible instead of being filtered out.
+fn spell_consumer_target_types(value: &serde_json::Value, out: &mut Vec<String>) {
     match value {
         serde_json::Value::Object(map) => {
             if matches!(
                 map.get("type").and_then(|v| v.as_str()),
                 Some("Counter") | Some("CopySpell")
             ) {
-                if let Some(target) = map
-                    .get("target")
-                    .and_then(|t| t.get("type"))
-                    .and_then(|v| v.as_str())
-                    .filter(|t| matches!(*t, "ParentTarget" | "TriggeringSource"))
-                {
-                    out.push(target.to_string());
-                }
+                out.push(
+                    map.get("target")
+                        .and_then(|t| t.get("type"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<none>")
+                        .to_string(),
+                );
             }
             for inner in map.values() {
-                spell_anaphor_targets(inner, out);
+                spell_consumer_target_types(inner, out);
             }
         }
         serde_json::Value::Array(items) => {
             for inner in items {
-                spell_anaphor_targets(inner, out);
+                spell_consumer_target_types(inner, out);
             }
         }
         _ => {}
     }
 }
 
-fn assert_spell_anaphor(name: &str, text: &str, types: &[&str], expected: &str) {
+/// `announced` lists the row's own announced-target node(s) ("counter target
+/// spell ..."); every other Counter/CopySpell node must bind `expected`.
+fn assert_spell_anaphor(
+    name: &str,
+    text: &str,
+    types: &[&str],
+    announced: &[&str],
+    expected: &str,
+) {
     let parsed = parse_named_face(text, name, types);
     // Walk the whole parse: spells/activated abilities live in `abilities`,
     // triggered bodies in `triggers` (and their execute chains).
     let value = serde_json::to_value(&parsed).expect("parsed abilities serialize");
     let mut targets = Vec::new();
-    spell_anaphor_targets(&value, &mut targets);
+    spell_consumer_target_types(&value, &mut targets);
+    let all_targets = targets.clone();
+    for announced_type in announced {
+        let position = targets
+            .iter()
+            .position(|target| target == announced_type)
+            .unwrap_or_else(|| {
+                panic!("{name}: announced target {announced_type} missing from {all_targets:?}")
+            });
+        targets.remove(position);
+    }
     assert!(
         !targets.is_empty(),
-        "{name}: expected a Counter/CopySpell spell anaphor, got none in {value}"
+        "{name}: expected a Counter/CopySpell spell anaphor beyond the announced targets, got \
+         {all_targets:?} in {value}"
     );
     assert!(
         targets.iter().all(|target| target == expected),
-        "{name}: every spell anaphor must bind {expected}, got {targets:?}"
+        "{name}: every spell anaphor must bind {expected}, got {targets:?} (all consumers: \
+         {all_targets:?})"
     );
 }
 
@@ -96416,6 +96436,7 @@ fn resolving_spell_that_spell_binds_the_parent_target() {
         "Choose a card name, then target spell's controller reveals their hand. If a card with the \
          chosen name is revealed this way, counter that spell.",
         &["Instant"],
+        &[],
         "ParentTarget",
     );
     assert_spell_anaphor(
@@ -96424,6 +96445,7 @@ fn resolving_spell_that_spell_binds_the_parent_target() {
          order, each player may top the high bid. The bidding ends if the high bid stands. The high \
          bidder loses life equal to the high bid. If you win the bidding, counter that spell.",
         &["Instant"],
+        &[],
         "ParentTarget",
     );
     assert_spell_anaphor(
@@ -96431,6 +96453,7 @@ fn resolving_spell_that_spell_binds_the_parent_target() {
         "Counter target spell unless its controller pays {2}.\nCorrupted — Counter that spell \
          instead if its controller has three or more poison counters.",
         &["Instant"],
+        &["StackSpell"],
         "ParentTarget",
     );
     assert_spell_anaphor(
@@ -96438,6 +96461,7 @@ fn resolving_spell_that_spell_binds_the_parent_target() {
         "Counter target noncreature spell unless its controller pays {1}.\nFerocious — If you \
          control a creature with power 4 or greater, counter that spell instead.",
         &["Instant"],
+        &["And"],
         "ParentTarget",
     );
     assert_spell_anaphor(
@@ -96446,6 +96470,7 @@ fn resolving_spell_that_spell_binds_the_parent_target() {
          Counter target spell unless its controller pays {1}. If you revealed a Dragon card or \
          controlled a Dragon as you cast this spell, counter that spell instead.",
         &["Instant"],
+        &["StackSpell"],
         "ParentTarget",
     );
     assert_spell_anaphor(
@@ -96454,6 +96479,7 @@ fn resolving_spell_that_spell_binds_the_parent_target() {
          opponent has eight or more cards in their graveyard, instead counter that spell, then \
          scry 2.",
         &["Instant"],
+        &["Or"],
         "ParentTarget",
     );
     assert_spell_anaphor(
@@ -96462,6 +96488,7 @@ fn resolving_spell_that_spell_binds_the_parent_target() {
          if its mana value is 2 or less. If this spell was kicked, counter that spell if its mana \
          value is 4 or less instead.",
         &["Instant"],
+        &["StackSpell"],
         "ParentTarget",
     );
 }
@@ -96481,6 +96508,7 @@ fn triggered_ability_that_spell_binds_the_event_source() {
         "This artifact enters with X charge counters on it.\nWhenever a player casts a spell with \
          mana value equal to the number of charge counters on this artifact, counter that spell.",
         &["Artifact"],
+        &[],
         "TriggeringSource",
     );
     assert_spell_anaphor(
@@ -96488,6 +96516,7 @@ fn triggered_ability_that_spell_binds_the_event_source() {
         "When you next cast an instant or sorcery spell this turn, copy that spell. You may choose \
          new targets for the copy.\nFlashback {1}{U}{R}",
         &["Instant"],
+        &[],
         "TriggeringSource",
     );
     assert_spell_anaphor(
@@ -96496,6 +96525,11 @@ fn triggered_ability_that_spell_binds_the_event_source() {
          value 2 or less you cast this turn when you cast it. If this creature was kicked, copy that \
          spell twice instead. You may choose new targets for the copies.",
         &["Creature"],
+        // The second CopySpell node ("copy that spell twice instead") is a
+        // pre-existing trigger-level misparse (it sits beside the ETB's delayed
+        // trigger, not inside its body); this row only pins the anaphor's type
+        // name and does not vouch for the card's full parse.
+        &[],
         "TriggeringSource",
     );
     assert_spell_anaphor(
@@ -96504,6 +96538,7 @@ fn triggered_ability_that_spell_binds_the_event_source() {
          each turn, copy it. If you've completed a dungeon, copy that spell twice instead. You may \
          choose new targets for the copies.",
         &["Creature"],
+        &[],
         "TriggeringSource",
     );
     assert_spell_anaphor(
@@ -96512,6 +96547,7 @@ fn triggered_ability_that_spell_binds_the_event_source() {
          1-9 | Each player draws a card.\n10-19 | You draw a card.\n20 | Copy that spell. You may \
          choose new targets for the copy.",
         &["Creature"],
+        &[],
         "TriggeringSource",
     );
     assert_spell_anaphor(
@@ -96519,8 +96555,43 @@ fn triggered_ability_that_spell_binds_the_event_source() {
         "{T}: Add {R}. When that mana is spent to cast a red instant or sorcery spell, copy that \
          spell and you may choose new targets for the copy.",
         &["Artifact"],
+        &[],
         "TriggeringSource",
     );
+}
+
+/// CR 706.3b + CR 608.2k: a trigger-owned die-result table is part of the
+/// triggered ability, so a bare "that spell" in one of its rows names the
+/// trigger event's spell (`TriggeringSource`), not a parent target.
+///
+/// No printed card has a Counter row in a trigger-owned results table (checked
+/// against AtomicCards), so this face is synthetic. The nearest printed analog
+/// is Mathise, Surge Channeler ("Whenever you cast an instant or sorcery spell
+/// with mana value 3 or greater, roll a d20. ... 20 | Copy that spell. You may
+/// choose new targets for the copy."), whose Copy row cannot tell the bindings
+/// apart because the CopySpell consumer keeps the event-source default. This
+/// face swaps row 20 to the Counter consumer, which does read the binding, as a
+/// regression guard for the hand-off.
+#[test]
+fn trigger_owned_die_result_row_counter_binds_the_event_source() {
+    let name = "Synthetic Die-Row Counter";
+    let text =
+        "Whenever you cast an instant or sorcery spell with mana value 3 or greater, roll a \
+                d20.\n1-9 | Each player draws a card.\n10-19 | You draw a card.\n20 | Counter \
+                that spell.";
+    assert_spell_anaphor(name, text, &["Creature"], &[], "TriggeringSource");
+
+    // Reach guard: the Counter really is the table's row 20 under the trigger's
+    // RollDie, so the assertion above is not satisfied by an unrelated node.
+    let parsed = parse_named_face(text, name, &["Creature"]);
+    let trigger = serde_json::to_value(&parsed.triggers[0]).expect("trigger serializes");
+    let roll = &trigger["execute"]["effect"];
+    assert_eq!(roll["type"], "RollDie", "{trigger}");
+    let results = roll["results"].as_array().expect("results table");
+    assert_eq!(results.len(), 3, "{trigger}");
+    let counter = &results[2]["effect"]["effect"];
+    assert_eq!(counter["type"], "Counter", "{trigger}");
+    assert_eq!(counter["target"]["type"], "TriggeringSource", "{trigger}");
 }
 
 /// SHAPE (Vulcan Mind-Meld, verbatim): CR 608.2c + CR 115.1 — the targeted

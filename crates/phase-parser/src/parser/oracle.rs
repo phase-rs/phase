@@ -86,7 +86,7 @@ use super::oracle_effect::{
     try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::ast::parsed_clause;
-use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::context::{ParseContext, SpellAnaphorBinding};
 use super::oracle_ir::diagnostic::ClauseGapKind;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{
@@ -645,16 +645,11 @@ fn try_parse_opening_hand_reveal_delayed_trigger(
 
     // CR 603.7 + CR 608.2k: delayed body, no announced parent target. Keep the
     // Standalone lowering mode this builder already used.
-    let mut body_ctx = crate::parser::oracle_ir::context::ParseContext {
-        spell_anaphor_event_source: true,
-        ..Default::default()
-    };
     let effect = crate::parser::oracle_effect::lower_ability_ir(
-        &crate::parser::oracle_effect::parse_ability_ir(
+        &crate::parser::oracle_effect::parse_ability_ir_standalone_with_spell_anaphor(
             rest,
             AbilityKind::Spell,
-            crate::parser::oracle_effect::ChainLoweringMode::Standalone,
-            &mut body_ctx,
+            SpellAnaphorBinding::EventSource,
         ),
     );
     if has_unimplemented(&effect) {
@@ -5808,8 +5803,12 @@ fn attach_trigger_die_result_branches(
 
     // CR 608.2c + CR 608.2k: a trigger-owned results table is part of the
     // triggered ability, so its rows keep the event-source anaphor binding.
-    let (branches, next_line) =
-        parse_die_result_branches_ir(lines, start_line, AbilityKind::Spell, true);
+    let (branches, next_line) = parse_die_result_branches_ir(
+        lines,
+        start_line,
+        AbilityKind::Spell,
+        SpellAnaphorBinding::EventSource,
+    );
     for trigger in triggers
         .iter_mut()
         .filter(|trigger| trigger.has_terminal_roll_die())
@@ -5838,8 +5837,12 @@ fn attach_following_die_result_table(
         return start_line;
     }
 
-    let (branches, next_line) =
-        parse_die_result_branches_ir(lines, start_line, AbilityKind::Spell, false);
+    let (branches, next_line) = parse_die_result_branches_ir(
+        lines,
+        start_line,
+        AbilityKind::Spell,
+        SpellAnaphorBinding::ParentTarget,
+    );
     if branches.is_empty() {
         return start_line;
     }
@@ -14404,6 +14407,7 @@ mod following_die_result_table_attach_tests {
 mod die_result_row_failure_marker_tests {
     use super::has_unimplemented;
     use crate::parser::oracle_effect::lower_ability_ir;
+    use crate::parser::oracle_ir::context::SpellAnaphorBinding;
     use crate::parser::oracle_special::parse_die_result_branches_ir;
     use crate::types::ability::{AbilityKind, Effect};
 
@@ -14417,8 +14421,12 @@ mod die_result_row_failure_marker_tests {
 
     #[test]
     fn an_unparseable_row_body_surfaces_a_marker_instead_of_vanishing() {
-        let (branches, next_line) =
-            parse_die_result_branches_ir(&LINES, 0, AbilityKind::Spell, false);
+        let (branches, next_line) = parse_die_result_branches_ir(
+            &LINES,
+            0,
+            AbilityKind::Spell,
+            SpellAnaphorBinding::ParentTarget,
+        );
         // A row that VANISHES is worse than a row that fails: the table would
         // silently shrink and the printed instruction would be unrecoverable.
         assert_eq!(branches.len(), 2, "both printed rows must be collected");
@@ -14446,7 +14454,12 @@ mod die_result_row_failure_marker_tests {
     /// the assertion above while being completely inert.
     #[test]
     fn the_sibling_row_in_the_same_table_still_carries_a_real_effect() {
-        let (branches, _) = parse_die_result_branches_ir(&LINES, 0, AbilityKind::Spell, false);
+        let (branches, _) = parse_die_result_branches_ir(
+            &LINES,
+            0,
+            AbilityKind::Spell,
+            SpellAnaphorBinding::ParentTarget,
+        );
         let parseable = lower_ability_ir(&branches[0].effect);
         assert!(
             matches!(parseable.effect.as_ref(), Effect::Draw { .. }),
@@ -14454,5 +14467,59 @@ mod die_result_row_failure_marker_tests {
             parseable.effect
         );
         assert!(!has_unimplemented(&parseable));
+    }
+}
+
+/// CR 706.3b + CR 608.2k: the spell-anaphor binding handed to
+/// `parse_die_result_branches_ir` is honored by a row's bare "that spell"
+/// consumer. A resolving die-roll spell's table names its own announced spell
+/// (`ParentTarget`); a trigger-owned table names the event's spell
+/// (`EventSource` -> `TriggeringSource`).
+///
+/// No printed card has a bare "that spell" Counter row in any results table
+/// (checked against AtomicCards). The nearest printed card is Mathise, Surge
+/// Channeler ("20 | Copy that spell. You may choose new targets for the
+/// copy."), whose CopySpell row cannot tell the bindings apart because the
+/// copy consumer keeps the event-source default. This table therefore uses the
+/// Counter consumer, which does read the binding, as a regression guard for the
+/// hand-off rather than a coverage change.
+#[cfg(test)]
+mod die_result_row_spell_anaphor_tests {
+    use crate::parser::oracle_effect::lower_ability_ir;
+    use crate::parser::oracle_ir::context::SpellAnaphorBinding;
+    use crate::parser::oracle_special::parse_die_result_branches_ir;
+    use crate::types::ability::{AbilityKind, Effect, TargetFilter};
+
+    const LINES: [&str; 2] = ["1—19 | Draw a card.", "20 | Counter that spell."];
+
+    #[test]
+    fn die_result_row_counter_anaphor_follows_the_handed_down_binding() {
+        for (binding, expected) in [
+            (
+                SpellAnaphorBinding::ParentTarget,
+                TargetFilter::ParentTarget,
+            ),
+            (
+                SpellAnaphorBinding::EventSource,
+                TargetFilter::TriggeringSource,
+            ),
+        ] {
+            let (branches, _) =
+                parse_die_result_branches_ir(&LINES, 0, AbilityKind::Spell, binding);
+            // Reach guard: both rows were collected, so row 20 is the Counter row.
+            assert_eq!(
+                branches.len(),
+                2,
+                "{binding:?}: both rows must be collected"
+            );
+            let row = lower_ability_ir(&branches[1].effect);
+            match row.effect.as_ref() {
+                Effect::Counter { target, .. } => assert_eq!(
+                    *target, expected,
+                    "{binding:?}: the row's bare 'that spell' must follow the binding"
+                ),
+                other => panic!("{binding:?}: row 20 must lower to Counter, got {other:?}"),
+            }
+        }
     }
 }
