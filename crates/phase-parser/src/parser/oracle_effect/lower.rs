@@ -17489,6 +17489,7 @@ mod where_x_tests {
                                     ]),
                                 ),
                                 rest_destination: Some(Zone::Library),
+                                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                                 rest_split_top_count: None,
                                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                                 reveal: true,

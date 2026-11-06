@@ -18842,6 +18842,42 @@ fn trigger_unless_intervening_controls_creature() {
     }
 }
 
+/// CR 608.2c: an "unless" bound to a LATER instruction gates only that
+/// instruction. Hoisting it onto the trigger would also skip the earlier
+/// instruction. Splitskin Doll, verbatim Oracle text (Scryfall).
+///
+/// The ", then " branch of `unless_binds_to_later_instruction` is covered by
+/// printed cards in `oracle_effect/tests.rs`: `cyclone_paid_continuation_fails_closed`
+/// and `phantasmal_sphere_unless_binds_to_the_sacrifice`.
+#[test]
+fn trigger_unless_bound_to_later_instruction_is_not_hoisted() {
+    let def = parse_trigger_line(
+        "When this creature enters, draw a card. Then discard a card unless you control \
+another creature with power 2 or less.",
+        "Splitskin Doll",
+    );
+    assert!(
+        def.condition.is_none(),
+        "later-instruction unless must not gate the trigger"
+    );
+    let execute = def.execute.as_ref().expect("trigger effect");
+    assert!(
+        matches!(*execute.effect, Effect::Draw { .. }),
+        "draw stays the unconditional first instruction"
+    );
+    assert!(execute.condition.is_none(), "draw is unconditional");
+    let discard = execute.sub_ability.as_ref().expect("discard instruction");
+    assert!(matches!(*discard.effect, Effect::Discard { .. }));
+    assert!(
+        matches!(
+            discard.condition,
+            Some(AbilityCondition::Not { .. }) | Some(AbilityCondition::QuantityCheck { .. })
+        ),
+        "the unless gate attaches to the discard: {:?}",
+        discard.condition
+    );
+}
+
 #[test]
 fn trigger_unless_intervening_does_not_swallow_unless_pay() {
     // Sanity: "unless you pay {2}" must remain captured by
@@ -42489,6 +42525,157 @@ fn stack_spell_copy_cast_indicated_action_strict_fails() {
         "{:?}",
         cast.effect
     );
+}
+
+/// CR 608.2c + CR 118.12a: Indoraptor's Enrage — "that player" (damage
+/// recipient) and "they" (unless-payer) both name the opponent chosen at random,
+/// not the triggering player or the controller.
+#[test]
+fn indoraptor_enrage_binds_damage_and_payer_to_chosen_opponent() {
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose an opponent at random. ~ deals damage equal to its power to that player unless they sacrifice a nontoken creature of their choice.",
+        "Indoraptor, the Perfect Hybrid",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::Choose {
+            choice_type: crate::types::ability::ChoiceType::Opponent { .. },
+            selection: crate::types::ability::TargetSelectionMode::Random,
+            ..
+        }
+    ));
+    let chosen = TargetFilter::Typed(
+        TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
+    );
+    let damage = execute.sub_ability.as_ref().expect("damage sub-ability");
+    let Effect::DealDamage { target, .. } = damage.effect.as_ref() else {
+        panic!("expected DealDamage, got {:?}", damage.effect);
+    };
+    assert_eq!(*target, chosen);
+    let unless_pay = damage.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, chosen);
+    assert!(matches!(unless_pay.cost, AbilityCost::Sacrifice(_)));
+}
+
+/// CR 608.2c + CR 118.12a: the chosen-player unless-payer rebind is a FALLBACK
+/// for an anaphoric "they"/"that player". The shared building block covers the
+/// mana and non-mana unless-payment forms over either choice type, and a clause
+/// that declares its own player subject keeps that nearer antecedent.
+///
+/// SHAPE: these are synthetic combined grammar probes, with no known exact
+/// printed witness. The nearest printed anchors are Indoraptor, the Perfect
+/// Hybrid and Vial Smasher the Fierce for chosen-player damage; neither prints
+/// the declared-recipient/unless conflict isolated here. These rows pin the
+/// preserve-nearer-declared-player fallback invariant, not new card coverage.
+#[test]
+fn chosen_player_unless_payer_rebind_covers_the_grammar() {
+    let chosen = TargetFilter::Typed(
+        TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
+    );
+
+    // Non-mana alternative cost after "choose a player at random": the
+    // anaphoric "they" names the resolution-chosen player.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose a player at random. That player discards a card unless they sacrifice a creature.",
+        "Rebind Probe",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::Choose {
+            choice_type: crate::types::ability::ChoiceType::Player { .. },
+            selection: crate::types::ability::TargetSelectionMode::Random,
+            ..
+        }
+    ));
+    let discard = execute.sub_ability.as_ref().expect("discard clause");
+    let unless_pay = discard.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, chosen);
+
+    // Mana alternative cost: the "they pay" arm is the same anaphor.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose an opponent at random. That player sacrifices a creature unless they pay {2}.",
+        "Rebind Probe",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    let sacrifice = execute.sub_ability.as_ref().expect("sacrifice clause");
+    let unless_pay = sacrifice.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, chosen);
+    assert!(matches!(unless_pay.cost, AbilityCost::Mana { .. }));
+
+    // Nearer declared player subject: "Target player loses 3 life unless they
+    // discard a card" names its own player, so the earlier random choice must
+    // not capture the payer.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose an opponent at random. Target player loses 3 life unless they discard a card.",
+        "Rebind Probe",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    let lose_life = execute.sub_ability.as_ref().expect("lose-life clause");
+    let unless_pay = lose_life.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::Player);
+
+    // Nearer declared player RECIPIENT: "deals 3 damage to target player"
+    // declares its own player after the verb, so "they" is that target, not
+    // the opponent chosen earlier in the chain.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose an opponent at random. ~ deals 3 damage to target player unless they pay {2}.",
+        "Rebind Probe",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    let damage = execute.sub_ability.as_ref().expect("damage clause");
+    let Effect::DealDamage { target, .. } = damage.effect.as_ref() else {
+        panic!("expected DealDamage, got {:?}", damage.effect);
+    };
+    assert_eq!(*target, TargetFilter::Player);
+    let unless_pay = damage.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::Player);
+
+    // Compound declared recipients still introduce a player target even when
+    // the target grammar also permits an object in the same slot.
+    for recipient in [
+        "target player or planeswalker",
+        "target permanent or player",
+    ] {
+        let text = format!(
+            "Whenever ~ is dealt damage, choose an opponent at random. ~ deals 3 damage to {recipient} unless they pay {{2}}."
+        );
+        let def = parse_trigger_line(&text, "Rebind Probe");
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(matches!(
+            execute.effect.as_ref(),
+            Effect::Choose {
+                choice_type: crate::types::ability::ChoiceType::Opponent { .. },
+                selection: crate::types::ability::TargetSelectionMode::Random,
+                ..
+            }
+        ));
+        let damage = execute.sub_ability.as_ref().expect("damage clause");
+        let Effect::DealDamage { target, .. } = damage.effect.as_ref() else {
+            panic!("expected DealDamage, got {:?}", damage.effect);
+        };
+        assert!(matches!(
+            target,
+            TargetFilter::Or { filters }
+                if filters.iter().any(|filter| matches!(filter, TargetFilter::Player))
+        ));
+        let unless_pay = damage.unless_pay.as_ref().expect("unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Player);
+        assert!(matches!(unless_pay.cost, AbilityCost::Mana { .. }));
+    }
+
+    // An explicitly named payer is never rebound: "unless its controller
+    // pays" keeps the damaged permanent's controller even after the chain
+    // chose an opponent at random.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose an opponent at random. ~ deals 3 damage to target creature unless its controller pays {2}.",
+        "Rebind Probe",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    let damage = execute.sub_ability.as_ref().expect("damage clause");
+    let unless_pay = damage.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
 }
 
 // CR 122.1 + CR 603.2: an active-voice "you remove a <kind> counter" trigger

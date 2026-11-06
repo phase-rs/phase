@@ -872,14 +872,23 @@ pub(crate) fn try_parse_cost_modification(
                 }
             })
             .or_else(|| {
-                let (count_filter, _) = parse_type_phrase_folding(count_text);
-                Some(QuantityRef::ObjectCount {
+                let (count_filter, remainder) = parse_type_phrase_folding(count_text);
+                // CR 601.2f: an unconstrained filter means the type phrase
+                // recognized nothing; counting every object would invent a
+                // reduction, so the clause stays unparsed instead (#7899).
+                // Also require full clause consumption — an unparsed qualifier
+                // would make the count apply more broadly than the text allows.
+                (remainder.trim().is_empty()
+                    && count_filter != TargetFilter::Typed(TypedFilter::default()))
+                .then_some(QuantityRef::ObjectCount {
                     filter: count_filter,
                 })
             })
     } else {
         None
     };
+    let has_unparsed_for_each =
+        dynamic_count.is_none() && cost_tp.split_around("for each ").is_some();
 
     if dynamic_count.is_none() && amount_is_variable_x {
         let (_, where_x_text) = super::oracle_effect::strip_trailing_where_x(cost_tp);
@@ -895,6 +904,12 @@ pub(crate) fn try_parse_cost_modification(
     // and no dynamic_count silently under-reduces by {1} (Drag to the Underworld
     // class when the where-X clause fails to lower).
     if amount_is_variable_x && dynamic_count.is_none() {
+        return None;
+    }
+
+    // CR 601.2f: a "for each" clause whose count did not parse must not
+    // degrade to a flat per-unit change.
+    if has_unparsed_for_each {
         return None;
     }
 
