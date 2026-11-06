@@ -3292,7 +3292,7 @@ fn starts_each_player_predicate_clause_lower(s: &str) -> OracleResult<'_, ()> {
 /// discarding (CR 701.9a), milling (CR 701.17a), sacrificing (CR 701.21a),
 /// exiling (CR 701.13a) — so ending a bare-`" and "` conjunct with one of them is
 /// unambiguous: a player-subject predicate, never a noun-phrase continuation.
-fn parse_conjugated_player_action_verb(input: &str) -> OracleResult<'_, ()> {
+pub(super) fn parse_conjugated_player_action_verb(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((

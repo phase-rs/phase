@@ -11544,7 +11544,7 @@ fn parse_effect_clause_inner_with_damage_context(
             let (target, remainder) = parse_target_with_ctx(target_input, ctx);
             if remainder.trim().is_empty()
                 && !matches!(&target, TargetFilter::Typed(filter)
-                    if filter.type_filters.is_empty() && filter.controller.is_none())
+                    if *filter == TypedFilter::default())
             {
                 let mut clause = parsed_clause(Effect::TargetOnly { target });
                 clause.multi_target = Some(multi);
@@ -15924,90 +15924,31 @@ fn try_parse_put_on_top_or_bottom(
         }));
     }
 
-    // Pattern 1: "target [filter]'s owner puts it ..."
-    if super::oracle_nom::bridge::nom_on_lower(tp.original, tp.lower, |i| {
-        let (i, _) = take_until("'s owner puts it on ").parse(i)?;
-        let (i, _) = tag("'s owner puts it on ").parse(i)?;
-        let (i, _) = alt((
-            tag("the top or bottom of their library"),
-            tag("their choice of the top or bottom of their library"),
-        ))
-        .parse(i)?;
-        value((), eof).parse(i)
-    })
-    .is_some()
-    {
-        let target_text = tp
-            // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
-            .strip_suffix("'s owner puts it on the top or bottom of their library")
-            .or_else(|| {
-                // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
-                tp.strip_suffix(
-                    "'s owner puts it on their choice of the top or bottom of their library",
-                )
-            })
-            .map(|pair| pair.original)?;
-        let (filter, remainder) =
-            ctx.with_player_antecedents(|scoped| parse_target_with_ctx(target_text, scoped));
-        if !remainder.trim().is_empty() {
-            ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
-                text: remainder.trim().into(),
-                parser: "owner-puts-it".into(),
-                line_index: 0,
-            });
-        }
-        return Some(parsed_clause(Effect::PutOnTopOrBottom {
-            target: filter,
-            chooser: TargetFilter::ParentTargetOwner,
-            top_position: LibraryPosition::Top,
-        }));
-    }
-
-    // Pattern 2: "the owner of target [filter] puts it ..."
-    if super::oracle_nom::bridge::nom_on_lower(tp.original, tp.lower, |i| {
-        let (i, _) = tag("the owner of ").parse(i)?;
-        let (i, _) = take_until(" puts it on ").parse(i)?;
-        let (i, _) = tag(" puts it on ").parse(i)?;
-        let (i, _) = alt((
-            tag("the top or bottom of their library"),
-            tag("their choice of the top or bottom of their library"),
-        ))
-        .parse(i)?;
-        value((), eof).parse(i)
-    })
-    .is_some()
-    {
-        let target_text = tp
-            // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
-            .strip_prefix("the owner of ")
-            .and_then(|pair| {
-                // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
-                pair.strip_suffix(" puts it on the top or bottom of their library")
-                    .or_else(|| {
-                        // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
-                        pair.strip_suffix(
-                            " puts it on their choice of the top or bottom of their library",
-                        )
-                    })
-            })
-            .map(|pair| pair.original)?;
-        let (filter, remainder) =
-            ctx.with_player_antecedents(|scoped| parse_target_with_ctx(target_text, scoped));
-        if !remainder.trim().is_empty() {
-            ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
-                text: remainder.trim().into(),
-                parser: "owner-puts-it".into(),
-                line_index: 0,
-            });
-        }
-        return Some(parsed_clause(Effect::PutOnTopOrBottom {
-            target: filter,
-            chooser: TargetFilter::ParentTargetOwner,
-            top_position: LibraryPosition::Top,
-        }));
-    }
-
-    None
+    // CR 115.1 + CR 601.2c: both owner-subject spellings preserve the
+    // declaration's cardinality and constraints through the shared authority.
+    let predicate_start = subject::find_predicate_start(tp.original)?;
+    all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("puts it on the top or bottom of their library"),
+        tag("puts it on their choice of the top or bottom of their library"),
+    )))
+    .parse(&tp.lower[predicate_start..])
+    .ok()?;
+    let mut trial = ctx.clone();
+    let subject::OwnerSubject::Declared {
+        target,
+        multi_target,
+    } = subject::parse_owner_subject(tp.original[..predicate_start].trim(), &mut trial)?
+    else {
+        return None;
+    };
+    let mut clause = parsed_clause(Effect::PutOnTopOrBottom {
+        target,
+        chooser: TargetFilter::ParentTargetOwner,
+        top_position: LibraryPosition::Top,
+    });
+    clause.multi_target = multi_target;
+    *ctx = trial;
+    Some(clause)
 }
 
 /// Parse self-reference top-or-bottom forms such as Arashin Sovereign's
@@ -16170,64 +16111,86 @@ fn try_parse_owner_of_target_shuffle(
 ) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
-    // CR 608.2c: this shortcut owns only the shuffle instruction, never an
-    // earlier action followed by a shuffle elsewhere in the clause.
+    enum ShuffleObject {
+        Pronoun,
+        SelfReference(TargetFilter),
+    }
+    // CR 608.2c: consume exactly this predicate; only the source-owner form
+    // can bind a following player action to the same owner.
     let predicate_start = subject::find_predicate_start(tp.original)?;
-    all_consuming((
+    let (_, (_, object, _, _, conjunct)) = all_consuming((
         alt((tag::<_, _, OracleError<'_>>("shuffle "), tag("shuffles "))),
-        tag("it into "),
+        alt((
+            map(nom_primitives::parse_object_recipient_pronoun, |_| {
+                ShuffleObject::Pronoun
+            }),
+            map(
+                nom_target::parse_self_reference,
+                ShuffleObject::SelfReference,
+            ),
+        )),
+        tag(" into "),
         alt((tag("their library"), tag("its owner's library"))),
+        opt(preceded(
+            tag(" and "),
+            recognize((peek(sequence::parse_conjugated_player_action_verb), rest)),
+        )),
     ))
     .parse(&tp.lower[predicate_start..])
     .ok()?;
-    let subject_text = tp.original[..predicate_start].trim();
-    let mut trial = ctx.clone_throwaway();
-    let application = subject::parse_subject_application(subject_text, &mut trial);
-    // allow-noncombinator: possessive anaphor classification for the owner-shuffle shortcut.
-    let possessive_anaphor = subject_text.contains("'s owner") // allow-noncombinator: possessive subject scan.
-        && !subject_text.to_ascii_lowercase().contains("target "); // allow-noncombinator: declared-target guard.
-    let target = match application {
-        Some(application) => {
-            if application.multi_target.is_some() {
-                return None;
-            }
-            extract_owner_of_target(tp, ctx)?
+    let mut trial = ctx.clone();
+    let owner = subject::parse_owner_subject(tp.original[..predicate_start].trim(), &mut trial)?;
+    let (target, movement_target) = match (owner, object) {
+        (
+            subject::OwnerSubject::Declared {
+                target,
+                multi_target: None,
+            },
+            ShuffleObject::Pronoun,
+        ) if conjunct.is_none() => (Some(target), TargetFilter::ParentTarget),
+        (subject::OwnerSubject::Possessive { object }, ShuffleObject::Pronoun)
+            if conjunct.is_none() || object == TargetFilter::SelfRef =>
+        {
+            (None, object)
         }
-        None if possessive_anaphor => extract_owner_of_target(tp, ctx)?,
-        None => return None,
+        (
+            subject::OwnerSubject::Possessive {
+                object: TargetFilter::SelfRef,
+            },
+            ShuffleObject::SelfReference(TargetFilter::SelfRef),
+        ) => (None, TargetFilter::SelfRef),
+        _ => return None,
     };
-
-    // CR 115.10a + CR 400.3: a possessive anaphor subject ("this creature's
-    // owner", "that creature's owner", "enchanted creature's owner") announces
-    // no target — being affected does not make the object a target. The
-    // possessor phrase therefore has to carry the object into the move itself;
-    // reusing the selected `ParentTarget` population here would resolve to
-    // nothing (Cerulean Sphinx, Watery Grasp) because that population is only
-    // ever an announced/chosen referent. The DECLARED form ("the owner of
-    // target permanent") keeps `ParentTarget`: there the declared slot IS the
-    // object the move names.
-    let movement_target = if possessive_anaphor {
-        target.clone()
+    let tail = if let Some(conjunct) = conjunct {
+        let mut clause = parse_effect_clause(&subject::deconjugate_verb(conjunct), &mut trial);
+        if !bind_player_recipient_to_possessive_actor(&mut clause.effect, &TargetFilter::Owner) {
+            return None;
+        }
+        let mut tail = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
+        tail.sub_ability = clause.sub_ability;
+        Some(Box::new(tail))
     } else {
-        TargetFilter::ParentTarget
+        None
     };
-    let movement = imperative::lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
+    let mut movement = imperative::lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
         target: movement_target,
         owner_library: true,
     });
+    if let Some(tail) = tail {
+        movement.sub_ability.as_mut()?.sub_ability = Some(tail);
+    }
     let mut bound_move = AbilityDefinition::new(AbilityKind::Spell, movement.effect);
     bound_move.sub_ability = movement.sub_ability;
-    // CR 400.3: a possessive anaphor ("that creature's owner") announces no new
-    // target, so the shuffle is the clause's root effect — a replacement
-    // follow-up must execute it, not a TargetOnly declaration.
-    if possessive_anaphor {
+    *ctx = trial;
+    if let Some(target) = target {
+        let mut declaration = parsed_clause(Effect::TargetOnly { target });
+        declaration.sub_ability = Some(Box::new(bound_move));
+        Some(declaration)
+    } else {
         let mut bound = parsed_clause(*bound_move.effect);
         bound.sub_ability = bound_move.sub_ability;
-        return Some(bound);
+        Some(bound)
     }
-    let mut declaration = parsed_clause(Effect::TargetOnly { target });
-    declaration.sub_ability = Some(Box::new(bound_move));
-    Some(declaration)
 }
 
 /// CR 400.3 + CR 401.7: Parse "the owner of target [filter] puts it into their
@@ -16281,29 +16244,20 @@ fn parse_into_library_nth_from_top_or_bottom(i: &str) -> OracleResult<'_, Librar
 ///
 /// Returns `Some(target_filter)` if the pattern matches, `None` otherwise.
 fn extract_owner_of_target(tp: TextPair, ctx: &mut ParseContext) -> Option<TargetFilter> {
-    // CR 400.3: a possessive anaphor subject ("that creature's owner", "its
-    // owner") announces no new target; restore the pre-declaration binding.
-    // allow-noncombinator: possessive boundary scan; target parsing stays in parse_target_with_ctx.
-    if let Some(idx) = tp.find("'s owner ") {
-        let subject = &tp.original[..idx];
-        // allow-noncombinator: declared-target guard on the possessive anaphor subject.
-        if !subject.to_ascii_lowercase().contains("target ") {
-            let (filter, remainder) =
-                ctx.with_player_antecedents(|scoped| parse_target_with_ctx(subject, scoped));
-            if remainder.trim().is_empty() {
-                return Some(filter);
-            }
-        }
-    }
     let predicate_start = subject::find_predicate_start(tp.original)?;
     let mut trial = ctx.clone();
-    let application =
-        subject::parse_subject_application(tp.original[..predicate_start].trim(), &mut trial)?;
-    if application.affected != TargetFilter::ParentTargetOwner || application.multi_target.is_some()
-    {
-        return None;
-    }
-    let target = application.target?;
+    let target =
+        match subject::parse_owner_subject(tp.original[..predicate_start].trim(), &mut trial)? {
+            subject::OwnerSubject::Declared {
+                target,
+                multi_target: None,
+            } => target,
+            subject::OwnerSubject::Possessive { object } => object,
+            subject::OwnerSubject::Declared {
+                multi_target: Some(_),
+                ..
+            } => return None,
+        };
     *ctx = trial;
     Some(target)
 }
@@ -32688,7 +32642,7 @@ fn sync_player_into_nested_shuffle_sub(
 /// draw, CR 701.9a discard, CR 701.17a mill, CR 701.22a scry, CR 701.25a
 /// surveil), under the same unbound-default guard; every other `Effect` is
 /// intentionally left untouched by the `_` arm.
-fn bind_player_recipient_to_possessive_actor(effect: &mut Effect, actor: &TargetFilter) {
+fn bind_player_recipient_to_possessive_actor(effect: &mut Effect, actor: &TargetFilter) -> bool {
     match effect {
         Effect::RevealHand { target, .. }
         | Effect::Draw { target, .. }
@@ -32699,8 +32653,9 @@ fn bind_player_recipient_to_possessive_actor(effect: &mut Effect, actor: &Target
             if matches!(target, TargetFilter::Any | TargetFilter::Controller) =>
         {
             *target = actor.clone();
+            true
         }
-        _ => {}
+        _ => false,
     }
 }
 
@@ -53846,6 +53801,35 @@ mod trk_phase1_binding_tests {
     #[test]
     fn owner_shuffle_shortcut_cannot_drop_an_earlier_draw_or_failed_predicate() {
         let mut ctx = ParseContext::default();
+        let positive = "The owner of target creature shuffles it into their library.";
+        let lower = positive.to_lowercase();
+        let clause = try_parse_owner_of_target_shuffle(TextPair::new(positive, &lower), &mut ctx)
+            .expect("declared owner shortcut");
+        assert!(
+            matches!(&clause.effect, Effect::TargetOnly { target: TargetFilter::Typed(filter) }
+            if filter.type_filters == [TypeFilter::Creature])
+        );
+        let movement = clause.sub_ability.as_deref().expect("bound movement");
+        assert!(matches!(
+            &*movement.effect,
+            Effect::ChangeZoneAll {
+                target: TargetFilter::ParentTarget,
+                destination: Zone::Library,
+                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                ..
+            }
+        ));
+        let shuffle = movement.sub_ability.as_deref().expect("terminal shuffle");
+        assert!(matches!(
+            &*shuffle.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        ));
+        assert_eq!(
+            shuffle.player_scope,
+            Some(imperative::owner_library_shuffle_scope())
+        );
         for text in [
             CHAPTER,
             "The owner of target creature draws two cards, then shuffles it into their library.",

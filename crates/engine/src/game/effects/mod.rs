@@ -17753,7 +17753,7 @@ pub(crate) fn resolve_player_for_context_ref(
         TargetFilter::DeclaredPlayer { group } => {
             crate::game::targeting::resolve_live_declared_player(state, ability, *group)
         }
-        TargetFilter::SpecificPlayer { .. } => {
+        TargetFilter::SpecificPlayer { .. } | TargetFilter::Owner => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
         }
         _ if declared_player_slot_is_empty(state, ability, target_filter) => None,

@@ -96374,9 +96374,9 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
 #[test]
 fn self_death_shuffle_binds_the_event_successor_not_a_selected_population() {
     let parsed = parse_card(
-        "When this creature dies, shuffle it into its owner's library.",
+        "Flying\nWhen this creature dies, shuffle it into its owner's library.",
         "Alabaster Dragon",
-        &[],
+        &["Flying"],
         &["Creature"],
     );
     let execute = parsed.triggers[0].execute.as_ref().expect("dies trigger");
@@ -96409,6 +96409,8 @@ fn self_death_shuffle_binds_the_event_successor_not_a_selected_population() {
 /// (no departure event, so no CR 603.6 successor is needed — the source is still
 /// the object "it" names). Pre-change this lowered to the selected
 /// `ChangeZoneAll { ParentTarget }`, which has no source fallback.
+/// Infrastructure exception: Fblthp, the Lost is the nearest printed non-departure
+/// self-shuffle. Its full Oracle is covered by the named-owner row below.
 #[test]
 fn self_trigger_shuffle_without_chosen_antecedent_binds_the_source() {
     let parsed = parse_card(
@@ -96465,9 +96467,9 @@ fn chosen_antecedent_shuffle_still_names_the_selected_target() {
 #[test]
 fn source_possessive_owner_shuffle_moves_the_source_without_a_target_slot() {
     let parsed = parse_card(
-        "{U}: This creature's owner shuffles it into their library.",
+        "Flying\n{U}: This creature's owner shuffles it into their library.",
         "Cerulean Sphinx",
-        &[],
+        &["Flying"],
         &["Creature"],
     );
     let ability = &parsed.abilities[0];
@@ -96490,6 +96492,12 @@ fn source_possessive_owner_shuffle_moves_the_source_without_a_target_slot() {
         ability.effect
     );
     assert!(outer_gap_names(&parsed).is_empty());
+    assert!(matches!(
+        &*ability.sub_ability.as_deref().expect("shuffle").effect,
+        Effect::Shuffle {
+            target: TargetFilter::Owner
+        }
+    ));
 }
 
 /// CR 115.10a + CR 400.3: "Enchanted creature's owner shuffles it into their
@@ -96498,7 +96506,7 @@ fn source_possessive_owner_shuffle_moves_the_source_without_a_target_slot() {
 #[test]
 fn host_possessive_owner_shuffle_moves_the_host_without_a_target_slot() {
     let parsed = parse_card(
-        "Enchant creature\nWaterbend {5}: Enchanted creature's owner shuffles it into their library.",
+        "Enchant creature\nEnchanted creature doesn't untap during its controller's untap step.\nWaterbend {5}: Enchanted creature's owner shuffles it into their library. (While paying a waterbend cost, you can tap your artifacts and creatures to help. Each one pays for {1}.)",
         "Watery Grasp",
         &[],
         &["Enchantment"],
@@ -96604,7 +96612,7 @@ fn plural_player_target_noun_carries_its_declared_cardinality() {
 #[test]
 fn officious_interrogation_plural_player_declaration_survives_the_peel() {
     let parsed = parse_card(
-        "Choose any number of target players. Investigate X times, where X is \
+        "This spell costs {W}{U} more to cast for each target beyond the first.\nChoose any number of target players. Investigate X times, where X is \
          the total number of creatures those players control.",
         "Officious Interrogation",
         &[],
@@ -96634,7 +96642,7 @@ fn officious_interrogation_plural_player_declaration_survives_the_peel() {
 #[test]
 fn call_the_coppercoats_plural_opponent_declaration_survives_the_peel() {
     let parsed = parse_card(
-        "Choose any number of target opponents. Create X 1/1 white Human Soldier \
+        "Strive — This spell costs {1}{W} more to cast for each target beyond the first.\nChoose any number of target opponents. Create X 1/1 white Human Soldier \
          creature tokens, where X is the number of creatures those opponents control.",
         "Call the Coppercoats",
         &[],
@@ -96655,5 +96663,230 @@ fn call_the_coppercoats_plural_opponent_declaration_survives_the_peel() {
     assert!(
         !matches!(&*ability.effect, Effect::Unimplemented { .. }),
         "the declaration must not be an Unimplemented node"
+    );
+}
+
+/// CR 201.5 + CR 201.5c: named and shortened self references keep source ownership.
+#[test]
+fn etrata_fblthp_named_owner_shuffles_preserve_self_reference() {
+    for (name, oracle) in [
+        ("Etrata, the Silencer", "Etrata can't be blocked.\nWhenever Etrata deals combat damage to a player, exile target creature that player controls and put a hit counter on that card. That player loses the game if they own three or more exiled cards with hit counters on them. Etrata's owner shuffles Etrata into their library."),
+        ("Fblthp, Impossibly Lost", "When one or more of your opponents are dealt combat damage during your turn, draw two cards. If your library has no cards in it, you win the game. Fblthp's owner shuffles him into their library. (If you draw from an empty library this way, you still win the game.)"),
+        ("Fblthp, the Lost", "When Fblthp enters, draw a card. If it entered from your library or was cast from your library, draw two cards instead.\nWhen Fblthp becomes the target of a spell, shuffle Fblthp into its owner's library."),
+    ] {
+        let parsed = parse_card(oracle, name, &[], &["Creature"]);
+        assert!(!outer_gap_names(&parsed).iter().any(|gap| gap == "unbound_subject"), "{name}: {parsed:?}");
+        let defs: Vec<_> = parsed.triggers.iter().filter_map(|trigger| trigger.execute.as_deref())
+            .flat_map(chain_defs).collect();
+        let movement = defs.iter().find(|def| matches!(&*def.effect,
+            Effect::ChangeZone { target: TargetFilter::SelfRef, owner_library: true, destination: Zone::Library, .. }
+        )).unwrap_or_else(|| panic!("{name}: missing source move: {defs:?}"));
+        assert!(matches!(&*movement.sub_ability.as_ref().expect("terminal shuffle").effect,
+            Effect::Shuffle { target: TargetFilter::Owner }
+        ), "{name}: {movement:?}");
+    }
+}
+
+#[test]
+fn gandalf_owner_shuffle_conjunct_draws_for_owner() {
+    let parsed = parse_card(
+        "Ward {3} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {3}.)\n{6}: Gandalf's owner shuffles him into their library and draws three cards.",
+        "Gandalf, Wandering Wizard", &[], &["Creature"],
+    );
+    let ability = parsed
+        .abilities
+        .iter()
+        .find(|ability| ability.cost.is_some())
+        .expect("activated ability");
+    assert!(
+        matches!(
+            &*ability.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::SelfRef,
+                destination: Zone::Library,
+                owner_library: true,
+                ..
+            }
+        ),
+        "{ability:?}"
+    );
+    let shuffle = ability.sub_ability.as_deref().expect("shuffle");
+    assert!(
+        matches!(
+            &*shuffle.effect,
+            Effect::Shuffle {
+                target: TargetFilter::Owner
+            }
+        ),
+        "{shuffle:?}"
+    );
+    assert!(
+        matches!(
+            &*shuffle.sub_ability.as_deref().expect("draw").effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Owner
+            }
+        ),
+        "{shuffle:?}"
+    );
+    assert!(outer_gap_names(&parsed).is_empty());
+}
+
+#[test]
+fn owner_shuffle_explicit_source_cannot_substitute_a_different_possessor() {
+    for text in [
+        "The owner of target creature shuffles ~ into their library.",
+        "Target creature's owner shuffles ~ into their library.",
+        "Enchanted creature's owner shuffles ~ into their library.",
+        "~'s owner shuffles him into their library and sacrifices a creature.",
+    ] {
+        let lower = text.to_lowercase();
+        assert!(
+            try_parse_owner_of_target_shuffle(
+                TextPair::new(text, &lower),
+                &mut ParseContext::default(),
+            )
+            .is_none(),
+            "{text}"
+        );
+    }
+    for apostrophe in ["'", "\u{2019}"] {
+        let text = format!("~{apostrophe}s owner shuffles ~ into their library.");
+        let lower = text.to_lowercase();
+        let clause = try_parse_owner_of_target_shuffle(
+            TextPair::new(&text, &lower),
+            &mut ParseContext::default(),
+        )
+        .expect("source possessor and explicit source agree");
+        assert!(matches!(
+            clause.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::SelfRef,
+                owner_library: true,
+                ..
+            }
+        ));
+    }
+}
+
+/// CR 115.1 + CR 601.2c: optional other-target owner subjects retain both
+/// cardinality and object constraints; no empower support is asserted here.
+#[test]
+fn plan_for_all_outcomes_owner_declares_optional_other_nonland_permanent() {
+    let parsed = parse_card(
+        "When this enchantment enters, the owner of up to one other target nonland permanent puts it on their choice of the top or bottom of their library.\nWhenever you cast your first noncreature spell each turn, empower Jace 1. (Put a loyalty counter on a Jace token you control. If you don't control one, first create a blue Jace planeswalker token with \"[−1]: Surveil 1\" and \"[−3]: Draw a card.\")",
+        "Plan for All Outcomes", &[], &["Enchantment"],
+    );
+    let body = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("entry trigger");
+    assert_eq!(body.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+    let Effect::PutOnTopOrBottom {
+        target: TargetFilter::Typed(filter),
+        chooser: TargetFilter::ParentTargetOwner,
+        top_position: LibraryPosition::Top,
+    } = &*body.effect
+    else {
+        panic!("missing object declaration: {body:?}");
+    };
+    assert!(
+        filter.properties.contains(&FilterProp::Another),
+        "{filter:?}"
+    );
+    assert!(
+        filter.type_filters.contains(&TypeFilter::Permanent),
+        "{filter:?}"
+    );
+    assert!(
+        filter
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))),
+        "{filter:?}"
+    );
+    assert!(
+        chain_defs(body).iter().any(|def| matches!(
+            &*def.effect,
+            Effect::PutOnTopOrBottom {
+                chooser: TargetFilter::ParentTargetOwner,
+                ..
+            }
+        )),
+        "{body:?}"
+    );
+    for subject in [
+        "the owner of target player",
+        "the owner of target",
+        "the owner of target creature nonsense",
+    ] {
+        assert!(
+            subject::parse_owner_subject(subject, &mut ParseContext::default()).is_none(),
+            "{subject}"
+        );
+    }
+    let plain = parse_effect_chain(
+        "The owner of target nonland permanent puts it on their choice of the top or bottom of their library.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(plain.multi_target, None);
+    assert!(
+        matches!(&*plain.effect,
+            Effect::PutOnTopOrBottom {
+                target: TargetFilter::Typed(filter),
+                chooser: TargetFilter::ParentTargetOwner,
+                top_position: LibraryPosition::Top,
+            } if filter.type_filters == [
+                TypeFilter::Permanent, TypeFilter::Non(Box::new(TypeFilter::Land))
+            ] && filter.properties.is_empty()
+        ),
+        "{plain:?}"
+    );
+    for subject in ["its owner", "their owner"] {
+        assert!(subject::parse_owner_subject(subject, &mut ParseContext::default()).is_none());
+    }
+}
+
+/// CR 903.3 + CR 115.1c: property constraints alone are a real target filter.
+#[test]
+fn forge_of_heroes_property_only_commander_declaration() {
+    let parsed = parse_card(
+        "{T}: Add {C}.\n{T}: Choose target commander that entered this turn. Put a +1/+1 counter on it if it's a creature and a loyalty counter on it if it's a planeswalker.",
+        "Forge of Heroes", &[], &["Land"],
+    );
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .any(|ability| matches!(&*ability.effect,
+                Effect::TargetOnly { target: TargetFilter::Typed(filter) }
+                    if filter.properties == [FilterProp::IsCommander, FilterProp::EnteredThisTurn]
+            )),
+        "{parsed:?}"
+    );
+}
+
+#[test]
+fn weeping_angel_owner_prevention_keeps_damaged_creature_anaphor() {
+    let parsed = parse_card(
+        "Flash\nFirst strike, vigilance\nWhenever an opponent casts a creature spell, this creature isn't a creature until end of turn.\nIf this creature would deal combat damage to a creature, prevent that damage and that creature's owner shuffles it into their library.",
+        "Weeping Angel", &["Flash", "First strike", "Vigilance"], &["Artifact", "Creature"],
+    );
+    assert!(
+        parsed
+            .replacements
+            .iter()
+            .filter_map(|replacement| replacement.execute.as_deref())
+            .flat_map(chain_defs)
+            .any(|def| matches!(
+                &*def.effect,
+                Effect::ChangeZoneAll {
+                    target: TargetFilter::PostReplacementDamageTarget,
+                    destination: Zone::Library,
+                    library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                    ..
+                }
+            )),
+        "{parsed:?}"
     );
 }

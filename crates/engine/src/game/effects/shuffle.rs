@@ -58,11 +58,14 @@ pub fn resolve(
 
     let target_player = match &shuffle_target {
         // CR 400.3: "its owner's library" resolves to the owner of source_id.
-        TargetFilter::Owner => state
-            .objects
-            .get(&ability.source_id)
-            .map(|obj| obj.owner)
-            .unwrap_or(ability.controller),
+        TargetFilter::Owner => {
+            let Some(player) =
+                crate::game::targeting::resolve_effect_player_ref(state, ability, &shuffle_target)
+            else {
+                return Ok(());
+            };
+            player
+        }
         // CR 608.2b: a slot that was an illegal target names no player, so no library is shuffled.
         TargetFilter::ParentTargetSlot { index } => {
             match crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)

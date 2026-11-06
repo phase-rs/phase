@@ -786,3 +786,26 @@ fn chimera_retarget_subject_binds_to_the_triggering_spell() {
         ref other => panic!("expected RetargetChoice for the triggering spell, got {other:?}"),
     }
 }
+
+/// CR 115.1 + CR 400.3: source-owner recipients are resolved, never announced.
+#[test]
+fn owner_anchor_claims_no_target_slot() {
+    use engine::types::ability::QuantityExpr;
+    let state = GameState::new_two_player(42);
+    for effect in [
+        Effect::Shuffle {
+            target: TargetFilter::Owner,
+        },
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Owner,
+        },
+    ] {
+        let ability =
+            ResolvedAbility::new(effect, vec![], engine::types::identifiers::ObjectId(1), P0);
+        assert!(
+            build_target_slots(&state, &ability).unwrap().is_empty(),
+            "{ability:?}"
+        );
+    }
+}

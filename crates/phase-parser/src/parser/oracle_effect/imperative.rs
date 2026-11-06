@@ -5151,7 +5151,7 @@ pub(super) fn parse_choose_ast(
                 && !tail.chars().all(|c| c.is_ascii_punctuation())
                 && !super::sequence::starts_clause_text_or_conjugated(tail))
                 || matches!(&target, TargetFilter::Typed(filter)
-                    if filter.type_filters.is_empty() && filter.controller.is_none())
+                    if *filter == TypedFilter::default())
             {
                 return None;
             }
@@ -10985,6 +10985,13 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         // object's owner as the anaphoric shuffle subject. Unlike a mass move,
         // this already has one exact parent object and needs no tracked-set
         // population fan-out (Chaos Warp and prevention follow-ups).
+        // CR 108.3 + CR 400.3: an explicit source move retains the source's owner,
+        // independent of any earlier announced target.
+        Effect::ChangeZone {
+            target: TargetFilter::SelfRef,
+            owner_library: true,
+            ..
+        } => TargetFilter::Owner,
         Effect::ChangeZone {
             owner_library: true,
             ..
@@ -19419,7 +19426,7 @@ mod tests {
         assert!(matches!(
             *own.sub_ability.unwrap().effect,
             Effect::Shuffle {
-                target: TargetFilter::ParentTargetOwner
+                target: TargetFilter::Owner
             }
         ));
     }

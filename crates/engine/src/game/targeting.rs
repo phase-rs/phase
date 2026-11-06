@@ -2975,6 +2975,31 @@ pub fn resolve_effect_player_ref(
                             .map(|lki| lki.controller)
                     })
             }),
+        // CR 108.3 + CR 111.2: ownership is invariant across zone changes;
+        // spells and replacement bodies need no source-incarnation pin.
+        TargetFilter::Owner => ability
+            .trigger_source
+            .as_ref()
+            .map(|source| source.source_read(state).owner())
+            .or_else(|| {
+                state
+                    .objects
+                    .get(&ability.source_id)
+                    .map(|source| source.owner)
+            })
+            .or_else(|| {
+                state
+                    .lki_cache
+                    .get(&ability.source_id)
+                    .map(|source| source.owner)
+            })
+            .or_else(|| {
+                state
+                    .lki_by_incarnation
+                    .get(&ability.source_id)
+                    .and_then(|by_incarnation| by_incarnation.values().next())
+                    .map(|source| source.owner)
+            }),
         // CR 109.5: The ability's original controller — fixed even when
         // `player_scope` iteration has rebound `ability.controller`.
         TargetFilter::OriginalController => {
@@ -9058,6 +9083,85 @@ mod tests {
             find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99))
                 .contains(&TargetRef::Object(c1)),
             "hexproof does not block the controller (CR 702.11b)"
+        );
+    }
+
+    /// CR 108.3 + CR 111.2: every source authority resolves ownership without
+    /// requiring an incarnation pin or substituting the ability's controller.
+    #[test]
+    fn resolve_effect_player_ref_owner_reads_spell_and_replacement_sources() {
+        use crate::types::ability::Effect;
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Owner source".into(),
+            Zone::Stack,
+        );
+        let object = &state.objects[&source];
+        let snapshot = object.snapshot_public_characteristics();
+        let incarnation = object.incarnation;
+        let trigger_source = object
+            .snapshot_for_zone_change(source, Some(Zone::Stack), Zone::Graveyard)
+            .trigger_source_context
+            .unwrap();
+        let mut ability = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Owner,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(ability.source_incarnation, None);
+        assert!(ability.trigger_source.is_none());
+        assert_eq!(
+            resolve_effect_player_ref(&state, &ability, &TargetFilter::Owner),
+            Some(PlayerId(1))
+        );
+        // A replacement body has the same unpinned source shape in the graveyard.
+        state.objects.get_mut(&source).unwrap().zone = Zone::Graveyard;
+        assert_eq!(
+            resolve_effect_player_ref(&state, &ability, &TargetFilter::Owner),
+            Some(PlayerId(1))
+        );
+        ability.trigger_source = Some(trigger_source);
+        // The zone mismatch forces source_read to use the latched authority.
+        // Conflicting defensive fallbacks discriminate precedence only.
+        state.objects.get_mut(&source).unwrap().owner = PlayerId(0);
+        assert_eq!(
+            resolve_effect_player_ref(&state, &ability, &TargetFilter::Owner),
+            Some(PlayerId(1))
+        );
+        ability.trigger_source = None;
+        state.objects.remove(&source);
+        state.lki_cache.insert(source, snapshot.clone());
+        let mut older_snapshot = snapshot.clone();
+        older_snapshot.owner = PlayerId(0);
+        state
+            .lki_by_incarnation
+            .entry(source)
+            .or_default()
+            .insert(incarnation, older_snapshot);
+        assert_eq!(
+            resolve_effect_player_ref(&state, &ability, &TargetFilter::Owner),
+            Some(PlayerId(1))
+        );
+        state.lki_cache.remove(&source);
+        state
+            .lki_by_incarnation
+            .get_mut(&source)
+            .unwrap()
+            .insert(incarnation, snapshot);
+        assert_eq!(
+            resolve_effect_player_ref(&state, &ability, &TargetFilter::Owner),
+            Some(PlayerId(1))
+        );
+        state.lki_by_incarnation.remove(&source);
+        assert_eq!(
+            resolve_effect_player_ref(&state, &ability, &TargetFilter::Owner),
+            None
         );
     }
 

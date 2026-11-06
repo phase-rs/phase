@@ -34,12 +34,13 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{DelayedTriggerCondition, Effect};
+use engine::types::ability::{DelayedTriggerCondition, Effect, EffectKind};
 use engine::types::actions::GameAction;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::ManaColor;
+use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -556,4 +557,202 @@ fn a_source_possessive_subject_still_names_its_own_source() {
         Some(Zone::Battlefield),
         "no other permanent is moved — the pronoun names the source, not a parent target"
     );
+}
+
+/// CR 108.3 + CR 400.3 + CR 121.1: the source's owner shuffles and draws,
+/// even when the activating player controls a permanent owned by another seat.
+#[test]
+fn gandalf_wandering_wizard_owner_shuffles_and_draws() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let gandalf = scenario
+        .add_creature_from_oracle(
+            P1, "Gandalf, Wandering Wizard", 4, 5,
+            "Ward {3} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {3}.)\n{6}: Gandalf's owner shuffles him into their library and draws three cards.",
+        )
+        .controlled_by(P0)
+        .id();
+    for _ in 0..12 {
+        scenario.add_card_to_library_top(P1, "Island");
+    }
+    scenario.with_mana_pool(
+        P0,
+        (0..6)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    let ability_index = runner.state().objects[&gandalf]
+        .abilities
+        .iter()
+        .position(|ability| ability.cost.is_some())
+        .expect("Gandalf's activated ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: gandalf,
+            ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("Gandalf's six-mana activation");
+    assert!(runner
+        .state()
+        .stack
+        .iter()
+        .any(|entry| entry.source_id == gandalf));
+    let mut events = Vec::new();
+    while !runner.state().stack.is_empty() {
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("resolve activation")
+                .events,
+        );
+    }
+    assert_eq!(runner.state().players[1].hand.len(), 3);
+    assert!(runner.state().players[0].hand.is_empty());
+    assert_eq!(runner.state().objects[&gandalf].zone, Zone::Library);
+    assert!(runner.state().players[1].library.contains(&gandalf));
+    let shuffles: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert!(!shuffles.is_empty());
+    assert!(shuffles.iter().all(|player| *player == P1), "{shuffles:?}");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().resolution_stack.is_empty());
+}
+
+/// CR 701.24c: the explicit shuffle must execute, not merely the zone-move tail.
+#[test]
+fn beacon_of_destruction_shuffles_into_its_owners_library() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let beacon = scenario.add_spell_to_hand_from_oracle(
+        P0, "Beacon of Destruction", true,
+        "Beacon of Destruction deals 5 damage to any target. Shuffle Beacon of Destruction into its owner's library.",
+    ).with_mana_cost(parse_mtgjson_mana_cost("{3}{R}{R}")).id();
+    scenario.with_mana_pool(
+        P0,
+        (0..5)
+            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    let events = runner
+        .cast(beacon)
+        .target_object(victim)
+        .resolve()
+        .events()
+        .to_vec();
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+    assert!(runner.state().players[0].library.contains(&beacon));
+    let shuffles: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    // FU-2: the existing automatic zone-move shuffle duplicates the explicit
+    // instruction. This count records that defect, not a desired rules contract.
+    assert_eq!(shuffles, vec![P0, P0]);
+    assert_eq!(events.iter().filter(|event| matches!(event,
+        GameEvent::EffectResolved { kind: EffectKind::Shuffle, source_id, .. } if *source_id == beacon
+    )).count(), 1);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+}
+
+/// CR 108.3 + CR 400.3: a replacement body's source keeps its owner without
+/// an incarnation stamp. Diabolic Edict avoids indestructible and protection.
+#[test]
+fn darksteel_colossus_replacement_shuffles_owners_library() {
+    assert_edict_replacement_owner(
+        "Darksteel Colossus", 11,
+        "Trample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)\nIndestructible (Damage and effects that say \"destroy\" don't destroy this creature.)\nIf Darksteel Colossus would be put into a graveyard from anywhere, reveal Darksteel Colossus and shuffle it into its owner's library instead.",
+    );
+}
+
+#[test]
+fn progenitus_replacement_shuffles_owners_library() {
+    assert_edict_replacement_owner(
+        "Progenitus", 10,
+        "Protection from everything\nIf Progenitus would be put into a graveyard from anywhere, reveal Progenitus and shuffle it into its owner's library instead.",
+    );
+}
+
+fn assert_edict_replacement_owner(name: &str, size: i32, oracle: &str) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let body = scenario
+        .add_creature_from_oracle(P1, name, size, size, oracle)
+        .controlled_by(P0)
+        .id();
+    let edict = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Diabolic Edict",
+            true,
+            "Target player sacrifices a creature of their choice.",
+        )
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{B}"))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().objects[&body].controller, P0);
+    assert_eq!(runner.state().objects[&body].owner, P1);
+    let events = runner
+        .cast(edict)
+        .target_player(P0)
+        .resolve()
+        .events()
+        .to_vec();
+    assert_eq!(runner.state().objects[&body].zone, Zone::Library);
+    assert!(runner.state().players[1].library.contains(&body));
+    let shuffles: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert!(!shuffles.is_empty(), "replacement shuffle reached");
+    assert!(shuffles.iter().all(|player| *player == P1), "{shuffles:?}");
+    assert!(events.iter().any(|event| matches!(event,
+        GameEvent::EffectResolved { kind: EffectKind::Shuffle, source_id, .. } if *source_id == body
+    )), "explicit replacement Shuffle reached");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
 }

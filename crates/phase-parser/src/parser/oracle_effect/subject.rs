@@ -3232,6 +3232,76 @@ enum AnaphorConsumer {
     Other,
 }
 
+/// CR 115.1 + CR 115.10a: distinguish an announced object from an untargeted possessor.
+pub(super) enum OwnerSubject {
+    Declared {
+        target: TargetFilter,
+        multi_target: Option<MultiTargetSpec>,
+    },
+    Possessive {
+        object: TargetFilter,
+    },
+}
+
+/// CR 108.3 + CR 601.2c: one authority for owner actors and their object declarations.
+pub(super) fn parse_owner_subject(subject: &str, ctx: &mut ParseContext) -> Option<OwnerSubject> {
+    let lower = subject.to_lowercase();
+    let (owner_of, object_text) = if let Some(((), object_text)) =
+        nom_on_lower(subject, &lower, |i| {
+            value((), tag::<_, _, OracleError<'_>>("the owner of ")).parse(i)
+        }) {
+        (true, object_text)
+    } else {
+        let (_, object_text) = all_consuming(terminated(
+            alt((
+                take_until::<_, _, OracleError<'_>>("'s owner"),
+                take_until("\u{2019}s owner"),
+            )),
+            alt((tag("'s owner"), tag("\u{2019}s owner"))),
+        ))
+        .parse(lower.as_str())
+        .ok()?;
+        (false, &subject[..object_text.len()])
+    };
+    let (declared_text, multi_target) = super::strip_optional_target_prefix(object_text);
+    let declared_lower = declared_text.to_lowercase();
+    let declared = peek(super::nom_target::parse_declared_target_prefix)
+        .parse(declared_lower.as_str())
+        .is_ok();
+    if declared {
+        let mut trial = ctx.clone();
+        let (target, remainder) = parse_target_with_ctx(declared_text, &mut trial);
+        if !remainder.trim().is_empty()
+            || super::target_filter_can_target_player(&target)
+            || matches!(target, TargetFilter::Any)
+        {
+            return None;
+        }
+        *ctx = trial;
+        return Some(OwnerSubject::Declared {
+            target,
+            multi_target,
+        });
+    }
+    if owner_of || multi_target.is_some() {
+        return None;
+    }
+    let object_lower = object_text.to_lowercase();
+    let object = if let Ok((_, object)) =
+        all_consuming(super::nom_target::parse_self_reference).parse(object_lower.as_str())
+    {
+        object
+    } else {
+        let (object, remainder) =
+            ctx.with_player_antecedents(|scoped| parse_target_with_ctx(object_text, scoped));
+        if !remainder.trim().is_empty() || matches!(object, TargetFilter::Any) {
+            return None;
+        }
+        object
+    };
+    Some(OwnerSubject::Possessive { object })
+}
+
 pub(super) fn parse_subject_application(
     subject: &str,
     ctx: &mut ParseContext,
@@ -3270,26 +3340,14 @@ fn parse_subject_application_for(
 
     // CR 108.3 + CR 115.1: the owner is the actor, while the printed object
     // (including its optional cardinality) is the only announced target.
-    if let Some(((), object_text)) = nom_on_lower(subject, &lower, |i| {
-        value((), tag::<_, _, OracleError<'_>>("the owner of ")).parse(i)
-    }) {
-        let (object_text, multi_target) = super::strip_optional_target_prefix(object_text);
-        let object_lower = object_text.to_lowercase();
-        tag::<_, _, OracleError<'_>>("target ")
-            .parse(object_lower.as_str())
-            .ok()?;
-        let mut trial = ctx.clone();
-        let (filter, remainder) = parse_target_with_ctx(object_text, &mut trial);
-        if !remainder.trim().is_empty()
-            || super::target_filter_can_target_player(&filter)
-            || matches!(filter, TargetFilter::Any)
-        {
-            return None;
-        }
-        *ctx = trial;
+    if let Some(OwnerSubject::Declared {
+        target,
+        multi_target,
+    }) = parse_owner_subject(subject, ctx)
+    {
         return Some(SubjectApplication {
             affected: TargetFilter::ParentTargetOwner,
-            target: Some(filter),
+            target: Some(target),
             multi_target,
             inherits_parent: false,
             is_optional: false,
