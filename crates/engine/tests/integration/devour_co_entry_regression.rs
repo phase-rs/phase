@@ -599,7 +599,9 @@ fn twilights_call_two_devourers_empty_pool_cannot_offer_each_other() {
     assert_reanimation_settled(&runner);
 }
 
-// CR 608.2c: a producer without an iteration tail leaves no transient anchor.
+// CR 702.82a + CR 608.2c: two simultaneously reanimated devourers share one
+// fodder; the pool and prompt-order assertions below witness the producer's
+// continuation order.
 #[test]
 fn rise_two_devourers_one_fodder() {
     let mut scenario = GameScenario::new();

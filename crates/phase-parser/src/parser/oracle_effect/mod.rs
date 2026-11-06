@@ -15894,11 +15894,15 @@ fn player_filter_reads_chain_local_result(filter: &PlayerFilter) -> bool {
     }
 }
 
-/// Parse "owner puts it on their choice of the top or bottom of their library".
+/// Parse "<owner> puts it on their choice of the top or bottom of their library".
 ///
-/// Two Oracle patterns:
-/// - "Target creature's owner puts it on their choice of the top or bottom of their library"
-/// - "The owner of target nonland permanent puts it on their choice of the top or bottom of their library"
+/// Pattern 0 is the anaphoric "its owner puts it ..." continuation. Every other
+/// spelling takes its subject from `subject::parse_owner_subject`, the single
+/// owner-subject authority:
+/// - declared: "The owner of [up to one] [other] target nonland permanent puts it ..."
+///   and "Target creature's owner puts it ..." (the declaration keeps its cardinality);
+/// - possessive: "That creature's owner puts it ..." (an anaphoric object that
+///   declares no new target, CR 115.10a).
 fn try_parse_put_on_top_or_bottom(
     tp: TextPair,
     ctx: &mut ParseContext,
@@ -16101,9 +16105,14 @@ fn parse_blight_with_player(tp: TextPair) -> Option<(TargetFilter, u32, String)>
 
 /// CR 701.24a + CR 400.3: Parse "the owner of target [filter] shuffles it into their library".
 ///
-/// Handles both subject forms:
-/// - "The owner of target permanent shuffles it into their library" (Chaos Warp)
-/// - "Target permanent's owner shuffles it into their library"
+/// The subject comes from `subject::parse_owner_subject` and the predicate is an
+/// all-consuming grammar; the accepted shapes are:
+/// - declared owner: "The owner of target permanent shuffles it into their library"
+///   (Chaos Warp) and "Target permanent's owner shuffles it ...";
+/// - possessive object: "<object>'s owner shuffles it ..." (Weeping Angel);
+/// - the source's own owner, by pronoun or by name: "~'s owner shuffles it / ~ into
+///   their library" (Etrata, Fblthp), optionally followed by "and <player action>"
+///   (Gandalf's "and draws three cards") bound to the same owner.
 ///
 /// Preserves the target declaration before a bound owner-population move and terminal shuffle.
 fn try_parse_owner_of_target_shuffle(
