@@ -602,6 +602,300 @@ fn fifo_selection_accepted_reports_returned_and_discarded_ids() {
     );
 }
 
+/// The pass and round-outcome deltas among `events`, in order.
+fn pass_and_round_deltas(events: &[DraftDelta]) -> Vec<DraftDelta> {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                DraftDelta::PackPassed
+                    | DraftDelta::PackExhausted { .. }
+                    | DraftDelta::TransitionedTo { .. }
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn fifo_selection_that_passes_its_remainder_reports_pack_passed() {
+    let mut session = fixture(DraftKind::Premier, 6, 0, 0, 0, None);
+    let prompt_id = prompt(&session, 0);
+    let action = select(&session, 0, ids(0, &["z"]), vec![], vec![]);
+    let events = apply_at(&mut session, action, None, 1100).unwrap();
+    // Reach: the remainder joined the next seat's queue, behind its own pack.
+    let queue = &session.fifo.as_ref().unwrap().seats[1].queue;
+    assert_eq!(queue.len(), 2);
+    assert_eq!(queue.back().unwrap().pack_id, DraftPackId(0));
+    assert_eq!(
+        card_ids(&queue.back().unwrap().pack.0),
+        ids(0, &["a", "y", "b", "x", "c"])
+    );
+    assert_eq!(pass_and_round_deltas(&events), vec![DraftDelta::PackPassed]);
+    assert_eq!(
+        events,
+        vec![
+            DraftDelta::CardPicked {
+                seat: 0,
+                card_instance_id: "s0-r0-z".into(),
+            },
+            DraftDelta::PackPassed,
+            expected(prompt_id, ids(0, &["z"]), vec![], vec![], vec![]),
+        ]
+    );
+
+    // The picks take every card of the head, and the returned draft-effect
+    // card is the remainder that moves on.
+    let mut session = fixture(DraftKind::Premier, 3, 0, 0, 0, Some(1));
+    choose(&mut session, 1, 1100);
+    choose(&mut session, 0, 1100);
+    assert_eq!(
+        card_ids(&session.head_pack(1).unwrap().0),
+        ids(0, &["a", "y"])
+    );
+    let prompt_id = prompt(&session, 1);
+    let action = select(
+        &session,
+        1,
+        ids(0, &["a", "y"]),
+        vec![],
+        vec!["s1-r0-z".into()],
+    );
+    let events = apply_at(&mut session, action, None, 1100).unwrap();
+    // Reach: the returned card is the pack the next seat now holds last.
+    let queue = &session.fifo.as_ref().unwrap().seats[2].queue;
+    assert_eq!(queue.back().unwrap().pack_id, DraftPackId(0));
+    assert_eq!(card_ids(&queue.back().unwrap().pack.0), vec!["s1-r0-z"]);
+    assert_eq!(pass_and_round_deltas(&events), vec![DraftDelta::PackPassed]);
+    assert_eq!(
+        events,
+        vec![
+            DraftDelta::CardPicked {
+                seat: 1,
+                card_instance_id: "s0-r0-a".into(),
+            },
+            DraftDelta::CardPicked {
+                seat: 1,
+                card_instance_id: "s0-r0-y".into(),
+            },
+            DraftDelta::PackPassed,
+            expected(
+                prompt_id,
+                ids(0, &["a", "y"]),
+                vec![],
+                vec!["s1-r0-z".into()],
+                vec![]
+            ),
+        ]
+    );
+}
+
+#[test]
+fn fifo_selection_that_empties_its_head_reports_no_pack_passed() {
+    // The last card of a pack passed on by the previous seat.
+    let mut session = fixture(DraftKind::Premier, 2, 0, 0, 0, None);
+    choose(&mut session, 0, 1100);
+    choose(&mut session, 1, 1100);
+    assert_eq!(card_ids(&session.head_pack(1).unwrap().0), ids(0, &["a"]));
+    let prompt_id = prompt(&session, 1);
+    let action = select(&session, 1, ids(0, &["a"]), vec![], vec![]);
+    let events = apply_at(&mut session, action, None, 1100).unwrap();
+    // Reach: the selection was accepted, its head is gone, and the round goes
+    // on while the next seat still holds two packs.
+    assert_eq!(
+        accepted(&events),
+        vec![expected(
+            prompt_id.clone(),
+            ids(0, &["a"]),
+            vec![],
+            vec![],
+            vec![]
+        )]
+    );
+    assert!(session.head_pack(1).is_none());
+    assert_eq!(session.status, Drafting);
+    assert_eq!(session.current_pack_number, 0);
+    assert_eq!(session.fifo.as_ref().unwrap().seats[2].queue.len(), 2);
+    assert_eq!(pass_and_round_deltas(&events), Vec::<DraftDelta>::new());
+    assert_eq!(
+        events,
+        vec![
+            DraftDelta::CardPicked {
+                seat: 1,
+                card_instance_id: "s0-r0-a".into(),
+            },
+            expected(prompt_id, ids(0, &["a"]), vec![], vec![], vec![]),
+        ]
+    );
+
+    // A pick and a burn that take the whole head.
+    let mut session = fixture(DraftKind::Premier, 2, 1, 0, 0, None);
+    let prompt_id = prompt(&session, 0);
+    let action = select(&session, 0, ids(0, &["z"]), ids(0, &["a"]), vec![]);
+    let events = apply_at(&mut session, action, None, 1100).unwrap();
+    assert_eq!(
+        accepted(&events),
+        vec![expected(
+            prompt_id.clone(),
+            ids(0, &["z"]),
+            ids(0, &["a"]),
+            vec![],
+            vec![]
+        )]
+    );
+    assert!(session.head_pack(0).is_none());
+    assert_eq!(session.status, Drafting);
+    assert_eq!(session.fifo.as_ref().unwrap().seats[1].queue.len(), 1);
+    assert_eq!(pass_and_round_deltas(&events), Vec::<DraftDelta>::new());
+    assert_eq!(
+        events,
+        vec![
+            DraftDelta::CardPicked {
+                seat: 0,
+                card_instance_id: "s0-r0-z".into(),
+            },
+            expected(prompt_id, ids(0, &["z"]), ids(0, &["a"]), vec![], vec![]),
+        ]
+    );
+}
+
+#[test]
+fn fifo_selection_that_discards_its_remainder_reports_no_pack_passed() {
+    let mut session = fixture(DraftKind::Premier, 4, 0, 3, 0, None);
+    let prompt_id = prompt(&session, 0);
+    let action = select(&session, 0, ids(0, &["z"]), vec![], vec![]);
+    let events = apply_at(&mut session, action, None, 1100).unwrap();
+    // Reach: the three remaining cards were discarded at the threshold, and
+    // the next seat still holds only its own pack.
+    let discarded = ids(0, &["a", "y", "b"]);
+    assert_eq!(
+        accepted(&events),
+        vec![expected(
+            prompt_id.clone(),
+            ids(0, &["z"]),
+            vec![],
+            vec![],
+            discarded.clone()
+        )]
+    );
+    assert!(session.head_pack(0).is_none());
+    assert_eq!(session.status, Drafting);
+    assert_eq!(session.current_pack_number, 0);
+    let queue = &session.fifo.as_ref().unwrap().seats[1].queue;
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.front().unwrap().pack_id, DraftPackId(1));
+    assert_eq!(pass_and_round_deltas(&events), Vec::<DraftDelta>::new());
+    assert_eq!(
+        events,
+        vec![
+            DraftDelta::CardPicked {
+                seat: 0,
+                card_instance_id: "s0-r0-z".into(),
+            },
+            expected(prompt_id, ids(0, &["z"]), vec![], vec![], discarded),
+        ]
+    );
+}
+
+#[test]
+fn fifo_expiry_that_empties_its_head_reports_no_pack_passed() {
+    let mut session = fixture(DraftKind::Premier, 2, 0, 0, 0, None);
+    // Seat 3's remainder becomes seat 0's only pack at 1200, so seat 0's
+    // prompt falls due at 2200. Seats 1 and 2 move on at 1300, so their next
+    // prompts fall due at 2300.
+    choose(&mut session, 0, 1100);
+    choose(&mut session, 3, 1200);
+    choose(&mut session, 1, 1300);
+    choose(&mut session, 2, 1300);
+    assert_eq!(card_ids(&session.head_pack(0).unwrap().0), ids(3, &["a"]));
+    let expiring = prompt(&session, 0);
+    let events = apply_at(&mut session, DraftAction::AdvanceClock, None, 2200).unwrap();
+    // Reach: only seat 0's expiry selection ran and it took the head's last
+    // card; the round goes on with every other seat holding a pack.
+    assert_eq!(
+        accepted(&events),
+        vec![expected(
+            expiring.clone(),
+            ids(3, &["a"]),
+            vec![],
+            vec![],
+            vec![]
+        )]
+    );
+    assert!(session.head_pack(0).is_none());
+    assert_eq!(session.status, Drafting);
+    assert_eq!(session.current_pack_number, 0);
+    assert!((1..4).all(|seat| session.head_pack(seat).is_some()));
+    assert_eq!(pass_and_round_deltas(&events), Vec::<DraftDelta>::new());
+    assert_eq!(
+        events,
+        vec![
+            DraftDelta::CardPicked {
+                seat: 0,
+                card_instance_id: "s3-r0-a".into(),
+            },
+            expected(expiring, ids(3, &["a"]), vec![], vec![], vec![]),
+        ]
+    );
+}
+
+#[test]
+fn fifo_round_ending_selection_keeps_its_round_outcome() {
+    // One card per pack: the fourth selection of a round empties the last
+    // queue, so it ends the round.
+    for (review, outcome) in [
+        (0, DraftDelta::PackExhausted { new_pack_number: 1 }),
+        (1000, DraftDelta::TransitionedTo { status: Review }),
+    ] {
+        let mut session = fixture(DraftKind::Premier, 1, 0, 0, review, None);
+        for seat in 0..3 {
+            choose(&mut session, seat, 1100);
+        }
+        assert_eq!(session.status, Drafting);
+        assert_eq!(session.current_pack_number, 0);
+        let prompt_id = prompt(&session, 3);
+        let events = choose(&mut session, 3, 1100);
+        assert_eq!(pass_and_round_deltas(&events), vec![outcome.clone()]);
+        assert_eq!(
+            events,
+            vec![
+                DraftDelta::CardPicked {
+                    seat: 3,
+                    card_instance_id: "s3-r0-z".into(),
+                },
+                outcome,
+                expected(prompt_id, ids(3, &["z"]), vec![], vec![], vec![]),
+            ]
+        );
+    }
+
+    // The last round's last selection moves the draft to deckbuilding.
+    let mut session = fixture(DraftKind::Premier, 1, 0, 0, 0, None);
+    drain_round(&mut session, 1100);
+    for seat in 0..3 {
+        choose(&mut session, seat, 1100);
+    }
+    let prompt_id = prompt(&session, 3);
+    let events = choose(&mut session, 3, 1100);
+    assert_eq!(session.status, Deckbuilding);
+    let outcome = DraftDelta::TransitionedTo {
+        status: Deckbuilding,
+    };
+    assert_eq!(pass_and_round_deltas(&events), vec![outcome.clone()]);
+    assert_eq!(
+        events,
+        vec![
+            DraftDelta::CardPicked {
+                seat: 3,
+                card_instance_id: "s3-r1-z".into(),
+            },
+            outcome,
+            expected(prompt_id, vec!["s3-r1-z".into()], vec![], vec![], vec![]),
+        ]
+    );
+}
+
 #[test]
 fn fifo_selection_is_atomic_and_exact() {
     for kind in [DraftKind::Premier, DraftKind::CommanderDraft] {
@@ -2093,6 +2387,7 @@ fn fifo_snapshots_continue_through_review_and_tournament() {
                 seat,
                 main_deck: vec!["Forest".into(); 40],
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
             2700,
@@ -2838,6 +3133,7 @@ fn legacy_upgrade_preserves_retained_clocks_and_known_missing_fields() {
                 seat,
                 main_deck: vec!["Forest".into(); 40],
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -3405,7 +3701,8 @@ fn legacy_draft_wire_shapes_remain_unchanged() {
         serde_json::to_string(&DraftAction::SubmitDeck {
             seat: 1,
             main_deck: vec!["Forest".into()],
-            commanders: Vec::new()
+            commanders: Vec::new(),
+            printings: Vec::new()
         })
         .unwrap(),
         r#"{"type":"SubmitDeck","data":{"seat":1,"main_deck":["Forest"],"commanders":[]}}"#
@@ -4404,6 +4701,7 @@ fn fifo_only_actions_are_classified_once() {
                 seat: 0,
                 main_deck: vec![],
                 commanders: vec![],
+                printings: Vec::new(),
             },
             false,
         ),
@@ -5766,5 +6064,84 @@ fn fifo_own_admission_checks_keep_their_order() {
         upgrade_legacy_snapshot(&sealed, migration_context()),
         Ok(sealed.clone()),
         "a legacy Sealed session is returned before the upgrade's FIFO check"
+    );
+}
+
+fn shared_fifo_legacy_admission() -> serde_json::Value {
+    serde_json::from_str(include_str!(
+        "../../../fixtures/draft-contract/fifo_legacy_admission.json"
+    ))
+    .unwrap()
+}
+
+/// Each field the client's legacy view check or the guest decoder's seat bound
+/// reads, with its presence and value.
+fn view_verdict_fields(view: &serde_json::Value) -> Vec<(String, Option<serde_json::Value>)> {
+    let seats = view["seats"]
+        .as_array()
+        .expect("a player view publishes its seats");
+    let mut fields = vec![
+        ("flow".to_string(), view.get("flow").cloned()),
+        ("status".to_string(), view.get("status").cloned()),
+        (
+            "fifo present".to_string(),
+            Some(serde_json::Value::Bool(view.get("fifo").is_some())),
+        ),
+        (
+            "seat count".to_string(),
+            Some(serde_json::Value::from(seats.len())),
+        ),
+    ];
+    fields.extend(seats.iter().enumerate().map(|(index, seat)| {
+        (
+            format!("seats[{index}].active_pack_count"),
+            seat.get("active_pack_count").cloned(),
+        )
+    }));
+    fields
+}
+
+/// A selection passes its remainder, so that seat 1 holds its own pack and the
+/// passed one.
+fn queued_fifo_session() -> DraftSession {
+    let mut session = fixture(DraftKind::Premier, 2, 0, 0, 0, None);
+    let action = select(&session, 0, ids(0, &["z"]), vec![], vec![]);
+    apply_at(&mut session, action, None, 1100).unwrap();
+    assert_eq!(session.fifo.as_ref().unwrap().seats[1].queue.len(), 2);
+    session
+}
+
+#[test]
+fn shared_fixture_views_carry_the_engine_projection_fields() {
+    let shared = shared_fifo_legacy_admission();
+    let queued = queued_fifo_session();
+    // Every seat drafts its one-card pack, and the Review delay opens Review.
+    let mut review = fixture(DraftKind::Premier, 1, 0, 0, 1000, None);
+    for seat in 0..4 {
+        choose(&mut review, seat, 1100);
+    }
+    assert_eq!(review.status, Review);
+    let queued_view = serde_json::to_value(filter_for_player(&queued, 2)).unwrap();
+    let review_view = serde_json::to_value(filter_for_player(&review, 2)).unwrap();
+    assert!(queued_view["seats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|seat| seat["active_pack_count"]
+            .as_u64()
+            .is_some_and(|count| count >= 2)));
+    assert_eq!(review_view["status"], "Review");
+    assert!(review_view["seats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|seat| seat["active_pack_count"].as_u64() == Some(0)));
+    assert_eq!(
+        view_verdict_fields(&shared["queued_view"]),
+        view_verdict_fields(&queued_view)
+    );
+    assert_eq!(
+        view_verdict_fields(&shared["review_view"]),
+        view_verdict_fields(&review_view)
     );
 }

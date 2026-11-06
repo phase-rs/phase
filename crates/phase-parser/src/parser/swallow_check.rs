@@ -31,6 +31,7 @@ use super::oracle_ir::feature::{
 };
 use super::oracle_nom::error::OracleError;
 use super::oracle_nom::primitives::{scan_contains, scan_preceded, split_sentence_units};
+use super::oracle_nom::quantity::parse_using_mana_produced_by_head;
 use super::oracle_target::{
     parse_block_pairing_clause, parse_source_blocked_history_clause, BlockPairingForm,
     CombatRelationSubjectWord,
@@ -38,15 +39,15 @@ use super::oracle_target::{
 use super::oracle_trigger::parse_distributed_x_cost_condition;
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission,
-    ChooseFromZoneConstraint, CoinFlipRun, CombatHistoryScope, CombatRelation,
-    CombatRelationSubject, Comparator, ContinuousModification, CopyRetargetPermission,
-    DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, ManaProduction,
-    ModalSelectionConstraint, OpponentMayScope, ParsedCondition, PerPlayerScope, PlayerFilter,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    RestrictionExpiry, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayScaling,
-    ZoneOwner,
+    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastManaObjectScope,
+    CastManaSpentMetric, CastingPermission, ChooseFromZoneConstraint, CoinFlipRun,
+    CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator, ContinuousModification,
+    CopyRetargetPermission, DamageModification, DelayedTriggerCondition, Duration, Effect,
+    FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope, ParsedCondition,
+    PerPlayerScope, PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, RestrictionExpiry, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, UnlessPayScaling, ZoneOwner,
 };
 use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
@@ -230,6 +231,7 @@ pub(crate) fn check_swallowed_clauses(
         detect_duration_this_turn(&cleaned, fragment, &evidence, &mut found);
         detect_combat_history_relation(&cleaned, fragment, &evidence, &mut found);
         detect_combat_pairing_relation(&cleaned, fragment, &evidence, &mut found);
+        detect_cast_mana_source_qualifier(&cleaned, fragment, &evidence, &mut found);
         detect_duration_next_turn(&cleaned, fragment, &evidence, &mut found);
         detect_optional_may_have(&cleaned, fragment, &evidence, &mut found);
         detect_apnap(&cleaned, fragment, &scoped, &mut found);
@@ -295,14 +297,24 @@ fn detect_replacement(
     evidence: &UnitEvidence,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
+    // CR 106.6a + CR 614.1c: remove only the represented mana-spend rider's own
+    // sentence before raising the replacement expectation. This replaces the
+    // earlier whole-unit `EntersWithCounters` exemption: `UnitEvidence` proves the
+    // carrier exists but not which sentence produced it, so a unit that also
+    // prints an unrelated replacement marker (an orphaned "Activate only if …"
+    // line is enough — audit units own every line up to the next item's start)
+    // must keep reporting it.
+    let without_mana_rider = strip_represented_mana_entry_counter_rider(cleaned, evidence);
+    let marker_text: &str = without_mana_rider.as_deref().unwrap_or(cleaned);
+
     // CR 614.1b: "skip" — scoped to the verb form, so "skipped" / a card NAMED
     // "Skip" cannot raise the expectation.
     // allow-noncombinator: swallow detector marker scan on classified text
-    let has_skip = cleaned.contains("skip your ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("skip their ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("skip the next ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("skips their ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("skips his or her "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_skip = marker_text.contains("skip your ") // allow-noncombinator: swallow detector marker scan on classified text
+        || marker_text.contains("skip their ") // allow-noncombinator: swallow detector marker scan on classified text
+        || marker_text.contains("skip the next ") // allow-noncombinator: swallow detector marker scan on classified text
+        || marker_text.contains("skips their ") // allow-noncombinator: swallow detector marker scan on classified text
+        || marker_text.contains("skips his or her "); // allow-noncombinator: swallow detector marker scan on classified text
 
     // CR 614.1c: the three explicit enters-replacement templates. "as ~ enters" is
     // matched per LINE (a line whose first word is "as" and which mentions entering),
@@ -315,14 +327,14 @@ fn detect_replacement(
     // REPLACEMENT reading raises a CR 614 expectation, so the trigger reading is excluded
     // per line: when the phrase sits inside the trigger's condition clause (ahead of the
     // comma that closes it) on a line that opens with "when"/"whenever", it is a filter.
-    let has_enters_with = cleaned
+    let has_enters_with = marker_text
         .lines()
         // allow-noncombinator: swallow detector marker scan on classified text
         .filter(|line| line.contains("enters with "))
         .any(|line| !enters_with_is_trigger_filter(line)); // allow-noncombinator: swallow detector marker scan on classified text
                                                            // allow-noncombinator: swallow detector marker scan on classified text
-    let has_enters_as = cleaned.contains(" enters as "); // allow-noncombinator: swallow detector marker scan on classified text
-    let has_as_enters = cleaned.lines().any(|line| {
+    let has_enters_as = marker_text.contains(" enters as "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_as_enters = marker_text.lines().any(|line| {
         let l = line.trim_start();
         // allow-noncombinator: swallow detector marker scan on classified text
         l.starts_with("as ") && l.contains(" enters")
@@ -520,6 +532,98 @@ fn enters_with_counter_carrier_is_only_enters_with_marker(
         // allow-noncombinator: swallow detector marker scan on classified text
         !sentence.contains("enters with ") || enters_with_is_trigger_filter(sentence)
     })
+}
+
+/// CR 106.6a + CR 614.1c: a mana unit's "that creature enters with an additional
+/// counter on it" rider is the replacement itself, carried on the produced mana
+/// as `ManaSpellGrant::EntersWithCounters` and registered when that mana is
+/// spent (Biophagus, Animal Attendant, Guildmages' Forum, Opal Palace).
+///
+/// Typed evidence only proves the unit CONTAINS such a carrier; it carries no
+/// sentence-level provenance. When exactly one sentence is the grant's own
+/// mana-spend clause, evidence and syntax necessarily agree on which sentence
+/// produced the carrier, so removing exactly that one is sound (`Some`). When
+/// two or more sentences match the rider's shape, removing them all could
+/// swallow an unrelated rider, so `None` is returned and nothing is removed —
+/// the caller's residual scan then keeps reporting, which is the honest
+/// direction. Mirrors `enters_with_counter_rider_residual_sentences` and
+/// `alt_cost_rider_residual_sentences`.
+fn mana_entry_counter_grant_residual_sentences(cleaned: &str) -> Option<Vec<&str>> {
+    let sentences = crate::parser::oracle_nom::primitives::split_sentence_units(cleaned);
+    let is_mana_spend_rider = |sentence: &str| {
+        crate::parser::oracle_effect::mana::parse_conditional_enters_with_counters_grant(
+            sentence.trim_start(),
+        )
+        .is_some()
+    };
+    let matching_rider_count = sentences
+        .iter()
+        .filter(|sentence| is_mana_spend_rider(sentence))
+        .count();
+    if matching_rider_count != 1 {
+        return None;
+    }
+    Some(
+        sentences
+            .into_iter()
+            .filter(|sentence| !is_mana_spend_rider(sentence))
+            .collect(),
+    )
+}
+
+/// CR 106.6a + CR 614.1c: true when the unit contains the `EntersWithCounters`
+/// mana rider at all. Presence alone is NOT sufficient to suppress a finding —
+/// the detectors below always pair it with the sentence-scoped residual from
+/// `mana_entry_counter_grant_residual_sentences`.
+fn mana_entry_counter_grant_is_present(evidence: &UnitEvidence) -> bool {
+    evidence.any_effect(|e| {
+        matches!(
+            e,
+            Effect::Mana { grants, .. }
+                if grants
+                    .iter()
+                    .any(|grant| matches!(grant, ManaSpellGrant::EntersWithCounters { .. }))
+        )
+    })
+}
+
+/// CR 106.6a + CR 614.1c: the unit's text with the represented mana-spend
+/// rider's own sentence removed, or `None` when the unit has no such carrier
+/// (or removal would be unsound — see
+/// `mana_entry_counter_grant_residual_sentences`).
+fn strip_represented_mana_entry_counter_rider(
+    cleaned: &str,
+    evidence: &UnitEvidence,
+) -> Option<String> {
+    if !mana_entry_counter_grant_is_present(evidence) {
+        return None;
+    }
+    // Sentence units keep their terminating periods; rejoin per LINE so the
+    // line-scoped marker scans below (`enters_with_is_trigger_filter`) still see
+    // one physical clause per line.
+    Some(
+        mana_entry_counter_grant_residual_sentences(cleaned)?
+            .join("\n")
+            .trim()
+            .to_string(),
+    )
+}
+
+/// CR 106.6 + CR 608.2c: true when the unit's remaining conditional text is
+/// accounted for by the mana unit's own "if this/that mana is spent …" clause.
+/// Sentence-scoped on purpose: an audit unit can absorb several physical lines,
+/// so an unrelated conditional that shares the unit (an orphaned "Activate only
+/// if …" line, for instance — the parser skips those without an IR item) must
+/// still produce its own `Condition_If` finding.
+fn mana_entry_counter_grant_is_only_if_marker(stripped: &str, evidence: &UnitEvidence) -> bool {
+    let Some(residual) = strip_represented_mana_entry_counter_rider(stripped, evidence) else {
+        return false;
+    };
+    // allow-noncombinator: swallow detector marker scan on classified text
+    let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !has_other_if
 }
 
 /// CR 701.6a + CR 614.1a: true when this def tree carries a typed
@@ -1981,6 +2085,13 @@ fn def_tree_has_conditional_mana_spell_grant(def: &AbilityDefinition) -> bool {
     {
         return true;
     }
+    // CR 106.6: "If that mana is spent on [a filter] spell, it gains <keyword>"
+    // is the spend event gating a keyword grant carried on the mana unit itself —
+    // represented by the grant's restriction/filter, not a swallowed condition.
+    // The sibling `EntersWithCounters` rider (CR 106.6a + CR 614.1c) is NOT
+    // exempted unit-wide here: see `mana_entry_counter_grant_is_only_if_marker`,
+    // which removes only that rider's own sentence so an unrelated conditional
+    // sharing the audit unit is still detected.
     if let Effect::Mana { grants, .. } = &*def.effect {
         if grants.iter().any(|grant| {
             matches!(
@@ -3359,6 +3470,28 @@ fn detect_dynamic_qty(
     // Meteor) realizes its iteration as a per-opponent `ChooseFromZone`
     // population; one choice discharges one raised "for each " occurrence.
     if per_opponent_choices_cover_all_for_each_markers(cleaned, &markers, scoped) {
+        return;
+    }
+    // CR 406.3a + CR 611.2a: "For each card exiled this way, the player who
+    // exiled it may play it" (Vulcan Mind-Meld) distributes one grant per
+    // exiled card; its carrier is the per-object `PermissionGrantee::ObjectExiler`
+    // binding, not a `QuantityExpr`.
+    if markers == ["for each "]
+        && cleaned
+            .match_indices("for each ") // allow-noncombinator: swallow detector marker scan on classified text
+            .all(|(idx, _)| {
+                crate::parser::oracle_effect::is_object_exiler_play_grant(&cleaned[idx..])
+            })
+        && evidence.any_effect(|e| {
+            matches!(
+                e,
+                Effect::GrantCastingPermission {
+                    grantee: crate::types::ability::PermissionGrantee::ObjectExiler,
+                    ..
+                }
+            )
+        })
+    {
         return;
     }
     // CR 608.2c: each printed "For each <population>," is represented by its own
@@ -4793,6 +4926,15 @@ fn detect_condition_if(
     if enters_with_finality_this_way_is_only_if_marker(&stripped, evidence) {
         return;
     }
+    // CR 106.6 + CR 608.2c: the leading "If this/that mana is spent …" of an
+    // entry-counter mana rider is the spend event the `EntersWithCounters`
+    // grant's filter represents. Sentence-scoped, not unit-scoped: a conditional
+    // that shares the audit unit but that the grant does not represent (for
+    // example an orphaned "Activate only if …" line) still produces its own
+    // finding — see `mana_entry_counter_grant_is_only_if_marker`.
+    if mana_entry_counter_grant_is_only_if_marker(&stripped, evidence) {
+        return;
+    }
     // CR 608.2c + CR 611.2a: "If you cast a [quality] spell this way, it gains …"
     // — represented by the typed `AddPendingEntersModifications` carrier
     // (Strago and Relm). Scopes the carrier to a `CastFromZone` parent's
@@ -5004,6 +5146,11 @@ fn detect_condition_if(
     {
         return;
     }
+    // CR 106.6a: when this unit carries the `EntersWithCounters` mana rider, the
+    // rider's own clause is represented, so report the gap from the RESIDUAL text —
+    // otherwise the finding names the clause this detector just decided is
+    // represented instead of the one that actually survived.
+    let gap_residual = strip_represented_mana_entry_counter_rider(&stripped, evidence);
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::ConditionIf.detector_label(),
         truncate(original, 140),
@@ -5011,7 +5158,10 @@ fn detect_condition_if(
         // CR-implicit "if" sentences, the represented replacement-antecedent sentences and the
         // represented tiered counter pairs removed. Reporting from `cleaned` here would name a
         // guard this detector has already decided is represented.
-        swallowed_clause_gap(SwallowedAxis::Guard(GuardWord::If), &stripped),
+        swallowed_clause_gap(
+            SwallowedAxis::Guard(GuardWord::If),
+            gap_residual.as_deref().unwrap_or(&stripped),
+        ),
     ));
 }
 
@@ -5601,6 +5751,7 @@ fn detect_duration_this_turn(
                 | QuantityRef::EnteredThisTurn { .. }
                 | QuantityRef::SacrificedThisTurn { .. }
                 | QuantityRef::CrimesCommittedThisTurn
+                | QuantityRef::EnergyPaidOrLostThisTurn
                 | QuantityRef::BendTypesThisTurn
                 | QuantityRef::LifeGainedThisTurn { .. }
                 | QuantityRef::CardsDrawnThisTurn { .. }
@@ -6401,6 +6552,41 @@ fn detect_combat_pairing_relation(
     }
 }
 
+// ── Detector S: CastManaSourceQualifier ─────────────────────────────────
+
+/// CR 106.3 + CR 601.2h: "whenever you cast <spell> using mana produced by <source>"
+/// restricts the trigger event to spells paid for with that source's mana. The clause
+/// must surface as a `FromSource` read of the triggering spell's payment; otherwise the
+/// trigger fires on every matching spell. The audit reads un-normalized text, so only
+/// the name-independent head is scanned: `cleaned` holds the card's name, never `~`.
+/// CR 201.5: the source named is the card itself, so only a `SelfRef` source filter
+/// represents the clause; a `FromSource` read of some other source does not.
+fn detect_cast_mana_source_qualifier(
+    cleaned: &str,
+    original: &str,
+    evidence: &UnitEvidence,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
+    let represented = evidence.any_quantity_ref(|qty| {
+        matches!(
+            qty,
+            QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::TriggeringSpell,
+                metric: CastManaSpentMetric::FromSource {
+                    source_filter: TargetFilter::SelfRef,
+                },
+            }
+        )
+    });
+    if !represented && scan_preceded(cleaned, parse_using_mana_produced_by_head).is_some() {
+        diagnostics.push(OracleDiagnostic::swallowed_clause(
+            OracleSemanticFeature::CastManaSourceQualifier.detector_label(),
+            truncate(original, 140),
+            None,
+        ));
+    }
+}
+
 /// The `CombatRelationSubject` a pairing clause's subject denotes when it is
 /// represented: the source for "it" / "~" / "this creature", the parent
 /// target for "target creature".
@@ -6581,12 +6767,13 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode,
-        CardSelectionMode, CastFromZoneDriver, ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
-        Comparator, ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
-        EffectOutcomeSignal, FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition,
-        PlayerFilter, QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
-        StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, UnlessPayModifier,
-        ZoneChoiceCandidateSource, ZoneOwner,
+        CardSelectionMode, CastFromZoneDriver, CastManaObjectScope, CastManaSpentMetric,
+        ChooseFromZoneConstraint, ChooseOneOfKind, Chooser, Comparator, ContinuousModification,
+        CopyRetargetPermission, DamageModification, Effect, EffectOutcomeSignal, FilterProp,
+        ManaProduction, OutsideGameSourcePool, ParsedCondition, PlayerFilter, QuantityExpr,
+        QuantityRef, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+        TargetFilter, TriggerCondition, TypedFilter, UnlessPayModifier, ZoneChoiceCandidateSource,
+        ZoneOwner,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -6994,11 +7181,12 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     }
 
     /// The ten detector labels that pass `None` and are measured present in the phase-base
-    /// corpus. `ActivateLimit`, `ModalDynamicMaxDropped` and `CombatHistoryRelation` are
-    /// deliberately absent: none has a corpus warning (`CombatHistoryRelation`'s clause is
-    /// printed on exactly two cards, both represented since #9179), so no corpus fixture
-    /// can reach them. They are bought by the compiler instead — the constructor's new
-    /// parameter makes omission a compile error.
+    /// corpus. `ActivateLimit`, `ModalDynamicMaxDropped`, `CombatHistoryRelation` and
+    /// `CastManaSourceQualifier` are deliberately absent: none has a corpus warning
+    /// (`CombatHistoryRelation`'s clause is printed on exactly two cards, both represented
+    /// since #9179; `CastManaSourceQualifier`'s on exactly three, all represented), so no
+    /// corpus fixture can reach them. They are bought by the compiler instead — the
+    /// constructor's new parameter makes omission a compile error.
     ///
     /// "Non-phrase" here means "no gap axis wired at the push site", NOT "no phrase is
     /// nameable". `Replacement` is in this set and its axis names phrases perfectly well —
@@ -8954,6 +9142,46 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         );
     }
 
+    /// CR 406.3a: Vulcan Mind-Meld's "For each card exiled this way, the player
+    /// who exiled it may play it" is carried by the per-object `ObjectExiler`
+    /// grant. Reach-guard: that grant must be present (not `Unimplemented`)
+    /// before the negative; revert-to-red: dropping the exiler suppression
+    /// reintroduces the warning while the guard holds.
+    #[test]
+    fn vulcan_mind_meld_exiler_grant_does_not_flag_dynamic_qty() {
+        let parsed = parse_named(
+            "Target opponent looks at the top card of your library, then exiles it face down. \
+             You look at the top two cards of their library, then exile them face down. For \
+             each card exiled this way, the player who exiled it may play it for as long as it \
+             remains exiled. Mana of any type can be spent to cast spells this way.",
+            "Vulcan Mind-Meld",
+            &["Sorcery"],
+        );
+        let mut effects = Vec::new();
+        let mut node = parsed.abilities.first();
+        while let Some(def) = node {
+            effects.push(def.effect.as_ref());
+            node = def.sub_ability.as_deref();
+        }
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::GrantCastingPermission {
+                    grantee: crate::types::ability::PermissionGrantee::ObjectExiler,
+                    ..
+                }
+            )) && !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Unimplemented { .. })),
+            "premise: the exiler grant parses: {effects:?}"
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "DynamicQty"),
+            "{:?}",
+            parsed.parse_warnings
+        );
+    }
+
     #[test]
     fn modal_bullet_lines_are_audited_not_orphaned() {
         let parsed = parse_named(
@@ -10653,6 +10881,136 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 parsed.parse_warnings
             );
         }
+    }
+
+    /// CR 106.6 + CR 614.1c: the leading "If this/that mana is spent …" of an
+    /// entry-counter mana rider is the spend event the `EntersWithCounters`
+    /// grant's filter represents, and its "enters with" is the replacement the
+    /// grant carries — neither is a swallowed `Condition_If` / `Replacement`
+    /// (Biophagus, Animal Attendant, Guildmages' Forum, Opal Palace — verbatim
+    /// Oracle text).
+    #[test]
+    fn mana_entry_counter_grant_if_is_evidence() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "Genomic Enhancement — {T}: Add one mana of any color. If this mana is spent \
+                 to cast a creature spell, that creature enters with an additional +1/+1 \
+                 counter on it.",
+                "Biophagus",
+                &["Creature"],
+            ),
+            (
+                "{T}: Add one mana of any color. If that mana is spent to cast a non-Human \
+                 creature spell, that creature enters with an additional +1/+1 counter on it.",
+                "Animal Attendant",
+                &["Creature"],
+            ),
+            (
+                "{T}: Add {C}.\n{1}, {T}: Add one mana of any color. If that mana is spent on \
+                 a multicolored creature spell, that creature enters with an additional +1/+1 \
+                 counter on it.",
+                "Guildmages' Forum",
+                &["Land"],
+            ),
+            (
+                "{T}: Add {C}.\n{1}, {T}: Add one mana of any color in your commander's color \
+                 identity. If you spend this mana to cast your commander, it enters with a \
+                 number of additional +1/+1 counters on it equal to the number of times it's \
+                 been cast from the command zone this game.",
+                "Opal Palace",
+                &["Land"],
+            ),
+        ];
+        for (oracle, name, types) in cases {
+            let parsed = parse_named(oracle, name, types);
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name} reach guard: production parse must contain zero Unimplemented: {parsed:#?}"
+            );
+            assert!(
+                unit_has_effect(&parsed, &|effect: &Effect| matches!(
+                    effect,
+                    Effect::Mana { grants, .. }
+                        if matches!(grants.as_slice(), [ManaSpellGrant::EntersWithCounters { .. }])
+                )),
+                "{name} reach guard: the EntersWithCounters grant must be present"
+            );
+            for detector in ["Condition_If", "Replacement"] {
+                assert!(
+                    !has_swallowed_detector(&parsed, detector),
+                    "{name} must account for its {detector} marker through the mana grant; \
+                     warnings: {:?}",
+                    parsed.parse_warnings
+                );
+            }
+        }
+    }
+
+    /// CR 106.6 + CR 608.2c: the mana-spend exemption is SENTENCE-scoped, not
+    /// unit-scoped. An audit unit owns every line up to the next item's start, and
+    /// the parser skips a standalone `Activate only …` restriction with no IR item
+    /// and no `Unimplemented`, so that orphan line joins the preceding mana
+    /// ability's unit. The grant represents only its own rider's clause; the
+    /// restriction's conditional must still raise `Condition_If`.
+    ///
+    /// This is a MIXED-UNIT probe, not a printed card: Opal Palace's real mana
+    /// ability (verbatim) followed by an activation restriction whose wording is
+    /// printed on Blazemire Verge. The combined card does not exist and no runtime
+    /// behavior is asserted — only that the audit stays honest about the orphan
+    /// line the parser silently skipped.
+    #[test]
+    fn mana_entry_counter_grant_does_not_exempt_an_unrelated_conditional_in_its_unit() {
+        let oracle = "{T}: Add {C}.\n{1}, {T}: Add one mana of any color in your commander's \
+                      color identity. If you spend this mana to cast your commander, it enters \
+                      with a number of additional +1/+1 counters on it equal to the number of \
+                      times it's been cast from the command zone this game.\nActivate only if \
+                      you control a Swamp or a Mountain.";
+        let parsed = parse_named(oracle, "Opal Palace", &["Land"]);
+        assert!(
+            !any_ability_has_unimplemented(&parsed),
+            "reach guard: production parse must contain zero Unimplemented: {parsed:#?}"
+        );
+        assert!(
+            unit_has_effect(&parsed, &|effect: &Effect| matches!(
+                effect,
+                Effect::Mana { grants, .. }
+                    if grants
+                        .iter()
+                        .any(|grant| matches!(grant, ManaSpellGrant::EntersWithCounters { .. }))
+            )),
+            "reach guard: the entry-counter mana grant must parse: {parsed:#?}"
+        );
+        // The finding is stamped with its audit unit rather than the individual
+        // clause, so assert on the unit span: the mana ability's unit starts at line 1
+        // and owns the orphaned restriction line 2. A unit-wide
+        // `EntersWithCounters` exemption removes this finding entirely.
+        let condition_findings = swallows_for(&parsed, "Condition_If");
+        assert_eq!(
+            condition_findings.len(),
+            1,
+            "exactly one Condition_If finding is expected — the orphaned 'Activate only if …' \
+             line the mana grant does not represent; warnings: {:?}",
+            parsed.parse_warnings
+        );
+        let OracleDiagnostic::SwallowedClause { unit_span, .. } = condition_findings[0] else {
+            unreachable!("swallows_for only returns SwallowedClause diagnostics")
+        };
+        let span = unit_span
+            .as_ref()
+            .expect("the audit stamps a unit span on every finding it emits");
+        assert_eq!(
+            (span.first_line, span.last_line),
+            (1, 2),
+            "the finding must be scoped to the mana ability's unit (line 1) plus the orphaned \
+             restriction line (line 2); warnings: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Replacement"),
+            "the grant's own 'enters with' rider IS represented, so no Replacement finding may \
+             survive the sentence-scoped strip; warnings: {:?}",
+            parsed.parse_warnings
+        );
     }
 
     /// Hostile sibling of `mana_spend_grant_optionality_is_evidence`: the same
@@ -15452,6 +15810,148 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         assert!(
             reports(&[&source, &target]),
             "a parent-target filter does not represent a source clause"
+        );
+    }
+
+    // ── Detector S: CastManaSourceQualifier ─────────────────────────────
+
+    const CAST_MANA_SOURCE_CARDS: [(&str, &[&str], &str); 3] = [
+        (
+            "Barracks of the Thousand",
+            &["Artifact", "Land"],
+            "(Transforms from Thousand Moons Smithy.)\n{T}: Add {W}.\nWhenever you cast an artifact or creature spell using mana produced by Barracks of the Thousand, create a white Gnome Soldier artifact creature token with \"This token's power and toughness are each equal to the number of artifacts and/or creatures you control.\"",
+        ),
+        (
+            "Tecutlan, the Searing Rift",
+            &["Land"],
+            "(Transforms from Brass's Tunnel-Grinder.)\n{T}: Add {R}.\nWhenever you cast a permanent spell using mana produced by Tecutlan, discover X, where X is that spell's mana value.",
+        ),
+        (
+            "The Myriad Pools",
+            &["Artifact", "Land"],
+            "(Transforms from The Everflowing Well.)\n{T}: Add {U}.\nWhenever you cast a permanent spell using mana produced by The Myriad Pools, up to one other target permanent you control becomes a copy of that spell until end of turn.",
+        ),
+    ];
+
+    /// CR 106.3 + CR 601.2h: a parse that drops the qualifier leaves a trigger that
+    /// fires on every matching spell. The audit reads un-normalized text, so the
+    /// detector must fire on the card's name, never on `~`: this is the case a
+    /// self-reference tail in the detector grammar would miss.
+    #[test]
+    fn cast_mana_source_detector_flags_a_qualifier_with_no_carrier() {
+        for (_, _, text) in CAST_MANA_SOURCE_CARDS {
+            let line = text.lines().last().expect("the trigger is the last line");
+            let cleaned = line.to_lowercase();
+            let mut parsed = no_activation_limit_abilities();
+            parsed
+                .triggers
+                .push(crate::types::ability::TriggerDefinition::new(
+                    TriggerMode::SpellCast,
+                ));
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "reach guard: an unimplemented unit is skipped before the detector runs"
+            );
+            let evidence = UnitEvidence::of(&parsed);
+            let mut found = Vec::new();
+            super::detect_cast_mana_source_qualifier(&cleaned, &cleaned, &evidence, &mut found);
+            assert!(
+                matches!(
+                    found.as_slice(),
+                    [OracleDiagnostic::SwallowedClause { detector, .. }]
+                        if detector == "CastManaSourceQualifier"
+                ),
+                "{line}: {found:?}"
+            );
+        }
+    }
+
+    /// The represented qualifier silences the detector on the real parse of all three
+    /// cards. Its carrier sits under `TriggerCondition::EventTime`, so this also pins
+    /// the evidence probe's reach into that wrapper.
+    #[test]
+    fn cast_mana_source_detector_is_silent_on_the_represented_qualifier() {
+        for (name, types, text) in CAST_MANA_SOURCE_CARDS {
+            let parsed = parse_named(text, name, types);
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name}: reach guard, an unimplemented unit is skipped before the detector runs"
+            );
+            let [trigger] = parsed.triggers.as_slice() else {
+                panic!("{name}: {:?}", parsed.triggers);
+            };
+            assert!(
+                matches!(
+                    &trigger.condition,
+                    Some(TriggerCondition::EventTime { condition })
+                        if matches!(
+                            &**condition,
+                            TriggerCondition::QuantityComparison { .. }
+                        )
+                ),
+                "{name}: reach guard, the qualifier must be represented: {:?}",
+                trigger.condition
+            );
+            assert!(
+                !has_swallowed_detector(&parsed, "CastManaSourceQualifier"),
+                "{name}: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// CR 201.5: "mana produced by ~" names the card itself, so a `FromSource` read of
+    /// another source (Treasure mana here) is not a carrier for it. The positive row swaps
+    /// the same unit's filter back to `SelfRef`, the shape the real parse carries.
+    #[test]
+    fn cast_mana_source_detector_flags_a_carrier_for_another_source() {
+        let (name, types, text) = CAST_MANA_SOURCE_CARDS[0];
+        let real = parse_named(text, name, types);
+        let line = text.lines().last().expect("the trigger is the last line");
+        let cleaned = line.to_lowercase();
+        let carrier = |source_filter: TargetFilter| TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::TriggeringSpell,
+                        metric: CastManaSpentMetric::FromSource { source_filter },
+                    },
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            }),
+        };
+        let [trigger] = real.triggers.as_slice() else {
+            panic!("{name}: {:?}", real.triggers);
+        };
+        assert_eq!(
+            trigger.condition,
+            Some(carrier(TargetFilter::SelfRef)),
+            "reach guard: the built carrier is the real parse's"
+        );
+        let detect = |source_filter: TargetFilter| {
+            let mut parsed = real.clone();
+            parsed.triggers[0].condition = Some(carrier(source_filter));
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "reach guard: an unimplemented unit is skipped before the detector runs"
+            );
+            let evidence = UnitEvidence::of(&parsed);
+            let mut found = Vec::new();
+            super::detect_cast_mana_source_qualifier(&cleaned, &cleaned, &evidence, &mut found);
+            found
+        };
+
+        assert_eq!(detect(TargetFilter::SelfRef), []);
+        let treasure =
+            TargetFilter::Typed(TypedFilter::permanent().subtype("Treasure".to_string()));
+        assert!(
+            matches!(
+                detect(treasure).as_slice(),
+                [OracleDiagnostic::SwallowedClause { detector, .. }]
+                    if detector == "CastManaSourceQualifier"
+            ),
+            "a Treasure carrier does not represent mana produced by {name}"
         );
     }
 }
