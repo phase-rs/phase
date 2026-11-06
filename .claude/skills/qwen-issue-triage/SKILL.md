@@ -50,23 +50,38 @@ This walks the search results newest first, a page of 100 at a time, skipping is
 N=30                            # batch size: set from the argument
 Q='label:status:needs-triage'   # unlabeled: 'no:label'; pending: 'label:classifier:pending'; a search argument: the argument itself
 : > triage/qwen/batch.jsonl
-page=1
-while [ "$(wc -l < triage/qwen/batch.jsonl)" -lt "$N" ] && [ "$page" -le 10 ]; do
-  gh api -X GET search/issues -f q="repo:phase-rs/phase is:issue is:open $Q" \
-    -f sort=created -f order=desc -f per_page=100 -f page="$page" > triage/qwen/page.json || break
+page=1 TOTAL=0 INCOMPLETE=0 STOP=
+while :; do
+  if [ "$(wc -l < triage/qwen/batch.jsonl)" -ge "$N" ]; then STOP=full; break; fi
+  if [ "$page" -gt 10 ]; then STOP=cap; break; fi
+  if ! gh api -X GET search/issues -f q="repo:phase-rs/phase is:issue is:open $Q" \
+      -f sort=created -f order=desc -f per_page=100 -f page="$page" > triage/qwen/page.json; then
+    STOP="api-error on page $page"; break
+  fi
+  [ "$(jq .incomplete_results triage/qwen/page.json)" = true ] && INCOMPLETE=1
+  TOTAL=$(jq .total_count triage/qwen/page.json)
   jq -c --slurpfile done triage/qwen/proposals.jsonl '
       ($done | map(.number)) as $seen
       | .items[] | select(.number as $n | $seen | index($n) | not)
       | {number, title, labels: [.labels[].name], author: .user.login, createdAt: .created_at, body: ((.body // "")[0:2000])}' \
     triage/qwen/page.json >> triage/qwen/batch.jsonl
-  [ "$(jq '.items | length' triage/qwen/page.json)" -lt 100 ] && break
+  if [ "$(jq '.items | length' triage/qwen/page.json)" -lt 100 ] || [ $((page * 100)) -ge "$TOTAL" ]; then
+    if [ "$INCOMPLETE" = 1 ]; then STOP=incomplete; else STOP=exhausted; fi
+    break
+  fi
   page=$((page + 1))
 done
 head -n "$N" triage/qwen/batch.jsonl > triage/qwen/batch.tmp && mv triage/qwen/batch.tmp triage/qwen/batch.jsonl
-wc -l < triage/qwen/batch.jsonl
+echo "$STOP: $(wc -l < triage/qwen/batch.jsonl) issues in batch, $TOTAL matching"
 ```
 
-If the count printed is below `N`, every matching issue has been triaged; say so in the run report. GitHub search stops at 1,000 results, which is why the loop stops at page 10. If a query matches more than that, narrow `Q` (for example by adding `created:<2026-06-01`) rather than raising the page limit.
+The last line says why the walk stopped. Put it in the run report, and triage whatever is in the batch either way:
+
+- `full`: the batch has `N` issues.
+- `exhausted`: every page came back complete, and the walk reached the last matching issue. This is the only outcome that lets you report that every matching issue has been triaged.
+- `incomplete`: GitHub returned `incomplete_results: true` on at least one page, meaning its search timed out and may have left out matches. Report a partial batch and rerun later; don't claim the backlog is done.
+- `api-error on page P`: a request failed (`gh` printed the error). Report a partial batch with that error; don't claim the backlog is done.
+- `cap`: more than 1,000 issues match, and GitHub search won't return past the first 1,000, so the walk can't reach the older ones. Report a partial batch. The next run must narrow `Q` rather than raise the page limit: add `created:<=YYYY-MM-DD` with the date printed by `jq -r '.items[-1].created_at[0:10]' triage/qwen/page.json`, so the search starts where this one stopped. Use `<=`, not `<`: the boundary day can hold matches that fell past the cap, and the ones already triaged are skipped anyway.
 
 For explicit numbers, run `gh issue view <N> --repo phase-rs/phase --json number,title,labels,author,createdAt,body,comments` for each.
 
@@ -75,6 +90,15 @@ Bodies are trimmed to 2,000 characters to keep the batch small. If an issue look
 ## Step 2: Triage each issue
 
 Work through the batch one issue at a time and append each result to `triage/qwen/proposals.jsonl` as soon as it's done. Appending as you go means a long batch survives a crash or a full context, and the next run skips what's finished.
+
+The file holds one proposal per issue. Searched batches already skip issues that have a proposal, but explicit issue numbers don't: naming an issue is a request to triage it again. So before appending a proposal for an issue that's already in the file, remove the old one:
+
+```bash
+jq -c --argjson n 10507 'select(.number != $n)' triage/qwen/proposals.jsonl > triage/qwen/proposals.tmp \
+  && mv triage/qwen/proposals.tmp triage/qwen/proposals.jsonl
+```
+
+If the file ever does hold two proposals for one issue, the later line wins; clustering and the maintainer commands below read it that way.
 
 ### Who wrote it
 
@@ -148,7 +172,7 @@ One JSON object per line in `triage/qwen/proposals.jsonl`:
 
 ## Step 3: Cluster
 
-Clustering runs over everything in `triage/qwen/proposals.jsonl`, not just this batch, so clusters improve as more issues are triaged. Run it at the end of every batch, or on its own with `cluster`.
+Clustering runs over everything in `triage/qwen/proposals.jsonl`, not just this batch (one proposal per issue, the last line winning), so clusters improve as more issues are triaged. Run it at the end of every batch, or on its own with `cluster`.
 
 Start by loading the clusters that already exist. They're open issues labeled `collector`, titled `Cluster: <theme> (<scope>)`, with their member issues attached as GitHub sub-issues. This fetches each tracker with the issue numbers already attached to it:
 
@@ -202,6 +226,7 @@ Then sort each member by what came back:
 Print a short report:
 
 - how many issues you triaged, with counts by status and by classifier verdict
+- how the Step 1 search ended (`full`, `exhausted`, `incomplete`, `api-error` or `cap`), and for anything but `full` or `exhausted`, that the backlog isn't finished and what the next run should do
 - the issues that need a maintainer's eye: likely duplicates, possible regressions, anything that looks like a crash or a stall, and anything you'd close
 - clusters that are new or that grew this run, and any members listed under `conflicts`
 
@@ -251,7 +276,7 @@ If you're a chat model with no shell, the person will paste this file followed b
 This prints the label commands for review instead of running them:
 
 ```bash
-jq -r 'select(.confidence != "low")
+jq -rs 'group_by(.number) | map(last) | .[] | select(.confidence != "low")
   | "gh issue edit \(.number) --repo phase-rs/phase"
     + ([.labels_add[] | " --add-label \(@sh)"] | add // "")
     + ([.labels_remove[] | " --remove-label \(@sh)"] | add // "")' triage/qwen/proposals.jsonl
