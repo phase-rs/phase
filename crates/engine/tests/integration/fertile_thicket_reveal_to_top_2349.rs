@@ -19,7 +19,8 @@
 //! parsed Dig config runs through the real cast pipeline, so reverting either
 //! parser step breaks the assertions below.
 
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::visibility::filter_state_for_viewer;
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::game_state::WaitingFor;
@@ -142,14 +143,27 @@ fn fertile_thicket_keeps_revealed_basic_land_on_top_and_rest_on_bottom() {
         "the kept basic land must not be moved to hand"
     );
 
-    // CR 701.20a (second assertion — fails if Step 2 reverted): the looked-at
-    // cards were publicly revealed because the clause's verb is "reveal". If the
-    // Dig were left at reveal:false (a private look), `revealed_cards` would be
-    // empty for these cards.
-    assert!(
-        state.revealed_cards.contains(&basic_land),
-        "the revealed basic land must be publicly revealed (reveal:true); \
-         revealed_cards = {:?}",
-        state.revealed_cards
-    );
+    // CR 701.20d + CR 401.2 (issue #8059): putting that card on top and the rest
+    // on the bottom reordered the library, so NO card this instruction revealed
+    // is still revealed — the four cards on the bottom and the kept Forest on
+    // top alike. A revealed card that is reordered in a library stops being
+    // revealed (CR 701.20d), and once it is back in the library no player may
+    // see its face there (CR 401.2).
+    let caster_view = filter_state_for_viewer(state, P0);
+    let opponent_view = filter_state_for_viewer(state, P1);
+    for &id in &[basic_land, other1, other2, other3, other4] {
+        assert!(
+            !state.revealed_cards.contains(&id),
+            "the reordered card {id:?} must stop being revealed; revealed_cards = {:?}",
+            state.revealed_cards
+        );
+        assert_eq!(
+            caster_view.objects[&id].name, "Hidden Card",
+            "the reordered card {id:?} must not stay visible to its own controller"
+        );
+        assert_eq!(
+            opponent_view.objects[&id].name, "Hidden Card",
+            "the reordered card {id:?} must not stay visible to the opponent"
+        );
+    }
 }

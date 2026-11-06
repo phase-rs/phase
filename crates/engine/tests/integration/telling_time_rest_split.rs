@@ -1004,6 +1004,7 @@ fn a_library_bound_remainder_with_no_split_routes_uniformly() {
         selectable_cards: vec![a, b, c],
         kept_destination: Some(Zone::Hand),
         rest_destination: Some(Zone::Library),
+        rest_remainder: engine::types::ability::DigRestRemainder::Route,
         rest_split_top_count: None,
         rest_order: engine::types::ability::DigRestOrder::Preserve,
         source_id: None,
@@ -1055,6 +1056,7 @@ fn non_splitting_dig_still_auto_routes_its_whole_remainder() {
         selectable_cards: vec![a, b, c],
         kept_destination: Some(Zone::Hand),
         rest_destination: Some(Zone::Graveyard),
+        rest_remainder: engine::types::ability::DigRestRemainder::Route,
         rest_split_top_count: None,
         rest_order: engine::types::ability::DigRestOrder::Preserve,
         source_id: None,
@@ -1133,6 +1135,7 @@ fn cross_player_split_cast_revealing(
         up_to: false,
         filter: TargetFilter::Any,
         rest_destination: Some(Zone::Library),
+        rest_remainder: engine::types::ability::DigRestRemainder::Route,
         rest_split_top_count: Some(QuantityExpr::Fixed { value: top }),
         rest_order: DigRestOrder::Preserve,
         reveal,
@@ -1939,7 +1942,7 @@ fn diabolic_vision_parses_an_all_top_remainder() {
             );
             assert_eq!(
                 *rest_order,
-                DigRestOrder::Preserve,
+                DigRestOrder::PlayerChoice,
                 "\"in any order\" is a player arrangement, not a random one"
             );
         }
