@@ -21,6 +21,27 @@ cr_file_effective() {
     | head -n 1 | tr -d '\r'
 }
 
+# Echo PATH as an absolute path with symlinks followed, including a dangling
+# final link to a file that does not exist yet. Fails if the directory the path
+# finally lands in does not exist (nothing there can alias an existing file) or
+# the links do not end within 40 hops. Uses plain readlink, which GNU, BSD and
+# busybox all provide; readlink -f is not portable to older macOS.
+cr_resolve_path() {
+  local path="$1" hops=0 target dir
+  while [ -L "$path" ]; do
+    [ "$hops" -lt 40 ] || return 1
+    target="$(readlink "$path")"
+    case "$target" in
+      /*) path="$target" ;;
+      *) path="$(dirname "$path")/$target" ;;
+    esac
+    hops=$((hops + 1))
+  done
+  dir="$(dirname "$path")"
+  [ -d "$dir" ] || return 1
+  printf '%s/%s\n' "$(cd "$dir" && pwd -P)" "$(basename "$path")"
+}
+
 # Download URL to DEST, converting Wizards' UTF-16 encoding to UTF-8 if needed.
 cr_download() {
   local url="$1" dest="$2" bom

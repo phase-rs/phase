@@ -61,12 +61,13 @@ if [ -n "$OUTPUT" ]; then
     exit 2
   fi
   # The pinned copy must only ever hold the pinned edition. -ef catches an
-  # existing file reached through a symlink or hard link; the resolved-path
-  # comparison catches a not-yet-existing DEST named by another spelling.
-  OUT_DIR="$(dirname "$OUTPUT")"
-  if [ "$OUTPUT" -ef "$DEST" ] || { [ -d "$OUT_DIR" ] \
-    && [ "$(cd "$OUT_DIR" && pwd -P)/$(basename "$OUTPUT")" \
-      = "$(cd "$(dirname "$DEST")" && pwd -P)/$(basename "$DEST")" ]; }; then
+  # existing file reached through a symlink or hard link; comparing resolved
+  # paths catches a not-yet-existing DEST, whether named by another spelling
+  # or by a dangling symlink that cp would follow.
+  OUT_RESOLVED="$(cr_resolve_path "$OUTPUT")" || OUT_RESOLVED=""
+  if [ "$OUTPUT" -ef "$DEST" ] \
+    || { [ -n "$OUT_RESOLVED" ] \
+      && [ "$OUT_RESOLVED" = "$(cr_resolve_path "$DEST")" ]; }; then
     echo "ERROR: --output must not be $DEST, which holds the pinned edition" >&2
     exit 2
   fi
