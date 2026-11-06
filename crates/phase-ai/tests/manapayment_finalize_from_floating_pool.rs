@@ -79,7 +79,15 @@ fn load_turn4_capture() -> GameState {
     let raw = gunzip_fixture(include_bytes!(
         "../fixtures/scenarios/galvanic-blast-manapayment-turn4.json.gz"
     ));
-    load_saved_game_state(&raw).expect("the turn-4 capture deserializes and restores")
+    // The committed capture predates the cast-history provenance fields, so the
+    // strict restore boundary refuses it. This is the shared TEST-ONLY fixture
+    // migration (the same one the engine fixture loaders use); production
+    // admission is unchanged and still refuses an unknown-provenance save.
+    let mut value: serde_json::Value =
+        serde_json::from_str(&raw).expect("the capture parses as JSON");
+    engine::types::game_state::record_captured_onsets(&mut value);
+    let migrated = serde_json::to_string(&value).expect("the migrated capture re-serializes");
+    load_saved_game_state(&migrated).expect("the turn-4 capture deserializes and restores")
 }
 
 /// Non-vacuity guard: pin the shape that makes finalizing both necessary and
