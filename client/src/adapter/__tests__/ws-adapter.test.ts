@@ -6118,7 +6118,7 @@ describe("WebSocketAdapter — retained close and early credential frames", () =
 // suppressed). Everything runs against the real initialize/openPhaseSocket/
 // handlers; only the decoder is scripted.
 
-describe("WebSocketAdapter — initialization-owned fallback (salvaged credentials)", () => {
+describe("WebSocketAdapter — initialization-owned fallback (salvaged and held credentials)", () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); });
 
@@ -6177,10 +6177,12 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged credentia
 
   type FirstFullFailure = "decodeFailure" | "bootstrapRejection";
   /** Fails the join's first GameStarted Full in the decoder and waits for its lease release. */
-  async function failFirstFull(join: Join, kind: FirstFullFailure, envelope: unknown = codecGameStarted(1, 1)) {
+  async function failFirstFull(
+    join: Join, kind: FirstFullFailure, envelope: unknown = codecGameStarted(1, 1), frame: "Full" | "Delta" = "Full",
+  ) {
     if (kind === "decodeFailure") join.codec.decode.mockRejectedValueOnce(new Error("decoder trapped"));
     else join.codec.rejectNext(1);
-    deliverCodec(join.raw, "Full", envelope);
+    deliverCodec(join.raw, frame, envelope);
     await vi.waitFor(() => expect(join.codec.close).toHaveBeenCalledOnce());
     expect(policyOf(join.adapter)).toEqual({ kind: "snapshotOnly", reason: kind });
   }
@@ -6903,6 +6905,897 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged credentia
       } finally {
         adapter.dispose();
       }
+    });
+  });
+
+  // ── Held source: a waiting-room joiner whose attachment already accepted
+  // SessionAttached. The session is published and the token, seat and Full key
+  // are known; only the bootstrap codec failed. Credential-only recovery again:
+  // one snapshot-only `Reconnect` carrying the HELD tuple, never a second join.
+
+  describe("held credentials (a waiting-room joiner's own SessionAttached)", () => {
+    const HELD_SESSION = {
+      gameCode: "GAME01", playerId: 0, playerToken: "codec-token", fullKey: REPLY_OWNERSHIP_FULL_KEY,
+    };
+    const sessionAttached = (overrides: Record<string, unknown> = {}) => JSON.stringify({
+      type: "SessionAttached",
+      data: {
+        game_code: "GAME01", player_id: 0, player_token: "codec-token",
+        full_key: REPLY_OWNERSHIP_FULL_KEY, ...overrides,
+      },
+    });
+    const gameCreated = (overrides: Record<string, unknown> = {}) => JSON.stringify({
+      type: "GameCreated",
+      data: { game_code: "GAME01", player_token: "codec-token", full_key: REPLY_OWNERSHIP_FULL_KEY, ...overrides },
+    });
+    const playerSlots = JSON.stringify({ type: "PlayerSlotsUpdate", data: { slots: [] } });
+    /** Events that precede any failure: the joiner's whole published prefix. */
+    const prefixOf = (waitingSnapshot: boolean) => [
+      "serverHello", "sessionChanged", "sessionAttached", ...(waitingSnapshot ? ["stateChanged"] : []),
+    ];
+    const returnedFromWaiting = () => codecStateUpdate(1, 1, {}, { legal_actions: [{ type: "WaitingRoom" }] });
+    /** The failed no-token GameStarted Full a started game's first state frame can be. */
+    const tokenlessStarted = () => codecGameStarted(1, 1, { player_token: undefined });
+    const pregameReturnOf = (adapter: WebSocketAdapter) => (adapter as unknown as {
+      initialFallback: { pregameReturn?: string };
+    }).initialFallback.pregameReturn;
+
+    /** A join that has accepted its SessionAttached (and, optionally, a delivered waiting snapshot). */
+    async function startHeld(waitingSnapshot: boolean) {
+      const join = await startJoin();
+      join.raw.dispatchSynthetic("message", sessionAttached());
+      await vi.waitFor(() => expect(typesOf(join.events)).toContain("sessionAttached"));
+      if (waitingSnapshot) {
+        deliverCodec(join.raw, "Full", returnedFromWaiting());
+        await vi.waitFor(() => expect(typesOf(join.events)).toContain("stateChanged"));
+        expect((await join.adapter.getLegalActions()).actions).toEqual([{ type: "WaitingRoom" }]);
+      }
+      // Reach guards: the held session is published and the join is still pending.
+      expect(typesOf(join.events)).toEqual(prefixOf(waitingSnapshot));
+      expect(join.adapter.nativeSession).toEqual(HELD_SESSION);
+      expect(join.outcome.value).toBe("never settled");
+      return join;
+    }
+
+    /** A held join whose bootstrap failed, with the replacement attachment's socket open. */
+    async function heldFallback(options: {
+      waitingSnapshot?: boolean; reason?: FirstFullFailure; envelope?: unknown; kind?: "Full" | "Delta";
+    } = {}) {
+      const join = await startHeld(options.waitingSnapshot ?? false);
+      await failFirstFull(
+        join, options.reason ?? "decodeFailure", options.envelope ?? tokenlessStarted(), options.kind ?? "Full",
+      );
+      const fallback = await snapshotOnlyHandshake("Reconnect", join.raw);
+      return { join, fallback };
+    }
+
+    const heldReconnect = {
+      type: "Reconnect",
+      data: { game_code: "GAME01", player_token: "codec-token", full_key: REPLY_OWNERSHIP_FULL_KEY },
+    };
+
+    describe("admission by reason and frame kind", () => {
+      const failedFrames: [string, "Full" | "Delta", () => unknown][] = [
+        ["a failed Delta", "Delta", () => codecStateUpdate(2, 2)],
+        ["a failed waiting StateUpdate Full", "Full", () => codecStateUpdate(1, 1)],
+        ["a failed GameStarted Full without a token", "Full", tokenlessStarted],
+      ];
+      const reasons: FirstFullFailure[] = ["decodeFailure", "bootstrapRejection"];
+
+      it.each(reasons.flatMap((reason) => failedFrames.map(([name, kind, envelope]) => [reason, name, kind, envelope] as const)))(
+        "admits the held tuple on %s of %s although the failed notice carries no credentials",
+        async (reason, _name, kind, envelope) => {
+          const { join, fallback } = await heldFallback({ reason, kind, envelope: envelope() });
+          try {
+            // Reach guards: the failed attachment's notice had no credentials to salvage,
+            // the codec was offered once and the sticky provider was not consulted again.
+            expect(offeredCodec(join.raw)).toBe(true);
+            expect(offeredCodec(fallback)).toBe(false);
+            expect(join.provider).toHaveBeenCalledOnce();
+            expect(sentFrames(fallback, "Reconnect")).toEqual([heldReconnect]);
+            expect(sentFrames(join.raw, "JoinGameWithPassword")).toHaveLength(1);
+            expect(sentFrames(fallback, "JoinGameWithPassword")).toHaveLength(0);
+            expect(fallbackOf(join.adapter)).toBe("reconnecting");
+            expect(join.outcome.value).toBe("never settled");
+            // Admission publishes nothing: the held session was published once, by SessionAttached.
+            expect(typesOf(join.events)).toEqual([...prefixOf(false), "serverHello"]);
+
+            fallback.dispatchSynthetic("message", plainStarted(2));
+            await expect(settledAs(join)).resolves.toEqual({ resolvedWith: undefined });
+            expect(episodeEventsOf(join.events)).toEqual([]);
+          } finally {
+            join.adapter.dispose();
+          }
+        },
+      );
+
+      it("agrees with a token-bearing failed Full that repeats the held tuple, and admits", async () => {
+        const { join, fallback } = await heldFallback({ envelope: codecGameStarted(1, 1) });
+        try {
+          expect(sentFrames(fallback, "Reconnect")).toEqual([heldReconnect]);
+          fallback.dispatchSynthetic("message", plainStarted(2));
+          await expect(settledAs(join)).resolves.toEqual({ resolvedWith: undefined });
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+
+      it.each([
+        ["another token", { player_token: "other-token" }],
+        ["another seat", { your_player: 1 }],
+        ["another generation", { full_key: { game_code: "GAME01", generation: 8 } }],
+        ["another game", { full_key: { game_code: "OTHER1", generation: 7 } }],
+      ])("rejects the join as an identity failure, keeping the held session, when the failed Full carries %s", async (_name, overrides) => {
+        const join = await startHeld(false);
+        try {
+          await failFirstFull(join, "decodeFailure", codecGameStarted(1, 1, overrides));
+          await expect(settledAs(join)).resolves.toMatchObject({
+            code: "WS_ERROR",
+            message: "Failed state frame carried credentials that differ from this join's session",
+            recoverable: false,
+          });
+          // Reach guard: the failure reached the adapter's admission as an eligible held join.
+          expect(policyOf(join.adapter)).toEqual({ kind: "snapshotOnly", reason: "decodeFailure" });
+          expect(fallbackOf(join.adapter)).toBe("unused");
+          expect(join.adapter.nativeSession).toEqual(HELD_SESSION);
+          await vi.advanceTimersByTimeAsync(10_000);
+          expect(MockWebSocket.last).toBe(join.raw);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+
+      it("does not admit the held source for a codec frame that precedes the confirmation", async () => {
+        MockWebSocket.last = null;
+        const codec = scriptedCodec();
+        const adapter = new WebSocketAdapter(
+          "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+          undefined, undefined, undefined, { stateCodecSessionProvider: () => Promise.resolve(codec.session) },
+        );
+        const events: Seen[] = [];
+        adapter.onEvent((event) => events.push(event as Seen));
+        const outcome: { value: unknown } = { value: "never settled" };
+        adapter.initialize().then(
+          (value) => { outcome.value = { resolvedWith: value }; },
+          (error) => { outcome.value = error; },
+        );
+        try {
+          const raw = await snapshotOnlyHandshake("JoinGameWithPassword", null);
+          raw.dispatchSynthetic("message", sessionAttached());
+          await vi.waitFor(() => expect(typesOf(events)).toContain("sessionAttached"));
+          // The confirmation never arrives: the Full is a protocol violation, not a bootstrap failure.
+          deliverCodec(raw, "Full", codecGameStarted(1, 1));
+          await vi.waitFor(() => expect(codec.close).toHaveBeenCalledOnce());
+          expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "confirmationFailure" });
+          expect(codec.decode).not.toHaveBeenCalled();
+          await expect(vi.waitFor(() => {
+            if (outcome.value === "never settled") throw new Error("pending");
+          }).then(() => outcome.value)).resolves.toMatchObject({
+            code: "WS_CLOSED", message: "Connection closed before game started", recoverable: true,
+          });
+          expect(fallbackOf(adapter)).toBe("unused");
+          await vi.advanceTimersByTimeAsync(10_000);
+          expect(MockWebSocket.last).toBe(raw);
+        } finally {
+          adapter.dispose();
+        }
+      });
+
+      it("never uses the held tuple of another attachment for a later attachment's failure", async () => {
+        // The first attachment accepts SessionAttached; an explicit reconnect then
+        // replaces it while the join is pending, and the replacement's codec fails.
+        const join = await startHeld(false);
+        try {
+          expect(join.adapter.tryReconnect(RECONNECT_SESSION as never)).toBe(true);
+          const second = await codecHandshake("Reconnect", join.raw);
+          join.codec.decode.mockRejectedValueOnce(new Error("decoder trapped"));
+          deliverCodec(second, "Delta", codecStateUpdate(2, 2));
+          await vi.waitFor(() => expect(join.codec.close).toHaveBeenCalled());
+          // Reach guard: the replacement's failure was reported as the sticky policy.
+          expect(policyOf(join.adapter)).toEqual({ kind: "snapshotOnly", reason: "decodeFailure" });
+          await expect(settledAs(join)).resolves.toMatchObject({
+            code: "WS_CLOSED", message: "Connection closed before game started",
+          });
+          expect(fallbackOf(join.adapter)).toBe("unused");
+          await vi.advanceTimersByTimeAsync(10_000);
+          expect(MockWebSocket.last).toBe(second);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+    });
+
+    describe("pregame return", () => {
+      it.each<FirstFullFailure>(["decodeFailure", "bootstrapRejection"])(
+        "waits for the game to start after GameCreated, SessionAttached and PlayerSlotsUpdate, then resolves the join once (%s)",
+        async (reason) => {
+          const { join, fallback } = await heldFallback({
+            waitingSnapshot: true, reason, envelope: codecStateUpdate(2, 2),
+          });
+          const { adapter, events } = join;
+          try {
+            // The failed waiting snapshot is discarded without a synthetic state event.
+            expect(typesOf(events)).toEqual([...prefixOf(true), "serverHello"]);
+            await expect(adapter.getSnapshot()).rejects.toBeDefined();
+            expect(sentFrames(fallback, "Reconnect")).toEqual([heldReconnect]);
+            expect(adapter.nativeSession).toEqual(HELD_SESSION);
+
+            fallback.dispatchSynthetic("message", gameCreated());
+            await vi.waitFor(() => expect(pregameReturnOf(adapter)).toBe("gameCreated"));
+            expect(typesOf(events)).toEqual([...prefixOf(true), "serverHello"]);
+            expect(join.outcome.value).toBe("never settled");
+
+            const timersWithDeadline = vi.getTimerCount();
+            fallback.dispatchSynthetic("message", sessionAttached());
+            await vi.waitFor(() => expect(fallbackOf(adapter)).toBe("awaitingGameStarted"));
+            // The matching SessionAttached ended the episode's deadline (and only it).
+            expect(vi.getTimerCount()).toBe(timersWithDeadline - 1);
+            fallback.dispatchSynthetic("message", playerSlots);
+            await vi.advanceTimersByTimeAsync(0);
+            // No host, session, reconnect or state event, and the join is still pending.
+            expect(typesOf(events)).toEqual([...prefixOf(true), "serverHello"]);
+            expect(join.outcome.value).toBe("never settled");
+            await expect(adapter.getSnapshot()).rejects.toBeDefined();
+            expect(sentFrames(fallback, "JoinGameWithPassword")).toHaveLength(0);
+
+            // Waiting for the game to start owns no deadline: far past the episode's budget.
+            await vi.advanceTimersByTimeAsync(3 * REMOTE_BUDGET_MS);
+            expect(join.outcome.value).toBe("never settled");
+            expect(MockWebSocket.last).toBe(fallback);
+
+            fallback.dispatchSynthetic("message", plainStarted(5));
+            await expect(settledAs(join)).resolves.toEqual({ resolvedWith: undefined });
+            expect(typesOf(events)).toEqual([
+              ...prefixOf(true), "serverHello", "bootstrapDelivered", "playerIdentity",
+            ]);
+            expect(typesOf(events).filter((type) => type === "sessionChanged")).toHaveLength(1);
+            expect(episodeEventsOf(events)).toEqual([]);
+            expect(fallbackOf(adapter)).toBe("finished");
+            expect((await adapter.getSnapshot()).state.turn_number).toBe(5);
+          } finally {
+            adapter.dispose();
+          }
+          expect(vi.getTimerCount()).toBe(0);
+        },
+      );
+
+      it("takes the same route from a healthy waiting snapshot to the started game with no fallback", async () => {
+        const join = await startHeld(true);
+        try {
+          deliverCodec(join.raw, "Full", tokenlessStarted());
+          await expect(settledAs(join)).resolves.toEqual({ resolvedWith: undefined });
+          expect(typesOf(join.events)).toEqual([...prefixOf(true), "bootstrapDelivered", "playerIdentity"]);
+          expect(fallbackOf(join.adapter)).toBe("unused");
+          expect(MockWebSocket.last).toBe(join.raw);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+
+      it.each(["close", "error"] as const)("uses base pending-initialization settlement for a transport %s after the pregame return", async (loss) => {
+        const { join, fallback } = await heldFallback({ waitingSnapshot: false });
+        try {
+          fallback.dispatchSynthetic("message", gameCreated());
+          fallback.dispatchSynthetic("message", sessionAttached());
+          await vi.waitFor(() => expect(fallbackOf(join.adapter)).toBe("awaitingGameStarted"));
+          if (loss === "close") fallback.dispatchSynthetic("close");
+          else fallback.onerror?.();
+          await expect(settledAs(join)).resolves.toMatchObject(loss === "close"
+            ? { code: "WS_CLOSED", message: "Connection closed before game started", recoverable: true }
+            : { code: "WS_ERROR", message: "WebSocket connection failed", recoverable: true });
+          // Not a second episode: nothing is dialled again and no reconnect is announced.
+          await vi.advanceTimersByTimeAsync(REMOTE_BUDGET_MS);
+          expect(MockWebSocket.last).toBe(fallback);
+          expect(fallbackOf(join.adapter)).toBe("awaitingGameStarted");
+          expect(join.events.filter((event) => event.type === "reconnecting")).toEqual([]);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+    });
+
+    describe("in-game return", () => {
+      it.each([
+        [false, "decodeFailure"], [false, "bootstrapRejection"],
+        [true, "decodeFailure"], [true, "bootstrapRejection"],
+      ] as const)("answers a failed GameStarted with a plain GameStarted that publishes no second session (waiting snapshot: %s, %s)", async (waitingSnapshot, reason) => {
+        const { join, fallback } = await heldFallback({ waitingSnapshot, reason });
+        const { adapter, events } = join;
+        try {
+          // Admission discarded any waiting snapshot without a synthetic state event.
+          expect(typesOf(events)).toEqual([...prefixOf(waitingSnapshot), "serverHello"]);
+          await expect(adapter.getSnapshot()).rejects.toBeDefined();
+
+          fallback.dispatchSynthetic("message", plainStarted(5, { legal_actions: [{ type: "PassPriority" }] }));
+          await expect(settledAs(join)).resolves.toEqual({ resolvedWith: undefined });
+          expect(typesOf(events)).toEqual([
+            ...prefixOf(waitingSnapshot), "serverHello", "bootstrapDelivered", "playerIdentity",
+          ]);
+          expect(typesOf(events).filter((type) => type === "sessionChanged")).toHaveLength(1);
+          expect(episodeEventsOf(events)).toEqual([]);
+          // The explicit accepted state, not the discarded wait cache, is what is playable.
+          expect((await adapter.getSnapshot()).state.turn_number).toBe(5);
+          expect((await adapter.getLegalActions()).actions).toEqual([{ type: "PassPriority" }]);
+          expect(adapter.nativeSession).toEqual(HELD_SESSION);
+          expect(fallbackOf(adapter)).toBe("finished");
+
+          // The recovered seat is usable on the replacement socket.
+          const completion = adapter.submitAction({ type: "PassPriority" } as GameAction, 0);
+          await vi.waitFor(() => expect(submissionTypes(fallback)).toHaveLength(1));
+          fallback.dispatchSynthetic("message", JSON.stringify(
+            codecStateUpdate(6, 6, { command_id: lastSubmissionCommandId(fallback) }),
+          ));
+          await expect(completion).resolves.toMatchObject({ events: [] });
+        } finally {
+          adapter.dispose();
+        }
+      });
+
+      it("takes the same route to the started game on a healthy decode, with no second socket", async () => {
+        const join = await startHeld(false);
+        try {
+          deliverCodec(join.raw, "Full", tokenlessStarted());
+          await expect(settledAs(join)).resolves.toEqual({ resolvedWith: undefined });
+          expect(typesOf(join.events)).toEqual([...prefixOf(false), "bootstrapDelivered", "playerIdentity"]);
+          expect((await join.adapter.getSnapshot()).state.turn_number).toBe(1);
+          expect(MockWebSocket.last).toBe(join.raw);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+    });
+
+    describe("identity preflight of the held reply", () => {
+      it.each([
+        ["a missing Full key", { full_key: undefined }, "Server omitted a valid Full session identity"],
+        ["another game", { full_key: { game_code: "OTHER1", generation: 7 } }, "Server changed the Full session identity"],
+        ["another generation", { full_key: { game_code: "GAME01", generation: 8 } }, "Server changed the Full session identity"],
+        ["another seat", { your_player: 1 }, "Reconnect attached player 1, expected 0"],
+        ["another token", { player_token: "other-token" }, "Reconnect changed the player token"],
+      ])("rejects the join before any bootstrap, cache or second session when the in-game reply carries %s", async (_name, overrides, message) => {
+        const { join, fallback } = await heldFallback({ waitingSnapshot: true });
+        fallback.dispatchSynthetic("message", plainStarted(2, overrides));
+        try {
+          await expect(settledAs(join)).resolves.toMatchObject({ code: "WS_ERROR", message, recoverable: false });
+          // Reach guard: the reply reached the real handler on the replacement socket.
+          expect(sentFrames(fallback, "Reconnect")).toHaveLength(1);
+          expect(typesOf(join.events)).toEqual([...prefixOf(true), "serverHello"]);
+          await expect(join.adapter.getSnapshot()).rejects.toBeDefined();
+          expect(join.adapter.nativeSession).toEqual(HELD_SESSION);
+          expect(fallback.close).toHaveBeenCalled();
+          expect(fallbackOf(join.adapter)).toBe("finished");
+          expect(latchesOf(join.adapter)).toEqual(CLEAN_LATCHES);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+
+      it.each([
+        ["omits the token", { player_token: undefined }],
+        ["repeats the held token", { player_token: "codec-token" }],
+      ])("accepts an in-game reply that %s and publishes no further session", async (_name, overrides) => {
+        const { join, fallback } = await heldFallback();
+        try {
+          fallback.dispatchSynthetic("message", plainStarted(2, overrides));
+          await expect(settledAs(join)).resolves.toEqual({ resolvedWith: undefined });
+          expect(typesOf(join.events).filter((type) => type === "sessionChanged")).toHaveLength(1);
+          expect(join.adapter.nativeSession).toEqual(HELD_SESSION);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+
+      it.each([
+        ["another seat", { your_player: 1 }, "Reconnect attached player 1, expected 0"],
+        ["another token", { player_token: "other-token" }, "Reconnect changed the player token"],
+        ["another generation", { full_key: { game_code: "GAME01", generation: 8 } }, "Server changed the Full session identity"],
+      ])("applies the strict preflight to the GameStarted that follows a pregame return (%s)", async (_name, overrides, message) => {
+        const { join, fallback } = await heldFallback();
+        try {
+          fallback.dispatchSynthetic("message", gameCreated());
+          fallback.dispatchSynthetic("message", sessionAttached());
+          await vi.waitFor(() => expect(fallbackOf(join.adapter)).toBe("awaitingGameStarted"));
+          fallback.dispatchSynthetic("message", plainStarted(2, overrides));
+          await expect(settledAs(join)).resolves.toMatchObject({ code: "WS_ERROR", message, recoverable: false });
+          // Reach guard: the return completed, and nothing of the rejected reply was published.
+          expect(typesOf(join.events)).toEqual([...prefixOf(false), "serverHello", "error"]);
+          expect(join.events[join.events.length - 1]).toMatchObject({ type: "error", message });
+          await expect(join.adapter.getSnapshot()).rejects.toBeDefined();
+          expect(join.adapter.nativeSession).toEqual(HELD_SESSION);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+
+      describe("pregame prefix", () => {
+        const afterPrefix = async (frames: string[]) => {
+          const held = await heldFallback();
+          for (const frame of frames) held.fallback.dispatchSynthetic("message", frame);
+          return held;
+        };
+        const rejectedAs = async (join: Join, fallback: MockWebSocket, message: string) => {
+          await expect(settledAs(join)).resolves.toMatchObject({ code: "WS_ERROR", message, recoverable: false });
+          // Reach guard: the frames reached the real handler on the replacement socket.
+          expect(sentFrames(fallback, "Reconnect")).toHaveLength(1);
+          expect(typesOf(join.events)).toEqual([...prefixOf(false), "serverHello"]);
+          expect(join.adapter.nativeSession).toEqual(HELD_SESSION);
+          expect(fallbackOf(join.adapter)).toBe("finished");
+          expect(latchesOf(join.adapter)).toEqual(CLEAN_LATCHES);
+        };
+
+        it.each([
+          ["another game", { game_code: "OTHER1" }, "Reconnect attached game OTHER1, expected GAME01"],
+          ["another token", { player_token: "other-token" }, "Reconnect changed the player token"],
+          ["no token", { player_token: undefined }, "Reconnect changed the player token"],
+          ["another generation", { full_key: { game_code: "GAME01", generation: 8 } }, "Server changed the Full session identity"],
+          ["no Full key", { full_key: undefined }, "Server omitted a valid Full session identity"],
+        ])("rejects a GameCreated that carries %s, before anything is published", async (_name, overrides, message) => {
+          const { join, fallback } = await afterPrefix([gameCreated(overrides)]);
+          try {
+            await rejectedAs(join, fallback, message);
+          } finally {
+            join.adapter.dispose();
+          }
+        });
+
+        it.each([
+          ["another game", { game_code: "OTHER1" }, "Reconnect attached game OTHER1, expected GAME01"],
+          ["another seat", { player_id: 1 }, "Reconnect attached player 1, expected 0"],
+          ["another token", { player_token: "other-token" }, "Reconnect changed the player token"],
+          ["another generation", { full_key: { game_code: "GAME01", generation: 8 } }, "Server changed the Full session identity"],
+          ["no Full key", { full_key: undefined }, "Server omitted a valid Full session identity"],
+        ])("rejects a SessionAttached that carries %s after a matching GameCreated", async (_name, overrides, message) => {
+          const { join, fallback } = await heldFallback();
+          try {
+            fallback.dispatchSynthetic("message", gameCreated());
+            await vi.waitFor(() => expect(pregameReturnOf(join.adapter)).toBe("gameCreated"));
+            fallback.dispatchSynthetic("message", sessionAttached(overrides));
+            await rejectedAs(join, fallback, message);
+          } finally {
+            join.adapter.dispose();
+          }
+        });
+
+        it("rejects a SessionAttached that is not preceded by the matching GameCreated", async () => {
+          const { join, fallback } = await afterPrefix([sessionAttached()]);
+          try {
+            await rejectedAs(join, fallback, "Server answered the join's reconnect with an unexpected pregame session reply");
+          } finally {
+            join.adapter.dispose();
+          }
+        });
+
+        it("keeps the deadline when a GameCreated is never followed by its SessionAttached, and fails the join at the bound", async () => {
+          const failedAt = Date.now();
+          const { join, fallback } = await afterPrefix([gameCreated()]);
+          try {
+            await vi.waitFor(() => expect(pregameReturnOf(join.adapter)).toBe("gameCreated"));
+            await vi.advanceTimersByTimeAsync(REMOTE_BUDGET_MS - 1000 - (Date.now() - failedAt));
+            // Reach guard: the matching GameCreated was processed and the join still waits.
+            expect(pregameReturnOf(join.adapter)).toBe("gameCreated");
+            expect(join.outcome.value).toBe("never settled");
+            await vi.advanceTimersByTimeAsync(2000);
+            await expect(settledAs(join)).resolves.toMatchObject({
+              code: "WS_CLOSED", message: FAILURE_MESSAGE, recoverable: true,
+            });
+            expect(fallback.close).toHaveBeenCalled();
+            expect(typesOf(join.events)).toEqual([...prefixOf(false), "serverHello"]);
+            expect(join.adapter.nativeSession).toEqual(HELD_SESSION);
+            expect(vi.getTimerCount()).toBe(0);
+          } finally {
+            join.adapter.dispose();
+          }
+        });
+      });
+    });
+
+    describe("deadline and retry budget", () => {
+      it("fails the join once at the episode's deadline when the replacement socket never answers", async () => {
+        const failedAt = Date.now();
+        const { join, fallback } = await heldFallback({ waitingSnapshot: true });
+        try {
+          fallback.close.mockImplementation(() => fallback.dispatchSynthetic("close"));
+          await vi.advanceTimersByTimeAsync(REMOTE_BUDGET_MS - 1000 - (Date.now() - failedAt));
+          expect(sentFrames(fallback, "Reconnect")).toHaveLength(1);
+          expect(join.outcome.value).toBe("never settled");
+          await vi.advanceTimersByTimeAsync(2000);
+          await expect(settledAs(join)).resolves.toMatchObject({
+            code: "WS_CLOSED", message: FAILURE_MESSAGE, recoverable: true,
+          });
+          expect(episodeEventsOf(join.events)).toEqual([]);
+          expect(vi.getTimerCount()).toBe(0);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+
+      it.each(["a natural close", "a handshake that closes before the hello"] as const)("retries after %s inside the same budget, without a second join or episode", async (loss) => {
+        const join = await startHeld(false);
+        try {
+          await failFirstFull(join, "bootstrapRejection", tokenlessStarted());
+          const first = loss === "a natural close"
+            ? await snapshotOnlyHandshake("Reconnect", join.raw)
+            : await vi.waitFor(() => { expect(MockWebSocket.last).not.toBe(join.raw); }).then(latestSocket);
+          first.dispatchSynthetic("close");
+          await vi.advanceTimersByTimeAsync(2000);
+          expect(join.outcome.value).toBe("never settled");
+          expect(fallbackOf(join.adapter)).toBe("reconnecting");
+
+          const second = await snapshotOnlyHandshake("Reconnect", first);
+          expect(second).not.toBe(first);
+          expect(offeredCodec(second)).toBe(false);
+          second.dispatchSynthetic("message", plainStarted(2));
+          await expect(settledAs(join)).resolves.toEqual({ resolvedWith: undefined });
+          expect(join.provider).toHaveBeenCalledOnce();
+          expect(sentFrames(join.raw, "JoinGameWithPassword")).toHaveLength(1);
+          expect(sentFrames(second, "Reconnect")).toEqual([heldReconnect]);
+          expect(episodeEventsOf(join.events)).toEqual([]);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+
+      it("exhausts the budget through repeated lost attempts with the single failure and no re-admission", async () => {
+        const join = await startHeld(false);
+        try {
+          await failFirstFull(join, "decodeFailure", tokenlessStarted());
+          const dialled = new Set<MockWebSocket>();
+          let last: MockWebSocket = join.raw;
+          for (let step = 0; step < 100 && join.outcome.value === "never settled"; step += 1) {
+            await vi.advanceTimersByTimeAsync(2000);
+            const socket = latestSocket();
+            if (socket !== last) {
+              last = socket;
+              dialled.add(socket);
+              socket.dispatchSynthetic("close");
+            }
+          }
+          await expect(settledAs(join)).resolves.toMatchObject({
+            code: "WS_CLOSED", message: FAILURE_MESSAGE, recoverable: true,
+          });
+          expect(dialled.size).toBeGreaterThan(2);
+          expect(episodeEventsOf(join.events)).toEqual([]);
+          expect(fallbackOf(join.adapter)).toBe("finished");
+          expect(vi.getTimerCount()).toBe(0);
+          expect(join.adapter.nativeSession).toEqual(HELD_SESSION);
+          expect([...dialled].flatMap((socket) => sentFrames(socket, "JoinGameWithPassword"))).toEqual([]);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+
+      it("succeeds on a reply just inside the bound and leaves the timer inert", async () => {
+        const failedAt = Date.now();
+        const join = await startHeld(false);
+        try {
+          await failFirstFull(join, "decodeFailure", tokenlessStarted());
+          const fallback = await snapshotOnlyHandshake("Reconnect", join.raw);
+          await vi.advanceTimersByTimeAsync(REMOTE_BUDGET_MS - 1000 - (Date.now() - failedAt));
+          expect(join.outcome.value).toBe("never settled");
+          fallback.dispatchSynthetic("message", plainStarted(2));
+          await expect(settledAs(join)).resolves.toEqual({ resolvedWith: undefined });
+          await vi.advanceTimersByTimeAsync(10_000);
+          expect(join.outcome.value).toEqual({ resolvedWith: undefined });
+          expect(episodeEventsOf(join.events)).toEqual([]);
+          expect((await join.adapter.getSnapshot()).state.turn_number).toBe(2);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+    });
+
+    describe("terminal failures keep the published session", () => {
+      const terminated = async (join: Join, waitingSnapshot: boolean) => {
+        // Reach guard shared by every terminal row: one prefix, one replacement hello, then nothing.
+        expect(typesOf(join.events)).toEqual([...prefixOf(waitingSnapshot), "serverHello"]);
+        expect(join.adapter.nativeSession).toEqual(HELD_SESSION);
+        expect(latchesOf(join.adapter)).toEqual(CLEAN_LATCHES);
+        expect(episodeEventsOf(join.events)).toEqual([]);
+        await expect(join.adapter.getSnapshot()).rejects.toBeDefined();
+      };
+
+      it.each([false, true])("fails the join once, without episode events, when the replacement socket errors (waiting snapshot: %s)", async (waitingSnapshot) => {
+        const { join, fallback } = await heldFallback({ waitingSnapshot });
+        try {
+          expect(join.outcome.value).toBe("never settled");
+          fallback.onerror?.();
+          await expect(settledAs(join)).resolves.toMatchObject({
+            code: "WS_CLOSED", message: FAILURE_MESSAGE, recoverable: true,
+          });
+          await terminated(join, waitingSnapshot);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+
+      it("fails the join once, without an error event, when the replacement's setup send fails", async () => {
+        const join = await startHeld(false);
+        try {
+          await failFirstFull(join, "decodeFailure", tokenlessStarted());
+          const fallback = await nextHandshake(join.raw, (socket) => {
+            socket.send.mockImplementation((text: unknown) => {
+              if (typeof text === "string" && text.includes('"type":"Reconnect"')) throw new Error("socket is gone");
+            });
+          });
+          await vi.waitFor(() => expect(fallback.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Reconnect"')));
+          await expect(settledAs(join)).resolves.toMatchObject({
+            code: "WS_CLOSED", message: FAILURE_MESSAGE, recoverable: true,
+          });
+          expect(fallback.close).toHaveBeenCalled();
+          await terminated(join, false);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+
+      it.each([
+        ["a refusal", { message: "Game not found" }, "ACTION_REJECTED", true],
+        ["a stale refusal", { message: "Engine error: ReorderHand: expected 3 ids, got 2" }, "STALE_ACTION", false],
+        ["a rejected deck", { message: "Deck is not legal", code: "deck_rejected" }, "DECK_REJECTED", false],
+      ])("keeps the existing initialization error for %s and announces nothing else", async (_name, data, code, recoverable) => {
+        const { join, fallback } = await heldFallback({ waitingSnapshot: true });
+        try {
+          fallback.dispatchSynthetic("message", JSON.stringify({ type: "Error", data }));
+          await expect(settledAs(join)).resolves.toMatchObject({ code, message: data.message, recoverable });
+          await terminated(join, true);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+
+      it("maps a protocol mismatch to the handshake rejection, then adds the incompatible hello", async () => {
+        const join = await startHeld(false);
+        try {
+          await failFirstFull(join, "decodeFailure", tokenlessStarted());
+          const initPendingAtHello: boolean[] = [];
+          join.adapter.onEvent((event) => {
+            if (event.type === "serverHello" && !event.compatible) {
+              initPendingAtHello.push((join.adapter as unknown as { initReject: unknown }).initReject !== null);
+            }
+          });
+          await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(join.raw));
+          latestSocket().dispatchSynthetic("message", JSON.stringify({
+            type: "ServerHello",
+            data: {
+              server_version: "9.9.9", build_commit: "other", protocol_version: PROTOCOL_VERSION + 1000,
+              mode: "Full",
+            },
+          }));
+          await expect(settledAs(join)).resolves.toMatchObject({ code: "WS_ERROR", recoverable: false });
+          expect(initPendingAtHello).toEqual([false]);
+          expect(join.events.filter((event) => event.type === "serverHello" && event.compatible === false)).toHaveLength(1);
+          expect(episodeEventsOf(join.events)).toEqual([]);
+          expect(join.adapter.nativeSession).toEqual(HELD_SESSION);
+          expect(latchesOf(join.adapter)).toEqual(CLEAN_LATCHES);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+
+      it("rejects with PASSWORD_REQUIRED and announces neither the password prompt nor a reconnect failure", async () => {
+        const { join, fallback } = await heldFallback();
+        try {
+          fallback.dispatchSynthetic("message", JSON.stringify({ type: "PasswordRequired", data: { game_code: "GAME01" } }));
+          await expect(settledAs(join)).resolves.toMatchObject({
+            code: "PASSWORD_REQUIRED", message: "Room requires a password", recoverable: true,
+          });
+          await terminated(join, false);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+
+      it.each([false, true])("fails a withheld GameStarted bootstrap with the server's reason and no synthetic bootstrap (waiting snapshot: %s)", async (waitingSnapshot) => {
+        const { join, fallback } = await heldFallback({ waitingSnapshot });
+        try {
+          fallback.dispatchSynthetic("message", JSON.stringify({
+            type: "StateWithheld",
+            data: {
+              full_key: REPLY_OWNERSHIP_FULL_KEY, state_revision: 3,
+              withheld: { type: "GameStarted", data: { your_player: 0 } },
+              reason: "The game state is too large to send.",
+            },
+          }));
+          await expect(settledAs(join)).resolves.toMatchObject({
+            code: "REQUEST_FAILED", message: "The game state is too large to send.", recoverable: true,
+          });
+          await terminated(join, waitingSnapshot);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+
+      it("leaves a withheld StateUpdate pending until the real GameStarted completes the join", async () => {
+        const { join, fallback } = await heldFallback();
+        try {
+          fallback.dispatchSynthetic("message", JSON.stringify({
+            type: "StateWithheld",
+            data: {
+              full_key: REPLY_OWNERSHIP_FULL_KEY, state_revision: 3,
+              withheld: { type: "StateUpdate" }, reason: "The game state is too large to send.",
+            },
+          }));
+          await vi.waitFor(() => expect(typesOf(join.events)).toContain("stateDelivery"));
+          expect(join.outcome.value).toBe("never settled");
+          expect(fallbackOf(join.adapter)).toBe("reconnecting");
+          fallback.dispatchSynthetic("message", plainStarted(4));
+          await expect(settledAs(join)).resolves.toEqual({ resolvedWith: undefined });
+          expect(episodeEventsOf(join.events)).toEqual([]);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+    });
+
+    describe("cleanup and later reuse", () => {
+      const endings = {
+        "the deadline": async (_fallback: MockWebSocket) => { await vi.advanceTimersByTimeAsync(REMOTE_BUDGET_MS); },
+        "a server refusal": async (fallback: MockWebSocket) => {
+          fallback.dispatchSynthetic("message", JSON.stringify({ type: "Error", data: { message: "Game not found" } }));
+        },
+        "a withheld bootstrap": async (fallback: MockWebSocket) => {
+          fallback.dispatchSynthetic("message", JSON.stringify({
+            type: "StateWithheld",
+            data: {
+              full_key: REPLY_OWNERSHIP_FULL_KEY, state_revision: 3,
+              withheld: { type: "GameStarted", data: { your_player: 0 } }, reason: "too large",
+            },
+          }));
+        },
+      } as const;
+
+      it.each(Object.keys(endings) as (keyof typeof endings)[])("clears every latch and the waiting cache but keeps the held session after %s, and an explicit reconnect starts fresh", async (ending) => {
+        const { join, fallback } = await heldFallback({ waitingSnapshot: true });
+        const { adapter, events } = join;
+        try {
+          // An ordinary StateUpdate may be delivered during the episode (it cannot end it);
+          // the terminal cleanup must discard what it cached.
+          fallback.dispatchSynthetic("message", JSON.stringify(codecStateUpdate(2, 2)));
+          await vi.waitFor(() => expect(latchesOf(adapter).snapshot).not.toBeNull());
+          expect(latchesOf(adapter).cachedStateRevision).toBe(2);
+          expect(fallbackOf(adapter)).toBe("reconnecting");
+          await endings[ending](fallback);
+          await expect(settledAs(join)).resolves.toBeInstanceOf(AdapterError);
+          expect(latchesOf(adapter)).toEqual(CLEAN_LATCHES);
+          expect(adapter.nativeSession).toEqual(HELD_SESSION);
+          expect(episodeEventsOf(events)).toEqual([]);
+          // The held session was published once, by SessionAttached, and not retracted.
+          expect(typesOf(events).filter((type) => type === "sessionChanged")).toHaveLength(1);
+          expect(vi.getTimerCount()).toBe(0);
+
+          expect(adapter.tryReconnect(RECONNECT_SESSION as never)).toBe(true);
+          const fresh = await snapshotOnlyHandshake("Reconnect", fallback);
+          expect(sentFrames(fresh, "Reconnect")).toHaveLength(1);
+          expect(offeredCodec(fresh)).toBe(false);
+          expect(fallbackOf(adapter)).toBe("finished");
+        } finally {
+          adapter.dispose();
+        }
+      });
+    });
+
+    describe("stale opening and disposal", () => {
+      it.each(["backoff", "handshake", "waiting for the reply"] as const)("disposal during %s keeps the exact disposal result and dials nothing afterwards", async (phase) => {
+        const join = await startHeld(true);
+        const { adapter, events } = join;
+        await failFirstFull(join, "decodeFailure", tokenlessStarted());
+        if (phase === "waiting for the reply") {
+          await snapshotOnlyHandshake("Reconnect", join.raw);
+        } else if (phase === "handshake") {
+          await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(join.raw));
+          expect((adapter as unknown as { socketOpening: boolean }).socketOpening).toBe(true);
+        } else {
+          const first = await snapshotOnlyHandshake("Reconnect", join.raw);
+          first.dispatchSynthetic("close");
+          await vi.advanceTimersByTimeAsync(0);
+          expect((adapter as unknown as { reconnectTimer: unknown }).reconnectTimer).not.toBeNull();
+        }
+        expect(join.outcome.value).toBe("never settled");
+        adapter.dispose();
+        await expect(settledAs(join)).resolves.toMatchObject({
+          code: "WS_CLOSED", message: DISPOSED_MESSAGE, recoverable: true,
+        });
+        expect(events.slice(-2)).toEqual([
+          { type: "actionPendingChanged", pending: false },
+          { type: "latencyChanged", latencyMs: null },
+        ]);
+        expect(episodeEventsOf(events)).toEqual([]);
+        // Disposal keeps its own contract and clears every credential.
+        expect(adapter.nativeSession).toBeNull();
+        expect(vi.getTimerCount()).toBe(0);
+        const dialled = MockWebSocket.last;
+        await vi.advanceTimersByTimeAsync(REMOTE_BUDGET_MS + 10_000);
+        expect(MockWebSocket.last).toBe(dialled);
+      });
+
+      it("closes a handshake that lands after the deadline without a Reconnect or any event, and leaves a successor's opening alone", async () => {
+        const jitter = vi.spyOn(Math, "random").mockReturnValue(0);
+        const failedAt = Date.now();
+        const join = await startHeld(false);
+        const { adapter, events } = join;
+        try {
+          await failFirstFull(join, "decodeFailure", tokenlessStarted());
+          let stale: MockWebSocket | null = null;
+          let seen: MockWebSocket | null = MockWebSocket.last;
+          for (let step = 0; step < 800 && stale === null; step += 1) {
+            await vi.advanceTimersByTimeAsync(250);
+            const socket = latestSocket();
+            const fresh = socket !== seen;
+            seen = socket;
+            const opening = (adapter as unknown as { socketOpening: boolean }).socketOpening;
+            if (fresh && opening && Date.now() - failedAt >= 121_000) stale = socket;
+          }
+          if (stale === null) throw new Error("no late replacement handshake was observed");
+          expect(join.outcome.value).toBe("never settled");
+          await vi.advanceTimersByTimeAsync(REMOTE_BUDGET_MS - (Date.now() - failedAt) + 100);
+          await expect(settledAs(join)).resolves.toMatchObject({ code: "WS_CLOSED", message: FAILURE_MESSAGE });
+          expect(latchesOf(adapter)).toEqual(CLEAN_LATCHES);
+
+          expect(adapter.tryReconnect(RECONNECT_SESSION as never)).toBe(true);
+          expect((adapter as unknown as { socketOpening: boolean }).socketOpening).toBe(true);
+          const eventsBefore = events.length;
+          stale.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+          await vi.waitFor(() => expect(stale!.close).toHaveBeenCalled());
+          expect(sentFrames(stale, "Reconnect")).toHaveLength(0);
+          expect(events).toHaveLength(eventsBefore);
+          expect((adapter as unknown as { socketOpening: boolean }).socketOpening).toBe(true);
+          const successor = await snapshotOnlyHandshake("Reconnect", stale);
+          expect(sentFrames(successor, "Reconnect")).toHaveLength(1);
+        } finally {
+          jitter.mockRestore();
+          adapter.dispose();
+        }
+      });
+    });
+
+    describe("success reentrancy and regression", () => {
+      it("consumes the episode before any subscriber can run, so a disposing subscriber leaves no timer and settles the join once", async () => {
+        const join = await startHeld(true);
+        const { adapter } = join;
+        const stateAtBootstrap: string[] = [];
+        adapter.onEvent((event) => {
+          if (event.type === "bootstrapDelivered") {
+            stateAtBootstrap.push(fallbackOf(adapter));
+            adapter.dispose();
+          }
+        });
+        await failFirstFull(join, "decodeFailure", tokenlessStarted());
+        const fallback = await snapshotOnlyHandshake("Reconnect", join.raw);
+        fallback.dispatchSynthetic("message", plainStarted(2));
+        await vi.waitFor(() => expect(stateAtBootstrap).toEqual(["finished"]));
+        await expect(settledAs(join)).resolves.toMatchObject({ code: "WS_CLOSED", message: DISPOSED_MESSAGE });
+        expect(vi.getTimerCount()).toBe(0);
+      });
+
+      it("treats a loss after the held fallback succeeded as an ordinary established recovery, announced normally", async () => {
+        const { join, fallback } = await heldFallback();
+        try {
+          fallback.dispatchSynthetic("message", plainStarted(2));
+          await expect(settledAs(join)).resolves.toEqual({ resolvedWith: undefined });
+          expect(episodeEventsOf(join.events)).toEqual([]);
+
+          fallback.dispatchSynthetic("close");
+          await vi.waitFor(() => expect(join.events).toContainEqual(expect.objectContaining({ type: "reconnecting" })));
+          const next = await snapshotOnlyHandshake("Reconnect", fallback);
+          next.dispatchSynthetic("message", plainStarted(3));
+          await vi.waitFor(() => expect(join.events).toContainEqual({ type: "reconnected", inGame: true }));
+          expect(fallbackOf(join.adapter)).toBe("finished");
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+
+      it("announces no host or reconnect event for a pregame return's GameCreated", async () => {
+        const { join, fallback } = await heldFallback();
+        try {
+          fallback.dispatchSynthetic("message", gameCreated());
+          fallback.dispatchSynthetic("message", sessionAttached());
+          await vi.waitFor(() => expect(fallbackOf(join.adapter)).toBe("awaitingGameStarted"));
+          expect(join.events.filter((event) => ["reconnected", "gameCreated", "waitingForOpponent"].includes(event.type))).toEqual([]);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
     });
   });
 });

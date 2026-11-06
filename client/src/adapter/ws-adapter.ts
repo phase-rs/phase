@@ -1603,32 +1603,50 @@ const NATIVE_AI_RECONNECT_POLICY: ReconnectPolicy = {
 };
 
 /**
- * Lifecycle of the initialization-owned fallback: a remote join whose first
- * GameStarted `Full` failed in the codec, recovered by a new snapshot-only
+ * Where the credentials of an initial fallback came from.
+ *
+ *  - `salvaged`: the seat's first GameStarted `Full` failed in the codec and its
+ *    plain envelope carried the credentials. Nothing of the join was published
+ *    yet, so the credentials are provisional until a plain GameStarted
+ *    authenticates them.
+ *  - `held`: a waiting-room joiner whose SAME attachment had already accepted
+ *    SessionAttached with a valid token, seat and Full key. The session is
+ *    already published; the credentials are only reused.
+ */
+type InitialFallbackSource = "salvaged" | "held";
+
+/**
+ * Lifecycle of the initialization-owned fallback: a remote join whose bootstrap
+ * codec failed before its first GameStarted, recovered by a new snapshot-only
  * attachment within the SAME initialization.
  *
- * Credential-only recovery, not same-socket resync: the credentials come from
- * the failing frame itself, are provisional until a plain GameStarted
- * authenticates them, and the failed state is never rendered. A second source
- * (credentials held from this attachment's SessionAttached) widens
- * `reconnecting` and adds an `awaitingGameStarted` state; only the salvaged
- * source is admitted today, so the union carries nothing it cannot reach.
+ * Credential-only recovery, not same-socket resync: the failed state is never
+ * rendered, and the original initialization is settled exactly once.
  *
  *  - `unused`: no episode has been admitted.
  *  - `reconnecting`: the episode is active. `deadlineTimer` is the episode's one
- *    non-extending bound; it is cleared on every exit.
+ *    non-extending bound; it is cleared on every exit. `pregameReturn` tracks a
+ *    held source's pregame reply (the server answers a waiting seat's
+ *    `Reconnect` with GameCreated, then SessionAttached): `gameCreated` means
+ *    the first of the two matched the held identity.
+ *  - `awaitingGameStarted`: a held source's pregame return completed. Not an
+ *    active episode: no deadline, no event suppression, and it cannot admit
+ *    another fallback. Waiting for the game to start is base behavior; the
+ *    eventual GameStarted is preflighted against `credentials`.
  *  - `finished`: the episode was consumed (success or failure) and never
- *    re-admits; the original initialization has been settled once.
+ *    re-admits.
  */
 type InitialFallback =
   | { readonly kind: "unused" }
   | {
       readonly kind: "reconnecting";
-      readonly source: "salvaged";
+      readonly source: InitialFallbackSource;
       readonly credentials: StateCodecJoinCredentials;
       readonly originatingReason: StateCodecFailureReason;
       readonly deadlineTimer: ReturnType<typeof setTimeout>;
+      readonly pregameReturn: "none" | "gameCreated";
     }
+  | { readonly kind: "awaitingGameStarted"; readonly credentials: StateCodecJoinCredentials }
   | { readonly kind: "finished" };
 
 /** The single failure the original initialization sees when the fallback cannot finish the join. */
@@ -1638,6 +1656,23 @@ function initialFallbackFailure(): AdapterError {
     "Could not finish joining after state delivery failed; reconnect failed.",
     true,
   );
+}
+
+/** The pregame frames a server may answer an initial fallback's `Reconnect` with. */
+interface FallbackPregameFrame {
+  readonly type: "GameCreated" | "SessionAttached";
+  readonly game_code: string;
+  readonly player_id?: PlayerId;
+  readonly player_token?: string;
+  readonly full_key?: FullSessionKey;
+}
+
+/** Whether two credential tuples name the same seat of the same Full session. */
+function sameJoinCredentials(a: StateCodecJoinCredentials, b: StateCodecJoinCredentials): boolean {
+  return a.playerToken === b.playerToken
+    && a.yourPlayer === b.yourPlayer
+    && a.fullKey.game_code === b.fullKey.game_code
+    && a.fullKey.generation === b.fullKey.generation;
 }
 
 /**
@@ -1744,6 +1779,16 @@ export class WebSocketAdapter implements EngineAdapter {
   private readonly stateCodec = new StateCodecAttachment();
   /** Initialization-owned fallback after a failed initial GameStarted `Full`. */
   private initialFallback: InitialFallback = { kind: "unused" };
+  /**
+   * The credentials a join's own SessionAttached delivered, keyed by the socket
+   * that received it: provenance for the held fallback source. A tuple of
+   * another socket (or none) never authorizes admission, and it is never
+   * shared with the draft adapter's binding.
+   */
+  private heldAttachment: {
+    readonly socket: PhaseSocketTransport;
+    readonly credentials: StateCodecJoinCredentials;
+  } | null = null;
   /** A rejected Full identity is terminal for this socket. */
   private sessionIdentityRejected = false;
   /** Set by AiDriverFault: the server permanently rejects every later submission for this game code. */
@@ -2585,8 +2630,9 @@ export class WebSocketAdapter implements EngineAdapter {
     }
     if (this.initialFallback.kind === "reconnecting") {
       clearTimeout(this.initialFallback.deadlineTimer);
-      this.initialFallback = { kind: "finished" };
     }
+    if (this.initialFallback.kind !== "unused") this.initialFallback = { kind: "finished" };
+    this.heldAttachment = null;
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
       this.pingInterval = null;
@@ -2750,15 +2796,24 @@ export class WebSocketAdapter implements EngineAdapter {
    * just closed, or returns false and changes nothing. Admission requires the
    * original remote join to be pending with no GameStarted ever delivered, this
    * failed attachment's bootstrap still pending, the sticky snapshot-only
-   * policy, no earlier episode or successor, no held session, and credentials
-   * on the attachment's first failure notice whose game is the one being
-   * joined. Retired, pending or foreign bindings never reach here: the caller
-   * is the close consumer of the CURRENT socket and passes its own binding.
+   * policy, and no earlier episode, successor or reconnect in flight. Retired,
+   * pending or foreign bindings never reach here: the caller is the close
+   * consumer of the CURRENT socket and passes its own binding.
    *
-   * Admission publishes nothing: the credentials seed the session
+   * The credentials come from one of two sources, chosen by provenance:
+   *  - `held`, when this SAME socket already accepted SessionAttached: the held
+   *    tuple, admitted for a decode failure or bootstrap rejection of ANY frame
+   *    kind (the failed frame need not carry credentials). If the failed notice
+   *    also carries credentials they must agree exactly with the held tuple; a
+   *    disagreement is a terminal identity rejection.
+   *  - `salvaged`, otherwise: the credentials of the failed GameStarted `Full`.
+   * Both must name the game being joined.
+   *
+   * Admission publishes nothing. Salvaged credentials seed the session
    * provisionally so the existing reconnect owners can send the exact
-   * `Reconnect`; they are published only by the plain GameStarted that
-   * authenticates them. The caller schedules the first attempt.
+   * `Reconnect`; held credentials are already published and a retained waiting
+   * snapshot is discarded silently (it is not the recovered board). The caller
+   * schedules the first attempt.
    */
   private admitInitialFallback(
     bootstrap: StateCodecBootstrapBinding,
@@ -2771,16 +2826,41 @@ export class WebSocketAdapter implements EngineAdapter {
     if (bootstrap.status !== "pending" || bootstrap.socket !== socket) return false;
     if (this.stateCodec.deliveryPolicy.kind !== "snapshotOnly") return false;
     if (this.reconnectInFlight || this.reconnectTimer !== null || this.socketOpening) return false;
-    if (this.playerToken !== null || this.snapshot !== null) return false;
     const failure = bootstrap.failure;
-    const credentials = failure?.joinCredentials ?? null;
-    if (failure === null || credentials === null) return false;
-    if (credentials.fullKey.game_code !== gameCode) return false;
+    if (failure === null) return false;
 
-    this._gameCode = gameCode;
-    this._playerId = credentials.yourPlayer;
-    this.playerToken = credentials.playerToken;
-    if (!this.acceptFullSessionKey(credentials.fullKey)) return false;
+    const held = this.heldAttachment?.socket === socket ? this.heldAttachment.credentials : null;
+    const source: InitialFallbackSource = held === null ? "salvaged" : "held";
+    let credentials: StateCodecJoinCredentials;
+    if (held === null) {
+      if (this.playerToken !== null || this.snapshot !== null) return false;
+      if (failure.joinCredentials === null) return false;
+      credentials = failure.joinCredentials;
+    } else {
+      // The held tuple came from this attachment's own SessionAttached, so
+      // the failed frame (of any kind) need not carry credentials itself.
+      if (failure.reason !== "decodeFailure" && failure.reason !== "bootstrapRejection") return false;
+      credentials = held;
+    }
+    if (credentials.fullKey.game_code !== gameCode) return false;
+    if (held !== null && failure.joinCredentials !== null && !sameJoinCredentials(failure.joinCredentials, held)) {
+      this.rejectSessionIdentity(new AdapterError(
+        "WS_ERROR",
+        "Failed state frame carried credentials that differ from this join's session",
+        false,
+      ));
+      return false;
+    }
+
+    if (held === null) {
+      this._gameCode = gameCode;
+      this._playerId = credentials.yourPlayer;
+      this.playerToken = credentials.playerToken;
+      if (!this.acceptFullSessionKey(credentials.fullKey)) return false;
+    } else {
+      this.snapshot = null;
+      this.cachedStateRevision = null;
+    }
     // One non-extending bound for the whole episode. It also covers an open
     // socket that never answers, which the scheduling-only budget checks in
     // attemptReconnect cannot see.
@@ -2790,17 +2870,23 @@ export class WebSocketAdapter implements EngineAdapter {
     );
     this.initialFallback = {
       kind: "reconnecting",
-      source: "salvaged",
+      source,
       credentials,
       originatingReason: failure.reason,
       deadlineTimer,
+      pregameReturn: "none",
     };
+    this.heldAttachment = null;
     return true;
   }
 
   /** The plain GameStarted authenticated the fallback: consume the episode silently. */
   private completeInitialFallback(): void {
     const episode = this.initialFallback;
+    if (episode.kind === "awaitingGameStarted") {
+      this.initialFallback = { kind: "finished" };
+      return;
+    }
     if (episode.kind !== "reconnecting") return;
     // Bookkeeping runs while the episode is still active, so it announces nothing.
     this.completeReconnect(true);
@@ -2853,22 +2939,51 @@ export class WebSocketAdapter implements EngineAdapter {
       ws.close();
     }
     this.stateCodec.clearRecovery();
-    // The salvaged credentials were never authenticated, so none survives the
-    // failure, and no sessionChanged(null) announces a session never published.
-    if (episode.source === "salvaged") {
-      this._gameCode = null;
-      this._playerId = null;
-      this.playerToken = null;
-      this.fullSessionKey = null;
+    switch (episode.source) {
+      case "salvaged":
+        // The salvaged credentials were never authenticated, so none survives
+        // the failure, and no sessionChanged(null) announces a session never
+        // published.
+        this._gameCode = null;
+        this._playerId = null;
+        this.playerToken = null;
+        this.fullSessionKey = null;
+        break;
+      case "held":
+        // Already published by this join's SessionAttached: kept exactly as a
+        // base pending-initialization rejection keeps them, so the persisted
+        // session is not silently contradicted.
+        break;
     }
     return true;
   }
 
   /**
-   * The server answered a join's state-recovery `Reconnect` with a pregame
-   * session instead of the started game. The salvaged premise (the seat's first
-   * GameStarted was already delivered) makes that impossible, so it is an
-   * identity failure, never host handling.
+   * The server answered the fallback's `Reconnect` with a pregame frame
+   * (GameCreated or SessionAttached) instead of the started game. What that
+   * means depends on where the credentials came from: a salvaged source's seat
+   * already had its first GameStarted delivered, so a pregame reply contradicts
+   * it; a held source's seat is still waiting, so it is the expected return.
+   */
+  private answerFallbackWithPregameFrame(
+    episode: Extract<InitialFallback, { kind: "reconnecting" }>,
+    frame: FallbackPregameFrame,
+  ): void {
+    switch (episode.source) {
+      case "salvaged":
+        this.rejectFallbackPregameReply();
+        break;
+      case "held":
+        this.acceptHeldPregameReply(episode, frame);
+        break;
+    }
+  }
+
+  /**
+   * The server answered a salvaged join's state-recovery `Reconnect` with a
+   * pregame session instead of the started game. The salvaged premise (the
+   * seat's first GameStarted was already delivered) makes that impossible, so
+   * it is an identity failure, never host handling.
    */
   private rejectFallbackPregameReply(): void {
     this.rejectSessionIdentity(new AdapterError(
@@ -2879,27 +2994,122 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   /**
+   * Why a fallback reply's identity does not match the retained credentials, or
+   * null when it does. Checked in a fixed order: game, Full key, seat, token. A
+   * reconnect's GameStarted omits the token (`"optional"`: omitted or exactly the
+   * retained one); the pregame frames always carry it (`"required"`).
+   */
+  private fallbackIdentityMismatch(
+    expected: StateCodecJoinCredentials,
+    frame: {
+      gameCode?: string;
+      playerId?: PlayerId;
+      playerToken?: string;
+      fullKey?: FullSessionKey;
+    },
+    token: "optional" | "required",
+  ): string | null {
+    if (frame.gameCode !== undefined && frame.gameCode !== expected.fullKey.game_code) {
+      return `Reconnect attached game ${frame.gameCode}, expected ${expected.fullKey.game_code}`;
+    }
+    if (!frame.fullKey) return "Server omitted a valid Full session identity";
+    if (
+      frame.fullKey.game_code !== expected.fullKey.game_code
+      || frame.fullKey.generation !== expected.fullKey.generation
+    ) {
+      return "Server changed the Full session identity";
+    }
+    if (frame.playerId !== undefined && frame.playerId !== expected.yourPlayer) {
+      return `Reconnect attached player ${frame.playerId}, expected ${expected.yourPlayer}`;
+    }
+    if (
+      (frame.playerToken !== undefined || token === "required")
+      && frame.playerToken !== expected.playerToken
+    ) {
+      return "Reconnect changed the player token";
+    }
+    return null;
+  }
+
+  /**
    * Identity preflight of the fallback's GameStarted, before any bootstrap,
-   * cache or episode completion: same Full key, same seat, token omitted
-   * (a reconnect reply carries none) or exactly the retained one.
+   * cache or episode completion: same game, Full key and seat, and the token
+   * omitted (a reconnect reply carries none) or exactly the retained one.
    */
   private acceptFallbackGameStarted(
     expected: StateCodecJoinCredentials,
     frame: { your_player: PlayerId; player_token?: string; full_key?: FullSessionKey },
   ): boolean {
-    const message = !frame.full_key
-      ? "Server omitted a valid Full session identity"
-      : frame.full_key.game_code !== expected.fullKey.game_code
-          || frame.full_key.generation !== expected.fullKey.generation
-        ? "Server changed the Full session identity"
-        : frame.your_player !== expected.yourPlayer
-          ? `Reconnect attached player ${frame.your_player}, expected ${expected.yourPlayer}`
-          : frame.player_token !== undefined && frame.player_token !== expected.playerToken
-            ? "Reconnect changed the player token"
-            : null;
+    const message = this.fallbackIdentityMismatch(expected, {
+      playerId: frame.your_player,
+      playerToken: frame.player_token,
+      fullKey: frame.full_key,
+    }, "optional");
     return message === null
       ? true
       : this.rejectSessionIdentity(new AdapterError("WS_ERROR", message, false));
+  }
+
+  /**
+   * Records the credentials this join's own SessionAttached delivered, against
+   * the socket that received them. Only a complete tuple counts (nonempty
+   * token, nonnegative safe-integer seat, and the Full key the identity guard
+   * above just accepted), and only for a remote initial join that can still
+   * take the held fallback. The tuple is copied so later frames cannot alias it.
+   */
+  private recordHeldAttachment(attachment: NativeSessionAttachment): void {
+    const socket = this.ws;
+    if (socket === null || this.mode !== "join" || this.isNativeSocket()) return;
+    if (this.initReject === null || this.initialFallback.kind !== "unused") return;
+    if (attachment.playerToken.length === 0 || !Number.isSafeInteger(attachment.playerId)) return;
+    if (attachment.playerId < 0) return;
+    this.heldAttachment = {
+      socket,
+      credentials: {
+        playerToken: attachment.playerToken,
+        yourPlayer: attachment.playerId,
+        fullKey: {
+          game_code: attachment.fullKey.game_code,
+          generation: attachment.fullKey.generation,
+        },
+      },
+    };
+  }
+
+  /**
+   * A held source's pregame reply to the fallback's `Reconnect`: GameCreated,
+   * then SessionAttached. GameCreated is validated against the held identity
+   * and announces nothing (it is the return of an existing seat, not a new
+   * host), and the matching SessionAttached completes the reconnect
+   * bookkeeping silently and parks the join in `awaitingGameStarted`: no waiting
+   * snapshot is sent on this route, and the original initialization resolves
+   * only at the eventual GameStarted. Any mismatch, or a SessionAttached
+   * without its GameCreated, fails the identity before anything is published.
+   */
+  private acceptHeldPregameReply(
+    episode: Extract<InitialFallback, { kind: "reconnecting" }>,
+    frame: FallbackPregameFrame,
+  ): void {
+    const message = frame.type === "SessionAttached" && episode.pregameReturn !== "gameCreated"
+      ? "Server answered the join's reconnect with an unexpected pregame session reply"
+      : this.fallbackIdentityMismatch(episode.credentials, {
+        gameCode: frame.game_code,
+        playerId: frame.player_id,
+        playerToken: frame.player_token,
+        fullKey: frame.full_key,
+      }, "required");
+    if (message !== null) {
+      this.rejectSessionIdentity(new AdapterError("WS_ERROR", message, false));
+      return;
+    }
+    if (frame.type === "GameCreated") {
+      this.initialFallback = { ...episode, pregameReturn: "gameCreated" };
+      return;
+    }
+    // Bookkeeping runs while the episode is still active, so it announces nothing.
+    this.completeReconnect(false);
+    clearTimeout(episode.deadlineTimer);
+    this.initialFallback = { kind: "awaitingGameStarted", credentials: episode.credentials };
   }
 
   /** A delivered state ends both withheld conditions. */
@@ -3166,15 +3376,18 @@ export class WebSocketAdapter implements EngineAdapter {
       // post-handshake message loop begins.
 
       case "GameCreated": {
-        if (this.initialFallbackActive()) {
-          this.rejectFallbackPregameReply();
-          break;
-        }
         const data = msg.data as {
           game_code: string;
           player_token: string;
           full_key?: FullSessionKey;
         };
+        // Intercepted before the ordinary host branch: during an initial
+        // fallback a pregame reply is never a new host.
+        const fallback = this.initialFallback;
+        if (fallback.kind === "reconnecting") {
+          this.answerFallbackWithPregameFrame(fallback, { type: "GameCreated", ...data });
+          break;
+        }
         if (!this.acceptNativeReconnectIdentity({
           gameCode: data.game_code,
           playerToken: data.player_token,
@@ -3193,16 +3406,17 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "SessionAttached": {
-        if (this.initialFallbackActive()) {
-          this.rejectFallbackPregameReply();
-          break;
-        }
         const data = msg.data as {
           game_code: string;
           player_id: PlayerId;
           player_token: string;
           full_key?: FullSessionKey;
         };
+        const fallback = this.initialFallback;
+        if (fallback.kind === "reconnecting") {
+          this.answerFallbackWithPregameFrame(fallback, { type: "SessionAttached", ...data });
+          break;
+        }
         if (!this.acceptNativeReconnectIdentity({
           gameCode: data.game_code,
           playerId: data.player_id,
@@ -3224,6 +3438,7 @@ export class WebSocketAdapter implements EngineAdapter {
         };
         this._playerId = attachment.playerId;
         this.playerToken = attachment.playerToken;
+        this.recordHeldAttachment(attachment);
         this.emit({ type: "sessionChanged", session: this.currentSession() });
         this.emit({ type: "sessionAttached", attachment });
         if (this.pregameResolve) {
@@ -3308,7 +3523,12 @@ export class WebSocketAdapter implements EngineAdapter {
         // credentials before it bootstraps anything, then consumes the episode
         // before any subscriber can run: nothing it publishes can race its
         // deadline or re-enter it.
-        const fallback = this.initialFallback.kind === "reconnecting" ? this.initialFallback : null;
+        const fallback = this.initialFallback.kind === "reconnecting"
+          || this.initialFallback.kind === "awaitingGameStarted"
+          ? this.initialFallback
+          : null;
+        // Only a salvaged source still owes the session its first publication.
+        const publishesRetainedSession = fallback?.kind === "reconnecting" && fallback.source === "salvaged";
         if (fallback !== null) {
           if (!this.acceptFallbackGameStarted(fallback.credentials, data)) break;
           this.completeInitialFallback();
@@ -3367,11 +3587,15 @@ export class WebSocketAdapter implements EngineAdapter {
           this._gameCode = this.joinGameCode;
         }
         if (!nativeReconnect && data.full_key && !this.acceptFullSessionKey(data.full_key)) break;
-        // A fallback reply omits the token; the retained credentials are
-        // published here, once, as the session this join now owns.
+        // A salvaged fallback's reply omits the token; the retained credentials
+        // are published here, once, as the session this join now owns. A held
+        // fallback's session was published by its SessionAttached and is not
+        // repeated.
         if (!nativeReconnect && (data.player_token || fallback !== null)) {
           if (data.player_token) this.playerToken = data.player_token;
-          this.emit({ type: "sessionChanged", session: this.currentSession() });
+          if (fallback === null || publishesRetainedSession) {
+            this.emit({ type: "sessionChanged", session: this.currentSession() });
+          }
         }
         const playerNames = data.player_names === undefined
           ? undefined
