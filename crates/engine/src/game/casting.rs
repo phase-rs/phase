@@ -24126,15 +24126,6 @@ pub(crate) enum PausedManaPayment {
     Unresumable,
 }
 
-/// Cap on the source-derived width of the simulated-ceiling probe (see
-/// [`effect_payment_simulated_ceiling`]). It bounds the source-derived part of
-/// the probe only (`plan_auto_tap_rows` re-scans every need per assigned shard)
-/// and never the floating mana pool, which is counted in full. Pool mana the
-/// cost cannot spend (floating {U} for an {R} unit) is not removed by
-/// `reduce_cost_by_pool`, so it still reaches the planner's residual; that
-/// pool-dominated case is the pre-existing descent cost named in the PR notes.
-const PROBE_UNIT_CAP: u32 = 512;
-
 /// CR 118.1 + CR 605.3a: Each battlefield permanent's
 /// [`super::mana_sources::effect_payment_mana_capacity`] for a resolution-time
 /// effect payment, keeping only permanents that can contribute mana.
@@ -24254,12 +24245,16 @@ fn effect_payment_permissions(
 /// largest `n` such that `cost_at(n)` is payable from the resulting pool, plus
 /// one per choice-owing echo firing.
 ///
-/// The probe asks for `pool_total + min(PROBE_UNIT_CAP, sum of max(2, capacity))`
-/// units, so the pool the planner subtracts first never leaves it with fewer
-/// than the source-derived residual: at least one shard per capacity-positive
-/// permanent after the two-shard combination rows (Rugged Prairie, Arena of
-/// Glory). Past [`PROBE_UNIT_CAP`] of source width the simulation can undercount
-/// and callers fall back on the capacity floor.
+/// The probe asks for `pool_total + sum of max(2, capacity)` units, so the pool
+/// the planner subtracts first never leaves it with fewer than the
+/// source-derived residual: at least one shard per capacity-positive permanent
+/// after the two-shard combination rows (Rugged Prairie, Arena of Glory). The
+/// width is not capped: a cap would undercount multiplier boards wider than the
+/// cap (Nyxbloom Ancient over hundreds of lands), and the caller's first exact
+/// check already drives the planner at the capacity width. Pool mana the cost
+/// cannot spend (floating {U} for an {R} unit) still reaches the planner's
+/// residual; that pool-dominated case makes the caller's downward search start
+/// high (see `resolution_mana_per_unit_max`).
 ///
 /// `cost_at` returns `None` when scaling to `n` is not representable; that
 /// makes the probe itself `None` (callers use the capacity floor) and makes
@@ -24273,8 +24268,7 @@ pub(super) fn effect_payment_simulated_ceiling(
 ) -> Option<u32> {
     let source_width = effect_payment_permanent_capacities(state, payer)
         .into_iter()
-        .fold(0u32, |acc, capacity| acc.saturating_add(capacity.max(2)))
-        .min(PROBE_UNIT_CAP);
+        .fold(0u32, |acc, capacity| acc.saturating_add(capacity.max(2)));
     let probe_units = effect_payment_pool_total(state, payer).saturating_add(source_width);
     let probe_cost = cost_at(probe_units)?;
 

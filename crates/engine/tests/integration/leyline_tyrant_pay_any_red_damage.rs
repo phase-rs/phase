@@ -859,7 +859,7 @@ fn ceiling_i0_no_red_source_offers_zero() {
         .is_err());
 }
 
-/// Row BIG: a floating pool far beyond the simulation's source-width cap (512)
+/// Row BIG: a floating pool far beyond any source width
 /// is counted in full: 2000 floating {R} plus the Mountain tripled by Nyxbloom.
 #[test]
 fn ceiling_big_floating_pool_is_not_capped() {
@@ -876,5 +876,29 @@ fn ceiling_big_floating_pool_is_not_capped() {
     assert!(max >= 2003, "2000 floating + a tripled Mountain: {max}");
     assert_offer_is_payable(&mut runner, max);
     assert!(tapped(&runner, ids[1]), "the Mountain was tapped to pay");
+    assert_all_red_spent(&runner);
+}
+
+/// Row WIDE: source width just past the old probe cap (512). Each Mountain
+/// contributes two probe units, so 260 of them cross it; Nyxbloom Ancient
+/// triples each (CR 106.12b), so the real maximum is 780 and the offer must
+/// reach it. Life is raised so the 780 damage is not lethal.
+#[test]
+fn ceiling_wide_battlefield_is_not_capped() {
+    let mut names = vec!["Nyxbloom Ancient"];
+    names.extend(std::iter::repeat_n("Mountain", 260));
+    let cards = mine(&names);
+    let Some((mut runner, ids)) =
+        real_board(&[ManaType::Black], Some(1_000_000), &cards, ManaColor::Red)
+    else {
+        return;
+    };
+    let max = prompt_max(&mut runner);
+    assert!(
+        !tapped(&runner, ids[1]),
+        "reach: the Mountains are untapped"
+    );
+    assert_eq!(max, 780, "260 tripled Mountains: {max}");
+    assert_offer_is_payable(&mut runner, max);
     assert_all_red_spent(&runner);
 }
