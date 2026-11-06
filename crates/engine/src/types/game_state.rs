@@ -29459,6 +29459,11 @@ fn validate_draw_dealer(frame: &DrawSequenceFrame, dealer: &DrawDealer) -> Resul
     }
 }
 
+/// A replacement-ordering pause. A zone change's library placement lives on
+/// `proposed` (`ProposedEvent::ZoneChange.library_placement`). Older saves also
+/// carried a carrier-level `library_placement` key;
+/// `migrate_legacy_replacement_library_placement` imports it from the raw JSON
+/// into `proposed` before typed decoding, and this struct ignores the key.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingReplacement {
     pub proposed: ProposedEvent,
@@ -29485,11 +29490,6 @@ pub struct PendingReplacement {
     /// the affected player.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub choice_player: Option<PlayerId>,
-    /// Legacy save mirror. Decode imports this only when a Library-targeting
-    /// proposed ZoneChange lacks its own `library_placement` key. Current event
-    /// null and values are authoritative; execution must not consult this mirror.
-    #[serde(default)]
-    pub library_placement: Option<crate::types::ability::LibraryPosition>,
     /// CR 603.3a + CR 109.5: preserve the controller that resolved a
     /// monarch-bounded exile while its zone change waits on CR 616.1.
     #[serde(default)]
@@ -57219,7 +57219,6 @@ mod tests {
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: ZoneDeliveryExileTracking::None,

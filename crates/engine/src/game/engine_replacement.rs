@@ -525,8 +525,6 @@ fn handle_replacement_choice_inner(
                             },
                             drain:
                                 crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
-                            // The approved event carries the final placement.
-                            library_placement: None,
                         },
                         batch_member_owner,
                         events,
@@ -4842,7 +4840,6 @@ mod tests {
         assert!(null.is_null());
         state = serde_json::from_value(wire).expect("decode current explicit-null proposal");
         let pending = state.pending_replacement.as_ref().unwrap();
-        assert_eq!(pending.library_placement, Some(LibraryPosition::Top));
         assert!(matches!(
             &pending.proposed,
             ProposedEvent::ZoneChange {
@@ -4937,7 +4934,6 @@ mod tests {
             depth: 0,
             is_optional: true,
             choice_player: Some(PlayerId(0)),
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -5615,7 +5611,6 @@ mod tests {
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,

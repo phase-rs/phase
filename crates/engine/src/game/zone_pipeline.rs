@@ -676,9 +676,6 @@ pub(crate) struct DeliveryCtx {
     /// CR 614.12a: who drains `post_replacement_continuation` after this
     /// delivery (see [`PostReplacementDrainOwner`]).
     pub drain: PostReplacementDrainOwner,
-    /// Legacy caller mirror, retained for source compatibility. Terminal delivery
-    /// reads only `ApprovedZoneChange.event.library_placement`, including null.
-    pub library_placement: Option<LibraryPosition>,
 }
 
 /// CR 400.7d + CR 608.3: the cast-link family — information about the spell
@@ -950,7 +947,6 @@ fn move_batch_member_with_terminal(
                             ZoneDeliveryExileTracking::TrackBySource
                         ),
                         PostReplacementDrainOwner::DeliveryTail,
-                        Some(position),
                         owner,
                         events,
                     ) {
@@ -969,11 +965,6 @@ fn move_batch_member_with_terminal(
                     // CR 616.1: park at the single unparked origin (mirrors
                     // `execute_zone_move`'s NeedsChoice arm) so the prompt surfaces.
                     state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
-                    // Retain the legacy wire mirror. The proposed event already
-                    // owns the position; resume never restores from this mirror.
-                    if let Some(pending) = state.pending_replacement.as_mut() {
-                        pending.library_placement = Some(position);
-                    }
                     ZoneMoveTerminalResult::NeedsChoice(player)
                 }
             };
@@ -1025,7 +1016,6 @@ fn move_batch_member_with_terminal(
                     exile_links.controller,
                     track_exiled_by_source,
                     PostReplacementDrainOwner::DeliveryTail,
-                    None,
                     owner,
                     events,
                 ) {
@@ -1152,10 +1142,6 @@ fn move_batch_member_with_terminal(
                 source_id,
                 exile_links,
                 drain: PostReplacementDrainOwner::DeliveryTail,
-                // CR 701.24a: exempt LIBRARY placements were already delivered and
-                // returned by the placement arm above; any exempt cause reaching
-                // this generic delivery has no library placement to honor.
-                library_placement: None,
             },
             owner,
             events,
@@ -1998,7 +1984,6 @@ mod paused_search_audience_tests {
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: ZoneDeliveryExileTracking::None,
@@ -2114,8 +2099,6 @@ pub(crate) fn deliver_batch_member(
         ctx.exile_links.controller,
         track_exiled_by_source,
         ctx.drain,
-        // Compatibility context only: the sealed event owns placement.
-        ctx.library_placement,
         owner,
         events,
     )
@@ -3843,7 +3826,6 @@ pub(crate) fn deliver_replaced_zone_change(
     exile_controller: Option<PlayerId>,
     track_exiled_by_source: bool,
     drain: PostReplacementDrainOwner,
-    _legacy_library_placement: Option<LibraryPosition>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
     deliver_replaced_batch_member(
@@ -3854,7 +3836,6 @@ pub(crate) fn deliver_replaced_zone_change(
         exile_controller,
         track_exiled_by_source,
         drain,
-        _legacy_library_placement,
         None,
         events,
     )
@@ -3869,7 +3850,6 @@ fn deliver_replaced_batch_member(
     exile_controller: Option<PlayerId>,
     track_exiled_by_source: bool,
     drain: PostReplacementDrainOwner,
-    _legacy_library_placement: Option<LibraryPosition>,
     owner: Option<BatchMemberDeliveryOwner>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
@@ -4902,7 +4882,7 @@ fn execute_zone_move_with_applied_terminal(
         ..
     } = &mut proposed
     {
-        *placement = library_placement.clone();
+        *placement = library_placement;
         *applied = replacement_applied;
         *conceal_in_exile = face_down_in_exile;
         *intent = chain_referent;
@@ -5156,7 +5136,6 @@ fn execute_zone_move_with_applied_terminal(
                     exile_controller,
                     track_exiled_by_source,
                     PostReplacementDrainOwner::DeliveryTail,
-                    library_placement,
                     owner,
                     events,
                 ) {
@@ -5202,7 +5181,6 @@ fn execute_zone_move_with_applied_terminal(
                 exile_controller,
                 track_exiled_by_source,
                 PostReplacementDrainOwner::DeliveryTail,
-                library_placement,
                 owner,
                 events,
             ) {
@@ -5238,9 +5216,6 @@ fn execute_zone_move_with_applied_terminal(
             // wait state is already set by the counter-pause / devour machinery
             // (`replacement_pause_delivery_result` reads it).
             if let Some(pending) = state.pending_replacement.as_mut() {
-                // Legacy wire mirror only; the proposal owns the disposition
-                // through every pause and terminal delivery.
-                pending.library_placement = library_placement;
                 pending.exile_controller = exile_controller;
                 pending.exile_duration = duration.cloned();
                 pending.exile_tracking = if track_exiled_by_source {
@@ -5576,7 +5551,6 @@ mod w3_library_placement_tests {
                             source_id: Some(card),
                             exile_links: ExileLinkSpec::default(),
                             drain: PostReplacementDrainOwner::DeliveryTail,
-                            library_placement: Some(LibraryPosition::Top),
                         },
                         &mut events
                     ),
@@ -5598,8 +5572,8 @@ mod w3_library_placement_tests {
                     );
                     assert_no_shuffle(&events);
                 } else {
-                    // Current null selects the existing placement-less delivery
-                    // convention even when the legacy caller still says Top.
+                    // A null event placement selects the placement-less delivery
+                    // convention: the tail's auto-shuffle (CR 701.24a).
                     assert!(events.iter().any(|e| matches!(
                         e,
                         GameEvent::PlayerPerformedAction {
@@ -5622,7 +5596,6 @@ mod w3_library_placement_tests {
             None,
             false,
             PostReplacementDrainOwner::DeliveryTail,
-            Some(LibraryPosition::Top),
             &mut events,
         );
         assert_eq!(state.objects[&card].zone, Zone::Exile);
@@ -5655,6 +5628,10 @@ mod w3_library_placement_tests {
                 Some(_) => Some(LibraryPosition::Bottom),
             };
             let mut wire = serde_json::to_value(&state).unwrap();
+            // The legacy carrier mirror an authentic old save carried; the
+            // current engine no longer writes it.
+            wire["pending_replacement"]["library_placement"] =
+                serde_json::to_value(LibraryPosition::Top).unwrap();
             let proposed = wire["pending_replacement"]["proposed"]["ZoneChange"]
                 .as_object_mut()
                 .expect("paused proposal wire");
@@ -7099,6 +7076,12 @@ mod w3_library_placement_tests {
                             if let Some(boundary) = carrier.get_mut("delivery_boundary") {
                                 strip_event_placement(boundary);
                             }
+                            // An authentic old save carried the placement on the
+                            // carrier itself; the current engine no longer writes it.
+                            carrier.insert(
+                                "library_placement".into(),
+                                serde_json::json!({"type": "Bottom"}),
+                            );
                         }
                     }
                     if let Some(expected) = object
@@ -7250,7 +7233,7 @@ mod w3_library_placement_tests {
             carrier["proposed"]["ZoneChange"]["library_placement"],
             bottom
         );
-        carrier["library_placement"] = top.clone();
+        carrier.insert("library_placement".into(), top.clone());
         let owner = find_key_mut(&mut wire, "paused_current")
             .and_then(serde_json::Value::as_object_mut)
             .expect("the pause retains its exact owner");
@@ -7264,9 +7247,9 @@ mod w3_library_placement_tests {
         assert_parked_position(&restored, first, Some(LibraryPosition::Bottom));
         let rewritten = serde_json::to_value(&restored).expect("restored pause serializes");
         let carrier = find_key(&rewritten, "pending_replacement").expect("carrier");
-        assert_eq!(
-            carrier["library_placement"], top,
-            "legacy mirror is preserved verbatim"
+        assert!(
+            carrier.get("library_placement").is_none(),
+            "the typed carrier no longer holds the legacy mirror, so it is not re-encoded"
         );
         assert_eq!(
             carrier["proposed"]["ZoneChange"]["library_placement"], bottom,
@@ -7304,7 +7287,10 @@ mod w3_library_placement_tests {
                 .as_object_mut()
                 .expect("proposal is a ZoneChange")
                 .remove("library_placement");
-            carrier["library_placement"] = serde_json::json!({"type": "Bottom"});
+            carrier.insert(
+                "library_placement".into(),
+                serde_json::json!({"type": "Bottom"}),
+            );
         }
         {
             let owner = find_key_mut(&mut wire, "paused_current")
@@ -7385,6 +7371,8 @@ mod w3_library_placement_tests {
                 .as_object_mut()
                 .expect("the pinned boundary is a ZoneChange")
                 .remove("library_placement");
+            // The authentic old save carried the mirror on the carrier.
+            carrier.insert("library_placement".into(), bottom.clone());
         }
         {
             let owner = find_key_mut(&mut wire, "paused_current")
@@ -7492,7 +7480,10 @@ mod w3_library_placement_tests {
                 .as_object_mut()
                 .expect("proposal is a ZoneChange")
                 .remove("library_placement");
-            carrier["library_placement"] = serde_json::json!({"type": "Bottom"});
+            carrier.insert(
+                "library_placement".into(),
+                serde_json::json!({"type": "Bottom"}),
+            );
         }
         let owner = wire["pending_batch_deliveries"]["paused_current"]
             .as_object_mut()
