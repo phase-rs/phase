@@ -212,12 +212,15 @@ pub(crate) fn apply_zone_exit_cleanup(
     // memory of its previous existence. The information authority receives the
     // pre-move occurrence so the future Zone command can apply this same clear
     // without ever exposing the new incarnation through the old reveal lease.
+    // `to` is passed too: CR 701.20a keeps a PUBLIC reveal alive when the card
+    // lands in a hand (the table already saw it), while CR 401.2 retires it on a
+    // move into a library — see `clear_revealed_information_on_zone_exit`.
     let occurrence = state
         .objects
         .get(&object_id)
         .map(ObjectIncarnationRef::from_object)
         .expect("zone-exit cleanup must reference a live object");
-    state.clear_revealed_information_on_zone_exit(occurrence);
+    state.clear_revealed_information_on_zone_exit(occurrence, to);
     // CR 400.7 + CR 702.187b: The "discarded this turn" mark (Mayhem's gate)
     // belongs to the old object. Clear it on any zone change so a card that
     // leaves the graveyard and returns is not treated as still discarded; the

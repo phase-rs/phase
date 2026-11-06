@@ -97,12 +97,13 @@ use crate::types::ability::{
     AttachmentReferent, AttackSubject, CardTypeSetSource, CastingPermission,
     ContinuousModification, ControllerRef, CountScope, DelayedTriggerCondition, Duration,
     EachDamageRecipient, Effect, EffectScope, FilterProp, ForEachCategoryAction, GuessSubject,
-    KeeperConstraint, ManaProduction, ModalChoice, ModalSelectionCondition,
-    ModalSelectionConstraint, MultiTargetSpec, NameStickerSet, ObjectScope, PlayerFilter,
-    PlayerScope, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation,
-    ReplacementCondition, ResolvedAbility, StaticCondition, TargetFilter, TokenAttackDestination,
-    TrackedAnaphorSource, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    TriggerLimitSpend, TypedFilter, UnlessPayModifier, ZoneChangeClause, ZoneChoiceCandidateSource,
+    KeeperConstraint, LibraryInstructionActor, ManaProduction, ModalChoice,
+    ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, NameStickerSet,
+    ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    ReciprocalZoneChoiceRole, RepeatContinuation, ReplacementCondition, ResolvedAbility,
+    StaticCondition, TargetFilter, TokenAttackDestination, TrackedAnaphorSource, TriggerCondition,
+    TriggerConstraint, TriggerDefinition, TriggerLimitSpend, TypedFilter, UnlessPayModifier,
+    ZoneChangeClause, ZoneChoiceCandidateSource,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::keywords::{DisguiseCost, Keyword};
@@ -241,6 +242,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         effect,
         sub_ability,
         else_ability,
+        coin_branches,
         condition,
         duration,
         player_scope,
@@ -328,6 +330,14 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
     let mut acc = scan_effect(effect, mode);
     if reads_return_result.is_some() {
         acc = acc.or(Axes::CONSERVATIVE);
+    }
+    if let Some(branches) = coin_branches {
+        for child in [branches.won.as_ref(), branches.lost.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            acc = acc.or(resolved_ability_axes(child, mode));
+        }
     }
     if let Some(sub) = sub_ability {
         acc = acc.or(resolved_ability_axes(sub, mode));
@@ -951,6 +961,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             keep_count: _,
             up_to: _,
             rest_destination: _,
+            rest_remainder: _,
             rest_order: _,
             reveal: _,
             enter_tapped: _,
@@ -1471,11 +1482,12 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             count,
             position: _,
             face_down: _,
-            actor: _,
+            actor,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(player, target_ctx, mode));
             acc = acc.or(scan_quantity_expr(count, mode));
+            acc = acc.or(scan_library_instruction_actor(actor, target_ctx, mode));
             acc
         }
         Effect::ExileFaceDownPile {
@@ -2915,6 +2927,14 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             acc
         }
         QuantityRef::CrimesCommittedThisTurn => Axes::NONE,
+        // CR 107.14 + CR 122.1: controller energy-spent journal; a projected
+        // per-turn resource tracker like `LifeLostThisTurn`.
+        QuantityRef::EnergyPaidOrLostThisTurn => Axes {
+            event: false,
+            sibling: false,
+            projected: true,
+            history: HistoryReads::NONE,
+        },
         // Controller turn-accumulator: no event/sibling/projected axis (mirrors
         // CrimesCommittedThisTurn / DescendedThisTurn).
         QuantityRef::BendTypesThisTurn => {
@@ -5559,6 +5579,29 @@ fn scan_player_scope(x: &PlayerScope) -> Axes {
     }
 }
 
+/// CR 608.2c: the reads of the player who performs a library instruction
+/// (`Effect::ExileTop.actor`). The resolver (`effects/exile_top.rs`) reads the
+/// named subject through the same context the instruction's own `player`
+/// selector uses, so `ctx` is the effect's target context.
+fn scan_library_instruction_actor(
+    x: &LibraryInstructionActor,
+    ctx: FilterReadContext,
+    mode: ScanMode,
+) -> Axes {
+    match x {
+        // The spell or ability's controller — a `ResolvedAbility` field, not a
+        // filter read.
+        LibraryInstructionActor::Controller => Axes::NONE,
+        // The library's owner — the instruction's `player` selector, which the
+        // calling arm already scans.
+        LibraryInstructionActor::LibraryPlayer => Axes::NONE,
+        // A named subject other than the library's owner ("Target opponent
+        // looks at the top card of your library, then exiles it face down" —
+        // Vulcan Mind-Meld) reads whatever its player filter reads.
+        LibraryInstructionActor::Player { player } => scan_target_filter(player, ctx, mode),
+    }
+}
+
 /// CR 508.4: the reads of the defender a token instruction names.
 fn scan_token_attack_destination(x: &TokenAttackDestination, mode: ScanMode) -> Axes {
     match x {
@@ -5893,6 +5936,19 @@ pub(crate) fn ability_cost_references_sibling_mutable(cost: &AbilityCost) -> boo
 /// object-growth cost firewall.
 pub(crate) fn quantity_ref_references_sibling_mutable(qty: &QuantityRef) -> bool {
     scan_quantity_ref(qty, ScanMode::Conservative).sibling
+}
+
+/// Axis 3 on a bare `QuantityRef` — the dynamic cost multiplier
+/// (`dynamic_count: Option<QuantityRef>`) carried by CR 601.2f cost-modification
+/// statics (`StaticMode::ModifyCost` / `StaticMode::ReduceAbilityCost`). Thin
+/// `.projected` projection of the exhaustive [`scan_quantity_ref`] scanner: a
+/// per-turn journal read there (Blaster Hulk's
+/// `EnergyPaidOrLostThisTurn`) grows with every repeat of a loop while
+/// `project_out_resources` zeroes it, so a cost that reads it changes per
+/// iteration and must be caught by the cost-affordability firewall exactly as a
+/// board aggregate is.
+pub(crate) fn quantity_ref_references_projected_resource(qty: &QuantityRef) -> bool {
+    scan_quantity_ref(qty, ScanMode::Conservative).projected
 }
 
 fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes {
@@ -8253,6 +8309,99 @@ mod tests {
         }
     }
 
+    fn exile_top_performed_by(actor: LibraryInstructionActor) -> Effect {
+        Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: crate::types::ability::LibraryPosition::Top,
+            face_down: true,
+            actor,
+        }
+    }
+
+    /// CR 608.2c: the player who performs a library exile is read through its
+    /// own filter. The controller and library-owner roles carry no filter and
+    /// add no axis; a named subject reads what its player filter reads — a
+    /// context-ref controller nothing, the triggering player an event read,
+    /// and Vulcan Mind-Meld's targeted opponent keeps its `Typed`
+    /// classification.
+    /// Revert-probe: bind `actor: _` in the `ExileTop` arm ⇒ the triggering and
+    /// targeted-opponent rows equal the controller row.
+    #[test]
+    fn exile_top_actor_is_read_as_its_player_filter() {
+        let named = |player| LibraryInstructionActor::Player { player };
+        let opponent =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+        for mode in [ScanMode::Conservative, ScanMode::LoopFirewall] {
+            let axes = |actor| {
+                let a = scan_effect(&exile_top_performed_by(actor), mode);
+                (a.event, a.sibling, a.projected, a.history)
+            };
+            let controller = axes(LibraryInstructionActor::Controller);
+            assert!(
+                !controller.0,
+                "{mode:?}: the controller-performed exile is event-free"
+            );
+            assert_eq!(
+                axes(LibraryInstructionActor::LibraryPlayer),
+                controller,
+                "{mode:?}: the library owner adds no axis beyond `player`"
+            );
+            assert_eq!(
+                axes(named(TargetFilter::Controller)),
+                controller,
+                "{mode:?}: a named controller subject adds no axis"
+            );
+            assert!(
+                axes(named(TargetFilter::TriggeringPlayer)).0,
+                "{mode:?}: a triggering-player subject is an event read"
+            );
+            assert!(
+                axes(named(opponent.clone())).0,
+                "{mode:?}: the targeted opponent keeps the Typed event read"
+            );
+        }
+    }
+
+    /// The actor read survives nesting — a subject filter composed inside
+    /// `Not`, on an `ExileTop` that is a sub-ability — and reaches the
+    /// resolved-ability consumer the trigger-ordering gate calls.
+    /// Revert-probe: bind `actor: _` in the `ExileTop` arm ⇒ the nested row
+    /// reads no event context.
+    #[test]
+    fn nested_exile_top_actor_read_reaches_resolved_ability_consumer() {
+        let with_exile = |actor| {
+            ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                Vec::new(),
+                ObjectId(1),
+                PlayerId(0),
+            )
+            .sub_ability(ResolvedAbility::new(
+                exile_top_performed_by(actor),
+                Vec::new(),
+                ObjectId(1),
+                PlayerId(0),
+            ))
+        };
+        assert!(!ability_uses_event_context(&with_exile(
+            LibraryInstructionActor::Controller
+        )));
+        assert!(!ability_uses_event_context(&with_exile(
+            LibraryInstructionActor::LibraryPlayer
+        )));
+        assert!(ability_uses_event_context(&with_exile(
+            LibraryInstructionActor::Player {
+                player: TargetFilter::Not {
+                    filter: Box::new(TargetFilter::TriggeringPlayer),
+                },
+            }
+        )));
+    }
+
     /// A vanilla token stays fail-closed CONSERVATIVE in `Conservative` mode.
     /// Revert-probe: make the Token arm descend unconditionally ⇒ `event` flips false.
     #[test]
@@ -10043,6 +10192,10 @@ mod tests {
             QuantityRef::LifeGainedThisTurn {
                 player: PlayerScope::Controller
             }
+        )));
+        // Energy paid/lost journal (CR 107.14) — Blaster Hulk's cost multiplier.
+        assert!(ability_reads_projected_resource(&ability_with_amount(
+            QuantityRef::EnergyPaidOrLostThisTurn
         )));
         // Cast journal (spells cast this turn, cleared by project_out_resources).
         assert!(ability_reads_projected_resource(&ability_with_amount(

@@ -258,6 +258,7 @@ fn peel_inner(text: String, mut ctx: ClauseContext) -> (String, ClauseContext) {
     // repeat count, and keeps its prefix.
     if ctx.repeat_for.is_none()
         && !super::oracle_effect::is_for_each_opponent_choose_controlled(&text.to_lowercase())
+        && !super::oracle_effect::is_object_exiler_play_grant(&text.to_lowercase())
     {
         let (qty, rest) = peel_for_each_prefix(&text);
         if qty.is_some() {
