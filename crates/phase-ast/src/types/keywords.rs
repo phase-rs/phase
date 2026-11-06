@@ -3492,7 +3492,8 @@ pub fn parse_protection_target(s: &str) -> ProtectionTarget {
     }
 }
 
-/// CR 702.16i: Parse a qualified live color set. One trailing period is
+/// CR 702.16i: Parse a qualified color set, read live from the board or fixed at
+/// game start (a commander's color identity, CR 903.4a). One trailing period is
 /// tolerated because the keyword quality splitter can preserve punctuation.
 fn parse_protection_color_set(s: &str) -> Option<ProtectionColorSet> {
     type E<'a> = nom::error::Error<&'a str>;

@@ -13567,7 +13567,7 @@ mod tests {
         GameState::new_two_player(42)
     }
 
-    // Focused partial-revert guard for R5, independent of cast settlement's
+    // Focused partial-revert guard for the live color-set population probe, independent of cast settlement's
     // broader invalidation. The integration regression casts the actual cards.
     #[test]
     fn kannushi_pledge_population_probe_reads_entrant_color_and_controller() {

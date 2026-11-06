@@ -145,7 +145,8 @@ fn assert_grant(database: &CardDatabase, name: &str, oracle: &str, aura: bool) {
 }
 
 // CR 702.16i: each member is a separate concrete protection ability.
-// CR 110.1: off-battlefield cards and the opponent's permanents don't contribute.
+// CR 110.1: a permanent is a card or token on the battlefield, so off-battlefield cards contribute no color.
+// CR 109.5: "you" is the granting permanent's controller, so the opponent's permanents contribute nothing.
 #[test]
 fn kannushi_pledge_self_and_aura_protect_from_noncreature_color() {
     for (aura, phased_out) in [(false, false), (false, true), (true, false), (true, true)] {
@@ -804,7 +805,7 @@ fn kannushi_pledge_raw_oracle_and_nonbattlefield_colors() {
     assert_eq!(colors(&runner, kannushi), vec![ManaColor::White]);
 }
 
-// CR 702.160a, 718.3b, 105.2, 611.3a: a genuinely prototyped entrant
+// CR 702.160a + CR 718.3b + CR 105.2 + CR 611.3a: a genuinely prototyped entrant
 // contributes its alternative color to an already-settled live protection set.
 // No test-side layer flush, dirty marking, keyword seeding, or form assignment.
 #[test]
