@@ -79398,6 +79398,8 @@ fn bare_choose_partial_object_phrase_keeps_stack_timing() {
 /// SHAPE: a non-controller subject cannot use the controller-only resolution chooser.
 #[test]
 fn bare_choose_non_controller_subject_keeps_stack_timing() {
+    // Synthetic Oracle: no printed card says "other than this creature" on a bare
+    // choose; the nearest printed card is Guard Dogs ("Choose a permanent you control.").
     let text = "Choose a permanent you control other than this creature.";
     let def = parse_effect_chain(text, AbilityKind::Spell);
     assert!(
@@ -79412,7 +79414,9 @@ fn bare_choose_non_controller_subject_keeps_stack_timing() {
 
     // Subject-path control: the controller as the printed subject takes the same
     // seam as the third-party rows below, so only a non-controller subject may
-    // withdraw the Resolution declaration. Synthetic: no printed card words this.
+    // withdraw the Resolution declaration. Synthetic: the nearest printed card is
+    // Tunnel of Love ("They choose a creature they control, then you choose a creature
+    // you control.").
     let text = "You choose a permanent you control other than this creature.";
     let def = parse_effect_chain(text, AbilityKind::Spell);
     assert!(
@@ -79519,8 +79523,9 @@ fn bare_choose_stripped_quantifier_does_not_declare_resolution_timing() {
     );
     assert_eq!(ir.clauses[0].declared_target_choice_timing, None);
 
-    // A later singular, unquantified choice declares Resolution at any chain
-    // position, even after a quantified head that stays undeclared.
+    // Synthetic Oracle: no printed card chains Log Flume's choice before Final
+    // Showdown's. A later singular, unquantified choice declares Resolution at any
+    // chain position, even after a quantified head that stays undeclared.
     let chain = format!("{log_flume} {final_showdown}");
     let ir = parse_effect_chain_ir(&chain, AbilityKind::Spell, &mut ParseContext::default());
     assert_eq!(ir.clauses.len(), 2);
