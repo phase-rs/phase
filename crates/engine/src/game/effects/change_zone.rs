@@ -642,8 +642,8 @@ fn filter_names_library_owner(filter: &TargetFilter) -> bool {
 /// (Declaration in Stone; Deputy of Detention: "all other nonland permanents
 /// that player controls") and "search its controller's
 /// graveyard, hand, and library … and exile them" (Eradicate, Counterbore)
-/// name whose objects are swept; the spell's controller follows the
-/// instruction. A pick with the same scope is the subject form ("then that
+/// name whose objects are swept; the controller of the spell or ability
+/// follows the instruction. A pick with the same scope is the subject form ("then that
 /// player exiles a card from their hand", Ashiok, Nightmare Muse) and is not
 /// matched. The shape is read from `ability.effect`, the discriminant both
 /// resolvers already dispatch on.
@@ -2099,10 +2099,10 @@ pub(crate) fn resolving_stack_ability_for_source(
 pub(crate) struct ChangeZoneIterationCtx {
     pub source_id: ObjectId,
     /// The player who performs this instruction's move (CR 608.2c) — the
-    /// announced-target controller when the members were announced as targets,
-    /// the instruction's performer on the mass path, and the `EffectZoneChoice`
-    /// chooser on an interactive pick resume (which has no `ResolvedAbility` to
-    /// re-derive it from).
+    /// controller for announced targets, bound referents and
+    /// search-outside-the-game pulls, `move_performer`'s answer on the mass
+    /// path, and the `EffectZoneChoice` chooser on an interactive pick resume
+    /// (which has no `ResolvedAbility` to re-derive it from).
     pub controller: PlayerId,
     pub origin: Option<Zone>,
     pub destination: Zone,
@@ -2225,8 +2225,9 @@ pub(crate) fn process_one_zone_move_with_terminal(
         ctx.enter_attached_to,
         Some(ctx.controller),
         // CR 608.2c: `ctx.controller` is the performer the caller computed —
-        // the caster for announced targets, the instruction's subject on the
-        // mass path, the chooser on an `EffectZoneChoice` resume.
+        // the controller for announced targets, bound referents and
+        // search-outside-the-game pulls, `move_performer`'s answer on a
+        // mass-move resume, the chooser on an `EffectZoneChoice` resume.
         Some(ctx.controller),
         events,
     );
@@ -3009,8 +3010,8 @@ pub fn resolve_all(
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(state, ability, &target_filter);
     // CR 608.2c: who performs this mass move, decided once beside the chooser.
-    // A mass move announces no targets, so the instruction's own subject (when
-    // it names one) is the performer; the library-owner and parent-target-sweep
+    // A mass move's members are not announced as targets, so the instruction's
+    // own subject (when it names one) is the performer; the library-owner and parent-target-sweep
     // gates keep those moves on the controller (`move_performer`). The classifier
     // reads both filter encodings, so computing it before
     // `owner_scoped_nonbattlefield_mass_filter` is order-independent.
@@ -3317,7 +3318,7 @@ pub fn resolve_all(
             Some(performer),
             // CR 608.2c: the instruction's own subject performs the move
             // ("that player exiles …"); where no subject is named this is the
-            // controller (see `move_performer`).
+            // controller (the exceptions are `move_performer`'s gates).
             Some(performer),
             events,
         ) {
@@ -13101,8 +13102,13 @@ mod tests {
 
     // ---------------------------------------------------------------------
     // Performer classification (issue #10414): `move_performer`'s library-owner
-    // and parent-target-sweep gates. Nothing here is card-specific; each
-    // fixture is a filter shape that printed cards produce, named per row.
+    // and parent-target-sweep gates. Nothing here is card-specific. The leaf
+    // legs are relations printed cards use (Rahilda's library leg, which the
+    // parser prints in encoding B; Eradicate's parent-target sweep; a
+    // ScopedPlayer graveyard leg). Encoding A and the Or/And/Not/
+    // TrackedSetFiltered wrappers are synthetic (no printed card produces them
+    // today) and pin the traversal set `owner_scoped_nonbattlefield_mass_filter`
+    // rewrites.
     // ---------------------------------------------------------------------
 
     fn performer_test_mass_exile(
@@ -13270,7 +13276,7 @@ mod tests {
                 false,
             ),
             (
-                "typed ScopedPlayer + graveyard (Mudhole / Strategic Betrayal subject form)",
+                "typed ScopedPlayer + graveyard (encoding A of the Mudhole / Strategic Betrayal relation; those cards parse to encoding B)",
                 card_leg(
                     Some(ControllerRef::ScopedPlayer),
                     vec![FilterProp::InZone {
@@ -13525,12 +13531,14 @@ mod tests {
     /// card at random from their hand") is that subject's exile. This reaches
     /// the `TargetSelectionMode::Random` single-pick arm of `resolve` with a
     /// subject-form, non-library filter (`Owned { ScopedPlayer }` +
-    /// `InZone { Hand }`), the shape of Elkin Lair — "At the beginning of each
+    /// `InZone { Hand }`), the relation of Elkin Lair (which the parser prints with an additional, redundant typed `controller: ScopedPlayer`) — "At the beginning of each
     /// player's upkeep, that player exiles a card at random from their hand. The
     /// player may play that card this turn. At the beginning of the next end
     /// step, if the player hasn't played the card, they put it into their
-    /// graveyard." Two eligible cards keep the single-eligible shortcut from
-    /// being the arm that fires. (Rona, Tolarian Obliterator — "Whenever a
+    /// graveyard." The Random arm is checked before the single-eligible
+    /// shortcut in `resolve`, so it fires whatever the eligible count; two
+    /// eligible cards make the random draw observable (one is exiled, the other
+    /// stays). (Rona, Tolarian Obliterator — "Whenever a
     /// source deals damage to Rona, that source's controller exiles a card from
     /// their hand at random." — reaches the same arm through a
     /// `ParentTargetController`-scoped hand filter.)
@@ -13569,9 +13577,8 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).expect("random hand pick resolves");
 
-        // Reach-guards: exactly one of the two P1 cards was drawn at random (so
-        // the single-eligible arm did not fire), nothing prompted, and the
-        // controller's own card was untouched.
+        // Reach-guards: exactly one of the two P1 cards was drawn at random,
+        // nothing prompted, and the controller's own card was untouched.
         let exiled: Vec<ObjectId> = [p1_a, p1_b]
             .into_iter()
             .filter(|id| state.objects[id].zone == Zone::Exile)

@@ -299,8 +299,8 @@ fn strategic_betrayal_mass_leg_records_the_subject() {
 
 /// Skullcap Snail: "When this creature enters, target opponent exiles a card
 /// from their hand." With exactly one eligible card the resolver takes its
-/// single-eligible shortcut (no prompt), which is the site that discarded the
-/// computed performer.
+/// single-eligible shortcut (no prompt), which is the site that passed the
+/// controller instead of the computed chooser.
 ///
 /// Revert sensitivity: reverted, this records `Some(P0)`.
 #[test]
