@@ -29,12 +29,13 @@
 //! recapture after the sacrifice.
 
 use engine::game::filter::{spell_record_matches_filter, FilterContext};
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{FilterProp, TargetFilter, TargetRef, TypedFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
-    ActivationTargetFact, CastPaymentMode, GameState, SpellCastRecord, WaitingFor,
+    ActivationTargetFact, CastPaymentMode, GameState, PersistedGameState, PersistedRestoreError,
+    PersistedRestoreFinalization, SpellCastRecord, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -47,6 +48,9 @@ const BONE_SPLINTERS: &str =
 /// Printed Mishra's Factory, verbatim: the `{1}` activation is the animation
 /// that makes it a creature while it remains a land.
 const MISHRA_S_FACTORY: &str = "{T}: Add {C}.\n{1}: This land becomes a 2/2 Assembly-Worker artifact creature until end of turn. It's still a land.\n{T}: Target Assembly-Worker creature gets +1/+1 until end of turn.";
+
+const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
+const LEYLINE_OF_THE_VOID: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.";
 
 fn pool(types: &[ManaType]) -> Vec<ManaUnit> {
     types
@@ -270,4 +274,131 @@ fn bone_splinters_records_an_animated_sacrificed_target_as_the_creature_it_was()
              Head of the Class's first-spell gate counts; prompts {prompts:?}"
         );
     }
+}
+
+/// CR 601.2c + CR 400.7 + CR 616.1: a cast parked on a replacement choice raised by
+/// its own additional sacrifice cost must still be admitted with its announced
+/// targets, and a save that cannot prove them must be refused *before* it resumes
+/// with a history record that claims the cast declared nothing.
+///
+/// The target here is a **distinct surviving** creature, not the sacrificed one: it
+/// is still on the battlefield when the cast resumes, so the paused carrier — not a
+/// later lookup — is what preserves it.
+#[test]
+fn a_persisted_first_cast_sacrifice_pause_keeps_its_announced_targets_or_is_refused() {
+    let mut sc = board();
+    // Both replacements must apply to P0's sacrificed creature for CR 616.1 to
+    // raise an ordering choice: Rest in Peace affects any graveyard, and Leyline of
+    // the Void only an opponent's — so the opponent controls both.
+    sc.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE);
+    sc.add_enchantment_from_oracle(P1, "Leyline of the Void", LEYLINE_OF_THE_VOID);
+    let survivor = sc.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let fodder = sc.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let spell = bone_splinters(&mut sc);
+    sc.with_mana_pool(P0, pool(&[ManaType::Black]));
+    let mut runner = sc.build();
+
+    cast(&mut runner, spell, CastPaymentMode::Manual);
+    // Drive to the replacement-order choice CR 616.1 raises for the sacrifice.
+    let mut saw_choice = false;
+    for _ in 0..32 {
+        let wf = runner.state().waiting_for.clone();
+        match wf {
+            WaitingFor::ReplacementChoice { .. } => {
+                saw_choice = true;
+                break;
+            }
+            WaitingFor::TargetSelection { .. } => runner
+                .act(GameAction::SelectTargets {
+                    targets: vec![TargetRef::Object(survivor)],
+                })
+                .expect("target the surviving creature"),
+            WaitingFor::PayCost { .. } => runner
+                .act(GameAction::SelectCards {
+                    cards: vec![fodder],
+                })
+                .expect("sacrifice the fodder"),
+            WaitingFor::ManaPayment { .. } => runner
+                .act(GameAction::PassPriority)
+                .expect("pay the black mana"),
+            other => panic!("unexpected announcement prompt {other:?}"),
+        };
+    }
+    assert!(
+        saw_choice,
+        "reach guard: the two graveyard replacements raise a CR 616.1 choice while the cast is parked"
+    );
+
+    let persisted = PersistedGameState::capture(runner.state().clone());
+    let json = serde_json::to_value(&persisted).expect("the park serializes");
+
+    // (a) A park that carries its announced targets is admitted.
+    let admitted = serde_json::from_value::<PersistedGameState>(json.clone())
+        .expect("the park decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated);
+    assert!(
+        admitted.is_ok(),
+        "a parked cast carrying its announced targets must be admitted: {:?}",
+        admitted.err()
+    );
+
+    // (b) The same park written before the latch existed cannot prove what the
+    // spell declared, so it is refused at the shared restore boundary rather than
+    // resumed into a falsely known-empty history record.
+    fn strip_pending_facts(value: &mut serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut stripped = map.remove("committed_target_facts").is_some();
+                for nested in map.values_mut() {
+                    stripped |= strip_pending_facts(nested);
+                }
+                stripped
+            }
+            serde_json::Value::Array(items) => items
+                .iter_mut()
+                .fold(false, |acc, item| strip_pending_facts(item) | acc),
+            _ => false,
+        }
+    }
+    let mut legacy = json.clone();
+    assert!(
+        strip_pending_facts(&mut legacy),
+        "reach: the fixture really carried a latch to strip"
+    );
+    let refused = serde_json::from_value::<PersistedGameState>(legacy)
+        .expect("the legacy park decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated);
+    assert!(
+        matches!(
+            refused,
+            Err(PersistedRestoreError::UnknownPendingTargetFacts { .. })
+        ),
+        "a park without announced targets is refused: {:?}",
+        refused.err()
+    );
+
+    // (c) The admitted park resumes to a correct history: the announced target is
+    // the surviving creature, and it answers the gate predicate Head of the Class
+    // counts.
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("order the replacement");
+    for _ in 0..16 {
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("settle");
+    }
+    let fact = declared_object_fact(runner.state(), spell);
+    let ActivationTargetFact::Object { id, .. } = &fact else {
+        panic!("the record declares an object target: {fact:?}");
+    };
+    assert_eq!(
+        *id, survivor,
+        "the resumed history names the announced target, not the sacrificed fodder"
+    );
+    assert!(
+        record_answers_targets_a_creature(runner.state(), spell),
+        "the resumed record answers `targets a creature`"
+    );
 }

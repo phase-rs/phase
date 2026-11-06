@@ -9148,8 +9148,10 @@ pub enum PendingCostMoveCompletion {
         /// from the pre-payment checks across the parked Sneak/Web-slinging
         /// returned-creature cost move so the CR 601.2i history write records the
         /// selection-time characteristics rather than a later incarnation's.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        committed_target_facts: Vec<ActivationTargetFact>,
+        /// `None` is a legacy park whose targets are unreconstructable; restore
+        /// admission refuses it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committed_target_facts: Option<Vec<ActivationTargetFact>>,
     },
     /// CR 601.2h + CR 702.66a: The cast's mana is already paid and `pending`
     /// carries that payment; once the Delve exiles settle, re-enter the inner
@@ -9192,9 +9194,14 @@ pub struct FinalizePrePaymentChecks {
     /// target it also targets (Bone Splinters) would otherwise re-read the raw
     /// id after payment and record the graveyard incarnation's printed
     /// characteristics instead of the selection-time ones (CR 115.9, CR 115.9b,
-    /// CR 400.7). Empty for a cast that declares no target.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub committed_target_facts: Vec<ActivationTargetFact>,
+    /// CR 400.7). `Some(vec![])` for a cast that declares no target.
+    ///
+    /// `Option` is deliberate: `None` is a parked cast written before this field
+    /// existed, whose announced targets are gone. Resuming it would write a
+    /// history record that falsely claims "declared nothing", so
+    /// `PersistedGameState::prepare_for_restore` refuses the save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_target_facts: Option<Vec<ActivationTargetFact>>,
 }
 
 /// CR 605.3b: Selects whether completing a mana-ability cost payment may ask
@@ -16453,6 +16460,101 @@ impl GameState {
         }
     }
 
+    /// CR 601.2c + CR 115.1 + CR 400.7: refuse a playable save whose parked cast
+    /// cannot prove what it declared.
+    ///
+    /// Every carrier that resumes a cast re-enters `finalize_cast_*` with
+    /// `Some(pre_payment_checks)` and therefore skips reconstruction. A save
+    /// written before the latch existed carries `None` there, so resuming it would
+    /// write a CR 601.2i record that falsely claims the cast declared nothing —
+    /// and a zero-count first-spell gate would re-grant a benefit the cast had
+    /// already spent. The announced targets are gone, so the honest outcome is to
+    /// refuse the save at the shared chokepoint rather than resume it.
+    ///
+    /// Only carriers that exist *after* finalization began are inspected: they
+    /// are by construction past target declaration. A plain `PendingCast` is not,
+    /// because it is also persisted during pre-declaration prompts (CR 601.2a–b)
+    /// where `committed_target_facts: None` legitimately means "not latched yet".
+    fn reject_unknown_pending_target_facts(&self) -> Result<(), PersistedRestoreError> {
+        fn checks_unknown(checks: &Option<Box<FinalizePrePaymentChecks>>) -> bool {
+            checks
+                .as_deref()
+                .is_some_and(|checks| checks.committed_target_facts.is_none())
+        }
+        fn prepared_unknown(prepared: &Option<Box<PrepaidSpellFinalization>>) -> bool {
+            prepared
+                .as_deref()
+                .is_some_and(|prepared| checks_unknown(&prepared.pre_payment_checks))
+        }
+        fn cast_unknown(pending: &PendingCast) -> bool {
+            prepared_unknown(&pending.prepaid_finalization)
+        }
+        fn move_unknown(completion: &PendingCostMoveCompletion) -> bool {
+            match completion {
+                PendingCostMoveCompletion::FinalizeCast {
+                    committed_target_facts,
+                    ..
+                } => committed_target_facts.is_none(),
+                PendingCostMoveCompletion::FinalizeDelvedCast {
+                    pre_payment_checks, ..
+                } => checks_unknown(pre_payment_checks),
+                _ => false,
+            }
+        }
+        fn sacrifice_unknown(completion: &PendingSacrificeCostCompletion) -> bool {
+            match completion {
+                PendingSacrificeCostCompletion::FinalizeSpell {
+                    pre_payment_checks, ..
+                } => pre_payment_checks.committed_target_facts.is_none(),
+                _ => false,
+            }
+        }
+
+        let mut offender: Option<Option<ObjectId>> = None;
+        if let Some(pending) = self.pending_cast.as_deref() {
+            if cast_unknown(pending) {
+                offender = Some(Some(pending.object_id));
+            }
+        }
+        if offender.is_none() {
+            if let Some(DeferredLifeCostResume::Cast {
+                pending: Some(pending),
+                ..
+            }) = self.pending_deferred_life_cost_resume.as_ref()
+            {
+                if cast_unknown(pending) {
+                    offender = Some(Some(pending.object_id));
+                }
+            }
+        }
+        if offender.is_none() {
+            match self.pending_cost_move_resume.as_ref() {
+                Some(PendingCostMoveResume::Cast {
+                    pending,
+                    completion,
+                    ..
+                }) if move_unknown(completion) => {
+                    offender = Some(pending.as_ref().map(|p| p.object_id));
+                }
+                Some(PendingCostMoveResume::SacrificeForCost {
+                    pending,
+                    completion,
+                    ..
+                }) if sacrifice_unknown(completion) => {
+                    offender = Some(pending.as_ref().map(|p| p.object_id));
+                }
+                _ => {}
+            }
+        }
+
+        match offender {
+            Some(spell_object_id) => {
+                Err(PersistedRestoreError::UnknownPendingTargetFacts { spell_object_id })
+            }
+            None => Ok(()),
+        }
+    }
+
     /// A staged payment is a replay authority, not merely display data.  Keep
     /// its player references inside the restored game's seat set before any
     /// caller can finalize or replay it; otherwise a crafted raw snapshot can
@@ -16661,6 +16763,16 @@ pub enum PersistedRestoreError {
          {spell_object_id:?} and cannot be restored"
     )]
     UnknownCastHistoryProvenance { spell_object_id: Option<ObjectId> },
+    /// CR 601.2c + CR 115.1 + CR 400.7: a cast is parked mid-payment and its
+    /// carrier holds no announced-target facts. The save predates the latch, so
+    /// what the spell declared is unreconstructable; resuming it would write a
+    /// CR 601.2i record that falsely claims the cast declared nothing, and a
+    /// first-spell gate would then re-grant a benefit the cast had already spent.
+    #[error(
+        "persisted pending cast carries unknown announced-target facts for spell \
+         {spell_object_id:?} and cannot be resumed"
+    )]
+    UnknownPendingTargetFacts { spell_object_id: Option<ObjectId> },
 }
 
 impl PreparedPersistedGameState {
@@ -16873,6 +16985,7 @@ impl PersistedGameState {
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
         state.reject_unknown_cast_history_provenance()?;
+        state.reject_unknown_pending_target_facts()?;
         crate::game::effects::choose_from_zone::migrate_legacy_per_player_frame_on_restore(
             &mut state,
         )
@@ -58176,7 +58289,7 @@ mod restored_exact_attack_authority_tests {
             resolution_success_waiting_for: None,
             cast_this_way_etb_counter: None,
             cast_this_way_enters_mods: Default::default(),
-            committed_target_facts: Vec::new(),
+            committed_target_facts: Some(Vec::new()),
         };
         let mut admitted = Vec::new();
         for carrier in 0..26 {
@@ -58500,7 +58613,7 @@ mod restored_exact_attack_authority_tests {
                                 },
                             )),
                             prepaid_actual_mana_spent: None,
-                            committed_target_facts: Vec::new(),
+                            committed_target_facts: Some(Vec::new()),
                         },
                         deferred_cost_events: vec![],
                         departure_record_indices: vec![],
@@ -58571,7 +58684,7 @@ mod restored_exact_attack_authority_tests {
                                 cascade_cast_transformed: false,
                                 resolution_success_waiting_for: Some(Box::new(token_host())),
                                 prepaid_actual_mana_spent: None,
-                                committed_target_facts: Vec::new(),
+                                committed_target_facts: Some(Vec::new()),
                             },
                         });
                     state.waiting_for.clone()

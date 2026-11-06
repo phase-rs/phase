@@ -326,9 +326,48 @@ impl CompactLki {
     }
 }
 
+/// Decode one snapshot, honouring the contract of the payload's own spelling.
+///
+/// The two shapes read the same fields, but an OMITTED field means different
+/// things in each, so the spelling decides:
+///
+/// * **compact** (`"n"`, written by this build) — omission is a *reconstruction*:
+///   `bp`/`bt` absent means "equal to the current P/T", `st` absent means "the
+///   object's name is its only subtype".
+/// * **verbose** (the pre-compaction `LKISnapshot` spelling, `"name"`, and the
+///   only shape any existing save uses) — omission is the historical serde
+///   default: `#[serde(default)] pub base_power: Option<i32>` ⇒ `None`, and
+///   `#[serde(default)] pub subtypes: Vec<String>` ⇒ `[]`. Reconstructing a base
+///   P/T or a name-shaped subtype list from a legacy omission would invent
+///   characteristics the save never held.
+///
+/// The discriminator is the key spelling itself, which costs no wire bytes: the
+/// compact form always writes `"n"` (the name is never skipped) and the verbose
+/// form always writes `"name"`.
+fn decode_snapshot(value: serde_json::Value) -> Result<LKISnapshot, serde_json::Error> {
+    let compact_spelling = value.get("n").is_some();
+    let mut compact = CompactLki::deserialize(&value)?;
+    if !compact_spelling {
+        let omitted =
+            |short: &str, long: &str| value.get(short).is_none() && value.get(long).is_none();
+        if omitted("bp", "base_power") {
+            // `Some(None)` is the explicit "no base value" encoding, which
+            // `into_lki` maps to `None` rather than to the current P/T.
+            compact.base_power = Some(None);
+        }
+        if omitted("bt", "base_toughness") {
+            compact.base_toughness = Some(None);
+        }
+        if omitted("st", "subtypes") {
+            compact.subtypes = Some(Vec::new());
+        }
+    }
+    Ok(compact.into_lki())
+}
+
 /// `#[serde(with = "compact_history_lki")]` for an owned `LKISnapshot`.
 pub(crate) mod compact_history_lki {
-    use super::{CompactLki, LKISnapshot};
+    use super::{decode_snapshot, CompactLki, LKISnapshot};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub(crate) fn serialize<S: Serializer>(
@@ -341,13 +380,14 @@ pub(crate) mod compact_history_lki {
     pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<LKISnapshot, D::Error> {
-        CompactLki::deserialize(deserializer).map(CompactLki::into_lki)
+        let value = serde_json::Value::deserialize(deserializer)?;
+        decode_snapshot(value).map_err(serde::de::Error::custom)
     }
 }
 
 /// `#[serde(with = "compact_history_boxed_lki")]` for a `Box<LKISnapshot>`.
 pub(crate) mod compact_history_boxed_lki {
-    use super::{CompactLki, LKISnapshot};
+    use super::{decode_snapshot, CompactLki, LKISnapshot};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     // `serde(with = ...)` requires the adapter to take exactly the field's type,
@@ -364,7 +404,10 @@ pub(crate) mod compact_history_boxed_lki {
     pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Box<LKISnapshot>, D::Error> {
-        CompactLki::deserialize(deserializer).map(|lki| Box::new(lki.into_lki()))
+        let value = serde_json::Value::deserialize(deserializer)?;
+        decode_snapshot(value)
+            .map(Box::new)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -560,6 +603,103 @@ mod tests {
             "a typical mana source must shrink by more than half: compact {} vs verbose {}",
             compact_plain.len(),
             verbose_plain.len()
+        );
+    }
+
+    /// The verbose `LKISnapshot` spelling is the only shape any existing save uses,
+    /// and its per-field serde defaults are part of its contract: an omitted
+    /// `base_power`/`base_toughness` means `None`, an omitted `subtypes` means `[]`.
+    /// The compact spelling means the opposite — omission is a reconstruction. Both
+    /// adapters must honour the contract of the payload they are handed.
+    #[test]
+    fn verbose_omissions_take_the_legacy_defaults_not_a_reconstruction() {
+        let mut lki = fully_populated_lki();
+        lki.power = Some(3);
+        lki.toughness = Some(4);
+        lki.base_power = None;
+        lki.base_toughness = None;
+        lki.subtypes = Vec::new();
+
+        let mut verbose = serde_json::to_value(&lki).expect("to_value");
+        let object = verbose
+            .as_object_mut()
+            .expect("an LKISnapshot is an object");
+        // Exactly what a payload predating those fields looks like.
+        object.remove("base_power");
+        object.remove("base_toughness");
+        object.remove("subtypes");
+        assert!(
+            !object.contains_key("n"),
+            "reach: this is the verbose spelling"
+        );
+
+        let payload = format!("{{\"lki\":{}}}", verbose);
+        let decoded: CompactWrapper = serde_json::from_str(&payload).expect("decodes");
+        assert_eq!(
+            decoded.lki, lki,
+            "a legacy omission must stay absent, not become the current P/T or the name"
+        );
+        assert_eq!(decoded.lki.base_power, None);
+        assert_eq!(decoded.lki.subtypes, Vec::<String>::new());
+    }
+
+    /// The same omission in the COMPACT spelling is a reconstruction, and must keep
+    /// reconstructing — otherwise the compaction would stop being lossless.
+    #[test]
+    fn compact_omissions_still_reconstruct() {
+        let mut lki = fully_populated_lki();
+        lki.name = "Plains".to_string();
+        lki.power = Some(3);
+        lki.toughness = Some(4);
+        lki.base_power = Some(3);
+        lki.base_toughness = Some(4);
+        lki.subtypes = vec!["Plains".to_string()];
+
+        let payload = serde_json::to_string(&CompactWrapper { lki: lki.clone() }).expect("compact");
+        assert!(
+            !payload.contains("\"bp\":") && !payload.contains("\"st\":"),
+            "reach: the compact form really omits both: {payload}"
+        );
+        let decoded: CompactWrapper = serde_json::from_str(&payload).expect("decodes");
+        assert_eq!(decoded.lki, lki, "compact omission reconstructs exactly");
+    }
+
+    /// The compact codec is attached to carriers outside cast history too — the
+    /// payment snapshot rides `GameObject::mana_spent_source_snapshots`, and the
+    /// target fact rides `AbilityActivationRecord::targets`. Exercise one of those
+    /// through the real type, in both spellings.
+    #[test]
+    fn a_non_cast_history_carrier_honours_both_contracts() {
+        let mut lki = fully_populated_lki();
+        lki.power = Some(2);
+        lki.toughness = Some(2);
+        lki.base_power = None;
+        lki.base_toughness = None;
+        lki.subtypes = Vec::new();
+        let snapshot = crate::types::game_state::ManaSpentSourceSnapshot {
+            source_id: ObjectId(41),
+            lki: lki.clone(),
+        };
+
+        // Compact spelling.
+        let json = serde_json::to_string(&snapshot).expect("compact serializes");
+        let decoded: crate::types::game_state::ManaSpentSourceSnapshot =
+            serde_json::from_str(&json).expect("compact decodes");
+        assert_eq!(decoded, snapshot);
+
+        // Verbose spelling with the three legacy-omitted keys stripped.
+        let mut verbose = serde_json::to_value(&snapshot).expect("to_value");
+        let inner = verbose["lki"]
+            .as_object_mut()
+            .expect("the snapshot carries an LKI object");
+        inner.remove("base_power");
+        inner.remove("base_toughness");
+        inner.remove("subtypes");
+        let decoded: crate::types::game_state::ManaSpentSourceSnapshot =
+            serde_json::from_value(verbose).expect("verbose decodes");
+        assert_eq!(
+            decoded, snapshot,
+            "the non-cast carrier keeps the legacy defaults for verbose omissions"
         );
     }
 }

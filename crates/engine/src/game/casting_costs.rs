@@ -13448,8 +13448,10 @@ fn finalize_cast_pre_payment_checks(
     // Factory, a graveyard Creature for a Grizzly Bears — which is neither the
     // CR 115.9 selection-time reading the history predicates are defined over nor
     // the CR 115.9b completed-cast reading that ignores a departed target.
-    let committed_target_facts =
-        super::casting::capture_target_facts(state, &declared_targets_in_chain(ability));
+    let committed_target_facts = Some(super::casting::capture_target_facts(
+        state,
+        &declared_targets_in_chain(ability),
+    ));
 
     // CR 614.1c + CR 122.1 + CR 205.1b + CR 613.1d: Snapshot the exact
     // cast-this-way ETB riders before resulting-MV evaluation consumes the
@@ -13826,9 +13828,15 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // is after CR 601.2h on every resumed path, where a raw-id lookup would
     // describe the target's new incarnation rather than the one the caster
     // announced (CR 115.9, CR 115.9b).
+    // CR 601.2c + CR 400.7: the latch is an `Option` because a parked cast written
+    // before it existed has no answer. Restore admission refuses such a save
+    // (`UnknownPendingTargetFacts`), so a playable state always resolves here; a
+    // cast this build captured states `Some`, including `Some(vec![])` for one
+    // that declared nothing.
     let committed_target_facts = deferred_life_resume_pending
         .and_then(|pending| pending.committed_target_facts.clone())
-        .unwrap_or(committed_target_facts);
+        .or(committed_target_facts)
+        .unwrap_or_default();
 
     if prepaid_actual_mana_spent.is_none() {
         let resume_at_resolution_depth = state.resolution_stack.len();
@@ -13899,7 +13907,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
                     resolution_success_waiting_for,
                     cast_this_way_etb_counter,
                     cast_this_way_enters_mods,
-                    committed_target_facts,
+                    committed_target_facts: Some(committed_target_facts),
                 }),
             },
             None,
@@ -13922,7 +13930,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 resolution_success_waiting_for: resolution_success_waiting_for.clone(),
                 cast_this_way_etb_counter: cast_this_way_etb_counter.clone(),
                 cast_this_way_enters_mods: cast_this_way_enters_mods.clone(),
-                committed_target_facts: committed_target_facts.clone(),
+                committed_target_facts: Some(committed_target_facts.clone()),
             })),
         };
         if let Some(waiting_for) = pay_delve_at_commit(
@@ -13967,7 +13975,9 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 cascade_cast_transformed,
                 resolution_success_waiting_for: resolution_success_waiting_for.map(Box::new),
                 prepaid_actual_mana_spent,
-                committed_target_facts,
+                // The latch is a known answer here: this frame captured it (or
+                // carried it) before the Sneak/Web-slinging return move parked.
+                committed_target_facts: Some(committed_target_facts),
             },
             cost_event_start,
             false,

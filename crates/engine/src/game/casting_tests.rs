@@ -53793,38 +53793,53 @@ fn add_mana_from_source(
     }
 }
 
-/// A cost-only spell in hand, for the payment-provenance tests.
+/// Printed **Environmental Sciences** in hand — `{2}`, Sorcery — Lesson.
 ///
-/// A `ManaCost::zero()` fixture cannot stand in for these tests: a zero cost
-/// makes no payment, so nothing is stamped and the positive reach guard could
-/// never fire. The spell therefore carries a real cost and nothing else.
+/// Verbatim Oracle text: "Search your library for a basic land card, reveal it,
+/// put it into your hand, then shuffle. You gain 2 life."
 ///
-/// SYNTHETIC, and the repo's real-card rule is applied deliberately. These legs
-/// need a cost-only spell at mana value 1 and at mana value 2, cast and discarded
-/// without resolving anything. Printed sorceries with a purely generic mana cost
-/// do exist, but not with that shape: the only `{1}` one is an Unknown Event
-/// playtest card, and all three `{2}` ones resolve an effect (Aang's Journey —
-/// "Search your library for a basic land card…" plus Kicker `{2}`; Environmental
-/// Sciences — the same search; Playtest Wish — playtest wording). Importing one
-/// would drag an effect path into a pure payment-provenance test, so the fixture
-/// keeps a synthetic Sorcery shell with no ability at all. The nearest printed
-/// analogue for the cost shape is Aang's Journey (`{2}`).
-fn create_paid_sorcery(
+/// A `ManaCost::zero()` stand-in cannot serve these legs: a zero cost makes no
+/// payment, so nothing is stamped and the positive reach guard could never fire.
+/// The card is used for its **printed cost and mana value** only — these legs
+/// commit the cast and clear the stack without resolving, so the search and the
+/// life gain never execute (`clear_stack_to_priority` discards the entry).
+fn create_environmental_sciences(
     state: &mut GameState,
     card_id: CardId,
     owner: PlayerId,
-    cost: ManaCost,
 ) -> ObjectId {
     let id = create_object(
         state,
         card_id,
         owner,
-        format!("Synthetic Cost-Only Spell {card_id:?}"),
+        "Environmental Sciences".to_string(),
         Zone::Hand,
     );
     let obj = state.objects.get_mut(&id).unwrap();
     obj.card_types.core_types.push(CoreType::Sorcery);
-    obj.mana_cost = cost;
+    obj.mana_cost = ManaCost::generic(2);
+    id
+}
+
+/// Printed **Wayfarer's Bauble** in hand — `{1}`, Artifact.
+///
+/// Verbatim Oracle text: "{2}, {T}, Sacrifice this artifact: Search your library
+/// for a basic land card, put that card onto the battlefield tapped, then shuffle."
+///
+/// The low-mana-value witness for TARDIS Bay's "mana value 2 or greater"
+/// qualifier. Its only text is an activated ability of the permanent, so a cast
+/// of it resolves nothing; the leg never resolves it anyway.
+fn create_wayfarers_bauble(state: &mut GameState, card_id: CardId, owner: PlayerId) -> ObjectId {
+    let id = create_object(
+        state,
+        card_id,
+        owner,
+        "Wayfarer's Bauble".to_string(),
+        Zone::Hand,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Artifact);
+    obj.mana_cost = ManaCost::generic(1);
     id
 }
 
@@ -53974,14 +53989,14 @@ fn first_qualifying_spell_enqueues_cascade_second_does_not() {
 /// you cast each turn that mana from a Treasure was spent to cast has cascade."
 ///
 /// Three casts in one game, each paid from a real source:
-///   leg A — a `{2}` sorcery paid by a plain land: the payment source does not
+///   leg A — Environmental Sciences (`{2}`) paid by a plain land: the source does not
 ///           match the qualifier, so the AFFECTED reader refuses it. (The gate is
 ///           true here — no qualifying spell has been cast — so this leg can only
 ///           fail on the filter.)
-///   leg B — a second `{2}` sorcery paid by a Treasure: the first *qualifying*
+///   leg B — a second Environmental Sciences paid by a Treasure: the first *qualifying*
 ///           spell of the turn, so the grant applies. This is also decision 8's
 ///           "a prior nonqualifying spell does not consume the grant".
-///   leg C — a third `{2}` sorcery paid by a Treasure: its affected filter matches,
+///   leg C — a third Environmental Sciences paid by a Treasure: its filter matches,
 ///           so only the GATE (`SpellsCastThisTurn(qualified) == 0`) can refuse it.
 ///
 /// A fourth leg pays from TWO sources at once — one Treasure unit and one land
@@ -54009,9 +54024,9 @@ fn rain_of_riches_grants_cascade_only_to_a_treasure_funded_first_spell() {
     let land = plain_mana_source(&mut state, CardId(7_101));
     let treasure = treasure_permanent(&mut state, CardId(7_102));
 
-    let leg_a = create_paid_sorcery(&mut state, CardId(7_103), PlayerId(0), ManaCost::generic(2));
-    let leg_b = create_paid_sorcery(&mut state, CardId(7_104), PlayerId(0), ManaCost::generic(2));
-    let leg_c = create_paid_sorcery(&mut state, CardId(7_105), PlayerId(0), ManaCost::generic(2));
+    let leg_a = create_environmental_sciences(&mut state, CardId(7_103), PlayerId(0));
+    let leg_b = create_environmental_sciences(&mut state, CardId(7_104), PlayerId(0));
+    let leg_c = create_environmental_sciences(&mut state, CardId(7_105), PlayerId(0));
 
     let mut runner = crate::game::scenario::GameRunner::from_state(state);
 
@@ -54078,8 +54093,7 @@ fn rain_of_riches_grants_cascade_only_to_a_treasure_funded_first_spell() {
         );
         let land = plain_mana_source(&mut state, CardId(7_107));
         let treasure = treasure_permanent(&mut state, CardId(7_108));
-        let mixed =
-            create_paid_sorcery(&mut state, CardId(7_109), PlayerId(0), ManaCost::generic(2));
+        let mixed = create_environmental_sciences(&mut state, CardId(7_109), PlayerId(0));
         let mut runner = crate::game::scenario::GameRunner::from_state(state);
 
         add_mana_from_source(
@@ -54115,7 +54129,7 @@ fn rain_of_riches_grants_cascade_only_to_a_treasure_funded_first_spell() {
 /// Same three-leg shape as Rain of Riches, with the honest difference that the
 /// qualifier is a live characteristic (mana value) rather than a payment
 /// provenance, so the payment source is irrelevant:
-///   leg A — mana value 1: the affected reader refuses it (the gate is true).
+///   leg A — Wayfarer's Bauble (`{1}` artifact), mana value 1: the affected reader refuses it.
 ///   leg B — mana value 2 as the turn's second spell: the first *qualifying* one,
 ///           so the grant applies — a prior nonqualifying spell does not consume it.
 ///   leg C — a second mana value 2 spell: its affected filter matches, so only the
@@ -54130,9 +54144,9 @@ fn tardis_bay_grants_cascade_only_to_a_first_spell_with_mana_value_two_or_greate
         "The first spell you cast during each of your turns with mana value 2 or greater has cascade.",
     );
 
-    let leg_a = create_paid_sorcery(&mut state, CardId(7_501), PlayerId(0), ManaCost::generic(1));
-    let leg_b = create_paid_sorcery(&mut state, CardId(7_502), PlayerId(0), ManaCost::generic(2));
-    let leg_c = create_paid_sorcery(&mut state, CardId(7_503), PlayerId(0), ManaCost::generic(2));
+    let leg_a = create_wayfarers_bauble(&mut state, CardId(7_501), PlayerId(0));
+    let leg_b = create_environmental_sciences(&mut state, CardId(7_502), PlayerId(0));
+    let leg_c = create_environmental_sciences(&mut state, CardId(7_503), PlayerId(0));
 
     let mut runner = crate::game::scenario::GameRunner::from_state(state);
 
@@ -64187,41 +64201,71 @@ fn copy_cast_with_no_spell_ability_records_no_targets() {
     let zemo = scenario
         .add_creature_from_oracle(P0, "Baron Helmut Zemo", 3, 3, BARON_HELMUT_ZEMO)
         .id();
-    // SYNTHETIC COSTS, with the repo's real-card rule applied deliberately. The
-    // Boast cost needs fifteen or more black mana symbols among the exiled cards'
-    // costs, and this row needs exactly two exiled cards — one a zero-ability
-    // creature (the copy whose record must be empty) and one a spell. The highest
-    // printed black pip counts are six (Doomsday Excruciator, `{B}` x6) and five
-    // (Zodiark, Umbral God and Pox Plague, `{B}` x5); the highest on a zero-ability
-    // creature is two (Mass of Ghouls, `{3}{B}{B}`; Minotaur Abomination,
-    // `{4}{B}{B}`). A printed pair of that shape therefore tops out at eight
-    // symbols — below the fifteen the Boast cost requires — so the shells below
-    // carry no printed card's name or text. The nearest printed analogues for the
-    // cost shape are Doomsday Excruciator and Mass of Ghouls.
-    let black = ManaCost::Cost {
-        shards: vec![ManaCostShard::Black; 15],
+    // PRINTED THRESHOLD FODDER. Zemo's Boast reads "Exile any number of black cards
+    // from your graveyard with fifteen or more black mana symbols among their mana
+    // costs", so the payment is a *set* of printed black cards whose costs sum to
+    // the threshold — five cards, all printed, summing to exactly fifteen:
+    //
+    //   Mass of Ghouls        {3}{B}{B}      2   (zero-ability creature)
+    //   Walking Corpse        {1}{B}         1   (zero-ability creature)
+    //   Dark Ritual           {B}            1   ("Add {B}{B}{B}.")
+    //   Doomsday Excruciator  {B}{B}{B}{B}{B}{B}  6
+    //   Pox Plague            {B}{B}{B}{B}{B}     5
+    //
+    // Mass of Ghouls is the copy whose record must be empty: it is a vanilla body,
+    // so its spell has no ability. Dark Ritual is the spell copy. "You may cast up
+    // to three of the copies" is what makes selecting two of the five legal.
+    let ghouls_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+        generic: 3,
+    };
+    let corpse_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black],
+        generic: 1,
+    };
+    let ritual_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black],
         generic: 0,
     };
-    let draw = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::Draw {
-            count: QuantityExpr::Fixed { value: 1 },
-            target: TargetFilter::Controller,
-        },
-    );
-    // The ability-less copy: a vanilla black creature with no Oracle text and
-    // therefore no spell ability. Synthetic name so the fixture never attributes a
-    // fabricated cost to a printed card (see the cost note above).
+    let excruciator_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black; 6],
+        generic: 0,
+    };
+    let pox_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black; 5],
+        generic: 0,
+    };
+    // The ability-less copy: a printed vanilla body, so its spell has no ability.
     let vanilla = scenario
-        .add_creature_to_graveyard(P0, "Synthetic Black Vanilla", 2, 2)
+        .add_creature_to_graveyard(P0, "Mass of Ghouls", 5, 3)
         .from_oracle_text("")
-        .with_mana_cost(black.clone())
+        .with_mana_cost(ghouls_cost)
+        .id();
+    let corpse = scenario
+        .add_creature_to_graveyard(P0, "Walking Corpse", 2, 2)
+        .from_oracle_text("")
+        .with_mana_cost(corpse_cost)
         .id();
     let instant = scenario
-        .add_spell_to_graveyard(P0, "Synthetic Black Instant", true)
-        .with_ability_definition(draw)
-        .with_mana_cost(black)
+        .add_spell_to_graveyard(P0, "Dark Ritual", true)
+        .from_oracle_text("Add {B}{B}{B}.")
+        .with_mana_cost(ritual_cost)
         .id();
+    let excruciator = scenario
+        .add_creature_to_graveyard(P0, "Doomsday Excruciator", 6, 6)
+        .from_oracle_text(
+            "Flying\nWhen this creature enters, if it was cast, each player exiles all but the bottom six cards of their library face down.\nAt the beginning of your upkeep, draw a card.",
+        )
+        .with_mana_cost(excruciator_cost)
+        .id();
+    let pox = scenario
+        .add_spell_to_graveyard(P0, "Pox Plague", false)
+        .from_oracle_text(
+            "Each player loses half their life, then discards half the cards in their hand, then sacrifices half the permanents they control of their choice. Round down each time.",
+        )
+        .with_mana_cost(pox_cost)
+        .id();
+    let fodder = vec![vanilla, corpse, instant, excruciator, pox];
     let mut runner = scenario.build();
     assert!(
         runner.state().objects[&vanilla].abilities.is_empty(),
@@ -64242,9 +64286,9 @@ fn copy_cast_with_no_spell_ability_records_no_targets() {
         .expect("activate Boast");
     runner
         .act(GameAction::SelectCards {
-            cards: vec![vanilla, instant],
+            cards: fodder.clone(),
         })
-        .expect("pay the exile cost");
+        .expect("pay the exile cost: five printed black cards, fifteen symbols");
     pass_to_next_prompt(&mut runner);
     assert!(
         matches!(
@@ -64258,13 +64302,13 @@ fn copy_cast_with_no_spell_ability_records_no_targets() {
         .act(GameAction::SelectCards {
             cards: vec![vanilla, instant],
         })
-        .expect("CR 707.12: both copies are cast");
+        .expect("CR 707.12: two of the five copies are cast");
 
     let state = runner.state();
     let bear_copy = state
         .objects
         .values()
-        .find(|object| object.is_copy && object.name == "Synthetic Black Vanilla")
+        .find(|object| object.is_copy && object.name == "Mass of Ghouls")
         .expect("reach: the vanilla card's copy was cast");
     let copy_id = bear_copy.id;
     // Reach guard: the copy's own entry exists and carries NO spell ability, so the
