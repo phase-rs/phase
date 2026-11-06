@@ -25,13 +25,14 @@ use super::ability::{
     ChoiceValue, ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, ContinuousModification,
     ControlWindow, CopiableValues, CopyChooseScope, CopyScale, CopyTargetPurpose,
     CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, DelayedTriggerKind,
-    DigRestOrder, DigRestSplitScope, Duration, EffectKind, EntryAttackDestination, FaceDownProfile,
-    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice,
-    PermanentEntryMode, PileSource, QuantityExpr, ReplacementDefinition, ResolvedAbility,
-    ReturnResultId, SearchDestinationSplit, SearchOrderingHint, SearchSelectionConstraint,
-    StackAbilityKind, StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef,
-    ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
+    DigRestOrder, DigRestRemainder, DigRestSplitScope, Duration, EffectKind,
+    EntryAttackDestination, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant,
+    LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
+    ReplacementDefinition, ResolvedAbility, ReturnResultId, SearchDestinationSplit,
+    SearchOrderingHint, SearchSelectionConstraint, StackAbilityKind, StaticCondition,
+    TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef,
+    TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
+    TriggerEntry,
 };
 use super::actions::{DebugCardCreationKind, GameAction, ResolveAllScope};
 use super::attribution::ObjectAttribution;
@@ -4579,7 +4580,9 @@ pub struct PendingZoneChangeDelivery {
     pub delivery_events: Vec<GameEvent>,
     /// Exact terminal classification of the paused delivery once it has
     /// completed. It remains absent only while the original replacement or
-    /// as-enters prompt is unresolved.
+    /// as-enters prompt is unresolved; the resume seam records it before either
+    /// delivery terminal (issue #10431), so every resumed member the seam can
+    /// match is classified before `drain_pending_batch_deliveries` reads it.
     pub terminal_completion: Option<ZoneMoveCompletion>,
     pub count: PausedZoneChangeDeliveryCount,
     /// CR 406.3: A batch delivery requested concealment on an Exile landing.
@@ -4647,6 +4650,42 @@ impl PendingZoneChangeDelivery {
         self.member == member && self.expected_event == *expected_event
     }
 
+    /// CR 400.7 + CR 616.1: Match a resumed delivery against this paused key.
+    ///
+    /// The approved resume event is the SAME occurrence as the parked boundary
+    /// event but carries the chosen replacement's modifications
+    /// (`controller_override`, `enter_with_taps/counters`, `to`, `applied`, …),
+    /// so exact `ProposedEvent` equality (what [`Self::captures`] checks for the
+    /// pre-choice boundary) rejects it. The paused key's job at the resume seam
+    /// is to prove *which* member is being delivered. It matches the pre-move
+    /// occurrence (member incarnation, object, origin zone); the destination,
+    /// controller and entry modifiers are replacement-controlled (CR 614.6,
+    /// CR 614.1c / CR 614.1d, CR 616.1) and never part of the key. A later,
+    /// different zone change of the same object is a new incarnation and
+    /// therefore a different member.
+    pub fn captures_resumed(
+        &self,
+        member: ObjectIncarnationRef,
+        approved_event: &ProposedEvent,
+    ) -> bool {
+        if self.member != member {
+            return false;
+        }
+        let ProposedEvent::ZoneChange {
+            object_id: expected_object,
+            from: expected_from,
+            ..
+        } = &self.expected_event
+        else {
+            return false;
+        };
+        matches!(
+            approved_event,
+            ProposedEvent::ZoneChange { object_id, from, .. }
+                if object_id == expected_object && from == expected_from
+        )
+    }
+
     pub fn append_delivery_events(&mut self, events: &[GameEvent]) {
         self.delivery_events.extend_from_slice(events);
         if self.terminal_completion.is_none()
@@ -4679,6 +4718,24 @@ impl PendingZoneChangeDelivery {
         }
         self.terminal_completion = Some(completion);
         Ok(())
+    }
+
+    /// CR 400.7 + CR 406.3: Retain one matched delivery's completion and
+    /// face-down Exile event annotation. The caller applies live concealment
+    /// only after releasing this paused-owner borrow.
+    fn settle_delivery(
+        &mut self,
+        delivery_events: &[GameEvent],
+        terminal_completion: ZoneMoveCompletion,
+    ) -> Option<PausedExileOccurrence> {
+        self.append_delivery_events(delivery_events);
+        self.record_terminal_completion(terminal_completion)
+            .expect("one paused zone-change delivery has one terminal completion");
+        if self.face_down_in_exile.is_face_down() {
+            annotate_paused_exile_event(&mut self.delivery_events, self.member)
+        } else {
+            None
+        }
     }
 
     /// CR 400.7: A zone change creates a new object, so the retained delivery
@@ -5412,6 +5469,14 @@ pub struct PendingPerPlayerZoneChoice {
     /// cleared when it completes or is skipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nominee: Option<PlayerId>,
+    /// CR 608.2c + CR 608.2d: the chain tracked set a `Tracked` pool reads,
+    /// pinned when the iteration begins ("choose a land card that player owns
+    /// exiled this way" — Ensign Pavel Chekov). Each pick rebinds the chain's
+    /// tracked set to the chosen cards, so a later player's pool must read the
+    /// set the instruction named, never the previous player's picks. `None` for
+    /// every zone-backed (`Direct` / `Legacy`) or other source-bound pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracked_pool: Option<TrackedSetId>,
 }
 
 /// CR 401.4 + CR 101.4 + CR 608.2c: Per-owner library-order prompts for one
@@ -5640,6 +5705,33 @@ pub enum PendingPlayerScopeSacrificeFollowUp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exploiter_incarnation: Option<u64>,
     },
+}
+
+/// CR 701.9a + CR 614.6: a frameless single-card effect discard (connive,
+/// learn rummage) whose move paused for a replacement choice: either a
+/// CR 616.1 choice among two or more applicable replacement effects (two
+/// Rest in Peace), or the apply-or-decline choice of a single optional
+/// replacement whose own text says "you may ... instead" (Library of Leng).
+///
+/// CR 614.6: "If an event is replaced, it never happens. A modified event
+/// occurs instead." A hand -> graveyard redirect (Rest in Peace) or an optional
+/// "discard it, but ... instead" replacement (Library of Leng) therefore still
+/// discards the card; CR 701.9c presupposes the same for a card put into a
+/// hidden zone instead. The resumed zone-change delivery records a `Discarded`
+/// event only for a provenance-framed discard, so this carrier names the
+/// pre-move occurrence for the settle step to record exactly once
+/// (`effects::settle_paused_single_discard`).
+///
+/// Batches (Mind Rot) park [`PendingDiscardBatch`] instead; the two carriers
+/// are never installed together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingSingleDiscard {
+    /// CR 400.7: the pre-move hand occurrence that paused.
+    pub paused_card: ObjectIncarnationRef,
+    /// The discarding player.
+    pub player: PlayerId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<ObjectId>,
 }
 
 /// One discard instruction, parked mid-batch while an optional replacement
@@ -7326,6 +7418,13 @@ pub enum BatchCompletion {
         /// Where the rest pile goes (`Library` => bottom in a reposition, else
         /// the destination zone).
         rest_destination: Zone,
+        /// CR 701.20e: whether this rest pile is moved at all. `StayInLibrary`
+        /// keeps the drain moving nothing and falling straight through to the
+        /// reveal-marker cleanup / tracked-set publication / continuation, which
+        /// is where an instruction that never named a remainder destination
+        /// belongs.
+        #[serde(default)]
+        rest_remainder: DigRestRemainder,
         /// Dig-only rest piles preserve this policy across a replacement pause.
         /// Reveal-until uses the serde-default Preserve value.
         #[serde(default)]
@@ -10970,7 +11069,7 @@ pub struct PendingManaAbility {
     /// file for the immediately preceding `PayCostKind::TapCreatures::mode`
     /// retype, a deliberate break backed by `lobby_broker::PROTOCOL_VERSION` /
     /// `WIRE_PROTOCOL_VERSION` under the convention entry 23
-    /// (`PayableResource::ManaGeneric`) established, whose test proves that break
+    /// (`PayableResource::Mana`) established, whose test proves that break
     /// is a clean, non-silent deserialize failure. That decision is now TAKEN,
     /// the same way: `lobby_broker::PROTOCOL_VERSION` moved to 68 and
     /// `WIRE_PROTOCOL_VERSION` to 51 (#8698), and this field intentionally
@@ -11032,7 +11131,7 @@ pub struct PendingManaAbility {
     ///   `set_chosen_x_recursive`;
     /// * an `{X}` mana cost leg (Wizard's Rockets' `{X}, {T}, Sacrifice this
     ///   artifact: Add X mana in any combination of colors`), announced through
-    ///   `PayableResource::ManaGeneric` before cost payment; the activation pays
+    ///   `PayableResource::Mana` before cost payment; the activation pays
     ///   the leg with X concretized and the produced-mana count reads the same
     ///   value;
     /// * a literal `Remove X counters` cost (Saltcrusted Steppe class), where
@@ -14000,13 +14099,8 @@ pub(crate) fn has_return_result_metadata(ability: &ResolvedAbility) -> bool {
     ability.declares_return_result.is_some()
         || ability.reads_return_result.is_some()
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(has_return_result_metadata)
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(has_return_result_metadata)
+            .child_links()
+            .any(|(_, child)| has_return_result_metadata(child))
 }
 
 pub(crate) fn reads_return_result_id(ability: &ResolvedAbility, result_id: ReturnResultId) -> bool {
@@ -14015,13 +14109,8 @@ pub(crate) fn reads_return_result_id(ability: &ResolvedAbility, result_id: Retur
         .as_ref()
         .is_some_and(|(id, _)| *id == result_id)
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(|sub| reads_return_result_id(sub, result_id))
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(|branch| reads_return_result_id(branch, result_id))
+            .child_links()
+            .any(|(_, child)| reads_return_result_id(child, result_id))
 }
 
 pub(crate) fn live_return_result_occurrences(
@@ -16347,11 +16436,8 @@ impl GameState {
                     return Err(format!("root {label} {:?} is not a seat", player));
                 }
             }
-            if let Some(sub) = ability.sub_ability.as_deref() {
-                validate_ability(sub, valid)?;
-            }
-            if let Some(otherwise) = ability.else_ability.as_deref() {
-                validate_ability(otherwise, valid)?;
+            for (_, child) in ability.child_links() {
+                validate_ability(child, valid)?;
             }
             Ok(())
         }
@@ -17391,6 +17477,18 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reveal_until_hit_snapshot: Option<Box<EventObjectSnapshot>>,
     },
+    /// CR 701.20e + CR 401.4 + CR 608.2d: In a `Dig` resolution (PriorLook source) where
+    /// all looked-at cards are put on the bottom of the library "in any order"
+    /// (`DigRestOrder::PlayerChoice`), the controller announces the order for
+    /// the cards. The response is `GameAction::SelectCards { cards }` carrying
+    /// a permutation of `cards`; the engine places them on the library bottom in
+    /// that submitted order. Raised only when 2+ cards are bottomed — a single
+    /// card has no ordering choice.
+    DigBottomOrder {
+        player: PlayerId,
+        source_id: ObjectId,
+        cards: Vec<ObjectId>,
+    },
     /// CR 901.15 + CR 701.22a analogue: Arrange the top N cards of the planar
     /// deck — put exactly `keep_on_top` on top in the submitted order and the
     /// rest on the bottom in any order (Susan Foreman).
@@ -17464,6 +17562,12 @@ pub enum WaitingFor {
         /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
         #[serde(default)]
         rest_destination: Option<Zone>,
+        /// CR 701.20e: whether the unkept cards are moved at all. A silent
+        /// remainder stays in the library untouched, so the submission moves
+        /// only the kept cards; `rest_destination`'s graveyard default must not
+        /// be applied to cards that were only looked at.
+        #[serde(default, skip_serializing_if = "DigRestRemainder::is_route")]
+        rest_remainder: DigRestRemainder,
         /// CR 401.2 + CR 701.20e + CR 608.2c: Telling Time-class remainder
         /// split. `Some(n)` routes the unkept pile into a follow-up
         /// `DigRestSplitChoice` that puts exactly `n` of it on top of the
@@ -19098,6 +19202,14 @@ pub enum WaitingFor {
         #[serde(default = "default_pile_source_battlefield")]
         pile_source: PileSource,
     },
+    /// CR 702.106a / CR 702.106f: As a face-down agenda conspiracy is put into the
+    /// command zone, its owner secretly chooses `name_count` card names.
+    /// `name_count` is shown only to `player`; viewer projections report 1.
+    SecretAgendaChoice {
+        player: PlayerId,
+        object_id: ObjectId,
+        name_count: u8,
+    },
     /// CR 702.139a: Before the game begins, reveal companion from outside the game.
     CompanionReveal {
         player: PlayerId,
@@ -19419,15 +19531,23 @@ pub enum WaitingFor {
         total_damage: u32,
         attackers: Vec<ObjectId>,
     },
-    /// CR 601.2d: Distribute N among targets at casting time ("divide N damage among").
-    /// Infrastructure ready: handler in engine.rs, AI candidates, continuation match.
-    /// TODO: Wire trigger in casting.rs when a "divide/distribute" ability is being cast.
-    /// Requires parser support for "divide N damage among" Oracle text patterns.
+    /// CR 601.2d: divide N among the announced targets while a spell or ability
+    /// is cast, activated, or put on the stack ("divided as you choose among any
+    /// number of targets"); or CR 608.2d: divide N among untargeted resolution
+    /// candidates while the effect is applied ("divided as its controller chooses
+    /// among any number of those Wolves"). `scope` says which (see
+    /// [`DistributionScope`]); `targets` holds the announced targets or the
+    /// resolution candidates respectively.
     DistributeAmong {
         player: PlayerId,
         total: u32,
         targets: Vec<TargetRef>,
         unit: DistributionUnit,
+        #[serde(
+            default,
+            skip_serializing_if = "DistributionScope::is_announced_targets"
+        )]
+        scope: DistributionScope,
     },
     /// CR 122.5 + CR 608.2d: "Move any number of counters ... onto [set]"
     /// chooses destinations and counts as the ability resolves.
@@ -19724,10 +19844,38 @@ pub struct DamageSlot {
     pub lethal_minimum: u32,
 }
 
+/// CR 601.2d / CR 608.2d: when a `WaitingFor::DistributeAmong` division is
+/// chosen and what it must cover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type", content = "data")]
+pub enum DistributionScope {
+    /// CR 601.2d + CR 603.3d: announced among the spell's/ability's targets while
+    /// it is cast, activated, or put on the stack; each target receives at least one.
+    #[default]
+    AnnouncedTargets,
+    /// CR 608.2d + CR 115.10a: an untargeted division chosen while the effect is
+    /// applied, among any number of `targets` (the resolution candidates); each
+    /// chosen object receives at least one and the whole amount is divided.
+    /// `pending_effect` is the paused node (its `sub_ability`/`else_ability`
+    /// cleared — the continuation owns the tail), resolved with the chosen
+    /// portions stamped into `ResolvedAbility::distribution`.
+    ResolutionCandidates {
+        pending_effect: Box<ResolvedAbility>,
+    },
+}
+
+impl DistributionScope {
+    /// Serde skip predicate: the announce-time scope is the wire default, so
+    /// payloads that predate `scope` round-trip byte-identically.
+    pub fn is_announced_targets(&self) -> bool {
+        matches!(self, Self::AnnouncedTargets)
+    }
+}
+
 /// CR 107.14 + CR 118.8: Quantity named in a "pay any amount of X" prompt.
 /// Typed so the same `WaitingFor::PayAmountChoice` variant generalizes to future
 /// classes without re-introducing boolean flags. Most variants deduct a real
-/// resource (energy, life, generic mana, counters); `LoopCollapse` is the one
+/// resource (energy, life, X-concretized or per-unit mana, counters); `LoopCollapse` is the one
 /// non-payment member — its N is the finite count an accepted CR 732.2a
 /// object-growth loop collapses into, deducting nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19735,14 +19883,25 @@ pub struct DamageSlot {
 pub enum PayableResource {
     /// CR 107.14: Pay any amount of `{E}` — removes N energy counters from the player.
     Energy,
-    /// CR 107.3f + CR 118.1 + CR 118.12: Pay a chosen X as part of a
-    /// resolution-time mana cost. `base_cost` is the UNCONCRETIZED cost
-    /// (still carrying `ManaCostShard::X` plus any colored/generic pips
-    /// alongside it, e.g. `{X}{W}{U}{B}`); the submit handler concretizes X
-    /// into it (`ManaCost::concretize_x`) and pays the resulting cost through
-    /// the standard mana-payment authority, so colored requirements are
-    /// enforced exactly like any other mana cost — never dropped in favor of
-    /// a generic-only payment (Elenda and Azor, #6410).
+    /// Pay a chosen amount as part of a resolution-time mana cost; `composition`
+    /// says how the chosen amount becomes the concrete cost.
+    ///
+    /// - `ManaAmountComposition::ConcretizeX` (CR 107.3f + CR 118.1 +
+    ///   CR 118.12): `base_cost` is the UNCONCRETIZED cost (still carrying
+    ///   `ManaCostShard::X` plus any colored/generic pips alongside it, e.g.
+    ///   `{X}{W}{U}{B}`); the submit handler concretizes X into it
+    ///   (`ManaCost::concretize_x`) and pays the resulting cost through the
+    ///   standard mana-payment authority, so colored requirements are enforced
+    ///   exactly like any other mana cost — never dropped in favor of a
+    ///   generic-only payment (Elenda and Azor, #6410).
+    /// - `ManaAmountComposition::PerUnit` (CR 107.1c + CR 118.1): `base_cost`
+    ///   is one unit (e.g. `{R}` for "pay any amount of {R}", Leyline Tyrant);
+    ///   the submit handler pays it repeated the chosen number of times
+    ///   (`ManaCost::scaled`) through the same authority.
+    ///
+    /// The wire tag stays `ManaGeneric` (legacy-frozen): it names only that
+    /// the prompt is a mana payment, so a reader must consult `composition`
+    /// rather than infer `ConcretizeX` from the tag.
     ///
     /// `base_cost` intentionally carries NO `#[serde(default)]`: a serialized
     /// prompt missing this field must fail deserialization rather than
@@ -19755,7 +19914,12 @@ pub enum PayableResource {
     /// cost leg (Wizard's Rockets). The submit only binds
     /// `PendingManaAbility::chosen_x`; the activation then pays the
     /// concretized leg through its own cost cursor.
-    ManaGeneric { base_cost: ManaCost },
+    #[serde(rename = "ManaGeneric")] // wire tag legacy-frozen, see protocol record
+    Mana {
+        base_cost: ManaCost,
+        #[serde(default)]
+        composition: ManaAmountComposition,
+    },
     /// CR 107.1c + CR 122.1: Choose how many counters to remove.
     Counters,
     /// CR 119.4: Pay any amount of life — N is deducted as life loss via
@@ -19787,6 +19951,22 @@ pub enum PayableResource {
     /// correct growth axis (tokens / counters / life / mixed); resolution ignores it
     /// and reads the typed `PersistentAxisMaterialization` stash directly.
     LoopCollapse { axis: LoopCollapseAxis },
+}
+
+/// CR 107.1c: How the amount chosen in a `PayableResource::Mana` prompt
+/// becomes a concrete mana cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManaAmountComposition {
+    /// CR 107.3f + CR 118.1: the chosen amount is the value of X in the base
+    /// cost — `{X}{W}` with N chosen pays `{N}{W}` (Elenda and Azor). The
+    /// serde default, so payloads that predate `composition` keep today's
+    /// behavior.
+    #[default]
+    ConcretizeX,
+    /// CR 107.1c + CR 118.1: the base cost is one unit, repeated the chosen
+    /// number of times — `{R}` with N chosen pays `{R}` × N ("pay any amount
+    /// of {R}", Leyline Tyrant).
+    PerUnit,
 }
 
 /// CR 732.2a: which persistent-growth axis an accepted object-growth loop collapses
@@ -19863,17 +20043,17 @@ impl LoopCollapseAxis {
 /// CR 601.2c: one descent step from a stack entry's root `ResolvedAbility`
 /// toward a node that owns declared targets.
 ///
-/// Two variants because `ResolvedAbility` has exactly two child links. The
-/// enumerator (`ability_utils::chain_retarget_slots`) emits only `SubAbility`
-/// today, because `assign_targets_recursive` never descends into
-/// `else_ability` — read-verified; only `stamp_other_batch_source_targets`
-/// visits that branch, and its writes are synthesized rather than declared.
-/// `ElseAbility` exists so that a future else-branch owner is addressed
-/// correctly instead of being silently mis-addressed as a sub-branch one.
+/// Announcement addresses include independently declaring coin outcomes before
+/// the sequential sub-chain. Ordinary else edges remain addressable for
+/// declared-view readers but are not announcement routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChainStep {
     SubAbility,
     ElseAbility,
+    /// CR 705.2: The instructions selected by winning or losing the flip.
+    CoinFlipBranch {
+        result: CoinFlipResult,
+    },
 }
 
 /// CR 115.7d: the address of ONE declared-target slot inside a resolved chain.
@@ -20040,6 +20220,7 @@ impl WaitingFor {
             WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
             WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
             WaitingFor::RevealUntilBottomOrder { .. } => "RevealUntilBottomOrder",
+            WaitingFor::DigBottomOrder { .. } => "DigBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
@@ -20127,6 +20308,7 @@ impl WaitingFor {
             WaitingFor::SeparatePilesChooseOpponent { .. } => "SeparatePilesChooseOpponent",
             WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
             WaitingFor::SeparatePilesChoice { .. } => "SeparatePilesChoice",
+            WaitingFor::SecretAgendaChoice { .. } => "SecretAgendaChoice",
             WaitingFor::CompanionReveal { .. } => "CompanionReveal",
             WaitingFor::ChooseLegend { .. } => "ChooseLegend",
             WaitingFor::CommanderZoneChoice { .. } => "CommanderZoneChoice",
@@ -20208,6 +20390,7 @@ impl WaitingFor {
             | WaitingFor::RippleRevealChoice { player, .. }
             | WaitingFor::RippleBottomOrder { player, .. }
             | WaitingFor::RevealUntilBottomOrder { player, .. }
+            | WaitingFor::DigBottomOrder { player, .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { player, .. }
             | WaitingFor::RedistributeLifeTotals { player, .. }
             | WaitingFor::CoinFlipKeepChoice { player, .. }
@@ -20282,6 +20465,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneOpponentChooser { player, .. }
             | WaitingFor::ChooseAnnouncingOpponent { player, .. }
             | WaitingFor::ClashCardPlacement { player, .. }
+            | WaitingFor::SecretAgendaChoice { player, .. }
             | WaitingFor::CompanionReveal { player, .. }
             | WaitingFor::ChooseLegend { player, .. }
             | WaitingFor::BattleProtectorChoice { player, .. }
@@ -20572,6 +20756,7 @@ impl WaitingFor {
             | WaitingFor::RippleRevealChoice { .. }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::DigBottomOrder { .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
@@ -20648,6 +20833,7 @@ impl WaitingFor {
             | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
             | WaitingFor::SeparatePilesChoice { .. }
+            | WaitingFor::SecretAgendaChoice { .. }
             | WaitingFor::CompanionReveal { .. }
             | WaitingFor::ChooseLegend { .. }
             | WaitingFor::CommanderZoneChoice { .. }
@@ -20776,6 +20962,7 @@ impl WaitingFor {
             | WaitingFor::RippleRevealChoice { .. }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::DigBottomOrder { .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
@@ -20858,6 +21045,7 @@ impl WaitingFor {
             | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
             | WaitingFor::SeparatePilesChoice { .. }
+            | WaitingFor::SecretAgendaChoice { .. }
             | WaitingFor::CompanionReveal { .. }
             | WaitingFor::ChooseLegend { .. }
             | WaitingFor::CommanderZoneChoice { .. }
@@ -21115,6 +21303,7 @@ impl WaitingFor {
                 // only lists {identity}, so `apply()` is the real validator.
                 | WaitingFor::RippleBottomOrder { .. }
                 | WaitingFor::RevealUntilBottomOrder { .. }
+                | WaitingFor::DigBottomOrder { .. }
         )
     }
 
@@ -22221,12 +22410,12 @@ fn layers_read_current_step_unknown() -> bool {
 /// continuous `static_definitions` entry (including `GrantStaticAbility` hosts)
 /// and command-zone emblems. The opt-in-zone / off-zone arm (Incarnation cycle —
 /// Anger/Brawn/Filth/Wonder/Valor, `active_zones`-gated statics functioning from
-/// the graveyard) is INTENTIONALLY NOT indexed: its generator-set changes (e.g.
-/// self-milling an Anger into the graveyard) do not all mark `layers_dirty`
-/// (`zones.rs` marks dirty only on battlefield/hand transitions; mill/effect
-/// movers add no mark), so a `layers_dirty`-gated cache of off-zone generators
-/// would go stale. That arm keeps its live `state.objects` scan in
-/// `for_each_static_effect_source`.
+/// the graveyard) is INTENTIONALLY NOT indexed. A source's arrival in or
+/// departure from a zone its own `active_zones` declares NOW marks `layers_dirty`
+/// (#10400, via `zones::move_to_zone` and `zones::move_to_library_at_index` →
+/// `static_layer_dependency_for_zone_transition`), but indexing the arm remains a
+/// separate optimization with no measured need, so it keeps its live
+/// `state.objects` scan in `for_each_static_effect_source`.
 ///
 /// Backed by `im::Vector` so `GameState::clone()` stays O(1) structural share
 /// (and `GameState: Send` is preserved — no `Rc`). Rebuilt at the TOP of
@@ -25095,6 +25284,13 @@ declare_game_state! {
     /// box.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_discard_batch: Option<Box<PendingDiscardBatch>>,
+    /// CR 701.9a + CR 614.6: a frameless single-card effect discard (connive,
+    /// learn rummage) paused by a replacement choice. See [`PendingSingleDiscard`].
+    ///
+    /// Boxed for the same stack-budget reason as `pending_discard_batch`
+    /// (`types/game_state_size.rs`); populated only during a pause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_single_discard: Option<Box<PendingSingleDiscard>>,
     /// CR 608.2c + CR 616.1: Progress for a replacement-suspended exile loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_exile_from_top_until: Option<Box<PendingExileFromTopUntil>>,
@@ -27089,6 +27285,7 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::RevealUntilBottomOrder { .. }
+        | WaitingFor::DigBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::CoinFlipKeepChoice { .. }
@@ -27149,6 +27346,7 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesPartition { .. }
         | WaitingFor::SeparatePilesChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
         | WaitingFor::CommanderZoneChoice { .. }
@@ -31800,13 +31998,7 @@ impl GameState {
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
-            paused.append_delivery_events(delivery_events);
-            paused
-                .record_terminal_completion(terminal_completion)
-                .expect("one paused zone-change delivery has one terminal completion");
-            if paused.face_down_in_exile.is_face_down() {
-                occurrence = annotate_paused_exile_event(&mut paused.delivery_events, member);
-            }
+            occurrence = paused.settle_delivery(delivery_events, terminal_completion);
             true
         } else {
             false
@@ -31825,13 +32017,80 @@ impl GameState {
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
-            paused.append_delivery_events(delivery_events);
-            paused
-                .record_terminal_completion(terminal_completion)
-                .expect("one paused zone-change delivery has one terminal completion");
-            if paused.face_down_in_exile.is_face_down() {
-                occurrence = annotate_paused_exile_event(&mut paused.delivery_events, member);
+            occurrence = paused.settle_delivery(delivery_events, terminal_completion);
+            true
+        } else {
+            false
+        };
+        if matched {
+            if let Some(exile_occurrence) = occurrence {
+                self.apply_exact_paused_exile_concealment(member, exile_occurrence);
             }
+            return true;
+        }
+        false
+    }
+
+    /// CR 616.1 + CR 400.7: Record the classification of a resumed delivery whose
+    /// approved event carries the chosen replacement's modifications. Same
+    /// owners and single-authority classification as
+    /// [`Self::capture_paused_zone_change_delivery`], but matched by
+    /// [`PendingZoneChangeDelivery::captures_resumed`] so a controller/counter
+    /// override or a CR 614.6 zone redirect does not defeat the key comparison.
+    pub fn capture_resumed_paused_zone_change_delivery(
+        &mut self,
+        member: ObjectIncarnationRef,
+        approved_event: &ProposedEvent,
+        delivery_events: &[GameEvent],
+        terminal_completion: ZoneMoveCompletion,
+    ) -> bool {
+        let mut occurrence = None;
+        let matched = if let Some(paused) = self
+            .active_change_zone_frame_mut()
+            .and_then(|frame| frame.pending.as_mut())
+            .and_then(|owner| owner.paused_current.as_mut())
+            .filter(|paused| paused.captures_resumed(member, approved_event))
+        {
+            occurrence = paused.settle_delivery(delivery_events, terminal_completion);
+            true
+        } else {
+            false
+        };
+        if matched {
+            if let Some(exile_occurrence) = occurrence {
+                self.apply_exact_paused_exile_concealment(member, exile_occurrence);
+            }
+            return true;
+        }
+
+        occurrence = None;
+        let matched = if let Some(paused) = self
+            .resolution_stack
+            .active_batch_delivery_or_post_replacement_child_mut()
+            .and_then(|owner| owner.paused_current.as_mut())
+            .filter(|paused| paused.captures_resumed(member, approved_event))
+        {
+            occurrence = paused.settle_delivery(delivery_events, terminal_completion);
+            true
+        } else {
+            false
+        };
+        if matched {
+            if let Some(exile_occurrence) = occurrence {
+                self.apply_exact_paused_exile_concealment(member, exile_occurrence);
+            }
+            return true;
+        }
+
+        // A tail park can push more than one frame above the batch, so the fixed
+        // parent/child relation is not enough; the unique-member search is.
+        occurrence = None;
+        let matched = if let Some(paused) = self
+            .resolution_stack
+            .paused_batch_delivery_mut_for_member(member, approved_event)
+            .and_then(|owner| owner.paused_current.as_mut())
+        {
+            occurrence = paused.settle_delivery(delivery_events, terminal_completion);
             true
         } else {
             false
@@ -32156,7 +32415,17 @@ impl GameState {
                 }
             }
             ResolvedPlayerEdit::Energy { delta } => {
-                player.energy = apply_u32_delta(player.energy, *delta)?;
+                let energy = apply_u32_delta(player.energy, *delta)?;
+                // CR 107.14 + CR 122.1: Paying {E} removes energy counters, so
+                // every decrement (payment or other loss) counts toward
+                // "{E} you've paid or lost this turn".
+                if *delta < 0 {
+                    player.energy_paid_or_lost_this_turn = player
+                        .energy_paid_or_lost_this_turn
+                        .checked_add(nonzero_delta_magnitude(*delta)?)
+                        .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
+                }
+                player.energy = energy;
             }
             ResolvedPlayerEdit::Counter { kind, delta } => {
                 let count = apply_u32_delta(player.player_counter(kind), *delta)?;
@@ -32249,13 +32518,35 @@ impl GameState {
         )
     }
 
-    /// CR 400.7: Clear object-incarnation-scoped reveal state at the zone
-    /// boundary. The future Zone command will invoke this same final mutation
-    /// primitive while owning the enclosing zone-change command and journal
-    /// entry; this legacy boundary intentionally does not create one itself.
+    /// CR 400.7 + CR 701.20a: Clear object-incarnation-scoped reveal state at
+    /// the zone boundary. The future Zone command will invoke this same final
+    /// mutation primitive while owning the enclosing zone-change command and
+    /// journal entry; this legacy boundary intentionally does not create one
+    /// itself.
+    ///
+    /// `destination` decides whether a PUBLIC reveal survives the move, because
+    /// the two hidden-zone classes answer differently:
+    ///
+    ///  * CR 701.20a: "To reveal a card, show that card to all players." Once
+    ///    the table has seen a card, putting it into a hand does not unshow it
+    ///    — the move is a later part of the same instruction that revealed it
+    ///    (Malevolent Rumble, Narset, Parter of Veils: "reveal … and put it
+    ///    into your hand"), so opponents must still be able to tell WHICH card
+    ///    was taken. The publication therefore survives the move, and the
+    ///    hand identity leaf of `is_visible_revealed_card` keeps its face
+    ///    visible to every viewer while it sits there.
+    ///  * CR 401.2: a library's ORDER is not public ("players can't look at or
+    ///    change the order of cards in a library"), so a move into a library
+    ///    retires the publication. Keeping it would resurface the identity of
+    ///    a card that was shuffled in and later redrawn, which no player may
+    ///    infer from the earlier reveal.
+    ///
+    /// Exile is likewise retired: it may be face down (CR 406.3), and every
+    /// other destination is a public zone whose identity is already visible.
     pub(crate) fn clear_revealed_information_on_zone_exit(
         &mut self,
         occurrence: ObjectIncarnationRef,
+        destination: Zone,
     ) {
         let (controller, owner) = self
             .objects
@@ -32264,30 +32555,42 @@ impl GameState {
             .expect("zone-exit reveal clear must reference a live object");
         // Product knowledge is exact-occurrence scoped too. Unlike the
         // rules-visible reveal sets below, this removes every entitled viewer's
-        // fact, never just the object's current controller.
+        // fact, never just the object's current controller. A fact is keyed on
+        // (zone, incarnation), so it can never match the occurrence that is
+        // about to exist; a hand identity is projected from the public
+        // publication set instead.
         self.product_knowledge_state
             .facts
             .retain(|fact| fact.identity != occurrence);
         self.canonicalize_library_knowledge_epoch(owner);
-        for (audience, lifetime) in [
-            (
+        if self.information_active(
+            ResolvedInformationAudience::Controller(controller),
+            ResolvedInformationLifetime::UntilActionBoundary,
+            occurrence,
+        ) {
+            self.apply_information_edit(
+                &[occurrence],
                 ResolvedInformationAudience::Controller(controller),
                 ResolvedInformationLifetime::UntilActionBoundary,
-            ),
-            (
+                ResolvedInformationEdit::Hide,
+            )
+            .expect("zone-exit reveal clear must match the live object occurrence");
+        }
+        // CR 701.20a + CR 401.2: see the destination rule above.
+        if destination != Zone::Hand
+            && self.information_active(
                 ResolvedInformationAudience::Public,
                 ResolvedInformationLifetime::UntilZoneChange,
-            ),
-        ] {
-            if self.information_active(audience, lifetime, occurrence) {
-                self.apply_information_edit(
-                    &[occurrence],
-                    audience,
-                    lifetime,
-                    ResolvedInformationEdit::Hide,
-                )
-                .expect("zone-exit reveal clear must match the live object occurrence");
-            }
+                occurrence,
+            )
+        {
+            self.apply_information_edit(
+                &[occurrence],
+                ResolvedInformationAudience::Public,
+                ResolvedInformationLifetime::UntilZoneChange,
+                ResolvedInformationEdit::Hide,
+            )
+            .expect("zone-exit reveal clear must match the live object occurrence");
         }
         self.drop_stack_bound_reveals_for_occurrence(occurrence);
     }
@@ -33235,6 +33538,7 @@ impl GameState {
             pending_player_scope_sacrifice_choice: None,
             pending_player_scope_unless_payment: None,
             pending_discard_batch: None,
+            pending_single_discard: None,
             pending_exile_from_top_until: None,
             pending_mass_library_order_choice: None,
             pending_scoped_library_search: None,
@@ -37193,6 +37497,10 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_player_scope_sacrifice_choice: _,
         pending_player_scope_unless_payment: _,
         pending_discard_batch: _,
+        // `pending_single_discard`: COMPARED (hand-written `impl PartialEq` conjunct) — the
+        // single-card sibling of `pending_discard_batch`, `None` outside a pause, so COMPARING
+        // it can never suppress a legitimate loop's detection.
+        pending_single_discard: _,
         pending_exile_from_top_until: _,
         pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
@@ -37432,6 +37740,7 @@ impl PartialEq for GameState {
             && self.pending_player_scope_unless_payment
                 == other.pending_player_scope_unless_payment
             && self.pending_discard_batch == other.pending_discard_batch
+            && self.pending_single_discard == other.pending_single_discard
             && self.pending_exile_from_top_until == other.pending_exile_from_top_until
             && self.pending_combat_lifelink == other.pending_combat_lifelink
             && self.pending_mass_library_order_choice
@@ -46029,7 +46338,7 @@ mod tests {
     /// This is a deliberate wire-compatibility break, backed by
     /// `lobby_broker::PROTOCOL_VERSION` 36 / `WIRE_PROTOCOL_VERSION` 27 (not a
     /// backward-compatible decode shim) — the same convention entry 23
-    /// (`PayableResource::ManaGeneric`) established. This test proves the break
+    /// (`PayableResource::Mana`) established. This test proves the break
     /// is a clean, non-silent deserialize failure through the actual production
     /// restore path (`PersistedGameState`, the same type `server-core::session::
     /// PersistedSession.state` uses), for BOTH prior `TapCreatures` shapes: the
@@ -46103,7 +46412,7 @@ mod tests {
     /// wire-compatibility break,
     /// backed by `lobby_broker::PROTOCOL_VERSION` 68 / `WIRE_PROTOCOL_VERSION`
     /// 51 (not a backward-compatible decode shim) — the same convention entry
-    /// 23 (`PayableResource::ManaGeneric`) established and
+    /// 23 (`PayableResource::Mana`) established and
     /// `tap_creatures_pre_mode_wire_shape_is_rejected` above pins for the
     /// sibling `PayCostKind::TapCreatures::mode` retype.
     ///
@@ -46219,7 +46528,7 @@ mod tests {
     /// instead of collapsing them into one scalar. The field intentionally
     /// carries NO `#[serde(default)]` and no `skip_serializing_if`, backed by
     /// `lobby_broker::PROTOCOL_VERSION` 91 / `WIRE_PROTOCOL_VERSION` 73 — the
-    /// same convention entry 23 (`PayableResource::ManaGeneric`) established
+    /// same convention entry 23 (`PayableResource::Mana`) established
     /// and `chosen_tappers_pre_option_wire_shape_is_rejected` above pins for
     /// the sibling `chosen_tappers` retype.
     ///
@@ -49205,7 +49514,6 @@ mod tests {
                         source_id: ObjectId(5),
                         controller: PlayerId(0),
                         flipper: PlayerId(0),
-                        targets: vec![],
                         win_effect: None,
                         lose_effect: None,
                         kind: PendingCoinFlipKind::Exactly { remaining: 0 },
@@ -52294,6 +52602,7 @@ mod tests {
             selectable_cards: vec![ObjectId(1)],
             kept_destination: None,
             rest_destination: None,
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: crate::types::ability::DigRestOrder::Preserve,
             source_id: None,
@@ -53320,7 +53629,7 @@ mod tests {
         );
     }
 
-    /// #6410 review follow-up: `PayableResource::ManaGeneric::base_cost`
+    /// #6410 review follow-up: `PayableResource::Mana::base_cost`
     /// deliberately carries NO `#[serde(default)]`. A prior revision of this
     /// fix defaulted the missing field to `ManaCost::zero()`, which would
     /// have concretized a legacy/incomplete serialized prompt into a FREE
@@ -53343,6 +53652,52 @@ mod tests {
             serde_json::from_str::<PayableResource>(legacy_per_x_shape).is_err(),
             "the pre-fix per_x-only wire shape has no base_cost and must be rejected too"
         );
+    }
+
+    /// CR 107.3f: a `ManaGeneric` payload that predates `composition` (an
+    /// `{X}{W}` resolution-time prompt) still parses, and as `ConcretizeX` —
+    /// today's X semantics. `base_cost` keeps its no-default invariant (the
+    /// paired negative is `pay_amount_choice_mana_generic_missing_base_cost_is_rejected`).
+    #[test]
+    fn pay_amount_choice_mana_legacy_wire_shape_defaults_to_concretize_x() {
+        use crate::types::mana::{ManaCost, ManaCostShard};
+        let base_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::White],
+            generic: 0,
+        };
+        let legacy = serde_json::json!({
+            "type": "ManaGeneric",
+            "data": { "base_cost": serde_json::to_value(&base_cost).unwrap() },
+        });
+        let parsed: PayableResource = serde_json::from_value(legacy)
+            .expect("a pre-composition ManaGeneric payload must still deserialize");
+        assert_eq!(
+            parsed,
+            PayableResource::Mana {
+                base_cost,
+                composition: ManaAmountComposition::ConcretizeX,
+            }
+        );
+    }
+
+    /// CR 107.1c: a per-unit prompt ("pay any amount of {R}") serializes under
+    /// the legacy-frozen `ManaGeneric` tag with an explicit `composition`, and
+    /// round-trips.
+    #[test]
+    fn pay_amount_choice_mana_per_unit_serializes_under_frozen_wire_tag() {
+        use crate::types::mana::{ManaCost, ManaCostShard};
+        let resource = PayableResource::Mana {
+            base_cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            },
+            composition: ManaAmountComposition::PerUnit,
+        };
+        let value = serde_json::to_value(&resource).unwrap();
+        assert_eq!(value["type"], "ManaGeneric");
+        assert_eq!(value["data"]["composition"], "PerUnit");
+        let back: PayableResource = serde_json::from_value(value).unwrap();
+        assert_eq!(back, resource);
     }
 
     #[test]
@@ -56743,6 +57098,59 @@ mod tests {
         .expect("the marked export parses");
         assert_eq!(via_string, marked);
     }
+
+    /// C2.5 wire compatibility: a `DistributeAmong` payload serialized before
+    /// `scope` existed deserializes as the CR 601.2d announce-time scope and
+    /// re-serializes byte-identically; a CR 608.2d resolution-time wait carries
+    /// its scope on the wire and round-trips.
+    #[test]
+    fn distribute_among_scope_is_wire_compatible() {
+        let legacy = r#"{"type":"DistributeAmong","data":{"player":1,"total":3,"targets":[{"Object":7},{"Object":8}],"unit":{"type":"Damage"}}}"#;
+        let decoded: WaitingFor =
+            serde_json::from_str(legacy).expect("scope-less payload must deserialize");
+        match &decoded {
+            WaitingFor::DistributeAmong { scope, .. } => {
+                assert_eq!(scope, &DistributionScope::AnnouncedTargets);
+            }
+            other => panic!("expected DistributeAmong, got {other:?}"),
+        }
+        assert_eq!(
+            serde_json::to_string(&decoded).expect("serialize"),
+            legacy,
+            "announce-time scope must not appear on the wire"
+        );
+
+        let pending = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let resolution = WaitingFor::DistributeAmong {
+            player: PlayerId(1),
+            total: 3,
+            targets: vec![
+                TargetRef::Object(ObjectId(7)),
+                TargetRef::Object(ObjectId(8)),
+            ],
+            unit: DistributionUnit::Damage,
+            scope: DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            },
+        };
+        let json = serde_json::to_string(&resolution).expect("serialize");
+        assert!(
+            json.contains(r#""scope":{"type":"ResolutionCandidates""#),
+            "resolution-time scope must be on the wire: {json}"
+        );
+        let back: WaitingFor = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(back, resolution);
+    }
 }
 
 #[cfg(test)]
@@ -57620,6 +58028,7 @@ mod restored_exact_attack_authority_tests {
                     accumulated: false,
                     current: None,
                     nominee: None,
+                    tracked_pool: None,
                 }),
                 3 => ResolutionFrame::PerCategoryZoneChoice(PerCategoryZoneChoiceFrame {
                     pending: PendingPerCategoryZoneChoice {

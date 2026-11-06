@@ -6898,12 +6898,46 @@ pub(crate) fn parse_cant_attack_defended_scope_nom(
     .parse(input)
 }
 
+/// CR 508.1c + CR 508.6: "a player it has already attacked this turn" — the
+/// defended-player scope of a self-referential attack restriction (Bloodthirster,
+/// Port Razer: "This creature can't attack a player it has already attacked this
+/// turn.").
+///
+/// The subject of "already attacked" is the permanent carrying the restriction,
+/// so the phrase is composed from the shared self-reference combinator (which
+/// covers `it`, `~`, `this creature`, `this permanent`, and the normalized card
+/// name — CR 201.5) rather than a fixed subject word. The verb phrase is the one
+/// both printed cards share; it is a perfect-tense form of CR 508.6's "attacked
+/// [a player]" and is the only axis the two printings vary on.
+pub(crate) fn parse_previously_attacked_player_scope_nom(
+    input: &str,
+) -> OracleResult<'_, crate::types::triggers::AttackTargetFilter> {
+    let (rest, _) = tag("a player ").parse(input)?;
+    let (rest, _) = crate::parser::oracle_nom::target::parse_self_reference.parse(rest)?;
+    let (rest, _) = tag(" has already attacked this turn").parse(rest)?;
+    Ok((
+        rest,
+        crate::types::triggers::AttackTargetFilter::PlayerAttackedBySourceThisTurn,
+    ))
+}
+
 pub(crate) fn parse_cant_attack_rule_static_predicate_nom(
     input: &str,
 ) -> OracleResult<'_, Option<crate::types::triggers::AttackTargetFilter>> {
     use crate::types::triggers::AttackTargetFilter;
 
     let (rest, _) = tag("can't attack").parse(input)?;
+    // CR 508.1c + CR 508.6: "a player it has already attacked this turn" must be
+    // tried BEFORE the bare " a player" arm below, which consumes only " a
+    // player" and leaves the history rider behind: the rider then reads as an
+    // unrelated tail, the subject-led production declines on it, and the line
+    // falls through to the blanket "can't attack" arm — Bloodthirster and Port
+    // Razer became unable to attack ANY player (issue #8064).
+    let (rest, previously_attacked) =
+        opt(preceded(space1, parse_previously_attacked_player_scope_nom)).parse(rest)?;
+    if let Some(defended) = previously_attacked {
+        return Ok((rest, Some(defended)));
+    }
     let (rest, owner_restriction) = opt(preceded(
         space1,
         alt((

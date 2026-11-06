@@ -1193,6 +1193,10 @@ fn cast_bound_card_terminal(
     finish_payment_terminal(state, owner, cast, budget)
 }
 
+/// Depth-first search over the payer's mana candidates until the bound cast
+/// commits. `budget.payment_applications_remaining` is shared by the whole
+/// tree: each application (successful or not) spends one unit, and once it is
+/// spent the search returns `None` rather than certifying an unexplored route.
 fn finish_payment_terminal(
     state: &mut GameState,
     owner: PlayerId,
@@ -1207,6 +1211,12 @@ fn finish_payment_terminal(
         .filter(|candidate| candidate.metadata.tactical_class == TacticalClass::Mana)
         .collect();
     for candidate in mana {
+        // The allowance is one hard bound for this whole search tree: every
+        // application takes a unit only while one remains, and a subtree that
+        // spent the last unit ends the search here (fail closed).
+        if budget.payment_applications_remaining == 0 {
+            return None;
+        }
         let frozen = FrozenCandidate::capture(state, &candidate)?;
         let mut next = state.clone();
         budget.payment_applications_remaining -= 1;

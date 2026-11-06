@@ -53,6 +53,15 @@ fn treasure_cove_back_face() -> BackFaceData {
 }
 
 fn activate_with_prior_counters(prior: u32) -> (engine::game::scenario::GameRunner, ObjectId) {
+    activate_with_counters(prior, &[])
+}
+
+/// Activates Treasure Map holding `prior` landmark counters plus every
+/// `(kind, n)` in `others`, then resolves the ability.
+fn activate_with_counters(
+    prior: u32,
+    others: &[(CounterType, u32)],
+) -> (engine::game::scenario::GameRunner, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let map = scenario
@@ -79,6 +88,9 @@ fn activate_with_prior_counters(prior: u32) -> (engine::game::scenario::GameRunn
         if prior > 0 {
             obj.counters
                 .insert(CounterType::Generic("landmark".to_string()), prior);
+        }
+        for (kind, n) in others {
+            obj.counters.insert(kind.clone(), *n);
         }
     }
     runner
@@ -151,4 +163,36 @@ fn second_landmark_counter_does_not_transform() {
         Some(2)
     );
     assert_eq!(treasure_count(&runner), 0);
+}
+
+/// CR 608.2c + CR 122.1: "remove those counters" names the landmark counters
+/// the gate counted, not every counter on the artifact. The gate scopes over a
+/// multi-instruction body ("remove those counters, transform this artifact, and
+/// create three Treasure tokens"), so the counted kind must reach the removal
+/// through the recursive conditional-body parse. An unrelated counter kind on
+/// the map is not among "those counters" and survives the transform.
+#[test]
+fn third_landmark_counter_removes_only_landmark_counters() {
+    let charge = CounterType::Generic("charge".to_string());
+    let (runner, map) = activate_with_counters(2, &[(charge.clone(), 1)]);
+    let obj = &runner.state().objects[&map];
+    assert!(
+        obj.transformed,
+        "Treasure Map must transform at three counters"
+    );
+    assert_eq!(obj.name, "Treasure Cove");
+    assert_eq!(
+        obj.counters
+            .get(&CounterType::Generic("landmark".to_string()))
+            .copied()
+            .unwrap_or(0),
+        0,
+        "the landmark counters are removed"
+    );
+    assert_eq!(
+        obj.counters.get(&charge).copied(),
+        Some(1),
+        "the charge counter is not one of those counters"
+    );
+    assert_eq!(treasure_count(&runner), 3);
 }

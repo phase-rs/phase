@@ -120,6 +120,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "RippleRevealChoice",
     "RippleBottomOrder",
     "RevealUntilBottomOrder",
+    "DigBottomOrder",
     "ArrangePlanarDeckTopChoice",
     "CoinFlipKeepChoice",
     "DieKeepChoice",
@@ -214,6 +215,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "ChooseUntapSubset",
     "ExertChoice",
     "EnlistChoice",
+    "SecretAgendaChoice",
     "CompanionReveal",
     // Game lifecycle
     "GameOver",
