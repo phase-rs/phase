@@ -43,6 +43,7 @@ import { loadProviderCatalog } from "../services/llm/catalog";
 import { reportLlmFailure } from "../services/llm/diagnostics";
 import type { LlmDraftOutcome, LlmProfile } from "../services/llm/types";
 import { draftProfile, useLlmStore } from "./llmStore";
+import { exactAddedIds, poolMultiplicity } from "./draftPickAcknowledgement";
 import {
   MAX_MATERIALIZED_VIRTUAL_BASICS,
   migrateLegacyWorkspace,
@@ -813,37 +814,12 @@ function validPickRequest(request: PickRequest): boolean {
   }
 }
 
-function poolMultiplicity(pool: DraftPlayerView["pool"]): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const card of pool) counts.set(card.instance_id, (counts.get(card.instance_id) ?? 0) + 1);
-  return counts;
-}
-
 function acknowledgesRequestedId(
   before: ReadonlyMap<string, number>,
   after: ReadonlyMap<string, number>,
   instanceId: string,
 ): boolean {
   return (before.get(instanceId) ?? 0) === 0 && (after.get(instanceId) ?? 0) === 1;
-}
-
-/**
- * The ids the pool gained, each going from absent to exactly one copy; `null`
- * when any id changed in another way.
- */
-function acknowledgedAddedIds(
-  before: ReadonlyMap<string, number>,
-  after: ReadonlyMap<string, number>,
-): string[] | null {
-  const added: string[] = [];
-  for (const instanceId of new Set([...before.keys(), ...after.keys()])) {
-    const previous = before.get(instanceId) ?? 0;
-    const current = after.get(instanceId) ?? 0;
-    if (current === previous) continue;
-    if (previous !== 0 || current !== 1) return null;
-    added.push(instanceId);
-  }
-  return added;
 }
 
 /**
@@ -980,8 +956,7 @@ interface LocalFifoLlm {
   /** A view the engine answered while the player's selection was pending. */
   viewOwed: boolean;
   /** One sync runs at a time; one asked for meanwhile runs once more after it. */
-  syncing: boolean;
-  syncAgain: boolean;
+  sync: "idle" | "running" | "rerun";
 }
 
 /** LLM drafting on the local FIFO runtime for one lifecycle: what the engine was told, and each seat's call in flight with the prompt it answers. */
@@ -1005,8 +980,7 @@ function createLocalFifoLlm(
     inFlight: new Map(),
     statuses: new Map(),
     viewOwed: false,
-    syncing: false,
-    syncAgain: false,
+    sync: "idle",
   };
 }
 
@@ -1150,6 +1124,11 @@ async function syncLocalFifoLlmOnce(llm: LocalFifoLlm): Promise<void> {
   publishLocalFifoLlmStatuses(llm);
 }
 
+/** Whether a sync was asked for while `llm`'s sync ran. */
+function rerunRequested(llm: LocalFifoLlm): boolean {
+  return llm.sync === "rerun";
+}
+
 /**
  * Keep the local FIFO runtime's LLM seats in step with the store. Runs after
  * every view change, every player selection and every resolution; one sync
@@ -1158,23 +1137,23 @@ async function syncLocalFifoLlmOnce(llm: LocalFifoLlm): Promise<void> {
 function syncLocalFifoLlm(): void {
   const llm = fifoLlm;
   if (llm === null) return;
-  if (llm.syncing) {
-    llm.syncAgain = true;
+  if (llm.sync !== "idle") {
+    llm.sync = "rerun";
     return;
   }
-  llm.syncing = true;
+  llm.sync = "running";
   void (async () => {
     try {
       do {
-        llm.syncAgain = false;
+        llm.sync = "running";
         try {
           await syncLocalFifoLlmOnce(llm);
         } catch (error) {
           if (localFifoLlmOwnsDraft(llm)) console.warn("[draftStore] LLM seat sync failed:", error);
         }
-      } while (llm.syncAgain && localFifoLlmOwnsDraft(llm));
+      } while (rerunRequested(llm) && localFifoLlmOwnsDraft(llm));
     } finally {
-      llm.syncing = false;
+      llm.sync = "idle";
     }
   })();
 }
@@ -1414,7 +1393,7 @@ async function performPickOnce(request: PickRequest): Promise<DraftPickOutcome> 
       case "auto-pick": {
         // Acknowledged when the pool gains exactly the selection's published
         // count of new cards: one for every legacy Quick view.
-        const addedInstanceIds = acknowledgedAddedIds(before, after);
+        const addedInstanceIds = exactAddedIds(before, after);
         if (addedInstanceIds === null || addedInstanceIds.length !== draftSelectionPickCount(view, null)) {
           cleanup();
           return { status: "rejected", reason: "unacknowledged" };

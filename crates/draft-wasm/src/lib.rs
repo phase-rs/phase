@@ -9648,8 +9648,9 @@ mod local_fifo_runtime_tests {
         reset();
     }
 
-    /// CR 905.2a: a seat drafts at its own pace, so the request states the
-    /// steps that seat has taken in the round, not the pod's step counter.
+    /// CR 905.2a: there is no priority in a draft, so a FIFO seat drafts at
+    /// its own pace and the request states the steps that seat has taken in
+    /// the round, not the pod's step counter.
     #[test]
     fn a_request_states_the_seats_own_fifo_position() {
         reset();
