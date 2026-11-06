@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4511
-- **Total card appearances across root causes:** 4544 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4510
+- **Total card appearances across root causes:** 4543 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
@@ -15,11 +15,11 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
-| 1 | Relative-clause / filter restriction on target dropped | 724 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
-| 2 | Dropped intervening-if / gating condition (condition: null) | 570 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
+| 1 | Relative-clause / filter restriction on target dropped | 723 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
+| 2 | Dropped intervening-if / gating condition (condition: null) | 571 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 401 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 380 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
-| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 327 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
+| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 326 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 225 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 207 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 208 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
@@ -45,11 +45,11 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2409/4554 ≈ 52.9% of all misparse appearances; the top 10 cover 3392/4554 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped below row 8 as cards were fixed.
+> The top **5** root causes cover 2401/4543 ≈ 52.9% of all misparse appearances; the top 10 cover 3383/4543 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped below row 8 as cards were fixed.
 
 ## Full card lists per root cause
 
-### 1. Relative-clause / filter restriction on target dropped  (724 cards)
+### 1. Relative-clause / filter restriction on target dropped  (723 cards)
 
 **Signature.** TargetFilter/affected emitted with empty or missing properties; a trailing restrictive clause (type, subtype, color, mana value, zone, combat/temporal/control predicate, exclusion) is silently dropped, over-broadening the filter.
 
@@ -146,7 +146,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Caesar, Legion's Emperor
 - Calix, Destiny's Hand
 - Callous Giant
-- Campfire
 - Cantor of the Refrain
 - Captain America's Shield
 - Captain N'ghathrod
@@ -784,7 +783,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 2. Dropped intervening-if / gating condition (condition: null)  (570 cards)
+### 2. Dropped intervening-if / gating condition (condition: null)  (571 cards)
 
 **Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
 
@@ -1011,6 +1010,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Hall of the Bandit Lord
 - Hawkeye, Avenging Archer
 - Head to Head
+- Hedron Alignment
 - Hedron-Field Purists
 - Heir of the Ancient Fang
 - Helicarrier Strike
@@ -2167,7 +2167,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (327 cards)
+### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (326 cards)
 
 **Signature.** Effect quantity (count/amount/P-T) parses as Fixed(1)/constant instead of a dynamic QuantityExpr::Ref over a 'for each X' / 'that many' / 'equal to' clause; the multiplier is dropped.
 
@@ -2310,7 +2310,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Hex Parasite
 - Hinata, Dawn-Crowned
 - Hurkyl, Master Wizard
-- Huskburster Swarm
 - Hydradoodle
 - Ill-Gotten Gains
 - Illuminated Folio
@@ -2771,6 +2770,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Bringer of the Black Dawn
 - Burning-Rune Demon
 - Calibrated Blast
+- Campfire
 - Canyon Drake
 - Captain Kirk, Boldly Going
 - Cathartic Operation
@@ -2830,7 +2830,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Harper Recruiter
 - Haunted Angel
 - Hazardroot Herbalist
-- Hedron Alignment
 - Hellkite Courser
 - Hildibrand Manderville
 - Hinder
