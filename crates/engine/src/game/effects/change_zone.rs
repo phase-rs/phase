@@ -13454,10 +13454,11 @@ mod tests {
     /// player's upkeep, that player exiles a card at random from their hand. The
     /// player may play that card this turn. At the beginning of the next end
     /// step, if the player hasn't played the card, they put it into their
-    /// graveyard." — and Rona, Tolarian Obliterator — "Whenever a source deals
-    /// damage to Rona, that source's controller exiles a card from their hand at
-    /// random." Two eligible cards keep the single-eligible shortcut from being
-    /// the arm that fires.
+    /// graveyard." Two eligible cards keep the single-eligible shortcut from
+    /// being the arm that fires. (Rona, Tolarian Obliterator — "Whenever a
+    /// source deals damage to Rona, that source's controller exiles a card from
+    /// their hand at random." — reaches the same arm through a
+    /// `ParentTargetController`-scoped hand filter.)
     ///
     /// Revert sensitivity: reverting that arm's `Some(performer)` to
     /// `Some(ability.controller)` records `Some(P0)` and fails the
