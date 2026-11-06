@@ -7244,6 +7244,20 @@ impl PendingBatchDeliveries {
 
     fn validate_staged_stage(&self, staged: &StagedBatchDelivery) -> Result<(), String> {
         let members = &staged.members;
+        // CR 608.2c: arrangement preserves the next delivery member. A cursor
+        // may pass only terminal or abandoned members, never skip an approved
+        // move when an arrangement answer transitions the batch to delivery.
+        if matches!(
+            staged.stage,
+            BatchDeliveryStage::Arranging | BatchDeliveryStage::Delivering
+        ) && members.iter().take(staged.cursor).any(|member| {
+            !matches!(
+                member.state,
+                StagedBatchMemberState::Terminal | StagedBatchMemberState::Abandoned
+            )
+        }) {
+            return Err("an undelivered staged member precedes the delivery cursor".to_string());
+        }
         match staged.stage {
             BatchDeliveryStage::Approving => {
                 for (index, member) in members.iter().enumerate() {
@@ -7309,7 +7323,7 @@ impl PendingBatchDeliveries {
                 }
             }
             BatchDeliveryStage::Delivering => {
-                for (index, member) in members.iter().enumerate() {
+                for member in members {
                     if !matches!(
                         member.state,
                         StagedBatchMemberState::Approved
@@ -7318,26 +7332,6 @@ impl PendingBatchDeliveries {
                     ) {
                         return Err(
                             "a staged member entered delivery without a final approval".to_string()
-                        );
-                    }
-                    // CR 608.2c: the cursor is the next member to deliver, so
-                    // every member behind it has already been delivered and
-                    // must carry its terminal (or be abandoned because its owner
-                    // left). A still-`Approved` member there would be reported
-                    // Delivered without ever producing an outcome, and
-                    // `change_zone_settled_facts` would then reject the
-                    // remaining Pending slot it settled with. Members ahead of
-                    // the cursor may legitimately already be Terminal: approval
-                    // settles a prevented or remained member before the delivery
-                    // cursor resets to zero.
-                    if index < staged.cursor
-                        && !matches!(
-                            member.state,
-                            StagedBatchMemberState::Terminal | StagedBatchMemberState::Abandoned
-                        )
-                    {
-                        return Err(
-                            "an undelivered staged member precedes the delivery cursor".to_string()
                         );
                     }
                 }
@@ -31819,7 +31813,7 @@ impl GameState {
         snapshot
     }
 
-    /// CR 101.4 + CR 608.2c: re-park a detached staged batch owner after a run
+    /// CR 608.2c: re-park a detached staged batch owner after a run
     /// that may have raised a delivery child (an ETB-counter/choice frame).
     /// The batch belongs immediately BELOW that child and above its ChangeZone
     /// marker, so a plain top parking would bury the marker under the child.
@@ -31847,7 +31841,7 @@ impl GameState {
         }
     }
 
-    /// CR 101.4 + CR 608.2c: retire the ChangeZone marker frame that awaits
+    /// CR 608.2c: retire the ChangeZone marker frame that awaits
     /// exactly `group_id` when it is the stack top or the immediate parent of
     /// the resolving continuation that the staged delivery spliced above it.
     /// Returns whether a frame was consumed.

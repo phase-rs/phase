@@ -3367,7 +3367,7 @@ pub fn resolve_all(
     let mut logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &matching);
     let logical_group_event_start = events.len();
-    // CR 730.3a: multiple objects, or the physical components of
+    // CR 608.2c + CR 730.3a: multiple objects, or the physical components of
     // one merged permanent, need staged ownership through a component pause.
     // The early owner-arrangement branch above stays unchanged.
     if matching.len() >= 2

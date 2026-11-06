@@ -594,9 +594,10 @@ fn d3b_redirected_back_member_is_remained_with_one_creature_destroyed() {
     let redirected = {
         let mut builder = scenario.add_creature(P0, "Returning Bear", 2, 2);
         let id = builder.id();
-        // Labelled synthetic redirect (no printed card performs this exact
-        // Battlefield->Graveyard -> Battlefield substitution): applies to a
-        // self move destined for the graveyard and redirects it back.
+        // Infrastructure exception: no printed card performs this exact
+        // Battlefield->Graveyard -> Battlefield substitution. Rest in Peace
+        // is the nearest printed analogue: it redirects a graveyard-bound move
+        // to exile instead; this synthetic destination exercises Remained.
         builder.with_replacement_definition(
             ReplacementDefinition::new(ReplacementEvent::Moved)
                 .mode(ReplacementMode::Optional { decline: None })
@@ -1205,6 +1206,9 @@ fn d8_staged_destroy_pause_round_trips_and_resumes() {
         Zone::Graveyard,
         "the later member is still destroyed after the restore"
     );
+    assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
+    assert!(restored.stack.is_empty());
+    assert!(restored.resolution_stack.is_empty());
 }
 
 /// CR 616.1: retain an outer-approved Destroy rider across an inner choice
@@ -1228,7 +1232,7 @@ fn emergence_destroy_replacement_inner_choice_round_trips() {
         )
         .with_subtypes(vec!["Aura"])
         .id();
-    scenario.add_creature(P0, "Other Bear", 2, 2);
+    let other = scenario.add_creature(P0, "Other Bear", 2, 2).id();
     scenario.add_enchantment_from_oracle(
         P0,
         "Rest in Peace",
@@ -1308,6 +1312,11 @@ fn emergence_destroy_replacement_inner_choice_round_trips() {
         apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 0 })
             .expect("answer the competing graveyard replacements");
     }
+    assert_eq!(
+        restored.objects[&other].zone,
+        Zone::Exile,
+        "the restored batch still delivers the later Destroy member"
+    );
     assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
     assert!(restored.stack.is_empty());
     assert!(restored.resolution_stack.is_empty());
@@ -1975,7 +1984,7 @@ fn c12_forwarded_zone_result_binds_staged_arrivals_after_pause() {
     );
 }
 
-/// CR 730.3a + CR 401.4 + CR 401.7: the owner chooses both the numbered
+/// CR 401.4 + CR 730.3a: the owner chooses both the numbered
 /// position and the private order of the departing merged permanent's cards.
 #[test]
 fn deem_inferior_mutated_owner_orders_components_second_from_top() {

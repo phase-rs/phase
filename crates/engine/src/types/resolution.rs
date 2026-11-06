@@ -6790,7 +6790,7 @@ pub(crate) fn debug_assert_runtime_resolution_invariants(state: &GameState) {
         .unwrap_or_else(|error| panic!("canonical resolution frames must validate: {error}"));
     assert!(
         state.staged_population_parent.is_none(),
-        "staged_population_parent survived a public boundary"
+        "public-boundary retirement must clear staged_population_parent before validation"
     );
     assert!(
         state.pending_taps_for_mana_overrides.is_empty(),
@@ -8329,7 +8329,7 @@ mod tests {
         );
     }
 
-    /// CR 101.4 + CR 608.2c: an awaiting-batch marker is retained state. Two
+    /// CR 608.2c: an awaiting-batch marker is retained state. Two
     /// stacks that differ only in marker presence or group must not compare
     /// equal; only a Devour-only sidecar stays excluded from `GameState`
     /// equality.

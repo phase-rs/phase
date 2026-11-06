@@ -1814,7 +1814,7 @@ fn handle_replacement_choice_inner(
             {
                 state.pending_single_discard = None;
             }
-            // CR 101.4 + CR 614.6: a staged prevention is a retained terminal
+            // CR 614.6 + CR 608.2c: a staged prevention is a retained terminal
             // (or a `PreventedWithChild` while its own child prompt is live),
             // never an immediate delivery or logical-group recording.
             if let Some((group, fresh)) = staged_consult_owner {

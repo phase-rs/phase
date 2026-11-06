@@ -762,8 +762,8 @@ fn assert_edict_replacement_owner(name: &str, size: i32, oracle: &str) {
 ///
 /// Etrata's printed "That player loses the game if they own three or more
 /// exiled cards with hit counters on them" currently loses its condition in a
-/// pre-existing misparse (FU-4). This owner-binding row deliberately does not
-/// depend on that clause or on counters surviving the resulting elimination.
+/// pre-existing misparse (FU-4). This owner-binding row passes with or without
+/// that loss; if it occurs, the targeted exile must precede it.
 #[test]
 fn etrata_three_player_shuffles_into_owner_library() {
     let mut scenario = GameScenario::new_n_player(3, 42);
@@ -821,20 +821,18 @@ fn etrata_three_player_shuffles_into_owner_library() {
             )
         })
         .expect("the targeted exile, not elimination, moves the victim");
-    let loss = events
-        .iter()
-        .position(|event| {
-            matches!(
-                event,
-                GameEvent::PlayerLost { player_id } | GameEvent::PlayerEliminated { player_id }
-                    if *player_id == P1
-            )
-        })
-        .expect("FU-4 reaches the subsequent loss clause");
-    assert!(
-        exile < loss,
-        "the printed exile precedes the unrelated FU-4 loss"
-    );
+    if let Some(loss) = events.iter().position(|event| {
+        matches!(
+            event,
+            GameEvent::PlayerLost { player_id } | GameEvent::PlayerEliminated { player_id }
+                if *player_id == P1
+        )
+    }) {
+        assert!(
+            exile < loss,
+            "the printed exile precedes the unrelated FU-4 loss"
+        );
+    }
     assert_eq!(runner.state().objects[&etrata].zone, Zone::Library);
     assert!(runner.state().players[2].library.contains(&etrata));
     assert!(!runner.state().players[0].library.contains(&etrata));

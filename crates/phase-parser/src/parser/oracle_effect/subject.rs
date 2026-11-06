@@ -1896,7 +1896,7 @@ fn parse_source_and_target_subjects(
     Some((primary_application, secondary_application))
 }
 
-/// CR 702.26a + CR 702.26b: phasing out changes the permanent's status to
+/// CR 702.26b: phasing out changes the permanent's status to
 /// "phased out.", and both conjuncts phase out in one phasing batch. Only the
 /// second conjunct is targeted (CR 115.1), even if the source has shroud.
 /// CR 702.26g/h govern attachment / indirect phasing, which this clause does
@@ -3450,25 +3450,13 @@ fn parse_subject_application_for(
         let (target_text, multi_target) = super::strip_optional_target_prefix(subject);
         if multi_target.is_some() {
             let (filter, rest) = parse_target_with_ctx(target_text, ctx);
-            // CR 115.1d (issue #8581): "any number of target players other
-            // than that player" (Curse of Surveillance) is not silently
-            // dropped here. The plural-noun coordinated-player arm inside
-            // `parse_target_with_ctx` matches the singular "player" tag
-            // against "players", so `rest` routinely carries a benign
-            // leftover "s" even on the fully-supported "any number of target
-            // players"/"target creatures" shapes (see
-            // `parse_subject_any_number_of_target_players`) -- a bare
-            // non-empty-rest guard would fail those too. The actual signal
-            // for an unexpressed exclusion is that leftover, once the "s"
-            // pluralization artifact is stripped, starting with "other than
-            // " -- the one shape this arm cannot express (no player-scoped
-            // counterpart to `FilterProp::Another` exists yet). Failing
-            // closed here (returning None) sends the caller back to
-            // Effect::unimplemented instead of reporting a bare
-            // target=player as fully supported. The general "exclude the
-            // enchanted/reference player from a player-targeted count" shape
-            // is tracked separately (issue #8581); this guard only refuses to
-            // fabricate a wrong AST for it.
+            // CR 115.1d (issue #8581): the target parser consumes plural nouns,
+            // but "players other than that player" leaves an exclusion this arm
+            // cannot express (no player-scoped counterpart to
+            // `FilterProp::Another` exists yet). Refuse that remainder rather
+            // than report a bare player target as fully supported. Keep the
+            // optional plural suffix guard conservatively; this branch no
+            // longer depends on it for plural-player targets.
             if (
                 opt(nom::character::complete::char::<_, OracleError<'_>>('s')),
                 multispace0,

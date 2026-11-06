@@ -9225,9 +9225,9 @@ fn strip_distribute_among_target_quantifier<'a>(
     strip_optional_target_prefix(text)
 }
 
-/// Strip optional target-count prefixes before a targeted phrase.
-/// For spells, CR 115.1a + CR 115.6 + CR 601.2c: the caster announces
-/// zero through the stated maximum legal targets as the spell is cast.
+/// Strip optional or exact target-count prefixes before a targeted phrase.
+/// CR 601.2c + CR 602.2b: spells and activated abilities announce the required
+/// number of targets, or a count within the stated range, on the stack.
 /// CR 115.1d + CR 603.3d: triggered abilities choose the same optional
 /// target set after they are put on the stack.
 pub(crate) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTargetSpec>) {
@@ -9254,7 +9254,7 @@ pub(crate) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTar
         return (text, None);
     }
 
-    // CR 115.1c + CR 115.6: an exact count before the target article
+    // CR 601.2c + CR 602.2b: an exact count before the target article
     // ("choose two target players") declares a fixed number of slots.
     if let Ok((remainder, count)) = parse_multi_target_count_expr(lower.as_str()) {
         let consumed = lower.len() - remainder.len();

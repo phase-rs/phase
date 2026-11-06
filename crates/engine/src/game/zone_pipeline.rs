@@ -8528,8 +8528,8 @@ mod w3_library_placement_tests {
         components: &[ObjectId],
         sentinels: &[ObjectId],
     ) {
-        // CR 730.3a: do not assert a fixed internal permutation. The owner's
-        // private arrangement consumer is deferred to R4b.
+        // CR 730.3a: this helper checks component membership only; callers
+        // separately assert that the owner can submit a private arrangement.
         let library: Vec<_> = state.players[0].library.iter().copied().collect();
         assert_eq!(&library[components.len()..], sentinels);
         assert_eq!(
@@ -8661,6 +8661,13 @@ mod w3_library_placement_tests {
                 .act(GameAction::ChooseReplacement { index: 1 })
                 .unwrap()
                 .events,
+        );
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::DigRestSplitChoice { .. }
+            ),
+            "merged components must offer the owner arrangement after replacement"
         );
         if let WaitingFor::DigRestSplitChoice { cards, .. } = &runner.state().waiting_for {
             let mut order = cards.clone();
@@ -11859,6 +11866,7 @@ mod staged_batch_tests {
     };
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
+    use crate::types::resolution::ResolutionStateWire;
     use crate::types::triggers::TriggerMode;
 
     #[test]
@@ -13028,6 +13036,12 @@ mod staged_batch_tests {
         let (offered, top_count) = arrangement_prompt(&state);
         assert_eq!(offered, [a, b]);
         assert_eq!(top_count, 2);
+        let wire = serde_json::to_value(&state).expect("arrangement pause serializes");
+        state = serde_json::from_value(wire).expect("arrangement pause decodes");
+        state
+            .resolution_stack
+            .validate_at_rest(&state.waiting_for)
+            .expect("restored arrangement is valid before submitting");
 
         let mut events = Vec::new();
         submit_staged_batch_arrangement(
@@ -13360,6 +13374,129 @@ mod staged_batch_tests {
     }
 
     #[test]
+    fn staged_transport_rejects_undelivered_member_before_arranging_or_delivering_cursor() {
+        for stage in [
+            BatchDeliveryStage::Arranging,
+            BatchDeliveryStage::Delivering,
+        ] {
+            let mut state = GameState::new_two_player(42);
+            effect_source(&mut state);
+            let a = graveyard_card(&mut state, 1);
+            let b = graveyard_card(&mut state, 2);
+            let group = replacement_origin_group(&mut state, &[a, b], LibraryPosition::Top);
+            let mut owner = take_owner(&mut state, group);
+            begin_staged_arrangement(&state, &mut owner);
+            if stage == BatchDeliveryStage::Arranging {
+                assert!(publish_next_staged_arrangement(&mut state, &mut owner).is_some());
+            } else {
+                let staged = owner.staged.as_mut().unwrap();
+                staged.stage = stage;
+                for arrangement in &mut staged.arrangements {
+                    arrangement.status = StagedArrangementStatus::Submitted;
+                }
+            }
+            owner
+                .validate_staged()
+                .expect("cursor at the first undelivered member is valid");
+            put_owner(&mut state, owner);
+            let mut wire = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+                .expect("valid cursor serializes");
+            serde_json::from_value::<ResolutionStateWire>(wire.clone())
+                .expect("control: the first undelivered member decodes");
+            let frames = wire["resolution_frames"]["frames"]
+                .as_array_mut()
+                .expect("typed frames");
+            let batch = frames
+                .iter_mut()
+                .find(|frame| frame["type"] == "BatchDelivery")
+                .expect("the wire contains its staged batch");
+            batch["data"]["staged"]["cursor"] = serde_json::json!(2);
+            let error = match serde_json::from_value::<ResolutionStateWire>(wire) {
+                Ok(_) => panic!("{stage:?}: an undelivered member was skipped at decode"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("an undelivered staged member precedes the delivery cursor"),
+                "{stage:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn staged_arranging_concession_abandoned_prefix_round_trips_and_resumes() {
+        let mut state = GameState::new_two_player(42);
+        effect_source(&mut state);
+        let sentinel = library_card(&mut state, 10);
+        let departed = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Departed".into(),
+            Zone::Graveyard,
+        );
+        let a = graveyard_card(&mut state, 1);
+        let b = graveyard_card(&mut state, 2);
+        let group = replacement_origin_group(&mut state, &[departed, a, b], LibraryPosition::Top);
+        let mut owner = take_owner(&mut state, group);
+        begin_staged_arrangement(&state, &mut owner);
+        let identity = owner.staged.as_ref().unwrap().members[0].identity;
+        owner
+            .logical_zone_change_group
+            .record_abandoned_by_player_left(identity)
+            .unwrap();
+        prune_staged_member_for_player_left(&mut owner, identity);
+        let staged = owner.staged.as_ref().unwrap();
+        assert_eq!(staged.stage, BatchDeliveryStage::Arranging);
+        assert_eq!(staged.cursor, 1);
+        assert_eq!(staged.members[0].state, StagedBatchMemberState::Abandoned);
+        owner
+            .validate_staged()
+            .expect("concession may advance over an abandoned prefix");
+        let mut events = Vec::new();
+        move_object(
+            &mut state,
+            ZoneMoveRequest::player_left_game(departed, Zone::Exile),
+            &mut events,
+        );
+        assert!(publish_next_staged_arrangement(&mut state, &mut owner).is_some());
+        put_owner(&mut state, owner);
+        let wire = serde_json::to_value(&state).expect("abandoned prefix serializes");
+        let mut restored: GameState =
+            serde_json::from_value(wire).expect("abandoned prefix decodes");
+        restored
+            .resolution_stack
+            .validate_at_rest(&restored.waiting_for)
+            .expect("concession prefix remains valid after restore");
+        let (offered, top_count) = arrangement_prompt(&restored);
+        assert_eq!(offered, [a, b]);
+        submit_staged_batch_arrangement(
+            &mut restored,
+            group,
+            PlayerId(0),
+            &offered,
+            top_count,
+            DigRestSplitScope::OrderOnly,
+            &[b, a],
+            &mut events,
+        )
+        .expect("surviving members resume after the abandoned prefix");
+        assert_eq!(restored.objects[&departed].zone, Zone::Exile);
+        assert_eq!(
+            restored.players[0]
+                .library
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [b, a, sentinel]
+        );
+        assert!(restored.active_batch_delivery().is_none());
+        assert!(restored.stack.is_empty());
+        assert!(restored.resolution_stack.is_empty());
+    }
+
+    #[test]
     fn staged_transport_round_trips_every_stage() {
         for operation in [
             StagedMemberOperation::ZoneMove,
@@ -13417,7 +13554,10 @@ mod staged_batch_tests {
                     begin_staged_arrangement(&state, &mut owner);
                     let staged = owner.staged.as_mut().unwrap();
                     staged.stage = stage;
-                    staged.cursor = staged.members.len();
+                    staged.cursor = match stage {
+                        BatchDeliveryStage::Delivering => staged.members.len(),
+                        BatchDeliveryStage::Approving | BatchDeliveryStage::Arranging => 0,
+                    };
                     put_owner(&mut state, owner);
                 }
                 let before = state.active_batch_delivery().unwrap().staged.clone();
@@ -13590,6 +13730,10 @@ mod staged_batch_tests {
         let staged = owner.staged.as_mut().unwrap();
         staged.stage = BatchDeliveryStage::Delivering;
         staged.cursor = 0;
+        owner
+            .validate_staged()
+            .expect("ungrouped library-origin numbered placement is valid");
+        let staged = owner.staged.as_mut().unwrap();
         staged.arrangements.push(StagedLibraryArrangement {
             position: LibraryPosition::NthFromTop { n: 2 },
             batch: MassLibraryOrderBatch {
@@ -13602,9 +13746,11 @@ mod staged_batch_tests {
             },
             status: StagedArrangementStatus::Submitted,
         });
-        assert!(
-            owner.validate_staged().is_err(),
-            "library-origin numbered placement is ungrouped"
+        assert_eq!(
+            owner
+                .validate_staged()
+                .expect_err("library-origin numbered placement is ungrouped"),
+            "a staged arrangement is outside the approved grouping domain"
         );
     }
 

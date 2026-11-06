@@ -7221,7 +7221,7 @@ pub(super) fn handle_resolution_choice(
                         &entry_spec,
                         &chosen_ids,
                     );
-                    // CR 101.4 + CR 608.2c: two or more chosen cards are one
+                    // CR 608.2c: two or more chosen cards are one
                     // announced simultaneous ChangeZone population. The
                     // selection is published before the family entry can park.
                     let staged_settled =
