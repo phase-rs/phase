@@ -1,11 +1,16 @@
-//! CR 704.5a + CR 733.2a: offering a loop shortcut, and taking it as suggested, costs the same work
-//! whatever the players' life totals (a declaration whose target rotates in a round robin of two or
-//! more is still read one repetition at a time; see `PeriodicDelta::declared_seat_life_crossing`).
-//! A drain loop's offer asks at which repetition each player would reach 0 life (CR 704.5a: "If a
-//! player has 0 or less life, that player loses the game."), and the repetitions it has to read to
-//! answer do not depend on how much life a player has. With a player at 4,000,000 life or more, the
-//! offer and a take read exactly the life charges they read at an ordinary life total, on an
-//! untargeted drain and on a targeted one.
+//! CR 704.5a + CR 733.2a: offering a loop shortcut, and taking it as suggested, reads a number of
+//! life charges bounded by the declarations' switch points, not by any life total, so its work
+//! does not grow with the players' life totals (a declaration whose target rotates in a round
+//! robin of two or more is still read one repetition at a time; see
+//! `PeriodicDelta::declared_seat_life_crossing`). A drain loop's offer asks at which repetition
+//! each player would reach 0 life (CR 704.5a: "If a player has 0 or less life, that player loses
+//! the game."). Each time the offer or a take asks, a player's life charge is read once for each
+//! stretch the switch points cut the repetitions into, up to the stretch in which that player
+//! crosses, so a player who crosses in an earlier stretch is read fewer times than one who crosses
+//! later. On an untargeted drain with P0 at 4,000,000 or ten short of `i32::MAX` life or P1 at
+//! 4,000,000, and on a targeted drain with the loop's controller at 4,000,000 or 1,000,000,000
+//! life, the offer and a `Fixed(3)` take read exactly as many life charges as they read at an
+//! ordinary life total.
 
 use engine::analysis::decision_template::IterationCount;
 use engine::analysis::loop_check::ShortcutResponse;
@@ -145,7 +150,7 @@ impl AltarBoard {
 /// (`PeriodicDelta::first_life_crossing` in `PeriodicDelta::seat_crossing`) ⇒ the reads with P0
 /// at 4,000,000 are millions more than at 40.
 #[test]
-fn a_drain_shortcut_reads_the_same_life_charges_at_any_life_total() {
+fn a_drain_shortcut_reads_the_same_life_charges_at_a_large_life_total() {
     let Some(db) = crate::support::shared_card_db() else {
         return;
     };
@@ -211,7 +216,7 @@ fn a_drain_shortcut_reads_the_same_life_charges_at_any_life_total() {
 /// REVERT-PROBE: as above ⇒ the reads with P0 at 4,000,000 are millions more than at the saved
 /// total.
 #[test]
-fn a_targeted_drain_shortcut_reads_the_same_life_charges_at_any_life_total() {
+fn a_targeted_drain_shortcut_reads_the_same_life_charges_at_a_large_life_total() {
     /// The life each repetition moves: the amount the saved game's chain carries.
     const HIT: i32 = 4;
     let reads_at = |life: Option<i32>| {
