@@ -512,7 +512,8 @@ fn resolution_zone_candidates(
 /// (Legion's End's second sentence, which the parser does not produce today)
 /// would be credited to the caster. A performer distinct from the controller
 /// for these shapes needs an actor axis on `ChangeZoneAll` (a serialized
-/// change); no printed card needs it today. (Thought Lash's "that player
+/// change); no card the engine parses today reaches it (Legion's End's second
+/// sentence would, once parsed: phase-rs/phase#10692). (Thought Lash's "that player
 /// exiles all cards from their library" is the controller's exile in the
 /// ordinary case: CR 702.24a makes cumulative upkeep a trigger of "your
 /// upkeep", so the player who fails to pay is the controller of that trigger,
@@ -1424,7 +1425,8 @@ pub fn resolve(
                 Some(ability.controller),
                 // CR 608.2c: the subject of the instruction ("that player
                 // exiles a card from their hand") performs the move; where the
-                // instruction names no subject this is the controller.
+                // instruction names no subject this is the controller (the
+                // exceptions are `move_performer`'s gates).
                 Some(performer),
                 events,
             ) {
@@ -1503,7 +1505,8 @@ pub fn resolve(
                 Some(ability.controller),
                 // CR 608.2c: the subject of the instruction ("that player
                 // exiles a card from their hand") performs the move; where the
-                // instruction names no subject this is the controller.
+                // instruction names no subject this is the controller (the
+                // exceptions are `move_performer`'s gates).
                 Some(performer),
                 events,
             ) {
@@ -3395,8 +3398,9 @@ pub fn resolve_all(
                         // CR 800.4a elimination sweep reads this field as the
                         // resolving family's controller, so a performer other
                         // than the controller (only reachable through a
-                        // replacement on a move into exile; none is printed)
-                        // would be matched against the wrong player there.
+                        // replacement on a move into exile; no printed card the
+                        // engine supports has one) would be matched against the
+                        // wrong player there.
                         controller: performer,
                         origin: None,
                         destination: dest_zone,
@@ -3465,8 +3469,9 @@ pub fn resolve_all(
                         // CR 800.4a elimination sweep reads this field as the
                         // resolving family's controller, so a performer other
                         // than the controller (only reachable through a
-                        // replacement on a move into exile; none is printed)
-                        // would be matched against the wrong player there.
+                        // replacement on a move into exile; no printed card the
+                        // engine supports has one) would be matched against the
+                        // wrong player there.
                         controller: performer,
                         origin: None,
                         destination: dest_zone,

@@ -41,7 +41,8 @@
 //!     opponent's graveyard from anywhere, instead exile it with a void counter
 //!     on it."), which redirect a graveyard-bound move into exile. One
 //!     SYNTHETIC optional replacement on a move into exile raises the prompt;
-//!     every other card in the row is a real printed card.
+//!     Mudhole is the only card text the row exercises (the graveyard lands
+//!     and relic are vanilla placeholders).
 //!
 //! Class premise for R8/R9: every parsed `ChangeZoneAll` scoped by
 //! `ParentTargetController` is a subjectless sweep (Declaration in Stone,
@@ -50,13 +51,14 @@
 //! Muse -3; Isildur's Fateful Strike; Azula, Cunning Usurper; Struggle for
 //! Sanity's "That player exiles a card from it, then you exile a card from it").
 //!
-//! Revert sensitivity is stated per test. The readers of `exiled_by` are
+//! Revert sensitivity is stated per test. The gameplay readers of `exiled_by` are
 //! `casting::exile_permission_pool` (guarded by
 //! `uba_mask_draw_to_exile_play.rs`) and `PermissionGrantee::ObjectExiler` in
 //! `grant_permission` (guarded by `vulcan_mind_meld_exiler_plays.rs`; Vulcan
-//! Mind-Meld's exile is an `ExileTop`, which this change does not touch). No
-//! printed card observes this change, and these rows claim no reader-level
-//! discrimination.
+//! Mind-Meld's exile is an `ExileTop`, which this change does not touch);
+//! `object_content_eq` in `types/game_state.rs` also compares it for loop
+//! detection. No printed card observes this change, and these rows claim no
+//! reader-level discrimination.
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
