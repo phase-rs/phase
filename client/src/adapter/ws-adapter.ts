@@ -55,6 +55,9 @@ import {
   StateCodecPreparationAbortError,
   prepareStateCodecSession as prepareBoundedStateCodecSession,
   StateCodecAttachment,
+  type StateCodecBootstrapBinding,
+  type StateCodecFailureReason,
+  type StateCodecJoinCredentials,
   type StateCodecName,
   type StateCodecSessionProvider,
 } from "../services/stateCodecSocket";
@@ -1600,6 +1603,44 @@ const NATIVE_AI_RECONNECT_POLICY: ReconnectPolicy = {
 };
 
 /**
+ * Lifecycle of the initialization-owned fallback: a remote join whose first
+ * GameStarted `Full` failed in the codec, recovered by a new snapshot-only
+ * attachment within the SAME initialization.
+ *
+ * Credential-only recovery, not same-socket resync: the credentials come from
+ * the failing frame itself, are provisional until a plain GameStarted
+ * authenticates them, and the failed state is never rendered. A second source
+ * (credentials held from this attachment's SessionAttached) widens
+ * `reconnecting` and adds an `awaitingGameStarted` state; only the salvaged
+ * source is admitted today, so the union carries nothing it cannot reach.
+ *
+ *  - `unused`: no episode has been admitted.
+ *  - `reconnecting`: the episode is active. `deadlineTimer` is the episode's one
+ *    non-extending bound; it is cleared on every exit.
+ *  - `finished`: the episode was consumed (success or failure) and never
+ *    re-admits; the original initialization has been settled once.
+ */
+type InitialFallback =
+  | { readonly kind: "unused" }
+  | {
+      readonly kind: "reconnecting";
+      readonly source: "salvaged";
+      readonly credentials: StateCodecJoinCredentials;
+      readonly originatingReason: StateCodecFailureReason;
+      readonly deadlineTimer: ReturnType<typeof setTimeout>;
+    }
+  | { readonly kind: "finished" };
+
+/** The single failure the original initialization sees when the fallback cannot finish the join. */
+function initialFallbackFailure(): AdapterError {
+  return new AdapterError(
+    "WS_CLOSED",
+    "Could not finish joining after state delivery failed; reconnect failed.",
+    true,
+  );
+}
+
+/**
  * WebSocket-backed implementation of EngineAdapter.
  * Communicates with the phase-server via WebSocket protocol
  * for multiplayer games.
@@ -1701,6 +1742,8 @@ export class WebSocketAdapter implements EngineAdapter {
    * authorizes a new bootstrap.
    */
   private readonly stateCodec = new StateCodecAttachment();
+  /** Initialization-owned fallback after a failed initial GameStarted `Full`. */
+  private initialFallback: InitialFallback = { kind: "unused" };
   /** A rejected Full identity is terminal for this socket. */
   private sessionIdentityRejected = false;
   /** Set by AiDriverFault: the server permanently rejects every later submission for this game code. */
@@ -2133,6 +2176,11 @@ export class WebSocketAdapter implements EngineAdapter {
       // A retired socket's late error (e.g. a delayed envelope write) must not fail its replacement.
       if (this.disposed || this.ws !== socket.ws) return;
       if (this.sessionIdentityRejected) return;
+      // The initialization is the single failure surface of an initial fallback.
+      if (this.initialFallbackActive()) {
+        this.failInitialFallback(initialFallbackFailure());
+        return;
+      }
       const err = new AdapterError("WS_ERROR", "WebSocket connection failed", true);
       if (this.initReject || this.pregameReject || this.gameStartedReject) {
         this.rejectInitialization(err);
@@ -2184,6 +2232,17 @@ export class WebSocketAdapter implements EngineAdapter {
         new AdapterError("WS_CLOSED", "Connection closed during seat mutation", true),
       );
       this.rejectAbandon(new AdapterError("WS_CLOSED", "Connection closed while abandoning game", true));
+      // Admission of the initial fallback precedes the generic rejection below,
+      // and a retryable loss inside an active episode retries within the
+      // episode's own deadline: only the episode may settle the initialization.
+      if (this.admitInitialFallback(bootstrap, socket.ws)) {
+        this.attemptReconnect(true);
+        return;
+      }
+      if (this.initialFallbackActive()) {
+        this.attemptReconnect();
+        return;
+      }
       if (this.initReject) {
         this.initReject(
           new AdapterError("WS_CLOSED", "Connection closed before game started", true),
@@ -2240,6 +2299,10 @@ export class WebSocketAdapter implements EngineAdapter {
     }
 
     if (!this.send(setupFrame)) {
+      if (this.initialFallbackActive()) {
+        this.failInitialFallback(initialFallbackFailure());
+        return;
+      }
       socket.close();
       if (this.initReject) {
         this.initReject(
@@ -2520,6 +2583,10 @@ export class WebSocketAdapter implements EngineAdapter {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    if (this.initialFallback.kind === "reconnecting") {
+      clearTimeout(this.initialFallback.deadlineTimer);
+      this.initialFallback = { kind: "finished" };
+    }
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
       this.pingInterval = null;
@@ -2575,7 +2642,9 @@ export class WebSocketAdapter implements EngineAdapter {
     this.fullSessionKey = session.fullKey;
 
     if (!this.isNativeSocket() && !isValidWebSocketUrl(this.serverUrl)) {
-      this.emit({ type: "reconnectFailed" });
+      // An active initial fallback reports through its initialization only.
+      if (this.initialFallbackActive()) this.failInitialFallback(initialFallbackFailure());
+      else this.emit({ type: "reconnectFailed" });
       return false;
     }
 
@@ -2620,13 +2689,17 @@ export class WebSocketAdapter implements EngineAdapter {
     }
     this.reconnectInFlight = true;
     this.reconnectAttempt++;
-    this.emit({
-      type: "reconnecting",
-      attempt: this.reconnectAttempt,
-      // Only the loopback schedule is bounded by attempts; a remote episode
-      // ends on its time budget, so no denominator is reported (0 = unbounded).
-      maxAttempts: Number.isFinite(policy.budgetMs) ? 0 : this.maxReconnectAttempts,
-    });
+    // The initialization is the single surface of an initial fallback: its
+    // attempts are not announced as a reconnect episode.
+    if (!this.initialFallbackActive()) {
+      this.emit({
+        type: "reconnecting",
+        attempt: this.reconnectAttempt,
+        // Only the loopback schedule is bounded by attempts; a remote episode
+        // ends on its time budget, so no denominator is reported (0 = unbounded).
+        maxAttempts: Number.isFinite(policy.budgetMs) ? 0 : this.maxReconnectAttempts,
+      });
+    }
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (Date.now() - this.reconnectStartedAt! >= policy.budgetMs) {
@@ -2638,6 +2711,12 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   private failReconnect(outcome: "gave-up" | "failed" = "gave-up"): void {
+    // Retries, budget or attempts ran out inside an initial fallback: the
+    // original initialization fails once and no reconnect episode is announced.
+    if (this.initialFallbackActive()) {
+      this.failInitialFallback(initialFallbackFailure());
+      return;
+    }
     this.finishSocketDiagnostics(outcome);
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
@@ -2658,7 +2737,169 @@ export class WebSocketAdapter implements EngineAdapter {
     this.reconnectStartedAt = null;
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
-    this.emit({ type: "reconnected", inGame });
+    if (!this.initialFallbackActive()) this.emit({ type: "reconnected", inGame });
+  }
+
+  /** Whether the initialization-owned fallback is running right now. */
+  private initialFallbackActive(): boolean {
+    return this.initialFallback.kind === "reconnecting";
+  }
+
+  /**
+   * Admits the initialization-owned fallback for the attachment whose socket
+   * just closed, or returns false and changes nothing. Admission requires the
+   * original remote join to be pending with no GameStarted ever delivered, this
+   * failed attachment's bootstrap still pending, the sticky snapshot-only
+   * policy, no earlier episode or successor, no held session, and credentials
+   * on the attachment's first failure notice whose game is the one being
+   * joined. Retired, pending or foreign bindings never reach here: the caller
+   * is the close consumer of the CURRENT socket and passes its own binding.
+   *
+   * Admission publishes nothing: the credentials seed the session
+   * provisionally so the existing reconnect owners can send the exact
+   * `Reconnect`; they are published only by the plain GameStarted that
+   * authenticates them. The caller schedules the first attempt.
+   */
+  private admitInitialFallback(
+    bootstrap: StateCodecBootstrapBinding,
+    socket: PhaseSocketTransport,
+  ): boolean {
+    if (this.initialFallback.kind !== "unused") return false;
+    if (this.mode !== "join" || this.isNativeSocket()) return false;
+    const gameCode = this.joinGameCode;
+    if (!gameCode || this.initReject === null || this.receivedGameStarted) return false;
+    if (bootstrap.status !== "pending" || bootstrap.socket !== socket) return false;
+    if (this.stateCodec.deliveryPolicy.kind !== "snapshotOnly") return false;
+    if (this.reconnectInFlight || this.reconnectTimer !== null || this.socketOpening) return false;
+    if (this.playerToken !== null || this.snapshot !== null) return false;
+    const failure = bootstrap.failure;
+    const credentials = failure?.joinCredentials ?? null;
+    if (failure === null || credentials === null) return false;
+    if (credentials.fullKey.game_code !== gameCode) return false;
+
+    this._gameCode = gameCode;
+    this._playerId = credentials.yourPlayer;
+    this.playerToken = credentials.playerToken;
+    if (!this.acceptFullSessionKey(credentials.fullKey)) return false;
+    // One non-extending bound for the whole episode. It also covers an open
+    // socket that never answers, which the scheduling-only budget checks in
+    // attemptReconnect cannot see.
+    const deadlineTimer = setTimeout(
+      () => this.failInitialFallback(initialFallbackFailure()),
+      this.reconnectPolicy.budgetMs,
+    );
+    this.initialFallback = {
+      kind: "reconnecting",
+      source: "salvaged",
+      credentials,
+      originatingReason: failure.reason,
+      deadlineTimer,
+    };
+    return true;
+  }
+
+  /** The plain GameStarted authenticated the fallback: consume the episode silently. */
+  private completeInitialFallback(): void {
+    const episode = this.initialFallback;
+    if (episode.kind !== "reconnecting") return;
+    // Bookkeeping runs while the episode is still active, so it announces nothing.
+    this.completeReconnect(true);
+    clearTimeout(episode.deadlineTimer);
+    this.initialFallback = { kind: "finished" };
+  }
+
+  /** Fails the original initialization once and tears the active episode down. */
+  private failInitialFallback(error: AdapterError): void {
+    if (this.endInitialFallbackAsFailure()) this.rejectInitialization(error);
+  }
+
+  /**
+   * Terminal cleanup of an active episode that did not complete; false when none
+   * is active. Late messages and open continuations are fenced: the current
+   * socket is detached before it is closed, the attachment in flight is
+   * superseded (aborting alone is not enough, because the handshake follows
+   * `disposeAbort`), and every latch the episode owned is cleared. A later
+   * explicit `tryReconnect` may start over; the episode itself never re-admits.
+   */
+  private endInitialFallbackAsFailure(): boolean {
+    const episode = this.initialFallback;
+    if (episode.kind !== "reconnecting") return false;
+    clearTimeout(episode.deadlineTimer);
+    this.initialFallback = { kind: "finished" };
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.reconnectInFlight = false;
+    this.reconnectAttempt = 0;
+    this.reconnectStartedAt = null;
+    this.setSessionLifecycleListeners(false);
+    this.socketOpening = false;
+    this.withheldBootstrapFailed = false;
+    this.snapshot = null;
+    this.cachedStateRevision = null;
+    this.withheldState = null;
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+    this.stateCodecPreparation?.abort();
+    this.stateCodecPreparation = null;
+    this.finishSocketDiagnostics("failed");
+    const ws = this.ws;
+    if (ws) {
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
+      this.ws = null;
+      ws.close();
+    }
+    this.stateCodec.clearRecovery();
+    // The salvaged credentials were never authenticated, so none survives the
+    // failure, and no sessionChanged(null) announces a session never published.
+    if (episode.source === "salvaged") {
+      this._gameCode = null;
+      this._playerId = null;
+      this.playerToken = null;
+      this.fullSessionKey = null;
+    }
+    return true;
+  }
+
+  /**
+   * The server answered a join's state-recovery `Reconnect` with a pregame
+   * session instead of the started game. The salvaged premise (the seat's first
+   * GameStarted was already delivered) makes that impossible, so it is an
+   * identity failure, never host handling.
+   */
+  private rejectFallbackPregameReply(): void {
+    this.rejectSessionIdentity(new AdapterError(
+      "WS_ERROR",
+      "Server answered the join's reconnect with a pregame session instead of the started game",
+      false,
+    ));
+  }
+
+  /**
+   * Identity preflight of the fallback's GameStarted, before any bootstrap,
+   * cache or episode completion: same Full key, same seat, token omitted
+   * (a reconnect reply carries none) or exactly the retained one.
+   */
+  private acceptFallbackGameStarted(
+    expected: StateCodecJoinCredentials,
+    frame: { your_player: PlayerId; player_token?: string; full_key?: FullSessionKey },
+  ): boolean {
+    const message = !frame.full_key
+      ? "Server omitted a valid Full session identity"
+      : frame.full_key.game_code !== expected.fullKey.game_code
+          || frame.full_key.generation !== expected.fullKey.generation
+        ? "Server changed the Full session identity"
+        : frame.your_player !== expected.yourPlayer
+          ? `Reconnect attached player ${frame.your_player}, expected ${expected.yourPlayer}`
+          : frame.player_token !== undefined && frame.player_token !== expected.playerToken
+            ? "Reconnect changed the player token"
+            : null;
+    return message === null
+      ? true
+      : this.rejectSessionIdentity(new AdapterError("WS_ERROR", message, false));
   }
 
   /** A delivered state ends both withheld conditions. */
@@ -2861,11 +3102,15 @@ export class WebSocketAdapter implements EngineAdapter {
    */
   private send(msg: unknown): boolean {
     const ws = this.ws;
+    // An active initial fallback reports through its initialization only.
+    const quiet = this.initialFallbackActive();
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      this.emit({
-        type: "error",
-        message: "Cannot send message: WebSocket is not open.",
-      });
+      if (!quiet) {
+        this.emit({
+          type: "error",
+          message: "Cannot send message: WebSocket is not open.",
+        });
+      }
       return false;
     }
     try {
@@ -2875,12 +3120,14 @@ export class WebSocketAdapter implements EngineAdapter {
       }
       return true;
     } catch (err) {
-      this.emit({
-        type: "error",
-        message: `Failed to send message: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      });
+      if (!quiet) {
+        this.emit({
+          type: "error",
+          message: `Failed to send message: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        });
+      }
       return false;
     }
   }
@@ -2919,6 +3166,10 @@ export class WebSocketAdapter implements EngineAdapter {
       // post-handshake message loop begins.
 
       case "GameCreated": {
+        if (this.initialFallbackActive()) {
+          this.rejectFallbackPregameReply();
+          break;
+        }
         const data = msg.data as {
           game_code: string;
           player_token: string;
@@ -2942,6 +3193,10 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "SessionAttached": {
+        if (this.initialFallbackActive()) {
+          this.rejectFallbackPregameReply();
+          break;
+        }
         const data = msg.data as {
           game_code: string;
           player_id: PlayerId;
@@ -3024,6 +3279,10 @@ export class WebSocketAdapter implements EngineAdapter {
         // Otherwise the adapter would stay stuck waiting for a
         // `GameStarted` that will never come.
         const data = msg.data as { game_code: string };
+        if (this.initialFallbackActive()) {
+          this.failInitialFallback(new AdapterError("PASSWORD_REQUIRED", "Room requires a password", true));
+          break;
+        }
         this.emit({ type: "passwordRequired", gameCode: data.game_code });
         if (this.reconnectInFlight) this.failReconnect("failed");
         if (this.initReject) {
@@ -3045,6 +3304,15 @@ export class WebSocketAdapter implements EngineAdapter {
         const nativeReconnect = this.options.nativePregame?.kind === "reconnect"
           ? this.options.nativePregame
           : null;
+        // The initial fallback's reply is validated against the retained
+        // credentials before it bootstraps anything, then consumes the episode
+        // before any subscriber can run: nothing it publishes can race its
+        // deadline or re-enter it.
+        const fallback = this.initialFallback.kind === "reconnecting" ? this.initialFallback : null;
+        if (fallback !== null) {
+          if (!this.acceptFallbackGameStarted(fallback.credentials, data)) break;
+          this.completeInitialFallback();
+        }
         if (!this.acceptNativeReconnectIdentity({
           playerId: data.your_player,
           playerToken: data.player_token,
@@ -3099,8 +3367,10 @@ export class WebSocketAdapter implements EngineAdapter {
           this._gameCode = this.joinGameCode;
         }
         if (!nativeReconnect && data.full_key && !this.acceptFullSessionKey(data.full_key)) break;
-        if (!nativeReconnect && data.player_token) {
-          this.playerToken = data.player_token;
+        // A fallback reply omits the token; the retained credentials are
+        // published here, once, as the session this join now owns.
+        if (!nativeReconnect && (data.player_token || fallback !== null)) {
+          if (data.player_token) this.playerToken = data.player_token;
           this.emit({ type: "sessionChanged", session: this.currentSession() });
         }
         const playerNames = data.player_names === undefined
@@ -3259,6 +3529,11 @@ export class WebSocketAdapter implements EngineAdapter {
           withheld: WithheldFrame;
           reason: string;
         };
+        // A withheld bootstrap cannot finish the initial fallback: the join fails once.
+        if (data.withheld.type === "GameStarted" && this.initialFallbackActive()) {
+          this.failInitialFallback(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.reason, true));
+          break;
+        }
         // Without a delivered board the seat cannot reach the menu: fail the join recoverably.
         if (data.withheld.type === "GameStarted" && this.snapshot === null) {
           // The notice is this client's only seat assignment; GamePage resets the reconnect state on it, so it precedes the failure.
@@ -3603,6 +3878,10 @@ export class WebSocketAdapter implements EngineAdapter {
         const initializationError = data.code === "deck_rejected"
           ? new AdapterError(AdapterErrorCode.DECK_REJECTED, data.message, false)
           : actionRejectionError(data.message);
+        if (this.initialFallbackActive()) {
+          this.failInitialFallback(initializationError);
+          break;
+        }
         this.rejectInitialization(initializationError);
         this.rejectPregameMutation(actionRejectionError(data.message));
         this.rejectAbandon(actionRejectionError(data.message));
@@ -3708,16 +3987,20 @@ export class WebSocketAdapter implements EngineAdapter {
   private rejectSessionIdentity(error: AdapterError): false {
     if (this.sessionIdentityRejected) return false;
 
+    // Decided before the latch and the cleanup: an active initial fallback
+    // reports the identity failure through its initialization only.
+    const fallback = this.initialFallbackActive();
     this.sessionIdentityRejected = true;
     this.finishSocketDiagnostics("failed");
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
       this.pingInterval = null;
     }
+    this.endInitialFallbackAsFailure();
     this.rejectInitialization(error);
     this.rejectAuthoritativeStateExport(error);
     this.rejectPregameMutation(error);
-    this.emit({ type: "error", message: error.message });
+    if (!fallback) this.emit({ type: "error", message: error.message });
     this.ws?.close();
     return false;
   }

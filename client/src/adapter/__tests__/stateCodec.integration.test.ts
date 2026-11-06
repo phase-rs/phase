@@ -22,6 +22,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { StateCodecHandle } from "@wasm/engine";
 import type * as WasmEngine from "@wasm/engine";
 import { StateCodecRuntime } from "../state-codec-runtime";
+import { readGameStartedFullCredentials } from "../../services/stateCodecSocket";
 import { PROTOCOL_VERSION, WebSocketAdapter } from "../ws-adapter";
 import { ServerDraftAdapter } from "../server-draft-adapter";
 import type { GameState } from "../types";
@@ -971,4 +972,137 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
       vi.useRealTimers();
     }
   });
+
+  // ── Initialization-owned fallback over the real codec ─────────────────
+  //
+  // The envelope below is built in TypeScript in the shape the server's
+  // serializer is traced to produce (see `readGameStartedFullCredentials`); only
+  // its ENCODING is real WASM. These rows therefore prove that the reader
+  // extracts the exact credentials from a real encoded Full, that the real
+  // decoder accepts it healthy and rejects a wire-revision mutation with
+  // credentials intact, and that the production adapter then finishes the same
+  // join from plain frames. They are not independent evidence of the server's
+  // layout.
+
+  const REAL_CREDENTIALS = { playerToken: "integration-token", yourPlayer: 0, fullKey: FULL_KEY };
+
+  /** The real Full frame with ONLY its wire revision replaced by an invalid type. */
+  function withInvalidWireRevision(frame: Uint8Array): string {
+    const text = frameText(frame);
+    const valid = '"revision":1}}';
+    expect(text.endsWith(valid), "the wire revision closes the Full frame").toBe(true);
+    return `${text.slice(0, -valid.length)}"revision":"not-a-revision"}}`;
+  }
+
+  /** The plain reply a Reconnect receives: the same GameStarted without the token. */
+  function plainReconnectReply(stream: ReturnType<typeof realStream>): string {
+    const started = JSON.parse(stream.startedText) as ReturnType<typeof gameStartedEnvelope>;
+    const { player_token: _token, ...withoutToken } = started.data;
+    return JSON.stringify({ ...started, data: withoutToken });
+  }
+
+  it("extracts the exact join credentials from a real encoded Full, which a healthy real decode then accepts", () => {
+    const stream = realStream(baselineJson());
+    expect(readGameStartedFullCredentials(frameText(stream.started))).toEqual(REAL_CREDENTIALS);
+    // Only a GameStarted Full carries credentials, whatever the real encoder emits.
+    expect(readGameStartedFullCredentials(frameText(stream.update))).toBeNull();
+    expect(readGameStartedFullCredentials(frameText(stream.delta))).toBeNull();
+    const runtime = new StateCodecRuntime(wasm);
+    try {
+      expect(runtime.decode(runtime.open(), stream.started))
+        .toEqual({ kind: "decoded", json: stream.startedText });
+    } finally {
+      runtime.dispose();
+    }
+  });
+
+  it("makes the real codec reject a wire-revision mutation with the credentials intact, and the adapter finishes the same join from plain frames", async () => {
+    const stream = realStream(baselineJson());
+    const mutated = withInvalidWireRevision(stream.started);
+    // Reach guard: the mutation touched nothing but the revision, so the reader
+    // still extracts the same credentials, and the real decoder rejects it.
+    expect(readGameStartedFullCredentials(mutated)).toEqual(REAL_CREDENTIALS);
+    const probe = new StateCodecRuntime(wasm);
+    try {
+      expect(probe.decode(probe.open(), utf8.encode(mutated))).toEqual({ kind: "resyncRequired" });
+    } finally {
+      probe.dispose();
+    }
+
+    const runtime = new StateCodecRuntime(wasm);
+    const sessions: SessionStats[] = [];
+    const { adapter, events } = newNormalAdapter(runtime, sessions);
+    let settled: unknown = "never settled";
+    const init = adapter.initialize().then(
+      (value) => { settled = { resolvedWith: value }; },
+      (error: unknown) => { settled = error; },
+    );
+    try {
+      const socket = await handshakeSocket("JoinGameWithPassword");
+      socket.deliver(mutated);
+      // The real rejection is a bootstrap rejection: one resync, then the close.
+      await vi.waitFor(() => expect(sessions[0].closes).toBe(1));
+      expect(resyncCount(socket)).toBe(1);
+      expect(socket.close).toHaveBeenCalled();
+
+      // The same join continues on one snapshot-only Reconnect carrying the
+      // credentials read from the rejected frame.
+      await vi.waitFor(() => expect(IntegrationSocket.last).not.toBe(socket));
+      const fallback = IntegrationSocket.last!;
+      fallback.deliver(SERVER_HELLO);
+      await vi.waitFor(() => expect(sentTypes(fallback)).toContain("Reconnect"));
+      expect(sentTypes(fallback)).toContain("ClientHello");
+      expect(fallback.sent.some((raw) => raw.includes("state_codecs"))).toBe(false);
+      expect(fallback.sent.map((raw) => JSON.parse(raw) as { type?: string; data?: unknown })
+        .find((frame) => frame.type === "Reconnect")).toEqual({
+        type: "Reconnect",
+        data: { game_code: "GAME01", player_token: "integration-token", full_key: FULL_KEY },
+      });
+      expect(sessions).toHaveLength(1);
+      expect(settled).toBe("never settled");
+
+      fallback.deliver(plainReconnectReply(stream));
+      await init;
+      expect(settled).toEqual({ resolvedWith: undefined });
+      expect((await adapter.getSnapshot()).state).toEqual(JSON.parse(stream.startedText).data.state);
+      expect(events.map((event) => event.type)).not.toContain("reconnecting");
+      expect(sentTypes(socket).filter((type) => type === "JoinGameWithPassword")).toHaveLength(1);
+      expect(sentTypes(fallback)).not.toContain("JoinGameWithPassword");
+    } finally {
+      adapter.dispose();
+      runtime.dispose();
+    }
+  });
+
+  // Orchestration only: the lease below rejects by construction over the same
+  // real bytes. It is NOT a real wasm trap (that is the runtime-poison rows in
+  // ws-adapter.test.ts); it shows the adapter's reaction to a decode rejection.
+  it("finishes the same join from plain frames when an injected lease rejects the real Full (orchestration, not a real trap)", async () => {
+    const stream = realStream(baselineJson());
+    vi.stubGlobal("WebSocket", IntegrationSocket);
+    IntegrationSocket.last = null;
+    const lease = { decode: vi.fn(() => Promise.reject(new Error("decoder trapped"))), close: vi.fn() };
+    const adapter = new WebSocketAdapter(
+      "ws://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      undefined, undefined, undefined,
+      { stateCodecSessionProvider: () => Promise.resolve(lease) },
+    );
+    try {
+      const init = adapter.initialize();
+      const socket = await handshakeSocket("JoinGameWithPassword");
+      socket.deliver(frameText(stream.started));
+      await vi.waitFor(() => expect(lease.close).toHaveBeenCalledOnce());
+      expect(lease.decode).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(IntegrationSocket.last).not.toBe(socket));
+      const fallback = IntegrationSocket.last!;
+      fallback.deliver(SERVER_HELLO);
+      await vi.waitFor(() => expect(sentTypes(fallback)).toContain("Reconnect"));
+      fallback.deliver(plainReconnectReply(stream));
+      await init;
+      expect((await adapter.getSnapshot()).state).toEqual(JSON.parse(stream.startedText).data.state);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
 });
