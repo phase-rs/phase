@@ -731,6 +731,23 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
                 cmp_val(a0, b0)
             }
         }
+        GameAction::SayPhrase {
+            payment: a0,
+            seq: a1,
+            at_ms: a2,
+        } => {
+            let GameAction::SayPhrase {
+                payment: b0,
+                seq: b1,
+                at_ms: b2,
+            } = b
+            else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+                .then_with(|| cmp_val(a1, b1))
+                .then_with(|| cmp_val(a2, b2))
+        }
         GameAction::ChooseUnlessCostBranch { choice: a0 } => {
             let GameAction::ChooseUnlessCostBranch { choice: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");

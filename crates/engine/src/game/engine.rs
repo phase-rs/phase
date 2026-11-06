@@ -14807,6 +14807,27 @@ fn apply_non_priority_pass_action(
                 &mut events,
             );
         }
+        // Un-card (no CR entry): one host-stamped saying of a timed spoken
+        // unless-cost. The host reports the human's monotonic instant and
+        // sequence; the deterministic engine decides whether the saying landed
+        // inside the window it stores (`types::un_actions::SayPhrasePayment`).
+        (
+            waiting_for @ WaitingFor::UnlessPayment { .. },
+            GameAction::SayPhrase {
+                payment,
+                seq,
+                at_ms,
+            },
+        ) => {
+            return engine_payment_choices::handle_say_phrase(
+                state,
+                waiting_for.clone(),
+                payment,
+                seq,
+                at_ms,
+                &mut events,
+            );
+        }
         // CR 118.12a: Player chose **which** sub-cost of a disjunctive
         // unless-cost to pay (or declined to pay any). On a `Some(idx)`
         // choice, the handler swaps the multi-cost prompt for a single-cost

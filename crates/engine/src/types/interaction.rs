@@ -570,6 +570,7 @@ pub enum InteractionActionCode {
     RespondToSpliceOffer,
     DecideOptionalEffectAndRemember,
     PayUnlessCost,
+    SayPhrase,
     ChooseUnlessCostBranch,
     ChooseActivationCostBranch,
     PayCombatTax,

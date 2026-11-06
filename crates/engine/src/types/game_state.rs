@@ -24820,6 +24820,14 @@ declare_game_state! {
     /// [`crate::types::un_actions`].
     #[serde(default, skip_serializing_if = "super::un_actions::UnActionState::is_default")]
     pub un_actions: Box<super::un_actions::UnActionState>,
+    /// Un-card (no CR entry): the engine-owned instance of a TIMED spoken
+    /// unless-payment (Toy Boat's "Say \"Toy Boat\" quickly"). It records how
+    /// many sayings were actually reported, their host-stamped instants, and the
+    /// deadline for the next one; the engine validates every observation against
+    /// it, and it persists with the rest of `GameState` across a reconnect.
+    /// `None` when no timed spoken payment is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub say_payment: Option<Box<super::un_actions::SayPhrasePayment>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replacement_auto_choices: Vec<ReplacementAutoChoiceRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32810,6 +32818,7 @@ impl GameState {
             pending_die_roll_instruction: None,
             may_trigger_auto_choices: Vec::new(),
             un_actions: Default::default(),
+            say_payment: None,
             replacement_auto_choices: Vec::new(),
             replacement_auto_choice_tail: None,
             decision_templates: Vec::new(),

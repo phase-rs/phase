@@ -633,6 +633,22 @@ pub enum GameAction {
     PayUnlessCost {
         pay: bool,
     },
+    /// Un-card (no CR entry): one host-stamped saying of an in-flight spoken
+    /// unless-cost whose pace is timed (Toy Boat's "Say \"Toy Boat\" quickly").
+    ///
+    /// A timed payment is answered with this instead of
+    /// `PayUnlessCost { pay: true }`, because the engine validates each saying's
+    /// host-stamped instant against the window it stores
+    /// (`types::un_actions::SayPhrasePayment`). The division of responsibility
+    /// is the one `WaitingFor::PhysicalContest` uses: the host observes the
+    /// human's wall clock, the deterministic engine decides. `payment` names
+    /// the engine-authored instance (a delayed frame from an earlier payment is
+    /// ignored), and `seq`/`at_ms` are the host's monotonic observation.
+    SayPhrase {
+        payment: u64,
+        seq: u32,
+        at_ms: u64,
+    },
     /// CR 118.12a: Choose **which** sub-cost branch to pay from a disjunctive
     /// unless-cost ("unless they X or Y"). The `UnlessCostBranch` discriminant
     /// is `Decline` (fall through to the effect) or `Pay { index }` (re-enter
@@ -2184,6 +2200,7 @@ impl GameAction {
             | Self::ChooseResolutionOptionalPaymentBranch { .. }
             | Self::DecideOptionalEffectAndRemember { .. }
             | Self::PayUnlessCost { .. }
+            | Self::SayPhrase { .. }
             | Self::ChooseUnlessCostBranch { .. }
             | Self::ChooseActivationCostBranch { .. }
             | Self::PayCombatTax { .. }
@@ -2533,6 +2550,7 @@ impl GameAction {
             | GameAction::ChooseResolutionOptionalPaymentBranch { .. }
             | GameAction::DecideOptionalEffectAndRemember { .. }
             | GameAction::PayUnlessCost { .. }
+            | GameAction::SayPhrase { .. }
             | GameAction::ChooseUnlessCostBranch { .. }
             | GameAction::PayCombatTax { .. }
             | GameAction::ChooseDungeon { .. }

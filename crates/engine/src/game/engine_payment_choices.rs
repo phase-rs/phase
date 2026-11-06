@@ -1215,13 +1215,6 @@ pub(super) fn handle_unless_payment(
             // shape as the unless-discard loop above). Only the last saying
             // completes the payment, so no caller can satisfy a five-saying
             // upkeep with a single action.
-            //
-            // The pace (Toy Boat's "quickly") stays a wall-clock property of the
-            // saying itself. As with `types::contest`, the engine never reads a
-            // clock: a host that can observe wall-clock time reports what the
-            // human did. The host declines the payment (CR 118.12a) when a
-            // pause lapses, so the engine turns that report into the ordinary
-            // sacrifice rather than deciding it from a timer.
             AbilityCost::SayPhrase {
                 phrase,
                 pace,
@@ -1231,6 +1224,15 @@ pub(super) fn handle_unless_payment(
                 // they have not, the cost is unpaid and the "unless" branch
                 // fires exactly as if they had declined (CR 118.12a).
                 if !crate::game::un_actions::player_can_say_phrases(state, player) {
+                    payment_failed = true;
+                } else if pace.is_quick() {
+                    // Un-card (no CR entry): a TIMED payment cannot be bought
+                    // with a boolean answer. Without a host-stamped saying
+                    // (`GameAction::SayPhrase`) the engine has no evidence the
+                    // phrase was said inside the window it stores, so the cost
+                    // is unpaid and the ordinary unless-branch happens
+                    // (CR 118.12a). This is what stops a direct client from
+                    // paying Toy Boat's upkeep after an arbitrarily long pause.
                     payment_failed = true;
                 } else {
                     // One saying through the single payment authority.
@@ -1984,6 +1986,189 @@ pub(super) fn handle_unless_payment(
     )
 }
 
+/// Un-card (no CR entry) + CR 118.12a + CR 702.24a: accept ONE host-stamped
+/// saying of a timed spoken unless-cost (Toy Boat's "Say \"Toy Boat\"
+/// quickly").
+///
+/// This is the engine-owned half of the payment: the host reports what the human
+/// did (a monotonic instant and sequence, exactly as `WaitingFor::PhysicalContest`
+/// does), and this function — never the client — decides whether the saying fell
+/// inside the window stored on [`crate::types::un_actions::SayPhrasePayment`]. A
+/// saying after the deadline is a pause, so the cost is unpaid and the ordinary
+/// unless-branch (the sacrifice) happens. The decision does not depend on
+/// delivery latency: the gap is measured between the host's stamps.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn handle_say_phrase(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    payment_id: u64,
+    seq: u32,
+    at_ms: u64,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    use crate::types::un_actions::{SayPhraseDisposition, SayPhraseObservation, SayPhrasePayment};
+
+    let WaitingFor::UnlessPayment {
+        player,
+        cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+    } = waiting_for
+    else {
+        return Err(EngineError::InvalidAction(
+            "Not waiting for unless payment".to_string(),
+        ));
+    };
+    let AbilityCost::SayPhrase {
+        phrase,
+        pace,
+        repetitions,
+    } = cost.clone()
+    else {
+        return Err(EngineError::InvalidAction(
+            "Not waiting for a spoken payment".to_string(),
+        ));
+    };
+    // Only a TIMED payment needs host-stamped sayings; a phrase said at the
+    // payer's own pace is still paid with the ordinary boolean answer.
+    if !pace.is_quick() {
+        return Err(EngineError::InvalidAction(
+            "A spoken payment without a timed pace is paid through PayUnlessCost".to_string(),
+        ));
+    }
+    // Un-card: only an opted-in player is offered a spoken payment at all, so a
+    // report from a player who has not opted in is not a payment.
+    if !crate::game::un_actions::player_can_say_phrases(state, player) {
+        return Err(EngineError::InvalidAction(
+            "Player has not opted in to Un-card spoken actions".to_string(),
+        ));
+    }
+
+    // Bind the observation to the engine-authored instance. A frame addressed to
+    // an instance that is no longer live (a delayed delivery from an earlier
+    // upkeep) is ignored exactly as a stale contest click is. The client's `0`
+    // names "the payment this prompt advertises", which is also how the first
+    // saying of a freshly surfaced prompt arrives before any acknowledgement.
+    let is_bound = state
+        .say_payment
+        .as_ref()
+        .is_some_and(|payment| payment.id == payment_id);
+    if !is_bound {
+        if payment_id != 0 {
+            return Ok(action_result(events, state.waiting_for.clone()));
+        }
+        // `0` names "the payment this prompt advertises". Bind it to the live
+        // instance when one exists instead of minting a replacement: a client
+        // that omits the id must not be able to restart the count (and its
+        // window) by sending 0 again.
+        if state.say_payment.is_none() {
+            state.say_payment = Some(Box::new(SayPhrasePayment::new(
+                state.un_actions.mint_say_payment_id(),
+                repetitions,
+            )));
+        }
+    }
+
+    let payment = state.say_payment.as_mut().expect("spoken payment ensured");
+    let disposition = payment.observe(
+        SayPhraseObservation { seq, at_ms },
+        pace.max_gap_ms().map(u64::from),
+    );
+    match disposition {
+        SayPhraseDisposition::Stale => {
+            // Duplicate or reordered delivery: the payment does not move.
+            return Ok(action_result(events, state.waiting_for.clone()));
+        }
+        SayPhraseDisposition::Lapsed => {
+            // CR 118.12a: a pause leaves the cost unpaid, so the engine applies
+            // the "unless" branch instead of accepting the late saying.
+            return finish_unless_payment(
+                state,
+                true,
+                true,
+                AbilityCost::SayPhrase {
+                    phrase,
+                    pace,
+                    repetitions,
+                },
+                pending_effect,
+                trigger_event,
+                effect_description,
+                remaining,
+                None,
+                events,
+            );
+        }
+        SayPhraseDisposition::Accepted => {}
+    }
+
+    // One saying through the single payment authority — the only place that
+    // announces `PhraseSaid` and records the tell.
+    let one_saying = AbilityCost::SayPhrase {
+        phrase: phrase.clone(),
+        pace,
+        repetitions: 1,
+    };
+    match costs::pay_ability_cost_for_resolution(
+        state,
+        player,
+        &one_saying,
+        pending_effect.as_ref(),
+        events,
+    )? {
+        PaymentOutcome::Paid => {}
+        // A spoken cost moves no resources, so a failure or pause leaves it
+        // unpaid; the ordinary unless-branch follows.
+        PaymentOutcome::Failed { .. } | PaymentOutcome::Paused { .. } => {
+            return finish_unless_payment(
+                state,
+                true,
+                true,
+                AbilityCost::SayPhrase {
+                    phrase,
+                    pace,
+                    repetitions,
+                },
+                pending_effect,
+                trigger_event,
+                effect_description,
+                remaining,
+                None,
+                events,
+            );
+        }
+    }
+
+    let still_owed = state
+        .say_payment
+        .as_ref()
+        .map_or(1, |payment| payment.owed.saturating_sub(payment.said));
+    if still_owed > 0 {
+        // Ask for exactly the sayings still owed, carrying the same instance so
+        // its identity, progress and deadline survive the round trip.
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player,
+            cost: AbilityCost::SayPhrase {
+                phrase,
+                pace,
+                repetitions: still_owed,
+            },
+            pending_effect,
+            trigger_event,
+            effect_description,
+            remaining,
+        };
+        return Ok(action_result(events, state.waiting_for.clone()));
+    }
+
+    state.say_payment = None;
+    let settled =
+        finish_successful_unless_payment(state, pending_effect.as_ref(), &trigger_event, events)?;
+    Ok(action_result(events, settled))
+}
+
 /// CR 118.12 + CR 118.12a: The DECLINED-or-FAILED epilogue for every
 /// unless-cost shape — poll re-emit for "unless any player pays", resolve the
 /// guarded ability's chain when the cost is unpaid/failed, and settle
@@ -2008,6 +2193,9 @@ fn finish_unless_payment(
     mut post_action_event_start: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
+    // Un-card (no CR entry): this prompt is over, so its timed spoken-payment
+    // instance must not outlive it (a later prompt starts from zero).
+    state.say_payment = None;
     if !pay || payment_failed {
         // CR 614.17b + CR 614.17a: the CR 118.12a poll re-emit re-asks eligibility on
         // the LIVE board, so a prohibition that appears mid-poll skips the payer it
@@ -2090,6 +2278,9 @@ pub(crate) fn finish_successful_unless_payment(
     trigger_event: &Option<GameEvent>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // Un-card (no CR entry): a completed payment retires its timed spoken
+    // instance; nothing may keep counting sayings for a closed prompt.
+    state.say_payment = None;
     // CR 118.12: a completed successful payment owns this result even when
     // a previous instruction failed. Clear before every child/no-child route.
     state.cost_payment_failed_flag = false;
