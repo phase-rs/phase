@@ -1388,7 +1388,8 @@ pub(crate) fn lower_oracle_block_ir(
                         // resolves, not a printed source cost, so a bare "it" in
                         // it names an object the trigger introduced (Gorbag of
                         // Minas Morgul's "you may sacrifice it") and the cost
-                        // grammar must not bind it to the source.
+                        // grammar's sacrifice and self-exile legs do not bind it
+                        // to the source.
                         let cost = parse_oracle_cost_in(cost_text, CostChannel::ResolutionPayment);
                         TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
                             parent: ReflexiveParent::MayPay {

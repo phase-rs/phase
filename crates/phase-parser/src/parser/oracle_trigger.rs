@@ -5300,7 +5300,8 @@ fn split_reflexive_optional_payment(
     let cost_text = effect_text.get(cost_start..cost_start + cost_len)?.trim();
     let body_text = effect_text.get(body_start..)?.trim();
     // CR 118.12 + CR 603.12: the optional payment is made as the ability
-    // resolves, so a bare "it" in it is not bound to the printed source.
+    // resolves, so its sacrifice and self-exile legs leave a bare "it" unbound
+    // (see `CostChannel::ResolutionPayment` for the return-to-hand leg).
     let cost = super::oracle_cost::parse_oracle_cost_in(cost_text, CostChannel::ResolutionPayment);
     if matches!(cost, AbilityCost::Unimplemented { .. })
         || !reflexive_optional_cost_payable_by_resolution_prompt(&cost)

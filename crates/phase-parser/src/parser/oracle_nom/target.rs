@@ -629,11 +629,14 @@ pub fn parse_cost_self_reference(input: &str) -> OracleResult<'_, TargetFilter> 
 pub(crate) enum CostChannel {
     /// A cost the source's own text imposes: the activation cost (everything
     /// before the colon, CR 602.1a) and the source's additional, alternative
-    /// and keyword costs. In every printed source cost whose leg is a bare "it"
-    /// (the 16 pre-colon lines), the clause names the source first, and CR 113.7
-    /// makes that object the ability's source, so the following "it" names the
-    /// source; `behold … and exile it` is consumed whole by `parse_behold_cost`
-    /// first (see [`parse_cost_self_reference_for`]).
+    /// and keyword costs. A bare "it" leg appears in 21 printed source costs:
+    /// the 16 pre-colon lines (13 "… and sacrifice it", 2 "… and exile it",
+    /// Magosi, the Waterveil's "… and return it to its owner's hand"), each of
+    /// which names the source first, and CR 113.7 makes that object the
+    /// ability's source, so the following "it" names the source; and the five
+    /// "behold <quality> and exile it" additional costs, whose "it" is the
+    /// beheld card and which `parse_behold_cost` consumes whole before any leg
+    /// arm runs (see [`parse_cost_self_reference_for`]).
     SourceCost,
     /// An optional payment a resolving ability's own instruction offers
     /// (CR 118.12), including the reflexive form "you may <cost>. When you do,
@@ -645,9 +648,14 @@ pub(crate) enum CostChannel {
     /// Minas Morgul's "you may sacrifice it" is whichever Goblin or Orc dealt
     /// the damage, Gorbag himself or another — and the cost grammar cannot know
     /// that antecedent, so the sacrifice and self-exile legs do not bind the
-    /// pronoun on this channel (the return-to-hand leg's count-one fallback
-    /// still lowers "return it to its owner's hand" to `SelfRef` on both
-    /// channels, as at base; no printed reflexive payment uses that form).
+    /// pronoun on this channel. The return-to-hand leg is not channel-aware:
+    /// the count-one fallback in `try_parse_return_to_hand_cost` lowers a bare
+    /// "return it to its owner's hand" / "return it to your hand" to `SelfRef`
+    /// on both channels, as at base. The one printed resolution payment of that
+    /// shape, Circus of the Sun's "you may return it to your hand. If you do,
+    /// …" (whose "it" is the creature that dealt the damage), is refused by
+    /// `split_reflexive_optional_payment`'s payability filter, which admits no
+    /// `ReturnToHand`, so no cost is lowered from it.
     ResolutionPayment,
 }
 

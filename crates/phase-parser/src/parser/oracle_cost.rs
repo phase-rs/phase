@@ -43,8 +43,9 @@ use crate::types::zones::Zone;
 /// Returns an AbilityCost (possibly Composite for multi-part costs).
 ///
 /// CR 602.1a: this is the source-cost channel ([`CostChannel::SourceCost`]) —
-/// a cost the source's own text imposes, where a bare "it" names the source the
-/// same clause named first. A resolving ability's own optional payment ("you
+/// a cost the source's own text imposes; in its sacrifice and exile legs a bare
+/// "it" names the source the same clause named first (`behold … and exile it` is
+/// consumed whole by `parse_behold_cost` first). A resolving ability's own optional payment ("you
 /// may <cost>. When/If you do, …", CR 118.12 + CR 603.12), whose object pronoun
 /// names something that ability's text introduced, must go through
 /// [`parse_oracle_cost_in`] with [`CostChannel::ResolutionPayment`]; a keyword's
@@ -898,7 +899,7 @@ fn parse_single_cost_in(text: &str, channel: CostChannel) -> AbilityCost {
         // SelfRef) from a granted body's by-name reference to its granting object
         // (GRANTING_SELF_PLACEHOLDER → GrantingObject, e.g. Deconstruction
         // Hammer's "Sacrifice Deconstruction Hammer"). A bare "it" in a printed
-        // source-cost leg names the source the same clause named first (Ior Ruin
+        // source-cost sacrifice leg names the source the same clause named first (Ior Ruin
         // Expedition's "… from this enchantment and sacrifice it");
         // `parse_cost_self_reference_for` binds it on `SourceCost` only. On
         // `ResolutionPayment` (Gorbag of Minas Morgul's "you may sacrifice it")
@@ -2146,9 +2147,10 @@ fn parse_sacrifice_cost_filter(filter_text: &str) -> Option<TargetFilter> {
 /// this seam only on `ResolutionPayment` (the reflexive optional-payment
 /// callers — oracle_modal's MayPay arm, Gorbag of Minas Morgul's "you may
 /// sacrifice it. When you do, choose one —", and
-/// oracle_trigger::split_reflexive_optional_payment, Flaxen Intruder's "you may
-/// sacrifice it. When you do, destroy target artifact or enchantment.", which
-/// that caller's payability filter then declines), where the grammar
+/// oracle_trigger::split_reflexive_optional_payment /
+/// ::is_unsupported_disjunctive_reflexive_optional_payment, Flaxen Intruder's
+/// "you may sacrifice it. When you do, destroy target artifact or
+/// enchantment.", which that caller's payability filter then declines), where the grammar
 /// deliberately does not bind the pronoun and the phrase lowers to this
 /// information-free filter exactly as before; on `SourceCost` it lowers to
 /// `SelfRef` upstream.
@@ -3920,8 +3922,8 @@ mod tests {
         );
     }
 
-    /// CR 602.1a vs CR 118.12 / CR 603.12: the bare pronoun "it" binds the
-    /// source only on the source-cost channel. On `ResolutionPayment` (Gorbag of
+    /// CR 602.1a vs CR 118.12 / CR 603.12: a bare "it" in a sacrifice or exile
+    /// leg binds the source only on the source-cost channel. On `ResolutionPayment` (Gorbag of
     /// Minas Morgul's "you may sacrifice it. When you do, choose one —") the
     /// antecedent is an object the trigger introduced, which the cost grammar
     /// cannot know, so the pronoun is left unbound exactly as it was before the
@@ -4038,9 +4040,11 @@ mod tests {
     /// (Hourglass of the Lost, Trenzalore Clocktower). Base encodes it as an
     /// `EffectCost { ChangeZone { target: ParentTarget } }`, which
     /// `supports_effect_cost_payment` refuses, so the ability cannot be
-    /// activated at all. This is the only row of the three preserved/changed
-    /// rows in this neighbourhood that is RED at base: `Return it to its owner's
-    /// hand` below and the granter row above are green at base and must stay so.
+    /// activated at all. This row is RED at base, like the sacrifice rows above
+    /// (`cost_sacrifice_it_is_self_ref`); `cost_return_it_to_hand_stays_self_ref`
+    /// below and the granter row above
+    /// (`cost_sacrifice_it_does_not_displace_the_granting_object_arm`) are green
+    /// at base and must stay so.
     #[test]
     fn cost_exile_it_is_self_ref() {
         assert_eq!(

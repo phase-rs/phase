@@ -10,11 +10,11 @@
 //! panics on the surfaced `WaitingFor::PayCost { kind: Sacrifice, .. }` — that
 //! prompt is the defect this module pins.
 //!
-//! The pronoun binds the source only on the source-cost channel (the cost the
-//! source's own text imposes). A resolution-time optional payment such as Gorbag
-//! of Minas Morgul's "you may sacrifice it. When you do, choose one —" names an
-//! object the trigger introduced, so it is pinned below as never bound to the
-//! printed source.
+//! In a sacrifice or exile leg the pronoun binds the source only on the
+//! source-cost channel (the cost the source's own text imposes). A
+//! resolution-time optional payment such as Gorbag of Minas Morgul's "you may
+//! sacrifice it. When you do, choose one —" names an object the trigger
+//! introduced, so it is pinned below as never bound to the printed source.
 
 use engine::game::casting::activated_ability_definitions;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
