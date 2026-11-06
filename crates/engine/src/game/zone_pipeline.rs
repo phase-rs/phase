@@ -3140,7 +3140,7 @@ pub(crate) fn staged_approval_owner_for(
 /// Whether the staged owner still has work before the shared Execute epilogue.
 pub(crate) enum StagedConsultationHandback {
     NotOwned,
-    Parked(WaitingFor),
+    Parked(Box<WaitingFor>),
     Settled,
 }
 
@@ -3213,7 +3213,7 @@ pub(crate) fn record_staged_batch_consultation_result(
     if member.pending_outcome.is_some() {
         let waiting = state.waiting_for.clone();
         refuse(state, owner, retained);
-        return StagedConsultationHandback::Parked(waiting);
+        return StagedConsultationHandback::Parked(Box::new(waiting));
     }
     member.pending_outcome = Some(outcome.clone());
     if live_child {
@@ -3231,14 +3231,14 @@ pub(crate) fn record_staged_batch_consultation_result(
         }
         let waiting = state.waiting_for.clone();
         state.repark_batch_owner_below_children(owner, boundary);
-        return StagedConsultationHandback::Parked(waiting);
+        return StagedConsultationHandback::Parked(Box::new(waiting));
     }
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
     if !finalize_staged_pending_outcome_on(state, &mut owner, events) {
         refuse(state, owner, retained);
-        return StagedConsultationHandback::Parked(state.waiting_for.clone());
+        return StagedConsultationHandback::Parked(Box::new(state.waiting_for.clone()));
     }
     if let Some(drain) = retained.take() {
         attach_member_drain(&mut owner, cursor, drain);
@@ -3250,11 +3250,11 @@ pub(crate) fn record_staged_batch_consultation_result(
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             StagedConsultationHandback::Settled
         } else {
-            StagedConsultationHandback::Parked(state.waiting_for.clone())
+            StagedConsultationHandback::Parked(Box::new(state.waiting_for.clone()))
         }
     } else {
         state.repark_batch_owner_below_children(owner, boundary);
-        StagedConsultationHandback::Parked(state.waiting_for.clone())
+        StagedConsultationHandback::Parked(Box::new(state.waiting_for.clone()))
     }
 }
 
@@ -13827,12 +13827,12 @@ mod staged_batch_tests {
         let StagedConsultationHandback::Parked(waiting) = handback else {
             panic!("settlement must preserve the live completion prompt");
         };
-        let WaitingFor::RevealUntilBottomOrder { player, cards, .. } = &waiting else {
+        let WaitingFor::RevealUntilBottomOrder { player, cards, .. } = &*waiting else {
             panic!("expected remainder ordering, got {waiting:?}");
         };
         assert_eq!(*player, PlayerId(0));
         assert_eq!(cards, &misses);
-        assert_eq!(state.waiting_for, waiting);
+        assert_eq!(state.waiting_for, *waiting);
         assert_eq!(state.objects[&kept].zone, Zone::Hand);
         assert!(misses
             .iter()

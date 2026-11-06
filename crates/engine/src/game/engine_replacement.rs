@@ -1013,7 +1013,7 @@ fn handle_replacement_choice_inner(
                             crate::game::zone_pipeline::StagedConsultationHandback::NotOwned => {
                                 Ok(state.waiting_for.clone())
                             }
-                            crate::game::zone_pipeline::StagedConsultationHandback::Parked(waiting) => Ok(waiting),
+                            crate::game::zone_pipeline::StagedConsultationHandback::Parked(waiting) => Ok(*waiting),
                             crate::game::zone_pipeline::StagedConsultationHandback::Settled => {
                                 finish_replacement_execute_epilogue(
                                     state,
@@ -1620,7 +1620,7 @@ fn handle_replacement_choice_inner(
                             crate::game::zone_pipeline::StagedConsultationHandback::NotOwned => {
                                 Ok(state.waiting_for.clone())
                             }
-                            crate::game::zone_pipeline::StagedConsultationHandback::Parked(waiting) => Ok(waiting),
+                            crate::game::zone_pipeline::StagedConsultationHandback::Parked(waiting) => Ok(*waiting),
                             crate::game::zone_pipeline::StagedConsultationHandback::Settled => {
                                 finish_replacement_execute_epilogue(
                                     state,
@@ -1831,7 +1831,7 @@ fn handle_replacement_choice_inner(
                         Ok(state.waiting_for.clone())
                     }
                     crate::game::zone_pipeline::StagedConsultationHandback::Parked(waiting) => {
-                        Ok(waiting)
+                        Ok(*waiting)
                     }
                     crate::game::zone_pipeline::StagedConsultationHandback::Settled => {
                         finish_replacement_execute_epilogue(
