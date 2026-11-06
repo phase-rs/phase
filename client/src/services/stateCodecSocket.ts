@@ -17,6 +17,8 @@
  */
 import type { StateCodecDecodeResult, StateCodecSession } from "../adapter/state-codec-runtime";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
+import type { PlayerId } from "../adapter/types";
+import type { FullSessionKey } from "./multiplayerSession";
 import type { PhaseSocketTransport } from "./openPhaseSocket";
 
 /** The only codec this client advertises. */
@@ -48,10 +50,32 @@ export type StateCodecFailureReason =
   /** A second established-game recovery completed on the same wrapper. */
   | "repeatedRecovery";
 
-/** Terminal notification: published once, before the close notification. */
+/**
+ * The three join credentials a GameStarted `Full` frame carries. Provisional
+ * until the owning adapter has authenticated them with a plain acceptance; a
+ * shape check is not authentication.
+ */
+export interface StateCodecJoinCredentials {
+  readonly playerToken: string;
+  readonly yourPlayer: PlayerId;
+  readonly fullKey: FullSessionKey;
+}
+
+/**
+ * Terminal notification: published once, before the close notification.
+ *
+ * `joinCredentials` is non-null only for a post-adoption failure whose exact
+ * failing frame was a credential-bearing GameStarted `Full` received while the
+ * bootstrap was pending: a decode rejection, a bootstrap rejection, or a
+ * `Full` that preceded the codec confirmation. Every other failure carries
+ * `null`, and a notice recorded before its socket was adopted is stripped to
+ * `null` (the setup frame has not been sent, so a conforming join cannot have
+ * received credentials yet).
+ */
 export interface StateCodecFailure {
   readonly kind: "failed";
   readonly reason: StateCodecFailureReason;
+  readonly joinCredentials: StateCodecJoinCredentials | null;
 }
 
 /**
@@ -73,13 +97,14 @@ export type StateCodecPolicy =
  * One attachment's bootstrap authority, shared by the owning adapters. `socket`
  * is `null` until the attachment's socket is adopted; `status` becomes
  * `accepted` only after a genuine GameStarted passes the adapter's guards.
- * `failure` is the first terminal codec reason this attachment reported; it is
- * captured even before adoption so an early failure is not lost.
+ * `failure` is the complete first terminal notice this attachment reported
+ * (first wins); it is captured even before adoption so an early failure is not
+ * lost.
  */
 export interface StateCodecBootstrapBinding {
   socket: PhaseSocketTransport | null;
   status: StateCodecBootstrap;
-  failure: StateCodecFailureReason | null;
+  failure: StateCodecFailure | null;
 }
 
 /** Rejection message for a command dropped while codec recovery begins. */
@@ -160,7 +185,7 @@ export class StateCodecAttachment {
     binding.socket = socket;
     this.current = binding;
     this.recovery = null;
-    if (binding.failure !== null) this.degrade(binding.failure);
+    if (binding.failure !== null) this.degrade(binding.failure.reason);
   }
 
   /** Bootstrap status reported to the codec transport for `binding`. */
@@ -194,8 +219,9 @@ export class StateCodecAttachment {
    * already be refused. `interruptPending` drops the adapter's submission slot
    * and, if it held a command, rejects it with the supplied retryable error.
    *
-   * A terminal `failed` notice is recorded on `binding` (first reason wins)
-   * even when `binding` is not yet adopted. It degrades the adapter's policy
+   * A terminal `failed` notice is recorded on `binding` (the first notice wins)
+   * even when `binding` is not yet adopted; a notice recorded before adoption
+   * has its join credentials replaced by `null`. It degrades the adapter's policy
    * immediately only when `binding` is current and owns `currentSocket`: a
    * retired or still-pending attachment never poisons its replacement. It does
    * not touch the recovery gate, which the close that follows clears.
@@ -209,7 +235,9 @@ export class StateCodecAttachment {
   ): void {
     if (disposed) return;
     if (typeof state === "object") {
-      binding.failure ??= state.reason;
+      // Before adoption the setup frame has not been sent, so no conforming
+      // server could have issued credentials to this attachment yet.
+      binding.failure ??= binding.socket === null ? { ...state, joinCredentials: null } : state;
       if (this.current === binding && binding.socket !== null && currentSocket === binding.socket) {
         this.degrade(state.reason);
       }
@@ -400,9 +428,10 @@ export class StateCodecSocket implements PhaseSocketTransport {
         // A throwing open handler must not break the event routing.
       }
     };
-    inner.onerror = (event) => {
-      this.onerror?.(event);
-    };
+    // An error is ordered behind every frame this wrapper has already received
+    // and ahead of the natural close that follows it. It is only a
+    // notification: it never fails, degrades or closes the codec attachment.
+    inner.onerror = (event) => this.enqueue(() => this.deliverError(event));
     inner.onmessage = (event) => this.enqueue(() => this.receive(event.data as string));
     inner.onclose = (event) => this.enqueue(() => this.handleNaturalClose(event));
   }
@@ -499,6 +528,21 @@ export class StateCodecSocket implements PhaseSocketTransport {
     this.queue = this.queue.then(task).catch(() => undefined);
   }
 
+  /**
+   * Queued delivery of a raw transport error. The handler is read at delivery
+   * time (a replacement before delivery wins, `null` drops the error), nothing
+   * is retained for a handler installed afterwards, and a throwing handler
+   * cannot stall the queue. A closed wrapper suppresses it.
+   */
+  private deliverError(event: Event): void {
+    if (this.closed) return;
+    try {
+      this.onerror?.(event);
+    } catch {
+      // Subscribers do not own queue progress or transport cleanup.
+    }
+  }
+
   private async receive(text: string): Promise<void> {
     if (this.closed) return;
     // Confirmation can precede application attachment. All subsequent frames
@@ -515,7 +559,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
       }
       if (type === "Full" || type === "Delta") {
         // A codec frame cannot precede the confirmation that authorizes it.
-        this.terminate("immediate", "confirmationFailure");
+        this.terminate("immediate", "confirmationFailure", this.credentialsOf(text));
         return;
       }
       await this.waitForConsumer();
@@ -531,7 +575,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
     const decoded = await this.decode(text);
     if (decoded === null || this.closed) return;
     if (decoded.kind === "resyncRequired") {
-      this.beginRecovery();
+      this.beginRecovery(text);
       return;
     }
     if (this.state === "awaitingFull") {
@@ -552,7 +596,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
     } catch {
       // Decoder/RPC failure (unknown session, session closed, RPC timeout) is
       // a transport failure, not codec integrity: the socket cannot continue.
-      this.terminate("immediate", "decodeFailure");
+      this.terminate("immediate", "decodeFailure", this.credentialsOf(text));
       return null;
     }
   }
@@ -574,7 +618,11 @@ export class StateCodecSocket implements PhaseSocketTransport {
     this.state = "ready";
   }
 
-  private beginRecovery(): void {
+  /**
+   * `text` is the exact frame the decoder rejected. It is read only for the
+   * credentials of a bootstrap rejection and never retained.
+   */
+  private beginRecovery(text: string): void {
     if (this.state !== "ready") {
       // Deltas are suppressed while awaiting the Full, so a rejection inside an
       // open recovery window is the recovery Full itself.
@@ -594,7 +642,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
     const resyncSent = this.sendResync();
     // Request the Full best-effort, then take the fatal close path.
     if (bootstrapPending) {
-      this.terminate("immediate", "bootstrapRejection");
+      this.terminate("immediate", "bootstrapRejection", readGameStartedFullCredentials(text));
       return;
     }
     // A resync that could not be sent on an established game is a transport
@@ -674,6 +722,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
   private terminate(
     notification: CloseNotification = "immediate",
     failure: StateCodecFailureReason | null = null,
+    joinCredentials: StateCodecJoinCredentials | null = null,
   ): void {
     if (this.state === "closed") return;
     this.state = "closed";
@@ -684,7 +733,10 @@ export class StateCodecSocket implements PhaseSocketTransport {
     } finally {
       try {
         if (failure !== null) {
-          this.dispatch({ kind: "recovery", state: { kind: "failed", reason: failure } });
+          this.dispatch({
+            kind: "recovery",
+            state: { kind: "failed", reason: failure, joinCredentials },
+          });
         }
       } finally {
         try {
@@ -787,6 +839,16 @@ export class StateCodecSocket implements PhaseSocketTransport {
     this.dispatch(item);
   }
 
+  /**
+   * Credentials of the exact failing frame, only while this wrapper is live and
+   * the application bootstrap is still pending. Parsed once for this failure
+   * and never retained.
+   */
+  private credentialsOf(text: string): StateCodecJoinCredentials | null {
+    if (this.closed || this.bootstrap() !== "pending") return null;
+    return readGameStartedFullCredentials(text);
+  }
+
   private bootstrap(): StateCodecBootstrap {
     try {
       return this.options.bootstrap();
@@ -820,4 +882,64 @@ function frameType(text: string): string {
   } catch {
     return "";
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSafeInteger(value: unknown, minimum: number): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= minimum;
+}
+
+/**
+ * The join credentials of a GameStarted `Full` frame, or `null` for anything
+ * else. This isolates the envelope knowledge of the credential path:
+ * `{type:"Full", data:{state:{type:"GameStarted", data:{player_token,
+ * your_player, full_key, ...}}, revision}}`. The credentials sit at
+ * `data.state.data`, not inside the nested GameState.
+ *
+ * Trust boundary, from the server's serialization (not from a captured
+ * credential payload): the state codec embeds the raw ServerMessage value
+ * verbatim (`crates/state-codec/src/lib.rs:416-432,493-501`); the socket layer
+ * serializes the whole mailbox envelope before encoding it
+ * (`crates/phase-server/src/socket_io.rs:970-1001`); the mailbox flattens the
+ * ServerMessage into that envelope (`socket_mailbox.rs:116-125`); and the
+ * adjacent `type`/`data` tags with the optional credentials are defined in
+ * `crates/server-core/src/protocol.rs:720-722,824-831`. Historical run
+ * evidence (`browser/e2e93/results-new.json`) shows Full/Delta state delivery
+ * with no plain GameStarted and a published session/identity.
+ *
+ * Validation is strict and total: no coercion, trimming or default identity.
+ * Unknown fields are tolerated and only the three credentials are copied. The
+ * nested GameState and the codec revision are never inspected: a malformed
+ * revision may itself be why the frame was rejected. A shape check is not
+ * authentication; the server authenticates the token on Reconnect.
+ */
+export function readGameStartedFullCredentials(text: string): StateCodecJoinCredentials | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || parsed.type !== "Full") return null;
+  const data = parsed.data;
+  if (!isRecord(data)) return null;
+  const state = data.state;
+  if (!isRecord(state) || state.type !== "GameStarted") return null;
+  const started = state.data;
+  if (!isRecord(started)) return null;
+  const { player_token: playerToken, your_player: yourPlayer, full_key: fullKey } = started;
+  if (typeof playerToken !== "string" || playerToken === "") return null;
+  if (!isSafeInteger(yourPlayer, 0)) return null;
+  if (!isRecord(fullKey)) return null;
+  const { game_code: gameCode, generation } = fullKey;
+  if (typeof gameCode !== "string" || gameCode === "") return null;
+  if (!isSafeInteger(generation, 1)) return null;
+  return {
+    playerToken,
+    yourPlayer,
+    fullKey: { game_code: gameCode, generation },
+  };
 }

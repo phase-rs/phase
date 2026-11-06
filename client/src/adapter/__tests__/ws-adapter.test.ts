@@ -5548,6 +5548,7 @@ describe("WebSocketAdapter — codec degradation policy", () => {
       "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
       undefined, undefined, undefined, { stateCodecSessionProvider: provider },
     );
+    const sendSpy = vi.spyOn(adapter as unknown as { send(message: unknown): boolean }, "send");
     const events: unknown[] = [];
     const policyAtServerHello: unknown[] = [];
     adapter.onEvent((event) => {
@@ -5586,6 +5587,12 @@ describe("WebSocketAdapter — codec degradation policy", () => {
       expect(policyAtServerHello).toEqual([{ kind: "snapshotOnly", reason: "confirmationFailure" }]);
       expect(events.filter((event) => (event as { type?: string }).type === "serverHello")).toHaveLength(1);
       expect(events).not.toContainEqual(expect.objectContaining({ type: "reconnecting" }));
+      // The retained close had already settled the join, so the continuation is
+      // fenced: no setup frame is attempted on the closed attachment and the
+      // obsolete "Cannot send message" feedback is not emitted.
+      expect(sendSpy.mock.calls.filter(([message]) =>
+        (message as { type?: string }).type === "JoinGameWithPassword")).toHaveLength(0);
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "error" }));
 
       // The next eligible attachment of the same adapter is snapshot-only.
       expect(adapter.tryReconnect(RECONNECT_SESSION as never)).toBe(true);
@@ -5775,5 +5782,304 @@ describe("WebSocketAdapter — codec degradation policy", () => {
         second.dispose();
       }
     });
+  });
+});
+
+// ── Ordered codec errors and the attach continuation fence ──────────────
+//
+// A raw transport error is ordered behind the frames the codec wrapper has
+// already received, so a GameStarted held in the decoder still completes the
+// join before the error becomes established-socket feedback. A retained close
+// (or a reentrant attachment) can end an attachment while `attachSocket` is
+// still installing its consumers: the setup frame must then not be sent.
+
+describe("WebSocketAdapter — ordered codec errors", () => {
+  /** A decoder whose first decode stays inside the decoder until released. */
+  function heldCodec() {
+    let resolveDecode: ((result: CodecDecodeResult) => void) | null = null;
+    const decode = vi.fn(() => new Promise<CodecDecodeResult>((resolve) => { resolveDecode = resolve; }));
+    const close = vi.fn();
+    const session: StateCodecSession = { decode, close };
+    return {
+      session, decode, close,
+      release: (turn: number) => {
+        if (resolveDecode === null) throw new Error("the decoder was never entered");
+        resolveDecode({ kind: "decoded", json: JSON.stringify(codecGameStarted(turn, turn)) });
+      },
+    };
+  }
+
+  it("resolves the join from a GameStarted Full held in the decoder before the raw error that follows it, which only becomes established-socket feedback", async () => {
+    const held = heldCodec();
+    const { adapter, raw, init } = await startCodecAdapter(held.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    try {
+      deliverCodec(raw, "Full", codecGameStarted(1, 1));
+      // Reach guard: the frame is inside the decoder, so the wrapper received it.
+      await vi.waitFor(() => expect(held.decode).toHaveBeenCalledOnce());
+      raw.onerror?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      // The error is still queued behind the held frame.
+      expect(events).toEqual([]);
+
+      held.release(1);
+      await init;
+      await vi.waitFor(() => expect(events).toContainEqual(
+        { type: "error", message: "WebSocket connection failed" },
+      ));
+      const types = events.map((event) => (event as { type: string }).type);
+      expect(types.indexOf("bootstrapDelivered")).toBeGreaterThanOrEqual(0);
+      expect(types.indexOf("bootstrapDelivered")).toBeLessThan(types.indexOf("error"));
+      expect((await adapter.getSnapshot()).state.turn_number).toBe(1);
+      // An ordinary error is not a codec failure: the lease is untouched and
+      // the policy keeps negotiating.
+      expect(held.close).not.toHaveBeenCalled();
+      expect(policyOf(adapter)).toEqual({ kind: "negotiate" });
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("rejects a pending join once on an error that precedes every frame, and a following frame cannot undo it", async () => {
+    const codec = scriptedCodec();
+    const { adapter, raw, init } = await startCodecAdapter(codec.session);
+    const settled = trackRejection(init);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    try {
+      raw.onerror?.();
+      await expect(settled()).resolves.toMatchObject({
+        code: "WS_ERROR", message: "WebSocket connection failed", recoverable: true,
+      });
+      // Reach guard: the following Full really is decoded by the live wrapper.
+      deliverCodec(raw, "Full", codecGameStarted(1, 1));
+      await vi.waitFor(() => expect(codec.decode).toHaveBeenCalledOnce());
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await expect(settled()).resolves.toMatchObject({ code: "WS_ERROR", message: "WebSocket connection failed" });
+      expect(events.filter((event) => (event as { type: string }).type === "error")).toEqual([]);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  describe("an attachment superseded while it installs its consumers", () => {
+    const setupFrames = (send: { mock: { calls: unknown[][] } }) => send.mock.calls
+      .map(([message]) => (message as { type?: string }).type)
+      .filter((type) => type === "JoinGameWithPassword" || type === "Reconnect");
+
+    it.each([true, false])("closes the retired socket without a setup frame and leaves the join to its successor (reentrant=%s)", async (reentrant) => {
+      MockWebSocket.last = null;
+      const first = scriptedCodec();
+      const second = scriptedCodec();
+      const sessions = [first.session, second.session];
+      const adapter = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+        undefined, undefined, undefined,
+        { stateCodecSessionProvider: () => Promise.resolve(sessions.shift() ?? null) },
+      );
+      const sendSpy = vi.spyOn(adapter as unknown as { send(message: unknown): boolean }, "send");
+      let reentered = false;
+      adapter.onEvent((event) => {
+        if (reentrant && event.type === "serverHello" && !reentered) {
+          reentered = true;
+          expect(adapter.tryReconnect(RECONNECT_SESSION as never)).toBe(true);
+        }
+      });
+      try {
+        const init = trackRejection(adapter.initialize());
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+        const retired = latestSocket();
+        retired.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+
+        if (!reentrant) {
+          // Positive control: a still-current attachment does send its setup.
+          await vi.waitFor(() => expect(setupFrames(sendSpy)).toEqual(["JoinGameWithPassword"]));
+          expect(first.close).not.toHaveBeenCalled();
+          expect(retired.close).not.toHaveBeenCalled();
+          expect(await init()).toBe("never settled");
+          return;
+        }
+
+        // The superseded attachment's socket is closed through the normal path,
+        // releasing its lease, and no setup frame goes out on it.
+        await vi.waitFor(() => expect(first.close).toHaveBeenCalledOnce());
+        expect(retired.close).toHaveBeenCalled();
+        expect(setupFrames(sendSpy)).toEqual([]);
+        // The join is not settled by the retired attachment.
+        expect(await init()).toBe("never settled");
+
+        // The successor owns the join and completes it on its own socket.
+        const successor = await codecHandshake("Reconnect", retired);
+        expect(successor).not.toBe(retired);
+        expect(setupFrames(sendSpy)).toEqual(["Reconnect"]);
+        deliverCodec(successor, "Full", codecGameStarted(5, 5));
+        await vi.waitFor(() => expect(second.decode).toHaveBeenCalledOnce());
+        await expect(init()).resolves.toEqual({ resolvedWith: undefined });
+        expect((await adapter.getSnapshot()).state.turn_number).toBe(5);
+        expect(second.close).not.toHaveBeenCalled();
+        expect(first.close).toHaveBeenCalledOnce();
+      } finally {
+        adapter.dispose();
+      }
+    });
+  });
+});
+
+describe("WebSocketAdapter — retained close and early credential frames", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  const contradictoryConfirmation = JSON.stringify({
+    type: "ServerHello",
+    data: { server_version: "0.0.0-test", selected_state_codec: "SomeOtherCodec" },
+  });
+  const setupTypes = (raw: MockWebSocket) => raw.send.mock.calls
+    .map(([text]) => (JSON.parse(text as string) as { type?: string }).type)
+    .filter((type) => type === "JoinGameWithPassword" || type === "Reconnect");
+  const privateFailure = (adapter: WebSocketAdapter) => (adapter as unknown as {
+    stateCodec: { current: { failure: unknown } | null };
+  }).stateCodec.current?.failure;
+
+  /** The delivery of `frame` from inside the ClientHello send: before adoption. */
+  function deliverFromClientHello(raw: MockWebSocket, frame: string): void {
+    raw.send.mockImplementation((text: unknown) => {
+      if (typeof text === "string" && text.includes('"type":"ClientHello"')) {
+        raw.dispatchSynthetic("message", frame);
+      }
+    });
+  }
+
+  it("schedules the next reconnect attempt without the obsolete send error when a retained close lands during an established reconnect attachment", async () => {
+    const first = scriptedCodec();
+    const second = scriptedCodec();
+    const sessions = [first.session, second.session];
+    const { adapter, raw, events } = await establishCodecAdapter(() => Promise.resolve(sessions.shift() ?? null));
+    const sendSpy = vi.spyOn(adapter as unknown as { send(message: unknown): boolean }, "send");
+    try {
+      raw.dispatchSynthetic("close");
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+      const attempt = latestSocket();
+      deliverFromClientHello(attempt, contradictoryConfirmation);
+      attempt.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+
+      await vi.waitFor(() => expect(second.close).toHaveBeenCalledOnce());
+      // Reach guard: the attempt offered the codec, and the retained close was
+      // consumed as an established-game loss, which schedules the next attempt.
+      expect(offeredCodec(attempt)).toBe(true);
+      await vi.waitFor(() => expect(
+        events.filter((event) => (event as { type: string }).type === "reconnecting"),
+      ).toHaveLength(2));
+      expect(sendSpy.mock.calls.filter(([message]) => (message as { type?: string }).type === "Reconnect"))
+        .toHaveLength(0);
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "error" }));
+
+      // The next attempt is dialled and, the codec having failed, is snapshot-only.
+      await vi.advanceTimersByTimeAsync(2000);
+      const next = await snapshotOnlyHandshake("Reconnect", attempt);
+      expect(offeredCodec(next)).toBe(false);
+      expect(setupTypes(next)).toEqual(["Reconnect"]);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("rejects the join once, records a credential-free first notice and dials no fallback when a credential-bearing Full lands before adoption", async () => {
+    const early = scriptedCodec();
+    const provider = vi.fn(() => Promise.resolve(early.session));
+    MockWebSocket.last = null;
+    const adapter = new WebSocketAdapter(
+      "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      undefined, undefined, undefined, { stateCodecSessionProvider: provider },
+    );
+    const sendSpy = vi.spyOn(adapter as unknown as { send(message: unknown): boolean }, "send");
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    try {
+      const joined = (async () => {
+        try { await adapter.initialize(); return "resolved"; } catch (error) { return error; }
+      })();
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      const raw = latestSocket();
+      const adoptedAtFailure: boolean[] = [];
+      raw.send.mockImplementation((text: unknown) => {
+        if (typeof text !== "string" || !text.includes('"type":"ClientHello"')) return;
+        adoptedAtFailure.push((adapter as unknown as { ws: unknown }).ws !== null);
+        raw.dispatchSynthetic("message", fullFrame(JSON.stringify(codecGameStarted(1, 1))));
+      });
+      raw.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+
+      await expect(joined).resolves.toMatchObject({
+        code: "WS_CLOSED", message: "Connection closed before game started", recoverable: true,
+      });
+      // Reach guard: the codec was offered and the failure preceded adoption.
+      expect(offeredCodec(raw)).toBe(true);
+      expect(adoptedAtFailure).toEqual([false]);
+      expect(early.close).toHaveBeenCalledOnce();
+      expect(early.decode).not.toHaveBeenCalled();
+      expect(privateFailure(adapter)).toEqual({
+        kind: "failed", reason: "confirmationFailure", joinCredentials: null,
+      });
+      expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "confirmationFailure" });
+
+      // No fallback is dialled, and no setup frame ever follows the rejection.
+      await vi.advanceTimersByTimeAsync(130_000);
+      expect(MockWebSocket.last).toBe(raw);
+      expect(provider).toHaveBeenCalledOnce();
+      expect(sendSpy).not.toHaveBeenCalled();
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "reconnecting" }));
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "error" }));
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("records the credentials of a Full that precedes the confirmation after adoption on the first notice, and still rejects the join once without a fallback", async () => {
+    const codec = scriptedCodec();
+    const provider = vi.fn(() => Promise.resolve(codec.session));
+    MockWebSocket.last = null;
+    const adapter = new WebSocketAdapter(
+      "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      undefined, undefined, undefined, { stateCodecSessionProvider: provider },
+    );
+    const sendSpy = vi.spyOn(adapter as unknown as { send(message: unknown): boolean }, "send");
+    try {
+      const joined = (async () => {
+        try { await adapter.initialize(); return "resolved"; } catch (error) { return error; }
+      })();
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      const raw = latestSocket();
+      raw.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+      await vi.waitFor(() => expect(raw.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"JoinGameWithPassword"'),
+      ));
+      // Reach guard: the socket is adopted and the join setup was sent.
+      expect((adapter as unknown as { ws: unknown }).ws).not.toBeNull();
+      raw.dispatchSynthetic("message", fullFrame(JSON.stringify(codecGameStarted(1, 1))));
+
+      await expect(joined).resolves.toMatchObject({
+        code: "WS_CLOSED", message: "Connection closed before game started", recoverable: true,
+      });
+      expect(codec.decode).not.toHaveBeenCalled();
+      expect(codec.close).toHaveBeenCalledOnce();
+      expect(privateFailure(adapter)).toEqual({
+        kind: "failed",
+        reason: "confirmationFailure",
+        joinCredentials: {
+          playerToken: "codec-token",
+          yourPlayer: 0,
+          fullKey: REPLY_OWNERSHIP_FULL_KEY,
+        },
+      });
+      // This round's adapter does not consume the credentials: no fallback.
+      sendSpy.mockClear();
+      await vi.advanceTimersByTimeAsync(130_000);
+      expect(MockWebSocket.last).toBe(raw);
+      expect(provider).toHaveBeenCalledOnce();
+      expect(sendSpy).not.toHaveBeenCalled();
+    } finally {
+      adapter.dispose();
+    }
   });
 });

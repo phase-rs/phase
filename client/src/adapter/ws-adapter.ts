@@ -2207,6 +2207,38 @@ export class WebSocketAdapter implements EngineAdapter {
       }
     };
 
+    // Continuation fence. Installing the close consumer can synchronously
+    // deliver a retained close (or a listener above can dispose or start a newer
+    // attachment), so the attachment may no longer be the live one. Its setup
+    // frame must not be sent, and its failure is not a setup-send failure: the
+    // close consumer has already settled whatever it owned. A superseded or
+    // disposed attachment's socket is detached (its consumers must neither
+    // settle the pending initialization nor touch the successor) and closed
+    // through the normal path, which releases its codec lease. Only a still
+    // current attachment's failed setup send below is terminal.
+    if (
+      this.disposed
+      || this.ws !== socket.ws
+      || this.stateCodecPreparation !== preparation
+      || preparation.signal.aborted
+    ) {
+      socket.ws.onmessage = null;
+      socket.ws.onerror = null;
+      socket.ws.onclose = null;
+      if (this.ws === socket.ws) {
+        // Still the adapter's socket although a successor is already opening:
+        // the successor has not adopted, so this retired socket is ours to clear.
+        this.ws = null;
+        this.stateCodec.clearRecovery();
+        if (this.pingInterval) {
+          clearInterval(this.pingInterval);
+          this.pingInterval = null;
+        }
+      }
+      socket.close();
+      return;
+    }
+
     if (!this.send(setupFrame)) {
       socket.close();
       if (this.initReject) {
