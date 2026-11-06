@@ -12,7 +12,7 @@ use engine::game::scenario::{GameRunner, GameScenario};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityCondition, Effect, EffectKind, MassLibraryShuffleMode, PlayerFilter, PlayerRelation,
-    PossessionAxis, TargetFilter, ThisWayCause, TypeFilter,
+    PossessionAxis, TargetFilter, TargetRef, ThisWayCause, TypeFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::PlayerActionKind;
@@ -25,6 +25,7 @@ use engine::types::{CoreType, GameEvent};
 
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
+const P2: PlayerId = PlayerId(2);
 
 const ELECTROSTATIC_BOLT_ORACLE: &str = "Electrostatic Bolt deals 2 damage to target creature. \
     If it's an artifact creature, Electrostatic Bolt deals 4 damage to it instead.";
@@ -353,6 +354,13 @@ fn target_plus_revealed_preserves_revealed_card_type() {
     );
 }
 
+/// Audacious Swap's verbatim Oracle text (AtomicCards.json), including the
+/// casualty reminder text.
+const AUDACIOUS_SWAP: &str = "Casualty 2 (As you cast this spell, you may sacrifice a creature with power 2 or greater. When you do, copy this spell and you may choose a new target for the copy.)\n\
+    The owner of target nonenchantment permanent shuffles it into their library, \
+    then exiles the top card of their library. If it's a land card, they put it \
+    onto the battlefield. Otherwise, they may cast it without paying its mana cost.";
+
 /// Finish a cast that stopped at its optional prompt: answer it, then pass
 /// priority until the stack empties, returning every event the answers emitted.
 fn answer_optional_and_settle(runner: &mut GameRunner, accept: bool) -> Vec<GameEvent> {
@@ -415,11 +423,6 @@ fn cast_spells(events: &[GameEvent]) -> Vec<(ObjectId, PlayerId)> {
 /// control.
 #[test]
 fn audacious_swap_runtime_distinguishes_nonland_from_land() {
-    const AUDACIOUS_SWAP: &str = "Casualty 2 (As you cast this spell, you may sacrifice a creature with power 2 or greater. When you do, copy this spell and you may choose a new target for the copy.)\n\
-        The owner of target nonenchantment permanent shuffles it into their library, \
-        then exiles the top card of their library. If it's a land card, they put it \
-        onto the battlefield. Otherwise, they may cast it without paying its mana cost.";
-
     // Case 1: Nonland card (Target Bear).
     // - P1's target nonland creature is shuffled into P1's library.
     // - P1 exiles top card (Target Bear).
@@ -672,3 +675,250 @@ fn audacious_swap_runtime_distinguishes_nonland_from_land() {
 /// Staged lands in P1's library for Case 3 of the Audacious Swap runtime test
 /// (see the count record there).
 const STAGED_LANDS: usize = 5;
+
+/// The players whose library was shuffled, in order, consecutive repeats
+/// collapsed. A move into a library followed by the printed "shuffle" step
+/// emits one `ShuffledLibrary` event per step, so this reads WHOSE library was
+/// shuffled (what the owner binding discriminates), not how many events fired.
+fn shuffled_libraries(events: &[GameEvent]) -> Vec<PlayerId> {
+    let mut players: Vec<PlayerId> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    players.dedup();
+    players
+}
+
+/// CR 608.2d + CR 603.5 + CR 108.3: Audacious Swap's "they may cast it without
+/// paying its mana cost" is the OWNER's decision. When the owner (P1, not the
+/// caster P0) declines, the exiled card stays in exile and is never cast; the
+/// shuffle and exile-top still happened in the owner's library.
+///
+/// Boundary case: it also holds without the owner-iteration fix for the
+/// decline outcome itself; the prompt-actor assertion (`Some(P1)`) is the part
+/// that fails if the optional were asked of the caster.
+#[test]
+fn audacious_swap_owner_declining_the_free_cast_leaves_the_card_exiled() {
+    let mut scenario = GameScenario::new();
+    let target = scenario.add_creature(P1, "Target Bear", 2, 2).id();
+    let swap = scenario
+        .add_spell_to_hand_from_oracle(P0, "Audacious Swap", true, AUDACIOUS_SWAP)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    let stopped = runner
+        .cast(swap)
+        .target_object(target)
+        .commit()
+        .stop_at_optional()
+        .resolve();
+
+    // Reach guard: the optional cast prompt was reached, and it is the owner's.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "the optional cast prompt is reached: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().waiting_for.acting_player(),
+        Some(P1),
+        "the owner (P1), not the caster (P0), decides whether to cast the exiled card"
+    );
+    let mut events = stopped.events().to_vec();
+    events.extend(answer_optional_and_settle(&mut runner, false));
+
+    // Reach guards: the target was shuffled into P1's library (and only P1's),
+    // then left that library for exile as the exiled top card.
+    assert_eq!(
+        shuffled_libraries(&events),
+        vec![P1],
+        "only the owner's library is shuffled"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                to: Zone::Library,
+                ..
+            } if *object_id == target
+        )),
+        "the target was shuffled into its owner's library"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                ..
+            } if *object_id == target
+        )),
+        "the target is the top card of P1's library after the shuffle, and is exiled"
+    );
+
+    // Declined: the exiled card stays exiled, uncast; Audacious Swap's own cast
+    // is the only spell cast.
+    assert_eq!(runner.state().objects[&target].zone, Zone::Exile);
+    assert!(!runner.state().players[1].library.contains(&target));
+    assert_eq!(
+        cast_spells(&events),
+        vec![(swap, P0)],
+        "only Audacious Swap itself was cast; the exiled card was not"
+    );
+    assert_eq!(
+        &runner.state().waiting_for,
+        &WaitingFor::Priority { player: P0 }
+    );
+    assert!(runner.state().stack.is_empty());
+}
+
+/// CR 702.153a + CR 707.10 + CR 707.10c + CR 108.3: Audacious Swap with a paid
+/// casualty 2 copies the spell when the casualty trigger resolves, and the
+/// controller chooses a new target for the copy. In a three-player game the
+/// original's target is owned by P1 and the copy's new target by P2, so each
+/// resolution must shuffle and exile-top inside ITS OWN target's owner's
+/// library: the owner is derived from each spell's own target, never from the
+/// caster (P0) nor from the other spell's target. The copy is not cast
+/// (CR 707.10: a copy of a spell is not cast).
+///
+/// Would fail with the owner-iteration fix reverted: the original's and the
+/// copy's owner populations would not be bound to their own targets (the
+/// shuffle / optional prompt would go to the wrong player, or to one of the
+/// two owners twice).
+#[test]
+fn audacious_swap_casualty_copy_resolves_each_target_through_its_own_owner() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    let original_target = scenario.add_creature(P1, "Original Target", 2, 2).id();
+    let copy_target = scenario.add_creature(P2, "Copy Target", 2, 2).id();
+    let fodder = scenario.add_creature(P0, "Casualty Fodder", 2, 2).id();
+    let swap = scenario
+        .add_spell_to_hand_from_oracle(P0, "Audacious Swap", true, AUDACIOUS_SWAP)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().objects[&original_target].owner, P1);
+    assert_eq!(runner.state().objects[&copy_target].owner, P2);
+
+    let committed = runner
+        .cast(swap)
+        .target_object(original_target)
+        .sacrifice_with(&[fodder])
+        .accept_optional()
+        .commit()
+        .stop_at_optional()
+        .resolve();
+    let mut events = committed.events().to_vec();
+
+    // Drive every prompt through public actions, recording who is asked what.
+    let mut copy_id = None;
+    let mut optional_deciders = vec![];
+    let mut max_stack = 0;
+    for _ in 0..40 {
+        max_stack = max_stack.max(runner.state().stack.len());
+        let result = match runner.state().waiting_for.clone() {
+            WaitingFor::CopyRetarget {
+                player,
+                copy_id: id,
+                target_slots,
+                ..
+            } => {
+                // CR 707.10c: the copy's controller (P0) chooses the new target.
+                assert_eq!(player, P0);
+                assert_eq!(target_slots.len(), 1);
+                assert_eq!(
+                    target_slots[0].current,
+                    Some(TargetRef::Object(original_target)),
+                    "the copy starts with the original's target"
+                );
+                assert!(target_slots[0]
+                    .legal_alternatives
+                    .contains(&TargetRef::Object(copy_target)));
+                copy_id = Some(id);
+                runner.act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(copy_target)),
+                })
+            }
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                optional_deciders.push(player);
+                runner.act(GameAction::DecideOptionalEffect { accept: false })
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
+            other => panic!("unexpected prompt while resolving the casualty copy: {other:?}"),
+        };
+        events.extend(result.expect("prompt answer accepted").events);
+    }
+    let copy_id =
+        copy_id.expect("the paid casualty copied Audacious Swap and offered a new target");
+
+    // Reach guards: casualty was paid (fodder sacrificed), the spell was copied,
+    // and both the original and the copy were on the stack at once.
+    assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            GameEvent::SpellCopied { original_id, .. } if *original_id == swap
+        )),
+        "Audacious Swap was copied"
+    );
+    assert!(max_stack >= 2, "original and copy were stacked together");
+
+    // CR 707.10: only the original is cast; the copy is not.
+    let cast = cast_spells(&events);
+    assert!(
+        cast.contains(&(swap, P0)),
+        "reach guard: the original Audacious Swap was cast: {cast:?}"
+    );
+    assert!(
+        cast.iter().all(|(object_id, _)| *object_id != copy_id),
+        "the copy is not cast: {cast:?}"
+    );
+
+    // The copy resolves first (top of the stack): its target's owner (P2) is
+    // asked and shuffles first, then the original's target's owner (P1).
+    assert_eq!(
+        optional_deciders,
+        vec![P2, P1],
+        "each resolution asks the owner of that spell's own target"
+    );
+    assert_eq!(shuffled_libraries(&events), vec![P2, P1]);
+
+    // Each target went to its OWN owner's library and was exiled from there;
+    // declined, so neither is cast.
+    for target in [original_target, copy_target] {
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Library),
+                    to: Zone::Exile,
+                    ..
+                } if *object_id == target
+            )),
+            "{target:?} was exiled from its owner's library"
+        );
+        assert_eq!(runner.state().objects[&target].zone, Zone::Exile);
+    }
+    assert!(runner.state().players[0].library.is_empty());
+    assert!(runner.state().players[1].library.is_empty());
+    assert!(runner.state().players[2].library.is_empty());
+    assert_eq!(
+        &runner.state().waiting_for,
+        &WaitingFor::Priority { player: P0 }
+    );
+    assert!(runner.state().stack.is_empty());
+}

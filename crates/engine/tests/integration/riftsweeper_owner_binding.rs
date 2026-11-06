@@ -23,6 +23,7 @@ const ETRATA_THE_SILENCER: &str = "Etrata can't be blocked.\nWhenever Etrata dea
 const ALABASTER_DRAGON: &str =
     "Flying\nWhen this creature dies, shuffle it into its owner's library.";
 const MURDER: &str = "Destroy target creature.";
+const WRATH_OF_GOD: &str = "Destroy all creatures. They can't be regenerated.";
 const WATERY_GRASP: &str = "Enchant creature\nEnchanted creature doesn't untap during its controller's untap step.\nWaterbend {5}: Enchanted creature's owner shuffles it into their library. (While paying a waterbend cost, you can tap your artifacts and creatures to help. Each one pays for {1}.)";
 const FORGE_OF_HEROES: &str = "{T}: Add {C}.\n{T}: Choose target commander that entered this turn. Put a +1/+1 counter on it if it's a creature and a loyalty counter on it if it's a planeswalker.";
 const OBLATION: &str =
@@ -1049,4 +1050,159 @@ fn forge_of_heroes_choose_target_commander_offers_exactly_the_entered_commanders
         .expect("an entered commander is a legal choice");
     runner.advance_until_stack_empty();
     finished(&runner);
+}
+
+// CR 608.2b + CR 701.24a: Turn the Earth's "up to three target cards" with two
+// declared targets, one of which is no longer in a graveyard when the spell
+// resolves. The spell still resolves for the legal target: its owner (P1)
+// shuffles it into their library; the illegal target (P0's card, now in exile)
+// is untouched and P0's library is not shuffled on its account; and the
+// untargeted "You gain 2 life" tail still happens.
+//
+// Boundary case that also holds without the owner-iteration fix for the tail
+// and the untouched illegal target; the owner assertion (`vec![P1]`, the
+// legal target's owner, never the caster P0 who owns the illegal card) is the
+// part tied to the owner-population binding.
+#[test]
+fn turn_the_earth_with_one_illegal_target_shuffles_only_the_legal_one_and_keeps_the_tail() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let legal = scenario
+        .add_creature_to_graveyard(P1, "Grizzly Bears", 2, 2)
+        .id();
+    let doomed = scenario
+        .add_creature_to_graveyard(P0, "Runeclaw Bear", 2, 2)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Turn the Earth", true)
+        .with_mana_cost(parse_mtgjson_mana_cost("{G}"))
+        .from_oracle_text_with_keywords(&["Flashback"], TURN_THE_EARTH)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![])],
+    );
+    let mut runner = scenario.build();
+    let life_before = runner.life(P0);
+
+    let committed = runner
+        .cast(spell)
+        .target_objects(&[legal, doomed])
+        .commit()
+        .stop_at_optional()
+        .events()
+        .to_vec();
+    // Reach guard: both targets were declared and the spell is on the stack.
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+
+    // In response, P0's card leaves the graveyard (CR 608.2b: now illegal).
+    engine::game::zones::move_to_zone(runner.state_mut(), doomed, Zone::Exile, &mut vec![]);
+    assert_eq!(runner.state().objects[&doomed].zone, Zone::Exile);
+
+    let mut events = committed;
+    events.extend(pass_until_stack_empty(&mut runner));
+    finished(&runner);
+
+    // Reach guards: the legal target was shuffled into its owner's library and
+    // the life tail resolved.
+    assert_eq!(distinct_shuffles(&events), vec![P1]);
+    assert_eq!(runner.state().objects[&legal].zone, Zone::Library);
+    assert!(runner.state().players[1].library.contains(&legal));
+    assert_eq!(runner.life(P0), life_before + 2, "You gain 2 life");
+
+    // The illegal target is untouched: still in exile, not in any library.
+    assert_eq!(runner.state().objects[&doomed].zone, Zone::Exile);
+    assert!(!runner.state().players[0].library.contains(&doomed));
+    assert!(!runner.state().players[1].library.contains(&doomed));
+}
+
+// CR 603.10a + CR 400.3 + CR 701.24a: two Alabaster Dragons die at the same
+// time to one board wipe (Wrath of God). Both are controlled by P0 but owned by
+// different players (P0 and P1). Each death triggers (look-back, CR 603.10a),
+// and each trigger shuffles ITS Dragon into ITS OWNER's library, shuffling
+// that owner's library.
+//
+// Would fail with the owner binding reverted: a Dragon would go to its
+// controller's library (both to P0's) and only P0's library would be shuffled.
+#[test]
+fn alabaster_dragons_dying_together_each_shuffle_into_their_owners_library() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let own_dragon = scenario
+        .add_creature(P0, "Alabaster Dragon", 4, 4)
+        .with_subtypes(vec!["Dragon"])
+        .from_oracle_text_with_keywords(&["Flying"], ALABASTER_DRAGON)
+        .id();
+    let borrowed_dragon = scenario
+        .add_creature(P1, "Alabaster Dragon", 4, 4)
+        .controlled_by(P0)
+        .with_subtypes(vec!["Dragon"])
+        .from_oracle_text_with_keywords(&["Flying"], ALABASTER_DRAGON)
+        .id();
+    let wrath = scenario
+        .add_spell_to_hand_from_oracle(P0, "Wrath of God", false, WRATH_OF_GOD)
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{W}{W}"))
+        .id();
+    scenario.with_library_top(P0, &["P0 Card"]);
+    scenario.with_library_top(P1, &["P1 Card"]);
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().objects[&own_dragon].owner, P0);
+    assert_eq!(runner.state().objects[&borrowed_dragon].owner, P1);
+    assert_eq!(runner.state().objects[&borrowed_dragon].controller, P0);
+
+    let mut events = runner.cast(wrath).commit().events().to_vec();
+    // Pass priority until Wrath has resolved and both death triggers wait.
+    for _ in 0..4 {
+        if runner.state().stack.len() >= 2 {
+            break;
+        }
+        if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+            engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+            continue;
+        }
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+
+    // Reach guards: both Dragons died in the same wipe and both death triggers
+    // are on the stack together.
+    for dragon in [own_dragon, borrowed_dragon] {
+        assert!(
+            events.iter().any(|event| matches!(event,
+                GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Graveyard, .. }
+                if *object_id == dragon)),
+            "{dragon:?} died to the wipe"
+        );
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "one death trigger per Dragon is on the stack"
+    );
+
+    events.extend(pass_until_stack_empty(&mut runner));
+    finished(&runner);
+
+    // Each Dragon is in ITS OWNER's library, and each owner's library was
+    // shuffled.
+    assert_eq!(runner.state().objects[&own_dragon].zone, Zone::Library);
+    assert!(runner.state().players[0].library.contains(&own_dragon));
+    assert!(!runner.state().players[1].library.contains(&own_dragon));
+    assert_eq!(runner.state().objects[&borrowed_dragon].zone, Zone::Library);
+    assert!(runner.state().players[1].library.contains(&borrowed_dragon));
+    assert!(!runner.state().players[0].library.contains(&borrowed_dragon));
+    let mut shuffled = distinct_shuffles(&events);
+    shuffled.sort();
+    shuffled.dedup();
+    assert_eq!(
+        shuffled,
+        vec![P0, P1],
+        "both owners' libraries are shuffled"
+    );
 }
