@@ -1232,9 +1232,9 @@ fn wraith_at_payment_prompt(own_land_colors: &[ManaColor]) -> WraithBoard {
 
 /// Canoptek Wraith: "you may pay {3} and sacrifice it. If you do, choose a land
 /// you control" (CR 118.12 + CR 701.21a). Declining reaches neither the land
-/// choice nor the search; paying offers exactly the controller's lands (CR 115.10a
-/// + CR 608.2d), then searches for basic lands with the chosen land's name
-/// (CR 701.23a) and puts them onto the battlefield tapped.
+/// choice nor the search; paying offers exactly the controller's lands
+/// (CR 115.10a and CR 608.2d), then searches for basic lands with the chosen
+/// land's name (CR 701.23a) and puts them onto the battlefield tapped.
 #[test]
 fn canoptek_wraith_declined_payment_gives_no_land_choice_and_paid_payment_offers_own_lands() {
     // Declined. Two own lands with different names: a wrongly reached choice
