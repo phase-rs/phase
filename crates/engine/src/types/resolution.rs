@@ -1957,6 +1957,44 @@ impl ResolutionStack {
         }
     }
 
+    /// CR 400.7 + CR 616.1: Find the UNIQUE parked BatchDelivery owner whose
+    /// `paused_current` matches a resumed delivery. Unlike the fixed
+    /// parent/child accessor above, this walks the whole stack because a tail
+    /// park can push more than one frame above the batch (counter ordering, the
+    /// continuation tail). Owners are matched by the pre-move occurrence
+    /// (member incarnation, object, origin zone), so a CR 614.6 destination
+    /// redirect on the approved event does not defeat the match. Ambiguity (no
+    /// matching owner, or more than one) fails closed, and the
+    /// incarnation-bearing member key makes a collision impossible for a single
+    /// batch.
+    pub fn paused_batch_delivery_mut_for_member(
+        &mut self,
+        member: crate::types::identifiers::ObjectIncarnationRef,
+        approved_event: &crate::types::proposed_event::ProposedEvent,
+    ) -> Option<&mut PendingBatchDeliveries> {
+        let mut found = None;
+        let mut slot = self.frames.top();
+        while let Some(current) = slot {
+            if let Some(ResolutionFrame::BatchDelivery(batch)) = self.frames.get(current) {
+                if batch
+                    .paused_current
+                    .as_ref()
+                    .is_some_and(|paused| paused.captures_resumed(member, approved_event))
+                {
+                    if found.is_some() {
+                        return None;
+                    }
+                    found = Some(current);
+                }
+            }
+            slot = self.frames.below(current);
+        }
+        match self.frames.get_mut(found?) {
+            Some(ResolutionFrame::BatchDelivery(batch)) => Some(batch),
+            Some(_) | None => None,
+        }
+    }
+
     /// Consume exactly the active BatchDelivery owner after its logical group
     /// settles once.
     pub fn take_active_batch_delivery(
@@ -6658,9 +6696,10 @@ mod tests {
         PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
         PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingPerCategoryZoneChoice,
         PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil,
-        PendingSpellResolution, PendingVoteBallotIteration, PersistedGameState,
-        PostReplacementDrain, RandomDraw, RepeatUntilStopWitness, ResidentDrainPolicy, StackEntry,
-        StackEntryKind, ZoneDeliveryExileTracking,
+        PendingSpellResolution, PendingVoteBallotIteration, PendingZoneChangeDelivery,
+        PersistedGameState, PostReplacementDrain, RandomDraw, RepeatUntilStopWitness,
+        ResidentDrainPolicy, StackEntry, StackEntryKind, ZoneDeliveryExileTracking,
+        ZoneMoveCompletion,
     };
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
@@ -6906,6 +6945,247 @@ mod tests {
             zone_change_record_start: state.zone_changes_this_turn.len(),
             deferred_events: Vec::new(),
         }))
+    }
+
+    /// A `BatchDelivery` owner parked on the resumed member's pre-choice key.
+    fn paused_batch_delivery_frame(
+        seed: u64,
+        member: ObjectIncarnationRef,
+        expected: &ProposedEvent,
+    ) -> ResolutionFrame {
+        let mut frame = batch_delivery_frame(seed);
+        match &mut frame {
+            ResolutionFrame::BatchDelivery(batch) => {
+                batch.paused_current =
+                    Some(PendingZoneChangeDelivery::new(member, expected.clone()));
+            }
+            other => unreachable!("batch_delivery_frame builds a BatchDelivery, got {other:?}"),
+        }
+        frame
+    }
+
+    /// The approved resume event for `expected`: the same pre-move occurrence
+    /// (object, origin) with a CR 614.6 destination redirect; the entry counter
+    /// stands in for any other replacement-controlled modifier (CR 614.1c /
+    /// CR 614.1d) the key must also ignore.
+    fn approved_with_redirect(expected: &ProposedEvent, destination: Zone) -> ProposedEvent {
+        let mut approved = expected.clone();
+        match &mut approved {
+            ProposedEvent::ZoneChange {
+                to,
+                enter_with_counters,
+                ..
+            } => {
+                *to = destination;
+                *enter_with_counters = vec![(CounterType::Plus1Plus1, 1)];
+            }
+            other => unreachable!("fixture builds a ZoneChange, got {other:?}"),
+        }
+        approved
+    }
+
+    /// Stack: the paused `BatchDelivery` owner, then the counter-ordering park a
+    /// tail park pushes above it, then one more non-batch frame. Neither fixed
+    /// accessor can reach the owner from this shape.
+    fn state_with_buried_paused_owner(
+        member: ObjectIncarnationRef,
+        expected: &ProposedEvent,
+    ) -> GameState {
+        let mut state = GameState::new_two_player(7);
+        state
+            .resolution_stack
+            .push_inner(paused_batch_delivery_frame(7, member, expected));
+        state
+            .resolution_stack
+            .push_inner(ResolutionFrame::CounterAdditions(
+                PendingCounterAdditionQueue {
+                    remaining: Vec::new(),
+                    completion: None,
+                },
+            ));
+        state.resolution_stack.push_inner(continuation_frame(7));
+        state
+    }
+
+    fn buried_owner_terminal(state: &GameState) -> Option<ZoneMoveCompletion> {
+        state
+            .resolution_stack
+            .iter()
+            .find_map(|frame| match frame {
+                ResolutionFrame::BatchDelivery(batch) => batch.paused_current.as_ref(),
+                _ => None,
+            })
+            .expect("the paused owner is resident")
+            .terminal_completion
+    }
+
+    // CR 400.7 + CR 614.6 + CR 616.1: typed-invariant row. No printed card
+    // currently reaches a destination redirect under a buried BatchDelivery
+    // owner: Obstinate Baloth-class discard redirects are owned by
+    // PendingDiscardBatch/PendingSingleDiscard, and a Containment Priest exile
+    // redirect of a reveal-until entrant has no ETB tail park, so the fixed
+    // relation captures it. Both directions are exercised so the predicate is
+    // proven to ignore `to`.
+    #[test]
+    fn resumed_lookup_matches_a_buried_owner_by_pre_move_occurrence_across_a_destination_redirect()
+    {
+        let member = ObjectIncarnationRef::of(ObjectId(40), 3);
+        let source = ObjectId(41);
+        for (from, to, redirected_to) in [
+            (Zone::Hand, Zone::Graveyard, Zone::Battlefield),
+            (Zone::Library, Zone::Battlefield, Zone::Exile),
+        ] {
+            let expected = ProposedEvent::zone_change(member.object_id, from, to, Some(source));
+            let approved = approved_with_redirect(&expected, redirected_to);
+            let mut state = state_with_buried_paused_owner(member, &expected);
+
+            // Reach guard: neither fixed relation can see the buried owner, so
+            // only the whole-stack walk can match it.
+            assert!(state.resolution_stack.active_batch_delivery().is_none());
+            assert!(
+                state
+                    .resolution_stack
+                    .active_batch_delivery_or_post_replacement_child_mut()
+                    .is_none(),
+                "the fixed parent/child relation does not reach a twice-buried owner"
+            );
+            assert_eq!(buried_owner_terminal(&state), None);
+
+            assert!(
+                state.capture_resumed_paused_zone_change_delivery(
+                    member,
+                    &approved,
+                    &[],
+                    ZoneMoveCompletion::Moved,
+                ),
+                "{from:?} -> {to:?} redirected to {redirected_to:?} still names the same occurrence"
+            );
+            assert_eq!(
+                buried_owner_terminal(&state),
+                Some(ZoneMoveCompletion::Moved),
+                "the buried owner records the resumed terminal completion"
+            );
+        }
+    }
+
+    // Hostile siblings of the redirect row. Each negative is paired with the
+    // positive control on the same fixture, so it cannot pass by missing the
+    // owner for an unrelated reason.
+    #[test]
+    fn resumed_lookup_still_rejects_a_different_origin_or_a_later_incarnation() {
+        let member = ObjectIncarnationRef::of(ObjectId(40), 3);
+        let expected = ProposedEvent::zone_change(
+            member.object_id,
+            Zone::Hand,
+            Zone::Graveyard,
+            Some(ObjectId(41)),
+        );
+        let approved = approved_with_redirect(&expected, Zone::Battlefield);
+        let mut state = state_with_buried_paused_owner(member, &expected);
+
+        // Different origin zone: not the same pre-move occurrence.
+        let other_origin = ProposedEvent::zone_change(
+            member.object_id,
+            Zone::Library,
+            Zone::Graveyard,
+            Some(ObjectId(41)),
+        );
+        let other_origin = approved_with_redirect(&other_origin, Zone::Battlefield);
+        assert!(!state.capture_resumed_paused_zone_change_delivery(
+            member,
+            &other_origin,
+            &[],
+            ZoneMoveCompletion::Moved,
+        ));
+        assert_eq!(buried_owner_terminal(&state), None);
+
+        // Same object, later incarnation (CR 400.7): a different member.
+        let later = ObjectIncarnationRef::of(member.object_id, member.incarnation + 1);
+        assert!(!state.capture_resumed_paused_zone_change_delivery(
+            later,
+            &approved,
+            &[],
+            ZoneMoveCompletion::Moved,
+        ));
+        assert_eq!(buried_owner_terminal(&state), None);
+
+        // Positive control on the identical fixture.
+        assert!(state.capture_resumed_paused_zone_change_delivery(
+            member,
+            &approved,
+            &[],
+            ZoneMoveCompletion::Moved,
+        ));
+        assert_eq!(
+            buried_owner_terminal(&state),
+            Some(ZoneMoveCompletion::Moved)
+        );
+    }
+
+    // The unique-owner ambiguity rejection is preserved: two parked owners that
+    // both match the resumed member fail closed, and neither records.
+    #[test]
+    fn resumed_lookup_rejects_two_matching_owners_and_accepts_a_single_owner() {
+        let member = ObjectIncarnationRef::of(ObjectId(40), 3);
+        let expected = ProposedEvent::zone_change(
+            member.object_id,
+            Zone::Hand,
+            Zone::Graveyard,
+            Some(ObjectId(41)),
+        );
+        let approved = approved_with_redirect(&expected, Zone::Battlefield);
+
+        let mut ambiguous = GameState::new_two_player(7);
+        ambiguous
+            .resolution_stack
+            .push_inner(paused_batch_delivery_frame(7, member, &expected));
+        ambiguous
+            .resolution_stack
+            .push_inner(paused_batch_delivery_frame(8, member, &expected));
+        ambiguous.resolution_stack.push_inner(continuation_frame(7));
+        assert!(
+            ambiguous
+                .resolution_stack
+                .paused_batch_delivery_mut_for_member(member, &approved)
+                .is_none(),
+            "two matching owners are ambiguous"
+        );
+        assert!(!ambiguous.capture_resumed_paused_zone_change_delivery(
+            member,
+            &approved,
+            &[],
+            ZoneMoveCompletion::Moved,
+        ));
+        assert!(
+            ambiguous.resolution_stack.iter().all(|frame| match frame {
+                ResolutionFrame::BatchDelivery(batch) => batch
+                    .paused_current
+                    .as_ref()
+                    .is_some_and(|paused| paused.terminal_completion.is_none()),
+                _ => true,
+            }),
+            "neither ambiguous owner records a completion"
+        );
+
+        // Positive control: a freshly built state with exactly one owner.
+        let mut single = state_with_buried_paused_owner(member, &expected);
+        assert!(
+            single
+                .resolution_stack
+                .paused_batch_delivery_mut_for_member(member, &approved)
+                .is_some(),
+            "a single matching owner is found"
+        );
+        assert!(single.capture_resumed_paused_zone_change_delivery(
+            member,
+            &approved,
+            &[],
+            ZoneMoveCompletion::Moved,
+        ));
+        assert_eq!(
+            buried_owner_terminal(&single),
+            Some(ZoneMoveCompletion::Moved)
+        );
     }
 
     #[test]
