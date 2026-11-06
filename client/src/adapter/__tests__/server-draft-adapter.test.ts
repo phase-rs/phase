@@ -2904,6 +2904,71 @@ function offeredCodec(ws: MockWebSocket): boolean {
   return hello.data?.state_codecs !== undefined;
 }
 
+/** The adapter's delivery policy, observed only to discriminate when it was decided. */
+function policyOf(adapter: ServerDraftAdapter): unknown {
+  return (adapter as unknown as { stateCodec: { deliveryPolicy: unknown } }).stateCodec.deliveryPolicy;
+}
+
+/**
+ * A real `StateCodecRuntime` over a scripted engine, exposed as the lease
+ * provider the shared WasmAdapter facade hands out. The poison verdict is the
+ * runtime's own and is not mocked: `script.trapNext` makes the engine's next
+ * decode raise a genuine `WebAssembly.RuntimeError`, which the runtime latches
+ * before it refuses every later open and decode, whichever session asks.
+ */
+function realRuntimeCodec() {
+  interface FakeHandle { json(): string; free(): void; clone_handle(): FakeHandle }
+  const script = { trapNext: false };
+  const handle = (json: string): FakeHandle => ({
+    json: () => json,
+    free: () => undefined,
+    clone_handle: () => handle(json),
+  });
+  const engine = {
+    state_codec_decode: vi.fn((frame: Uint8Array) => {
+      if (script.trapNext) {
+        script.trapNext = false;
+        throw new WebAssembly.RuntimeError("unreachable");
+      }
+      const parsed = JSON.parse(new TextDecoder().decode(frame)) as { data: { state: unknown } };
+      return handle(JSON.stringify(parsed.data.state));
+    }),
+  };
+  const runtime = new StateCodecRuntime(engine as unknown as EngineModule);
+  const provider = vi.fn(async (): Promise<StateCodecSession | null> => {
+    const sessionId = runtime.open();
+    return {
+      decode: async (frame) => runtime.decode(sessionId, frame),
+      close: () => runtime.close(sessionId),
+    };
+  });
+  return { engine, runtime, script, provider };
+}
+
+/**
+ * Submits a command on `ws` and completes it with its correlated StateUpdate,
+ * as a codec Delta frame or as a plain snapshot frame.
+ */
+async function completeDraftCommand(
+  adapter: ServerDraftAdapter,
+  ws: MockWebSocket,
+  label: string,
+  transport: "codec" | "plain",
+): Promise<void> {
+  const before = submissionTypes(ws).length;
+  const settled = trackRejection(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
+  await vi.waitFor(() => expect(submissionTypes(ws)).toHaveLength(before + 1));
+  const completion = {
+    type: "StateUpdate",
+    command_id: lastSubmissionCommandId(ws),
+    data: { state: matchState(label), events: [], full_key: FULL_KEY },
+  };
+  ws.dispatchSynthetic("message", transport === "codec"
+    ? draftFrame("Delta", completion)
+    : JSON.stringify(completion));
+  await expect(settled()).resolves.toMatchObject({ resolvedWith: { events: [] } });
+}
+
 describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
   it("emits the same match state and events as the snapshot stream", async () => {
     const matchStart = {
@@ -3341,14 +3406,35 @@ describe("ServerDraftAdapter — codec degradation policy", () => {
       events.length = 0;
       await enterPlainMatch(replacement, events);
       expect(provider).toHaveBeenCalledOnce();
+
+      // The degraded adapter stays usable: a plain command completes ...
+      await completeDraftCommand(adapter, replacement, "plain-command-1", "plain");
+      // ... a new match on the snapshot socket stays snapshot ...
+      events.length = 0;
+      await enterPlainMatch(replacement, events, "r2-t0");
+      await completeDraftCommand(adapter, replacement, "plain-command-2", "plain");
+      expect(provider).toHaveBeenCalledOnce();
+      // ... and the new match did not re-enable negotiation for the next attachment.
+      replacement.dispatchSynthetic("close");
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "disconnected" }));
+      const again = await reattachSnapshotOnly(adapter, replacement);
+      expect(offeredCodec(again)).toBe(false);
+      expect(provider).toHaveBeenCalledOnce();
     } finally {
       adapter.dispose();
     }
 
     const next = draftCodecSession(decodeEnvelope);
     const fresh = await startCodecDraft(next.session);
+    const freshEvents: unknown[] = [];
+    fresh.adapter.onEvent((event) => freshEvents.push(event));
     try {
       expect(offeredCodec(fresh.ws)).toBe(true);
+      // The fresh adapter decodes, bootstraps and completes a command, not only advertises.
+      await enterCodecMatch(fresh.ws, freshEvents);
+      expect(next.decode).toHaveBeenCalledTimes(2);
+      await completeDraftCommand(fresh.adapter, fresh.ws, "fresh-command", "codec");
+      expect(next.decode).toHaveBeenCalledTimes(3);
     } finally {
       fresh.adapter.dispose();
     }
@@ -3391,6 +3477,322 @@ describe("ServerDraftAdapter — codec degradation policy", () => {
       expect(late.decode).not.toHaveBeenCalled();
     } finally {
       adapter.dispose();
+    }
+  });
+
+  afterEach(() => { artIO.openCodec = null; });
+
+  it("captures a confirmation failure that lands before adoption, rejects the reattachment once and reattaches snapshot-only", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider, transport } = await startCodecDraft(session.session);
+    const early = draftCodecSession(decodeEnvelope);
+    provider.mockResolvedValueOnce(early.session);
+    const events: unknown[] = [];
+    const policyAtServerHello: unknown[] = [];
+    adapter.onEvent((event) => {
+      events.push(event);
+      // The reason must already be consumed when a serverHello listener runs.
+      if ((event as { type?: string }).type === "serverHello") policyAtServerHello.push(policyOf(adapter));
+    });
+    try {
+      const reattached = trackRejection(adapter.reconnectDraft());
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(ws));
+      const candidate = MockWebSocket.last!;
+      const adoptedAtFailure: boolean[] = [];
+      // The contradictory confirmation is delivered from inside the ClientHello
+      // send, i.e. after the wrapper is installed and before openPhaseSocket
+      // resolves: the failure is published before the adapter adopts the socket.
+      candidate.send.mockImplementation((text: unknown) => {
+        if (typeof text !== "string" || !text.includes('"type":"ClientHello"')) return;
+        adoptedAtFailure.push((adapter as unknown as { ws: unknown }).ws !== transport);
+        candidate.dispatchSynthetic("message", JSON.stringify({
+          type: "ServerHello",
+          data: { server_version: "0.0.0-test", selected_state_codec: "SomeOtherCodec" },
+        }));
+      });
+      candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+
+      expect(await reattached()).toMatchObject({
+        code: "WS_CLOSED", message: "Connection closed before draft started", recoverable: true,
+      });
+      // Reach guard: the codec really was offered, and no socket was adopted yet.
+      expect(offeredCodec(candidate)).toBe(true);
+      expect(adoptedAtFailure).toEqual([false]);
+      expect(provider).toHaveBeenCalledTimes(2);
+      // One wrapper failure: lease released once, no resync, one serverHello for the attachment.
+      expect(early.close).toHaveBeenCalledOnce();
+      expect(candidate.send.mock.calls.filter(([text]) => text === '{"type":"ResyncState"}')).toHaveLength(0);
+      expect(policyAtServerHello).toEqual([{ kind: "snapshotOnly", reason: "confirmationFailure" }]);
+      expect(events.filter((event) => (event as { type?: string }).type === "serverHello")).toHaveLength(1);
+
+      // The next explicit attachment of the same adapter is snapshot-only.
+      const next = await reattachSnapshotOnly(adapter, candidate);
+      expect(offeredCodec(next)).toBe(false);
+      expect(provider).toHaveBeenCalledTimes(2);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("adopts an already-negotiated candidate when the current attachment degrades, then reattaches snapshot-only", async () => {
+    const first = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(first.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    const second = draftCodecSession(decodeEnvelope);
+    provider.mockResolvedValueOnce(second.session);
+    try {
+      // B holds its lease and awaits its hello while A is still current.
+      const settled = trackRejection(adapter.reconnectDraft());
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(ws));
+      const candidate = MockWebSocket.last!;
+      expect(provider).toHaveBeenCalledTimes(2);
+
+      first.decode.mockImplementationOnce(async () => { throw new Error("decoder trapped"); });
+      ws.dispatchSynthetic("message", draftFrame("Delta", stateUpdate("never-applied")));
+      await vi.waitFor(() => expect(first.close).toHaveBeenCalledOnce());
+      expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "decodeFailure" });
+      // Reach guard: A is gone and B's lease and handshake are untouched.
+      expect(second.close).not.toHaveBeenCalled();
+      expect(candidate.close).not.toHaveBeenCalled();
+
+      // B is not retired for A's failure: it negotiates, answers the reattachment and bootstraps.
+      candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"ReconnectDraft"')));
+      expect(offeredCodec(candidate)).toBe(true);
+      candidate.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+      receive(candidate, "DraftStateUpdate", { view: createMockDraftView() });
+      // The attachment owner is settled by the authoritative reply, not stranded.
+      expect(await settled()).toEqual({ resolvedWith: undefined });
+      events.length = 0;
+      await enterCodecMatch(candidate, events);
+      await completeDraftCommand(adapter, candidate, "overlap-command", "codec");
+      expect(second.decode).toHaveBeenCalledTimes(3);
+      expect(second.close).not.toHaveBeenCalled();
+
+      // The next attachment (C) is plain.
+      candidate.dispatchSynthetic("close");
+      const plain = await reattachSnapshotOnly(adapter, candidate);
+      expect(offeredCodec(plain)).toBe(false);
+      expect(provider).toHaveBeenCalledTimes(2);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("keeps negotiating across a recovery, a network reconnect and a second recovery on the replacement", async () => {
+    const first = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(first.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    const seen = (label: string) => expect(events).toContainEqual(expect.objectContaining({
+      type: "gameStateUpdated", state: expect.objectContaining({ label }),
+    }));
+    const resyncs = (socket: MockWebSocket) =>
+      socket.send.mock.calls.filter(([text]) => text === '{"type":"ResyncState"}').length;
+    try {
+      // Recovery one completes without closing and admits a command.
+      first.decode.mockImplementationOnce(async () => ({ kind: "resyncRequired" }));
+      ws.dispatchSynthetic("message", draftFrame("Delta", stateUpdate("corrupt-1")));
+      await vi.waitFor(() => expect(resyncs(ws)).toBe(1));
+      ws.dispatchSynthetic("message", draftFrame("Full", stateUpdate("resync-1")));
+      await vi.waitFor(() => seen("resync-1"));
+      await completeDraftCommand(adapter, ws, "command-1", "codec");
+      expect(ws.close).not.toHaveBeenCalled();
+
+      // An explicit reattachment after a network loss still advertises the codec.
+      ws.dispatchSynthetic("close");
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "disconnected" }));
+      const second = draftCodecSession(decodeEnvelope);
+      provider.mockResolvedValueOnce(second.session);
+      const reattached = adapter.reconnectDraft();
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(ws));
+      const replacement = MockWebSocket.last!;
+      replacement.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await vi.waitFor(() => expect(replacement.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"ReconnectDraft"')));
+      // Reach guard: the first recovery did not degrade the adapter.
+      expect(offeredCodec(replacement)).toBe(true);
+      replacement.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+      receive(replacement, "DraftStateUpdate", { view: createMockDraftView() });
+      await reattached;
+      events.length = 0;
+      await enterCodecMatch(replacement, events);
+
+      // One recovery on the replacement wrapper is the first for that wrapper.
+      second.decode.mockImplementationOnce(async () => ({ kind: "resyncRequired" }));
+      replacement.dispatchSynthetic("message", draftFrame("Delta", stateUpdate("corrupt-2")));
+      await vi.waitFor(() => expect(resyncs(replacement)).toBe(1));
+      replacement.dispatchSynthetic("message", draftFrame("Full", stateUpdate("resync-2")));
+      await vi.waitFor(() => seen("resync-2"));
+      await completeDraftCommand(adapter, replacement, "command-2", "codec");
+      expect(replacement.close).not.toHaveBeenCalled();
+      expect(second.close).not.toHaveBeenCalled();
+      expect(policyOf(adapter)).toEqual({ kind: "negotiate" });
+      expect(provider).toHaveBeenCalledTimes(2);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("creates the degraded attachment's socket in the same turn, while a negotiating attachment still awaits its lease", async () => {
+    const first = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(first.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    const second = draftCodecSession(decodeEnvelope);
+    provider.mockResolvedValueOnce(second.session);
+    try {
+      ws.dispatchSynthetic("close");
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "disconnected" }));
+
+      // Positive provider case: a negotiating adapter creates no socket until
+      // its lease has been prepared.
+      const reattached = adapter.reconnectDraft();
+      expect(provider).toHaveBeenCalledTimes(2);
+      expect(MockWebSocket.last).toBe(ws);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(ws));
+      const candidate = MockWebSocket.last!;
+      candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"ReconnectDraft"')));
+      expect(offeredCodec(candidate)).toBe(true);
+      candidate.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+      receive(candidate, "DraftStateUpdate", { view: createMockDraftView() });
+      await reattached;
+
+      // A real qualifying failure degrades the adapter ...
+      second.decode.mockImplementationOnce(async () => { throw new Error("decoder trapped"); });
+      candidate.dispatchSynthetic("message", draftFrame("Delta", stateUpdate("never-applied")));
+      await vi.waitFor(() => expect(second.close).toHaveBeenCalledOnce());
+      expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "decodeFailure" });
+
+      // ... so the next attachment opens its socket without any await in between.
+      const again = adapter.reconnectDraft();
+      expect(MockWebSocket.last).not.toBe(candidate);
+      expect(provider).toHaveBeenCalledTimes(2);
+      const plain = MockWebSocket.last!;
+      plain.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await vi.waitFor(() => expect(plain.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"ReconnectDraft"')));
+      expect(offeredCodec(plain)).toBe(false);
+      receive(plain, "DraftStateUpdate", { view: createMockDraftView() });
+      await again;
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("settles an adopted candidate normally when the shared runtime traps on the retired attachment before the candidate's next decode", async () => {
+    const { runtime, script, provider: runtimeProvider } = realRuntimeCodec();
+    const lease = await runtimeProvider();
+    const { adapter, ws, provider } = await startCodecDraft(lease!);
+    provider.mockImplementation(async () => (await runtimeProvider())!);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    try {
+      expect(runtime.state).toEqual({ kind: "ready" });
+      // B bootstraps on its own session of the same runtime while A is retired but still live.
+      const reattached = adapter.reconnectDraft();
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(ws));
+      const candidate = MockWebSocket.last!;
+      candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"ReconnectDraft"')));
+      expect(offeredCodec(candidate)).toBe(true);
+      candidate.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+      receive(candidate, "DraftStateUpdate", { view: createMockDraftView() });
+      await reattached;
+      events.length = 0;
+      await enterCodecMatch(candidate, events);
+      expect(provider).toHaveBeenCalledTimes(2);
+      const pending = trackRejection(adapter.submitAction(pass, 0));
+      await vi.waitFor(() => expect(submissionTypes(candidate)).toHaveLength(1));
+
+      // A genuine wasm trap on the retired attachment poisons the shared runtime.
+      script.trapNext = true;
+      ws.dispatchSynthetic("message", draftFrame("Delta", stateUpdate("trap")));
+      await vi.waitFor(() => expect(runtime.state).toEqual({ kind: "poisoned", reason: "wasmTrap" }));
+      await vi.waitFor(() => expect(ws.close).toHaveBeenCalled());
+      // Reach guard: B already held a session and was neither closed nor degraded by A's trap.
+      expect(candidate.close).not.toHaveBeenCalled();
+      expect(policyOf(adapter)).toEqual({ kind: "negotiate" });
+
+      // B's next decode meets the poison: its owner settles, it is not abandoned.
+      events.length = 0;
+      candidate.dispatchSynthetic("message", draftFrame("Delta", stateUpdate("poisoned")));
+      expect(await pending()).toMatchObject({
+        code: "WS_CLOSED", message: "Connection closed during action", recoverable: true,
+      });
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "disconnected" }));
+      expect(candidate.close).toHaveBeenCalled();
+      expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "decodeFailure" });
+
+      // The explicit reattachment continues on plain frames without the provider.
+      const plain = await reattachSnapshotOnly(adapter, candidate);
+      expect(offeredCodec(plain)).toBe(false);
+      expect(provider).toHaveBeenCalledTimes(2);
+      await enterPlainMatch(plain, events);
+      await completeDraftCommand(adapter, plain, "after-trap", "plain");
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("completes a command on a default-constructed fresh draft adapter after the trap, through the shared facade", async () => {
+    const { engine, runtime, script, provider } = realRuntimeCodec();
+    artIO.openCodec = provider;
+    const settings = { displayName: "Alice", setCodes: ["MKM"], kind: "Premier" as const,
+      public: true, tournamentFormat: "Swiss" as const, podPolicy: "Competitive" as const, podSize: 8 };
+    MockWebSocket.last = null;
+    const first = new ServerDraftAdapter("ws://localhost:9374/ws");
+    const firstEvents: unknown[] = [];
+    first.onEvent((event) => firstEvents.push(event));
+    const creating = first.createDraft(settings);
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+    const trapped = MockWebSocket.last!;
+    trapped.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+    await vi.waitFor(() => expect(trapped.send).toHaveBeenCalledWith(
+      expect.stringContaining('"type":"CreateDraftWithSettings"')));
+    expect(offeredCodec(trapped)).toBe(true);
+    trapped.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+    receive(trapped, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
+    await creating;
+    receive(trapped, "DraftMatchStart", { match_id: "r1-t0", round: 1, game_code: FULL_KEY.game_code,
+      full_key: FULL_KEY, player_token: "match-token", your_player: 0, opponent_name: "Bob" });
+    script.trapNext = true;
+    trapped.dispatchSynthetic("message", draftFrame("Full", { type: "GameStarted",
+      data: { state: matchState("trap"), your_player: 0, full_key: FULL_KEY } }));
+    await vi.waitFor(() => expect(firstEvents).toContainEqual({ type: "disconnected" }));
+    expect(runtime.state).toEqual({ kind: "poisoned", reason: "wasmTrap" });
+    first.dispose();
+
+    const second = new ServerDraftAdapter("ws://localhost:9374/ws");
+    const events: unknown[] = [];
+    second.onEvent((event) => events.push(event));
+    try {
+      const creatingNext = second.createDraft(settings);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(trapped));
+      const plain = MockWebSocket.last!;
+      plain.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+      await vi.waitFor(() => expect(plain.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"CreateDraftWithSettings"')));
+      // The default route consulted the shared facade; the runtime itself refused the lease.
+      expect(provider).toHaveBeenCalledTimes(2);
+      expect(offeredCodec(plain)).toBe(false);
+      receive(plain, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
+      await creatingNext;
+
+      // A genuine plain match, then a correlated command completion.
+      await enterPlainMatch(plain, events);
+      await completeDraftCommand(second, plain, "plain-after-trap", "plain");
+      expect(engine.state_codec_decode).toHaveBeenCalledOnce();
+    } finally {
+      second.dispose();
     }
   });
 

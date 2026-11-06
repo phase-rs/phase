@@ -5213,6 +5213,47 @@ const RECONNECT_SESSION = {
   serverUrl: "wss://localhost:9374/ws",
 };
 
+/** The adapter's delivery policy, observed only to discriminate when it was decided. */
+function policyOf(adapter: WebSocketAdapter): unknown {
+  return (adapter as unknown as { stateCodec: { deliveryPolicy: unknown } }).stateCodec.deliveryPolicy;
+}
+
+/**
+ * A real `StateCodecRuntime` over a scripted engine, exposed as the lease
+ * provider the shared WasmAdapter facade hands out. The poison verdict is the
+ * runtime's own and is not mocked: `script.trapNext` makes the engine's next
+ * decode raise a genuine `WebAssembly.RuntimeError`, which the runtime latches
+ * before it refuses every later open and decode, whichever session asks.
+ */
+function realRuntimeCodec() {
+  interface FakeHandle { json(): string; free(): void; clone_handle(): FakeHandle }
+  const script = { trapNext: false };
+  const handle = (json: string): FakeHandle => ({
+    json: () => json,
+    free: () => undefined,
+    clone_handle: () => handle(json),
+  });
+  const engine = {
+    state_codec_decode: vi.fn((frame: Uint8Array) => {
+      if (script.trapNext) {
+        script.trapNext = false;
+        throw new WebAssembly.RuntimeError("unreachable");
+      }
+      const parsed = JSON.parse(new TextDecoder().decode(frame)) as { data: { state: unknown } };
+      return handle(JSON.stringify(parsed.data.state));
+    }),
+  };
+  const runtime = new StateCodecRuntime(engine as unknown as EngineModule);
+  const provider = vi.fn(async (): Promise<StateCodecSession | null> => {
+    const sessionId = runtime.open();
+    return {
+      decode: async (frame) => runtime.decode(sessionId, frame),
+      close: () => runtime.close(sessionId),
+    };
+  });
+  return { engine, runtime, script, provider };
+}
+
 describe("WebSocketAdapter — codec degradation policy", () => {
   const action = { type: "PassPriority" } as GameAction;
   const outcomeOf = (promise: Promise<unknown>) => promise.then(() => "resolved" as const, (error: unknown) => error);
@@ -5444,7 +5485,194 @@ describe("WebSocketAdapter — codec degradation policy", () => {
     }
   });
 
+  it("captures a confirmation failure that lands before adoption, rejects the join once and attaches the next attempt snapshot-only", async () => {
+    const early = scriptedCodec();
+    const spare = scriptedCodec();
+    const sessions = [early.session, spare.session];
+    const provider = vi.fn(() => Promise.resolve(sessions.shift() ?? null));
+    MockWebSocket.last = null;
+    const adapter = new WebSocketAdapter(
+      "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      undefined, undefined, undefined, { stateCodecSessionProvider: provider },
+    );
+    const events: unknown[] = [];
+    const policyAtServerHello: unknown[] = [];
+    adapter.onEvent((event) => {
+      events.push(event);
+      // The reason must already be consumed when a serverHello listener runs.
+      if ((event as { type?: string }).type === "serverHello") policyAtServerHello.push(policyOf(adapter));
+    });
+    try {
+      const joined = outcomeOf(adapter.initialize());
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      const raw = latestSocket();
+      const adoptedAtFailure: boolean[] = [];
+      // The contradictory confirmation is delivered from inside the ClientHello
+      // send, i.e. after the wrapper is installed and before openPhaseSocket
+      // resolves: the failure is published before the adapter adopts the socket.
+      raw.send.mockImplementation((text: unknown) => {
+        if (typeof text !== "string" || !text.includes('"type":"ClientHello"')) return;
+        adoptedAtFailure.push((adapter as unknown as { ws: unknown }).ws !== null);
+        raw.dispatchSynthetic("message", JSON.stringify({
+          type: "ServerHello",
+          data: { server_version: "0.0.0-test", selected_state_codec: "SomeOtherCodec" },
+        }));
+      });
+      raw.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+
+      await expect(joined).resolves.toMatchObject({
+        code: "WS_CLOSED", message: "Connection closed before game started", recoverable: true,
+      });
+      // Reach guard: the codec really was offered, and no socket was adopted yet.
+      expect(offeredCodec(raw)).toBe(true);
+      expect(adoptedAtFailure).toEqual([false]);
+      expect(provider).toHaveBeenCalledOnce();
+      // One wrapper failure: lease released once, no resync, one serverHello, no retry of the join.
+      expect(early.close).toHaveBeenCalledOnce();
+      expect(resyncRequests(raw)).toBe(0);
+      expect(policyAtServerHello).toEqual([{ kind: "snapshotOnly", reason: "confirmationFailure" }]);
+      expect(events.filter((event) => (event as { type?: string }).type === "serverHello")).toHaveLength(1);
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "reconnecting" }));
+
+      // The next eligible attachment of the same adapter is snapshot-only.
+      expect(adapter.tryReconnect(RECONNECT_SESSION as never)).toBe(true);
+      const next = await snapshotOnlyHandshake("Reconnect", raw);
+      expect(offeredCodec(next)).toBe(false);
+      expect(provider).toHaveBeenCalledOnce();
+      next.dispatchSynthetic("message", JSON.stringify(codecGameStarted(5, 5)));
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+      expect(spare.decode).not.toHaveBeenCalled();
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("creates the degraded attachment's socket in the same turn, while a negotiating attachment still awaits its lease", async () => {
+    const first = scriptedCodec();
+    const second = scriptedCodec();
+    const sessions = [first.session, second.session];
+    const provider = vi.fn(() => Promise.resolve(sessions.shift() ?? null));
+    const { adapter, raw, events } = await establishCodecAdapter(provider);
+    try {
+      // Positive provider case: a healthy loss re-negotiates, so the socket is
+      // not created until the lease has been prepared.
+      raw.dispatchSynthetic("close");
+      await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "reconnecting" })));
+      vi.advanceTimersByTime(1000);
+      expect(provider).toHaveBeenCalledTimes(2);
+      expect(MockWebSocket.last).toBe(raw);
+      const candidate = await codecHandshake("Reconnect", raw);
+      expect(offeredCodec(candidate)).toBe(true);
+      deliverCodec(candidate, "Full", codecGameStarted(5, 5));
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+
+      // A real qualifying failure on the live attachment degrades the adapter.
+      second.decode.mockImplementationOnce(async () => { throw new Error("decoder trapped"); });
+      deliverCodec(candidate, "Delta", codecStateUpdate(6, 6));
+      await vi.waitFor(() => expect(second.close).toHaveBeenCalledOnce());
+      expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "decodeFailure" });
+      expect(MockWebSocket.last).toBe(candidate);
+
+      // The reconnect timer opens the next socket without any await in between.
+      vi.advanceTimersByTime(1000);
+      expect(MockWebSocket.last).not.toBe(candidate);
+      expect(provider).toHaveBeenCalledTimes(2);
+      const plain = latestSocket();
+      plain.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+      await vi.waitFor(() => expect(plain.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"Reconnect"'),
+      ));
+      expect(offeredCodec(plain)).toBe(false);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
   describe("after a decoder trap on the shared runtime", () => {
+    afterEach(() => { sharedEngine.open = null; });
+
+    it("settles an adopted candidate normally when the shared runtime traps on the retired attachment before the candidate's next decode", async () => {
+      const { runtime, script, provider } = realRuntimeCodec();
+      const { adapter, raw, events } = await establishCodecAdapter(provider);
+      try {
+        expect(runtime.state).toEqual({ kind: "ready" });
+        // B bootstraps on its own session of the same runtime while A is retired but still live.
+        expect(adapter.tryReconnect(RECONNECT_SESSION as never)).toBe(true);
+        const candidate = await codecHandshake("Reconnect", raw);
+        expect(offeredCodec(candidate)).toBe(true);
+        deliverCodec(candidate, "Full", codecGameStarted(5, 5));
+        await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+        expect(provider).toHaveBeenCalledTimes(2);
+        const outcome = outcomeOf(adapter.submitAction(action, 0));
+        await vi.waitFor(() => expect(submissionTypes(candidate)).toHaveLength(1));
+
+        // A genuine wasm trap on the retired attachment poisons the shared runtime.
+        script.trapNext = true;
+        deliverCodec(raw, "Delta", codecStateUpdate(6, 6));
+        await vi.waitFor(() => expect(runtime.state).toEqual({ kind: "poisoned", reason: "wasmTrap" }));
+        await vi.waitFor(() => expect(raw.close).toHaveBeenCalled());
+        // Reach guard: B already held a session and was neither closed nor degraded by A's trap.
+        expect(candidate.close).not.toHaveBeenCalled();
+        expect(policyOf(adapter)).toEqual({ kind: "negotiate" });
+
+        // B's next decode meets the poison: its owner settles, it is not abandoned.
+        events.length = 0;
+        deliverCodec(candidate, "Delta", codecStateUpdate(7, 7, { command_id: lastSubmissionCommandId(candidate) }));
+        await expect(outcome).resolves.toMatchObject({
+          code: "WS_CLOSED", message: "Connection closed during action", recoverable: true,
+        });
+        expect(candidate.close).toHaveBeenCalledOnce();
+        expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "decodeFailure" });
+        expect(events).toContainEqual(expect.objectContaining({ type: "reconnecting" }));
+
+        // The existing reconnect path continues on plain frames without the provider.
+        await restoreFromPlainFrames(adapter, events, candidate);
+        expect(provider).toHaveBeenCalledTimes(2);
+      } finally {
+        adapter.dispose();
+      }
+    });
+
+    it("completes a correlated action on a default-constructed fresh adapter after the trap, through the shared facade", async () => {
+      const { engine, runtime, script, provider } = realRuntimeCodec();
+      sharedEngine.open = provider;
+      const create = () => new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      );
+      MockWebSocket.last = null;
+      const first = create();
+      const failed = outcomeOf(first.initialize());
+      const trapped = await codecHandshake("JoinGameWithPassword", null);
+      expect(offeredCodec(trapped)).toBe(true);
+      script.trapNext = true;
+      deliverCodec(trapped, "Full", codecGameStarted(1, 1));
+      await expect(failed).resolves.toMatchObject({ code: "WS_CLOSED" });
+      expect(runtime.state).toEqual({ kind: "poisoned", reason: "wasmTrap" });
+      first.dispose();
+
+      const second = create();
+      try {
+        const init = second.initialize();
+        const plain = await snapshotOnlyHandshake("JoinGameWithPassword", trapped);
+        // The default route consulted the shared facade; the runtime itself refused the lease.
+        expect(provider).toHaveBeenCalledTimes(2);
+        expect(offeredCodec(plain)).toBe(false);
+        plain.dispatchSynthetic("message", JSON.stringify(codecGameStarted(1, 1)));
+        await init;
+
+        const completion = second.submitAction(action, 0);
+        await vi.waitFor(() => expect(submissionTypes(plain)).toHaveLength(1));
+        plain.dispatchSynthetic("message", JSON.stringify(
+          codecStateUpdate(2, 2, { command_id: lastSubmissionCommandId(plain) }),
+        ));
+        await expect(completion).resolves.toMatchObject({ events: [] });
+        expect((await second.getSnapshot()).state.turn_number).toBe(2);
+        expect(engine.state_codec_decode).toHaveBeenCalledOnce();
+      } finally {
+        second.dispose();
+      }
+    });
+
     function trappingRuntime() {
       const engine = {
         state_codec_decode: vi.fn(() => { throw new WebAssembly.RuntimeError("unreachable"); }),
