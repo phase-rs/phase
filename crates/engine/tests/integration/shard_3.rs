@@ -102,6 +102,7 @@ mod embiggen_typeline_pump;
 mod emblem_stack_owner_printing;
 mod empower_jace;
 mod emptiness_mana_spent_evoke_5943;
+mod empty_shrine_kannushi_pledge;
 mod emrakul_control_turn_crash;
 mod end_blaze_epiphany_choose_exiled_this_way;
 mod end_combat_phase;
