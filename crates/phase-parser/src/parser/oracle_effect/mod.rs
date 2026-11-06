@@ -15924,8 +15924,8 @@ fn try_parse_put_on_top_or_bottom(
         }));
     }
 
-    // CR 115.1 + CR 601.2c: both owner-subject spellings preserve the
-    // declaration's cardinality and constraints through the shared authority.
+    // CR 115.1 + CR 601.2c: declared owner subjects preserve cardinality and
+    // constraints; CR 115.10a: possessive references do not declare another target.
     let predicate_start = subject::find_predicate_start(tp.original)?;
     all_consuming(alt((
         tag::<_, _, OracleError<'_>>("puts it on the top or bottom of their library"),
@@ -15934,13 +15934,14 @@ fn try_parse_put_on_top_or_bottom(
     .parse(&tp.lower[predicate_start..])
     .ok()?;
     let mut trial = ctx.clone();
-    let subject::OwnerSubject::Declared {
-        target,
-        multi_target,
-    } = subject::parse_owner_subject(tp.original[..predicate_start].trim(), &mut trial)?
-    else {
-        return None;
-    };
+    let (target, multi_target) =
+        match subject::parse_owner_subject(tp.original[..predicate_start].trim(), &mut trial)? {
+            subject::OwnerSubject::Declared {
+                target,
+                multi_target,
+            } => (target, multi_target),
+            subject::OwnerSubject::Possessive { object } => (object, None),
+        };
     let mut clause = parsed_clause(Effect::PutOnTopOrBottom {
         target,
         chooser: TargetFilter::ParentTargetOwner,
@@ -32018,9 +32019,10 @@ fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
         | TargetFilter::ParentTargetOwner
         | TargetFilter::DeclaredPlayer { .. } => true,
         TargetFilter::Typed(tf) => tf.type_filters.is_empty(),
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(target_filter_can_target_player)
-        }
+        TargetFilter::Or { filters } => filters.iter().any(target_filter_can_target_player),
+        // A conjunction can match a player only when every leg can; an
+        // object-only leg still excludes players alongside a zone-only Typed leg.
+        TargetFilter::And { filters } => filters.iter().all(target_filter_can_target_player),
         TargetFilter::Not { filter } => target_filter_can_target_player(filter),
         _ => false,
     }

@@ -96847,6 +96847,117 @@ fn plan_for_all_outcomes_owner_declares_optional_other_nonland_permanent() {
     }
 }
 
+#[test]
+fn tolarian_contempt_end_step_keeps_possessive_owner_placement() {
+    let parsed = parse_card(
+        "When this enchantment enters, put a rejection counter on each creature your opponents control.\nAt the beginning of your end step, for each opponent, choose up to one target creature they control with a rejection counter on it. That creature's owner puts it on their choice of the top or bottom of their library.",
+        "Tolarian Contempt", &[], &["Enchantment"],
+    );
+    assert!(outer_gap_names(&parsed).is_empty(), "{parsed:?}");
+    let body = parsed.triggers[1]
+        .execute
+        .as_deref()
+        .expect("end-step trigger");
+    let placement = body.sub_ability.as_deref().expect("owner placement");
+    assert_eq!(
+        *placement.effect,
+        Effect::PutOnTopOrBottom {
+            target: TargetFilter::ParentTarget,
+            chooser: TargetFilter::ParentTargetOwner,
+            top_position: LibraryPosition::Top,
+        },
+    );
+    assert_eq!(placement.multi_target, None);
+}
+
+#[test]
+fn endless_detour_owner_declares_disjunctive_target() {
+    let parsed = parse_card(
+        "The owner of target spell, nonland permanent, or card in a graveyard puts it on their choice of the top or bottom of their library.",
+        "Endless Detour", &[], &["Instant"],
+    );
+    assert!(outer_gap_names(&parsed).is_empty(), "{parsed:?}");
+    let body = &parsed.abilities[0];
+    let Effect::PutOnTopOrBottom {
+        target: TargetFilter::Or { filters },
+        chooser: TargetFilter::ParentTargetOwner,
+        top_position: LibraryPosition::Top,
+    } = &*body.effect
+    else {
+        panic!("missing disjunctive owner placement: {body:?}");
+    };
+    assert_eq!(filters.len(), 3, "{filters:?}");
+    assert!(
+        filters.iter().any(|filter| matches!(filter,
+            TargetFilter::And { filters } if filters.contains(&TargetFilter::StackSpell)
+        )),
+        "{filters:?}"
+    );
+    assert!(
+        filters.iter().any(|filter| matches!(filter,
+            TargetFilter::Typed(typed) if typed.type_filters == [
+                TypeFilter::Permanent, TypeFilter::Non(Box::new(TypeFilter::Land))
+            ]
+        )),
+        "{filters:?}"
+    );
+    assert_eq!(body.multi_target, None);
+}
+
+#[test]
+fn owner_subject_declared_disjunction_preserves_each_object_alternative() {
+    for (text, multi_target) in [
+        ("target artifact, creature, or enchantment", None),
+        (
+            "up to one target artifact, creature, or enchantment",
+            Some(MultiTargetSpec::fixed(0, 1)),
+        ),
+    ] {
+        for subject in [format!("the owner of {text}"), format!("{text}'s owner")] {
+            let Some(subject::OwnerSubject::Declared {
+                target,
+                multi_target: parsed_multi,
+            }) = subject::parse_owner_subject(&subject, &mut ParseContext::default())
+            else {
+                panic!("missing declared owner: {subject}");
+            };
+            assert_eq!(parsed_multi, multi_target, "{subject}");
+            assert_eq!(
+                target,
+                TargetFilter::Or {
+                    filters: [
+                        TypeFilter::Artifact,
+                        TypeFilter::Creature,
+                        TypeFilter::Enchantment
+                    ]
+                    .into_iter()
+                    .map(|kind| TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![kind],
+                        ..Default::default()
+                    }))
+                    .collect(),
+                },
+                "{subject}"
+            );
+        }
+    }
+    for text in [
+        "target player or creature",
+        "target creature or player",
+        "target",
+        "target artifact, creature, or enchantment nonsense",
+    ] {
+        assert!(
+            subject::parse_owner_subject(
+                &format!("the owner of {text}"),
+                &mut ParseContext::default(),
+            )
+            .is_none(),
+            "{text}"
+        );
+    }
+}
+
 /// CR 903.3 + CR 115.1c: property constraints alone are a real target filter.
 #[test]
 fn forge_of_heroes_property_only_commander_declaration() {
