@@ -1549,14 +1549,17 @@ pub struct SpellCastRecord {
     /// which honestly means it cannot prove which targets the spell declared.
     /// An empty list never satisfies "targets [something]" (CR 115.9).
     ///
-    /// Note the one thing that flattening cannot express: an empty list is both
-    /// "this cast declared no target" and "this record predates the field", and
-    /// the two are indistinguishable here. Both answers are fail-closed for the
-    /// positive predicates this feeds, so the cost is confined to a *negated*
-    /// read — `Not { Targets }` over unproven provenance answers true — and that
-    /// is acceptable only because this field postdates every persisted game, so
-    /// no payload can reach the loader with it absent. A future second reader
-    /// must not assume absent provenance is evidence of absence.
+    /// An empty list is both "this cast declared no target" and "this record
+    /// cannot prove what it declared" — they are indistinguishable here, and
+    /// absence is produced by more than legacy saves: the live projection passes
+    /// an empty slice deliberately (the live reader answers this property from
+    /// the stack entry instead), and viewer redaction blanks a hidden target's
+    /// snapshot while keeping its slot. So absent provenance must stay
+    /// fail-closed in **both** polarities. Today it does, for two reasons worth
+    /// keeping true: no parser path builds a negated `Targets` read — the
+    /// negation appears only in engine unit tests, and no printed card carries a
+    /// negated "targets" Oracle clause — and every positive read treats an empty
+    /// list as "cannot prove", never as "proved absent".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<ActivationTargetFact>,
 }

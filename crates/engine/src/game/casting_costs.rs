@@ -13788,13 +13788,22 @@ fn finalize_cast_with_phyrexian_choices_inner(
         obj.fused_split_spell = casting_variant == CastingVariant::Fuse;
     }
 
-    // CR 601.2c + CR 400.7: snapshot the declared targets HERE — at target
-    // settlement and before the cost is paid — not at the record write below.
-    // The record is written at CR 601.2i, after CR 601.2h, and paying can change
-    // or remove a target: reading their characteristics there would record what
-    // they had become rather than what they were when committed, which is the
-    // state every history predicate is defined over (CR 115.9's selection-time
-    // reading). The facts are carried down to the write unchanged.
+    // CR 601.2c + CR 400.7: snapshot the declared targets before this frame pays
+    // the cost, rather than at the record write below. The write happens at
+    // CR 601.2i, after CR 601.2h, and paying can change or remove a target:
+    // reading their characteristics there records what they had become rather
+    // than what they were when committed, which is the state the history
+    // predicates are defined over (CR 115.9's selection-time reading).
+    //
+    // PARTIAL, by construction: this is the *paying* frame only. A cast that
+    // suspends during payment re-enters this function through
+    // `resume_prepaid_spell_finalization` (and the delve / sneak /
+    // deferred-discard resume roots), where `prepaid_actual_mana_spent` is
+    // already set and this capture is therefore still after payment. Closing that
+    // needs the facts latched on the cast's pending root before payment — the
+    // shape `crime_candidate` uses in `finish_pending_cast_cost_or_pay` — and
+    // carried to the write on every resume path. Filed as a follow-up: nothing
+    // here is worse than before, and the non-resumed path is strictly better.
     let committed_target_facts =
         super::casting::capture_target_facts(state, &declared_targets_in_chain(&ability));
 
