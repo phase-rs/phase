@@ -28724,7 +28724,11 @@ fn trigger_is_exiled_with_an_unreadable_origin_fails_closed() {
         "Whenever a creature is exiled from anywhere other than your graveyard, draw a card.",
     ] {
         let def = parse_trigger_line(text, "Test Card");
-        assert_ne!(def.mode, TriggerMode::Exiled, "{text}");
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "{text}: expected fail-closed Unknown, got {:?}",
+            def.mode
+        );
     }
 }
 
@@ -28740,8 +28744,32 @@ fn trigger_is_exiled_with_a_residual_tail_fails_closed() {
         "Whenever a creature is exiled from anywhere other than a graveyard, draw a card.",
     ] {
         let def = parse_trigger_line(text, "Test Card");
-        assert_ne!(def.mode, TriggerMode::Exiled, "{text}");
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "{text}: expected fail-closed Unknown, got {:?}",
+            def.mode
+        );
     }
+}
+
+/// CR 603.6c + CR 701.13a: "is exiled from anywhere other than <zone>" is a
+/// source-zone exclusion. `TriggerMode::Exiled` has no negative-origin field, so
+/// the exclusion is expressed as the positive zone list of every zone except the
+/// excluded one (`origin == None`, `origin_zones` without the battlefield).
+///
+/// Synthetic text: no printed card carries this tail; the nearest printed cards
+/// are the three "exiled from the battlefield" triggers.
+#[test]
+fn trigger_is_exiled_from_anywhere_other_than_the_battlefield_excludes_it() {
+    let def = parse_trigger_line(
+        "Whenever a creature is exiled from anywhere other than the battlefield, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(def.mode, TriggerMode::Exiled);
+    assert_eq!(def.origin, None);
+    assert!(!def.origin_zones.is_empty());
+    assert!(!def.origin_zones.contains(&Zone::Battlefield));
+    assert!(def.origin_zones.contains(&Zone::Graveyard));
 }
 
 /// The no-`from` shape keeps the unconstrained origin.
