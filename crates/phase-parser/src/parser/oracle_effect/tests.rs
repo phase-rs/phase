@@ -21,8 +21,8 @@ use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermi
 use crate::types::ability::{
     AbilityUseTally, ActivationRestriction, AttachSelection, AttachmentKind, AttachmentReferent,
     CardSelectionMode, CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
-    CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, DigSource,
-    ExcessRecipient, ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice,
+    CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, DigRestRemainder,
+    DigSource, ExcessRecipient, ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice,
     PerpetualModification, PileSource, PossessionAxis, RepeatContinuation, RuntimeHandler,
     SeatDirection, TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
 };
@@ -1101,6 +1101,55 @@ fn each_target_filter_mut_does_not_visit_shuffle() {
         ),
         "the shared walker must not visit Effect::Shuffle"
     );
+}
+
+/// CR 608.2c: the player who performs an `ExileTop` is a player slot like the
+/// library owner, so an anaphor rewrite reaches a named subject; the fieldless
+/// controller and library-owner roles stay fieldless.
+#[test]
+fn each_target_filter_mut_visits_exile_top_named_actor() {
+    use crate::types::ability::{LibraryInstructionActor, LibraryPosition};
+
+    let exile_top = |actor| Effect::ExileTop {
+        player: TargetFilter::TriggeringPlayer,
+        count: QuantityExpr::Fixed { value: 1 },
+        position: LibraryPosition::Top,
+        face_down: true,
+        actor,
+    };
+    let rewrite = |mut effect: Effect| {
+        each_target_filter_mut(&mut effect, &mut |f| {
+            if matches!(f, TargetFilter::TriggeringPlayer) {
+                *f = TargetFilter::SelfRef;
+            }
+        });
+        effect
+    };
+
+    assert_eq!(
+        rewrite(exile_top(LibraryInstructionActor::Player {
+            player: TargetFilter::TriggeringPlayer,
+        })),
+        Effect::ExileTop {
+            player: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Top,
+            face_down: true,
+            actor: LibraryInstructionActor::Player {
+                player: TargetFilter::SelfRef,
+            },
+        }
+    );
+    for fieldless in [
+        LibraryInstructionActor::Controller,
+        LibraryInstructionActor::LibraryPlayer,
+    ] {
+        let Effect::ExileTop { player, actor, .. } = rewrite(exile_top(fieldless.clone())) else {
+            unreachable!("the walker keeps the effect variant");
+        };
+        assert_eq!(player, TargetFilter::SelfRef);
+        assert_eq!(actor, fieldless);
+    }
 }
 
 #[test]
@@ -5037,6 +5086,7 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
         up_to,
         filter,
         rest_destination,
+        rest_remainder,
         rest_order,
         destination,
         ..
@@ -5052,6 +5102,9 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
     assert!(!*up_to, "alt branch is exact-2 (not up-to)");
     assert_eq!(*destination, Some(Zone::Hand));
     assert_eq!(*rest_destination, Some(Zone::Library));
+    // CR 608.2c: the later "Put the rest …" clause owns the remainder the
+    // from-among selection declared silent.
+    assert_eq!(*rest_remainder, DigRestRemainder::Route);
     assert_eq!(*rest_order, DigRestOrder::Random);
     let TargetFilter::Or { filters } = filter else {
         panic!("alt filter should be Or, got {:?}", filter);
@@ -5088,6 +5141,7 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
         up_to: base_up_to,
         filter: base_filter,
         rest_destination: base_rest,
+        rest_remainder: base_rest_remainder,
         rest_order: base_rest_order,
         ..
     } = &*base.effect
@@ -5098,6 +5152,11 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
     assert_eq!(*base_keep, Some(1));
     assert!(*base_up_to, "base branch is up-to 1");
     assert_eq!(*base_rest, Some(Zone::Library), "PutRest must recurse");
+    assert_eq!(
+        *base_rest_remainder,
+        DigRestRemainder::Route,
+        "PutRest must re-declare the base branch's remainder as a route"
+    );
     assert_eq!(
         *base_rest_order,
         DigRestOrder::Random,
@@ -5110,6 +5169,47 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
         panic!("base filter should be Or, got {:?}", base_filter);
     };
     assert_eq!(base_filters.len(), 2);
+}
+
+/// PAIRED NEGATIVE of [`dig_conditional_instead_alternative_preserves_both_branches`]:
+/// the same two from-among selections with the trailing "Put the rest …" clause
+/// removed. Each selection declares its own silent remainder (CR 701.20e — the
+/// others were only looked at), so both branches keep the unchosen cards in the
+/// library. Together the pair shows the remainder is owned by the clause that
+/// speaks last about it (CR 608.2c), not by a default applied after assembly.
+#[test]
+fn dig_conditional_instead_alternative_without_a_rest_clause_is_silent_on_both_branches() {
+    let def = parse_effect_chain(
+        "Look at the top four cards of your library. You may reveal a creature or land card \
+         from among them and put it into your hand. If you gained life this turn, you may \
+         instead reveal two creature and/or land cards from among them and put them into your \
+         hand.",
+        AbilityKind::Spell,
+    );
+    let base = def
+        .else_ability
+        .as_deref()
+        .expect("base Dig must be stored as else_ability");
+    for (branch, effect) in [("alternative", &*def.effect), ("base", &*base.effect)] {
+        match effect {
+            Effect::Dig {
+                destination,
+                rest_destination,
+                rest_remainder,
+                ..
+            } => {
+                assert_eq!(*destination, Some(Zone::Hand), "{branch}");
+                assert_eq!(*rest_destination, None, "{branch}");
+                assert_eq!(
+                    *rest_remainder,
+                    DigRestRemainder::StayInLibrary,
+                    "{branch}: a selection that is silent about the others leaves them \
+                     in the library"
+                );
+            }
+            other => panic!("{branch}: expected Effect::Dig, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -30958,6 +31058,142 @@ fn bare_copy_it_stays_copy_spell_not_cast_copy() {
         matches!(copy.effect.as_ref(), Effect::CopySpell { .. }),
         "bare 'copy it' must not fuse to CastCopyOfCard, got {:?}",
         copy.effect
+    );
+}
+
+/// CR 707.12 + CR 707.12a: "Copy that card N times. You may cast the copies"
+/// keeps the copy multiplicity on the fused `CastCopyOfCard` as its
+/// `repeat_for`, for a fixed count (Mnemonic Deluge) and a where-X-bound count
+/// (Infinite Diversity) alike. Reverting the Case 1 carry in
+/// `fold_cast_copy_of_card_defs` drops it with the redundant `CopySpell`, so a
+/// single copy is cast.
+#[test]
+fn copy_card_n_times_then_cast_copies_keeps_multiplicity() {
+    let cases = [
+        (
+            "Exile target instant or sorcery card from a graveyard. Copy that card three times. You may cast the copies without paying their mana costs. Exile Mnemonic Deluge.",
+            "fixed",
+        ),
+        (
+            "Exile target instant or sorcery card from your graveyard. Copy that card X times, where X is the number of creature types among non-Borg creatures you control. You may cast the copies without paying their mana costs. Exile Infinite Diversity.",
+            "where-x",
+        ),
+    ];
+    for (text, label) in cases {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let cast_copy = def
+            .sub_ability
+            .as_deref()
+            .expect("card-copy cast sub-ability");
+        assert!(
+            matches!(
+                cast_copy.effect.as_ref(),
+                Effect::CastCopyOfCard {
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0)
+                    },
+                    count: None,
+                    ..
+                }
+            ),
+            "{label}: expected uncapped CastCopyOfCard, got {:?}",
+            cast_copy.effect
+        );
+        match (label, cast_copy.repeat_for.as_ref()) {
+            ("fixed", Some(QuantityExpr::Fixed { value: 3 })) => {}
+            (
+                "where-x",
+                Some(QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::DistinctSubtypes {
+                            restrict: Some(crate::types::card_type::SubtypeSet::Creature),
+                            ..
+                        },
+                }),
+            ) => {}
+            (_, other) => panic!("{label}: unexpected copy multiplicity {other:?}"),
+        }
+        let self_exile = cast_copy
+            .sub_ability
+            .as_deref()
+            .expect("self-exile follows the copy cast");
+        assert!(matches!(
+            self_exile.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+    }
+}
+
+/// CR 107.1a + CR 608.2c: "for every N <things>" is the marker spelling of
+/// "for each N <things>" in a verb's count position — a draw counts complete
+/// groups (Sarek, Federation Ambassador; class: any "<verb> a card for every N").
+#[test]
+fn draw_a_card_for_every_n_counts_complete_groups() {
+    let def = parse_effect_chain(
+        "Draw a card for every five creature types among non-Borg creatures you control.",
+        AbilityKind::Spell,
+    );
+    let Effect::Draw { count, .. } = def.effect.as_ref() else {
+        panic!("expected Draw, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::DivideRounded {
+                divisor: 5,
+                rounding: RoundingMode::Down,
+                inner,
+            } if matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref { qty: QuantityRef::DistinctSubtypes { .. } }
+            )
+        ),
+        "got {count:?}"
+    );
+    let def = parse_effect_chain(
+        "Draw a card for every three cards in your graveyard.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::Draw {
+                count: QuantityExpr::DivideRounded { divisor: 3, .. },
+                ..
+            }
+        ),
+        "got {:?}",
+        def.effect
+    );
+}
+
+/// SHAPE: extending creature-type quantities must leave Svega's unsupported
+/// planeswalker-type for-each activation honestly unparsed, independently of
+/// the other abilities on the card.
+#[test]
+fn svega_planeswalker_type_token_activation_keeps_unparsed_quantity() {
+    let parsed = parse_oracle_text(
+        "Landfall — Whenever a land enters under your control, put a loyalty counter on target planeswalker.\n−2: For each planeswalker type among planeswalkers you control, create a 1/1 Attendee creature token that's all colors.\n−X: Choose an Elspeth, Teferi, Liliana, Chandra, or Garruk planeswalker card name with mana value X. Create a copy of the card with the chosen name. You may cast the copy without paying its mana cost.\nSvega can be your commander.",
+        "Svega, the Unconventional",
+        &[],
+        &["Planeswalker".to_string()],
+        &["Svega".to_string()],
+    );
+    let activation = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(ability.cost, Some(AbilityCost::Loyalty { amount: -2 })))
+        .expect("Svega's printed −2 activation is retained");
+    assert!(
+        matches!(
+            activation.effect.as_ref(),
+            Effect::Unimplemented { name, .. } if name == "unparsed_quantity"
+        ),
+        "the specific −2 activation must fail honestly, got {:?}",
+        activation.effect
     );
 }
 
@@ -96164,4 +96400,770 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
             "reveal-choice return keeps its pre-routing outcome, got {parsed:?} for {line:?}"
         );
     }
+}
+
+/// CR 701.20e + CR 608.2c — issue #7754 (Through the Forest Gate):
+/// "Look at the top twenty cards of your library, put any number of land cards
+/// from among them onto the battlefield tapped, then shuffle. You gain 8 life."
+///
+/// Looking at cards never moves them, and the instruction names a destination
+/// only for the chosen cards, so the rest of the looked-at pile REMAINS IN THE
+/// LIBRARY in the order it already had. That is neither of the two states
+/// `rest_destination` can name: its `None` is the graveyard default (the old
+/// behaviour — "mill them") and `Some(Zone::Library)` is an explicit "put the
+/// rest on the bottom", which moves and reorders the pile. The parser records
+/// the distinction as `DigRestRemainder::StayInLibrary`.
+#[test]
+fn dig_from_among_without_a_rest_clause_keeps_the_remainder_in_the_library() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Look at the top twenty cards of your library, put any number of land cards from \
+         among them onto the battlefield tapped, then shuffle. You gain 8 life.",
+        "Through the Forest Gate",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("Through the Forest Gate must parse to one spell ability");
+
+    match &*ability.effect {
+        Effect::Dig {
+            count,
+            destination,
+            keep_count,
+            up_to,
+            filter,
+            rest_destination,
+            rest_remainder,
+            enter_tapped,
+            ..
+        } => {
+            assert_eq!(*count, QuantityExpr::Fixed { value: 20 }, "look at twenty");
+            assert_eq!(
+                *destination,
+                Some(Zone::Battlefield),
+                "\"put any number of land cards from among them onto the battlefield\""
+            );
+            assert_eq!(
+                *keep_count,
+                Some(u32::MAX),
+                "\"any number\" lowers to the unbounded keep sentinel"
+            );
+            assert!(*up_to, "\"any number\" is an up-to choice");
+            assert!(
+                matches!(filter, TargetFilter::Typed(_)),
+                "the puttable cards are filtered to land cards"
+            );
+            assert!(*enter_tapped, "they enter the battlefield tapped");
+            // THE REGRESSION ASSERTION.
+            assert_eq!(
+                *rest_remainder,
+                DigRestRemainder::StayInLibrary,
+                "CR 701.20e: cards that were only looked at stay in the library — \
+                 the `None` graveyard default mills them"
+            );
+            assert_eq!(
+                *rest_destination, None,
+                "a silent remainder names no destination at all; `Some(Library)` \
+                 would be a different instruction (put the rest on the bottom)"
+            );
+        }
+        other => panic!("expected Effect::Dig, got {other:?}"),
+    }
+
+    let shuffle = ability
+        .sub_ability
+        .as_ref()
+        .expect("the printed \"then shuffle\" chains behind the Dig");
+    assert!(matches!(*shuffle.effect, Effect::Shuffle { .. }));
+    let gain = shuffle
+        .sub_ability
+        .as_ref()
+        .expect("\"You gain 8 life\" chains behind the shuffle");
+    assert!(matches!(*gain.effect, Effect::GainLife { .. }));
+}
+
+/// PAIRED NEGATIVES: the library default only fills a SILENT remainder. Both
+/// printed remainder instructions still own the rest pile — an explicit
+/// bottom-of-library rider keeps its zone and its random order, and an explicit
+/// graveyard rider keeps the graveyard.
+#[test]
+fn dig_from_among_explicit_rest_clauses_still_override_the_library_default() {
+    fn first_dig(oracle: &str, name: &str) -> Effect {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            oracle,
+            name,
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        parsed
+            .abilities
+            .first()
+            .map(|ability| (*ability.effect).clone())
+            .unwrap_or_else(|| panic!("{name} must parse to one spell ability"))
+    }
+
+    // Expand the Sphere (verbatim Scryfall text): "… and the rest on the bottom
+    // of your library in a random order."
+    let expand = first_dig(
+        "Look at the top six cards of your library. Put up to two land cards from among them \
+         onto the battlefield tapped and the rest on the bottom of your library in a random \
+         order.",
+        "Expand the Sphere",
+    );
+    match &expand {
+        Effect::Dig {
+            rest_destination,
+            rest_remainder,
+            rest_order,
+            ..
+        } => {
+            assert_eq!(*rest_destination, Some(Zone::Library));
+            assert_eq!(
+                *rest_remainder,
+                DigRestRemainder::Route,
+                "an explicit \"on the bottom\" instruction routes the pile — it is \
+                 not a silent remainder"
+            );
+            assert_eq!(
+                *rest_order,
+                DigRestOrder::Random,
+                "the printed \"in a random order\" must survive the silent-remainder default"
+            );
+        }
+        other => panic!("expected Effect::Dig, got {other:?}"),
+    }
+
+    // Forbidden Alchemy (verbatim Scryfall text): "… and the rest into your
+    // graveyard."
+    let alchemy = first_dig(
+        "Look at the top four cards of your library. Put one of them into your hand and the rest \
+         into your graveyard.",
+        "Forbidden Alchemy",
+    );
+    match &alchemy {
+        Effect::Dig {
+            rest_destination,
+            rest_remainder,
+            ..
+        } => {
+            assert_eq!(
+                *rest_destination,
+                Some(Zone::Graveyard),
+                "an explicit \"into your graveyard\" rider must not be replaced by the silent default"
+            );
+            assert_eq!(
+                *rest_remainder,
+                DigRestRemainder::Route,
+                "a named graveyard destination is a routed remainder"
+            );
+        }
+        other => panic!("expected Effect::Dig, got {other:?}"),
+    }
+}
+
+/// PAIRED NEGATIVE at the class boundary: the silent-remainder rule belongs to
+/// LIBRARY LOOKS (CR 701.20e "look at … does not move them"), not to any
+/// "from among them" anaphor. When the cards were MILLED first (CR 701.17a)
+/// they are already in the graveyard, and "return a permanent card from among
+/// them to your hand" selects out of that milled set — the unchosen milled
+/// cards must stay in the graveyard, never be shuffled back into the library.
+///
+/// The mill form lowers to `Mill` + a `ChangeZone`/`ChangeZoneAll` reading the
+/// milled tracked set (CR 701.17c), so the default has no `Effect::Dig` to
+/// touch; this test pins that shape with a printed card's verbatim text.
+#[test]
+fn mill_from_among_never_gets_the_silent_remainder_rule() {
+    fn collect<'a>(def: &'a crate::types::ability::AbilityDefinition, out: &mut Vec<&'a Effect>) {
+        out.push(&def.effect);
+        if let Some(sub) = def.sub_ability.as_deref() {
+            collect(sub, out);
+        }
+        if let Some(else_ability) = def.else_ability.as_deref() {
+            collect(else_ability, out);
+        }
+    }
+
+    // Midnight Tilling (verbatim Scryfall text): "Mill four cards, then you may
+    // return a permanent card from among them to your hand."
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Mill four cards, then you may return a permanent card from among them to your hand. (To \
+         mill four cards, put the top four cards of your library into your graveyard.)",
+        "Midnight Tilling",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let root = parsed
+        .abilities
+        .first()
+        .expect("Midnight Tilling must parse to one spell ability");
+    let mut effects = Vec::new();
+    collect(root, &mut effects);
+
+    // Positive reach guards: the mill really parsed, and the "from among them"
+    // selection really reads the milled set — otherwise the exclusion below
+    // would pass vacuously.
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Mill {
+                destination: Zone::Graveyard,
+                ..
+            }
+        )),
+        "the printed \"mill four cards\" must parse to Mill → graveyard, got {effects:#?}"
+    );
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::ChangeZone {
+                destination: Zone::Hand,
+                target: TargetFilter::TrackedSetFiltered { .. },
+                ..
+            }
+        )),
+        "the \"from among them\" return must read the milled tracked set, got {effects:#?}"
+    );
+
+    // THE EXCLUSION: no look-at Dig exists here at all, so the silent-remainder
+    // rule has no Dig to mark and can never route a milled card anywhere.
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Dig { .. })),
+        "a mill-from-among chain must not lower to Effect::Dig, got {effects:#?}"
+    );
+}
+
+/// CR 701.20e + CR 608.2c — issue #7754: the STANDALONE entry point.
+///
+/// `parse_effect_chain` assembles one effect body without the card pipeline
+/// around it. The silent remainder is declared by the from-among clause during
+/// assembly, so this entry point must reach the same verdict as
+/// `parse_oracle_text`; a `Route` here applies the graveyard default and moves
+/// every unchosen looked-at card out of the library.
+#[test]
+fn standalone_chain_declares_a_silent_dig_remainder() {
+    let def = super::parse_effect_chain(
+        "look at the top twenty cards of your library, put any number of land cards from among \
+         them onto the battlefield tapped",
+        AbilityKind::Spell,
+    );
+
+    match &*def.effect {
+        Effect::Dig {
+            destination,
+            rest_destination,
+            rest_remainder,
+            ..
+        } => {
+            assert_eq!(*destination, Some(Zone::Battlefield));
+            assert_eq!(
+                *rest_destination, None,
+                "the instruction names no destination for the other looked-at cards"
+            );
+            assert_eq!(
+                *rest_remainder,
+                DigRestRemainder::StayInLibrary,
+                "CR 701.20e: a standalone chain must reach the same verdict as the \
+                 card pipeline — `Route` mills the unchosen cards"
+            );
+        }
+        other => panic!("expected Effect::Dig, got {other:?}"),
+    }
+}
+
+/// CR 701.20e + CR 608.2c: the Hideaway-shape selection ("exile one of them face
+/// down") declares a silent remainder too. Siphon Insight (verbatim Scryfall
+/// text) places "the other" with its own instruction, a placement over the
+/// tracked set that reads the card in the library; a `Route` remainder would
+/// first send that card to the graveyard, so the placement would find nothing.
+#[test]
+fn exile_one_face_down_leaves_the_other_for_its_own_placement() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Look at the top two cards of target opponent's library. Exile one of them face down \
+         and put the other on the bottom of that library. You may play the exiled card for as \
+         long as it remains exiled, and you may spend mana as though it were mana of any color \
+         to cast that spell.\nFlashback {1}{U}{B}",
+        "Siphon Insight",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let root = parsed
+        .abilities
+        .first()
+        .expect("Siphon Insight must parse to a spell ability");
+
+    match &*root.effect {
+        Effect::Dig {
+            destination,
+            keep_count,
+            rest_destination,
+            rest_remainder,
+            ..
+        } => {
+            assert_eq!(*destination, Some(Zone::Exile), "\"exile one of them\"");
+            assert_eq!(*keep_count, Some(1));
+            assert_eq!(*rest_destination, None);
+            assert_eq!(
+                *rest_remainder,
+                DigRestRemainder::StayInLibrary,
+                "CR 701.20e: the card that was not exiled stays in the library until \
+                 \"put the other on the bottom\" moves it"
+            );
+        }
+        other => panic!("expected Effect::Dig, got {other:?}"),
+    }
+
+    // Positive reach guard: the printed placement of "the other" really parses
+    // behind the selection, so the remainder it reads is the one asserted above.
+    let mut next = root.sub_ability.as_deref();
+    let mut placement = None;
+    while let Some(def) = next {
+        if let Effect::PutAtLibraryPosition {
+            target, position, ..
+        } = &*def.effect
+        {
+            placement = Some((target.clone(), position.clone()));
+        }
+        next = def.sub_ability.as_deref();
+    }
+    let (target, position) =
+        placement.expect("\"put the other on the bottom\" must parse as a placement");
+    assert!(matches!(target, TargetFilter::TrackedSet { .. }));
+    assert_eq!(position, crate::types::ability::LibraryPosition::Bottom);
+}
+
+/// CR 701.20e + CR 608.2c: the REORDER form of the silent remainder.
+///
+/// "You may put one of those cards back on top of your library" lowers to a Dig
+/// with `destination: Some(Library)` and, when nothing about the others follows,
+/// `rest_destination: None`. That shape used to keep the `Route` default, which
+/// both sent the unchosen cards to the graveyard and (in the reorder arm) dropped
+/// them out of the library. Devourer of Destiny is the printed card that proves
+/// the clause parses; it adds "Exile the rest" (a routed remainder), so the
+/// silent form is exercised here as the clause pair the sequence parser accepts.
+#[test]
+fn put_one_back_on_top_without_a_rest_clause_keeps_the_others_in_the_library() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Look at the top four cards of your library. You may put one of those cards back on top \
+         of your library.",
+        "Test Looker",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let root = parsed
+        .abilities
+        .first()
+        .expect("the look-at body must parse to one ability");
+    // The continuation patches the look-at Dig in place (destination Library);
+    // accept it chained behind the look step as well, so the assertion pins the
+    // SHAPE rather than the fold site.
+    let dig = if matches!(&*root.effect, Effect::Dig { .. }) {
+        root
+    } else {
+        root.sub_ability
+            .as_deref()
+            .expect("the \"put one back on top\" clause must patch or chain behind the Dig")
+    };
+
+    match &*dig.effect {
+        Effect::Dig {
+            destination,
+            rest_destination,
+            rest_remainder,
+            ..
+        } => {
+            assert_eq!(
+                *destination,
+                Some(Zone::Library),
+                "\"back on top of your library\" is the reorder form"
+            );
+            assert_eq!(
+                *rest_destination, None,
+                "the instruction says nothing about the other looked-at cards"
+            );
+            assert_eq!(
+                *rest_remainder,
+                DigRestRemainder::StayInLibrary,
+                "CR 701.20e: the unchosen cards stay in the library — the \
+                 `Route` default moves them out of it"
+            );
+        }
+        other => panic!("expected Effect::Dig, got {other:?}"),
+    }
+}
+
+/// CR 608.2c + CR 701.20e: "put those cards …" after a look/reveal names the
+/// WHOLE looked-at set, not a remainder, so it must never be folded into the
+/// look's `rest_destination` (a zero-keep Dig never reaches the remainder
+/// routing, so the move would be silently lost).
+///
+/// The set is placed by one of two authorities, decided by what the look
+/// published:
+/// - a PUBLIC reveal (`RevealTop`: Stomping Slabs) publishes no private-look
+///   ledger to re-anchor, so the clause lowers to its own
+///   `PutAtLibraryPosition` over the tracked set, placing every card
+///   (`TrackedSetSize`) rather than the `Fixed(1)` default;
+/// - a bare private look (Petals of Insight) is bound by the assembly authority
+///   `bind_those_cards_bottom_to_prior_look`, which re-anchors the whole-set
+///   placement to a `DigSource::PriorLook` Dig that routes the looked-at ledger
+///   to the bottom (CR 701.20e).
+#[test]
+fn put_those_cards_after_a_look_moves_the_whole_looked_at_set() {
+    fn chain(def: &crate::types::ability::AbilityDefinition) -> Vec<&Effect> {
+        let mut out = vec![&*def.effect];
+        let mut next = def.sub_ability.as_deref();
+        while let Some(sub) = next {
+            out.push(&*sub.effect);
+            next = sub.sub_ability.as_deref();
+        }
+        out
+    }
+
+    // Verbatim Scryfall Oracle text: a public reveal names no private look.
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Reveal the top seven cards of your library, then put those cards on the bottom of \
+         your library in any order. If a card named Stomping Slabs was revealed this way, \
+         Stomping Slabs deals 7 damage to any target.",
+        "Stomping Slabs",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let root = parsed
+        .abilities
+        .first()
+        .expect("Stomping Slabs must parse to one spell ability");
+    let effects = chain(root);
+    assert!(
+        matches!(effects[0], Effect::RevealTop { .. }),
+        "the reveal must lower to RevealTop, got {:#?}",
+        effects[0]
+    );
+    let placement = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::PutAtLibraryPosition {
+                target,
+                count,
+                position,
+                ..
+            } => Some((target, count, position)),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "Stomping Slabs: \"put those cards on the bottom\" must lower to a placement, \
+                 got {effects:#?}"
+            )
+        });
+    assert!(
+        matches!(placement.0, TargetFilter::TrackedSet { .. }),
+        "the placement reads the revealed set, got {:?}",
+        placement.0
+    );
+    assert_eq!(
+        *placement.1,
+        QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize
+        },
+        "\"those cards\" places every card of the set, not one"
+    );
+    assert_eq!(*placement.2, LibraryPosition::Bottom);
+
+    // Verbatim Scryfall Oracle text: the optional placement after a bare look.
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Look at the top three cards of your library. You may put those cards on the bottom of \
+         your library in any order. If you do, return Petals of Insight to its owner's hand. \
+         Otherwise, draw three cards.",
+        "Petals of Insight",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let root = parsed
+        .abilities
+        .first()
+        .expect("Petals of Insight must parse to one spell ability");
+    let effects = chain(root);
+    assert!(
+        matches!(effects[0], Effect::Dig { .. }),
+        "the look must lower to a Dig, got {:#?}",
+        effects[0]
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PutAtLibraryPosition { .. })),
+        "the assembly authority re-anchors the whole-set placement to the look ledger, got \
+         {effects:#?}"
+    );
+    let bottom = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Dig {
+                source: DigSource::PriorLook,
+                keep_count,
+                rest_destination,
+                rest_order,
+                ..
+            } => Some((keep_count, rest_destination, rest_order)),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!("Petals of Insight: the placement must become a PriorLook Dig, got {effects:#?}")
+        });
+    assert_eq!(
+        *bottom.0,
+        Some(0),
+        "every looked-at card in the ledger goes to the bottom"
+    );
+    assert_eq!(*bottom.1, Some(Zone::Library));
+    assert_eq!(*bottom.2, DigRestOrder::PlayerChoice, "\"in any order\"");
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Bounce { .. })),
+        "the \"If you do\" bounce must survive the rebind, got {effects:#?}"
+    );
+}
+
+/// PAIRED NEGATIVE: the whole-set reading is only for the bare plural anaphor.
+/// Munda's "reveal any number of Ally cards from among them, then put those cards
+/// on top … and the rest on the bottom" still folds into one Dig whose kept
+/// cards go on top and whose remainder goes to the bottom.
+#[test]
+fn put_those_cards_with_a_rest_clause_keeps_the_dig_partition() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Haste\nRally — Whenever Munda or another Ally you control enters, you may look at the \
+         top four cards of your library. If you do, reveal any number of Ally cards from among \
+         them, then put those cards on top of your library in any order and the rest on the \
+         bottom in any order.",
+        "Munda, Ambush Leader",
+        &[],
+        &["Creature".to_string()],
+        &["Kor".to_string(), "Ally".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .first()
+        .expect("Munda's rally trigger must parse");
+    let mut node = trigger.execute.as_deref();
+    let mut dig = None;
+    while let Some(def) = node {
+        if let Effect::Dig { .. } = &*def.effect {
+            dig = Some(&*def.effect);
+            break;
+        }
+        node = def.sub_ability.as_deref();
+    }
+    match dig.expect("the look must lower to a Dig") {
+        Effect::Dig {
+            destination,
+            rest_destination,
+            rest_remainder,
+            up_to,
+            ..
+        } => {
+            assert_eq!(*destination, Some(Zone::Library), "kept cards go on top");
+            assert_eq!(
+                *rest_destination,
+                Some(Zone::Library),
+                "the rest go to the bottom"
+            );
+            assert_eq!(
+                *rest_remainder,
+                DigRestRemainder::Route,
+                "an explicit bottom-of-library remainder is routed, not left in place"
+            );
+            assert!(*up_to, "\"any number\" is an up-to choice");
+        }
+        other => panic!("expected Effect::Dig, got {other:?}"),
+    }
+}
+
+/// CR 701.20e + CR 701.20b: a bare look leaves its cards in the library, so a
+/// following "put those cards into your graveyard" must lower to a whole-set
+/// move that reads the looked-at set out of the LIBRARY. The tracked-set mass
+/// move otherwise falls back to the impulse exile origin and moves nothing.
+/// No printed card pairs a bare look with this clause, so the text is the
+/// minimal shape of the class.
+#[test]
+fn put_those_cards_into_the_graveyard_after_a_look_reads_the_library() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Look at the top three cards of your library. Put those cards into your graveyard.",
+        "Grim Tally",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let root = parsed.abilities.first().expect("one spell ability");
+    let Effect::Dig {
+        rest_destination, ..
+    } = &*root.effect
+    else {
+        panic!("the look lowers to a Dig, got {:?}", root.effect);
+    };
+    assert_eq!(
+        *rest_destination, None,
+        "the whole-set move is not a remainder of the look"
+    );
+    let sub = root.sub_ability.as_deref().expect("the put clause follows");
+    match &*sub.effect {
+        Effect::ChangeZoneAll {
+            origin,
+            destination,
+            target,
+            ..
+        } => {
+            assert_eq!(
+                *origin,
+                Some(Zone::Library),
+                "looked-at cards stay in the library"
+            );
+            assert_eq!(*destination, Zone::Graveyard);
+            assert!(
+                matches!(target, TargetFilter::TrackedSet { .. }),
+                "\"those cards\" names the looked-at set, got {target:?}"
+            );
+        }
+        other => panic!("expected a whole-set ChangeZoneAll, got {other:?}"),
+    }
+}
+
+/// SHAPE (Vulcan Mind-Meld, verbatim): CR 608.2c + CR 115.1 — the targeted
+/// subject performs the exile from the caster's library; "their library" binds
+/// to that declared player; CR 406.3a — each exiled card's grant binds to its
+/// exiling player; CR 609.4b — the standalone "this way" concession folds onto
+/// that grant.
+#[test]
+fn vulcan_mind_meld_parses_subject_exiles_and_exiler_grant() {
+    let chain = parse_effect_chain(
+        "Target opponent looks at the top card of your library, then exiles it face down. You \
+         look at the top two cards of their library, then exile them face down. For each card \
+         exiled this way, the player who exiled it may play it for as long as it remains exiled. \
+         Mana of any type can be spent to cast spells this way.",
+        AbilityKind::Spell,
+    );
+    let effects = collect_chain_effects(&chain);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+        "{effects:?}"
+    );
+    assert_eq!(effects.len(), 3, "{effects:?}");
+    assert!(
+        matches!(
+            effects[0],
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Player { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        effects[0]
+    );
+    assert!(
+        effects[0]
+            .target_filter()
+            .is_some_and(|filter| !filter.is_context_ref()),
+        "the targeted subject is the declared player target: {:?}",
+        effects[0]
+    );
+    assert!(
+        matches!(
+            effects[1],
+            Effect::ExileTop {
+                player: TargetFilter::DeclaredPlayer { .. },
+                count: QuantityExpr::Fixed { value: 2 },
+                face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                ..
+            }
+        ),
+        "{:?}",
+        effects[1]
+    );
+    assert!(
+        matches!(
+            effects[2],
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    mode: Play,
+                    duration: Duration::Permanent,
+                    mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                    ..
+                },
+                target: TargetFilter::TrackedSet { .. },
+                grantee: PermissionGrantee::ObjectExiler,
+            }
+        ),
+        "{:?}",
+        effects[2]
+    );
+    assert!(chain.repeat_for.is_none());
+    assert!(chain
+        .sub_ability
+        .as_deref()
+        .and_then(|sub| sub.sub_ability.as_deref())
+        .is_some_and(|grant| grant.repeat_for.is_none()));
+}
+
+/// SHAPE: CR 608.2c requires the whole fused look/exile instruction to be
+/// represented. Mind-Meld supplies the printed suffix-free sentence. No verified
+/// printed card combines that exact grammar with the synthetic hatching rider;
+/// the nearest printed forms are Mind-Meld and The Dragon-Kami Reborn's different
+/// "Exile one of them face down with a hatching counter on it" instruction.
+#[test]
+fn fused_subject_look_exile_preserves_or_rejects_the_complete_instruction() {
+    let printed = parse_effect_chain(
+        "Target opponent looks at the top card of your library, then exiles it face down.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        printed.effect.as_ref(),
+        Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+            face_down: true,
+            actor: crate::types::ability::LibraryInstructionActor::Player {
+                player: TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::Opponent),
+                    ..
+                })
+            },
+            ..
+        }
+    ));
+    assert!(printed.sub_ability.is_none());
+
+    // Structural synthetic fixture, not a claimed printed card or counter feature.
+    let fragment = "looks at the top card of your library, then exiles it face down with a hatching counter on it";
+    let ast = super::imperative::parse_search_and_creation_ast(
+        fragment,
+        fragment,
+        &mut ParseContext::default(),
+    )
+    .expect("the fused recognizer must claim even an unsupported tail");
+    let gap = super::imperative::lower_search_and_creation_ast(ast);
+    assert_eq!(gap.unimplemented_description(), Some(fragment));
+
+    let unsupported =
+        parse_effect_chain(&format!("Target opponent {fragment}."), AbilityKind::Spell);
+    assert!(
+        collect_chain_effects(&unsupported).iter().any(|effect| {
+            matches!(effect, Effect::Unimplemented { name, .. } if name == "look_exile_tail")
+        }),
+        "the public chain must retain the honest gap, not fall back to Dig: {unsupported:?}"
+    );
 }
