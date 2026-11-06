@@ -10,7 +10,7 @@ use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::{EffectKind, LibraryPosition};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{PersistedGameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -395,7 +395,6 @@ fn merge_pair(runner: &mut GameRunner, host: ObjectId, rider: ObjectId) {
 }
 
 fn round_trip_arrangement(runner: &mut GameRunner) {
-    use engine::types::game_state::PersistedGameState;
     runner
         .state()
         .resolution_stack
@@ -540,6 +539,131 @@ fn hallowed_burial_component_commander_pause_round_trips_the_inherited_arrangeme
     assert_arrangement_finished(&runner);
 }
 
+const OTRIMI_ORACLE: &str = "Mutate {1}{B}{G}{U} (If you cast this spell for its mutate cost, put it over or under target non-Human creature you own. They mutate into the creature on top plus all abilities from under it.)\nTrample\nWhenever this creature deals combat damage to a player, return target creature card with mutate from your graveyard to your hand.";
+
+fn check_hallowed_burial_commander_host_round_trip(with_ordinary: bool, accept_command: bool) {
+    let mut scenario =
+        GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, burial_mana());
+    scenario.with_library_top(P0, &["Sentinel"]);
+    let host = scenario
+        .add_creature_from_oracle(P0, "Otrimi, the Ever-Playful", 6, 6, OTRIMI_ORACLE)
+        .as_legendary()
+        .with_subtypes(vec!["Nightmare", "Beast"])
+        .commander()
+        .id();
+    let rider = scenario
+        .add_creature_to_hand_from_oracle(P0, "Gemrazer", 4, 4, GEMRAZER_ORACLE)
+        .with_subtypes(vec!["Beast"])
+        .id();
+    let ordinary = with_ordinary.then(|| scenario.add_creature(P0, "Ordinary creature", 2, 2).id());
+    let burial = add_hallowed_burial(&mut scenario);
+    let mut runner = scenario.build();
+    merge_pair(&mut runner, host, rider);
+    let sentinel = library(&runner, P0)[0];
+    let cast = runner.cast(burial).resolve();
+    if let Some(ordinary) = ordinary {
+        assert_bottom_arrangement_prompt(cast.final_waiting_for(), P0, &[host, rider, ordinary]);
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![rider, ordinary, host],
+            })
+            .unwrap();
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    let child = runner.state().active_batch_delivery().unwrap();
+    assert_eq!(
+        child
+            .component_delivery_parent
+            .as_ref()
+            .unwrap()
+            .member
+            .object_id,
+        host
+    );
+    round_trip_arrangement(&mut runner);
+    runner
+        .act(GameAction::ChooseReplacement {
+            index: usize::from(!accept_command),
+        })
+        .unwrap();
+    if ordinary.is_none() && !accept_command {
+        match &runner.state().waiting_for {
+            WaitingFor::DigRestSplitChoice { player, cards, .. } => {
+                assert_eq!(*player, P0);
+                let mut offered = cards.clone();
+                offered.sort_unstable();
+                let mut expected = vec![host, rider];
+                expected.sort_unstable();
+                assert_eq!(offered, expected);
+            }
+            other => panic!("expected lone merged permanent's component order, got {other:?}"),
+        }
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![host, rider],
+            })
+            .unwrap();
+    }
+    let mut expected_library = vec![sentinel];
+    if let Some(ordinary) = ordinary {
+        expected_library.extend([rider, ordinary]);
+        if !accept_command {
+            expected_library.push(host);
+        }
+        assert_eq!(zone(&runner, ordinary), Zone::Library);
+    } else if accept_command {
+        expected_library.push(rider);
+    } else {
+        expected_library.extend([host, rider]);
+    }
+    assert_eq!(library(&runner, P0), expected_library);
+    assert_eq!(
+        zone(&runner, host),
+        if accept_command {
+            Zone::Command
+        } else {
+            Zone::Library
+        }
+    );
+    assert_eq!(zone(&runner, rider), Zone::Library);
+    assert_eq!(zone(&runner, burial), Zone::Graveyard);
+    assert_arrangement_finished(&runner);
+}
+
+/// CR 903.9b + CR 903.9c: Otrimi is the representing permanent, with Gemrazer
+/// mutated underneath it. Accepting the command-zone replacement moves only
+/// the commander there, after a resumable, persisted component choice.
+#[test]
+fn hallowed_burial_lone_commander_host_accepts_command_after_round_trip() {
+    check_hallowed_burial_commander_host_round_trip(false, true);
+}
+
+/// CR 903.9b + CR 730.3a: Otrimi represents the permanent and Gemrazer is
+/// underneath; declining the replacement preserves the component order choice.
+#[test]
+fn hallowed_burial_lone_commander_host_declines_command_after_round_trip() {
+    check_hallowed_burial_commander_host_round_trip(false, false);
+}
+
+/// CR 903.9b + CR 903.9c + CR 401.4: Otrimi represents the permanent and
+/// Gemrazer is underneath; redirecting the host preserves the other cards' order.
+#[test]
+fn hallowed_burial_interleaved_commander_host_accepts_command_after_round_trip() {
+    check_hallowed_burial_commander_host_round_trip(true, true);
+}
+
+/// CR 903.9b + CR 730.3a + CR 401.4: Otrimi represents the permanent and
+/// Gemrazer is underneath; declining retains the full interleaved physical order.
+#[test]
+fn hallowed_burial_interleaved_commander_host_declines_command_after_round_trip() {
+    check_hallowed_burial_commander_host_round_trip(true, false);
+}
+
 /// CR 903.9b + CR 401.4: an earlier consultation can pause while the seeded
 /// permanent has not yet been consulted. Its original submitted order survives.
 #[test]
@@ -661,10 +785,6 @@ fn hallowed_burial_owner_concedes_while_seeded_group_is_live() {
     let burial = add_hallowed_burial(&mut scenario);
     let mut runner = scenario.build();
     merge_pair(&mut runner, host, rider);
-    let departing = engine::types::identifiers::ObjectIncarnationRef::of(
-        host,
-        runner.state().objects[&host].incarnation,
-    );
     let l0 = library(&runner, P0)[0];
     let l2 = library(&runner, P2)[0];
     let cast = runner.cast(burial).resolve();
@@ -692,14 +812,10 @@ fn hallowed_burial_owner_concedes_while_seeded_group_is_live() {
         .resolution_stack
         .validate_at_rest(&runner.state().waiting_for)
         .unwrap();
-    if let Some(owner) = runner.state().active_batch_delivery() {
-        assert!(!owner
-            .staged
-            .iter()
-            .flat_map(|staged| &staged.arrangements)
-            .flat_map(|group| &group.batch.members)
-            .any(|entry| entry.departing_permanent == Some(departing)));
-    }
+    // The batch has already settled. Entry pruning is witnessed by the lib rows
+    // `prune_inherited_entries_keeps_link_equality` and
+    // `component_detach_strips_inherited_foreign_entries`.
+    assert!(runner.state().active_batch_delivery().is_none());
     assert_eq!(library(&runner, P0), vec![l0, a]);
     assert_eq!(library(&runner, P2), vec![l2, b]);
     assert_arrangement_finished(&runner);

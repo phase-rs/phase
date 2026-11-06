@@ -2758,8 +2758,13 @@ fn deliver_staged_members(
                 // from it when no sidecar classification exists. A host choice
                 // pauses AFTER the entry was delivered, so its retained slice
                 // already witnesses the member's terminal.
-                let paused_current =
-                    staged_delivery_pause(state, &member, &event, &events[delivery_start..]);
+                let paused_current = staged_delivery_pause(
+                    state,
+                    owner.logical_zone_change_group.logical_group_id,
+                    &member,
+                    &event,
+                    &events[delivery_start..],
+                );
                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                     state,
                     &mut owner.logical_zone_change_group,
@@ -2808,18 +2813,29 @@ fn attach_member_drain(
     }
 }
 
-/// Build the pause record for one delivery-stage pause: the authoritative
-/// parked boundary when it is this member's, otherwise a fresh record, with
-/// this member's own delivered slice retained for terminal derivation.
+/// Build the pause record for one delivery-stage pause, preferring a component
+/// child's retained parent boundary to its component-specific replacement.
+/// Retain this member's own delivered slice for terminal derivation.
 fn staged_delivery_pause(
     state: &GameState,
+    group: LogicalZoneChangeGroupId,
     member: &StagedBatchMember,
     event: &ProposedEvent,
     delivery_events: &[GameEvent],
 ) -> PendingZoneChangeDelivery {
-    let mut paused = state
-        .pending_zone_change_delivery_from_replacement()
-        .filter(|parked| parked.member == member.identity)
+    // CR 903.9b + CR 903.9c: a commander's component replacement is a child
+    // event; its parent must retain the original whole-permanent boundary.
+    let delegated = state
+        .active_batch_delivery()
+        .and_then(|child| child.component_delivery_parent.as_ref())
+        .filter(|parent| parent.parent_group_id == group);
+    let mut paused = delegated
+        .map(|parent| PendingZoneChangeDelivery::new(parent.member, parent.expected_event.clone()))
+        .or_else(|| {
+            state
+                .pending_zone_change_delivery_from_replacement()
+                .filter(|parked| parked.member == member.identity)
+        })
         .unwrap_or_else(|| PendingZoneChangeDelivery::new(member.identity, event.clone()));
     paused.face_down_in_exile = member.request.face_down_in_exile;
     paused.append_delivery_events(delivery_events);
@@ -11764,12 +11780,17 @@ mod hand_entry_receiver_tests {
 #[cfg(test)]
 mod staged_batch_tests {
     use super::*;
+    use crate::game::effects::change_zone::{
+        fold_physical_order_to_departures, open_owner_library_arrangement,
+        submit_owner_library_order, submitted_owner_arrangements, OwnerArrangementInstruction,
+        OwnerLibraryOrderProgress,
+    };
     use crate::game::zones::create_object;
-    use crate::types::ability::LibraryPosition;
+    use crate::types::ability::{DigRestOrder, LibraryPosition};
     use crate::types::ability::{Effect, ResolvedAbility};
     use crate::types::game_state::{
-        BatchCompletion, StagedBatchMemberState, StagedDestroyOperation, StagedMemberOperation,
-        ZoneMoveCompletion,
+        BatchCompletion, DigDeliveryStage, StagedBatchMemberState, StagedDestroyOperation,
+        StagedMemberOperation, ZoneMoveCompletion,
     };
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
@@ -12122,11 +12143,6 @@ mod staged_batch_tests {
     /// discard a merged population's owner-submitted physical rank authority.
     #[test]
     fn staged_numbered_owner_arrangement_preserves_component_interleaving() {
-        use crate::game::effects::change_zone::{
-            fold_physical_order_to_departures, open_owner_library_arrangement,
-            submit_owner_library_order, submitted_owner_arrangements, OwnerArrangementInstruction,
-            OwnerLibraryOrderProgress,
-        };
         let mut scenario = crate::game::scenario::GameScenario::new();
         let player = PlayerId(0);
         scenario.with_library_top(player, &["L0", "L1", "L2"]);
@@ -13769,9 +13785,6 @@ mod staged_batch_tests {
     /// ordering choice; only that answer may resume the shared epilogue.
     #[test]
     fn staged_settle_with_live_completion_prompt_returns_parked() {
-        use crate::types::ability::DigRestOrder;
-        use crate::types::game_state::DigDeliveryStage;
-
         // Abundance's printed remainder: "put all other cards revealed this
         // way on the bottom of your library in any order." This isolates its
         // existing RevealRestPile completion after the kept card's consultation.
@@ -14031,7 +14044,7 @@ mod staged_batch_tests {
         // member's exact incarnation.
         let mut delivered = Vec::new();
         crate::game::zones::move_to_zone(&mut state, creature, Zone::Graveyard, &mut delivered);
-        let paused = staged_delivery_pause(&state, &member, &event, &delivered);
+        let paused = staged_delivery_pause(&state, group_id, &member, &event, &delivered);
         assert_eq!(
             paused.terminal_completion_after_resume(),
             ZoneMoveCompletion::Moved,

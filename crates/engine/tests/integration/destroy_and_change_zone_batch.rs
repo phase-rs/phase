@@ -1812,95 +1812,102 @@ fn c12_forwarded_zone_result_binds_staged_arrivals_after_pause() {
 #[test]
 fn deem_inferior_mutated_owner_orders_components_second_from_top() {
     const DEEM_INFERIOR: &str = "This spell costs {1} less to cast for each card you've drawn this turn.\nThe owner of target nonland permanent puts it into their library second from the top or on the bottom.";
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_library_top(P1, &["L0", "L1", "L2"]);
-    let host = scenario.add_creature(P1, "Host", 2, 2).id();
-    let rider = scenario.add_creature_to_hand(P1, "Rider", 3, 3).id();
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Deem Inferior", false, DEEM_INFERIOR)
-        .with_mana_cost(ManaCost::zero())
-        .id();
-    let mut runner = scenario.build();
-    engine::game::merge::merge_object_onto(
-        runner.state_mut(),
-        rider,
-        host,
-        engine::game::merge::MergeSide::Bottom,
-        &mut Vec::new(),
-    );
-    let sentinels: Vec<_> = runner.state().library_of(P1).iter().copied().collect();
-    runner.cast(spell).target_objects(&[host]).commit();
-    for _ in 0..16 {
-        if matches!(
-            runner.state().waiting_for,
-            WaitingFor::TopOrBottomChoice { .. }
-        ) {
-            break;
+    for reverse in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P1, &["L0", "L1", "L2"]);
+        let host = scenario.add_creature(P1, "Host", 2, 2).id();
+        let rider = scenario.add_creature_to_hand(P1, "Rider", 3, 3).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Deem Inferior", false, DEEM_INFERIOR)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        engine::game::merge::merge_object_onto(
+            runner.state_mut(),
+            rider,
+            host,
+            engine::game::merge::MergeSide::Bottom,
+            &mut Vec::new(),
+        );
+        let sentinels: Vec<_> = runner.state().library_of(P1).iter().copied().collect();
+        runner.cast(spell).target_objects(&[host]).commit();
+        for _ in 0..16 {
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::TopOrBottomChoice { .. }
+            ) {
+                break;
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            runner
+                .act(GameAction::PassPriority)
+                .expect("resolve Deem Inferior");
         }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::TopOrBottomChoice {
+                player: P1,
+                object_id,
+                top_position: engine::types::ability::LibraryPosition::NthFromTop { n: 2 },
+            } if object_id == host
+        ));
+        runner
+            .act(GameAction::ChooseTopOrBottom { top: true })
+            .expect("P1 chooses second from top");
+        match &runner.state().waiting_for {
+            WaitingFor::DigRestSplitChoice {
+                player,
+                library_owner,
+                cards,
+                top_count,
+                scope,
+                ..
+            } => {
+                assert_eq!(
+                    (*player, *library_owner),
+                    (P1, P1),
+                    "P0 never arranges P1's cards"
+                );
+                assert_eq!(*scope, engine::types::ability::DigRestSplitScope::OrderOnly);
+                assert_eq!(*top_count, 2, "the UI presents the numbered block top-down");
+                let mut offered = cards.clone();
+                offered.sort_unstable();
+                let mut expected = vec![host, rider];
+                expected.sort_unstable();
+                assert_eq!(offered, expected);
+            }
+            other => panic!("expected P1's component order, got {other:?}"),
+        }
+        let order = if reverse {
+            [rider, host]
+        } else {
+            [host, rider]
+        };
+        runner
+            .act(GameAction::SelectCards {
+                cards: order.to_vec(),
+            })
+            .expect("P1 submits the component permutation");
+        assert_eq!(
+            runner
+                .state()
+                .library_of(P1)
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [sentinels[0], order[0], order[1], sentinels[1], sentinels[2]]
+        );
         assert!(matches!(
             runner.state().waiting_for,
             WaitingFor::Priority { .. }
         ));
-        runner
-            .act(GameAction::PassPriority)
-            .expect("resolve Deem Inferior");
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
     }
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::TopOrBottomChoice {
-            player: P1,
-            object_id,
-            top_position: engine::types::ability::LibraryPosition::NthFromTop { n: 2 },
-        } if object_id == host
-    ));
-    runner
-        .act(GameAction::ChooseTopOrBottom { top: true })
-        .expect("P1 chooses second from top");
-    match &runner.state().waiting_for {
-        WaitingFor::DigRestSplitChoice {
-            player,
-            library_owner,
-            cards,
-            top_count,
-            scope,
-            ..
-        } => {
-            assert_eq!(
-                (*player, *library_owner),
-                (P1, P1),
-                "P0 never arranges P1's cards"
-            );
-            assert_eq!(*scope, engine::types::ability::DigRestSplitScope::OrderOnly);
-            assert_eq!(*top_count, 2, "the UI presents the numbered block top-down");
-            let mut offered = cards.clone();
-            offered.sort_unstable();
-            let mut expected = vec![host, rider];
-            expected.sort_unstable();
-            assert_eq!(offered, expected);
-        }
-        other => panic!("expected P1's component order, got {other:?}"),
-    }
-    runner
-        .act(GameAction::SelectCards {
-            cards: vec![rider, host],
-        })
-        .expect("P1 submits the component permutation");
-    assert_eq!(
-        runner
-            .state()
-            .library_of(P1)
-            .iter()
-            .copied()
-            .collect::<Vec<_>>(),
-        [sentinels[0], rider, host, sentinels[1], sentinels[2]]
-    );
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::Priority { .. }
-    ));
-    assert!(runner.state().stack.is_empty());
-    assert!(runner.state().resolution_stack.is_empty());
 }
 
 /// CR 401.7: a nonmerged tuck has no ordering prompt and uses the exact

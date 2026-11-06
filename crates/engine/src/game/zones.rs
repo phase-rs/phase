@@ -5383,6 +5383,64 @@ mod tests {
         );
     }
 
+    /// CR 401.4 + CR 401.7: either submitted order controls the final numbered
+    /// block, including the identity order that same-depth insertion reverses.
+    #[test]
+    fn arranged_library_slot_numbered_block_follows_both_submitted_orders() {
+        for reverse in [false, true] {
+            for count in [3, 1, 0] {
+                let mut state = setup();
+                let sentinels: Vec<_> = (0..count)
+                    .map(|index| {
+                        create_object(
+                            &mut state,
+                            CardId(index + 10),
+                            PlayerId(0),
+                            format!("L{index}"),
+                            Zone::Library,
+                        )
+                    })
+                    .collect();
+                state.players[0].library = sentinels.iter().copied().collect();
+                let a = create_object(
+                    &mut state,
+                    CardId(1),
+                    PlayerId(0),
+                    "A".into(),
+                    Zone::Graveyard,
+                );
+                let b = create_object(
+                    &mut state,
+                    CardId(2),
+                    PlayerId(0),
+                    "B".into(),
+                    Zone::Graveyard,
+                );
+                let order = if reverse { [b, a] } else { [a, b] };
+                deliver_grouped(
+                    &mut state,
+                    &order,
+                    &[a, b],
+                    &LibraryPosition::NthFromTop { n: 2 },
+                    PlayerId(0),
+                    &mut Vec::new(),
+                );
+                let mut expected = sentinels;
+                let base = expected.len().min(1);
+                expected.splice(base..base, order);
+                assert_eq!(
+                    state
+                        .library_of(PlayerId(0))
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "initial library length {count}, reverse {reverse}"
+                );
+            }
+        }
+    }
+
     /// CR 401.7: a singleton numbered group uses the ordinary clamped slot.
     #[test]
     fn arranged_library_slot_numbered_singleton_matches_ordinary_insertion() {

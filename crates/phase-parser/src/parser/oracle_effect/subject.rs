@@ -3252,7 +3252,7 @@ pub(super) fn parse_owner_subject(subject: &str, ctx: &mut ParseContext) -> Opti
         }) {
         (true, object_text)
     } else {
-        let (_, object_text) = all_consuming(terminated(
+        let (_, (_, owner_suffix)) = all_consuming(pair(
             alt((
                 take_until::<_, _, OracleError<'_>>("'s owner"),
                 take_until("\u{2019}s owner"),
@@ -3261,7 +3261,9 @@ pub(super) fn parse_owner_subject(subject: &str, ctx: &mut ParseContext) -> Opti
         ))
         .parse(lower.as_str())
         .ok()?;
-        (false, &subject[..object_text.len()])
+        // allow-noncombinator: TextPair dual-string mapping of the suffix already recognized by nom above, not parsing dispatch.
+        let object = TextPair::new(subject, &lower).strip_suffix(owner_suffix)?;
+        (false, object.original)
     };
     let (declared_text, multi_target) = super::strip_optional_target_prefix(object_text);
     let declared_lower = declared_text.to_lowercase();
@@ -3386,27 +3388,20 @@ fn parse_subject_application_for(
         // the Red Reaper) silently bound the target to the trigger
         // controller's own creatures.
         let (filter, rest) = parse_target_with_ctx(subject, ctx);
-        // CR 608.2c + CR 109.4: "target <filter>'s controller/owner <verb>s it"
-        // (Arcum Dagsson, Mercy Killing) — the ability TARGETS <filter>; its
-        // controller/owner performs the verb on it ("it" = that target). Preserve
-        // <filter> as the ability's object target while shifting the acting
-        // subject to the target's controller/owner, so the imperative lowering
-        // declares a `TargetOnly{<filter>}` slot (see `lower_subject_predicate_ast`)
-        // against which `ParentTarget`/`ParentTargetController` resolve. Only the
-        // exact possessive-controller/owner suffix (nothing else) qualifies.
-        if let Ok((_, actor)) = all_consuming(alt((
-            value(
-                TargetFilter::ParentTargetController,
-                alt((
-                    tag::<_, _, OracleError<'_>>("'s controller"),
-                    tag("\u{2019}s controller"),
-                )),
-            ),
-            value(
-                TargetFilter::ParentTargetOwner,
-                alt((tag("'s owner"), tag("\u{2019}s owner"))),
-            ),
-        )))
+        // CR 608.2c + CR 109.4: "target <filter>'s controller <verb>s it"
+        // (Arcum Dagsson) — the ability TARGETS <filter>; its controller
+        // performs the verb on it ("it" = that target). Preserve <filter> as
+        // the ability's object target while shifting the acting subject to its
+        // controller, so the imperative lowering declares a `TargetOnly` slot
+        // against which `ParentTarget`/`ParentTargetController` resolve.
+        // Owner subjects are classified only by `parse_owner_subject` above.
+        if let Ok((_, actor)) = all_consuming(value(
+            TargetFilter::ParentTargetController,
+            alt((
+                tag::<_, _, OracleError<'_>>("'s controller"),
+                tag("\u{2019}s controller"),
+            )),
+        ))
         .parse(rest.trim())
         {
             return Some(SubjectApplication {
