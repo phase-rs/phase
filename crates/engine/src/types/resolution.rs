@@ -2238,6 +2238,12 @@ impl ResolutionStack {
                 && matches!(&link.approved_event, crate::types::proposed_event::ProposedEvent::ZoneChange { object_id, .. } if *object_id == link.member.object_id)
                 && child.logical_zone_change_group.prospective_battlefield_members.iter()
                     .any(|member| member.identity == link.member)
+                && link.inherited_arrangements.iter().eq(
+                    parent.staged.iter().flat_map(|staged| &staged.arrangements)
+                        .filter(|arrangement| arrangement.batch.members.iter().any(|entry| {
+                            entry.departing_permanent == Some(link.member)
+                        }))
+                )
         });
         if valid {
             Ok(())
@@ -2425,7 +2431,7 @@ impl ResolutionStack {
             let child = self
                 .active_batch_delivery_mut()
                 .expect("checked active child");
-            child.component_delivery_parent = None;
+            child.detach_component_parent();
         }
         Ok(())
     }
@@ -2504,15 +2510,16 @@ impl ResolutionStack {
         if !abandoned.is_empty() {
             for frame in self.frames.iter_mut() {
                 if let ResolutionFrame::BatchDelivery(child) = frame {
-                    if child
+                    if let Some(link) = child
                         .component_delivery_parent
                         .as_ref()
-                        .is_some_and(|link| {
-                            link.parent_group_id == identity.group
-                                && abandoned.contains(&link.member)
-                        })
+                        .filter(|link| link.parent_group_id == identity.group)
                     {
-                        child.component_delivery_parent = None;
+                        if abandoned.contains(&link.member) {
+                            child.detach_component_parent();
+                        } else {
+                            child.prune_inherited_entries(&abandoned);
+                        }
                     }
                 }
             }
@@ -7902,6 +7909,7 @@ mod tests {
                 member: identity,
                 expected_event: event.clone(),
                 approved_event: event.clone(),
+                inherited_arrangements: Vec::new(),
             }),
         );
         let mut stack = ResolutionStack::default();

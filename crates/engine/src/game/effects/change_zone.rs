@@ -2,7 +2,7 @@ use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::game_state::RandomDraw;
 use rand::Rng;
 
-use crate::game::game_object::AttachTarget;
+use crate::game::game_object::{AttachTarget, GameObject};
 #[cfg(test)]
 use crate::game::zones;
 use crate::types::ability::{
@@ -2232,6 +2232,22 @@ fn mass_library_order_effect_zone_choice(
     }
 }
 
+/// CR 730.2: a merged permanent is represented by its nonempty physical pile.
+fn merged_components_of(object: &GameObject) -> Option<&[ObjectId]> {
+    (!object.merged_components.is_empty()).then_some(object.merged_components.as_slice())
+}
+
+/// CR 730.2 + CR 730.3a: all physical components share the permanent's
+/// pre-departure identity, regardless of which card represents it.
+fn merged_departure_of(state: &GameState, id: ObjectId) -> Option<ObjectIncarnationRef> {
+    state.battlefield.iter().find_map(|permanent_id| {
+        let permanent = state.objects.get(permanent_id)?;
+        let components = merged_components_of(permanent)?;
+        (*permanent_id == id || components.contains(&id))
+            .then(|| ObjectIncarnationRef::from_object(permanent))
+    })
+}
+
 /// Freeze the exact object incarnation and origin that a
 /// mass library-order prompt may arrange. This is deliberately captured before
 /// the first selection is published; a later zone change creates a distinct
@@ -2252,6 +2268,7 @@ fn snapshot_mass_library_order_batch(
                 MassLibraryOrderMember {
                     identity: ObjectIncarnationRef::from_object(object),
                     origin: object.zone,
+                    departing_permanent: merged_departure_of(state, object_id),
                 }
             })
             .collect(),
@@ -2329,7 +2346,7 @@ pub(crate) enum OwnerLibraryOrderProgress {
     NextOwner(PlayerId),
     /// Every owner has chosen: the complete arrangement, as APNAP owner
     /// segments each in that owner's order, to be moved as one batch.
-    Complete(Vec<ObjectId>),
+    Complete(Vec<MassLibraryOrderBatch>),
 }
 
 /// CR 101.4 + CR 401.4: record one owner's arrangement. Owners choose in APNAP
@@ -2350,17 +2367,26 @@ pub(crate) fn submit_owner_library_order(
     let Some(mut pending) =
         carrier.filter(|pending| owner_arrangement_carrier_binds(state, pending, instruction))
     else {
-        return OwnerLibraryOrderProgress::Complete(chosen.to_vec());
+        return OwnerLibraryOrderProgress::Complete(vec![snapshot_mass_library_order_batch(
+            state,
+            owner,
+            arranger,
+            chosen.to_vec(),
+        )]);
     };
     if pending.remaining_batches.is_empty() {
         // CR 400.7: a collected member that changed zones is a new object the instruction no longer finds.
-        let mut arranged: Vec<ObjectId> = pending
+        let mut arranged: Vec<MassLibraryOrderBatch> = pending
             .arranged_batches
             .iter()
-            .flat_map(|batch| live_mass_library_order_batch(state, batch).members)
-            .map(|member| member.identity.object_id)
+            .map(|batch| live_mass_library_order_batch(state, batch))
             .collect();
-        arranged.extend_from_slice(chosen);
+        arranged.push(snapshot_mass_library_order_batch(
+            state,
+            owner,
+            arranger,
+            chosen.to_vec(),
+        ));
         return OwnerLibraryOrderProgress::Complete(arranged);
     }
     pending
@@ -2372,6 +2398,59 @@ pub(crate) fn submit_owner_library_order(
             chosen.to_vec(),
         ));
     OwnerLibraryOrderProgress::NextOwner(open_next_owner_library_order(state, pending))
+}
+
+/// CR 730.3a: order departures by the first occurrence of each represented
+/// permanent, before applying the instruction's insertion-direction reversal.
+pub(crate) fn fold_physical_order_to_departures(
+    batches: &[MassLibraryOrderBatch],
+) -> Vec<ObjectId> {
+    let mut departures = Vec::new();
+    for member in batches.iter().flat_map(|batch| &batch.members) {
+        let id = member
+            .departing_permanent
+            .unwrap_or(member.identity)
+            .object_id;
+        if !departures.contains(&id) {
+            departures.push(id);
+        }
+    }
+    departures
+}
+
+/// CR 401.4 + CR 730.3a: the submitted physical order remains the one order
+/// authority while the folded permanent and its component child are delivered.
+pub(crate) fn submitted_owner_arrangements(
+    batches: Vec<MassLibraryOrderBatch>,
+    position: &LibraryPosition,
+) -> Vec<crate::types::game_state::StagedLibraryArrangement> {
+    batches
+        .into_iter()
+        .filter_map(|mut batch| {
+            batch.arranger = None;
+            batch
+                .members
+                .retain(|member| member.origin != Zone::Library);
+            // CR 401.4: ordinary numbered prompts retain their established
+            // repeated-insertion mapping through the derived group. Only a
+            // physical-component order must override that mapping with a seed.
+            if matches!(position, LibraryPosition::NthFromTop { .. })
+                && batch
+                    .members
+                    .iter()
+                    .all(|member| member.departing_permanent.is_none())
+            {
+                return None;
+            }
+            (!batch.members.is_empty()).then(|| {
+                crate::types::game_state::StagedLibraryArrangement {
+                    position: position.clone(),
+                    batch,
+                    status: crate::types::game_state::StagedArrangementStatus::Submitted,
+                }
+            })
+        })
+        .collect()
 }
 
 /// CR 401.4 + CR 101.4: open the owners' arrangement of cards an effect puts
@@ -2394,6 +2473,19 @@ pub(crate) fn open_owner_library_arrangement(
     track_exiled_by_source: bool,
     duration: Option<Duration>,
 ) {
+    // CR 401.4 + CR 730.3a: owners arrange physical cards, including every
+    // component of any merged permanent; each card goes to its own owner.
+    let physical: Vec<ObjectId> = owner_batches
+        .into_iter()
+        .flat_map(|(_, ids)| ids)
+        .flat_map(|id| {
+            let components = merged_components_of(&state.objects[&id]);
+            std::iter::once(id)
+                .filter(move |_| components.is_none())
+                .chain(components.into_iter().flatten().copied())
+        })
+        .collect();
+    let owner_batches = group_object_ids_by_owner_apnap(state, &physical);
     let (first_owner, first_cards) = owner_batches
         .first()
         .expect("an owner library arrangement requires at least one owner batch")
@@ -3094,7 +3186,7 @@ pub fn resolve_all(
         ability,
         filter_controller,
     );
-    let matching: Vec<_> = if let Some(objects) = selected_objects {
+    let mut matching: Vec<_> = if let Some(objects) = selected_objects {
         objects
     } else if let Some(player) = player_scope {
         // Player-scoped mass move: select every card in any of the origin zones
@@ -3162,6 +3254,9 @@ pub fn resolve_all(
             .map(|(id, _)| *id)
             .collect()
     };
+    // CR 730.2: absorbed cards represent one permanent, not additional
+    // permanents that a battlefield-origin mass instruction can select.
+    matching.retain(|id| !state.is_absorbed_merge_component(*id));
     // CR 607.2a + CR 730.3c: the linked return finds every object an exiled merged permanent became.
     let matching = match &target_filter {
         TargetFilter::ExiledBySource => {
@@ -3267,10 +3362,18 @@ pub fn resolve_all(
     let mut logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &matching);
     let logical_group_event_start = events.len();
-    // CR 101.4 + CR 608.2c: two or more matched objects are one announced
-    // simultaneous population; the staged owner retains every member across a
-    // pause. The early owner-arrangement branch above stays legacy.
-    if matching.len() >= 2 {
+    // CR 101.4 + CR 730.3a: multiple objects, or the physical components of
+    // one merged permanent, need staged ownership through a component pause.
+    // The early owner-arrangement branch above stays unchanged.
+    if matching.len() >= 2
+        || matching.iter().any(|id| {
+            state
+                .objects
+                .get(id)
+                .and_then(merged_components_of)
+                .is_some()
+        })
+    {
         let ctx = ChangeZoneIterationCtx {
             source_id: ability.source_id,
             controller: ability.controller,
@@ -9936,10 +10039,10 @@ mod tests {
                 ),
                 arranged_batches: vec![MassLibraryOrderBatch {
                     owner: PlayerId(0),
-                    members: vec![MassLibraryOrderMember {
-                        identity: ObjectIncarnationRef::from_object(&state.objects[&p0_card]),
-                        origin: Zone::Library,
-                    }],
+                    members: vec![MassLibraryOrderMember::card(
+                        ObjectIncarnationRef::from_object(&state.objects[&p0_card]),
+                        Zone::Library,
+                    )],
                     arranger: None,
                 }],
                 resolving_entry,
@@ -15402,5 +15505,42 @@ mod exile_card_population_tests {
             }
             other => panic!("expected EffectZoneChoice, got {other:?}"),
         }
+    }
+
+    /// CR 730.2: the origin scan selects the merged permanent once, not the
+    /// absorbed rider as another creature.
+    #[test]
+    fn resolve_all_scan_skips_absorbed_merge_components() {
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        let host = scenario.add_creature(P0, "Host", 2, 2).id();
+        let rider = scenario.add_creature_to_hand(P0, "Rider", 3, 3).id();
+        let mut runner = scenario.build();
+        crate::game::merge::merge_object_onto(
+            runner.state_mut(),
+            rider,
+            host,
+            crate::game::merge::MergeSide::Bottom,
+            &mut Vec::new(),
+        );
+        let mut ability = change_zone_all(
+            Zone::Battlefield,
+            Zone::Library,
+            TargetFilter::Typed(TypedFilter::creature()),
+        );
+        if let Effect::ChangeZoneAll {
+            library_position, ..
+        } = &mut ability.effect
+        {
+            *library_position = Some(LibraryPosition::Bottom);
+        }
+        resolve_all(runner.state_mut(), &ability, &mut Vec::new()).unwrap();
+        assert!(
+            matches!(
+                &runner.state().waiting_for,
+                WaitingFor::DigRestSplitChoice { cards, .. } if cards.len() == 2
+                    && cards.contains(&host) && cards.contains(&rider)
+            ),
+            "a lone merged permanent uses its component prompt, never the mass owner prompt"
+        );
     }
 }

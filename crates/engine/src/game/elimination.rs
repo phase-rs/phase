@@ -2825,6 +2825,7 @@ mod tests {
                 member: paused.member,
                 expected_event: paused.expected_event.clone(),
                 approved_event: paused.expected_event.clone(),
+                inherited_arrangements: Vec::new(),
             }),
             logical_zone_change_group: child_group,
             paused_current: None,
@@ -5663,10 +5664,7 @@ mod r4b_staged_elimination_tests {
                 arranger: None,
                 members: members
                     .iter()
-                    .map(|member| MassLibraryOrderMember {
-                        identity: member.identity,
-                        origin: Zone::Library,
-                    })
+                    .map(|member| MassLibraryOrderMember::card(member.identity, Zone::Library))
                     .collect(),
             },
             status: StagedArrangementStatus::Offered,
@@ -5785,10 +5783,7 @@ mod r4b_staged_elimination_tests {
                 arranger: None,
                 members: members
                     .iter()
-                    .map(|member| MassLibraryOrderMember {
-                        identity: member.identity,
-                        origin: Zone::Battlefield,
-                    })
+                    .map(|member| MassLibraryOrderMember::card(member.identity, Zone::Battlefield))
                     .collect(),
             },
             status: StagedArrangementStatus::Offered,

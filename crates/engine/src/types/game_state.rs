@@ -5423,6 +5423,19 @@ pub struct MassLibraryOrderMember {
     pub identity: ObjectIncarnationRef,
     /// The zone this member occupied when the library-order prompt was created.
     pub origin: Zone,
+    /// CR 730.3a: the pre-departure permanent represented by this physical card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub departing_permanent: Option<ObjectIncarnationRef>,
+}
+
+impl MassLibraryOrderMember {
+    pub fn card(identity: ObjectIncarnationRef, origin: Zone) -> Self {
+        Self {
+            identity,
+            origin,
+            departing_permanent: None,
+        }
+    }
 }
 
 /// One owner's exact members of a mass library-order instruction.
@@ -6716,6 +6729,8 @@ pub struct PendingComponentDeliveryParent {
     pub member: ObjectIncarnationRef,
     pub expected_event: ProposedEvent,
     pub approved_event: ProposedEvent,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited_arrangements: Vec<StagedLibraryArrangement>,
 }
 
 /// CR 603.10a + CR 616.1: The not-yet-delivered tail of a simultaneous
@@ -6812,6 +6827,63 @@ pub struct PendingBatchDeliveries {
 }
 
 impl PendingBatchDeliveries {
+    /// CR 800.4a: detached components retain only their own submitted entries.
+    pub(crate) fn detach_component_parent(&mut self) {
+        let Some(link) = self.component_delivery_parent.take() else {
+            return;
+        };
+        let Some(staged) = self.staged.as_mut() else {
+            return;
+        };
+        for arrangement in &mut staged.arrangements {
+            if link.inherited_arrangements.contains(arrangement) {
+                arrangement.batch.members.retain(|entry| {
+                    staged
+                        .members
+                        .iter()
+                        .any(|member| member.identity == entry.identity)
+                });
+                arrangement.status = StagedArrangementStatus::Submitted;
+            }
+        }
+        staged
+            .arrangements
+            .retain(|group| !group.batch.members.is_empty());
+        staged.arrangement_cursor = staged.arrangement_cursor.min(staged.arrangements.len());
+    }
+
+    /// CR 800.4a: prune the copied authority and its live inherited group together.
+    pub(crate) fn prune_inherited_entries(&mut self, abandoned: &[ObjectIncarnationRef]) {
+        let Some(link) = self.component_delivery_parent.as_mut() else {
+            return;
+        };
+        for inherited in &mut link.inherited_arrangements {
+            let live = self.staged.as_mut().and_then(|staged| {
+                staged
+                    .arrangements
+                    .iter_mut()
+                    .find(|group| *group == inherited)
+            });
+            inherited.batch.members.retain(|entry| {
+                !abandoned.contains(&entry.identity)
+                    && entry
+                        .departing_permanent
+                        .is_none_or(|id| !abandoned.contains(&id))
+            });
+            if let Some(live) = live {
+                *live = inherited.clone();
+            }
+        }
+        link.inherited_arrangements
+            .retain(|group| !group.batch.members.is_empty());
+        if let Some(staged) = &mut self.staged {
+            staged
+                .arrangements
+                .retain(|group| !group.batch.members.is_empty());
+            staged.arrangement_cursor = staged.arrangement_cursor.min(staged.arrangements.len());
+        }
+    }
+
     /// CR 608.2c: this batch is the ChangeZone family. The typed completion's
     /// `ChangeZonePopulationSettled` tail is the only family authority, so no
     /// parallel flag can disagree with it.
@@ -6923,7 +6995,7 @@ impl PendingBatchDeliveries {
 
         self.validate_staged_stage(staged)?;
         for arrangement in &staged.arrangements {
-            Self::validate_staged_arrangement(staged, arrangement)?;
+            self.validate_staged_arrangement(staged, arrangement)?;
         }
         // CR 401.4: one owner/position set has exactly one arrangement authority.
         let mut keys = Vec::with_capacity(staged.arrangements.len());
@@ -6958,11 +7030,11 @@ impl PendingBatchDeliveries {
                         );
                     };
                     if indices.iter().any(|&index| {
-                        !arrangement
-                            .batch
-                            .members
-                            .iter()
-                            .any(|ordered| ordered.identity == staged.members[index].identity)
+                        !arrangement.batch.members.iter().any(|ordered| {
+                            ordered.identity == staged.members[index].identity
+                                || ordered.departing_permanent
+                                    == Some(staged.members[index].identity)
+                        })
                     }) {
                         return Err(
                             "a positioned staged approval is missing from its arrangement"
@@ -7261,7 +7333,61 @@ impl PendingBatchDeliveries {
         Ok(())
     }
 
+    /// CR 401.4 + CR 730.3a: one entry's authority is the physical card or
+    /// the permanent it represents. During approval, the frozen membership
+    /// authorizes seeds; only after consultation does the approved position do so.
+    fn staged_arrangement_entry_member<'a>(
+        staged: &'a StagedBatchDelivery,
+        arrangement: &StagedLibraryArrangement,
+        ordered: &MassLibraryOrderMember,
+        stage: BatchDeliveryStage,
+    ) -> Result<Option<&'a StagedBatchMember>, String> {
+        if let Some(member) = staged
+            .members
+            .iter()
+            .find(|member| member.identity.object_id == ordered.identity.object_id)
+        {
+            if member.identity != ordered.identity {
+                return Err("a staged arrangement rebinds a stale incarnation".to_string());
+            }
+            if member.owner != arrangement.batch.owner {
+                return Err("a staged arrangement mixes library owners".to_string());
+            }
+            return Ok(Some(member));
+        }
+        let covering = ordered.departing_permanent.and_then(|identity| {
+            staged
+                .members
+                .iter()
+                .find(|member| member.identity == identity)
+        });
+        let Some(member) = covering else {
+            return Ok(None);
+        };
+        if ordered.origin != Zone::Battlefield {
+            return Err("a staged component arrangement has a nonbattlefield origin".to_string());
+        }
+        let at_key = match stage {
+            BatchDeliveryStage::Approving => true,
+            BatchDeliveryStage::Arranging | BatchDeliveryStage::Delivering => {
+                matches!(
+                    member.state,
+                    StagedBatchMemberState::Approved | StagedBatchMemberState::Terminal
+                ) && matches!(
+                    member.approved_event.as_ref(),
+                    Some(ProposedEvent::ZoneChange {
+                        to: Zone::Library,
+                        library_placement: Some(position),
+                        ..
+                    }) if *position == arrangement.position
+                )
+            }
+        };
+        Ok(at_key.then_some(member))
+    }
+
     fn validate_staged_arrangement(
+        &self,
         staged: &StagedBatchDelivery,
         arrangement: &StagedLibraryArrangement,
     ) -> Result<(), String> {
@@ -7274,70 +7400,67 @@ impl PendingBatchDeliveries {
         if arrangement.batch.arranger.is_some() {
             return Err("a staged arrangement has a named arranger".to_string());
         }
+        let inherited = self
+            .component_delivery_parent
+            .as_ref()
+            .is_some_and(|link| link.inherited_arrangements.contains(arrangement));
         let mut seen = HashSet::new();
+        let mut covered = HashSet::new();
         for ordered in &arrangement.batch.members {
             if !seen.insert(ordered.identity) {
                 return Err("a staged arrangement repeats one member".to_string());
             }
-            let Some(member) = staged
-                .members
-                .iter()
-                .find(|member| member.identity.object_id == ordered.identity.object_id)
-            else {
-                return Err("a staged arrangement names a foreign member".to_string());
-            };
-            if member.identity != ordered.identity {
-                return Err("a staged arrangement rebinds a stale incarnation".to_string());
-            }
-            if member.owner != arrangement.batch.owner {
-                return Err("a staged arrangement mixes library owners".to_string());
+            match Self::staged_arrangement_entry_member(staged, arrangement, ordered, staged.stage)?
+            {
+                Some(member) if member.owner == arrangement.batch.owner => {
+                    covered.insert(member.identity);
+                }
+                Some(_) => {}
+                None if inherited => {}
+                None => return Err("a staged arrangement names a foreign member".to_string()),
             }
         }
         if staged.stage == BatchDeliveryStage::Arranging {
-            let expected: Vec<ObjectIncarnationRef> = staged
-                .members
-                .iter()
-                .filter(|member| {
-                    member.state == StagedBatchMemberState::Approved
-                        && member.owner == arrangement.batch.owner
-                        && member.approved_event.as_ref().is_some_and(|event| {
-                            matches!(
-                                event,
-                                ProposedEvent::ZoneChange {
+            if !inherited {
+                let expected: HashSet<ObjectIncarnationRef> = staged
+                    .members
+                    .iter()
+                    .filter(|member| {
+                        member.state == StagedBatchMemberState::Approved
+                            && member.owner == arrangement.batch.owner
+                            && matches!(
+                                member.approved_event.as_ref(),
+                                Some(ProposedEvent::ZoneChange {
                                     to: Zone::Library,
                                     library_placement: Some(position),
                                     ..
-                                } if *position == arrangement.position
+                                }) if *position == arrangement.position
                             )
-                        })
-                })
-                .map(|member| member.identity)
-                .collect();
-            let offered: HashSet<ObjectIncarnationRef> = arrangement
-                .batch
-                .members
-                .iter()
-                .map(|m| m.identity)
-                .collect();
-            if offered.len() != expected.len() || offered != expected.iter().copied().collect() {
-                return Err(
-                    "a staged arrangement is not the exact approved group membership".to_string(),
-                );
+                    })
+                    .map(|member| member.identity)
+                    .collect();
+                if covered != expected {
+                    return Err(
+                        "a staged arrangement is not the exact approved group membership"
+                            .to_string(),
+                    );
+                }
             }
-            if arrangement.status == StagedArrangementStatus::Awaiting
-                || arrangement.status == StagedArrangementStatus::Offered
-            {
+            if matches!(
+                arrangement.status,
+                StagedArrangementStatus::Awaiting | StagedArrangementStatus::Offered
+            ) {
                 let announcement: Vec<ObjectIncarnationRef> = staged
                     .members
                     .iter()
-                    .filter(|member| offered.contains(&member.identity))
+                    .filter(|member| seen.contains(&member.identity))
                     .map(|member| member.identity)
                     .collect();
                 let offered_order: Vec<ObjectIncarnationRef> = arrangement
                     .batch
                     .members
                     .iter()
-                    .map(|m| m.identity)
+                    .map(|member| member.identity)
                     .collect();
                 if offered_order != announcement {
                     return Err(
@@ -55451,10 +55574,10 @@ mod tests {
     fn effect_zone_choice_roundtrips() {
         let mass_library_order = MassLibraryOrderBatch {
             owner: PlayerId(0),
-            members: vec![MassLibraryOrderMember {
-                identity: ObjectIncarnationRef::of(ObjectId(1), 7),
-                origin: Zone::Battlefield,
-            }],
+            members: vec![MassLibraryOrderMember::card(
+                ObjectIncarnationRef::of(ObjectId(1), 7),
+                Zone::Battlefield,
+            )],
             arranger: None,
         };
         let wf = WaitingFor::EffectZoneChoice {
@@ -55688,33 +55811,33 @@ mod tests {
             duration: None,
             remaining_batches: PendingMassLibraryOrderBatches::Typed(vec![MassLibraryOrderBatch {
                 owner: PlayerId(2),
-                members: vec![MassLibraryOrderMember {
-                    identity: ObjectIncarnationRef::of(ObjectId(5), 1),
-                    origin: Zone::Battlefield,
-                }],
+                members: vec![MassLibraryOrderMember::card(
+                    ObjectIncarnationRef::of(ObjectId(5), 1),
+                    Zone::Battlefield,
+                )],
                 arranger: None,
             }]),
             arranged_batches: vec![MassLibraryOrderBatch {
                 owner: PlayerId(1),
                 members: vec![
-                    MassLibraryOrderMember {
-                        identity: ObjectIncarnationRef::of(ObjectId(3), 2),
-                        origin: Zone::Battlefield,
-                    },
-                    MassLibraryOrderMember {
-                        identity: ObjectIncarnationRef::of(ObjectId(4), 0),
-                        origin: Zone::Graveyard,
-                    },
+                    MassLibraryOrderMember::card(
+                        ObjectIncarnationRef::of(ObjectId(3), 2),
+                        Zone::Battlefield,
+                    ),
+                    MassLibraryOrderMember::card(
+                        ObjectIncarnationRef::of(ObjectId(4), 0),
+                        Zone::Graveyard,
+                    ),
                 ],
                 arranger: None,
             }],
             resolving_entry: Some(ObjectId(7)),
             arranger_election: Some(MassLibraryOrderBatch {
                 owner: PlayerId(3),
-                members: vec![MassLibraryOrderMember {
-                    identity: ObjectIncarnationRef::of(ObjectId(6), 0),
-                    origin: Zone::Graveyard,
-                }],
+                members: vec![MassLibraryOrderMember::card(
+                    ObjectIncarnationRef::of(ObjectId(6), 0),
+                    Zone::Graveyard,
+                )],
                 arranger: Some(PlayerId(0)),
             }),
         };
@@ -55748,10 +55871,10 @@ mod tests {
     fn mass_library_order_batch_round_trips_an_explicit_arranger() {
         let batch = |owner: u8, object: u64| MassLibraryOrderBatch {
             owner: PlayerId(owner),
-            members: vec![MassLibraryOrderMember {
-                identity: ObjectIncarnationRef::of(ObjectId(object), 0),
-                origin: Zone::Graveyard,
-            }],
+            members: vec![MassLibraryOrderMember::card(
+                ObjectIncarnationRef::of(ObjectId(object), 0),
+                Zone::Graveyard,
+            )],
             arranger: Some(PlayerId(0)),
         };
         let pending = PendingMassLibraryOrderChoice {

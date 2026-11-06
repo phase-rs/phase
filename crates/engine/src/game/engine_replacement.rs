@@ -907,6 +907,7 @@ fn handle_replacement_choice_inner(
                     expected_event: Some(paused.expected_event.clone()),
                     population_devour_snapshot: None,
                     approved_post_replacement: None,
+                    inherited_arrangements: Vec::new(),
                 },
             )
     });
