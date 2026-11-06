@@ -53799,15 +53799,16 @@ fn add_mana_from_source(
 /// makes no payment, so nothing is stamped and the positive reach guard could
 /// never fire. The spell therefore carries a real cost and nothing else.
 ///
-/// SYNTHETIC, and the repo's real-card rule is applied deliberately. Printed
-/// sorceries with a purely generic mana cost do exist — Aang's Journey (`{2}`),
-/// Gruesome Slaughter (`{6}`) — but this consumer needs a specific mana VALUE on
-/// each leg (1 and 2), and the printed generic-only sorceries sit at `{0}`, `{2}`
-/// and `{6}` with a library search, kicker or target clause of their own. The
-/// legs are paid and discarded without resolving anything, so importing one would
-/// drag in an effect path the provenance tests are not about. The fixture keeps a
-/// synthetic Sorcery shell with no ability at all; the nearest printed analogue
-/// for the cost shape is Aang's Journey (`{2}`).
+/// SYNTHETIC, and the repo's real-card rule is applied deliberately. These legs
+/// need a cost-only spell at mana value 1 and at mana value 2, cast and discarded
+/// without resolving anything. Printed sorceries with a purely generic mana cost
+/// do exist, but not with that shape: the only `{1}` one is a Mystery Booster
+/// playtest card, and the `{2}` ones each resolve an effect (Aang's Journey —
+/// "Search your library for a basic land card…" plus Kicker `{2}`; Environmental
+/// Sciences — the same search). Importing one would drag an effect path into a
+/// pure payment-provenance test, so the fixture keeps a synthetic Sorcery shell
+/// with no ability at all. The nearest printed analogue for the cost shape is
+/// Aang's Journey (`{2}`).
 fn create_paid_sorcery(
     state: &mut GameState,
     card_id: CardId,
