@@ -52952,6 +52952,13 @@ fn parse_put_rest_library_position(lower: &str) -> Option<LibraryPosition> {
     let (after_rest, _) = take_until::<_, _, OracleError<'_>>("the rest")
         .parse(lower)
         .ok()?;
+    rest_tail_library_position(after_rest)
+}
+
+/// CR 401.4: the library position ("on the bottom" / "on top [of …]") a
+/// "the rest …" tail names, shared by the standalone put-the-rest clause and the
+/// same-clause Dig remainder ("… and the rest on top of your library").
+pub(super) fn rest_tail_library_position(after_rest: &str) -> Option<LibraryPosition> {
     if scan_contains_phrase(after_rest, "on the bottom") {
         Some(LibraryPosition::Bottom)
     } else if scan_contains_phrase(after_rest, "on top") {

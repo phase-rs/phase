@@ -390,23 +390,6 @@ pub(crate) enum RevealChoiceBinding {
     RevealedThisWay,
 }
 
-/// CR 401.4 + CR 701.20e: The position of the ONE library a remainder clause
-/// names. A "put the rest …" instruction can only say top or bottom, so only
-/// those two are expressible here — unlike [`LibraryPosition`], whose
-/// `NthFromTop` / `BeneathTop` / `RandomWithinTop` forms place a single card.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
-pub(crate) enum RestLibraryPosition {
-    #[default]
-    Bottom,
-    Top,
-}
-
-impl RestLibraryPosition {
-    pub(crate) fn is_bottom(&self) -> bool {
-        matches!(self, Self::Bottom)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ContinuationAst {
     SearchDestination {
@@ -607,8 +590,8 @@ pub(crate) enum ContinuationAst {
         /// the degenerate all-top remainder split the Dig resolver already
         /// routes (and, for a 2+ card pile, hands to the owner for the CR 401.4
         /// arrangement). `Bottom` keeps the uniform bottom route.
-        #[serde(default, skip_serializing_if = "RestLibraryPosition::is_bottom")]
-        rest_library_position: RestLibraryPosition,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_library_position: Option<LibraryPosition>,
         /// CR 110.2a: Controller override for the kept cards' battlefield entry
         /// ("... onto the battlefield ... under your control"). `None` leaves
         /// them under their owner's control.

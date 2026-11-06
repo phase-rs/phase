@@ -31,7 +31,7 @@ use super::parse_effect_chain;
 use super::sequence::parse_dig_from_among;
 use super::subject;
 use super::{parse_effect_clause_inner, scan_contains_phrase, ParseContext};
-use crate::parser::oracle_ir::ast::{parsed_clause, ContinuationAst, RestLibraryPosition};
+use crate::parser::oracle_ir::ast::{parsed_clause, ContinuationAst};
 use crate::parser::oracle_ir::context::TriggerZoneChangeProvenance;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{
@@ -41,9 +41,9 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally, AdditionalCostOrigin,
     AttachCardinality, AttachSelection, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
     CoinFlipResult, Comparator, ControllerRef, CostCategory, CountScope, DamageChannel, DigSource,
-    Duration, Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, ObjectScope, ParsedCondition,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SpentColor,
-    StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    Duration, Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, LibraryPosition, ObjectScope,
+    ParsedCondition, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
+    SpentColor, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -6214,7 +6214,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
             // CR 401.4: an alternative that puts its remainder on TOP names
             // the degenerate all-top split, exactly as the same clause does on
             // the base branch.
-            (alt_rest_library_position == RestLibraryPosition::Top).then(|| prev_count.clone())
+            (alt_rest_library_position == Some(LibraryPosition::Top)).then(|| prev_count.clone())
         } else {
             prev_rest_split_top_count.clone()
         }

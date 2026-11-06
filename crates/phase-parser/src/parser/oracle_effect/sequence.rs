@@ -5886,7 +5886,7 @@ pub(super) fn apply_clause_continuation(
                         // the top remainder could be clamped from. Fail closed:
                         // the "if you do" clause becomes the strict unsupported
                         // receipt instead of a Dig that would bottom the pile.
-                        if rest_library_position == RestLibraryPosition::Top
+                        if rest_library_position == Some(LibraryPosition::Top)
                             && rest_split_top.is_none()
                         {
                             let mut unsupported =
@@ -6059,7 +6059,7 @@ pub(super) fn apply_clause_continuation(
                 // pile, so the whole remainder lands on top and a 2+ card pile
                 // is handed to its owner for the CR 401.4 arrangement.
                 *rest_split_top_count = rest_split_top.map(|boxed| *boxed).or_else(|| {
-                    (rest_library_position == RestLibraryPosition::Top).then(|| dig_count.clone())
+                    (rest_library_position == Some(LibraryPosition::Top)).then(|| dig_count.clone())
                 });
                 *rest_order = continuation_rest_order;
                 // CR 701.20e + CR 608.2c: this clause names where the chosen
@@ -7701,7 +7701,7 @@ pub(super) fn parse_dig_from_among(
             rest_destination: None,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
-            rest_library_position: RestLibraryPosition::Bottom,
+            rest_library_position: None,
             enters_under,
             face_down_profile,
             enter_tapped,
@@ -7801,7 +7801,7 @@ pub(super) fn parse_dig_from_among(
         // "Put the rest ..." sentence still patches via its own PutRest continuation.
         let (rest_destination, rest_order, rest_library_position) =
             parse_of_them_rest_destination(lower).map_or(
-                (None, DigRestOrder::Preserve, RestLibraryPosition::Bottom),
+                (None, DigRestOrder::Preserve, None),
                 |(destination, order, position)| (Some(destination), order, position),
             );
 
@@ -7869,7 +7869,7 @@ pub(super) fn parse_dig_from_among(
 
             let (rest_destination, rest_order, rest_library_position) =
                 parse_of_them_rest_destination(lower).map_or(
-                    (None, DigRestOrder::Preserve, RestLibraryPosition::Bottom),
+                    (None, DigRestOrder::Preserve, None),
                     |(destination, order, position)| (Some(destination), order, position),
                 );
             // CR 401.2 + CR 701.20e: a Telling Time-class clause names both
@@ -8276,7 +8276,7 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
 /// classification.
 fn parse_of_them_rest_destination(
     lower: &str,
-) -> Option<(Zone, DigRestOrder, RestLibraryPosition)> {
+) -> Option<(Zone, DigRestOrder, Option<LibraryPosition>)> {
     let (_, (_, after_rest)) = nom_primitives::split_once_on(lower, " and the rest")
         .or_else(|_| nom_primitives::split_once_on(lower, " and the other"))
         .ok()?;
@@ -8293,13 +8293,13 @@ fn parse_of_them_rest_destination(
     // order") are the library rest clauses that do not mean the bottom.
     // `Zone::Library` alone cannot carry the position, so the caller threads it
     // into the remainder routing (Diabolic Vision's "… and the rest on top of
-    // your library").
-    let rest_library_position =
-        if destination == Zone::Library && nom_primitives::scan_contains(after_rest, "on top") {
-            RestLibraryPosition::Top
-        } else {
-            RestLibraryPosition::Bottom
-        };
+    // your library"). The tail classifier is shared with the standalone
+    // put-the-rest clause.
+    let rest_library_position = if destination == Zone::Library {
+        super::rest_tail_library_position(after_rest)
+    } else {
+        None
+    };
     let random = opt(preceded(
         take_until::<_, _, OracleError<'_>>(" in a random order"),
         tag(" in a random order"),
@@ -9252,7 +9252,7 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 rest_destination: None,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
-                rest_library_position: RestLibraryPosition::Bottom,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -9278,7 +9278,7 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 rest_split_top_count: None,
                 rest_order: parse_put_one_dig_card_on_top(&lower)
                     .expect("continuation guard just matched"),
-                rest_library_position: RestLibraryPosition::Bottom,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13617,7 +13617,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::PlayerChoice,
-                rest_library_position: RestLibraryPosition::Bottom,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13646,7 +13646,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::PlayerChoice,
-                rest_library_position: RestLibraryPosition::Bottom,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13680,7 +13680,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
-                rest_library_position: RestLibraryPosition::Bottom,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13708,7 +13708,7 @@ mod tests {
                 rest_destination: Some(Zone::Graveyard),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
-                rest_library_position: RestLibraryPosition::Bottom,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13736,7 +13736,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::PlayerChoice,
-                rest_library_position: RestLibraryPosition::Bottom,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13766,7 +13766,7 @@ mod tests {
                     rest_destination: None,
                     rest_split_top_count: None,
                     rest_order: DigRestOrder::Preserve,
-                    rest_library_position: RestLibraryPosition::Bottom,
+                    rest_library_position: None,
                     enters_under: None,
                     face_down_profile: None,
                     enter_tapped: false,
@@ -14068,7 +14068,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
-                rest_library_position: RestLibraryPosition::Bottom,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -14353,7 +14353,7 @@ mod tests {
                 rest_destination: None,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
-                rest_library_position: RestLibraryPosition::Bottom,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -14406,7 +14406,7 @@ mod tests {
                 rest_destination: None,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
-                rest_library_position: RestLibraryPosition::Bottom,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -14477,7 +14477,7 @@ mod tests {
                 rest_destination: None,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
-                rest_library_position: RestLibraryPosition::Bottom,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -15784,7 +15784,7 @@ mod tests {
                 rest_destination: None,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
-                rest_library_position: RestLibraryPosition::Bottom,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
