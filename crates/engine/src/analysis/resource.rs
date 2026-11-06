@@ -1529,12 +1529,13 @@ impl PeriodicDelta {
     /// stepping through repetitions whose charge cannot differ from the one before.
     ///
     /// On one board a repetition's charge depends on its index only through the two templates'
-    /// resolutions, and a resolution changes only at a pre-declared switch point
-    /// ([`DecisionTemplate::resolution_change_points`]). Between two such points every repetition
-    /// carries one charge, so [`Self::first_life_crossing_by_stretch`] reads one charge per
-    /// stretch where the stepping walk reads one per repetition up to `horizon`. A seat the
-    /// declaration never charges, on a board whose horizon is a life total in the billions, is
-    /// read once per stretch instead of once per point of that total.
+    /// resolutions and, for a slot that leads, the latched aim its first repetition reads and the
+    /// declaration it reads one index behind (CR 603.3d + CR 601.2c); a resolution changes only at
+    /// a pre-declared switch point ([`DecisionTemplate::resolution_change_points`]). Between two
+    /// such points every repetition carries one charge, so [`Self::first_life_crossing_by_stretch`]
+    /// reads one charge per stretch where the stepping walk reads one per repetition up to
+    /// `horizon`. A seat the declaration never charges, on a board whose horizon is a life total in
+    /// the billions, is read once per stretch instead of once per point of that total.
     ///
     /// A template with no finite list of switch points (a round robin of two or more) is walked
     /// repetition by repetition, as [`Self::first_life_crossing`] walks any stream. That is a

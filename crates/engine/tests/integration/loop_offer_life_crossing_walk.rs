@@ -1,9 +1,11 @@
-//! CR 704.5a + CR 733.2a: offering and taking a loop shortcut costs the same work whatever the
-//! players' life totals. A drain loop's offer asks at which repetition each player would reach 0
-//! life (CR 704.5a: "If a player has 0 or less life, that player loses the game."), and the
-//! repetitions it has to read to answer do not depend on how much life a player has. With a
-//! player at 4,000,000 life or more, the offer and a take read exactly the life charges they read
-//! at an ordinary life total, on an untargeted drain and on a targeted one.
+//! CR 704.5a + CR 733.2a: offering a loop shortcut, and taking it as suggested, costs the same work
+//! whatever the players' life totals (a declaration whose target rotates in a round robin of two or
+//! more is still read one repetition at a time; see `PeriodicDelta::declared_seat_life_crossing`).
+//! A drain loop's offer asks at which repetition each player would reach 0 life (CR 704.5a: "If a
+//! player has 0 or less life, that player loses the game."), and the repetitions it has to read to
+//! answer do not depend on how much life a player has. With a player at 4,000,000 life or more, the
+//! offer and a take read exactly the life charges they read at an ordinary life total, on an
+//! untargeted drain and on a targeted one.
 
 use engine::analysis::decision_template::IterationCount;
 use engine::analysis::loop_check::ShortcutResponse;
