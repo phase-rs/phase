@@ -2576,7 +2576,12 @@ fn parse_if_mana_is_spent_to_cast(input: &str) -> OracleResult<'_, ()> {
 ///   "that mana … non-Human creature spell")
 /// - "If that mana is spent on a multicolored creature spell, that creature
 ///   enters with an additional +1/+1 counter on it." (Guildmages' Forum)
-fn parse_conditional_enters_with_counters_grant(lower: &str) -> Option<ManaSpellGrant> {
+///
+/// This is also the single recognizer `swallow_check`'s sentence-scoped carrier
+/// helpers use to locate the rider's OWN clause (`mana_entry_counter_grant_*
+/// residual_sentences`), so recognition and lowering cannot disagree on which
+/// sentence produced the `EntersWithCounters` grant.
+pub(crate) fn parse_conditional_enters_with_counters_grant(lower: &str) -> Option<ManaSpellGrant> {
     let (rest, ()) = parse_if_mana_is_spent_to_cast(lower).ok()?;
     let (rest, filter_text) = terminated(
         take_until::<_, _, OracleError<'_>>(", "),
