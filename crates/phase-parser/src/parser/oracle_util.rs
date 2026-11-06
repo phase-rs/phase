@@ -2033,27 +2033,30 @@ fn unmask_ring_tempts_you_phrase(text: String) -> String {
 const KEYWORD_ACTION_PLACEHOLDER: &str = "\u{E0001}";
 const SAY_PHRASE_PLACEHOLDER: &str = "\u{E0005}";
 
-/// Whether `lower_before` (the lowercased text before an opening double quote)
-/// ends in the verb that introduces VERBATIM player speech — `say "…"`/
-/// `says "…"`, as in Toy Boat's "Say \"Toy Boat\" quickly" and Rod of
-/// Spanking's "unless that player says \"…\"". The check is word-bounded so
-/// "essay \"…\"" never counts.
-fn preceded_by_say_verb(lower_before: &str) -> bool {
-    // This checks the ONE word immediately in front of a quote, so it is a
-    // structural tail check (Gate A escape hatch), not Oracle-phrase dispatch.    // allow-noncombinator: structural tail-token check before verbatim-quote masking
-    let Some(head) = lower_before.strip_suffix(' ') else {
-        return false;
-    };
-    // allow-noncombinator: structural tail-token check (verb word boundary)
-    let says = head.strip_suffix("says");
-    // allow-noncombinator: structural tail-token check (verb word boundary)
-    let verb = says.or_else(|| head.strip_suffix("say"));
-    verb.is_some_and(|before_verb| {
-        !before_verb
-            .chars()
-            .next_back()
-            .is_some_and(|c| c.is_alphanumeric())
-    })
+/// Un-card (no CR entry): the grammatical form that introduces VERBATIM player
+/// speech — a speech verb (`say` / `says`), a space, and a double-quoted phrase
+/// (Toy Boat's "Say \"Toy Boat\" quickly", Rod of Spanking's "unless that
+/// player says \"…\""). Returns the byte offset of the quoted body (just past
+/// the opening quote) and the body's byte length.
+///
+/// Recognition is grammatical, so it is a nom combinator like the adjacent
+/// named-literal recognizers rather than a string-tail check. The caller scans
+/// word boundaries, which is what keeps `essay "…"` out without a manual
+/// boundary test here.
+fn parse_say_phrase_literal(input: &str) -> OracleResult<'_, (usize, usize)> {
+    let (after_verb, _) = alt((tag::<_, _, OracleError<'_>>("says "), tag("say "))).parse(input)?;
+    let (after_open, _) = tag("\"").parse(after_verb)?;
+    let body_start = input.len() - after_open.len();
+    let (after_body, body) = take_until("\"").parse(after_open)?;
+    let (rest, _) = tag("\"").parse(after_body)?;
+    Ok((rest, (body_start, body.len())))
+}
+
+/// Offset of the next spoken phrase's body and its length, tried at each word
+/// boundary of `lower` (the shared scan idiom).
+fn next_say_phrase_literal(lower: &str) -> Option<(usize, usize)> {
+    nom_primitives::scan_at_word_boundaries_with_offset(lower, parse_say_phrase_literal)
+        .map(|(offset, (body_start, body_len), _)| (offset + body_start, body_len))
 }
 
 /// Un-card: a phrase a player must SAY is verbatim speech, not a card-name
@@ -2069,30 +2072,16 @@ fn mask_say_phrase_literal_spans(text: &str) -> (String, Vec<String>) {
     let mut originals: Vec<String> = Vec::new();
     let mut rest = text;
     let mut lower_rest = lower.as_str();
-    while let Some(idx) = lower_rest.find('"') {
-        let open = idx + 1;
-        let quoted = quoted_body_end(rest, open);
-        if preceded_by_say_verb(&lower_rest[..idx]) {
-            let Some(close) = quoted else { break };
-            masked.push_str(&rest[..open]);
-            masked.push_str(SAY_PHRASE_PLACEHOLDER);
-            originals.push(rest[open..open + close].to_string());
-            rest = &rest[open + close..];
-            lower_rest = &lower_rest[open + close..];
-        } else {
-            masked.push_str(&rest[..open]);
-            rest = &rest[open..];
-            lower_rest = &lower_rest[open..];
-        }
+    while let Some((body_start, body_len)) = next_say_phrase_literal(lower_rest) {
+        let body_end = body_start + body_len;
+        masked.push_str(&rest[..body_start]);
+        masked.push_str(SAY_PHRASE_PLACEHOLDER);
+        originals.push(rest[body_start..body_end].to_string());
+        rest = &rest[body_end..];
+        lower_rest = &lower_rest[body_end..];
     }
     masked.push_str(rest);
     (masked, originals)
-}
-
-/// Byte length of the quoted body starting at `open`, or `None` when the quote
-/// is unterminated.
-fn quoted_body_end(text: &str, open: usize) -> Option<usize> {
-    text.get(open..)?.find('"')
 }
 
 /// Restore the verbatim spoken phrases masked by
@@ -3552,6 +3541,70 @@ mod tests {
         assert_eq!(
             normalized,
             "Whenever ~ is put into a graveyard from the battlefield, you may attach it to the Curse attached to enchanted player."
+        );
+    }
+
+    #[test]
+    fn normalize_say_phrase_preserves_verbatim_speech() {
+        // Un-card (no CR entry): Toy Boat's own name inside the words the payer
+        // must say is literal speech, not a CR 201.5 self-reference.
+        assert_eq!(
+            normalize_card_name_refs("Cumulative upkeep—Say \"Toy Boat\" quickly.", "Toy Boat"),
+            "Cumulative upkeep—Say \"Toy Boat\" quickly."
+        );
+    }
+
+    #[test]
+    fn normalize_say_phrase_preserves_exact_punctuation() {
+        assert_eq!(
+            normalize_card_name_refs(
+                "At the beginning of your upkeep, you may say \"Ach! Hans, run! It's the . . .\" and the name of a creature card.",
+                "Ach! Hans, Run!",
+            ),
+            "At the beginning of your upkeep, you may say \"Ach! Hans, run! It's the . . .\" and the name of a creature card."
+        );
+    }
+
+    #[test]
+    fn normalize_say_phrase_handles_case_and_says() {
+        assert_eq!(
+            normalize_card_name_refs("SAY \"Ow\" and SAYS \"Ow\".", "Ow"),
+            "SAY \"Ow\" and SAYS \"Ow\"."
+        );
+    }
+
+    #[test]
+    fn normalize_say_phrase_preserves_each_of_multiple_quotes() {
+        assert_eq!(
+            normalize_card_name_refs(
+                "Say \"I'm rubber, you're glue. Everything bounces off me and sticks to you.\": Change the target of target spell.",
+                "I'm Rubber, You're Glue",
+            ),
+            "Say \"I'm rubber, you're glue. Everything bounces off me and sticks to you.\": Change the target of target spell."
+        );
+    }
+
+    #[test]
+    fn normalize_say_phrase_keeps_granted_ability_adjacency() {
+        assert_eq!(
+            normalize_card_name_refs(
+                "Say \"Goblin S.W.A.T. Team\": Put a +1/+1 counter on this creature. Activate only once each turn.",
+                "Goblin S.W.A.T. Team",
+            ),
+            // The `this creature` self-reference is the ordinary `~`
+            // normalization; only the spoken name is protected.
+            "Say \"Goblin S.W.A.T. Team\": Put a +1/+1 counter on ~. Activate only once each turn."
+        );
+    }
+
+    #[test]
+    fn normalize_say_phrase_requires_the_whole_speech_verb() {
+        // `essay` merely ends in "say": the recognizer matches the verb at a
+        // word boundary, so this quote is not speech and the name still
+        // normalizes as a reference.
+        assert_eq!(
+            normalize_card_name_refs("Write an essay \"Ow\".", "Ow"),
+            "Write an essay \"~\"."
         );
     }
 

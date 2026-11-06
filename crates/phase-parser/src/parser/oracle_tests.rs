@@ -15,6 +15,7 @@ use crate::types::ability::{
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
+use crate::types::un_actions::PhrasePace;
 
 // Printed Oracle text and metadata verified against MTGJSON AtomicCards.
 const DIAGNOSTIC_JULIUS: &str = "Dr. Julius Jumblemorph is every creature type (even if this card isn't on the battlefield).\nWhenever a host you control enters, you may search your library and/or graveyard for a card with augment and combine it with that host. If you search your library this way, shuffle.";
@@ -18478,8 +18479,6 @@ fn parse_cumulative_upkeep_say_phrase_quickly() {
     // part of the payment (`PhrasePace::Quickly` with the engine's window), not
     // part of the phrase, and the base cost is said once before the per-counter
     // expansion raises the repetition count.
-    use crate::types::un_actions::PhrasePace;
-
     let r = parse(
         "Cumulative upkeep\u{2014}Say \"Toy Boat\" quickly. (At the beginning of your upkeep, put an age counter on this creature, then sacrifice it unless you say \"Toy Boat\" once for each age counter on it\u{2014}without pausing between or fumbling it.)",
         "Toy Boat",
@@ -18514,6 +18513,159 @@ fn parse_cumulative_upkeep_say_phrase_quickly() {
         }
         other => panic!("expected SayPhrase(\"Toy Boat\", quickly), got {other:?}"),
     }
+}
+
+/// Walk an ability tree for a spoken cost of `phrase`. A tree covers the
+/// quoted speech wherever the parser attached it (activated ability head or a
+/// continuation link).
+fn tree_has_say_phrase(def: &AbilityDefinition, phrase: &str) -> bool {
+    fn cost_matches(cost: &AbilityCost, phrase: &str) -> bool {
+        match cost {
+            AbilityCost::SayPhrase { phrase: said, .. } => said.as_str() == phrase,
+            AbilityCost::OneOf { costs } => costs.iter().any(|cost| cost_matches(cost, phrase)),
+            _ => false,
+        }
+    }
+    def.cost
+        .as_ref()
+        .is_some_and(|cost| cost_matches(cost, phrase))
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub| tree_has_say_phrase(sub, phrase))
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(|alt| tree_has_say_phrase(alt, phrase))
+}
+
+fn tree_has_change_targets(def: &AbilityDefinition) -> bool {
+    matches!(def.effect.as_ref(), Effect::ChangeTargets { .. })
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(tree_has_change_targets)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(tree_has_change_targets)
+}
+
+fn tree_has_unimplemented(def: &AbilityDefinition) -> bool {
+    matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(tree_has_unimplemented)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(tree_has_unimplemented)
+}
+
+/// Un-card (no CR entry) + CR 114.1: preserving the exact speech literal newly
+/// exposes a supported payoff. The quoted sentence is the cost of the saying
+/// ability, and the effect it introduces is the ordinary `ChangeTargets` that
+/// "Change the target ... that targets only you" already parses.
+#[test]
+fn parse_say_phrase_scope_im_rubber_exposes_change_targets() {
+    let r = parse(
+        "When you speak in non-rhyming sentences, sacrifice this enchantment.\nSay \"I'm rubber, you're glue. Everything bounces off me and sticks to you\": Change the target of target spell or ability that targets only you.",
+        "I'm Rubber, You're Glue",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    assert!(
+        r.abilities.iter().any(|ability| tree_has_say_phrase(
+            ability,
+            "I'm rubber, you're glue. Everything bounces off me and sticks to you"
+        )),
+        "the quoted speech is the ability's spoken cost: {:?}",
+        r.abilities
+    );
+    assert!(
+        r.abilities.iter().any(tree_has_change_targets),
+        "the saying introduces the exposed ChangeTargets effect: {:?}",
+        r.abilities
+    );
+}
+
+/// Un-card (no CR entry): Ow's trigger is recognized while the repeated speech
+/// stays literally quoted. The "once for each permanent named Ow" payment is a
+/// known unsupported gap and stays honest rather than being approximated.
+#[test]
+fn parse_say_phrase_scope_ow_preserves_speech() {
+    let r = parse(
+        "Whenever a creature deals damage to a player, that player may say \"Ow\" once for each permanent named Ow. If the player doesn't, this enchantment deals 1 damage to them.",
+        "Ow",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    assert!(
+        !r.triggers.is_empty() || !r.abilities.is_empty(),
+        "the trigger still parses: triggers={:?} abilities={:?}",
+        r.triggers,
+        r.abilities
+    );
+    assert!(
+        format!("{:?}{:?}", r.abilities, r.triggers).contains("say \\\"Ow\\\""),
+        "the exact speech literal survives: triggers={:?} abilities={:?}",
+        r.triggers,
+        r.abilities
+    );
+}
+
+/// Un-card (no CR entry): "Ach! Hans, run!" keeps its punctuation and ellipsis
+/// verbatim, so the quoted speech is never confused with the card's own name.
+#[test]
+fn parse_say_phrase_scope_ach_hans_preserves_speech() {
+    let r = parse(
+        "At the beginning of your upkeep, you may say \"Ach! Hans, run! It's the . . .\" and the name of a creature card. If you do, search your library for a card with that name, put it onto the battlefield, then shuffle. That creature gains haste. Exile it at the beginning of the next end step.",
+        "Ach! Hans, Run!",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    assert!(
+        !r.triggers.is_empty() || !r.abilities.is_empty(),
+        "the upkeep trigger still parses: triggers={:?} abilities={:?}",
+        r.triggers,
+        r.abilities
+    );
+    assert!(
+        format!("{:?}{:?}", r.abilities, r.triggers).contains("Ach! Hans, run! It's the . . ."),
+        "the exact speech literal survives: triggers={:?} abilities={:?}",
+        r.triggers,
+        r.abilities
+    );
+}
+
+/// Un-card (no CR entry): Goblin S.W.A.T. Team's speech is its own name, which
+/// the literal masking must NOT normalize to `~`. The unsupported "swats the
+/// table" unless clause stays an explicit `Unimplemented` gap.
+#[test]
+fn parse_say_phrase_scope_goblin_swat_preserves_name_and_gap() {
+    let r = parse(
+        "Say \"Goblin S.W.A.T. Team\": Put a +1/+1 counter on this creature unless an opponent swats the table within five seconds. Activate only once each turn.",
+        "Goblin S.W.A.T. Team",
+        &[],
+        &["Creature"],
+        &["Goblin"],
+    );
+    assert!(
+        r.abilities
+            .iter()
+            .any(|ability| tree_has_say_phrase(ability, "Goblin S.W.A.T. Team")),
+        "the printed name is literal speech, not a ~ reference: {:?}",
+        r.abilities
+    );
+    assert!(
+        r.abilities.iter().any(tree_has_unimplemented),
+        "the repeated physical-action unless clause remains an honest gap: {:?}",
+        r.abilities
+    );
 }
 
 #[test]

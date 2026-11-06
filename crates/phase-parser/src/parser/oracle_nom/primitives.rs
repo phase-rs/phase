@@ -961,18 +961,39 @@ pub fn peek_clause_terminator(input: &str) -> OracleResult<'_, ()> {
 /// });
 /// assert_eq!(found, Some("dies"));
 /// ```
+fn word_boundary_candidates(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    text.char_indices()
+        .filter(move |&(i, _)| {
+            i == 0 || (text.as_bytes()[i - 1] == b' ' && text.as_bytes()[i] != b' ')
+        })
+        .map(move |(i, _)| (i, &text[i..]))
+}
+
 pub fn scan_at_word_boundaries<'a, O, F>(text: &'a str, mut combinator: F) -> Option<O>
 where
     F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
 {
-    let mut remaining = text;
-    while !remaining.is_empty() {
-        if let Ok((_, val)) = combinator(remaining) {
+    for (_, candidate) in word_boundary_candidates(text) {
+        if let Ok((_, val)) = combinator(candidate) {
             return Some(val);
         }
-        remaining = remaining
-            .find(' ')
-            .map_or("", |i| remaining[i + 1..].trim_start());
+    }
+    None
+}
+
+/// Like [`scan_at_word_boundaries`] but returns the **first** successful match,
+/// together with the byte offset where that match began.
+pub fn scan_at_word_boundaries_with_offset<'a, O, F>(
+    text: &'a str,
+    mut combinator: F,
+) -> Option<(usize, O, &'a str)>
+where
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
+{
+    for (offset, candidate) in word_boundary_candidates(text) {
+        if let Ok((rest, val)) = combinator(candidate) {
+            return Some((offset, val, rest));
+        }
     }
     None
 }
@@ -986,18 +1007,10 @@ pub fn scan_last_at_word_boundaries_with_offset<'a, O, F>(
 where
     F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
 {
-    let mut remaining = text;
-    let mut offset = 0;
     let mut last = None;
-    while !remaining.is_empty() {
-        if let Ok((rest, val)) = combinator(remaining) {
+    for (offset, candidate) in word_boundary_candidates(text) {
+        if let Ok((rest, val)) = combinator(candidate) {
             last = Some((offset, val, rest));
-        }
-        if let Some(rel) = remaining.find(' ') {
-            offset += rel + 1;
-            remaining = remaining[rel + 1..].trim_start();
-        } else {
-            break;
         }
     }
     last
@@ -1014,20 +1027,12 @@ where
     F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
     P: FnMut(usize) -> bool,
 {
-    let mut remaining = text;
-    let mut offset = 0;
     let mut last = None;
-    while !remaining.is_empty() {
-        if let Ok((rest, val)) = combinator(remaining) {
+    for (offset, candidate) in word_boundary_candidates(text) {
+        if let Ok((rest, val)) = combinator(candidate) {
             if accept_offset(offset) {
                 last = Some((offset, val, rest));
             }
-        }
-        if let Some(rel) = remaining.find(' ') {
-            offset += rel + 1;
-            remaining = remaining[rel + 1..].trim_start();
-        } else {
-            break;
         }
     }
     last
@@ -1044,15 +1049,11 @@ pub fn scan_last_at_word_boundaries<'a, O, F>(
 where
     F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
 {
-    let mut remaining = text;
     let mut last = None;
-    while !remaining.is_empty() {
-        if let Ok((rest, val)) = combinator(remaining) {
+    for (_, candidate) in word_boundary_candidates(text) {
+        if let Ok((rest, val)) = combinator(candidate) {
             last = Some((val, rest));
         }
-        remaining = remaining
-            .find(' ')
-            .map_or("", |i| remaining[i + 1..].trim_start());
     }
     last
 }
