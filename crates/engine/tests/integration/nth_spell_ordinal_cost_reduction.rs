@@ -24,9 +24,12 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 
-/// Head of the Class — verbatim Oracle text (both sentences; the second is the
-/// CR 118.7c rider that keeps the reduction on colored mana).
-const HEAD_OF_THE_CLASS_ORACLE: &str = "The first spell you cast during each of your turns that targets a creature costs {W}{B} less to cast. This effect reduces only the amount of colored mana you pay.";
+/// Head of the Class — complete printed Oracle text, both abilities. The first
+/// sentence is the CR 601.2f reducer under test; the second is the printed
+/// Repartee trigger, which the card really has and which this fixture must carry
+/// so the whole parse → layers → cost pipeline sees the real card rather than a
+/// truncated stand-in.
+const HEAD_OF_THE_CLASS_ORACLE: &str = "The first spell you cast during each of your turns that targets a creature costs {W}{B} less to cast. This effect reduces only the amount of colored mana you pay.\nRepartee — Whenever you cast an instant or sorcery spell that targets a creature, this creature perpetually gets +1/+1.";
 
 /// Doom Blade — a printed `{1}{B}` instant that targets a creature, so Head of the
 /// Class's discount is measurable as a pool delta: full `{1}{B}` spends 2, the

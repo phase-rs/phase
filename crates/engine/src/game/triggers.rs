@@ -24725,9 +24725,9 @@ pub mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
-            mana_spent_source_snapshots: Vec::new(),
+            mana_spent_source_snapshots: Some(Vec::new()),
             // A hand-built case record carries no announced cast, so it declares no target.
-            targets: Vec::new(),
+            targets: Some(Vec::new()),
         };
         let current_record = SpellCastRecord {
             name: String::new(),
@@ -24744,9 +24744,9 @@ pub mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
-            mana_spent_source_snapshots: Vec::new(),
+            mana_spent_source_snapshots: Some(Vec::new()),
             // A hand-built case record carries no announced cast, so it declares no target.
-            targets: Vec::new(),
+            targets: Some(Vec::new()),
         };
         state.spells_cast_this_turn_by_player.insert(
             player,
@@ -33110,9 +33110,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
-                    mana_spent_source_snapshots: Vec::new(),
+                    mana_spent_source_snapshots: Some(Vec::new()),
                     // A hand-built case record carries no announced cast, so it declares no target.
-                    targets: Vec::new(),
+                    targets: Some(Vec::new()),
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -33129,9 +33129,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
-                    mana_spent_source_snapshots: Vec::new(),
+                    mana_spent_source_snapshots: Some(Vec::new()),
                     // A hand-built case record carries no announced cast, so it declares no target.
-                    targets: Vec::new(),
+                    targets: Some(Vec::new()),
                 },
             ]),
         );
@@ -39733,9 +39733,9 @@ pub mod tests {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
-                mana_spent_source_snapshots: Vec::new(),
+                mana_spent_source_snapshots: Some(Vec::new()),
                 // A hand-built case record carries no announced cast, so it declares no target.
-                targets: Vec::new(),
+                targets: Some(Vec::new()),
             }]),
         );
         assert!(
@@ -39761,9 +39761,9 @@ pub mod tests {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
-                mana_spent_source_snapshots: Vec::new(),
+                mana_spent_source_snapshots: Some(Vec::new()),
                 // A hand-built case record carries no announced cast, so it declares no target.
-                targets: Vec::new(),
+                targets: Some(Vec::new()),
             }]),
         );
         assert!(
@@ -39790,9 +39790,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
-                    mana_spent_source_snapshots: Vec::new(),
+                    mana_spent_source_snapshots: Some(Vec::new()),
                     // A hand-built case record carries no announced cast, so it declares no target.
-                    targets: Vec::new(),
+                    targets: Some(Vec::new()),
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -39809,9 +39809,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
-                    mana_spent_source_snapshots: Vec::new(),
+                    mana_spent_source_snapshots: Some(Vec::new()),
                     // A hand-built case record carries no announced cast, so it declares no target.
-                    targets: Vec::new(),
+                    targets: Some(Vec::new()),
                 },
             ]),
         );
@@ -39841,9 +39841,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
-                    mana_spent_source_snapshots: Vec::new(),
+                    mana_spent_source_snapshots: Some(Vec::new()),
                     // A hand-built case record carries no announced cast, so it declares no target.
-                    targets: Vec::new(),
+                    targets: Some(Vec::new()),
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -39860,9 +39860,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
-                    mana_spent_source_snapshots: Vec::new(),
+                    mana_spent_source_snapshots: Some(Vec::new()),
                     // A hand-built case record carries no announced cast, so it declares no target.
-                    targets: Vec::new(),
+                    targets: Some(Vec::new()),
                 },
             ]),
         );
@@ -39890,9 +39890,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
-                    mana_spent_source_snapshots: Vec::new(),
+                    mana_spent_source_snapshots: Some(Vec::new()),
                     // A hand-built case record carries no announced cast, so it declares no target.
-                    targets: Vec::new(),
+                    targets: Some(Vec::new()),
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -39909,9 +39909,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
-                    mana_spent_source_snapshots: Vec::new(),
+                    mana_spent_source_snapshots: Some(Vec::new()),
                     // A hand-built case record carries no announced cast, so it declares no target.
-                    targets: Vec::new(),
+                    targets: Some(Vec::new()),
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -39928,9 +39928,9 @@ pub mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
-                    mana_spent_source_snapshots: Vec::new(),
+                    mana_spent_source_snapshots: Some(Vec::new()),
                     // A hand-built case record carries no announced cast, so it declares no target.
-                    targets: Vec::new(),
+                    targets: Some(Vec::new()),
                 },
             ]),
         );
@@ -39958,9 +39958,9 @@ pub mod tests {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
-                mana_spent_source_snapshots: Vec::new(),
+                mana_spent_source_snapshots: Some(Vec::new()),
                 // A hand-built case record carries no announced cast, so it declares no target.
-                targets: Vec::new(),
+                targets: Some(Vec::new()),
             }
         }
 

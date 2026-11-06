@@ -9091,14 +9091,14 @@ fn spell_record_matches_property(
         // source snapshots, so this answers exactly as the live object did. An empty
         // vector cannot prove a source-qualified payment and answers false.
         FilterProp::ManaSpentFromSource { source_filter } => {
-            mana_spent_from_source(state, &record.mana_spent_source_snapshots, source_filter, ctx)
+            mana_spent_from_source(state, record.mana_source_snapshots(), source_filter, ctx)
         }
         // CR 115.1 + CR 601.2c: the record carries the cast's declared targets as the
         // cast committed them, so "the first spell you cast … that targets [something]"
         // is answered from that latched set (CR 115.9 selection-time reading), never by
         // rescanning. CR 115.9b governs the live per-spell reader, not this one.
         FilterProp::Targets { filter } => {
-            declared_target_facts_match(state, &record.targets, filter, ctx)
+            declared_target_facts_match(state, record.declared_targets(), filter, ctx)
         }
         // CR 708.4: A face-down spell is a real spell on the stack, not a
         // battlefield-only state — a morph/megamorph/disguise card cast face down
@@ -16218,9 +16218,9 @@ mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
-            mana_spent_source_snapshots: Vec::new(),
+            mana_spent_source_snapshots: Some(Vec::new()),
             // A hand-built case record carries no announced cast, so it declares no target.
-            targets: Vec::new(),
+            targets: Some(Vec::new()),
         };
         let filter = TargetFilter::Typed(
             TypedFilter::creature()
@@ -16333,9 +16333,9 @@ mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
-            mana_spent_source_snapshots: Vec::new(),
+            mana_spent_source_snapshots: Some(Vec::new()),
             // A hand-built case record carries no announced cast, so it declares no target.
-            targets: Vec::new(),
+            targets: Some(Vec::new()),
         };
         let non_x_record = SpellCastRecord {
             has_x_in_cost: false,
@@ -16514,9 +16514,9 @@ mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
-            mana_spent_source_snapshots: Vec::new(),
+            mana_spent_source_snapshots: Some(Vec::new()),
             // A hand-built case record carries no announced cast, so it declares no target.
-            targets: Vec::new(),
+            targets: Some(Vec::new()),
         };
         let exile_record = SpellCastRecord {
             from_zone: Zone::Exile,
@@ -24129,9 +24129,9 @@ mod tests {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
-                mana_spent_source_snapshots: Vec::new(),
+                mana_spent_source_snapshots: Some(Vec::new()),
                 // A hand-built case record carries no announced cast, so it declares no target.
-                targets: Vec::new(),
+                targets: Some(Vec::new()),
             }
         };
 
@@ -24722,9 +24722,9 @@ mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
-            mana_spent_source_snapshots: Vec::new(),
+            mana_spent_source_snapshots: Some(Vec::new()),
             // A hand-built case record carries no announced cast, so it declares no target.
-            targets: Vec::new(),
+            targets: Some(Vec::new()),
         };
         let dragon_filter = make_subtype_filter("Dragon");
         let plains_filter = make_subtype_filter("Plains");

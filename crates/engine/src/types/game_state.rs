@@ -1357,6 +1357,11 @@ impl<'context, 'state> TriggerSourceRead<'context, 'state> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManaSpentSourceSnapshot {
     pub source_id: ObjectId,
+    /// The source's public characteristics as they were when it paid. Encoded
+    /// through [`crate::types::history_snapshot`]'s lossless compact projection:
+    /// the same `LKISnapshot` value, without the default-valued scaffolding that
+    /// would otherwise ride every `StateUpdate` frame.
+    #[serde(with = "crate::types::history_snapshot::compact_history_lki")]
     pub lki: LKISnapshot,
 }
 
@@ -1441,7 +1446,14 @@ fn is_battlefield_zone(zone: &Zone) -> bool {
 #[serde(tag = "type", content = "data")]
 pub enum ActivationTargetFact {
     Player(PlayerId),
-    Object { id: ObjectId, lki: Box<LKISnapshot> },
+    Object {
+        id: ObjectId,
+        /// The target's public characteristics as they were when it was
+        /// committed. Encoded through
+        /// [`crate::types::history_snapshot`]'s lossless compact projection.
+        #[serde(with = "crate::types::history_snapshot::compact_history_boxed_lki")]
+        lki: Box<LKISnapshot>,
+    },
 }
 
 /// Snapshot of a spell's characteristics at cast time for per-turn history queries.
@@ -1533,10 +1545,22 @@ pub struct SpellCastRecord {
     /// CR 106.3 + CR 601.2h + CR 400.7d: the per-mana-unit payment sources, as they
     /// were when each unit was paid. Latched so a source-qualified cast predicate
     /// survives the spell's resolution and the source's departure (CR 400.7).
-    /// `#[serde(default)]`: a record predating this field deserializes to empty,
-    /// which honestly means it cannot prove a source-qualified payment.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mana_spent_source_snapshots: Vec<ManaSpentSourceSnapshot>,
+    ///
+    /// `Option` distinguishes **unknown** provenance (`None`, a record written
+    /// before this field existed) from **known-empty** (`Some(vec![])`, a cast
+    /// that provably paid no source-attributed mana). A history gate compares a
+    /// qualifying count with zero, so collapsing the two would let an unknown
+    /// record read as "did not qualify" and re-grant a once-per-turn benefit.
+    /// `PersistedGameState::prepare_for_restore` refuses a playable save that
+    /// still carries an unknown, which is the only honest outcome: the paying
+    /// objects are gone, so the provenance is not reconstructable.
+    ///
+    /// On the wire, known-empty is the common case and is omitted entirely; only
+    /// the (legacy-only) unknown is spelled out, as an explicit `null`. An absent
+    /// field therefore decodes to known-empty, which is what every record written
+    /// by this build means.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_spent_source_snapshots: Option<Vec<ManaSpentSourceSnapshot>>,
     /// CR 115.1 + CR 601.2c: the spell's declared targets as the cast committed
     /// them — each object target's public characteristics snapshotted as they
     /// were then — so a turn-history predicate such as "the first spell you cast
@@ -1545,23 +1569,40 @@ pub struct SpellCastRecord {
     /// selection-time reading; CR 115.9b's current-state reading governs the
     /// live per-spell reader instead.
     ///
-    /// `#[serde(default)]`: a record predating this field deserializes to empty,
-    /// which honestly means it cannot prove which targets the spell declared.
-    /// An empty list never satisfies "targets [something]" (CR 115.9).
+    /// `Option` distinguishes **unknown** provenance (`None`, a record written
+    /// before this field existed) from **known-empty** (`Some(vec![])`, a cast
+    /// that provably declared no target). Every positive read treats an empty
+    /// list as "declared nothing", but a zero-count gate makes that unsafe for
+    /// an unknown: an unknown record would read as "did not qualify" and
+    /// re-grant a once-per-turn benefit. `PersistedGameState::prepare_for_restore`
+    /// therefore refuses a playable save that still carries an unknown — the
+    /// announced targets are gone and cannot be reconstructed.
     ///
-    /// An empty list is both "this cast declared no target" and "this record
-    /// cannot prove what it declared" — they are indistinguishable here, and
-    /// absence is produced by more than legacy saves: the live projection passes
+    /// Absence is also produced outside legacy saves — the live projection passes
     /// an empty slice deliberately (the live reader answers this property from
     /// the stack entry instead), and viewer redaction blanks a hidden target's
-    /// snapshot while keeping its slot. So absent provenance must stay
-    /// fail-closed in **both** polarities. Today it does, for two reasons worth
-    /// keeping true: no parser path builds a negated `Targets` read — the
-    /// negation appears only in engine unit tests, and no printed card carries a
-    /// negated "targets" Oracle clause — and every positive read treats an empty
-    /// list as "cannot prove", never as "proved absent".
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub targets: Vec<ActivationTargetFact>,
+    /// snapshot while keeping its slot — but both of those know the answer, so
+    /// they record `Some(vec![])` rather than `None`.
+    ///
+    /// Wire encoding matches [`Self::mana_spent_source_snapshots`]: known-empty is
+    /// omitted, and only the legacy-only unknown is spelled out as `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targets: Option<Vec<ActivationTargetFact>>,
+}
+
+impl SpellCastRecord {
+    /// The declared-target facts this record proves, or `&[]` when it proves
+    /// none. Callers that must tell "declared nothing" apart from "cannot prove
+    /// what it declared" read [`Self::targets`] directly.
+    pub fn declared_targets(&self) -> &[ActivationTargetFact] {
+        self.targets.as_deref().unwrap_or(&[])
+    }
+
+    /// The payment-source facts this record proves, or `&[]` when it proves
+    /// none. See [`Self::declared_targets`] for the unknown/known-empty split.
+    pub fn mana_source_snapshots(&self) -> &[ManaSpentSourceSnapshot] {
+        self.mana_spent_source_snapshots.as_deref().unwrap_or(&[])
+    }
 }
 
 /// Snapshot of a land play's cast-capable origin for per-turn history queries.
@@ -1597,8 +1638,10 @@ impl Default for SpellCastRecord {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
-            mana_spent_source_snapshots: Vec::new(),
-            targets: Vec::new(),
+            // A hand-built record describes no real cast, so it provably
+            // declared nothing and paid nothing: known-empty, never unknown.
+            mana_spent_source_snapshots: Some(Vec::new()),
+            targets: Some(Vec::new()),
         }
     }
 }
@@ -9092,6 +9135,12 @@ pub enum PendingCostMoveCompletion {
         cascade_cast_transformed: bool,
         resolution_success_waiting_for: Option<Box<WaitingFor>>,
         prepaid_actual_mana_spent: Option<u32>,
+        /// CR 115.1 + CR 601.2c + CR 400.7: the announced target facts, carried
+        /// from the pre-payment checks across the parked Sneak/Web-slinging
+        /// returned-creature cost move so the CR 601.2i history write records the
+        /// selection-time characteristics rather than a later incarnation's.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        committed_target_facts: Vec<ActivationTargetFact>,
     },
     /// CR 601.2h + CR 702.66a: The cast's mana is already paid and `pending`
     /// carries that payment; once the Delve exiles settle, re-enter the inner
@@ -9126,6 +9175,17 @@ pub struct FinalizePrePaymentChecks {
         deserialize_with = "crate::types::ability::deserialize_enters_with_modifications_compat"
     )]
     pub cast_this_way_enters_mods: crate::types::ability::PendingEntersModifications,
+    /// CR 115.1 + CR 601.2c + CR 400.7: the spell's declared targets as they were
+    /// when they were committed, latched at the one moment before any cost is
+    /// paid and carried across every parked payment continuation. The CR 601.2i
+    /// history write must describe the announced targets, not whatever object
+    /// later shares their storage id: a spell whose additional cost sacrifices a
+    /// target it also targets (Bone Splinters) would otherwise re-read the raw
+    /// id after payment and record the graveyard incarnation's printed
+    /// characteristics instead of the selection-time ones (CR 115.9, CR 115.9b,
+    /// CR 400.7). Empty for a cast that declares no target.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub committed_target_facts: Vec<ActivationTargetFact>,
 }
 
 /// CR 605.3b: Selects whether completing a mana-ability cost payment may ask
@@ -16354,6 +16414,35 @@ impl GameState {
         });
     }
 
+    /// CR 601.2c + CR 115.1 + CR 106.3: refuse a playable save whose cast history
+    /// cannot prove what its spells declared or what paid for them.
+    ///
+    /// `SpellCastRecord` carries `Option` provenance precisely so that "this cast
+    /// declared nothing" (`Some(vec![])`) stays distinguishable from "this record
+    /// predates the field" (`None`). The distinction matters because a first-spell
+    /// gate is a zero-count comparison: treating an unknown as a non-qualifying
+    /// cast would let a later spell receive a once-per-turn benefit a second time.
+    /// The announced targets and the paying mana sources of a finished cast are
+    /// gone, so the provenance is not reconstructable — the honest outcome is to
+    /// refuse the load at the one chokepoint every production restore funnels
+    /// through, rather than to admit an unknown as a known-empty.
+    fn reject_unknown_cast_history_provenance(&self) -> Result<(), PersistedRestoreError> {
+        let unknown = self
+            .spells_cast_this_turn_by_player
+            .values()
+            .chain(self.spells_cast_this_game_by_player.values())
+            .flat_map(|records| records.iter())
+            .find(|record| {
+                record.targets.is_none() || record.mana_spent_source_snapshots.is_none()
+            });
+        match unknown {
+            Some(record) => Err(PersistedRestoreError::UnknownCastHistoryProvenance {
+                spell_object_id: record.spell_object_id,
+            }),
+            None => Ok(()),
+        }
+    }
+
     /// A staged payment is a replay authority, not merely display data.  Keep
     /// its player references inside the restored game's seat set before any
     /// caller can finalize or replay it; otherwise a crafted raw snapshot can
@@ -16551,6 +16640,17 @@ pub enum PersistedRestoreError {
     /// never inferred, so the save is not resumable.
     #[error("persisted copy announcement for {copy_id:?} has targets before its announcing-opponent election and is not resumable")]
     UnelectedCopyAnnouncer { copy_id: ObjectId },
+    /// CR 601.2c + CR 115.1 + CR 106.3: a saved cast-history record predates the
+    /// declared-target and mana-source provenance fields. Its announced targets
+    /// and paying sources are gone, so the history is neither reconstructable nor
+    /// safe to read as "declared nothing": a zero-count first-spell gate would
+    /// re-grant a once-per-turn benefit. Restore refuses the state rather than
+    /// admitting an unknown as a known-empty.
+    #[error(
+        "persisted cast history carries unknown target/mana-source provenance for spell \
+         {spell_object_id:?} and cannot be restored"
+    )]
+    UnknownCastHistoryProvenance { spell_object_id: Option<ObjectId> },
 }
 
 impl PreparedPersistedGameState {
@@ -16762,6 +16862,7 @@ impl PersistedGameState {
         state
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
+        state.reject_unknown_cast_history_provenance()?;
         crate::game::effects::choose_from_zone::migrate_legacy_per_player_frame_on_restore(
             &mut state,
         )
@@ -23149,9 +23250,41 @@ pub fn record_captured_onsets(document: &mut serde_json::Value) {
     fn mark(root: &mut serde_json::Value) {
         let recorded = serde_json::to_value(AbilityOnsetRecord::Recorded)
             .expect("AbilityOnsetRecord serializes");
-        root.as_object_mut()
-            .expect("a committed capture's game-state root is a JSON object")
-            .insert(ABILITY_ONSET_RECORD_FIELD.to_string(), recorded);
+        let object = root
+            .as_object_mut()
+            .expect("a committed capture's game-state root is a JSON object");
+        object.insert(ABILITY_ONSET_RECORD_FIELD.to_string(), recorded);
+        // CR 601.2c + CR 106.3: every committed capture was taken before the
+        // cast-history provenance fields existed, so production admission rightly
+        // refuses it (`UnknownCastHistoryProvenance`). These captures are fixtures
+        // for tests that assert unrelated behaviour, so the test loader admits their
+        // cast records as known-empty. This is a FIXTURE-ONLY concession: it is
+        // `#[cfg(any(test, feature = "test-support"))]`, it never runs in a product
+        // build, and it does not weaken the production rule — a real save with
+        // unknown provenance is still refused.
+        for field in [
+            "spells_cast_this_turn_by_player",
+            "spells_cast_this_game_by_player",
+        ] {
+            let Some(by_player) = object.get_mut(field).and_then(|v| v.as_object_mut()) else {
+                continue;
+            };
+            for records in by_player.values_mut() {
+                let Some(records) = records.as_array_mut() else {
+                    continue;
+                };
+                for record in records {
+                    let Some(record) = record.as_object_mut() else {
+                        continue;
+                    };
+                    for provenance in ["targets", "mana_spent_source_snapshots"] {
+                        record
+                            .entry(provenance)
+                            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+                    }
+                }
+            }
+        }
     }
     let Some(object) = document.as_object_mut() else {
         return;
@@ -55348,9 +55481,9 @@ mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
-            mana_spent_source_snapshots: vec![],
+            mana_spent_source_snapshots: Some(vec![]),
             // A hand-built case record carries no announced cast, so it declares no target.
-            targets: Vec::new(),
+            targets: Some(Vec::new()),
         };
         let json = serde_json::to_string(&original).unwrap();
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();
@@ -58031,6 +58164,7 @@ mod restored_exact_attack_authority_tests {
             resolution_success_waiting_for: None,
             cast_this_way_etb_counter: None,
             cast_this_way_enters_mods: Default::default(),
+            committed_target_facts: Vec::new(),
         };
         let mut admitted = Vec::new();
         for carrier in 0..26 {
@@ -58354,6 +58488,7 @@ mod restored_exact_attack_authority_tests {
                                 },
                             )),
                             prepaid_actual_mana_spent: None,
+                            committed_target_facts: Vec::new(),
                         },
                         deferred_cost_events: vec![],
                         departure_record_indices: vec![],
@@ -58424,6 +58559,7 @@ mod restored_exact_attack_authority_tests {
                                 cascade_cast_transformed: false,
                                 resolution_success_waiting_for: Some(Box::new(token_host())),
                                 prepaid_actual_mana_spent: None,
+                                committed_target_facts: Vec::new(),
                             },
                         });
                     state.waiting_for.clone()

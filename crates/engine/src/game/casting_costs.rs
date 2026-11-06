@@ -3418,6 +3418,7 @@ fn finish_cost_object_moves(
             cascade_cast_transformed,
             resolution_success_waiting_for,
             prepaid_actual_mana_spent,
+            committed_target_facts,
         } => {
             let returned_creature = chosen
                 .first()
@@ -3451,6 +3452,7 @@ fn finish_cost_object_moves(
                     resolution_success_waiting_for: resolution_success_waiting_for.map(|wf| *wf),
                     cast_this_way_etb_counter: None,
                     cast_this_way_enters_mods: Default::default(),
+                    committed_target_facts,
                 }),
                 Some(actual_mana_spent),
                 ReturnedCreatureCostMove::Delivered,
@@ -13425,6 +13427,19 @@ fn finalize_cast_pre_payment_checks(
     cast_timing_permission: Option<CastTimingPermission>,
     events: &mut Vec<GameEvent>,
 ) -> Result<FinalizePrePaymentChecks, EngineError> {
+    // CR 115.1 + CR 601.2c + CR 400.7: latch the declared targets HERE, once,
+    // before this frame pays any cost. `FinalizePrePaymentChecks` is the carrier
+    // every parked payment continuation re-enters with, so the CR 601.2i write
+    // reads selection-time facts even when the cast suspends on an additional-cost
+    // move that removes a target (Bone Splinters sacrificing the creature it also
+    // targets). Re-reading by raw id after payment would describe the target's new
+    // incarnation under CR 400.7 — a graveyard Land for an animated Mishra's
+    // Factory, a graveyard Creature for a Grizzly Bears — which is neither the
+    // CR 115.9 selection-time reading the history predicates are defined over nor
+    // the CR 115.9b completed-cast reading that ignores a departed target.
+    let committed_target_facts =
+        super::casting::capture_target_facts(state, &declared_targets_in_chain(ability));
+
     // CR 614.1c + CR 122.1 + CR 205.1b + CR 613.1d: Snapshot the exact
     // cast-this-way ETB riders before resulting-MV evaluation consumes the
     // during-resolution permission. Legacy pending casts without an index keep
@@ -13527,6 +13542,7 @@ fn finalize_cast_pre_payment_checks(
                     resolution_success_waiting_for: None,
                     cast_this_way_etb_counter,
                     cast_this_way_enters_mods,
+                    committed_target_facts,
                 });
             }
         };
@@ -13571,6 +13587,7 @@ fn finalize_cast_pre_payment_checks(
         resolution_success_waiting_for,
         cast_this_way_etb_counter,
         cast_this_way_enters_mods,
+        committed_target_facts,
     })
 }
 
@@ -13710,6 +13727,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
         resolution_success_waiting_for,
         cast_this_way_etb_counter,
         cast_this_way_enters_mods,
+        committed_target_facts,
     } = match pre_payment_checks {
         Some(checks) => checks,
         None => finalize_cast_pre_payment_checks(
@@ -13788,24 +13806,12 @@ fn finalize_cast_with_phyrexian_choices_inner(
         obj.fused_split_spell = casting_variant == CastingVariant::Fuse;
     }
 
-    // CR 601.2c + CR 400.7: snapshot the declared targets before this frame pays
-    // the cost, rather than at the record write below. The write happens at
-    // CR 601.2i, after CR 601.2h, and paying can change or remove a target:
-    // reading their characteristics there records what they had become rather
-    // than what they were when committed, which is the state the history
-    // predicates are defined over (CR 115.9's selection-time reading).
-    //
-    // PARTIAL, by construction: this is the *paying* frame only. A cast that
-    // suspends during payment re-enters this function through
-    // `resume_prepaid_spell_finalization` (and the delve / sneak /
-    // deferred-discard resume roots), where `prepaid_actual_mana_spent` is
-    // already set and this capture is therefore still after payment. Closing that
-    // needs the facts latched on the cast's pending root before payment — the
-    // shape `crime_candidate` uses in `finish_pending_cast_cost_or_pay` — and
-    // carried to the write on every resume path. Filed as a follow-up: nothing
-    // here is worse than before, and the non-resumed path is strictly better.
-    let committed_target_facts =
-        super::casting::capture_target_facts(state, &declared_targets_in_chain(&ability));
+    // CR 601.2c + CR 400.7: `committed_target_facts` was latched with the
+    // pre-payment checks above — once, before any cost was paid — and every
+    // parked payment continuation re-enters this function carrying it. There is
+    // deliberately no capture here: this point is after CR 601.2h on every
+    // resumed path, where a raw-id lookup would describe the target's new
+    // incarnation rather than the one the caster announced (CR 115.9, CR 115.9b).
 
     if prepaid_actual_mana_spent.is_none() {
         let resume_at_resolution_depth = state.resolution_stack.len();
@@ -13876,6 +13882,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
                     resolution_success_waiting_for,
                     cast_this_way_etb_counter,
                     cast_this_way_enters_mods,
+                    committed_target_facts,
                 }),
             },
             None,
@@ -13898,6 +13905,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 resolution_success_waiting_for: resolution_success_waiting_for.clone(),
                 cast_this_way_etb_counter: cast_this_way_etb_counter.clone(),
                 cast_this_way_enters_mods: cast_this_way_enters_mods.clone(),
+                committed_target_facts: committed_target_facts.clone(),
             })),
         };
         if let Some(waiting_for) = pay_delve_at_commit(
@@ -13942,6 +13950,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 cascade_cast_transformed,
                 resolution_success_waiting_for: resolution_success_waiting_for.map(Box::new),
                 prepaid_actual_mana_spent,
+                committed_target_facts,
             },
             cost_event_start,
             false,
@@ -14698,11 +14707,11 @@ fn finalize_cast_with_phyrexian_choices_inner(
         &obj,
         source_zone,
         casting_variant,
-        // CR 115.1 + CR 601.2c: `committed_target_facts` was captured above at
-        // target settlement, before the cost was paid, and is passed here
-        // unchanged; a placeholder cast (no ability) necessarily declares none,
-        // which is what `is_placeholder`'s `ability.targets.is_empty()` conjunct
-        // already encodes.
+        // CR 115.1 + CR 601.2c: `committed_target_facts` was latched with the
+        // pre-payment checks and arrived here unchanged through every parked
+        // payment continuation; a placeholder cast (no ability) necessarily
+        // declares none, which is what `is_placeholder`'s
+        // `ability.targets.is_empty()` conjunct already encodes.
         &committed_target_facts,
     )
     .map_err(finalized_spell_cast_ledger_error)?;

@@ -2290,7 +2290,10 @@ fn payment_paths(value: &serde_json::Value) -> Vec<(String, Vec<serde_json::Valu
 }
 
 fn snapshot_name(item: &serde_json::Value) -> Option<&str> {
-    item.pointer("/lki/name")
+    // The cast-history payment snapshot uses the compact `LKISnapshot` projection
+    // (`"n"`); the verbose spelling is still accepted for any carrier that keeps it.
+    item.pointer("/lki/n")
+        .or_else(|| item.pointer("/lki/name"))
         .and_then(serde_json::Value::as_str)
 }
 

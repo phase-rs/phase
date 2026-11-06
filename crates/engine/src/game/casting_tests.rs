@@ -4925,9 +4925,9 @@ fn record_one_spell_cast_this_turn(state: &mut GameState, player: PlayerId) {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
-            mana_spent_source_snapshots: Vec::new(),
+            mana_spent_source_snapshots: Some(Vec::new()),
             // A hand-built case record carries no announced cast, so it declares no target.
-            targets: Vec::new(),
+            targets: Some(Vec::new()),
         }]),
     );
 }
@@ -13076,9 +13076,9 @@ fn self_cost_reduction_applies_from_graveyard() {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
-                mana_spent_source_snapshots: Vec::new(),
+                mana_spent_source_snapshots: Some(Vec::new()),
                 // A hand-built case record carries no announced cast, so it declares no target.
-                targets: Vec::new(),
+                targets: Some(Vec::new()),
             },
             crate::types::SpellCastRecord {
                 name: "Opt".to_string(),
@@ -13095,9 +13095,9 @@ fn self_cost_reduction_applies_from_graveyard() {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
-                mana_spent_source_snapshots: Vec::new(),
+                mana_spent_source_snapshots: Some(Vec::new()),
                 // A hand-built case record carries no announced cast, so it declares no target.
-                targets: Vec::new(),
+                targets: Some(Vec::new()),
             },
         ]),
     );
@@ -31961,9 +31961,9 @@ fn first_qualified_spell_reducer_only_applies_to_first_matching_spell() {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
-            mana_spent_source_snapshots: Vec::new(),
+            mana_spent_source_snapshots: Some(Vec::new()),
             // A hand-built case record carries no announced cast, so it declares no target.
-            targets: Vec::new(),
+            targets: Some(Vec::new()),
         }]),
     );
 
@@ -32084,9 +32084,9 @@ fn first_x_spell_reducer_uses_x_filter_dynamic_counter_count_and_first_gate() {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
-            mana_spent_source_snapshots: Vec::new(),
+            mana_spent_source_snapshots: Some(Vec::new()),
             // A hand-built case record carries no announced cast, so it declares no target.
-            targets: Vec::new(),
+            targets: Some(Vec::new()),
         }]),
     );
 
@@ -32167,9 +32167,9 @@ fn opponent_first_noncreature_tax_uses_caster_history() {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
-            mana_spent_source_snapshots: Vec::new(),
+            mana_spent_source_snapshots: Some(Vec::new()),
             // A hand-built case record carries no announced cast, so it declares no target.
-            targets: Vec::new(),
+            targets: Some(Vec::new()),
         }]),
     );
 
@@ -53793,10 +53793,20 @@ fn add_mana_from_source(
     }
 }
 
-/// A sorcery with a real mana cost and a library-independent effect, in hand.
-/// A `ManaCost::zero()` fixture cannot stand in for the provenance tests: a zero
-/// cost makes no payment, so nothing is stamped and the positive reach guard
-/// could never fire.
+/// A cost-only spell in hand, for the payment-provenance tests.
+///
+/// A `ManaCost::zero()` fixture cannot stand in for these tests: a zero cost
+/// makes no payment, so nothing is stamped and the positive reach guard could
+/// never fire. The spell therefore carries a real cost and nothing else.
+///
+/// SYNTHETIC, and the repo's real-card rule is applied deliberately: no printed
+/// sorcery has a purely generic mana cost — the `{N}`-only cards are artifacts,
+/// whose nearest printed members are Mind Stone (`{2}`) and Wayfarer's Bauble
+/// (`{1}`). Substituting one of those would change the cast's card type and
+/// reach into the artifact/spell-ability paths these legs are not about, so the
+/// fixture keeps a synthetic Sorcery shell with no ability at all — it is never
+/// resolved, only cast and paid — and says so here rather than misreporting a
+/// printed card's text or cost.
 fn create_paid_sorcery(
     state: &mut GameState,
     card_id: CardId,
@@ -53807,19 +53817,12 @@ fn create_paid_sorcery(
         state,
         card_id,
         owner,
-        format!("Paid Sorcery {card_id:?}"),
+        format!("Synthetic Cost-Only Spell {card_id:?}"),
         Zone::Hand,
     );
     let obj = state.objects.get_mut(&id).unwrap();
     obj.card_types.core_types.push(CoreType::Sorcery);
     obj.mana_cost = cost;
-    Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::GainLife {
-            amount: QuantityExpr::Fixed { value: 1 },
-            player: TargetFilter::Controller,
-        },
-    ));
     id
 }
 
@@ -54229,9 +54232,9 @@ fn convoke_query_before_record_unaffected_by_snapshot() {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
-            mana_spent_source_snapshots: Vec::new(),
+            mana_spent_source_snapshots: Some(Vec::new()),
             // A hand-built case record carries no announced cast, so it declares no target.
-            targets: Vec::new(),
+            targets: Some(Vec::new()),
         }]
         .into(),
     );
@@ -63702,13 +63705,13 @@ fn record_answers_declared_creature_target() {
     let record = recorded_cast(state, growth);
     // Reach guard 1: the committed fact list is non-empty and names the bear.
     assert_eq!(
-        record.targets.len(),
+        record.declared_targets().len(),
         1,
         "the cast recorded exactly one declared target"
     );
     assert!(
         matches!(
-            &record.targets[0],
+            &record.declared_targets()[0],
             crate::types::game_state::ActivationTargetFact::Object { id, .. } if *id == bear
         ),
         "the recorded fact names the declared target"
@@ -63760,9 +63763,13 @@ fn record_answers_false_for_only_non_matching_targets() {
     let record = recorded_cast(state, bolt);
     // Reach guard: exactly one fact, and it is the targeted PLAYER — so the answer
     // below is the player branch's, not an empty list's.
-    assert_eq!(record.targets.len(), 1, "exactly one declared target");
     assert_eq!(
-        record.targets[0],
+        record.declared_targets().len(),
+        1,
+        "exactly one declared target"
+    );
+    assert_eq!(
+        record.declared_targets()[0],
         crate::types::game_state::ActivationTargetFact::Player(P1),
         "the recorded fact is the targeted player"
     );
@@ -63808,7 +63815,7 @@ fn record_answers_false_for_a_cast_that_declared_no_target() {
     let record = recorded_cast(state, divination);
     // Reach guard: the record is real and its list is honestly empty.
     assert!(
-        record.targets.is_empty(),
+        record.declared_targets().is_empty(),
         "a non-targeting cast declared nothing"
     );
     let ctx = crate::game::filter::FilterContext::neutral();
@@ -63855,7 +63862,7 @@ fn declared_target_facts_fold_is_existential() {
     runner.cast(growth).target_objects(&[bear]).commit();
     let state = runner.state();
 
-    let bear_fact = recorded_cast(state, growth).targets[0].clone();
+    let bear_fact = recorded_cast(state, growth).declared_targets()[0].clone();
     let non_matching_player = crate::types::game_state::ActivationTargetFact::Player(P1);
     let filter = a_creature_filter();
     let ctx = crate::game::filter::FilterContext::neutral();
@@ -63989,7 +63996,7 @@ fn live_and_history_readers_agree_on_one_board() {
         // Reach guard: the history reader's own input was non-empty for the matching
         // case, so the `true` is the fact set's and not a permissive fallback.
         if expected {
-            assert_eq!(record.targets.len(), 1);
+            assert_eq!(record.declared_targets().len(), 1);
         }
     }
 }
@@ -64142,13 +64149,13 @@ fn copy_cast_records_its_announced_declared_targets() {
 
     let record = recorded_cast(state, copy_id);
     assert_eq!(
-        record.targets.len(),
+        record.declared_targets().len(),
         1,
         "the copy's cast recorded its one announced target"
     );
     assert!(
         matches!(
-            &record.targets[0],
+            &record.declared_targets()[0],
             crate::types::game_state::ActivationTargetFact::Object { id, .. } if *id == a
         ),
         "the recorded fact names the announced creature"
@@ -64178,7 +64185,13 @@ fn copy_cast_with_no_spell_ability_records_no_targets() {
     let zemo = scenario
         .add_creature_from_oracle(P0, "Baron Helmut Zemo", 3, 3, BARON_HELMUT_ZEMO)
         .id();
-    // Fixture: fifteen black symbols per card meets the Boast cost.
+    // SYNTHETIC COSTS, with the repo's real-card rule applied deliberately: the
+    // Boast cost needs fifteen or more black mana symbols among the exiled cards'
+    // costs, and the highest printed black pip count on any card is four
+    // (Phyrexian Obliterator, `{B}{B}{B}{B}`), so a printed pair cannot reach the
+    // threshold and the shape is genuinely unavailable. The two shells below carry
+    // no printed card's name or text; Phyrexian Obliterator is the nearest printed
+    // analogue for the cost shape.
     let black = ManaCost::Cost {
         shards: vec![ManaCostShard::Black; 15],
         generic: 0,
@@ -64190,15 +64203,16 @@ fn copy_cast_with_no_spell_ability_records_no_targets() {
             target: TargetFilter::Controller,
         },
     );
-    // The ability-less copy: a vanilla creature with no Oracle text and therefore no
-    // spell ability (Grizzly Bears, the same vanilla R3's board measures).
+    // The ability-less copy: a vanilla black creature with no Oracle text and
+    // therefore no spell ability. Synthetic name so the fixture never attributes a
+    // fabricated cost to a printed card (see the cost note above).
     let vanilla = scenario
-        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .add_creature_to_graveyard(P0, "Synthetic Black Vanilla", 2, 2)
         .from_oracle_text("")
         .with_mana_cost(black.clone())
         .id();
     let instant = scenario
-        .add_spell_to_graveyard(P0, "Draw Instant B", true)
+        .add_spell_to_graveyard(P0, "Synthetic Black Instant", true)
         .with_ability_definition(draw)
         .with_mana_cost(black)
         .id();
@@ -64244,7 +64258,7 @@ fn copy_cast_with_no_spell_ability_records_no_targets() {
     let bear_copy = state
         .objects
         .values()
-        .find(|object| object.is_copy && object.name == "Grizzly Bears")
+        .find(|object| object.is_copy && object.name == "Synthetic Black Vanilla")
         .expect("reach: the vanilla card's copy was cast");
     let copy_id = bear_copy.id;
     // Reach guard: the copy's own entry exists and carries NO spell ability, so the
@@ -64260,7 +64274,7 @@ fn copy_cast_with_no_spell_ability_records_no_targets() {
     );
     let record = recorded_cast(state, copy_id);
     assert!(
-        record.targets.is_empty(),
+        record.declared_targets().is_empty(),
         "an ability-less copy declared nothing and honestly records nothing"
     );
     let ctx = crate::game::filter::FilterContext::neutral();

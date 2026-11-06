@@ -3231,7 +3231,7 @@ fn mana_spent_source_snapshots_round_trip_and_stay_backward_compatible() {
     let populated = SpellCastRecord {
         name: "Grizzly Bears".to_string(),
         mana_value: 2,
-        mana_spent_source_snapshots: vec![ManaSpentSourceSnapshot {
+        mana_spent_source_snapshots: Some(vec![ManaSpentSourceSnapshot {
             source_id,
             lki: LKISnapshot {
                 name: "Treasure".to_string(),
@@ -3256,7 +3256,7 @@ fn mana_spent_source_snapshots_round_trip_and_stay_backward_compatible() {
                 attachments: Vec::new(),
                 intensity: 0,
             },
-        }],
+        }]),
         ..Default::default()
     };
 
@@ -3269,23 +3269,25 @@ fn mana_spent_source_snapshots_round_trip_and_stay_backward_compatible() {
     let restored: SpellCastRecord =
         serde_json::from_str(&populated_json).expect("populated record deserializes");
     assert_eq!(restored, populated, "the snapshot survives the round-trip");
-    assert_eq!(restored.mana_spent_source_snapshots.len(), 1);
-    assert_eq!(restored.mana_spent_source_snapshots[0].source_id, source_id);
+    assert_eq!(restored.mana_source_snapshots().len(), 1);
+    assert_eq!(restored.mana_source_snapshots()[0].source_id, source_id);
     assert_eq!(
         serde_json::to_string(&restored).expect("restored record reserializes"),
         populated_json,
         "reserialization is byte-identical"
     );
 
-    // (2) An empty vector emits NO key (`skip_serializing_if = "Vec::is_empty"`).
+    // (2) A KNOWN-EMPTY vector is written as an explicit `[]`, so it cannot be
+    // confused with the absent field a legacy payload has (which decodes to
+    // unknown). This is the whole point of the `Option` split.
     let empty = SpellCastRecord {
         name: "Grizzly Bears".to_string(),
         ..Default::default()
     };
     let empty_json = serde_json::to_string(&empty).expect("empty record serializes");
     assert!(
-        !empty_json.contains("mana_spent_source_snapshots"),
-        "an empty snapshot vector is omitted from the wire"
+        empty_json.contains("\"mana_spent_source_snapshots\":[]"),
+        "known-empty is written explicitly, not omitted like an unknown: {empty_json}"
     );
     // Positive reach guard: a sibling `skip_serializing_if` field on the SAME record
     // still emits its key when set, so the omission above is attributable to
@@ -3300,32 +3302,60 @@ fn mana_spent_source_snapshots_round_trip_and_stay_backward_compatible() {
         "the sibling cast-fact key is still emitted when set"
     );
 
-    // (3) A payload that predates the field (no key at all) deserializes to an
-    // empty vector — the honest "cannot prove" reading, not a hard error.
-    let legacy: SpellCastRecord =
-        serde_json::from_str(&empty_json).expect("keyless payload deserializes");
+    // (3) A payload that predates the field (no key at all) decodes to `None`:
+    // UNKNOWN provenance, which is not the same claim as "this cast provably paid
+    // no source-attributed mana".
+    let keyless_json = empty_json.replace(",\"mana_spent_source_snapshots\":[]", "");
     assert!(
-        legacy.mana_spent_source_snapshots.is_empty(),
-        "a record predating the field carries no payment provenance"
+        !keyless_json.contains("mana_spent_source_snapshots"),
+        "reach: the fixture really has no key"
     );
-    // The same reading survives the full-game-state persistence path: a real
-    // `GameState` whose cast history holds an empty record serializes and restores.
+    let legacy: SpellCastRecord =
+        serde_json::from_str(&keyless_json).expect("keyless payload deserializes");
+    assert!(
+        legacy.mana_spent_source_snapshots.is_none(),
+        "a record predating the field has unknown payment provenance, not a proven empty"
+    );
+
+    // A record this build wrote states the answer even when the answer is "none",
+    // so the two readings stay distinguishable on the wire.
+    assert_eq!(empty.mana_spent_source_snapshots, Some(Vec::new()));
     let mut state = GameState::new(FormatConfig::standard(), 2, 42);
     state.spells_cast_this_turn_by_player =
         HashMap::from([(PlayerId(0), im::Vector::from(vec![empty.clone()]))]);
     let persisted = PersistedGameState::capture(state);
     let bytes = serde_json::to_string(&persisted).expect("persisted state serializes");
     assert!(
-        !bytes.contains("mana_spent_source_snapshots"),
-        "the empty vector is omitted from the persisted game state too"
+        bytes.contains("\"mana_spent_source_snapshots\":[]"),
+        "known-empty is spelled out so it cannot be confused with a legacy absent field"
     );
     let restored_state = serde_json::from_str::<PersistedGameState>(&bytes)
         .expect("persisted state deserializes")
         .into_game_state()
         .expect("persisted state finalizes");
     let record = &restored_state.spells_cast_this_turn_by_player[&PlayerId(0)][0];
-    assert!(record.mana_spent_source_snapshots.is_empty());
+    assert_eq!(record.mana_spent_source_snapshots, Some(Vec::new()));
     assert_eq!(record.name, "Grizzly Bears");
+
+    // A save whose cast history cannot prove what paid for its spells is refused at
+    // the shared restore boundary. Admitting it would let the unknown read as "this
+    // spell did not qualify", and a zero-count first-spell gate would re-grant a
+    // once-per-turn benefit the save had already spent.
+    let mut unknown_state = GameState::new(FormatConfig::standard(), 2, 42);
+    unknown_state.spells_cast_this_turn_by_player =
+        HashMap::from([(PlayerId(0), im::Vector::from(vec![legacy.clone()]))]);
+    let persisted = PersistedGameState::capture(unknown_state);
+    let bytes = serde_json::to_string(&persisted).expect("persisted state serializes");
+    let refused = serde_json::from_str::<PersistedGameState>(&bytes)
+        .expect("persisted state deserializes")
+        .into_game_state();
+    assert!(
+        matches!(
+            refused,
+            Err(engine::types::game_state::PersistedRestoreError::UnknownCastHistoryProvenance { .. })
+        ),
+        "an unknown-provenance save is refused rather than read as zero qualifying history: {refused:?}"
+    );
 }
 
 /// CR 115.1 + CR 601.2c + CR 400.7: `SpellCastRecord::targets` is the cast-history
@@ -3340,7 +3370,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
     let populated = SpellCastRecord {
         name: "Giant Growth".to_string(),
         mana_value: 1,
-        targets: vec![
+        targets: Some(vec![
             ActivationTargetFact::Object {
                 id: target_id,
                 lki: Box::new(LKISnapshot {
@@ -3369,7 +3399,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
             },
             // The player axis carries no snapshot at all.
             ActivationTargetFact::Player(PlayerId(1)),
-        ],
+        ]),
         ..Default::default()
     };
 
@@ -3385,15 +3415,15 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
         restored, populated,
         "the committed targets survive the round-trip"
     );
-    assert_eq!(restored.targets.len(), 2);
-    let ActivationTargetFact::Object { id, lki } = &restored.targets[0] else {
+    assert_eq!(restored.declared_targets().len(), 2);
+    let ActivationTargetFact::Object { id, lki } = &restored.declared_targets()[0] else {
         panic!("index 0 is an object fact");
     };
     assert_eq!(*id, target_id, "the object fact keeps its stable id");
     assert_eq!(lki.name, "Grizzly Bears", "the latched snapshot survives");
     assert_eq!(lki.power, Some(2));
     assert_eq!(
-        restored.targets[1],
+        restored.declared_targets()[1],
         ActivationTargetFact::Player(PlayerId(1))
     );
     assert_eq!(
@@ -3402,15 +3432,17 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
         "reserialization is byte-identical"
     );
 
-    // (2) An empty vector emits NO key (`skip_serializing_if = "Vec::is_empty"`).
+    // (2) A KNOWN-EMPTY vector is written as an explicit `[]`, so it cannot be
+    // confused with the absent field a legacy payload has (which decodes to
+    // unknown). This is the whole point of the `Option` split.
     let empty = SpellCastRecord {
         name: "Grizzly Bears".to_string(),
         ..Default::default()
     };
     let empty_json = serde_json::to_string(&empty).expect("empty record serializes");
     assert!(
-        !empty_json.contains("\"targets\""),
-        "an empty committed-target vector is omitted from the wire"
+        empty_json.contains("\"targets\":[]"),
+        "known-empty is written explicitly, not omitted like an unknown: {empty_json}"
     );
     // Positive reach guard: a sibling `skip_serializing_if` field on the SAME record
     // still emits its key when set, so the omission above is attributable to
@@ -3425,30 +3457,56 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
         "the sibling cast-fact key is still emitted when set"
     );
 
-    // (3) A payload that predates the field (no key at all) deserializes to an
-    // empty vector — the honest "cannot prove" reading, not a hard error.
-    let legacy: SpellCastRecord =
-        serde_json::from_str(&empty_json).expect("keyless payload deserializes");
+    // (3) A payload that predates the field (no key at all) decodes to `None`:
+    // UNKNOWN provenance, which is not the same claim as "this spell provably
+    // declared no target".
+    let keyless_json = empty_json.replace(",\"targets\":[]", "");
     assert!(
-        legacy.targets.is_empty(),
-        "a record predating the field carries no committed-target provenance"
+        !keyless_json.contains("\"targets\""),
+        "reach: the fixture really has no key"
     );
-    // The same reading survives the full-game-state persistence path: a real
-    // `GameState` whose cast history holds a keyless record serializes and restores.
+    let legacy: SpellCastRecord =
+        serde_json::from_str(&keyless_json).expect("keyless payload deserializes");
+    assert!(
+        legacy.targets.is_none(),
+        "a record predating the field has unknown committed-target provenance"
+    );
+
+    // A record this build wrote states the answer even when the answer is "none".
+    assert_eq!(empty.targets, Some(Vec::new()));
     let mut state = GameState::new(FormatConfig::standard(), 2, 42);
     state.spells_cast_this_turn_by_player =
         HashMap::from([(PlayerId(0), im::Vector::from(vec![empty.clone()]))]);
     let persisted = PersistedGameState::capture(state);
     let bytes = serde_json::to_string(&persisted).expect("persisted state serializes");
     assert!(
-        !bytes.contains("\"targets\""),
-        "the empty vector is omitted from the persisted game state too"
+        bytes.contains("\"targets\":[]"),
+        "known-empty is spelled out so it cannot be confused with a legacy absent field"
     );
     let restored_state = serde_json::from_str::<PersistedGameState>(&bytes)
         .expect("persisted state deserializes")
         .into_game_state()
         .expect("persisted state finalizes");
     let record = &restored_state.spells_cast_this_turn_by_player[&PlayerId(0)][0];
-    assert!(record.targets.is_empty());
+    assert_eq!(record.targets, Some(Vec::new()));
     assert_eq!(record.name, "Grizzly Bears");
+
+    // A save whose cast history cannot prove what its spells declared is refused at
+    // the shared restore boundary rather than read as history in which nothing
+    // qualified.
+    let mut unknown_state = GameState::new(FormatConfig::standard(), 2, 42);
+    unknown_state.spells_cast_this_turn_by_player =
+        HashMap::from([(PlayerId(0), im::Vector::from(vec![legacy.clone()]))]);
+    let persisted = PersistedGameState::capture(unknown_state);
+    let bytes = serde_json::to_string(&persisted).expect("persisted state serializes");
+    let refused = serde_json::from_str::<PersistedGameState>(&bytes)
+        .expect("persisted state deserializes")
+        .into_game_state();
+    assert!(
+        matches!(
+            refused,
+            Err(engine::types::game_state::PersistedRestoreError::UnknownCastHistoryProvenance { .. })
+        ),
+        "an unknown-provenance save is refused rather than read as zero qualifying history: {refused:?}"
+    );
 }

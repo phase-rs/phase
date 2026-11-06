@@ -196,11 +196,11 @@ fn assert_leg_snapshots(
     subtype: &str,
 ) {
     assert_eq!(
-        record.mana_spent_source_snapshots.len(),
+        record.mana_source_snapshots().len(),
         2,
         "each leg pays {{2}} with two one-mana units, so both units must stamp a source snapshot"
     );
-    for snapshot in &record.mana_spent_source_snapshots {
+    for snapshot in record.mana_source_snapshots() {
         assert_eq!(
             snapshot.source_id, expected,
             "every snapshot must name this leg's mana source"
@@ -626,20 +626,20 @@ fn two_units_from_one_source_and_mixed_sources_still_answer_true() {
     runner.cast(mixed_bears).commit();
     let record = last_record(&runner);
     assert_eq!(
-        record.mana_spent_source_snapshots.len(),
+        record.mana_source_snapshots().len(),
         2,
         "the mixed payment stamps both units"
     );
     assert!(
         record
-            .mana_spent_source_snapshots
+            .mana_source_snapshots()
             .iter()
             .any(|s| s.source_id == treasure),
         "the mixed payment's Treasure unit is present"
     );
     assert!(
         record
-            .mana_spent_source_snapshots
+            .mana_source_snapshots()
             .iter()
             .any(|s| s.source_id == forest),
         "the mixed payment's Forest unit is present"
@@ -780,7 +780,7 @@ fn record_without_payment_provenance_answers_false() {
     runner.cast(bears).commit();
     let proved = last_record(&runner);
     assert_eq!(
-        proved.mana_spent_source_snapshots.len(),
+        proved.mana_source_snapshots().len(),
         2,
         "reach guard: the same filter shape answers true for a record WITH provenance"
     );
@@ -797,11 +797,14 @@ fn record_without_payment_provenance_answers_false() {
     let unprovable = SpellCastRecord {
         name: BEARS_NAME.to_string(),
         mana_value: 2,
+        // Unknown, not known-empty: the row this reproduces is one a legacy save
+        // decodes to, and only the unknown fails closed under the source gate.
+        mana_spent_source_snapshots: None,
         ..Default::default()
     };
     assert!(
-        unprovable.mana_spent_source_snapshots.is_empty(),
-        "the fixture record really carries no provenance"
+        unprovable.mana_spent_source_snapshots.is_none(),
+        "the fixture record really carries no payment provenance"
     );
     assert!(
         !spell_record_matches_filter(

@@ -403,12 +403,15 @@ pub(crate) fn spell_cast_record_for(
         prepared_copy_source: obj.prepared_copy_source,
         // CR 106.3 + CR 601.2h: persist the payment-time source snapshots so a
         // source-qualified cast predicate survives resolution (CR 400.7d) and the
-        // source's departure (CR 400.7).
-        mana_spent_source_snapshots: obj.mana_spent_source_snapshots.clone(),
+        // source's departure (CR 400.7). `Some` — this projection is built from a
+        // live cast, so the provenance is known; only a legacy payload decodes to
+        // `None`.
+        mana_spent_source_snapshots: Some(obj.mana_spent_source_snapshots.clone()),
         // CR 115.1 + CR 601.2c: the committed declared targets, captured by the
         // caller that holds them. The pure projection never reaches for ambient
         // state: a caller with no committed list must pass an empty slice and say why.
-        targets: targets.to_vec(),
+        // `Some` for the same reason as the source snapshots above.
+        targets: Some(targets.to_vec()),
     }
 }
 
@@ -4364,9 +4367,9 @@ mod tests {
                 was_kicked: false,
                 spell_object_id: None,
                 prepared_copy_source: None,
-                mana_spent_source_snapshots: Vec::new(),
+                mana_spent_source_snapshots: Some(Vec::new()),
                 // A hand-built case record carries no announced cast, so it declares no target.
-                targets: Vec::new(),
+                targets: Some(Vec::new()),
             }]),
         );
 
@@ -4405,9 +4408,9 @@ mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
-                    mana_spent_source_snapshots: Vec::new(),
+                    mana_spent_source_snapshots: Some(Vec::new()),
                     // A hand-built case record carries no announced cast, so it declares no target.
-                    targets: Vec::new(),
+                    targets: Some(Vec::new()),
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -4424,9 +4427,9 @@ mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
-                    mana_spent_source_snapshots: Vec::new(),
+                    mana_spent_source_snapshots: Some(Vec::new()),
                     // A hand-built case record carries no announced cast, so it declares no target.
-                    targets: Vec::new(),
+                    targets: Some(Vec::new()),
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -4443,9 +4446,9 @@ mod tests {
                     was_kicked: false,
                     spell_object_id: None,
                     prepared_copy_source: None,
-                    mana_spent_source_snapshots: Vec::new(),
+                    mana_spent_source_snapshots: Some(Vec::new()),
                     // A hand-built case record carries no announced cast, so it declares no target.
-                    targets: Vec::new(),
+                    targets: Some(Vec::new()),
                 },
             ]),
         );

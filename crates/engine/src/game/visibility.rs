@@ -4648,14 +4648,17 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
                 .is_some_and(|id| hidden_ids.contains(&id))
             {
                 redact_spell_cast_record(record, hidden_ids);
-            } else if payment_names_hidden_source(&record.mana_spent_source_snapshots, hidden_ids)
-                || targets_name_hidden_fact(&record.targets, hidden_ids)
+            } else if payment_names_hidden_source(record.mana_source_snapshots(), hidden_ids)
+                || targets_name_hidden_fact(record.declared_targets(), hidden_ids)
             {
-                redact_payment_source_snapshots(
-                    &mut record.mana_spent_source_snapshots,
-                    hidden_ids,
-                );
-                redact_target_facts(&mut record.targets, hidden_ids);
+                // Redaction blanks a hidden carrier's slot but never invents
+                // provenance: an unknown (`None`) list stays unknown.
+                if let Some(snapshots) = record.mana_spent_source_snapshots.as_mut() {
+                    redact_payment_source_snapshots(snapshots, hidden_ids);
+                }
+                if let Some(facts) = record.targets.as_mut() {
+                    redact_target_facts(facts, hidden_ids);
+                }
             }
         }
     }
@@ -4777,8 +4780,12 @@ fn redact_spell_cast_record(
         mana_spent_source_snapshots,
         targets,
     } = record;
-    redact_payment_source_snapshots(mana_spent_source_snapshots, hidden_ids);
-    redact_target_facts(targets, hidden_ids);
+    if let Some(snapshots) = mana_spent_source_snapshots.as_mut() {
+        redact_payment_source_snapshots(snapshots, hidden_ids);
+    }
+    if let Some(facts) = targets.as_mut() {
+        redact_target_facts(facts, hidden_ids);
+    }
     *name = HIDDEN_CARD_NAME.to_string();
     *spell_object_id = None;
 }
@@ -5383,7 +5390,7 @@ mod tests {
             core_types: vec![CoreType::Creature],
             mana_value: 2,
             spell_object_id: Some(hidden_spell),
-            mana_spent_source_snapshots: vec![snapshot(hidden_source, &hidden_lki)],
+            mana_spent_source_snapshots: Some(vec![snapshot(hidden_source, &hidden_lki)]),
             ..Default::default()
         };
         // A PUBLIC cast paid from a hidden source plus a public one.
@@ -5392,10 +5399,10 @@ mod tests {
             core_types: vec![CoreType::Creature],
             mana_value: 2,
             spell_object_id: Some(public_spell),
-            mana_spent_source_snapshots: vec![
+            mana_spent_source_snapshots: Some(vec![
                 snapshot(public_source, &public_lki),
                 snapshot(hidden_source, &hidden_lki),
-            ],
+            ]),
             ..Default::default()
         };
         // A public cast paid only from a public source (reach guard (i)).
@@ -5404,7 +5411,7 @@ mod tests {
             core_types: vec![CoreType::Creature],
             mana_value: 2,
             spell_object_id: Some(public_spell),
-            mana_spent_source_snapshots: vec![snapshot(public_source, &public_lki)],
+            mana_spent_source_snapshots: Some(vec![snapshot(public_source, &public_lki)]),
             ..Default::default()
         };
         state
@@ -5426,18 +5433,18 @@ mod tests {
         // Reach guards on the raw state: every slot is present and names its source.
         assert_eq!(
             state.spells_cast_this_turn_by_player[&owner][0]
-                .mana_spent_source_snapshots
+                .mana_source_snapshots()
                 .len(),
             1
         );
         assert_eq!(
             state.spells_cast_this_turn_by_player[&owner][1]
-                .mana_spent_source_snapshots
+                .mana_source_snapshots()
                 .len(),
             2
         );
         assert_eq!(
-            state.spells_cast_this_turn_by_player[&owner][1].mana_spent_source_snapshots[1]
+            state.spells_cast_this_turn_by_player[&owner][1].mana_source_snapshots()[1]
                 .lki
                 .name,
             "Island"
@@ -5455,12 +5462,13 @@ mod tests {
         assert_eq!(hidden.name, HIDDEN_CARD_NAME);
         assert_eq!(hidden.spell_object_id, None);
         assert_eq!(
-            hidden.mana_spent_source_snapshots.len(),
+            hidden.mana_source_snapshots().len(),
             1,
             "the slot is kept so the per-source count stays correct"
         );
         assert_eq!(
-            hidden.mana_spent_source_snapshots[0].lki.name, HIDDEN_CARD_NAME,
+            hidden.mana_source_snapshots()[0].lki.name,
+            HIDDEN_CARD_NAME,
             "the hidden source's snapshot is blanked"
         );
 
@@ -5476,13 +5484,15 @@ mod tests {
             Some(public_spell),
             "a public cast keeps its id link"
         );
-        assert_eq!(public.mana_spent_source_snapshots.len(), 2);
+        assert_eq!(public.mana_source_snapshots().len(), 2);
         assert_eq!(
-            public.mana_spent_source_snapshots[0].lki.name, "Treasure",
+            public.mana_source_snapshots()[0].lki.name,
+            "Treasure",
             "the public source's snapshot is untouched"
         );
         assert_eq!(
-            public.mana_spent_source_snapshots[1].lki.name, HIDDEN_CARD_NAME,
+            public.mana_source_snapshots()[1].lki.name,
+            HIDDEN_CARD_NAME,
             "only the hidden source's snapshot is blanked"
         );
 
@@ -5490,11 +5500,8 @@ mod tests {
         // snapshot unredacted, so the pass did not blank everything.
         let public_only = &records[2];
         assert_eq!(public_only.name, "Grizzly Bears");
-        assert_eq!(public_only.mana_spent_source_snapshots.len(), 1);
-        assert_eq!(
-            public_only.mana_spent_source_snapshots[0].lki.name,
-            "Treasure"
-        );
+        assert_eq!(public_only.mana_source_snapshots().len(), 1);
+        assert_eq!(public_only.mana_source_snapshots()[0].lki.name, "Treasure");
 
         // The hidden source's name never reaches the viewer's wire form.
         let json = serde_json::to_string(&projected.spells_cast_this_turn_by_player[&owner])
@@ -5564,7 +5571,7 @@ mod tests {
             name: "Doom Blade".to_string(),
             mana_value: 2,
             spell_object_id: Some(hidden_spell),
-            targets: vec![fact(hidden_target)],
+            targets: Some(vec![fact(hidden_target)]),
             ..Default::default()
         };
         // (2) A PUBLIC cast naming one public target and one hidden target — the
@@ -5574,7 +5581,7 @@ mod tests {
             name: "Doom Blade".to_string(),
             mana_value: 2,
             spell_object_id: Some(public_spell),
-            targets: vec![fact(public_target), fact(hidden_target)],
+            targets: Some(vec![fact(public_target), fact(hidden_target)]),
             ..Default::default()
         };
         // (3) A public cast naming only public targets (the negative control).
@@ -5582,7 +5589,7 @@ mod tests {
             name: "Doom Blade".to_string(),
             mana_value: 2,
             spell_object_id: Some(public_spell),
-            targets: vec![fact(public_target)],
+            targets: Some(vec![fact(public_target)]),
             ..Default::default()
         };
         state
@@ -5605,18 +5612,18 @@ mod tests {
         // fact still names its target's real characteristics.
         assert_eq!(
             state.spells_cast_this_turn_by_player[&owner][0]
-                .targets
+                .declared_targets()
                 .len(),
             1
         );
         assert_eq!(
             state.spells_cast_this_turn_by_player[&owner][1]
-                .targets
+                .declared_targets()
                 .len(),
             2
         );
         assert_eq!(
-            state.spells_cast_this_turn_by_player[&owner][1].targets[1],
+            state.spells_cast_this_turn_by_player[&owner][1].declared_targets()[1],
             crate::types::game_state::ActivationTargetFact::Object {
                 id: hidden_target,
                 lki: Box::new(state.objects[&hidden_target].snapshot_public_characteristics()),
@@ -5637,11 +5644,12 @@ mod tests {
         assert_eq!(hidden.name, HIDDEN_CARD_NAME);
         assert_eq!(hidden.spell_object_id, None);
         assert_eq!(
-            hidden.targets.len(),
+            hidden.declared_targets().len(),
             1,
             "the slot is kept so a count stays correct"
         );
-        let crate::types::game_state::ActivationTargetFact::Object { id, lki } = &hidden.targets[0]
+        let crate::types::game_state::ActivationTargetFact::Object { id, lki } =
+            &hidden.declared_targets()[0]
         else {
             panic!("the hidden target is an object fact");
         };
@@ -5663,8 +5671,13 @@ mod tests {
             Some(public_spell),
             "a public cast keeps its id link"
         );
-        assert_eq!(public.targets.len(), 2, "the slot count is unchanged");
-        let crate::types::game_state::ActivationTargetFact::Object { id, lki } = &public.targets[0]
+        assert_eq!(
+            public.declared_targets().len(),
+            2,
+            "the slot count is unchanged"
+        );
+        let crate::types::game_state::ActivationTargetFact::Object { id, lki } =
+            &public.declared_targets()[0]
         else {
             panic!("the public target is an object fact");
         };
@@ -5673,7 +5686,8 @@ mod tests {
             lki.name, "Grizzly Bears",
             "reach guard (b): the public target's snapshot is untouched"
         );
-        let crate::types::game_state::ActivationTargetFact::Object { id, lki } = &public.targets[1]
+        let crate::types::game_state::ActivationTargetFact::Object { id, lki } =
+            &public.declared_targets()[1]
         else {
             panic!("the hidden target is an object fact");
         };
