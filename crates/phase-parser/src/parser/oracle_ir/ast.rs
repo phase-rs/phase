@@ -589,9 +589,12 @@ pub(crate) enum ContinuationAst {
         /// rest route defaults to the bottom — so the patch arm turns this into
         /// the degenerate all-top remainder split the Dig resolver already
         /// routes (and, for a 2+ card pile, hands to the owner for the CR 401.4
-        /// arrangement). `None` (no position named) and `Some(Bottom)` keep the uniform bottom route; only `Some(Top)` lowers to the all-top split.
+        /// arrangement). `None` (no position named) and `Some(Bottom)` keep the
+        /// uniform bottom route; only `Some(Top)` lowers to the all-top split.
+        /// Boxed only to keep `clippy::large_enum_variant` satisfied
+        /// (`LibraryPosition` carries a `QuantityExpr`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        rest_library_position: Option<LibraryPosition>,
+        rest_library_position: Option<Box<LibraryPosition>>,
         /// CR 110.2a: Controller override for the kept cards' battlefield entry
         /// ("... onto the battlefield ... under your control"). `None` leaves
         /// them under their owner's control.

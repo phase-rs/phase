@@ -6214,7 +6214,8 @@ pub(crate) fn try_parse_dig_instead_alternative(
             // CR 401.4: an alternative that puts its remainder on TOP names
             // the degenerate all-top split, exactly as the same clause does on
             // the base branch.
-            (alt_rest_library_position == Some(LibraryPosition::Top)).then(|| prev_count.clone())
+            (alt_rest_library_position.as_deref() == Some(&LibraryPosition::Top))
+                .then(|| prev_count.clone())
         } else {
             prev_rest_split_top_count.clone()
         }

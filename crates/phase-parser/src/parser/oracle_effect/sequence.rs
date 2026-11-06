@@ -5886,7 +5886,7 @@ pub(super) fn apply_clause_continuation(
                         // the top remainder could be clamped from. Fail closed:
                         // the "if you do" clause becomes the strict unsupported
                         // receipt instead of a Dig that would bottom the pile.
-                        if rest_library_position == Some(LibraryPosition::Top)
+                        if rest_library_position.as_deref() == Some(&LibraryPosition::Top)
                             && rest_split_top.is_none()
                         {
                             let mut unsupported =
@@ -6059,7 +6059,8 @@ pub(super) fn apply_clause_continuation(
                 // pile, so the whole remainder lands on top and a 2+ card pile
                 // is handed to its owner for the CR 401.4 arrangement.
                 *rest_split_top_count = rest_split_top.map(|boxed| *boxed).or_else(|| {
-                    (rest_library_position == Some(LibraryPosition::Top)).then(|| dig_count.clone())
+                    (rest_library_position.as_deref() == Some(&LibraryPosition::Top))
+                        .then(|| dig_count.clone())
                 });
                 *rest_order = continuation_rest_order;
                 // CR 701.20e + CR 608.2c: this clause names where the chosen
@@ -8276,7 +8277,7 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
 /// classification.
 fn parse_of_them_rest_destination(
     lower: &str,
-) -> Option<(Zone, DigRestOrder, Option<LibraryPosition>)> {
+) -> Option<(Zone, DigRestOrder, Option<Box<LibraryPosition>>)> {
     let (_, (_, after_rest)) = nom_primitives::split_once_on(lower, " and the rest")
         .or_else(|_| nom_primitives::split_once_on(lower, " and the other"))
         .ok()?;
@@ -8296,7 +8297,7 @@ fn parse_of_them_rest_destination(
     // your library"). The tail classifier is shared with the standalone
     // put-the-rest clause.
     let rest_library_position = if destination == Zone::Library {
-        super::rest_tail_library_position(after_rest)
+        super::rest_tail_library_position(after_rest).map(Box::new)
     } else {
         None
     };
@@ -13617,7 +13618,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::PlayerChoice,
-                rest_library_position: Some(LibraryPosition::Bottom),
+                rest_library_position: Some(Box::new(LibraryPosition::Bottom)),
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13646,7 +13647,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::PlayerChoice,
-                rest_library_position: Some(LibraryPosition::Bottom),
+                rest_library_position: Some(Box::new(LibraryPosition::Bottom)),
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13680,7 +13681,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
-                rest_library_position: Some(LibraryPosition::Bottom),
+                rest_library_position: Some(Box::new(LibraryPosition::Bottom)),
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13736,7 +13737,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::PlayerChoice,
-                rest_library_position: Some(LibraryPosition::Bottom),
+                rest_library_position: Some(Box::new(LibraryPosition::Bottom)),
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
