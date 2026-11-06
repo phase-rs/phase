@@ -493,6 +493,7 @@ fn parse_named_counter_type(input: &str) -> OracleResult<'_, &str> {
         tag("pupa"),
         tag("net"),
         tag("stun"),
+        tag("ore"),
     )));
     terminated(
         named,
@@ -1640,6 +1641,32 @@ mod tests {
         assert_eq!(
             parse_strict_counter_type("lore").unwrap(),
             ("", CounterType::Lore)
+        );
+    }
+
+    /// CR 122.1: "ore" (Orcish Mine) is a recognized named counter, so the
+    /// strict parser accepts it, and the shared word-boundary guard keeps a
+    /// longer word that starts with it ("oreo") from reading as an ore counter.
+    #[test]
+    fn named_counter_type_recognizes_ore() {
+        let ore = crate::types::counter::parse_counter_type("ore");
+        assert_eq!(
+            parse_strict_counter_type("ore counter").unwrap(),
+            (" counter", ore.clone())
+        );
+        assert_eq!(
+            parse_counter_type_typed("ore counter").unwrap(),
+            (" counter", ore)
+        );
+        assert!(parse_strict_counter_type("oreo counter").is_err());
+        // The open-ended typed arm keeps the whole word instead of splitting
+        // "ore" off the front of "oreo".
+        assert_eq!(
+            parse_counter_type_typed("oreo counter").unwrap(),
+            (
+                " counter",
+                crate::types::counter::parse_counter_type("oreo")
+            )
         );
     }
 

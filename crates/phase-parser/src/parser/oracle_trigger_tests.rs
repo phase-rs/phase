@@ -28001,6 +28001,93 @@ fn trigger_counter_removed_passive_grammar_declines_malformed_forms() {
     assert_eq!(control.mode, TriggerMode::CounterRemoved);
 }
 
+fn last_counter_filter(
+    counter_type: CounterType,
+) -> Option<crate::types::ability::CounterTriggerFilter> {
+    Some(crate::types::ability::CounterTriggerFilter {
+        counter_type,
+        threshold: Some(0),
+    })
+}
+
+// CR 122.1: "the last <type> counter is removed from <subject>" parses to a
+// typed, non-batched `CounterRemoved` trigger with a threshold of 0, so it
+// fires only on the removal that leaves none of that kind. Covers a custom
+// named kind on a battlefield Aura (Orcish Mine) and the "while it's exiled"
+// rider on suspend cards (Riftmarked Knight, Veiling Oddity).
+#[test]
+fn trigger_last_typed_counter_removed_sets_zero_threshold() {
+    let mine = parse_trigger_line(
+        "When the last ore counter is removed from this Aura, destroy enchanted land and this Aura deals 2 damage to that land's controller.",
+        "Orcish Mine",
+    );
+    assert_eq!(mine.mode, TriggerMode::CounterRemoved);
+    assert_eq!(mine.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        mine.counter_filter,
+        last_counter_filter(crate::types::counter::parse_counter_type("ore"))
+    );
+    assert!(!mine.batched, "\"the last\" is a single occurrence");
+    assert_eq!(mine.trigger_zones, vec![Zone::Battlefield]);
+
+    for (text, name) in [
+        (
+            "When the last time counter is removed from this card while it's exiled, create a 2/2 black Knight creature token with flanking, protection from white, and haste.",
+            "Riftmarked Knight",
+        ),
+        (
+            "When the last time counter is removed from this card while it's exiled, creatures can't be blocked this turn.",
+            "Veiling Oddity",
+        ),
+    ] {
+        let def = parse_trigger_line(text, name);
+        assert_eq!(def.mode, TriggerMode::CounterRemoved, "{name}");
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{name}");
+        assert_eq!(
+            def.counter_filter,
+            last_counter_filter(CounterType::Time),
+            "{name}"
+        );
+        assert_eq!(def.trigger_zones, vec![Zone::Exile], "{name}");
+        assert!(!def.batched, "{name}");
+    }
+}
+
+// CR 122.1: the "the last" grammar requires a counter kind, a singular noun,
+// and a fully consumed subject; each malformed form declines.
+#[test]
+fn trigger_last_counter_removed_declines_malformed_forms() {
+    let untyped = parse_trigger_line(
+        "When the last counter is removed from ~, you gain 1 life.",
+        "Test Card",
+    );
+    assert_ne!(untyped.mode, TriggerMode::CounterRemoved);
+
+    let plural = parse_trigger_line(
+        "When the last time counters are removed from ~, you gain 1 life.",
+        "Test Card",
+    );
+    assert_ne!(plural.mode, TriggerMode::CounterRemoved);
+
+    let tail = parse_trigger_line(
+        "When the last time counter is removed from ~ during your upkeep, you gain 1 life.",
+        "Test Card",
+    );
+    assert_ne!(tail.mode, TriggerMode::CounterRemoved);
+
+    // Reach guard: the same frame with a kind, a singular noun, and no tail
+    // parses with the zero threshold.
+    let control = parse_trigger_line(
+        "When the last time counter is removed from ~, you gain 1 life.",
+        "Test Card",
+    );
+    assert_eq!(control.mode, TriggerMode::CounterRemoved);
+    assert_eq!(
+        control.counter_filter,
+        last_counter_filter(CounterType::Time)
+    );
+}
+
 // CR 603.2c: `lower_trigger_ir` re-gates the batched flag on the lowered
 // effect — a typed effect keeps it (Regenerations Restored's scry/gain-life
 // chain), an `Unimplemented` effect drops it.

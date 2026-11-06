@@ -22872,7 +22872,8 @@ fn parse_counter_type_prefix(prefix: &str) -> Option<CounterTriggerFilter> {
 
 /// CR 122.1: Parse counter-removal triggers: active "you remove a [type]
 /// counter [from <subject>]", passive "a [type] counter is removed from
-/// <subject>", and batched "one or more [type] counters are removed from
+/// <subject>", batched "one or more [type] counters are removed from
+/// <subject>", and threshold "the last [type] counter is removed from
 /// <subject>". Also handles zone constraints like "while it's exiled" (e.g.
 /// suspend cards).
 fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
@@ -22951,6 +22952,25 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
             )),
             tag("counter is removed from "),
         ),
+        // CR 122.1: "the last [type] counter is removed from <subject>" fires
+        // only on the removal that leaves none of that kind (Orcish Mine,
+        // Riftmarked Knight). The type is required: an untyped "the last
+        // counter" would mean the last counter of any kind, which this
+        // per-kind threshold does not express, so it declines.
+        (
+            value(
+                CounterRemovalQuantity::Last,
+                tag::<_, _, OracleError<'_>>("the last "),
+            ),
+            map(
+                terminated(
+                    nom_primitives::parse_strict_counter_type,
+                    tag::<_, _, OracleError<'_>>(" "),
+                ),
+                Some,
+            ),
+            tag("counter is removed from "),
+        ),
     ))
     .map(|(quantity, counter_type, _)| (quantity, counter_type))
     .parse(after_prefix)
@@ -22978,11 +22998,17 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     def.mode = TriggerMode::CounterRemoved;
     def.valid_card = Some(filter);
     // CR 122.1: a named counter kind restricts the trigger to that kind; the
-    // untyped form leaves the filter unset and matches every kind.
+    // untyped form leaves the filter unset and matches every kind. "The last"
+    // adds a threshold of 0: the trigger matcher fires only when the removal
+    // leaves no counters of that kind on the object.
     if let Some(counter_type) = counter_type {
+        let threshold = match quantity {
+            CounterRemovalQuantity::Last => Some(0),
+            CounterRemovalQuantity::Singular | CounterRemovalQuantity::OneOrMore => None,
+        };
         def.counter_filter = Some(CounterTriggerFilter {
             counter_type,
-            threshold: None,
+            threshold,
         });
     }
     // CR 603.2c: "one or more ... counters are removed" is one occurrence per
@@ -22997,12 +23023,15 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
 }
 
 /// Grammatical quantifier of a passive counter-removal trigger subject: "a
-/// [type] counter is removed" (one occurrence per removal) versus "one or more
-/// [type] counters are removed" (one occurrence per simultaneous batch).
+/// [type] counter is removed" (one occurrence per removal), "one or more
+/// [type] counters are removed" (one occurrence per simultaneous batch), and
+/// "the last [type] counter is removed" (one occurrence, only on the removal
+/// that leaves none of that kind).
 #[derive(Clone, Copy)]
 enum CounterRemovalQuantity {
     Singular,
     OneOrMore,
+    Last,
 }
 
 /// CR 603.6c: Parse the source-zone tail of a "put into a graveyard" clause.

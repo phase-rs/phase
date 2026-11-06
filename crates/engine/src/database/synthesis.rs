@@ -6808,15 +6808,41 @@ fn is_suspend_upkeep_trigger(t: &TriggerDefinition) -> bool {
         )
 }
 
-/// Structural predicate: true iff `trigger` is the suspend last-counter free-cast
-/// trigger shape. Mirrors `is_echo_trigger` — stays correct if the builder ever
-/// gains a parameter.
-fn is_suspend_last_counter_trigger(t: &TriggerDefinition) -> bool {
+/// Shared structural core of the keyword last-time-counter triggers (suspend's
+/// free cast, CR 702.62a; Vanishing's sacrifice, CR 702.63a): a `CounterRemoved`
+/// trigger on the source itself that fires only when the removal leaves no time
+/// counters. The event alone does not identify a keyword trigger: a printed
+/// "When the last time counter is removed from this card while it's exiled, …"
+/// (Riftmarked Knight) has the same event, so each keyword predicate adds its
+/// own effect check on top of this core.
+fn is_self_last_time_counter_removal(t: &TriggerDefinition) -> bool {
     matches!(t.mode, TriggerMode::CounterRemoved)
         && matches!(t.valid_card, Some(TargetFilter::SelfRef))
         && t.counter_filter
             .as_ref()
             .is_some_and(|f| matches!(f.counter_type, CounterType::Time) && f.threshold == Some(0))
+}
+
+/// Structural predicate: true iff `trigger` is the suspend last-counter free-cast
+/// trigger shape. Mirrors `is_echo_trigger` — stays correct if the builder ever
+/// gains a parameter.
+///
+/// CR 702.62a: the third suspend ability functions from exile and casts the card
+/// itself without paying its mana cost. Testing the zone and the free self-cast
+/// keeps a printed last-time-counter trigger on a suspend card (Riftmarked
+/// Knight, Veiling Oddity) from being mistaken for the keyword trigger, which
+/// would stop `synthesize_suspend` from adding the real one.
+fn is_suspend_last_counter_trigger(t: &TriggerDefinition) -> bool {
+    is_self_last_time_counter_removal(t)
+        && t.trigger_zones == vec![Zone::Exile]
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::CastFromZone {
+                target: TargetFilter::SelfRef,
+                without_paying_mana_cost: true,
+                ..
+            })
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -7006,11 +7032,7 @@ fn is_fading_upkeep_trigger(t: &TriggerDefinition) -> bool {
 /// sacrifice trigger shape. Mirrors `is_suspend_last_counter_trigger` but
 /// executes a self-sacrifice rather than a free cast.
 fn is_vanishing_sacrifice_trigger(t: &TriggerDefinition) -> bool {
-    matches!(t.mode, TriggerMode::CounterRemoved)
-        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
-        && t.counter_filter
-            .as_ref()
-            .is_some_and(|f| matches!(f.counter_type, CounterType::Time) && f.threshold == Some(0))
+    is_self_last_time_counter_removal(t)
         && matches!(
             t.execute.as_deref().map(|a| &*a.effect),
             Some(Effect::Sacrifice {
@@ -18351,6 +18373,132 @@ mod suspend_synthesis_tests {
             face.triggers.contains(&cast),
             "printed Suspend's last-counter trigger must equal the shared builder output"
         );
+    }
+
+    /// Drift guard: each keyword last-time-counter predicate recognizes its own
+    /// builder's output and not the other keyword's, so the builders and the
+    /// dedupe / removal predicates cannot silently diverge.
+    #[test]
+    fn last_time_counter_predicates_match_only_their_own_builder() {
+        let suspend_cast = build_suspend_last_counter_cast_trigger();
+        let vanishing_sacrifice = build_vanishing_sacrifice_trigger();
+        assert!(is_suspend_last_counter_trigger(&suspend_cast));
+        assert!(is_vanishing_sacrifice_trigger(&vanishing_sacrifice));
+        assert!(!is_suspend_last_counter_trigger(&vanishing_sacrifice));
+        assert!(!is_vanishing_sacrifice_trigger(&suspend_cast));
+    }
+
+    /// Parses one printed Oracle line and returns its triggers.
+    fn printed_triggers(line: &str, card_name: &str) -> Vec<TriggerDefinition> {
+        parse_oracle_text(line, card_name, &[], &["Creature".to_string()], &[]).triggers
+    }
+
+    fn is_printed_last_counter_trigger(t: &TriggerDefinition) -> bool {
+        matches!(t.mode, TriggerMode::CounterRemoved)
+            && !matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::CastFromZone { .. })
+            )
+    }
+
+    /// CR 702.62a: a suspend card that also prints its own "When the last time
+    /// counter is removed from this card while it's exiled, …" trigger
+    /// (Riftmarked Knight, Veiling Oddity) keeps that printed trigger AND gets
+    /// the keyword's free-cast trigger. The printed trigger shares the event
+    /// and the exile zone with the keyword trigger but not its effect, so it
+    /// must not satisfy the synthesizer's dedupe check.
+    #[test]
+    fn synthesize_suspend_keeps_printed_last_counter_trigger_and_adds_cast() {
+        for (line, card_name, count) in [
+            (
+                "When the last time counter is removed from this card while it's exiled, create a 2/2 black Knight creature token with flanking, protection from white, and haste.",
+                "Riftmarked Knight",
+                3,
+            ),
+            (
+                "When the last time counter is removed from this card while it's exiled, creatures can't be blocked this turn.",
+                "Veiling Oddity",
+                4,
+            ),
+        ] {
+            let mut face = suspend_face(count);
+            face.triggers = printed_triggers(line, card_name);
+            // Reach guard: the printed line parses to a last-time-counter
+            // trigger from exile that is not a free cast.
+            assert_eq!(face.triggers.len(), 1, "{card_name}");
+            let printed = face.triggers[0].clone();
+            assert!(is_printed_last_counter_trigger(&printed), "{card_name}");
+            assert_eq!(printed.trigger_zones, vec![Zone::Exile], "{card_name}");
+            assert_eq!(
+                printed.counter_filter,
+                Some(CounterTriggerFilter {
+                    counter_type: CounterType::Time,
+                    threshold: Some(0),
+                }),
+                "{card_name}"
+            );
+
+            synthesize_suspend(&mut face);
+            synthesize_suspend(&mut face);
+
+            let cast = build_suspend_last_counter_cast_trigger();
+            assert_eq!(
+                face.triggers.iter().filter(|t| **t == cast).count(),
+                1,
+                "{card_name}: exactly one keyword free-cast trigger"
+            );
+            assert_eq!(
+                face.triggers
+                    .iter()
+                    .filter(|t| is_printed_last_counter_trigger(t))
+                    .count(),
+                1,
+                "{card_name}: the printed trigger is kept once"
+            );
+            assert!(face.triggers.contains(&printed), "{card_name}");
+            assert_eq!(
+                face.triggers
+                    .iter()
+                    .filter(|t| **t == build_suspend_upkeep_removal_trigger())
+                    .count(),
+                1,
+                "{card_name}: exactly one upkeep trigger"
+            );
+        }
+    }
+
+    /// CR 702.62a + CR 604.1: removing Suspend strips only the keyword's own
+    /// triggers. The same retain predicate the `RemoveKeyword` layer arm and
+    /// the copy-install dedupe use keeps Riftmarked Knight's printed
+    /// last-time-counter trigger.
+    #[test]
+    fn suspend_keyword_kind_excludes_printed_last_counter_trigger() {
+        let mut face = suspend_face(3);
+        face.triggers = printed_triggers(
+            "When the last time counter is removed from this card while it's exiled, create a 2/2 black Knight creature token with flanking, protection from white, and haste.",
+            "Riftmarked Knight",
+        );
+        let printed = face.triggers[0].clone();
+        assert!(is_printed_last_counter_trigger(&printed));
+        synthesize_suspend(&mut face);
+        let suspend = face.keywords[0].clone();
+
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &printed, &suspend,
+        ));
+        // Reach guards: the keyword's own triggers still match.
+        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &build_suspend_last_counter_cast_trigger(),
+            &suspend,
+        ));
+        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &build_suspend_upkeep_removal_trigger(),
+            &suspend,
+        ));
+
+        face.triggers
+            .retain(|t| !KeywordTriggerInstaller::trigger_matches_keyword_kind(t, &suspend));
+        assert_eq!(face.triggers, vec![printed]);
     }
 }
 
