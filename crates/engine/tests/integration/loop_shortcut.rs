@@ -11929,6 +11929,9 @@ const LEYLINE_OF_SANCTITY: &str = "If this card is in your opening hand, you may
 /// CR 601.2c + CR 603.3d + CR 119.3: with P2 hexproof, Sanguine Bond's "target opponent" has the
 /// one legal target P1, so each repetition charges P1 its loss once. P1 at 3 leaves at the third
 /// (CR 704.5a), and the next trigger has no legal target, so P2 stays in the game.
+/// `Test Lifegain Kickoff` ("You gain 1 life.") only starts the drain; no printed card has exactly
+/// that text, and the nearest is Blessed Wine ("You gain 1 life. Draw a card at the beginning of
+/// the next turn's upkeep.").
 #[test]
 fn a_drain_whose_only_target_is_forced_counts_each_loss_once() {
     let mut scenario = GameScenario::new_n_player(3, 7);

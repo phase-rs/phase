@@ -1959,10 +1959,17 @@ fn a_drain_with_an_out_outside_the_loop_is_offered_not_won() {
             60,
             |state| {
                 if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    no_axis += confirm_for_tests(state)
+                    for (span, _) in confirm_for_tests(state)
                         .into_iter()
                         .filter(|(_, verdict)| *verdict == Err(OfferRefusal::NoAxis))
-                        .count();
+                    {
+                        assert_eq!(
+                            span.cause,
+                            NamingCause::MandatoryRecurrence,
+                            "{drive:?}: a refused span the recorded road would offer"
+                        );
+                        no_axis += 1;
+                    }
                 }
             },
         ) else {
@@ -1978,8 +1985,8 @@ fn a_drain_with_an_out_outside_the_loop_is_offered_not_won() {
         );
         assert!(
             no_axis > 0,
-            "{drive:?}: CR 104.4b: the drain's mandatory spans hold no optional answer, so they \
-             stay refused rather than offered as a may loop"
+            "{drive:?}: CR 104.4b: the drain's spans hold no optional answer, so the mandatory \
+             pass owns them, and confirm would refuse them too rather than offer a may loop"
         );
         let leg = format!("{drive:?}");
         let state = &armed(offered.state());
