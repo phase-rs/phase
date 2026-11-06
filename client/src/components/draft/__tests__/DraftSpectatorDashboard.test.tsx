@@ -75,3 +75,39 @@ describe("DraftSpectatorDashboard seat status", () => {
     expect(screen.queryByText("Pending")).toBeNull();
   });
 });
+
+describe("DraftSpectatorDashboard FIFO progress", () => {
+  afterEach(cleanup);
+
+  /** A pip is filled when `PackSegment` gives it one of its two filled classes. */
+  function filledPipCount(pips: Iterable<Element>): number {
+    return [...pips].filter(
+      (pip) => pip.classList.contains("bg-amber-400/50") || pip.classList.contains("bg-amber-400/90"),
+    ).length;
+  }
+
+  /** A first-round seat publishing its own completed steps. */
+  function fifoSeat(seat_index: number, display_name: string, steps: number): SeatPublicView {
+    return {
+      ...seat(seat_index, display_name, "Pending"),
+      fifo_progress: { completed_steps: steps, round_completed_steps: steps },
+    };
+  }
+
+  it("shows_each_seats_own_progress_on_a_fifo_draft", () => {
+    // CR 905.2a: no seat waits on another in a FIFO draft, so each seat
+    // publishes its own completed steps while `pick_number` stays 0 all round.
+    const fifoView: SpectatorDraftView = {
+      ...view([fifoSeat(0, "Alice", 3), fifoSeat(1, "Bob", 7), fifoSeat(2, "Cara", 0)]),
+      kind: "Premier",
+      flow: "FifoAsync",
+      fifo: { session_id: "native-fifo-session", revision: 7, paused: null, review_clock: null },
+    };
+    const { container } = render(<DraftSpectatorDashboard view={fifoView} />);
+
+    // Reach guard: the seat list rendered.
+    for (const name of ["Alice", "Bob", "Cara"]) expect(screen.getByText(name)).toBeInTheDocument();
+
+    expect(filledPipCount(container.querySelectorAll('[data-seat-progress="1"] [data-pick-number]'))).toBe(7);
+  });
+});

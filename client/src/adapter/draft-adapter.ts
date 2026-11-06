@@ -400,6 +400,12 @@ export interface DraftProgressFields {
   pick_steps_per_pack: number;
   pack_count: number;
   pass_direction: "Left" | "Right";
+  /** The view's transport flow. Present only on a FIFO view; a legacy view omits it. */
+  flow?: "FifoAsync";
+  /** A player view's FIFO record or a spectator view's public FIFO state. */
+  fifo?: FifoPlayerView | FifoPublicView;
+  /** Every seat's public state; on a FIFO view each seat carries its own progress. */
+  seats?: readonly SeatPublicView[];
 }
 
 // @sync-with: crates/draft-core/src/view.rs
@@ -745,6 +751,17 @@ export interface DraftViewPresentation {
   isReadOnly: boolean;
 }
 
+/** Where a view stands in the current round, read from what the engine publishes. */
+export type DraftProgressPresentation =
+  /** A legacy view: `pick_number`, the step every seat is taking together. */
+  | { kind: "pod"; completedSteps: number }
+  /** A FIFO player view: the seat's own steps this round, its queued packs, and whether it holds a pack. */
+  | { kind: "seat"; completedSteps: number; queuedPacks: number; holdsHead: boolean }
+  /** A FIFO spectator view: each seat's own steps this round. */
+  | { kind: "seats"; seats: readonly { seatIndex: number; completedSteps: number }[] }
+  /** A view that claims FIFO and fails the wire check: it publishes no position. */
+  | { kind: "unavailable" };
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
 }
@@ -771,20 +788,28 @@ function isFifoClock(value: unknown): value is FifoClock {
   return validTarget && validState;
 }
 
-function isFifoPlayerView(view: DraftPlayerView): view is DraftPlayerViewFields & FifoPlayerDraftViewArm {
-  if (view.flow !== "FifoAsync" || !isRecord(view.fifo)) return false;
-  const fifo = view.fifo;
-  const state = fifo.state;
-  const paused = isRecord(state) ? state.paused : undefined;
+/** The public FIFO state a player view nests and a spectator view publishes directly. */
+function isFifoPublicState(value: unknown): value is FifoPublicView {
+  if (!isRecord(value)) return false;
+  const paused = value.paused;
   const validPause = paused === null || (isRecord(paused)
     && (paused.phase === "Drafting" || paused.phase === "Review")
     && typeof paused.reason === "string");
-  const validHead = fifo.head === null || (isRecord(fifo.head)
-    && isCount(fifo.head.pack_id)
-    && isCount(fifo.head.opening_seat)
-    && isCount(fifo.head.round)
-    && isCount(fifo.head.original_size));
-  const effects = fifo.effects;
+  return typeof value.session_id === "string"
+    && isCount(value.revision)
+    && validPause
+    && (value.review_clock === null || isFifoClock(value.review_clock));
+}
+
+/** A player view's FIFO record: its seat's progress, queue, head, prompt and options. */
+function isFifoPlayerData(value: unknown): value is FifoPlayerView {
+  if (!isRecord(value)) return false;
+  const validHead = value.head === null || (isRecord(value.head)
+    && isCount(value.head.pack_id)
+    && isCount(value.head.opening_seat)
+    && isCount(value.head.round)
+    && isCount(value.head.original_size));
+  const effects = value.effects;
   const validEffects = effects === null || (isRecord(effects)
     && Array.isArray(effects.card_instance_ids)
     && effects.card_instance_ids.every((id) => typeof id === "string")
@@ -792,22 +817,22 @@ function isFifoPlayerView(view: DraftPlayerView): view is DraftPlayerViewFields 
     && effects.requirements.every((entry) => isRecord(entry)
       && isCount(entry.picks)
       && isCount(entry.burns)));
-  return isRecord(state)
-    && typeof state.session_id === "string"
-    && isCount(state.revision)
-    && validPause
-    && (state.review_clock === null || isFifoClock(state.review_clock))
-    && isRecord(fifo.progress)
-    && isCount(fifo.progress.completed_steps)
-    && isCount(fifo.progress.round_completed_steps)
-    && isCount(fifo.queue_count)
+  return isFifoPublicState(value.state)
+    && isRecord(value.progress)
+    && isCount(value.progress.completed_steps)
+    && isCount(value.progress.round_completed_steps)
+    && isCount(value.queue_count)
     && validHead
-    && (fifo.prompt_id === null || isFifoPromptId(fifo.prompt_id))
-    && isRecord(fifo.requirements)
-    && isCount(fifo.requirements.picks)
-    && isCount(fifo.requirements.burns)
+    && (value.prompt_id === null || isFifoPromptId(value.prompt_id))
+    && isRecord(value.requirements)
+    && isCount(value.requirements.picks)
+    && isCount(value.requirements.burns)
     && validEffects
-    && (fifo.clock === null || isFifoClock(fifo.clock));
+    && (value.clock === null || isFifoClock(value.clock));
+}
+
+function isFifoPlayerView(view: DraftPlayerView): view is DraftPlayerViewFields & FifoPlayerDraftViewArm {
+  return view.flow === "FifoAsync" && isFifoPlayerData(view.fifo);
 }
 
 /**
@@ -912,6 +937,48 @@ export function draftSelectionPickCount(
   const effects = view.fifo.effects;
   if (effects === null || !effects.card_instance_ids.includes(effectCardInstanceId)) return null;
   return effects.requirements[0]?.picks ?? null;
+}
+
+/** Whether a seat publishes its FIFO progress: a record whose two fields are counts. */
+function hasFifoProgress(seat: SeatPublicView): seat is SeatPublicView & { fifo_progress: FifoProgressView } {
+  return isRecord(seat.fifo_progress)
+    && isCount(seat.fifo_progress.completed_steps)
+    && isCount(seat.fifo_progress.round_completed_steps);
+}
+
+/**
+ * The engine's reading of where the draft stands, for the progress bar and the
+ * pack's position label. A legacy view's `pick_number` is the step every seat
+ * takes together. CR 905.2a: during a draft there is no active player or
+ * system of priority, so on a FIFO view no one step number describes every
+ * seat: each seat publishes its own completed steps this round and its queue.
+ * A view that claims FIFO and cannot be read publishes no position; it never
+ * falls back to the legacy counter.
+ */
+export function draftProgressPresentation(view: DraftProgressFields): DraftProgressPresentation {
+  if (view.flow === undefined && view.fifo === undefined) {
+    return { kind: "pod", completedSteps: view.pick_number };
+  }
+  if (view.flow !== "FifoAsync") return { kind: "unavailable" };
+  if (isFifoPlayerData(view.fifo)) {
+    return {
+      kind: "seat",
+      completedSteps: view.fifo.progress.round_completed_steps,
+      queuedPacks: view.fifo.queue_count,
+      holdsHead: view.fifo.head !== null,
+    };
+  }
+  const seats: readonly SeatPublicView[] = view.seats ?? [];
+  if (isFifoPublicState(view.fifo) && seats.length > 0 && seats.every(hasFifoProgress)) {
+    return {
+      kind: "seats",
+      seats: seats.map((seat) => ({
+        seatIndex: seat.seat_index,
+        completedSteps: seat.fifo_progress.round_completed_steps,
+      })),
+    };
+  }
+  return { kind: "unavailable" };
 }
 
 export interface SpectatorDraftViewFields {

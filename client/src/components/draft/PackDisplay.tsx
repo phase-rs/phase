@@ -4,10 +4,12 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import {
+  draftProgressPresentation,
   draftSelectionEffectCards,
   draftSelectionPickCount,
   type DraftCardInstance,
   type DraftPlayerView,
+  type DraftProgressPresentation,
 } from "../../adapter/draft-adapter";
 import { useLongPress } from "../../hooks/useLongPress";
 import type {
@@ -467,6 +469,29 @@ function PackCard({
   );
 }
 
+/**
+ * The toolbar's position for this view: the pack and the step being taken,
+ * and on a FIFO view the packs in the seat's queue. A view that publishes no
+ * position shows none.
+ */
+function PackPosition({ progress, packNumber }: { progress: DraftProgressPresentation; packNumber: number }) {
+  const { t } = useTranslation("draft");
+  switch (progress.kind) {
+    case "pod":
+      return <span className="text-sm text-fg">{t("pack.currentPick", { pack: packNumber, pick: progress.completedSteps + 1 })}</span>;
+    case "seat":
+      return (
+        <>
+          <span className="text-sm text-fg">{t("pack.currentPick", { pack: packNumber, pick: progress.completedSteps + 1 })}</span>
+          <span data-pack-queue className="text-xs text-white/60">{t("pack.queuedPacks", { count: progress.queuedPacks })}</span>
+        </>
+      );
+    case "seats":
+    case "unavailable":
+      return null;
+  }
+}
+
 export function PackDisplay({
   controller,
   presentation,
@@ -540,6 +565,10 @@ export function PackDisplay({
   // The draft-effect cards this view offers, from the engine's publication: a
   // legacy view's `draft_effects`, or a FIFO view's options for its head.
   const draftEffects = useMemo(() => view === null ? [] : draftSelectionEffectCards(view), [view]);
+  // Where this view stands, from the engine's publication: a legacy view's
+  // shared step, or a FIFO seat's own step and queue. A missing view has no
+  // position (and renders nothing below).
+  const progress: DraftProgressPresentation = view === null ? { kind: "unavailable" } : draftProgressPresentation(view);
   const offeredEffect = activeEffect !== null && draftEffects.some((card) => card.instance_id === activeEffect)
     ? activeEffect
     : null;
@@ -860,12 +889,7 @@ export function PackDisplay({
         className={`flex min-w-0 shrink-0 flex-nowrap items-center gap-3 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${phoneToolbarPinned ? "sticky top-0 z-20 bg-slate-950 py-1" : "min-h-9"}`}
       >
         <div data-pack-status-controls className="flex shrink-0 items-center gap-2">
-          <span className="text-sm text-fg">
-            {t("pack.currentPick", {
-              pack: view.current_pack_number + 1,
-              pick: view.pick_number + 1,
-            })}
-          </span>
+          <PackPosition progress={progress} packNumber={view.current_pack_number + 1} />
           {canConfirmPick && !mobileLayout && (
             <button
               type="button"

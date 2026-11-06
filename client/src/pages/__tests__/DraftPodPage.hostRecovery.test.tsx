@@ -466,8 +466,8 @@ describe("DraftPodPage host recovery on the saved pod storage", () => {
       await saveDraftHostSession(savedPod.persistenceId, saved);
       saveActiveDraftPod(savedRecord({ phase: "drafting" }));
       mocks.checkRestorableSession.mockResolvedValue(verdict);
-      // draft-wasm's import throws its refusal text as a string; this is the
-      // text its restore throws for this session.
+      // draft-wasm's import throws its refusal text as a string; its
+      // restore's refusal for this session begins with this text.
       mocks.restoreRefusal = "Failed to deserialize draft session: unknown variant `FutureFlow`";
     });
 

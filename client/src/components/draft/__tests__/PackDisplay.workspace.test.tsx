@@ -151,7 +151,10 @@ function packCard(instanceId: string): DraftCardInstance {
   return { instance_id: instanceId, name: instanceId, set_code: "TST", collector_number: instanceId, rarity: "common", colors: [], cmc: 1, type_line: "Card" };
 }
 
-/** Seat 0's view of a local FIFO draft: a literal that passes the client's FIFO wire check. */
+/**
+ * Seat 0's view of a local FIFO draft: a literal that passes the client's FIFO
+ * wire check, unless `dropProgress` removes its progress record.
+ */
 function fifoView({
   currentPack,
   effects,
@@ -160,6 +163,11 @@ function fifoView({
   promptGeneration = 3,
   pickSelectionMode = "Direct",
   draftEffects = [],
+  roundCompletedSteps = 0,
+  queueCount = 1,
+  currentPackNumber = view.current_pack_number,
+  pickNumber = view.pick_number,
+  dropProgress = false,
 }: {
   currentPack: DraftCardInstance[];
   effects: FifoEffectOptions | null;
@@ -168,11 +176,25 @@ function fifoView({
   promptGeneration?: number;
   pickSelectionMode?: DraftPlayerView["pick_selection_mode"];
   draftEffects?: DraftCardInstance[];
+  /** The seat's own completed steps this round. */
+  roundCompletedSteps?: number;
+  /** Packs in the seat's queue, its head among them. */
+  queueCount?: number;
+  currentPackNumber?: number;
+  pickNumber?: number;
+  dropProgress?: boolean;
 }): DraftPlayerView {
   const sessionId = "local-0123456789abcdef";
+  // The earlier rounds' steps plus this round's: the seat's total.
+  const progress = {
+    completed_steps: currentPackNumber * view.pick_steps_per_pack + roundCompletedSteps,
+    round_completed_steps: roundCompletedSteps,
+  };
   return {
     ...view,
     kind,
+    current_pack_number: currentPackNumber,
+    pick_number: pickNumber,
     current_pack: currentPack,
     pool: [cogworkLibrarian],
     draft_effects: draftEffects,
@@ -181,9 +203,9 @@ function fifoView({
     flow: "FifoAsync",
     fifo: {
       state: { session_id: sessionId, revision: promptGeneration, paused: null, review_clock: null },
-      progress: { completed_steps: 0, round_completed_steps: 0 },
-      queue_count: 1,
-      head: { pack_id: 0, opening_seat: 0, round: 0, original_size: 15 },
+      ...(dropProgress ? {} : { progress }),
+      queue_count: queueCount,
+      head: { pack_id: 0, opening_seat: 0, round: currentPackNumber, original_size: 15 },
       prompt_id: { session_id: sessionId, seat: 0, generation: promptGeneration },
       requirements: { picks, burns: 0 },
       effects,
@@ -403,6 +425,7 @@ describe("PackDisplay local workspace controller", () => {
       "min-h-9",
     );
     expect(screen.queryByText(/cards? in pack/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/in your queue/)).not.toBeInTheDocument();
     expect(screen.queryByText("Mythic Rare")).not.toBeInTheDocument();
     const scaleControls = [
       screen.getByRole("button", { name: "Decrease pack scale" }),
@@ -2076,5 +2099,44 @@ describe("PackDisplay local workspace controller", () => {
 
     fireEvent.click(within(packCardElement("a")).getByRole("button", { name: "Pick a to Deck" }));
     expect(pickEffect).toHaveBeenCalledExactlyOnceWith("cogwork", ["a", "b", "c"], "deck");
+  });
+
+  it.each([
+    { queueCount: 1, queueText: "1 pack in your queue" },
+    { queueCount: 3, queueText: "3 packs in your queue" },
+  ])("labels_a_fifo_pick_with_the_seats_own_step_and_queue ($queueText)", ({ queueCount, queueText }) => {
+    // CR 905.2a: a FIFO seat drafts at its own pace, so the step it is taking
+    // follows its own `round_completed_steps`. `pick_number` stays 0 all round:
+    // a label that read it would say `Pack 2 Pick 1`.
+    render(<PackDisplay controller={controller({
+      view: fifoView({
+        currentPack: [packCard("pk-a"), packCard("pk-b")],
+        effects: null,
+        currentPackNumber: 1,
+        roundCompletedSteps: 4,
+        queueCount,
+      }),
+    })} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
+
+    expect(screen.getByText("Pack 2 Pick 5")).toBeInTheDocument();
+    expect(screen.getByText(queueText)).toHaveAttribute("data-pack-queue");
+  });
+
+  it("shows_no_position_for_a_fifo_view_it_cannot_read", () => {
+    // Without its progress record the view fails the client's FIFO wire check.
+    // `pick_number` is 2, so a fallback to the legacy counter would say `Pick 3`.
+    const { container } = render(<PackDisplay controller={controller({
+      view: fifoView({
+        currentPack: [packCard("pk-a"), packCard("pk-b")],
+        effects: null,
+        pickNumber: 2,
+        dropProgress: true,
+      }),
+    })} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
+
+    // Reach guard: the view's cards still render.
+    expect([...container.querySelectorAll("[data-instance-id]")].map((node) => node.getAttribute("data-instance-id"))).toEqual(["pk-a", "pk-b"]);
+    expect(screen.queryByText(/^Pack \d+ Pick \d+$/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/in your queue/)).not.toBeInTheDocument();
   });
 });

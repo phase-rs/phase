@@ -1,4 +1,8 @@
-import type { DraftProgressFields } from "../../adapter/draft-adapter";
+import {
+  draftProgressPresentation,
+  type DraftProgressFields,
+  type DraftProgressPresentation,
+} from "../../adapter/draft-adapter";
 import { useDraftStore } from "../../stores/draftStore";
 
 export function DraftProgress({ view: viewOverride }: { view?: DraftProgressFields | null } = {}) {
@@ -12,10 +16,10 @@ export function DraftProgress({ view: viewOverride }: { view?: DraftProgressFiel
   // a 14-card Commander pack is 7 steps, and 14 is a denominator the session
   // can never reach. A multi-set draft's boosters also differ from each other,
   // so the count is read per pack. This component computes nothing: it reads
-  // one engine value instead of another.
+  // one engine value instead of another. On a FIFO view the count is the seat's
+  // own `round_completed_steps`, also a step count.
   const {
     current_pack_number,
-    pick_number,
     pack_pick_steps,
     pick_steps_per_pack,
     pack_set_codes,
@@ -23,6 +27,8 @@ export function DraftProgress({ view: viewOverride }: { view?: DraftProgressFiel
     pack_count,
     pass_direction,
   } = view;
+  const progress = draftProgressPresentation(view);
+  const counterSteps = counterStepsFor(progress);
   const directionArrow = pass_direction === "Left" ? "←" : "→";
   // Engine-owned per-pack step counts. Views delivered before the field existed
   // fall back to the current booster's step count for every pack.
@@ -42,6 +48,9 @@ export function DraftProgress({ view: viewOverride }: { view?: DraftProgressFiel
         {Array.from({ length: pack_count }, (_, packIdx) => {
           const isComplete = packIdx < current_pack_number;
           const isCurrent = packIdx === current_pack_number;
+          const setCode = chaosCurrentPackCode !== undefined
+            ? (isCurrent ? chaosCurrentPackCode ?? undefined : undefined)
+            : (mixedSets ? pack_set_codes?.[packIdx] : undefined);
 
           return (
             <div key={packIdx} className="flex w-full min-w-0 items-center gap-1.5 sm:w-auto sm:flex-1">
@@ -54,27 +63,108 @@ export function DraftProgress({ view: viewOverride }: { view?: DraftProgressFiel
               >
                 P{packIdx + 1}
               </span>
-              <PackSegment
-                pickCount={packSteps(packIdx)}
-                filledPicks={isComplete ? packSteps(packIdx) : isCurrent ? pick_number : 0}
-                packNumber={packIdx + 1}
-                isCurrent={isCurrent}
-                setCode={
-                  chaosCurrentPackCode !== undefined
-                    ? (isCurrent ? chaosCurrentPackCode ?? undefined : undefined)
-                    : (mixedSets ? pack_set_codes?.[packIdx] : undefined)
-                }
-              />
+              {isCurrent ? (
+                <CurrentPackProgress
+                  progress={progress}
+                  pickCount={packSteps(packIdx)}
+                  packNumber={packIdx + 1}
+                  setCode={setCode}
+                />
+              ) : (
+                <PackSegment
+                  pickCount={packSteps(packIdx)}
+                  filledPicks={isComplete ? packSteps(packIdx) : 0}
+                  packNumber={packIdx + 1}
+                  isCurrent={false}
+                  setCode={setCode}
+                />
+              )}
             </div>
           );
         })}
       </div>
-      <div className="shrink-0 text-xs tabular-nums text-white/45">
-        <span className="font-semibold text-white">{pick_number + 1}</span>
-        <span>/{packSteps(current_pack_number)}</span>
-      </div>
+      {counterSteps !== null && (
+        <div data-draft-progress-counter className="shrink-0 text-xs tabular-nums text-white/45">
+          <span className="font-semibold text-white">{counterSteps + 1}</span>
+          <span>/{packSteps(current_pack_number)}</span>
+        </div>
+      )}
     </div>
   );
+}
+
+/**
+ * The step the counter names, or `null` when the view publishes none: a FIFO
+ * seat holding no pack is taking no step, and a spectator's seats each stand
+ * at their own.
+ */
+function counterStepsFor(progress: DraftProgressPresentation): number | null {
+  switch (progress.kind) {
+    case "pod":
+      return progress.completedSteps;
+    case "seat":
+      return progress.holdsHead ? progress.completedSteps : null;
+    case "seats":
+    case "unavailable":
+      return null;
+  }
+}
+
+/**
+ * The booster being drafted, filled to the view's position: one row for a
+ * player or legacy view, one row per seat on a FIFO spectator view, and no
+ * fill when the view publishes no position.
+ */
+function CurrentPackProgress({
+  progress,
+  pickCount,
+  packNumber,
+  setCode,
+}: {
+  progress: DraftProgressPresentation;
+  pickCount: number;
+  packNumber: number;
+  setCode?: string;
+}) {
+  switch (progress.kind) {
+    case "pod":
+    case "seat":
+      return (
+        <PackSegment
+          pickCount={pickCount}
+          filledPicks={progress.completedSteps}
+          packNumber={packNumber}
+          isCurrent
+          setCode={setCode}
+        />
+      );
+    case "seats":
+      return (
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          {progress.seats.map((seat, row) => (
+            <div key={seat.seatIndex} data-seat-progress={seat.seatIndex} className="flex min-w-0">
+              <PackSegment
+                pickCount={pickCount}
+                filledPicks={seat.completedSteps}
+                packNumber={packNumber}
+                isCurrent
+                setCode={row === 0 ? setCode : undefined}
+              />
+            </div>
+          ))}
+        </div>
+      );
+    case "unavailable":
+      return (
+        <PackSegment
+          pickCount={pickCount}
+          filledPicks={0}
+          packNumber={packNumber}
+          isCurrent
+          setCode={setCode}
+        />
+      );
+  }
 }
 
 function PackSegment({
