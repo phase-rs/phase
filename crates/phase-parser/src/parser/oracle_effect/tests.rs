@@ -96498,9 +96498,12 @@ fn resolving_spell_that_spell_binds_the_parent_target() {
 /// Void), delayed bodies (Galvanic Iteration, Sea Gate Stormcaller, Tomb of
 /// Horrors Adventurer) and trigger-owned sub-parsers that carry a COPY anaphor
 /// (Mathise's die-result row, Pyromancer's Goggles' mana-spend trigger). The copy
-/// consumer keeps the event-source default by design, so those two rows prove the
-/// sub-parser keeps the binding; the corpus diff guards a future counter anaphor
-/// inside those bodies (no printed card has one today).
+/// consumer keeps the event-source default by design and never consults the
+/// binding, so those two rows are printed-card output checks only (CopySpell is
+/// binding-blind). The binding hand-off for trigger-owned die rows is covered by
+/// the synthetic Counter tests (`trigger_owned_die_result_row_counter_binds_the_event_source`
+/// and the oracle.rs die-row tests), since no printed card has a counter anaphor
+/// inside those bodies today.
 #[test]
 fn triggered_ability_that_spell_binds_the_event_source() {
     assert_spell_anaphor(

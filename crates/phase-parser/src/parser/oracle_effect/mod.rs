@@ -53447,7 +53447,7 @@ fn try_parse_change_targets(lower: &str, ctx: &mut ParseContext) -> Option<Effec
     // Split off trailing "to [target]" — forced retarget destination.
     let (spell_phrase, forced_to) =
         if let Ok((_, (before, after))) = nom_primitives::split_once_on(rest, " to ") {
-            let (filter, _) = parse_target_with_ctx(after, ctx);
+            let (filter, _) = parse_target(after);
             (before, Some(filter))
         } else {
             (rest, None)
@@ -54382,7 +54382,7 @@ fn last_night_together_folds_attacker_restriction_into_additional_phase() {
 /// keep both legs.
 #[cfg(test)]
 mod change_targets_stack_object_tests {
-    use super::{try_parse_change_targets, ParseContext, TargetFilter};
+    use super::{try_parse_change_targets, ParseContext, SpellAnaphorBinding, TargetFilter};
     use crate::types::ability::{Effect, FilterProp, StackAbilityKind, TypeFilter};
     use crate::types::zones::Zone;
 
@@ -54437,6 +54437,60 @@ mod change_targets_stack_object_tests {
             );
         };
         assert_eq!(tf.properties, vec![FilterProp::HasSingleTarget]);
+    }
+
+    /// CR 608.2c + CR 608.2k + CR 115.7: a bare "that spell" retarget binds through
+    /// the shared `SpellAnaphorBinding` — `ParentTarget` in a resolving
+    /// spell/ability body, `TriggeringSource` when the body belongs to a triggered
+    /// ability (directly via `in_trigger`, or handed down via `EventSource`).
+    ///
+    /// Honest scope: this test is SYNTHETIC. No printed card has a NON-trigger
+    /// bare "that spell" retarget. Speedball, New Warrior ("Whenever a player casts
+    /// a spell that targets Speedball, he gets +2/+2 until end of turn. You may
+    /// choose new targets for that spell.") and Ricochet ("Change the target of
+    /// that spell to the player with the lowest result.") are triggers, and the
+    /// nearest resolving-spell card, Wyll's Reversal ("Choose target spell or
+    /// ability with one or more targets. ... You may choose new targets for that
+    /// spell or ability."), says "that spell or ability" and takes the earlier
+    /// "spell or ability" branch. The test is a regression guard for the shared
+    /// anaphor binding applied at the end of `try_parse_change_targets`: deleting
+    /// that `bind_spell_anaphor_to_context` call leaves `TriggeringSource` in every
+    /// row below, flipping the default-context (`ParentTarget`) assertions.
+    #[test]
+    fn bare_that_spell_retarget_binds_through_spell_anaphor_binding() {
+        for phrase in [
+            "change the target of that spell",
+            "you may choose new targets for that spell",
+        ] {
+            let bound = |mut ctx: ParseContext| match try_parse_change_targets(phrase, &mut ctx)
+                .unwrap_or_else(|| panic!("retarget clause must parse: {phrase}"))
+            {
+                Effect::ChangeTargets { target, .. } => target,
+                other => panic!("expected ChangeTargets for {phrase}, got {other:?}"),
+            };
+
+            assert_eq!(
+                bound(ParseContext::default()),
+                TargetFilter::ParentTarget,
+                "{phrase}: a resolving spell's bare \"that spell\" is the announced spell"
+            );
+            assert_eq!(
+                bound(ParseContext {
+                    in_trigger: true,
+                    ..Default::default()
+                }),
+                TargetFilter::TriggeringSource,
+                "{phrase}: a trigger-owned body keeps the event-source binding"
+            );
+            assert_eq!(
+                bound(ParseContext {
+                    spell_anaphor_binding: SpellAnaphorBinding::EventSource,
+                    ..Default::default()
+                }),
+                TargetFilter::TriggeringSource,
+                "{phrase}: a handed-down EventSource binding keeps the event source"
+            );
+        }
     }
 
     /// The ten printed "spell or ability" retarget cards (Bolt Bend, Spellskite,

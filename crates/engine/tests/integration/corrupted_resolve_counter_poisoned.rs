@@ -143,7 +143,7 @@ fn corrupted_resolve_counters_only_when_controller_poisoned() {
 const STUBBORN_DENIAL_ORACLE: &str = "Counter target noncreature spell unless its controller pays \
      {1}.\nFerocious — If you control a creature with power 4 or greater, counter that spell instead.";
 
-/// Drives the real cast->resolve pipeline: P0 casts an artifact spell, P1 answers with
+/// Drives the real cast->resolve pipeline: P0 casts Mox Pearl, P1 answers with
 /// Stubborn Denial while controlling a 4/4 (Ferocious). The "instead" body's
 /// `Counter { target: ParentTarget }` must counter the announced spell.
 #[test]
@@ -151,14 +151,12 @@ fn stubborn_denial_ferocious_counters_the_announced_spell() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    // A noncreature PERMANENT spell: a resolved artifact enters the battlefield,
+    // Mox Pearl ({0} Artifact, "{T}: Add {W}.") is a printed zero-mana-cost
+    // noncreature PERMANENT spell: a resolved artifact enters the battlefield,
     // while a countered one goes to the graveyard (CR 608.3a vs CR 701.6a), so the
     // final zone discriminates "countered" from "resolved".
-    let mut target_spell = scenario.add_artifact_to_hand_from_oracle(
-        P0,
-        "Doomed Relic",
-        "This artifact has indestructible.",
-    );
+    let mut target_spell =
+        scenario.add_artifact_to_hand_from_oracle(P0, "Mox Pearl", "{T}: Add {W}.");
     target_spell.with_mana_cost(ManaCost::zero());
     let target = target_spell.id();
 
