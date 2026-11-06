@@ -79493,6 +79493,50 @@ fn bare_choose_non_controller_subject_keeps_stack_timing() {
     assert_eq!(head.player_scope, Some(PlayerFilter::All));
 }
 
+/// Every `TargetOnly` link of an ability chain with its target-choice timing, head first.
+fn target_only_chain_timings(def: &AbilityDefinition) -> Vec<TargetChoiceTiming> {
+    let mut timings = Vec::new();
+    let mut node = Some(def);
+    while let Some(link) = node {
+        if matches!(link.effect.as_ref(), Effect::TargetOnly { .. }) {
+            timings.push(link.target_choice_timing);
+        }
+        node = link.sub_ability.as_deref();
+    }
+    timings
+}
+
+/// SHAPE: a non-controller subject owns the bare choice inherited by a compound
+/// continuation. Synthetic Oracle: no printed card pairs an object action with an
+/// inherited bare choose under a third-party subject; the nearest printed card is
+/// Wormfang Crab ("an opponent chooses a permanent you control other than this
+/// creature and exiles it"). The controller-subject rows are the matched controls.
+#[test]
+fn bare_choose_compound_child_inherits_non_controller_subject_timing() {
+    // The inherited verb is already imperative ("choose"), so no singular
+    // "chooses" deconjugation is involved.
+    let text = "Your opponents exile target creature and choose a creature you control.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert_eq!(
+        target_only_chain_timings(&def),
+        vec![TargetChoiceTiming::Stack],
+        "{text}: the inherited bare choice must reach a TargetOnly link that the \
+         controller does not choose at resolution: {def:#?}"
+    );
+
+    for text in [
+        "Exile target creature and choose a creature you control.",
+        "You exile target creature and choose a creature you control.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert_eq!(
+            target_only_chain_timings(&def),
+            vec![TargetChoiceTiming::Resolution],
+            "{text}: a controller subject keeps the resolution-time choice: {def:#?}"
+        );
+    }
+}
+
 /// SHAPE: Log Flume's printed Visit choice cannot enter the single-object chooser.
 #[test]
 fn bare_choose_stripped_quantifier_does_not_declare_resolution_timing() {
