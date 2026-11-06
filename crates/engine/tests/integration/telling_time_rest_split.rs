@@ -2315,6 +2315,18 @@ fn a_remainder_silent_any_number_alternative_keeps_the_inherited_split() {
             .any(|effect| effect.unimplemented_description().is_some()),
         "an any-number alternative is supported, got {effects:?}"
     );
+    // Reach guard: the alternative really attached, and inherited the split.
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Dig {
+                up_to: true,
+                rest_split_top_count: Some(QuantityExpr::Fixed { value: 5 }),
+                ..
+            }
+        )),
+        "the any-number alternative must inherit the all-top split, got {effects:?}"
+    );
 }
 
 /// CR 401.4, LATER PATCH: a separate "put the rest …" sentence re-declares the
@@ -2335,9 +2347,10 @@ fn a_later_random_order_rest_sentence_cannot_pair_with_the_all_top_split() {
 /// (the kept card on top, the rest on the bottom), and the resolver deliberately
 /// ignores a split on that branch. Pairing it with an all-top remainder must fail
 /// closed instead of bottoming the pile. No printed card has this sibling; the
-/// nearest printed card is Fertile Thicket ("Look at the top five cards of your
-/// library. You may reveal a basic land card from among them and put that card
-/// on top of your library and the rest on the bottom of your library in any order.").
+/// nearest printed card is Fertile Thicket ("When this land enters, you may look
+/// at the top five cards of your library. If you do, reveal up to one basic land
+/// card from among them, then put that card on top of your library and the rest
+/// on the bottom in any order.").
 #[test]
 fn a_kept_to_library_reorder_with_a_top_remainder_fails_closed() {
     let parsed = parse_sorcery(
@@ -2347,4 +2360,21 @@ fn a_kept_to_library_reorder_with_a_top_remainder_fails_closed() {
     );
     let effects = chain_effects(&parsed);
     assert_split_receipt(&effects, "a kept-to-library reorder with a top remainder");
+}
+
+/// CR 401.4: a separate "Put those cards on top of your library in any order."
+/// sentence makes a reveal-only from-among Dig a kept-to-library reorder
+/// (`PutChosenCardsAtLibraryPosition` defaults the kept destination to the
+/// library), which ignores a split an earlier clause installed. The patch must
+/// fail closed too. No printed card has this shape; the nearest printed card is
+/// Fertile Thicket (see above), whose kept-to-library reorder carries no split.
+#[test]
+fn a_chosen_cards_library_position_patch_cannot_pair_with_the_all_top_split() {
+    let parsed = parse_sorcery(
+        "Look at the top five cards of your library. Reveal a basic land card from \
+         among them and the rest on top of your library in any order. Put those \
+         cards on top of your library in any order.",
+    );
+    let effects = chain_effects(&parsed);
+    assert_split_receipt(&effects, "a chosen-cards library-position patch");
 }

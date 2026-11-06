@@ -6382,10 +6382,15 @@ pub(super) fn apply_clause_continuation(
             let Some(previous) = defs.last_mut() else {
                 return;
             };
+            let mut unsupported_split = false;
             if let Effect::Dig {
+                keep_count,
+                up_to,
                 destination,
                 rest_destination,
                 rest_remainder,
+                rest_split_top_count,
+                rest_order,
                 ..
             } = &mut *previous.effect
             {
@@ -6399,6 +6404,24 @@ pub(super) fn apply_clause_continuation(
                 // CR 608.2c: this clause places the rest itself, so the
                 // remainder is a route, not the silent one.
                 *rest_remainder = DigRestRemainder::Route;
+                // CR 401.4: defaulting the kept destination to the library
+                // makes this the kept-to-library reorder, which names both
+                // positions and ignores a split an earlier clause installed
+                // (see `unsupported_rest_split`).
+                unsupported_split = unsupported_rest_split(
+                    rest_split_top_count.is_some(),
+                    *rest_order,
+                    *keep_count,
+                    *up_to,
+                    *destination,
+                );
+            }
+            if unsupported_split {
+                *previous.effect = unsupported_rest_split_effect();
+                previous.sub_ability = None;
+                previous.else_ability = None;
+                previous.forward_result = false;
+                return;
             }
             let put_def = AbilityDefinition::new(
                 kind,
