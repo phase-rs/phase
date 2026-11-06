@@ -2834,6 +2834,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             state,
             &logical_zone_change_group,
             events,
+            crate::game::triggers::ConsumedTriggerEventScope::AllCollectors,
         );
         // CR 614.13a: the resumed mass/targeted co-entry finished without pausing —
         // the whole ChangeZone entry event is complete, so clear the pre-entry

@@ -1407,6 +1407,7 @@ pub(crate) fn move_component_batch_then(
                 state,
                 &logical_zone_change_group,
                 &events[event_start..],
+                crate::game::triggers::ConsumedTriggerEventScope::AllCollectors,
             );
             // Synchronous completion (the common single-redirect path): run the
             // cleanup now, and surface a pause it raises to the enclosing caller.
@@ -2800,6 +2801,7 @@ pub(crate) fn deliver_staged_change_zone_batch(
                 state,
                 &group,
                 &events[event_start..],
+                crate::game::triggers::ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
             );
             StagedChangeZoneOutcome::Settled { group, members }
         }
@@ -3465,10 +3467,20 @@ fn settle_batch_owner(
     );
     deferred_events.append(events);
     events.append(&mut deferred_events);
+    // CR 603.7b: staged population settlement collects ordinary triggers only;
+    // delayed triggers must still see the population's departure occurrences.
+    let consumed_scope = match completion.as_ref() {
+        Some(
+            BatchCompletion::ChangeZonePopulationSettled { .. }
+            | BatchCompletion::DestroyPopulationSettled { .. },
+        ) => crate::game::triggers::ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+        _ => crate::game::triggers::ConsumedTriggerEventScope::AllCollectors,
+    };
     crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
         state,
         &pending.logical_zone_change_group,
         events,
+        consumed_scope,
     );
     if let Some(link) = component_delivery_parent.as_ref() {
         let parent = state
@@ -11340,6 +11352,107 @@ mod staged_batch_tests {
     };
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
+
+    #[test]
+    fn staged_change_zone_keeps_delayed_leaves_trigger() {
+        use crate::game::triggers::{
+            collect_delayed_triggers_into_deferred, collect_triggers_into_deferred,
+            filter_consumed_trigger_events, TriggerCollectionRequester,
+        };
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, DelayedTriggerCondition, EffectKind, QuantityExpr,
+            TargetFilter, TriggerDefinition,
+        };
+        use crate::types::game_state::{
+            ChangeZoneBatchTail, ChangeZoneCountPolicy, DelayedTrigger,
+        };
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let source = effect_source(&mut state);
+        let members: Vec<_> = [1, 2]
+            .into_iter()
+            .map(|card| {
+                create_object(
+                    &mut state,
+                    CardId(card),
+                    controller,
+                    format!("Departing member {card}"),
+                    Zone::Battlefield,
+                )
+            })
+            .collect();
+        let gain = Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        };
+        let observer = TriggerDefinition::new(TriggerMode::LeavesBattlefield)
+            .valid_card(TargetFilter::Any)
+            .execute(AbilityDefinition::new(AbilityKind::Spell, gain.clone()));
+        let object = state.objects.get_mut(&source).unwrap();
+        std::sync::Arc::make_mut(&mut object.base_trigger_definitions).push(observer);
+        object.materialize_base_trigger_definitions();
+        state.delayed_triggers.push(DelayedTrigger::new(
+            DelayedTriggerCondition::WhenLeavesPlay {
+                object_id: members[0],
+            },
+            Box::new(ResolvedAbility::new(gain, vec![], source, controller)),
+            controller,
+            source,
+            true,
+        ));
+
+        let group = crate::game::triggers::allocate_logical_zone_change_group(&mut state, &members);
+        let tail = ChangeZoneBatchTail {
+            group_id: group.logical_group_id,
+            effect_kind: EffectKind::ChangeZone,
+            source_id: source,
+            controller,
+            destination: Zone::Exile,
+            count: ChangeZoneCountPolicy::MassAllMembers,
+            pending_return_result_producer: None,
+            stamp_this_way: true,
+            consumes_own_exile_links: false,
+        };
+        let requests = members
+            .iter()
+            .map(|&id| ZoneMoveRequest::effect(id, Zone::Exile, source))
+            .collect();
+        let mut events = Vec::new();
+        assert!(matches!(
+            deliver_staged_change_zone_batch(&mut state, requests, group, tail, &mut events),
+            StagedChangeZoneOutcome::Settled { .. }
+        ));
+        assert!(members
+            .iter()
+            .all(|id| state.objects[id].zone == Zone::Exile));
+        // CR 603.2c: the ordinary observer fires once for each departure,
+        // and the subsequent priority scan must not collect either one again.
+        assert_eq!(state.deferred_triggers.len(), 2);
+        let ordinary_events = filter_consumed_trigger_events(
+            &events,
+            TriggerCollectionRequester::Ordinary,
+            &state.consumed_before_priority_trigger_events,
+        );
+        collect_triggers_into_deferred(&mut state, &ordinary_events);
+        assert_eq!(state.deferred_triggers.len(), 2, "no ordinary recollection");
+        // CR 603.7b: the one-shot delayed trigger still sees its next event.
+        let delayed_events = filter_consumed_trigger_events(
+            &events,
+            TriggerCollectionRequester::Delayed,
+            &state.consumed_before_priority_trigger_events,
+        );
+        collect_delayed_triggers_into_deferred(&mut state, &delayed_events);
+        assert_eq!(state.deferred_triggers.len(), 3);
+        assert!(state.delayed_triggers.is_empty());
+        collect_delayed_triggers_into_deferred(&mut state, &delayed_events);
+        assert_eq!(
+            state.deferred_triggers.len(),
+            3,
+            "the delayed trigger fires once"
+        );
+    }
 
     fn effect_source(state: &mut GameState) -> ObjectId {
         create_object(

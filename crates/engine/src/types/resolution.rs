@@ -5779,6 +5779,10 @@ pub(crate) fn reject_wire_projection_marker(value: &Value) -> Result<(), String>
     Ok(())
 }
 
+/// Legacy top-level owners of a parked replacement library placement.
+pub(crate) const LEGACY_REPLACEMENT_PLACEMENT_OWNER_ROOTS: &[&str] =
+    &["pending_batch_deliveries", "pending_change_zone_iteration"];
+
 /// V1 suspension carriers that may retain an active `GameEvent::ZoneChanged`.
 /// Both provenance materialization and occurrence-key reconciliation must visit
 /// this exact legacy surface before it projects into the typed frame stack.

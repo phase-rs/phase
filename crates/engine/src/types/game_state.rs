@@ -27742,7 +27742,7 @@ fn migrate_legacy_replacement_library_placement(
                         }
                     }
                 }
-                for key in ["pending_batch_deliveries", "pending_change_zone_iteration"] {
+                for &key in crate::types::resolution::LEGACY_REPLACEMENT_PLACEMENT_OWNER_ROOTS {
                     if object.get(key).is_some_and(|owner| !owner.is_null()) {
                         local_owners.push(child_path(path, key));
                     }

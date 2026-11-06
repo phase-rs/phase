@@ -4912,10 +4912,13 @@ pub(crate) fn sync_logical_zone_change_departure_stamps(
 /// occurrence ordinal keeps byte-identical events distinct, so the generic
 /// collector still sees every unrelated event from the same action exactly
 /// once.
+/// CR 603.7b: an ordinary-only claim preserves the event for delayed triggers
+/// whose next matching occurrence has not yet been collected.
 pub(crate) fn mark_logical_zone_events_consumed_before_priority(
     state: &mut GameState,
     group: &LogicalZoneChangeGroup,
     events: &[GameEvent],
+    scope: ConsumedTriggerEventScope,
 ) {
     let mut unclaimed_owned_zone_events: Vec<_> = group
         .all_origin_occurrences
@@ -4938,7 +4941,7 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority(
                     ConsumedTriggerEventOccurrence {
                         event: event.clone(),
                         occurrence: trigger_event_occurrence(events, index),
-                        scope: ConsumedTriggerEventScope::AllCollectors,
+                        scope,
                     }
                 })
         })
@@ -4968,6 +4971,9 @@ pub(crate) fn collect_logical_zone_trigger_settlement(
         .iter()
         .map(|occurrence| occurrence.event.clone())
         .collect();
+    // CR 603.10a: departed observers read their retained pre-departure triggers;
+    // members with no such triggers cannot observe another member's departure.
+    let observer_index = CoDepartureObserverIndex::build(state, &all_events);
     let mut pending = Vec::new();
 
     for member_index in 0..group.prospective_battlefield_members.len() {
@@ -4978,10 +4984,21 @@ pub(crate) fn collect_logical_zone_trigger_settlement(
         ) {
             continue;
         }
+        let moved = matches!(
+            group.terminal_outcomes[member_index],
+            LogicalZoneChangeTerminalOutcome::Moved { .. }
+        );
+        if moved && !observer_index.may_observe(member.object_id) {
+            continue;
+        }
         let source_context = group.settlement_member_source_context(member_index)?;
         for occurrence in &group.all_origin_occurrences {
             if group.is_member_own_occurrence(member, occurrence) {
                 continue;
+            }
+            #[cfg(feature = "test-support")]
+            if moved {
+                super::perf_counters::record_co_departure_observer_resolution();
             }
             let mut batched_this_pass = HashSet::new();
             let mut registered_this_event = HashSet::new();
@@ -13683,23 +13700,25 @@ pub(crate) fn filter_consumed_trigger_events(
 /// 1. `consumed` — occurrences explicitly claimed by
 ///    [`mark_logical_zone_events_consumed_before_priority`]. Required wherever an
 ///    intervening `drain_deferred_trigger_queue` has already emptied
-///    `deferred_triggers`. Only three owners mark, and their ordinals are NOT
+///    `deferred_triggers`. Four sites mark, and their ordinals are NOT
 ///    uniformly exact: `effects/mod.rs` passes the whole action buffer (exact);
-///    `zone_pipeline.rs`'s synchronous-completion site passes a sub-slice, so its
-///    ordinals are rebased; and `zone_pipeline.rs`'s batch-drain site passes the
-///    whole buffer only after `drain_pending_batch_deliveries` has moved it out
-///    and re-assembled it, so its ordinals are computed against a re-ordered
-///    buffer. See the warning on [`filter_consumed_trigger_events_from`].
+///    `zone_pipeline.rs`'s two synchronous-completion sites pass sub-slices, so
+///    their ordinals are rebased; its batch-drain site passes the whole buffer
+///    only after `drain_pending_batch_deliveries` has moved it out and
+///    re-assembled it, so its ordinals use a re-ordered buffer. See the warning
+///    on [`filter_consumed_trigger_events_from`]. Staged ChangeZone and Destroy
+///    population completions claim ordinary collectors only; legacy drains and
+///    synchronous component batches claim all collectors.
 /// 2. `state.deferred_triggers` — the `ZoneChanged` values carried by contexts
 ///    that [`complete_logical_zone_trigger_collection`] and
 ///    [`append_and_collect_logical_zone_trigger_segment`] already queued. This is
 ///    the only witness for the four owners that deliberately do NOT mark
 ///    (`effects/change_zone.rs` x2, `engine_resolution_choices.rs` x2). Do NOT
-///    "fix" that asymmetry by adding `mark_`: claiming an occurrence also hides
-///    it from `check_delayed_triggers` (`engine_priority.rs`), which would
-///    silently kill the CR 603.7b leaves-the-battlefield delayed family (an
-///    ability triggers only the next time its trigger event occurs; hide the
-///    event and it never triggers).
+///    add an `AllCollectors` claim where only ordinary triggers were collected:
+///    it also hides the occurrence from `check_delayed_triggers`
+///    (`engine_priority.rs`), silently killing the CR 603.7b
+///    leaves-the-battlefield delayed family. An ordinary-only claim preserves
+///    that family's next matching occurrence.
 ///
 /// WITNESS 2 IS A BOUND, NOT AN OCCURRENCE COUNT. `deferred_triggers` holds one
 /// context per matching observer, not one entry per occurrence (every zone-change
