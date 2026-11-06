@@ -1892,6 +1892,17 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         }
     }
 
+    // Beam me up [cost] (TRK; the keyword's CR number is unpublished — needs
+    // manual verification): the line carries the beam me up alternative cost
+    // (CR 118.9). The reminder text is stripped by the router (CR 207.2a).
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("beam me up ").parse(text) {
+        let cost_str = rest.trim();
+        if !cost_str.is_empty() {
+            let cost = crate::types::mana::parse_mtgjson_mana_cost(cost_str);
+            return Some((Keyword::BeamMeUp(cost), mana_cost_remainder(cost_str)));
+        }
+    }
+
     // CR 701.57a: "discover N"
     // Delegates to nom combinator for number parsing.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("discover ").parse(text) {
@@ -2827,6 +2838,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Recover(_) => "recover".to_string(),
         Keyword::ForMirrodin => "for mirrodin!".to_string(),
         Keyword::MoreThanMeetsTheEye(_) => "more than meets the eye".to_string(),
+        Keyword::BeamMeUp(_) => "beam me up".to_string(),
         Keyword::Freerunning(_) => "freerunning".to_string(),
         Keyword::Increment => "increment".to_string(),
         Keyword::Specialize(_) => "specialize".to_string(),
@@ -3005,7 +3017,7 @@ fn type_filter_subject_name(tf: &TypeFilter) -> String {
 /// exactly how a candidate recognizer starts silently swallowing card text.
 ///
 /// CR 702.29e adds the one NON-fixed rule (typecycling), handled separately below.
-pub(crate) const KEYWORD_COST_PREFIXES: [&str; 98] = [
+pub(crate) const KEYWORD_COST_PREFIXES: [&str; 99] = [
     "cycling",
     "basic landcycling",
     "flashback",
@@ -3084,6 +3096,7 @@ pub(crate) const KEYWORD_COST_PREFIXES: [&str; 98] = [
     "collect evidence",
     "mayhem",
     "more than meets the eye",
+    "beam me up",
     "living weapon",
     "champion",
     "amplify",
@@ -3156,10 +3169,12 @@ pub(crate) fn keyword_candidate_ability_word_label(line: &str) -> Option<(&str, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityCost, ControllerRef, Effect, FilterProp, SacrificeCost};
+    use crate::types::ability::{
+        AbilityCost, ControllerRef, Effect, EffectKind, FilterProp, SacrificeCost,
+    };
     use crate::types::keywords::test_helpers::{mc, payload_bearing_samples};
     use crate::types::keywords::{BestowCost, BlitzCost, EchoCost, EvokeCost};
-    use crate::types::mana::ManaCost;
+    use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::player::PlayerCounterKind;
     use crate::types::zones::Zone;
 
@@ -3936,6 +3951,196 @@ mod tests {
             result,
             vec![Keyword::Ripple(4)],
             "Oracle text carries the ripple depth that MTGJSON's bare keyword omits"
+        );
+    }
+
+    /// The ten printed TRK "Beam me up" sorceries, verbatim (reminder included),
+    /// with each card's printed beam me up cost and its first-line effect kind.
+    const BEAM_ME_UP_CARDS: [(&str, &str, u32, &[ManaCostShard], EffectKind); 10] = [
+        (
+            "Energize",
+            "Return target creature an opponent controls to its owner's hand.\nBeam me up {3}{U} (You may cast this card from your graveyard for {3}{U} if you also return a creature you control to its owner's hand. Then exile this spell.)",
+            3,
+            &[ManaCostShard::Blue],
+            EffectKind::Bounce,
+        ),
+        (
+            "Pure Energy",
+            "Distribute two +1/+1 counters among one or two target creatures.\nBeam me up {2}{W} (You may cast this card from your graveyard for {2}{W} if you also return a creature you control to its owner's hand. Then exile this spell.)",
+            2,
+            &[ManaCostShard::White],
+            EffectKind::PutCounter,
+        ),
+        (
+            "Final Frontier",
+            "Search your library for a basic land card or Planet card, put it onto the battlefield tapped, then shuffle.\nBeam me up {1}{G} (You may cast this card from your graveyard for {1}{G} if you also return a creature you control to its owner's hand. Then exile this spell.)",
+            1,
+            &[ManaCostShard::Green],
+            EffectKind::SearchLibrary,
+        ),
+        (
+            "Open Communications",
+            "Draw a card.\nBeam me up {2}{U} (You may cast this card from your graveyard for {2}{U} if you also return a creature you control to its owner's hand. Then exile this spell.)",
+            2,
+            &[ManaCostShard::Blue],
+            EffectKind::Draw,
+        ),
+        (
+            "Adversary by Algorithm",
+            "Create a 3/3 colorless Illusion artifact creature token.\nBeam me up {3}{G} (You may cast this card from your graveyard for {3}{G} if you also return a creature you control to its owner's hand. Then exile this spell.)",
+            3,
+            &[ManaCostShard::Green],
+            EffectKind::Token,
+        ),
+        (
+            "There's Coffee in that Nebula",
+            "Look at the top five cards of your library. You may reveal a Plains card or nonland permanent card with mana value 3 or less from among them and put it into your hand. Put the rest on the bottom in a random order.\nBeam me up {2}{W} (You may cast this card from your graveyard for {2}{W} if you also return a creature you control to its owner's hand. Then exile this spell.)",
+            2,
+            &[ManaCostShard::White],
+            EffectKind::Dig,
+        ),
+        (
+            "Boarding Action",
+            "Create a 2/1 red Klingon Warrior creature token with haste.\nBeam me up {2}{R} (You may cast this card from your graveyard for {2}{R} if you also return a creature you control to its owner's hand. Then exile this spell.)",
+            2,
+            &[ManaCostShard::Red],
+            EffectKind::Token,
+        ),
+        (
+            "Federation Resupply",
+            "Search your library for an Aura, Equipment, or Spacecraft card, reveal it, put it into your hand, then shuffle.\nBeam me up {3}{W} (You may cast this card from your graveyard for {3}{W} if you also return a creature you control to its owner's hand. Then exile this spell.)",
+            3,
+            &[ManaCostShard::White],
+            EffectKind::SearchLibrary,
+        ),
+        (
+            "Pattern Buffer Preservation",
+            "Look at the top two cards of your library. Put one of them into your hand and the other into your graveyard.\nBeam me up {1}{B} (You may cast this card from your graveyard for {1}{B} if you also return a creature you control to its owner's hand. Then exile this spell.)",
+            1,
+            &[ManaCostShard::Black],
+            EffectKind::Dig,
+        ),
+        (
+            "Transporter Malfunction",
+            "Transporter Malfunction deals 3 damage to any target.\nBeam me up {3}{R}{R}{R} (You may cast this card from your graveyard for {3}{R}{R}{R} if you also return a creature you control to its owner's hand. Then exile this spell.)",
+            3,
+            &[ManaCostShard::Red, ManaCostShard::Red, ManaCostShard::Red],
+            EffectKind::DealDamage,
+        ),
+    ];
+
+    /// True when any JSON object at any depth is tagged `"type": "Unimplemented"`.
+    fn json_has_unimplemented(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(map) => {
+                map.get("type").and_then(serde_json::Value::as_str) == Some("Unimplemented")
+                    || map.values().any(json_has_unimplemented)
+            }
+            serde_json::Value::Array(items) => items.iter().any(json_has_unimplemented),
+            _ => false,
+        }
+    }
+
+    /// Beam me up [cost] (TRK; the keyword's rule number needs manual
+    /// verification): every printed carrier's full Oracle text parses to the
+    /// typed keyword with no `Unimplemented` node, and the keyword paragraph
+    /// contributes no ability (CR 113.2c: each paragraph is its own ability;
+    /// CR 207.2a: the parenthetical is reminder text).
+    #[test]
+    fn beam_me_up_full_oracle_text_parses_to_the_keyword_on_every_printed_card() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        let types = ["Sorcery".to_string()];
+        for (name, oracle, generic, shards, first_effect) in BEAM_ME_UP_CARDS {
+            let parsed = parse_oracle_text(oracle, name, &[], &types, &[]);
+            let expected = ManaCost::Cost {
+                shards: shards.to_vec(),
+                generic,
+            };
+            assert_eq!(
+                parsed.extracted_keywords,
+                vec![Keyword::BeamMeUp(expected)],
+                "[{name}] keyword"
+            );
+            assert_eq!(parsed.abilities.len(), 1, "[{name}] abilities");
+            let json = serde_json::to_value(&parsed).unwrap();
+            assert!(
+                !json_has_unimplemented(&json),
+                "[{name}] has an Unimplemented node: {json}"
+            );
+            crate::parser::test_support::assert_no_unimplemented(&parsed.abilities[0]);
+
+            let first_paragraph = oracle.lines().next().unwrap();
+            let first_only = parse_oracle_text(first_paragraph, name, &[], &types, &[]);
+            assert_eq!(
+                parsed.abilities, first_only.abilities,
+                "[{name}] the beam me up paragraph changed the spell's abilities"
+            );
+            for side in [&parsed, &first_only] {
+                assert!(side.statics.is_empty(), "[{name}] statics");
+                assert!(side.triggers.is_empty(), "[{name}] triggers");
+                assert!(side.replacements.is_empty(), "[{name}] replacements");
+            }
+            assert_eq!(
+                EffectKind::from(&*parsed.abilities[0].effect),
+                first_effect,
+                "[{name}] first-line effect"
+            );
+        }
+    }
+
+    /// CR 207.2a: the beam me up reminder is not semantic; the router strips it
+    /// and keeps the printed cost.
+    #[test]
+    fn beam_me_up_router_line_strips_reminder_and_keeps_the_cost() {
+        let routed = parse_router_keyword_line(
+            "Beam me up {3}{R}{R}{R} (You may cast this card from your graveyard for {3}{R}{R}{R} if you also return a creature you control to its owner's hand. Then exile this spell.)",
+        )
+        .expect("the printed beam me up line is routed");
+        assert_eq!(routed.keyword, Some(Keyword::BeamMeUp(mc("{3}{R}{R}{R}"))));
+        assert_eq!(
+            routed.tail.permitted_remainder,
+            PermittedKeywordRemainder::ReminderText
+        );
+
+        let bare = parse_router_keyword_line("Beam me up {3}{R}{R}{R}")
+            .expect("the line without its reminder is routed");
+        assert_eq!(bare.keyword, Some(Keyword::BeamMeUp(mc("{3}{R}{R}{R}"))));
+        assert_eq!(
+            bare.tail.permitted_remainder,
+            PermittedKeywordRemainder::None
+        );
+    }
+
+    /// A bare "beam me up" (no cost) and Scotty's grant sentence are not the
+    /// printed keyword line; Scotty stays honestly unimplemented.
+    #[test]
+    fn beam_me_up_without_a_cost_is_not_the_keyword_line() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        assert!(parse_router_keyword_line("Beam me up").is_none());
+        assert!(parse_granted_keyword_fragment("beam me up").is_none());
+
+        const SCOTTY: &str = "During your main phase, each card in your graveyard has beam me up. The beam me up cost is equal to that spell's mana cost. Scotty can't be beamed up to cast a spell this way. (Only instant and sorcery spells can be cast this way. You may cast a card from your graveyard for its beam me up cost if you also return another creature you control to its owner's hand. Then exile that spell.)";
+        let scotty = parse_oracle_text(
+            SCOTTY,
+            "Scotty, Miracle Worker",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Human".to_string(), "Artificer".to_string()],
+        );
+        assert!(
+            !scotty
+                .extracted_keywords
+                .iter()
+                .any(|kw| matches!(kw, Keyword::BeamMeUp(_))),
+            "Scotty's grant sentence must not become the printed keyword: {:?}",
+            scotty.extracted_keywords
+        );
+        let json = serde_json::to_value(&scotty).unwrap();
+        assert!(
+            json_has_unimplemented(&json),
+            "Scotty's grant stays honestly unimplemented (next cluster): {json}"
         );
     }
 
@@ -6926,6 +7131,11 @@ mod router_registry_tests {
         RouterKeywordCase {
             prefix: "more than meets the eye",
             valid_line: "More Than Meets the Eye {1}{W}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "beam me up",
+            valid_line: "Beam me up {3}{R}{R}{R}",
             reach: ProductionReach::KeywordCostLine,
         },
         RouterKeywordCase {

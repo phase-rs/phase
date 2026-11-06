@@ -20,12 +20,12 @@ use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, AssistState, CastOccurrence, CastPaymentMode,
     CastingPermissionIndex, CastingVariant, ConvokeMode, CostResume, CounterCostChoice,
-    CounterRemoveChoice, DeferredHandDiscardCost, DeferredSpellSacrifice, DistributionUnit,
-    FinalizePrePaymentChecks, GameState, ManaAbilityCostParent, ManaAbilityResume,
-    PausedCounterCostRemoval, PayCostKind, PendingCast, PendingCostMoveCompletion,
-    PendingCostMoveResume, PendingCounterRemoval, PendingDiscardForCostResume,
-    PendingSacrificeCostCompletion, PrepaidSpellFinalization, SpellCostSource, StackEntry,
-    StackEntryKind, StackPaidSnapshot, WaitingFor,
+    CounterRemoveChoice, DeferredHandDiscardCost, DeferredPermanentCostAction,
+    DeferredSpellSacrifice, DistributionUnit, FinalizePrePaymentChecks, GameState,
+    ManaAbilityCostParent, ManaAbilityResume, PausedCounterCostRemoval, PayCostKind, PendingCast,
+    PendingCostMoveCompletion, PendingCostMoveResume, PendingCounterRemoval,
+    PendingDiscardForCostResume, PendingSacrificeCostCompletion, PrepaidSpellFinalization,
+    SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{GiftKind, Keyword};
@@ -1937,39 +1937,51 @@ pub(crate) fn finish_pending_cost_or_cast(
         );
     }
     if !pending.deferred_sacrificed_permanents.is_empty() {
-        // CR 601.2f: the total is locked once, with the reduction the kept
-        // Emerge or Offering sacrifice earned applied in the caster's order
-        // (asking for that order when it is observable), never below {0}.
-        if !pending.accepted_cost_reductions.is_empty() {
-            match lock_in_total_cost_for_pending(
-                state,
-                player,
-                &pending,
-                &pending.accepted_cost_reductions,
-                pending.cost_reduction_election.as_ref(),
-            ) {
-                super::casting::CostLockOutcome::Locked(locked) => pending.cost = locked,
-                super::casting::CostLockOutcome::Election {
+        // CR 601.2f: the total is locked once, while the kept sacrifice and
+        // return selections are still on the battlefield (a cost reducer among
+        // them still reduces it), with any reduction a kept Emerge or Offering
+        // sacrifice earned applied in the caster's order (asking for that order
+        // when it is observable), never below {0}.
+        match lock_in_total_cost_for_pending(
+            state,
+            player,
+            &pending,
+            &pending.accepted_cost_reductions,
+            pending.cost_reduction_election.as_ref(),
+        ) {
+            super::casting::CostLockOutcome::Locked(locked) => pending.cost = locked,
+            super::casting::CostLockOutcome::Election {
+                reductions,
+                hybrid_symbols,
+                outcomes,
+            } => {
+                return Ok(WaitingFor::OrderCostReductions {
+                    player,
                     reductions,
                     hybrid_symbols,
                     outcomes,
-                } => {
-                    return Ok(WaitingFor::OrderCostReductions {
-                        player,
-                        reductions,
-                        hybrid_symbols,
-                        outcomes,
-                        pending_cast: Box::new(pending),
-                    });
-                }
+                    pending_cast: Box::new(pending),
+                });
             }
         }
-        state.pending_cast = Some(Box::new(pending));
-        return enter_payment_step(state, player, None, events);
+        // CR 601.2g: the mana window opens with the spell's tap-payment mode,
+        // exactly as for a cast with nothing kept until the commit.
+        return enter_locked_spell_payment(
+            state,
+            player,
+            pending,
+            AutoPaymentEntry::ThroughPaymentStep,
+            events,
+        );
     }
     if pending.deferred_hand_discard_cost.is_some() {
-        state.pending_cast = Some(Box::new(pending));
-        return enter_payment_step(state, player, None, events);
+        return enter_locked_spell_payment(
+            state,
+            player,
+            pending,
+            AutoPaymentEntry::ThroughPaymentStep,
+            events,
+        );
     }
     // CR 601.2f: carry this cast's declared additional mana costs and any
     // reduction the caster already accepted into the lock seam — the seam
@@ -3435,6 +3447,22 @@ fn finish_cost_object_moves(
             pre_payment_checks.map(|checks| *checks),
             events,
         )?,
+        // CR 601.2h: the deferred returns are paid; the commit continues with
+        // the remaining deferred sacrifices, discard and finalization.
+        PendingCostMoveCompletion::ResumeDeferredSpellCommit {
+            phyrexian_choices,
+            pre_payment_checks,
+        } => pay_deferred_spell_sacrifices_at_commit(
+            state,
+            player,
+            pending,
+            PendingSacrificeCostCompletion::FinalizeSpell {
+                phyrexian_choices,
+                pre_payment_checks,
+            },
+            None,
+            events,
+        )?,
     };
     if park_events_after_completion {
         park_cost_payment_triggers_if_paused(
@@ -3909,10 +3937,15 @@ fn validate_deferred_spell_sacrifices_at_commit(
     pending: &PendingCast,
 ) -> Result<(), EngineError> {
     // CR 601.2h: Costs are paid only if they remain payable; a deferred
-    // sacrifice selection must still satisfy the original cost at commit.
+    // sacrifice or return selection must still satisfy the original cost at
+    // commit.
     for selection in &pending.deferred_sacrificed_permanents {
-        let (id, filter) = match selection {
-            DeferredSpellSacrifice::Selected { object_id, filter } => (*object_id, filter),
+        let (id, filter, action) = match selection {
+            DeferredSpellSacrifice::Selected {
+                object_id,
+                filter,
+                action,
+            } => (*object_id, filter, *action),
             DeferredSpellSacrifice::All { filter } => {
                 if super::casting::find_determined_sacrifice_set(
                     state,
@@ -3940,18 +3973,24 @@ fn validate_deferred_spell_sacrifices_at_commit(
                     .to_string(),
             ));
         }
-        if super::static_abilities::player_cant_sacrifice_as_cost(state, player, id) {
-            return Err(EngineError::ActionNotAllowed(
-                "Deferred sacrifice permanent cannot be sacrificed as a cost".to_string(),
-            ));
+        match action {
+            DeferredPermanentCostAction::Sacrifice => {
+                if super::static_abilities::player_cant_sacrifice_as_cost(state, player, id) {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Deferred sacrifice permanent cannot be sacrificed as a cost".to_string(),
+                    ));
+                }
+            }
+            DeferredPermanentCostAction::ReturnToHand => {}
         }
         if !super::filter::matches_target_filter(
             state,
             id,
             filter,
             // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
-            // activated ability).
-            &super::filter::FilterContext::from_source_with_controller(pending.object_id, player),
+            // activated ability). Same context the selection's eligibility read.
+            &super::filter::FilterContext::from_source_with_controller(pending.object_id, player)
+                .with_granting_object(pending.ability.context.granting_object),
         ) {
             return Err(EngineError::ActionNotAllowed(
                 "Deferred sacrifice permanent no longer matches the sacrifice cost".to_string(),
@@ -4018,11 +4057,68 @@ fn pay_deferred_spell_sacrifices_at_commit(
     arrangement: Option<&[ObjectId]>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 601.2h: the total cost's components are paid in any order. The
+    // deferred returns move first, through the cost-move authority; once they
+    // settle (at once, or after a replacement choice) the commit re-enters here
+    // for the remaining sacrifices, discard and finalization.
+    let returns: Vec<ObjectId> = pending
+        .deferred_sacrificed_permanents
+        .iter()
+        .filter_map(DeferredSpellSacrifice::selected_return)
+        .collect();
+    if !returns.is_empty() {
+        let PendingSacrificeCostCompletion::FinalizeSpell {
+            phyrexian_choices,
+            pre_payment_checks,
+        } = completion
+        else {
+            return Err(EngineError::InvalidAction(
+                "a deferred return at the commit needs its spell finalization".into(),
+            ));
+        };
+        if arrangement.is_some() {
+            return Err(EngineError::InvalidAction(
+                "a sacrifice arrangement cannot precede the deferred returns".into(),
+            ));
+        }
+        pending
+            .deferred_sacrificed_permanents
+            .retain(|entry| entry.selected_return().is_none());
+        let cost_event_start = events.len();
+        return finish_cost_object_moves(
+            state,
+            player,
+            pending,
+            returns,
+            0,
+            Zone::Hand,
+            PendingCostMoveCompletion::ResumeDeferredSpellCommit {
+                phyrexian_choices,
+                pre_payment_checks,
+            },
+            cost_event_start,
+            false,
+            CostMoveLedger::default(),
+            events,
+        );
+    }
     let mut chosen: Vec<ObjectId> = Vec::new();
     let mut determined: Vec<ObjectId> = Vec::new();
     for entry in &pending.deferred_sacrificed_permanents {
         match entry {
-            DeferredSpellSacrifice::Selected { object_id, .. } => chosen.push(*object_id),
+            DeferredSpellSacrifice::Selected {
+                object_id,
+                action: DeferredPermanentCostAction::Sacrifice,
+                ..
+            } => chosen.push(*object_id),
+            DeferredSpellSacrifice::Selected {
+                action: DeferredPermanentCostAction::ReturnToHand,
+                ..
+            } => {
+                return Err(EngineError::InvalidAction(
+                    "a deferred return outlived its commit".into(),
+                ))
+            }
             DeferredSpellSacrifice::All { filter } => {
                 let set = super::casting::find_determined_sacrifice_set(
                     state,
@@ -5030,6 +5126,7 @@ pub(crate) fn handle_sacrifice_for_cost(
                         .map(|object_id| DeferredSpellSacrifice::Selected {
                             object_id,
                             filter: filter.clone(),
+                            action: DeferredPermanentCostAction::Sacrifice,
                         }),
                 );
             return finish_pending_cost_or_cast(state, player, pending, events);
@@ -5375,11 +5472,35 @@ pub(crate) fn handle_unattach_for_cost(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+/// CR 601.2f + CR 601.2g + CR 601.2h: the filter a spell's battlefield return
+/// cost keeps its selection under until the payment commit. `None` for an
+/// activation (its own payment ordering owns the move) and for a resume that
+/// does not carry the cost (an in-flight state saved before the cost rode on
+/// the resume), which pays the return at once as before.
+fn deferred_spell_return_filter(
+    pending: &PendingCast,
+    paid_cost: Option<SpellCostPayment<'_>>,
+) -> Option<TargetFilter> {
+    if pending.activation_ability_index.is_some() {
+        return None;
+    }
+    match paid_cost?.cost {
+        AbilityCost::ReturnToHand {
+            filter,
+            from_zone: None | Some(Zone::Battlefield),
+            ..
+        } => Some(filter.clone().unwrap_or(TargetFilter::Any)),
+        _ => None,
+    }
+}
+
 /// CR 118.3 + CR 601.2b: Complete return-to-hand-as-cost after player selection.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_return_to_hand_for_cost(
     state: &mut GameState,
     player: PlayerId,
     mut pending: PendingCast,
+    paid_cost: Option<SpellCostPayment<'_>>,
     count: usize,
     legal_permanents: &[ObjectId],
     chosen: &[ObjectId],
@@ -5410,6 +5531,26 @@ pub(crate) fn handle_return_to_hand_for_cost(
                 "Selected permanent not eligible to return".to_string(),
             ));
         }
+    }
+
+    // CR 601.2f + CR 601.2g + CR 601.2h: a spell's return cost is part of its
+    // total cost. The selected permanents stay on the battlefield while the
+    // total is locked in (a returned cost reducer still reduces it) and while
+    // mana abilities are activated (a returned mana creature can tap first);
+    // they move when the total is paid, with the deferred sacrifices.
+    if let Some(filter) = deferred_spell_return_filter(&pending, paid_cost) {
+        pending
+            .deferred_sacrificed_permanents
+            .extend(
+                chosen
+                    .iter()
+                    .map(|&object_id| DeferredSpellSacrifice::Selected {
+                        object_id,
+                        filter: filter.clone(),
+                        action: DeferredPermanentCostAction::ReturnToHand,
+                    }),
+            );
+        return finish_pending_cost_or_cast(state, player, pending, events);
     }
 
     if let Some(ability_index) = pending.activation_ability_index {
@@ -5891,9 +6032,12 @@ pub(crate) fn resume_counter_cost_removal_payment(
         ),
         PendingCostMoveCompletion::PublishExileTrackedSet
         | PendingCostMoveCompletion::FinalizeCast { .. }
-        | PendingCostMoveCompletion::FinalizeDelvedCast { .. } => Err(EngineError::InvalidAction(
-            "a counter-cost removal root cannot carry a cast finalization".to_string(),
-        )),
+        | PendingCostMoveCompletion::FinalizeDelvedCast { .. }
+        | PendingCostMoveCompletion::ResumeDeferredSpellCommit { .. } => {
+            Err(EngineError::InvalidAction(
+                "a counter-cost removal root cannot carry a cast finalization".to_string(),
+            ))
+        }
     }
 }
 
@@ -10297,6 +10441,8 @@ fn encode_declaration_exit(
 ///   cards from your graveyard"; possibly a Composite, Lunar Hatchling).
 /// - CR 702.81a: Retrace's land discard.
 /// - CR 702.133a: Jump-start's discard.
+/// - Beam me up's return of a creature you control (CR 118.8; rule number
+///   needs manual verification).
 /// - A card's own compound alternative cost (`alternative_cost_residual`).
 fn cast_variant_cost_residual(
     state: &GameState,
@@ -10329,6 +10475,7 @@ fn cast_variant_cost_residual(
         }
         CastingVariant::Retrace => return Some(retrace_discard_land_cost()),
         CastingVariant::JumpStart => return Some(jumpstart_discard_card_cost()),
+        CastingVariant::BeamMeUp => return Some(beam_me_up_return_creature_cost()),
         _ => {}
     }
     alternative_cost_residual(state, player, object_id, casting_variant)
@@ -10626,10 +10773,12 @@ pub(crate) fn defiler_reduction_entry_if_affordable(
 /// CR 601.2f + CR 601.2h: whether a paused cast still owes committed non-mana
 /// costs that only `finish_pending_cost_or_cast` pays: a required (imposed)
 /// cost on `additional_cost_flow`, a deferred required cost (a compound
-/// alternative cost's residual), or (CR 702.48b + CR 702.119c) an Emerge or
-/// Offering sacrifice chosen before a deferred target declaration, whose kept
-/// reduction the lock then applies once. A continuation that rebuilt the cast
-/// with `pay_and_push_with_lock` instead would drop them.
+/// alternative cost's residual), or (CR 601.2g + CR 601.2h) a sacrifice or
+/// return selection kept on the battlefield until the payment commit, such as
+/// an Emerge or Offering sacrifice chosen before a deferred target declaration
+/// (CR 702.48b + CR 702.119c), whose kept reduction the lock then applies
+/// once. A continuation that rebuilt the cast with `pay_and_push_with_lock`
+/// instead would drop them.
 pub(crate) fn pending_carries_unpaid_committed_costs(pending: &PendingCast) -> bool {
     matches!(
         pending.additional_cost_flow,
@@ -10860,9 +11009,10 @@ pub(crate) fn handle_order_cost_reductions(
         hybrid_announcement: hybrid_announcement.to_vec(),
     };
 
-    // CR 601.2f: a cast whose Emerge or Offering sacrifice was chosen before a
-    // deferred target declaration resumes through the payment step that makes
-    // that sacrifice, and the lock there honours this election.
+    // CR 601.2f: a cast that keeps a sacrifice or return selection until the
+    // payment commit (an Emerge or Offering sacrifice chosen before a deferred
+    // target declaration, a returned creature) resumes through the payment step
+    // that makes that move, and the lock there honours this election.
     if !pending.deferred_sacrificed_permanents.is_empty() {
         let mut pending = pending;
         pending.cost_reduction_election = Some(election);
@@ -11425,28 +11575,46 @@ fn pay_additional_cost_with_source(
         AbilityCost::ReturnToHand {
             count,
             ref filter,
-            from_zone: _,
+            from_zone,
         } => {
-            let eligible = super::casting::find_eligible_return_to_hand_targets(
+            let mut eligible = super::casting::find_eligible_return_to_hand_targets(
                 state,
                 player,
                 pending.object_id,
                 pending.ability.context.granting_object,
                 filter.as_ref(),
             );
+            // CR 601.2h: each permanent of the total cost pays one cost, so one
+            // already chosen for another cost of this spell (kept on the
+            // battlefield until the payment commit) is not offered again.
+            eligible.retain(|id| {
+                !pending
+                    .deferred_sacrificed_permanents
+                    .iter()
+                    .any(|kept| kept.selected_object() == Some(*id))
+            });
             if eligible.len() < count as usize {
                 return Err(EngineError::ActionNotAllowed(
                     "Not enough eligible permanents to return".into(),
                 ));
             }
+            // The resume carries the cost so a spell's selection can be kept,
+            // with the filter it must still match, until the payment commit.
+            let resume_cost = Box::new(AbilityCost::ReturnToHand {
+                count,
+                filter: filter.clone(),
+                from_zone,
+            });
             return Ok(WaitingFor::PayCost {
                 player,
                 kind: PayCostKind::ReturnToHand,
                 choices: eligible,
                 count: count as usize,
                 min_count: count as usize,
-                resume: CostResume::Spell {
+                resume: CostResume::SpellCost {
                     spell: Box::new(pending),
+                    cost: resume_cost,
+                    source: cost_source,
                 },
             });
         }
@@ -13013,6 +13181,32 @@ pub(super) fn can_pay_jumpstart_additional_cost(
     !super::casting::find_eligible_discard_targets(state, player, object_id, None, None).is_empty()
 }
 
+/// The single constructor of beam me up's additional cost, read by both the
+/// payment residual (`cast_variant_cost_residual`) and the affordability
+/// precheck (`can_pay_beam_me_up_additional_cost`), so they cannot diverge.
+// CR 118.8 + CR 601.2h: "if you also return a creature you control to its owner's hand"; CR 101.2: FilterProp::CanBeBeamedUp honors "can't be beamed up". Beam me up rule number needs manual verification.
+pub(super) fn beam_me_up_return_creature_cost() -> AbilityCost {
+    AbilityCost::ReturnToHand {
+        count: 1,
+        filter: Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(crate::types::ability::ControllerRef::You)
+                .properties(vec![crate::types::ability::FilterProp::CanBeBeamedUp]),
+        )),
+        from_zone: None,
+    }
+}
+
+/// CR 118.3: a beam me up cast is legal only while its additional cost can be
+/// paid fully — a creature you control that can be beamed up.
+pub(super) fn can_pay_beam_me_up_additional_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    beam_me_up_return_creature_cost().is_payable_for_spell(state, player, object_id)
+}
+
 /// CR 601.2f: What the lock seam at the head of [`pay_and_push_with_lock`] needs
 /// beyond the board to determine the total cost.
 ///
@@ -13217,24 +13411,37 @@ pub(super) fn pay_and_push_adventure(
     lock: CostLockInput,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    // CR 702.51a: Convoke lets players tap creatures to reduce mana cost.
-    // CR 702.126a: Improvise lets players tap artifacts to pay generic mana.
-    // Check for Convoke, Waterbend, or Improvise keyword on the spell.
+    let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+    pending.base_cost = base_cost;
+    pending.casting_variant = casting_variant;
+    pending.casting_permission_index = casting_permission_index;
+    pending.cast_timing_permission = cast_timing_permission;
+    pending.distribute = distribute;
+    pending.origin_zone = origin_zone;
+    pending.payment_mode = payment_mode;
+    // CR 601.2f: the `{X}` route re-derives the whole total in
+    // `apply_post_x_cost_modifiers` once X is concrete. Without these the
+    // re-derivation would drop the declared additional costs and silently
+    // discard the caster's elected reduction order.
+    lock.apply_to(&mut pending);
+    enter_locked_spell_payment(state, player, pending, AutoPaymentEntry::PayNow, events)
+}
+
+/// CR 702.51a + CR 702.126a + CR 702.66a: the tap-payment mode (convoke,
+/// waterbend, improvise or delve) the spell's own or granted keywords give this
+/// cast, offered only while something can pay through it.
+fn eligible_spell_tap_payment_mode(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+) -> Option<ConvokeMode> {
     // CR 702.102b: derive the pre-payment fused hint from the casting variant so a
     // `CastWithKeyword`-granted tap-payment keyword keyed on the combined mana
     // value / colors is seen on a fused split spell before its marker is set.
-    let convoke_mode = super::casting::spell_tap_payment_mode_for(
-        state,
-        player,
-        object_id,
-        casting_variant == CastingVariant::Fuse,
-    );
-    let has_delve = super::casting::spell_has_delve_payment_for(
-        state,
-        player,
-        object_id,
-        casting_variant == CastingVariant::Fuse,
-    );
+    let fused = casting_variant == CastingVariant::Fuse;
+    let convoke_mode = super::casting::spell_tap_payment_mode_for(state, player, object_id, fused);
+    let has_delve = super::casting::spell_has_delve_payment_for(state, player, object_id, fused);
     // Gate on eligible creatures/artifacts being present.
     // CR 702.66a: delve needs at least one fuel card in the caster's graveyard.
     let has_delve_fuel = || {
@@ -13243,7 +13450,7 @@ pub(super) fn pay_and_push_adventure(
             .keys()
             .any(|&id| state.is_delve_fuel_for(player, object_id, id))
     };
-    let convoke_mode = convoke_mode.filter(|mode| {
+    convoke_mode.filter(|mode| {
         (match mode {
             ConvokeMode::Convoke => state
                 .objects
@@ -13259,80 +13466,104 @@ pub(super) fn pay_and_push_adventure(
                 .any(|o| o.is_improvise_eligible(player)),
             ConvokeMode::Delve => has_delve_fuel(),
         }) || (has_delve && has_delve_fuel())
-    });
+    })
+}
+
+/// How an automatic (`CastPaymentMode::Auto`) payment that needs no input is
+/// entered by [`enter_locked_spell_payment`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AutoPaymentEntry {
+    /// An ordinary cast: offer assist and pay at once.
+    PayNow,
+    /// A cast that already committed a sacrifice, return or hand-discard
+    /// selection to its payment commit: the payment step decides, so an
+    /// unpayable total leaves the mana window open rather than unwinding the
+    /// selection (CR 601.2g).
+    ThroughPaymentStep,
+}
+
+/// CR 601.2g + CR 601.2h: the single entry into a spell's mana payment once its
+/// total cost is locked in (CR 601.2f): the ordinary cast and the casts that
+/// keep a sacrifice, return or hand-discard cost until the payment commit.
+/// Opens the mana-ability window with the spell's tap-payment mode (the spell's
+/// own or granted convoke, improvise, waterbend or delve) when the payment
+/// needs input (X, a tap-payment mode, manual payment, or an automatic payment
+/// that needs a mana-ability choice); otherwise pays automatically per `auto`,
+/// keeping sacrificial mana sources for the caster's selection under
+/// `AutoExceptSacrificialMana`.
+fn enter_locked_spell_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    auto: AutoPaymentEntry,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let object_id = pending.object_id;
+    let cost = pending.cost.clone();
+    let payment_mode = pending.payment_mode;
+    let casting_variant = pending.casting_variant;
+    let assist_offerable = pending.assist_state == AssistState::NotOffered;
+    // CR 601.2h + CR 605.3b + CR 616.1: The payment root is established before
+    // probing mana sources, so the probes see the cast's kept sacrifice and
+    // return selections (which no mana ability may consume) and a source-cost
+    // replacement can suspend into this root rather than falling through to
+    // priority.
+    state.pending_cast = Some(Box::new(pending));
+    let convoke_mode = eligible_spell_tap_payment_mode(state, player, object_id, casting_variant);
 
     // Enter the payment step if cost needs player input (X), convoke/waterbend is active,
     // or auto-tap cannot pay the locked cost without additional mana-ability choices.
     // `enter_payment_step` diverts to `ChooseXValue` when the cost has an unchosen X,
     // per CR 601.2f (X chosen before mana is paid).
-    let has_x = cost_has_x(cost);
+    let has_x = cost_has_x(&cost);
     let manual_payment = payment_mode == CastPaymentMode::Manual && cost.mana_value() > 0;
-    let auto_payment_needs_input = payment_mode == CastPaymentMode::Auto
+    let auto_payment_needs_input = auto == AutoPaymentEntry::PayNow
+        && payment_mode == CastPaymentMode::Auto
         && cost.mana_value() > 0
-        && !super::casting::can_pay_cost_after_auto_tap(state, player, object_id, cost)
-        && super::casting::spell_payment_manual_route(state, player, object_id, cost)
+        && !super::casting::can_pay_cost_after_auto_tap(state, player, object_id, &cost)
+        && super::casting::spell_payment_manual_route(state, player, object_id, &cost)
             == super::casting::ManualPaymentRoute::Feasible;
     if has_x || convoke_mode.is_some() || manual_payment || auto_payment_needs_input {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
-        pending.base_cost = base_cost.clone();
-        pending.casting_variant = casting_variant;
-        pending.casting_permission_index = casting_permission_index;
-        pending.cast_timing_permission = cast_timing_permission;
-        pending.distribute = distribute;
-        pending.origin_zone = origin_zone;
-        pending.payment_mode = payment_mode;
-        // CR 601.2f: the `{X}` route re-derives the whole total in
-        // `apply_post_x_cost_modifiers` once X is concrete. Without these the
-        // re-derivation would drop the declared additional costs and silently
-        // discard the caster's elected reduction order.
-        lock.apply_to(&mut pending);
-        state.pending_cast = Some(Box::new(pending));
         return enter_payment_step(state, player, convoke_mode, events);
     }
-
-    // CR 601.2h + CR 605.3b + CR 616.1: The automatic path must establish its
-    // authoritative payment root before probing mana sources. A source-cost
-    // replacement can suspend either ordinary payment or Phyrexian selection;
-    // retaining this `PendingCast` lets its typed mana resume finish the original
-    // operation rather than falling through to priority.
-    let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
-    pending.base_cost = base_cost;
-    pending.casting_variant = casting_variant;
-    pending.casting_permission_index = casting_permission_index;
-    pending.cast_timing_permission = cast_timing_permission;
-    pending.distribute = distribute;
-    pending.origin_zone = origin_zone;
-    pending.payment_mode = payment_mode;
-    lock.apply_to(&mut pending);
+    // A kept selection's payment step classifies `Auto` and `Manual` itself
+    // (and offers assist); only the sacrificial-mana preference is applied here.
+    if auto == AutoPaymentEntry::ThroughPaymentStep
+        && payment_mode != CastPaymentMode::AutoExceptSacrificialMana
+    {
+        return enter_payment_step(state, player, None, events);
+    }
 
     // CR 702.132a: Assist — the cost is now fully locked (no X / convoke / manual
     // step pending), so before finalizing, a spell with assist and a generic
     // component lets the caster choose another player to help pay it. Stash the
     // pending cast so the assist answer handlers can resume via `enter_payment_step`.
-    if let Some((generic, candidates)) = assist_offer_params(
-        state,
-        player,
-        object_id,
-        cost,
-        casting_variant == CastingVariant::Fuse,
-    ) {
-        pending.assist_state = AssistState::Offered;
-        state.pending_cast = Some(Box::new(pending));
-        return Ok(WaitingFor::AssistChoosePlayer {
+    if assist_offerable {
+        if let Some((generic, candidates)) = assist_offer_params(
+            state,
             player,
-            candidates,
-            max_generic: generic,
-            convoke_mode: None,
-        });
+            object_id,
+            &cost,
+            casting_variant == CastingVariant::Fuse,
+        ) {
+            if let Some(pending) = state.pending_cast.as_mut() {
+                pending.assist_state = AssistState::Offered;
+            }
+            return Ok(WaitingFor::AssistChoosePlayer {
+                player,
+                candidates,
+                max_generic: generic,
+                convoke_mode: None,
+            });
+        }
     }
 
-    state.pending_cast = Some(Box::new(pending));
     if payment_mode == CastPaymentMode::AutoExceptSacrificialMana {
-        let keep_untapped = sacrificial_tap_sources_to_keep(state, player, cost, object_id);
+        let keep_untapped = sacrificial_tap_sources_to_keep(state, player, &cost, object_id);
         auto_tap_non_sacrificial_mana_sources(
             state,
             player,
-            cost,
+            &cost,
             events,
             object_id,
             &keep_untapped,

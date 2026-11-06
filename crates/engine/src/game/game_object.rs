@@ -657,6 +657,7 @@ fn art_keyword_family_name(keyword: &Keyword) -> String {
         Keyword::Totem => "Totem".to_owned(),
         Keyword::Toxic(_) => "Toxic".to_owned(),
         Keyword::WebSlinging(_) => "WebSlinging".to_owned(),
+        Keyword::BeamMeUp(_) => "BeamMeUp".to_owned(),
     }
 }
 

@@ -8534,14 +8534,22 @@ impl ActivationResidual {
     }
 }
 
-/// CR 601.2g + CR 601.2h: a spell sacrifice cost whose zone move waits for the
-/// payment commit, after mana abilities.
+/// CR 601.2g + CR 601.2h: a spell cost that removes a permanent from the
+/// battlefield (a sacrifice, or a return to its owner's hand) whose zone move
+/// waits for the payment commit, after mana abilities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DeferredSpellSacrifice {
     Selected {
         object_id: ObjectId,
         filter: TargetFilter,
+        /// What the commit does to the selected permanent. Absent on the wire
+        /// for a sacrifice, the original and default action.
+        #[serde(
+            default,
+            skip_serializing_if = "DeferredPermanentCostAction::is_sacrifice"
+        )]
+        action: DeferredPermanentCostAction,
     },
     /// CR 701.21a: "sacrifice all <filter>"; membership is read at the commit.
     All { filter: TargetFilter },
@@ -8553,6 +8561,42 @@ impl DeferredSpellSacrifice {
             Self::Selected { object_id, .. } => Some(*object_id),
             Self::All { .. } => None,
         }
+    }
+
+    /// The selected permanent this entry returns to its owner's hand at the
+    /// commit, if it is a return.
+    pub fn selected_return(&self) -> Option<ObjectId> {
+        match self {
+            Self::Selected {
+                object_id,
+                action: DeferredPermanentCostAction::ReturnToHand,
+                ..
+            } => Some(*object_id),
+            Self::Selected {
+                action: DeferredPermanentCostAction::Sacrifice,
+                ..
+            }
+            | Self::All { .. } => None,
+        }
+    }
+}
+
+/// CR 601.2h: the action a deferred spell cost performs on the permanent
+/// selected for it, when the total cost is paid.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeferredPermanentCostAction {
+    /// CR 701.21a: sacrifice it.
+    #[default]
+    Sacrifice,
+    /// CR 118.8 + CR 400.3: return it to its owner's hand ("return a creature
+    /// you control to its owner's hand").
+    ReturnToHand,
+}
+
+impl DeferredPermanentCostAction {
+    /// `true` for the default action; the serde `skip_serializing_if` predicate.
+    pub fn is_sacrifice(&self) -> bool {
+        matches!(self, Self::Sacrifice)
     }
 }
 
@@ -8928,9 +8972,11 @@ pub struct PendingCast {
     /// They stay in the graveyard until the total cost is paid at commit.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delved_cards: Vec<ObjectId>,
-    /// CR 601.2g + CR 601.2h: Non-mana spell additional-cost permanents selected
-    /// for sacrifice, but whose actual zone move is deferred until the final
-    /// payment commit so mana abilities can be activated first.
+    /// CR 601.2g + CR 601.2h: Non-mana spell cost permanents selected for
+    /// sacrifice or for a return to their owner's hand, but whose actual zone
+    /// move is deferred until the final payment commit so mana abilities can be
+    /// activated first and the total cost is locked in (CR 601.2f) while they
+    /// are still on the battlefield.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_sacrificed_permanents: Vec<DeferredSpellSacrifice>,
     /// CR 118.3a: Player-directed pin hints recorded during
@@ -9136,6 +9182,15 @@ pub enum PendingCostMoveCompletion {
         phyrexian_choices: Option<Vec<ShardChoice>>,
         /// `None` when the first pass had not reached the pre-payment checks.
         pre_payment_checks: Option<Box<FinalizePrePaymentChecks>>,
+    },
+    /// CR 601.2g + CR 601.2h: The cast's mana is already paid and `pending`
+    /// carries that payment; the permanents a spell cost returns to their
+    /// owners' hands were kept through the mana-ability window and have now
+    /// moved. Continue the same payment commit with its remaining deferred
+    /// sacrifices, discard and finalization.
+    ResumeDeferredSpellCommit {
+        phyrexian_choices: Option<Vec<ShardChoice>>,
+        pre_payment_checks: Box<FinalizePrePaymentChecks>,
     },
 }
 
@@ -26913,6 +26968,9 @@ fn visit_cost_move_completion_chains<'a>(
         } => pre_payment_checks
             .as_deref()
             .map_or(Ok(()), |checks| visit_pre_payment_checks_chains(checks, f)),
+        PendingCostMoveCompletion::ResumeDeferredSpellCommit {
+            pre_payment_checks, ..
+        } => visit_pre_payment_checks_chains(pre_payment_checks, f),
         PendingCostMoveCompletion::FinishPending
         | PendingCostMoveCompletion::CompleteSelectedReturnToHand { .. }
         | PendingCostMoveCompletion::PublishExileTrackedSet => Ok(()),
@@ -58183,7 +58241,7 @@ mod restored_exact_attack_authority_tests {
             cast_this_way_enters_mods: Default::default(),
         };
         let mut admitted = Vec::new();
-        for carrier in 0..26 {
+        for carrier in 0..27 {
             let mut state = state.clone();
             state.waiting_for = match carrier {
                 // The rider in the mana ability's own resume root.
@@ -58618,6 +58676,24 @@ mod restored_exact_attack_authority_tests {
                             },
                         },
                     );
+                    state.waiting_for.clone()
+                }
+                // A deferred-return commit's cost-move root whose pre-payment
+                // checks hand back a prompt holding the chain.
+                26 => {
+                    state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
+                        player: P0,
+                        pending: None,
+                        chosen: vec![],
+                        paused_at_index: 0,
+                        destination: Zone::Hand,
+                        completion: PendingCostMoveCompletion::ResumeDeferredSpellCommit {
+                            phyrexian_choices: None,
+                            pre_payment_checks: Box::new(pre_payment_checks()),
+                        },
+                        deferred_cost_events: vec![],
+                        departure_record_indices: vec![],
+                    });
                     state.waiting_for.clone()
                 }
                 _ => unreachable!(),

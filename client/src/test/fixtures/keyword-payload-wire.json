@@ -775,6 +775,17 @@
       }
     },
     {
+      "BeamMeUp": {
+        "generic": 3,
+        "shards": [
+          "Red",
+          "Red",
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
       "Mobilize": {
         "type": "Fixed",
         "value": 3

@@ -342,7 +342,7 @@ const MANA_COST_KEYWORDS = new Set([
   "Prowl", "Megamorph", "Mayhem", "Madness", "Miracle", "Dash",
   "Harmonize", "Foretell", "Mutate", "Disturb", "Overload",
   "Spectacle", "Surge", "Encore", "Outlast", "Scavenge", "Fortify",
-  "Plot", "Offspring", "LevelUp", "Warp", "Sneak", "WebSlinging", "Squad",
+  "Plot", "Offspring", "LevelUp", "Warp", "Sneak", "WebSlinging", "BeamMeUp", "Squad",
   "Transmute", "Transfigure", "Recover", "Cleave", "Replicate",
   "MoreThanMeetsTheEye", "Freerunning", "Specialize",
 ]);

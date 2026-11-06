@@ -117,6 +117,7 @@ mod base_pt_dynamic_set_std_base_pt;
 mod batroc_the_leaper_multikicker_counters;
 mod battle_of_wits;
 mod bbfu10_entered_this_turn_snapshot;
+mod beam_me_up;
 mod become_choice_trailing_duration;
 mod become_chosen_subtype;
 mod become_color_set_std_batch;

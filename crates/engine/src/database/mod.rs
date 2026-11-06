@@ -42,8 +42,9 @@ pub use search::{CardSearchQuery, CardSearchResult, CardSearchResults};
 /// Used by the deck ingestion subcommand to filter preconstructed decks and by
 /// any other tooling that needs the same guarantee the runtime face index
 /// provides. Vanilla creatures and basic lands (zero abilities) are playable;
-/// cards with abilities are playable only when none of those abilities contain
-/// an `Effect::Unimplemented` or other unimplemented-marker part.
+/// cards with abilities or keywords are playable only when no ability contains
+/// an `Effect::Unimplemented` or other unimplemented-marker part and no keyword
+/// is a coverage keyword gap (`card_face_has_unimplemented_parts`).
 pub fn is_card_playable(db: &CardDatabase, name: &str) -> bool {
     match db.get_face_by_name(name) {
         Some(face) => !crate::game::coverage::card_face_has_unimplemented_parts(face),

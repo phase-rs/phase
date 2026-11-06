@@ -729,22 +729,29 @@ fn parse_reveal_until_rest_zone_and_order(lower: &str) -> (Option<Zone>, DigRest
     (rest_zone, rest_order)
 }
 
-/// Whole-line dig continuation "put the rest on the bottom of <owner's> library
+/// Whole-line dig continuation "put the rest on the bottom [of <owner's> library]
 /// [in a random order | in any order]" following a `Dig` or `ChooseFromZone`.
 ///
 /// CR 400.5 + CR 608.2c: "in a random order" is an instruction distinct from
 /// the player-chosen ordering in "in any order".
+/// CR 101.1 + CR 401.4: an explicit random order overrides the owner's arrangement.
 ///
 /// CR 400.3: a library is always its owner's, so the possessive ("your", "their",
 /// "that player's", "that library") selects no player; it must not decide whether
 /// the order instruction is read (Black Cat / Gonti: "... of their library in a
 /// random order" / "... of that library in a random order").
+/// CR 400.3: the bare form names no library; the rest go to the bottom of their
+/// owner's library (There's Coffee in that Nebula / Loot, Exuberant Explorer:
+/// "Put the rest on the bottom in a random order.").
 fn parse_put_rest_on_bottom_line(input: &str) -> OracleResult<'_, DigRestOrder> {
     let (input, _) = (
-        tag("put the rest on the bottom of "),
-        alt((
-            value((), tag("that library")),
-            value((), (parse_partition_owner_possessive, tag("library"))),
+        tag("put the rest on the bottom"),
+        opt(preceded(
+            tag(" of "),
+            alt((
+                value((), tag("that library")),
+                value((), (parse_partition_owner_possessive, tag("library"))),
+            )),
         )),
     )
         .parse(input)?;
@@ -17533,6 +17540,8 @@ mod tests {
             "put the rest on the bottom of their library in a random order",
             "put the rest on the bottom of that library in a random order.",
             "put the rest on the bottom of that player's library in a random order",
+            // The bare form (There's Coffee in that Nebula) names no library.
+            "put the rest on the bottom in a random order.",
         ] {
             assert_eq!(
                 parse_put_rest_on_bottom_line(text)
@@ -17548,6 +17557,69 @@ mod tests {
                 .map(|(_, order)| order),
             Some(DigRestOrder::Preserve)
         );
+        // Hostile: a non-library tail after "of" is still declined.
+        assert!(parse_put_rest_on_bottom_line(
+            "put the rest on the bottom of zzz in a random order"
+        )
+        .is_err());
+    }
+
+    /// CR 608.2c + CR 401.4: the bare "Put the rest on the bottom in a random
+    /// order." after a Dig reads its order instruction (There's Coffee in that
+    /// Nebula, Loot, Exuberant Explorer), and the library-possessive and
+    /// graveyard forms keep their readings.
+    #[test]
+    fn bare_put_the_rest_on_the_bottom_line_randomizes_the_dig_rest() {
+        fn first_dig(effect: &Effect) -> Option<(Option<Zone>, DigRestOrder)> {
+            match effect {
+                Effect::Dig {
+                    rest_destination,
+                    rest_order,
+                    ..
+                } => Some((*rest_destination, *rest_order)),
+                _ => None,
+            }
+        }
+        fn dig_of(text: &str, name: &str, types: &[&str]) -> (Option<Zone>, DigRestOrder) {
+            let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+            let parsed = crate::parser::oracle::parse_oracle_text(text, name, &[], &types, &[]);
+            parsed
+                .abilities
+                .iter()
+                .find_map(|ability| first_dig(&ability.effect))
+                .unwrap_or_else(|| panic!("[{name}] no Dig in {:?}", parsed.abilities))
+        }
+
+        let coffee = dig_of(
+            "Look at the top five cards of your library. You may reveal a Plains card or nonland permanent card with mana value 3 or less from among them and put it into your hand. Put the rest on the bottom in a random order.",
+            "There's Coffee in that Nebula",
+            &["Sorcery"],
+        );
+        assert_eq!(coffee, (Some(Zone::Library), DigRestOrder::Random));
+
+        let loot = dig_of(
+            "{4}{G}{G}, {T}: Look at the top six cards of your library. You may reveal a creature card with mana value less than or equal to the number of lands you control from among them and put it onto the battlefield. Put the rest on the bottom in a random order.",
+            "Loot, Exuberant Explorer",
+            &["Creature"],
+        );
+        assert_eq!(loot, (Some(Zone::Library), DigRestOrder::Random));
+
+        // Sibling: the library-possessive form still randomizes (Incubation).
+        let incubation = dig_of(
+            "Look at the top five cards of your library. You may reveal a creature card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+            "Incubation",
+            &["Sorcery"],
+        );
+        assert_eq!(incubation, (Some(Zone::Library), DigRestOrder::Random));
+
+        // Sibling: "Put the rest into your graveyard." keeps its zone
+        // (Commune with the Gods).
+        let graveyard = dig_of(
+            "Reveal the top five cards of your library. You may put a creature or enchantment card from among them into your hand. Put the rest into your graveyard.",
+            "Commune with the Gods",
+            &["Sorcery"],
+        );
+        assert_eq!(graveyard.0, Some(Zone::Graveyard));
     }
 
     /// CR 401.4: "in any order" is the owner's arrangement instruction on the
