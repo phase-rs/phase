@@ -50,10 +50,13 @@
 //! Muse -3; Isildur's Fateful Strike; Azula, Cunning Usurper; Struggle for
 //! Sanity's "That player exiles a card from it, then you exile a card from it").
 //!
-//! Revert sensitivity is stated per test. The one reader of `exiled_by`
-//! (`casting::exile_permission_pool`) is guarded by
-//! `uba_mask_draw_to_exile_play.rs`; no printed card observes this change, and
-//! these rows claim no reader-level discrimination.
+//! Revert sensitivity is stated per test. The readers of `exiled_by` are
+//! `casting::exile_permission_pool` (guarded by
+//! `uba_mask_draw_to_exile_play.rs`) and `PermissionGrantee::ObjectExiler` in
+//! `grant_permission` (guarded by `vulcan_mind_meld_exiler_plays.rs`; Vulcan
+//! Mind-Meld's exile is an `ExileTop`, which this change does not touch). No
+//! printed card observes this change, and these rows claim no reader-level
+//! discrimination.
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
