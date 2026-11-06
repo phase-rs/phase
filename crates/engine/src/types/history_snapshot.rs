@@ -89,7 +89,7 @@ struct CompactLki {
     /// CR 208.4b + CR 613.4b: the layer-7b base power. Omitted when it equals
     /// [`Self::power`] — the overwhelmingly common case for a printed body, and
     /// the one place a single snapshot spends two whole keys on a value the
-    /// decoder can reproduce. `base_power_absent` carries the case an omission
+    /// decoder can reproduce. An explicit `null` carries the case an omission
     /// cannot: a set current value with no base value, which is exactly what a
     /// noncreature permanent animated into a creature can look like, so a
     /// `PtComparison { scope: Base }` predicate still reads the real answer.
@@ -97,31 +97,19 @@ struct CompactLki {
         rename = "bp",
         alias = "base_power",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_option"
     )]
-    base_power: Option<i32>,
-    #[serde(
-        rename = "bn",
-        alias = "base_power_absent",
-        default,
-        skip_serializing_if = "is_false"
-    )]
-    base_power_absent: bool,
+    base_power: Option<Option<i32>>,
     /// CR 208.4b + CR 613.4b: the layer-7b base toughness; see [`Self::base_power`].
     #[serde(
         rename = "bt",
         alias = "base_toughness",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_option"
     )]
-    base_toughness: Option<i32>,
-    #[serde(
-        rename = "tn",
-        alias = "base_toughness_absent",
-        default,
-        skip_serializing_if = "is_false"
-    )]
-    base_toughness_absent: bool,
+    base_toughness: Option<Option<i32>>,
     #[serde(
         rename = "mv",
         alias = "mana_value",
@@ -250,17 +238,26 @@ fn encode_subtypes(name: &str, subtypes: &[String]) -> Option<Vec<String>> {
 
 /// Encode a base P/T value relative to the current one.
 ///
-/// Returns `(value, absent_flag)`. An omitted value with no flag reconstructs
-/// to the current value, which covers every equal pair (including both-absent).
-/// A set current value with no base value is the one case an omission cannot
-/// express, so it sets the flag instead of silently reconstructing a base.
-fn encode_base(base: Option<i32>, current: Option<i32>) -> (Option<i32>, bool) {
-    match base {
-        Some(value) if Some(value) == current => (None, false),
-        Some(value) => (Some(value), false),
-        None if current.is_none() => (None, false),
-        None => (None, true),
+/// `None` (field omitted) means "equal to the current value, so reproduce it";
+/// `Some(None)` (explicit `null`) means "there is no base value"; `Some(Some(v))`
+/// is a base that differs. The third arm is what keeps the animated-permanent
+/// shape exact — a set current value with no base value must not be read back as
+/// a base equal to the current one.
+fn encode_base(base: Option<i32>, current: Option<i32>) -> Option<Option<i32>> {
+    if base == current {
+        None
+    } else {
+        Some(base)
     }
+}
+
+/// Lift a present-but-null JSON value into `Some(None)` instead of collapsing it
+/// to the outer `None` (which serde's `Option` deserializer would do, making
+/// `null` indistinguishable from an omitted field).
+fn present_option<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<i32>>, D::Error> {
+    Option::<i32>::deserialize(deserializer).map(Some)
 }
 
 /// `PlayerId`'s `Default` is seat 0, so omitting it reconstructs exactly. This
@@ -276,18 +273,13 @@ fn is_zero_u32(value: &u32) -> bool {
 
 impl CompactLki {
     fn of(lki: &LKISnapshot) -> Self {
-        let (base_power, base_power_absent) = encode_base(lki.base_power, lki.power);
-        let (base_toughness, base_toughness_absent) =
-            encode_base(lki.base_toughness, lki.toughness);
         Self {
             name: lki.name.clone(),
             token_image_ref: lki.token_image_ref.clone(),
             power: lki.power,
             toughness: lki.toughness,
-            base_power,
-            base_power_absent,
-            base_toughness,
-            base_toughness_absent,
+            base_power: encode_base(lki.base_power, lki.power),
+            base_toughness: encode_base(lki.base_toughness, lki.toughness),
             mana_value: lki.mana_value,
             controller: lki.controller,
             owner: lki.owner,
@@ -313,16 +305,8 @@ impl CompactLki {
             token_image_ref: self.token_image_ref,
             power: self.power,
             toughness: self.toughness,
-            base_power: if self.base_power_absent {
-                None
-            } else {
-                self.base_power.or(self.power)
-            },
-            base_toughness: if self.base_toughness_absent {
-                None
-            } else {
-                self.base_toughness.or(self.toughness)
-            },
+            base_power: self.base_power.unwrap_or(self.power),
+            base_toughness: self.base_toughness.unwrap_or(self.toughness),
             mana_value: self.mana_value,
             controller: self.controller,
             owner: self.owner,
@@ -491,8 +475,8 @@ mod tests {
         })
         .expect("serialization succeeds");
         assert!(
-            payload.contains("\"bn\":true") && payload.contains("\"tn\":true"),
-            "an absent base with a set current P/T must be flagged: {payload}"
+            payload.contains("\"bp\":null") && payload.contains("\"bt\":null"),
+            "an absent base with a set current P/T must be written explicitly: {payload}"
         );
         let decoded: CompactWrapper = serde_json::from_str(&payload).expect("decodes");
         assert_eq!(decoded.lki, absent);
@@ -518,6 +502,22 @@ mod tests {
         let decoded: CompactWrapper =
             serde_json::from_str(&verbose_payload).expect("verbose spelling decodes");
         assert_eq!(decoded.lki, verbose_lki);
+
+        // The arm a pre-change payload really produces: a set current P/T with an
+        // explicit `null` base. A legacy save of a permanent with no base value
+        // must not come back with a fabricated base equal to its current P/T.
+        let mut no_base = fully_populated_lki();
+        no_base.base_power = None;
+        no_base.base_toughness = None;
+        let verbose_no_base = serde_json::to_value(&no_base).expect("to_value");
+        assert_eq!(verbose_no_base["base_power"], serde_json::Value::Null);
+        let payload = format!(
+            "{{\"lki\":{}}}",
+            serde_json::to_string(&verbose_no_base).expect("to_string")
+        );
+        let decoded: CompactWrapper =
+            serde_json::from_str(&payload).expect("verbose payload with a null base decodes");
+        assert_eq!(decoded.lki, no_base);
     }
 
     /// The compact form must be materially smaller than the verbose derived

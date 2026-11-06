@@ -8440,6 +8440,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,

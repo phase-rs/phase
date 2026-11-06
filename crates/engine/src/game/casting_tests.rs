@@ -53799,14 +53799,14 @@ fn add_mana_from_source(
 /// makes no payment, so nothing is stamped and the positive reach guard could
 /// never fire. The spell therefore carries a real cost and nothing else.
 ///
-/// SYNTHETIC, and the repo's real-card rule is applied deliberately: no printed
-/// sorcery has a purely generic mana cost — the `{N}`-only cards are artifacts,
-/// whose nearest printed members are Mind Stone (`{2}`) and Wayfarer's Bauble
-/// (`{1}`). Substituting one of those would change the cast's card type and
-/// reach into the artifact/spell-ability paths these legs are not about, so the
-/// fixture keeps a synthetic Sorcery shell with no ability at all — it is never
-/// resolved, only cast and paid — and says so here rather than misreporting a
-/// printed card's text or cost.
+/// SYNTHETIC, and the repo's real-card rule is applied deliberately. Printed
+/// sorceries with a purely generic mana cost do exist — Aang's Journey (`{2}`),
+/// Gruesome Slaughter (`{6}`) — but each carries a library search, a kicker or a
+/// target (Indicate, `{0}`), and these legs need a cost-only spell that is cast
+/// and discarded without resolving an effect. Substituting one would import an
+/// effect path the payment-provenance legs are not about, so the fixture keeps a
+/// synthetic Sorcery shell with no ability at all; the nearest printed analogue
+/// for the cost shape is Aang's Journey (`{2}`).
 fn create_paid_sorcery(
     state: &mut GameState,
     card_id: CardId,
@@ -64185,13 +64185,16 @@ fn copy_cast_with_no_spell_ability_records_no_targets() {
     let zemo = scenario
         .add_creature_from_oracle(P0, "Baron Helmut Zemo", 3, 3, BARON_HELMUT_ZEMO)
         .id();
-    // SYNTHETIC COSTS, with the repo's real-card rule applied deliberately: the
+    // SYNTHETIC COSTS, with the repo's real-card rule applied deliberately. The
     // Boast cost needs fifteen or more black mana symbols among the exiled cards'
-    // costs, and the highest printed black pip count on any card is four
-    // (Phyrexian Obliterator, `{B}{B}{B}{B}`), so a printed pair cannot reach the
-    // threshold and the shape is genuinely unavailable. The two shells below carry
-    // no printed card's name or text; Phyrexian Obliterator is the nearest printed
-    // analogue for the cost shape.
+    // costs, and this row needs exactly two exiled cards — one a vanilla,
+    // ability-less creature (the copy whose record must be empty) and one a spell.
+    // The highest printed black pip counts are Doomsday Excruciator (`{B}` x6) and
+    // Zodiark, Umbral God (`{B}` x5); the highest on a vanilla creature is one
+    // (Walking Corpse, `{1}{B}`). A printed pair of that shape therefore tops out
+    // at seven symbols, so the threshold is unreachable with two printed cards
+    // and the shells below carry no printed card's name or text. The nearest
+    // printed analogues for the cost shape are Doomsday Excruciator and Zodiark.
     let black = ManaCost::Cost {
         shards: vec![ManaCostShard::Black; 15],
         generic: 0,

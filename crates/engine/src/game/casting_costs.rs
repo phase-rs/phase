@@ -4217,6 +4217,17 @@ pub(super) fn pay_delve_after_distribution(
     pending: &mut PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EngineError> {
+    // CR 601.2c + CR 400.7: the delve exile below moves cards out of the graveyard
+    // as part of the total cost (CR 601.2h). A declared target can BE one of those
+    // cards, so the facts are latched here — before the exile — on the cast's own
+    // carrier, because this root rebuilds `FinalizePrePaymentChecks` from scratch
+    // and would otherwise recapture by raw id after the move.
+    if pending.committed_target_facts.is_none() {
+        pending.committed_target_facts = Some(super::casting::capture_target_facts(
+            state,
+            &declared_targets_in_chain(&pending.ability),
+        ));
+    }
     let spent = recorded_mana_spent_to_cast(state, pending.object_id);
     let completion = PendingCostMoveCompletion::FinalizeDelvedCast {
         phyrexian_choices: None,
@@ -13808,10 +13819,16 @@ fn finalize_cast_with_phyrexian_choices_inner(
 
     // CR 601.2c + CR 400.7: `committed_target_facts` was latched with the
     // pre-payment checks above — once, before any cost was paid — and every
-    // parked payment continuation re-enters this function carrying it. There is
-    // deliberately no capture here: this point is after CR 601.2h on every
-    // resumed path, where a raw-id lookup would describe the target's new
-    // incarnation rather than the one the caster announced (CR 115.9, CR 115.9b).
+    // parked payment continuation re-enters this function carrying it. A root
+    // that rebuilds the checks from scratch (`pay_delve_after_distribution`)
+    // parks the latch on the cast's own `PendingCast`, which wins here because it
+    // is the earlier capture. There is deliberately no capture at this point: it
+    // is after CR 601.2h on every resumed path, where a raw-id lookup would
+    // describe the target's new incarnation rather than the one the caster
+    // announced (CR 115.9, CR 115.9b).
+    let committed_target_facts = deferred_life_resume_pending
+        .and_then(|pending| pending.committed_target_facts.clone())
+        .unwrap_or(committed_target_facts);
 
     if prepaid_actual_mana_spent.is_none() {
         let resume_at_resolution_depth = state.resolution_stack.len();
@@ -20718,6 +20735,7 @@ mod tests {
             activation_ability_index: Some(0),
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -27231,6 +27249,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -27379,6 +27398,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -27496,6 +27516,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -27602,6 +27623,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -27741,6 +27763,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,

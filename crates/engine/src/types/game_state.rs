@@ -1555,10 +1555,12 @@ pub struct SpellCastRecord {
     /// still carries an unknown, which is the only honest outcome: the paying
     /// objects are gone, so the provenance is not reconstructable.
     ///
-    /// On the wire, known-empty is the common case and is omitted entirely; only
-    /// the (legacy-only) unknown is spelled out, as an explicit `null`. An absent
-    /// field therefore decodes to known-empty, which is what every record written
-    /// by this build means.
+    /// On the wire, known-empty is written as an explicit `[]` and an unknown is
+    /// the ABSENT field (`skip_serializing_if = "Option::is_none"`), which decodes
+    /// back to `None`. So a record this build wrote always states its answer, and
+    /// a payload written before the field existed says nothing — which is exactly
+    /// the distinction `PersistedRestoreError::UnknownCastHistoryProvenance`
+    /// acts on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mana_spent_source_snapshots: Option<Vec<ManaSpentSourceSnapshot>>,
     /// CR 115.1 + CR 601.2c: the spell's declared targets as the cast committed
@@ -1578,14 +1580,15 @@ pub struct SpellCastRecord {
     /// therefore refuses a playable save that still carries an unknown — the
     /// announced targets are gone and cannot be reconstructed.
     ///
-    /// Absence is also produced outside legacy saves — the live projection passes
-    /// an empty slice deliberately (the live reader answers this property from
-    /// the stack entry instead), and viewer redaction blanks a hidden target's
-    /// snapshot while keeping its slot — but both of those know the answer, so
-    /// they record `Some(vec![])` rather than `None`.
+    /// Absence is also produced outside legacy saves: the live projection passes
+    /// an empty slice deliberately (the live reader answers this property from the
+    /// stack entry instead, and that record is never persisted), and viewer
+    /// redaction blanks a hidden target's snapshot while keeping its slot. Both
+    /// spell that as `Some(vec![])` — "stated empty" — so `None` keeps meaning
+    /// only "this payload predates the field".
     ///
     /// Wire encoding matches [`Self::mana_spent_source_snapshots`]: known-empty is
-    /// omitted, and only the legacy-only unknown is spelled out as `null`.
+    /// written as `[]`, and an unknown is the absent field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub targets: Option<Vec<ActivationTargetFact>>,
 }
@@ -8829,6 +8832,12 @@ pub struct PendingCast {
     pub pending_loyalty_activation_player: Option<PlayerId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_constraints: Vec<TargetSelectionConstraint>,
+    /// CR 115.1 + CR 601.2c + CR 400.7: the announced target facts, latched at the
+    /// first pre-payment moment and parked here so a payment root that rebuilds
+    /// `FinalizePrePaymentChecks` from scratch still reaches the CR 601.2i write
+    /// with selection-time facts. `None` on a cast that has not latched them yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_target_facts: Option<Vec<ActivationTargetFact>>,
     /// CR 700.13 + CR 601.2c: Whether this action's announced target set was
     /// a crime at target-declaration time. It is committed only once stack
     /// placement succeeds, so failed casts and activations leave no record.
@@ -9821,6 +9830,7 @@ impl PendingCast {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -52348,6 +52358,7 @@ mod tests {
                 activation_ability_index: None,
                 pending_loyalty_activation_player: None,
                 target_constraints: vec![],
+                committed_target_facts: None,
                 crime_candidate: false,
                 casting_variant: CastingVariant::Normal,
                 casting_permission_index: None,
@@ -52899,6 +52910,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
