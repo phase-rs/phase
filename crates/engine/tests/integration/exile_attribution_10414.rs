@@ -487,7 +487,8 @@ fn froghemoth_announced_targets_stay_caster_performed() {
 // ---------------------------------------------------------------------------
 
 /// Tormod's Crypt: "{T}, Sacrifice this artifact: Exile target player's
-/// graveyard." The target names whose graveyard, not who acts (CR 109.5).
+/// graveyard." The target names whose graveyard, not who acts; the
+/// controller follows the instruction (CR 608.2c).
 ///
 /// Revert sensitivity: treating a player-valued filter as the subject records
 /// the graveyard's owner and fails; base behavior passes.

@@ -500,11 +500,14 @@ fn resolution_zone_candidates(
 /// property alike, so this answer is the same before and after
 /// `owner_scoped_nonbattlefield_mass_filter`.
 ///
-/// Known limits, each needing an actor axis on `ChangeZoneAll` (a serialized
-/// change, tracked on the issue): the mirror clause "that player exiles all
-/// cards from their library" (Thought Lash), and a subject-form sweep scoped to
-/// the parent target's controller (Legion's End's second sentence, which the
-/// parser does not produce today) would be credited to the caster.
+/// Known limit: a subject-form sweep scoped to the parent target's controller
+/// (Legion's End's second sentence, which the parser does not produce today)
+/// would be credited to the caster. A performer distinct from the controller
+/// for these shapes needs an actor axis on `ChangeZoneAll` (a serialized
+/// change); no printed card needs it today. (Thought Lash's "that player
+/// exiles all cards from their library" is not a limit: CR 702.24a makes
+/// cumulative upkeep a trigger of "your upkeep", so only the permanent's
+/// controller can fail to pay and "that player" is always the controller.)
 fn move_performer(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
@@ -13437,6 +13440,76 @@ mod tests {
             "the caster's own same-name card is not swept"
         );
         assert_eq!(state.objects[&target].zone, Zone::Battlefield);
+    }
+
+    /// CR 608.2c: a random single pick with a subject ("that player exiles a
+    /// card at random from their hand") is that subject's exile. This reaches
+    /// the `TargetSelectionMode::Random` single-pick arm of `resolve` with a
+    /// subject-form, non-library filter (`Owned { ScopedPlayer }` +
+    /// `InZone { Hand }`), the shape of Elkin Lair — "At the beginning of each
+    /// player's upkeep, that player exiles a card at random from their hand. The
+    /// player may play that card this turn. At the beginning of the next end
+    /// step, if the player hasn't played the card, they put it into their
+    /// graveyard." — and Rona, Tolarian Obliterator — "Whenever a source deals
+    /// damage to Rona, that source's controller exiles a card from their hand at
+    /// random." Two eligible cards keep the single-eligible shortcut from being
+    /// the arm that fires.
+    ///
+    /// Revert sensitivity: reverting that arm's `Some(performer)` to
+    /// `Some(ability.controller)` records `Some(P0)` and fails the
+    /// `exiled_by == Some(P1)` assertion.
+    #[test]
+    fn random_single_pick_with_a_subject_records_that_player() {
+        let mut state = GameState::new_two_player(42);
+        let mk = |state: &mut GameState, card: u64, owner: u8, name: &str| {
+            create_object(
+                state,
+                CardId(card),
+                PlayerId(owner),
+                name.to_string(),
+                Zone::Hand,
+            )
+        };
+        let p1_a = mk(&mut state, 9740, 1, "P1 Hand A");
+        let p1_b = mk(&mut state, 9741, 1, "P1 Hand B");
+        let p0_card = mk(&mut state, 9742, 0, "P0 Hand Card");
+
+        let filter = card_leg(
+            None,
+            vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::ScopedPlayer,
+                },
+                FilterProp::InZone { zone: Zone::Hand },
+            ],
+        );
+        let mut ability = performer_test_pick_exile(Some(Zone::Hand), filter, PlayerId(0));
+        ability.target_selection_mode = TargetSelectionMode::Random;
+        ability.scoped_player = Some(PlayerId(1));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("random hand pick resolves");
+
+        // Reach-guards: exactly one of the two P1 cards was drawn at random (so
+        // the single-eligible arm did not fire), nothing prompted, and the
+        // controller's own card was untouched.
+        let exiled: Vec<ObjectId> = [p1_a, p1_b]
+            .into_iter()
+            .filter(|id| state.objects[id].zone == Zone::Exile)
+            .collect();
+        assert_eq!(exiled.len(), 1, "exactly one of the two P1 cards is exiled");
+        let kept = if exiled[0] == p1_a { p1_b } else { p1_a };
+        assert_eq!(state.objects[&kept].zone, Zone::Hand);
+        assert_eq!(state.objects[&p0_card].zone, Zone::Hand);
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::EffectZoneChoice { .. }
+        ));
+
+        assert_eq!(
+            state.objects[&exiled[0]].exiled_by,
+            Some(PlayerId(1)),
+            "the subject of a random pick is the exiling player"
+        );
     }
 
     /// CR 614.12 + CR 701.24a + CR 701.24d: a parser-emitted mass “shuffle
