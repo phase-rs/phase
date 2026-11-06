@@ -243,6 +243,39 @@ export function local_fifo_booster_pack_pool_for_game(owner: number): any;
 export function local_fifo_bot_deck(owner: number, bot_seat: number): any;
 
 /**
+ * Build one LLM pick request for each head an LLM seat's drafter is
+ * answering. Read-only.
+ *
+ * Takes NO seat list, for the same reason [`build_llm_draft_pick_requests`]
+ * takes none: which seats an LLM may draft for is
+ * [`llm_eligible_bot_seats`]'s question, and which heads wait for a reply is
+ * [`llm_holds_head`]'s. CR 905.1c: each prompt is built from that seat's own
+ * projection. Every held head is listed: an endpoint that cannot carry a
+ * request makes each entry `unbuildable` with the reason, never a refused
+ * call.
+ *
+ * `set_names_json` is an optional set-code -> name map, as for
+ * [`build_llm_draft_pick_requests`].
+ */
+export function local_fifo_build_llm_requests(owner: number, endpoint_json: string, set_names_json: string): any;
+
+/**
+ * Resolve one LLM seat's head with its reply at `now_ms`, then run the bots
+ * that resolution releases.
+ *
+ * `resolution_json`: `{ promptId, reply }`, with the prompt id the request
+ * carried and `reply` the provider's `{ fingerprint, provider, status, body }`,
+ * or `null` when no reply came back. It names no seat: the seat is the
+ * prompt's, and a seat that is not an LLM seat holding a live prompt is
+ * refused with no change. The engine alone decides whether the reply is used:
+ * only on the seat's live prompt, against the pack the request was built
+ * over, when it decodes to a selection the engine accepts. Otherwise the
+ * engine bot drafts that seat's live head. Returns `{ view, llmOutcome }`:
+ * seat 0's view and what happened to the reply.
+ */
+export function local_fifo_resolve_llm_pick(owner: number, resolution_json: string, now_ms: bigint): any;
+
+/**
  * Apply the local human's composed selection at `now_ms`, then run the bots to
  * quiescence.
  *
@@ -253,6 +286,17 @@ export function local_fifo_bot_deck(owner: number, bot_seat: number): any;
  * Returns seat 0's view.
  */
 export function local_fifo_select(owner: number, selection_json: string, now_ms: bigint): any;
+
+/**
+ * Declare whether the local runtime's bot seats are LLM drafters at `now_ms`,
+ * then run the bots the declaration leaves to the engine. Returns seat 0's
+ * view.
+ *
+ * `drafting_json`: `"EngineBots"` or `"LlmSeats"`, parsed before the session
+ * is touched. Only the live owner declares it, and every local install resets
+ * it to `"EngineBots"`.
+ */
+export function local_fifo_set_llm_drafting(owner: number, drafting_json: string, now_ms: bigint): any;
 
 /**
  * Submit the local human's deck at `now_ms`.
@@ -492,7 +536,10 @@ export interface InitOutput {
     readonly local_fifo_auto_select: (a: number, b: number, c: number, d: bigint) => [number, number, number];
     readonly local_fifo_booster_pack_pool_for_game: (a: number) => [number, number, number];
     readonly local_fifo_bot_deck: (a: number, b: number) => [number, number, number];
+    readonly local_fifo_build_llm_requests: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+    readonly local_fifo_resolve_llm_pick: (a: number, b: number, c: number, d: bigint) => [number, number, number];
     readonly local_fifo_select: (a: number, b: number, c: number, d: bigint) => [number, number, number];
+    readonly local_fifo_set_llm_drafting: (a: number, b: number, c: number, d: bigint) => [number, number, number];
     readonly local_fifo_submit_deck: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
     readonly local_fifo_suggest_deck: (a: number) => [number, number, number];
     readonly local_fifo_suggest_lands: (a: number, b: number, c: number) => [number, number, number];

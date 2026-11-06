@@ -30,6 +30,10 @@ thread_local! {
     static PICK_ENHANCEMENT: Cell<bot_ai::PickEnhancement> =
         const { Cell::new(bot_ai::PickEnhancement::Off) };
     static RNG: Cell<Option<ChaCha20Rng>> = const { Cell::new(None) };
+    /// Whether the local runtime's bot seats are LLM drafters. Every local
+    /// install sets it; it is never part of the session.
+    static LOCAL_LLM_DRAFTING: Cell<LocalLlmDrafting> =
+        const { Cell::new(LocalLlmDrafting::EngineBots) };
     /// Per RESEARCH Pitfall 2: draft-wasm has its own CardDatabase, separate
     /// from engine-wasm's thread-local. The frontend loads card-data.json into
     /// draft-wasm independently for Hard/VeryHard bot evaluation.
@@ -2489,18 +2493,47 @@ struct LocalFifoSession {
     view: DraftPlayerView,
 }
 
+/// Who decides a local bot seat's head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+enum LocalLlmDrafting {
+    /// The engine bot drafts every bot seat as soon as it holds a head.
+    EngineBots,
+    /// Each bot seat's head waits for that seat's LLM reply, applied or fallen
+    /// back; a forced head is taken by the engine bot.
+    LlmSeats,
+}
+
+/// Install a local session with its difficulty, the bots' random state and
+/// its LLM drafting, and issue its owner. The one tail every local install
+/// shares, so none can leave an earlier install's runtime state behind. No
+/// pack generator is kept: every FIFO pack is dealt at `StartDraft`.
+fn install_local_fifo(
+    session: DraftSession,
+    difficulty: AiDifficulty,
+    rng: ChaCha20Rng,
+    drafting: LocalLlmDrafting,
+) -> LocalOwner {
+    let owner = session_cell::install_local(session);
+    DIFFICULTY.with(|cell| cell.set(difficulty));
+    RNG.with(|cell| cell.set(Some(rng)));
+    PACK_GEN.with(|cell| cell.set(None));
+    LOCAL_LLM_DRAFTING.with(|cell| cell.set(drafting));
+    owner
+}
+
 /// Create, start and install a local FIFO Quick draft, and issue its owner.
 ///
 /// Everything fallible runs before any thread-local is written. The session is
 /// constructed under a session id the runtime issues itself, never one a caller
 /// supplies; it is admitted by [`admit_local_fifo_runtime`] BEFORE `StartDraft`
-/// deals a single pack; it starts at `now_ms`; and its bots run to quiescence.
-/// Only then is it installed, with its difficulty and the bots' random state.
-/// No pack generator is kept: every FIFO pack is dealt at `StartDraft`.
+/// deals a single pack; it starts at `now_ms`; and its bots run to quiescence
+/// under `drafting`. Only then is it installed, with its difficulty, the bots'
+/// random state and `drafting`.
 ///
 /// CR 905.2a: during a draft there is no active player or system of priority,
 /// so a bot seat drafts as soon as it holds a pack, and the start batch makes
-/// every such pick before the human's first view.
+/// every such pick before the human's first view; under
+/// [`LocalLlmDrafting::LlmSeats`] a seat's choice waits for its own drafter.
 #[cfg_attr(
     not(test),
     expect(
@@ -2514,6 +2547,7 @@ fn start_local_fifo_draft(
     draft_code: String,
     pack_source: &dyn PackSource,
     difficulty: AiDifficulty,
+    drafting: LocalLlmDrafting,
     now_ms: u64,
 ) -> Result<LocalFifoSession, String> {
     let session_id = DraftSessionId(format!(
@@ -2538,9 +2572,12 @@ fn start_local_fifo_draft(
         let db_borrow = cell.borrow();
         drive_local_fifo_bot_batch(
             &mut session,
-            difficulty,
-            db_borrow.as_ref(),
-            enhancement,
+            &LocalBotSettings {
+                difficulty,
+                card_db: db_borrow.as_ref(),
+                enhancement,
+                drafting,
+            },
             &mut rng,
             now_ms,
             bound,
@@ -2548,10 +2585,7 @@ fn start_local_fifo_draft(
     })?;
     let view = filter_for_player(&session, LOCAL_HUMAN_SEAT);
 
-    let owner = session_cell::install_local(session);
-    DIFFICULTY.with(|cell| cell.set(difficulty));
-    RNG.with(|cell| cell.set(Some(rng)));
-    PACK_GEN.with(|cell| cell.set(None));
+    let owner = install_local_fifo(session, difficulty, rng, drafting);
     Ok(LocalFifoSession { owner, view })
 }
 
@@ -2633,13 +2667,7 @@ fn fifo_ai_selection(
     .into_iter()
     .map(|index| pack[index].instance_id.clone())
     .collect();
-    let burned_card_instance_ids = pack
-        .iter()
-        .map(|card| &card.instance_id)
-        .filter(|id| !picked_card_instance_ids.contains(*id))
-        .take(requirements.burns)
-        .cloned()
-        .collect();
+    let burned_card_instance_ids = fifo_burns(pack, &picked_card_instance_ids, requirements.burns);
     Some(DraftAction::Select {
         seat,
         prompt_id,
@@ -2647,6 +2675,18 @@ fn fifo_ai_selection(
         burned_card_instance_ids,
         effect_card_instance_ids: Vec::new(),
     })
+}
+
+/// The cards an engine-composed selection burns: the head's remaining cards
+/// in the projection's order, `burns` of them. Shared by the engine bot and an
+/// LLM drafter's selection, so both burn by the same rule.
+fn fifo_burns(pack: &[DraftCardInstance], picked: &[String], burns: usize) -> Vec<String> {
+    pack.iter()
+        .map(|card| &card.instance_id)
+        .filter(|id| !picked.contains(*id))
+        .take(burns)
+        .cloned()
+        .collect()
 }
 
 /// The termination bound for one local bot batch, DERIVED from the state: the
@@ -2675,10 +2715,48 @@ fn local_fifo_bot_batch_bound(session: &DraftSession) -> usize {
     queued.saturating_add(unopened).saturating_add(1)
 }
 
+/// The engine bot's settings for one local bot batch, and who decides the bot
+/// seats' heads.
+struct LocalBotSettings<'a> {
+    difficulty: AiDifficulty,
+    card_db: Option<&'a CardDatabase>,
+    enhancement: bot_ai::PickEnhancement,
+    drafting: LocalLlmDrafting,
+}
+
+/// Whether `seat`'s head waits for its LLM drafter's reply rather than being
+/// drafted by the engine bot: under [`LocalLlmDrafting::LlmSeats`], for an
+/// LLM-eligible seat ([`llm_eligible_bot_seats`]) whose step is a real choice.
+///
+/// CR 905.1c: `view` is that seat's own projection, the only thing it may look
+/// at. CR 905.1a: a step that takes every card left is no choice, so a forced
+/// head never waits; the prompt builder's own classification
+/// (`draft_pick_step`) decides it, so a head waits exactly when a prompt can be
+/// built for it.
+fn llm_holds_head(
+    session: &DraftSession,
+    seat: u8,
+    view: &DraftPlayerView,
+    drafting: LocalLlmDrafting,
+) -> bool {
+    match drafting {
+        LocalLlmDrafting::EngineBots => false,
+        LocalLlmDrafting::LlmSeats => {
+            llm_eligible_bot_seats(session).contains(&seat)
+                && matches!(
+                    phase_llm::draft_decision::draft_pick_step(view),
+                    phase_llm::draft_decision::DraftPickStep::Choice { .. }
+                )
+        }
+    }
+}
+
 /// Run the local bot seats to quiescence: while the session is drafting, the
-/// lowest-indexed bot seat holding a head pack makes the selection
-/// [`fifo_ai_selection`] chooses from its own projection, at `now_ms`, until no
-/// bot seat holds a head.
+/// lowest-indexed bot seat holding a head pack the engine drafts makes the
+/// selection [`fifo_ai_selection`] chooses from its own projection, at
+/// `now_ms`, until no bot seat holds a head the engine drafts. A head that
+/// [`llm_holds_head`] holds under `settings.drafting` is left for its seat's
+/// LLM reply.
 ///
 /// CR 905.2a: during a draft there is no active player or system of priority;
 /// when several players would act at once and cannot agree on an order, the
@@ -2696,19 +2774,20 @@ fn local_fifo_bot_batch_bound(session: &DraftSession) -> usize {
 /// [`local_fifo_bot_batch_bound`]. Loud on violation, never silent: the bound
 /// tripping, a bot seat with no selection, and a refused selection are each an
 /// `Err`. The legitimate exits are the session leaving `Drafting` and no bot
-/// seat holding a head.
+/// seat holding a head the engine drafts.
 fn drive_local_fifo_bot_batch(
     session: &mut DraftSession,
-    difficulty: AiDifficulty,
-    card_db: Option<&CardDatabase>,
-    enhancement: bot_ai::PickEnhancement,
+    settings: &LocalBotSettings<'_>,
     rng: &mut ChaCha20Rng,
     now_ms: u64,
     bound: usize,
 ) -> Result<(), String> {
     let mut applied = 0usize;
     while session.status == DraftStatus::Drafting {
-        let Some(seat) = session
+        // THE ONLY INPUT the bot gets: the projection a person in that seat
+        // would see. It is built once per seat holding a head, and the same
+        // projection decides the hold and the selection.
+        let Some((seat, view)) = session
             .seats
             .iter()
             .enumerate()
@@ -2716,7 +2795,9 @@ fn drive_local_fifo_bot_batch(
                 *index != usize::from(LOCAL_HUMAN_SEAT) && matches!(seat, DraftSeat::Bot { .. })
             })
             .filter_map(|(index, _)| u8::try_from(index).ok())
-            .find(|&seat| session.head_pack(seat).is_some())
+            .filter(|&seat| session.head_pack(seat).is_some())
+            .map(|seat| (seat, filter_for_player(session, seat)))
+            .find(|(seat, view)| !llm_holds_head(session, *seat, view, settings.drafting))
         else {
             break;
         };
@@ -2729,9 +2810,6 @@ fn drive_local_fifo_bot_batch(
             ));
         }
 
-        // THE ONLY INPUT the bot gets: the projection a person in that seat
-        // would see.
-        let view = filter_for_player(session, seat);
         let mut trial = rng.clone();
         let action = view
             .fifo
@@ -2742,9 +2820,9 @@ fn drive_local_fifo_bot_batch(
                     &view,
                     seat,
                     prompt_id,
-                    difficulty,
-                    card_db,
-                    enhancement,
+                    settings.difficulty,
+                    settings.card_db,
+                    settings.enhancement,
                     &mut trial,
                 )
             })
@@ -2757,12 +2835,13 @@ fn drive_local_fifo_bot_batch(
 }
 
 /// [`drive_local_fifo_bot_batch`] over the runtime's difficulty, pick
-/// enhancement, random state and card database, with the derived bound. The
-/// random state goes back on every exit, an error included: it then holds the
-/// state after the last committed application.
+/// enhancement, LLM drafting, random state and card database, with the derived
+/// bound. The random state goes back on every exit, an error included: it then
+/// holds the state after the last committed application.
 fn run_local_fifo_bot_batch(session: &mut DraftSession, now_ms: u64) -> Result<(), String> {
     let difficulty = DIFFICULTY.with(|cell| cell.get());
     let enhancement = PICK_ENHANCEMENT.with(|cell| cell.get());
+    let drafting = LOCAL_LLM_DRAFTING.with(Cell::get);
     let mut rng = RNG
         .with(|cell| cell.take())
         .ok_or_else(|| "RNG not initialized".to_string())?;
@@ -2771,9 +2850,12 @@ fn run_local_fifo_bot_batch(session: &mut DraftSession, now_ms: u64) -> Result<(
         let db_borrow = cell.borrow();
         drive_local_fifo_bot_batch(
             session,
-            difficulty,
-            db_borrow.as_ref(),
-            enhancement,
+            &LocalBotSettings {
+                difficulty,
+                card_db: db_borrow.as_ref(),
+                enhancement,
+                drafting,
+            },
             &mut rng,
             now_ms,
             bound,
@@ -3075,11 +3157,371 @@ fn import_local_fifo_session_inner(json: &str, difficulty: u8) -> Result<LocalFi
     let rng = ChaCha20Rng::seed_from_u64(session.config.rng_seed.wrapping_add(revision));
     let view = filter_for_player(&session, LOCAL_HUMAN_SEAT);
 
-    let owner = session_cell::install_local(session);
-    DIFFICULTY.with(|cell| cell.set(map_difficulty(difficulty)));
-    RNG.with(|cell| cell.set(Some(rng)));
-    PACK_GEN.with(|cell| cell.set(None));
+    // The import runs no bot and keeps no LLM drafting: the caller declares
+    // it with `local_fifo_set_llm_drafting`, which also runs any bot the saved
+    // session left waiting.
+    let owner = install_local_fifo(
+        session,
+        map_difficulty(difficulty),
+        rng,
+        LocalLlmDrafting::EngineBots,
+    );
     Ok(LocalFifoSession { owner, view })
+}
+
+// ── LLM seats on the local runtime ───────────────────────────────────────────
+//
+// Under `LocalLlmDrafting::LlmSeats` the bot batch leaves each LLM seat's
+// choice head for that seat's own drafter. The caller builds the requests for
+// those heads in one call, runs each provider call with no engine call open,
+// and hands each reply back in a later call, where the engine binds it to the
+// seat's live head or falls back to the engine bot for that seat alone.
+
+/// One held head's LLM request, or why none could be built for it. Every held
+/// head is listed, so no head waits on a request that was never sent.
+#[derive(Debug, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum LocalLlmPickRequest {
+    Request {
+        seat: u8,
+        /// The prompt the reply must answer; the resolution re-checks it live.
+        prompt_id: DraftPromptId,
+        fingerprint: String,
+        option_count: usize,
+        required_pick_count: usize,
+        /// Size of the prompt this request carries, for measuring prompt growth.
+        prompt_chars: usize,
+        request: phase_llm::HttpRequestSpec,
+    },
+    Unbuildable {
+        seat: u8,
+        prompt_id: DraftPromptId,
+        error: String,
+    },
+}
+
+/// One LLM seat's reply, bound to the prompt it answers. It names no seat: the
+/// seat is the prompt's, so a payload cannot name one seat and answer another
+/// seat's prompt.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LocalLlmPickResolution {
+    prompt_id: DraftPromptId,
+    /// `None` when no reply came back: a timeout, a transport failure, or a
+    /// request that could not be built.
+    reply: Option<LocalLlmReply>,
+}
+
+/// A provider's reply as the transport received it, with the fingerprint of
+/// the pack the request was built over.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LocalLlmReply {
+    fingerprint: String,
+    provider: String,
+    /// HTTP status of the provider response, so a non-2xx reply is refused
+    /// whatever its body looks like.
+    status: u16,
+    body: String,
+}
+
+/// The refusal for a resolution whose seat holds no head an LLM drafter is
+/// answering: not an LLM-eligible seat, or a seat with no live prompt.
+const NOT_AN_LLM_HEAD: &str = "This seat holds no head its LLM drafter is answering";
+
+/// The outcome error when no reply came back for a held head.
+const NO_LLM_REPLY: &str = "the LLM drafter returned no reply";
+
+/// Declare whether the local runtime's bot seats are LLM drafters at `now_ms`,
+/// then run the bots the declaration leaves to the engine. Returns seat 0's
+/// view.
+///
+/// `drafting_json`: `"EngineBots"` or `"LlmSeats"`, parsed before the session
+/// is touched. Only the live owner declares it, and every local install resets
+/// it to `"EngineBots"`.
+#[wasm_bindgen]
+pub fn local_fifo_set_llm_drafting(
+    owner: u32,
+    drafting_json: &str,
+    now_ms: u64,
+) -> Result<JsValue, JsValue> {
+    local_fifo_set_llm_drafting_inner(LocalOwner::from_raw(owner), drafting_json, now_ms)
+        .map(|view| to_js(&view))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Pure-Rust core for [`local_fifo_set_llm_drafting`].
+fn local_fifo_set_llm_drafting_inner(
+    owner: LocalOwner,
+    drafting_json: &str,
+    now_ms: u64,
+) -> Result<DraftPlayerView, String> {
+    let drafting: LocalLlmDrafting =
+        serde_json::from_str(drafting_json).map_err(|e| format!("Invalid LLM drafting: {e}"))?;
+    with_local_fifo_mut_inner(owner, |session| {
+        LOCAL_LLM_DRAFTING.with(|cell| cell.set(drafting));
+        run_local_fifo_bot_batch(session, now_ms)?;
+        Ok(filter_for_player(session, LOCAL_HUMAN_SEAT))
+    })
+}
+
+/// Build one LLM pick request for each head an LLM seat's drafter is
+/// answering. Read-only.
+///
+/// Takes NO seat list, for the same reason [`build_llm_draft_pick_requests`]
+/// takes none: which seats an LLM may draft for is
+/// [`llm_eligible_bot_seats`]'s question, and which heads wait for a reply is
+/// [`llm_holds_head`]'s. CR 905.1c: each prompt is built from that seat's own
+/// projection. Every held head is listed: an endpoint that cannot carry a
+/// request makes each entry `unbuildable` with the reason, never a refused
+/// call.
+///
+/// `set_names_json` is an optional set-code -> name map, as for
+/// [`build_llm_draft_pick_requests`].
+#[wasm_bindgen]
+pub fn local_fifo_build_llm_requests(
+    owner: u32,
+    endpoint_json: &str,
+    set_names_json: &str,
+) -> Result<JsValue, JsValue> {
+    local_fifo_build_llm_requests_inner(LocalOwner::from_raw(owner), endpoint_json, set_names_json)
+        .map(|requests| to_js(&requests))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Pure-Rust core for [`local_fifo_build_llm_requests`].
+fn local_fifo_build_llm_requests_inner(
+    owner: LocalOwner,
+    endpoint_json: &str,
+    set_names_json: &str,
+) -> Result<Vec<LocalLlmPickRequest>, String> {
+    // An endpoint that does not parse is every entry's reason, never the
+    // call's: the heads are held either way, and each must be answered.
+    let endpoint: Result<phase_llm::LlmEndpointConfig, String> =
+        serde_json::from_str(endpoint_json)
+            .map_err(|e| format!("Invalid LLM endpoint config: {e}"));
+    // A missing or unparsable name map degrades the brief to set codes.
+    let set_names: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(set_names_json).unwrap_or_default();
+    let set_names = phase_llm::draft_decision::set_names_from_pairs(set_names);
+    let difficulty = DIFFICULTY.with(|cell| cell.get());
+    let drafting = LOCAL_LLM_DRAFTING.with(Cell::get);
+
+    with_local_fifo_inner(owner, |session| {
+        let requests = CARD_DB.with(|cell| {
+            let db_borrow = cell.borrow();
+            let card_db = db_borrow.as_ref();
+            llm_eligible_bot_seats(session)
+                .into_iter()
+                .filter_map(|seat| {
+                    let view = filter_for_player(session, seat);
+                    let prompt_id = view.fifo.as_ref()?.prompt_id.clone()?;
+                    if !llm_holds_head(session, seat, &view, drafting) {
+                        return None;
+                    }
+                    let built = phase_llm::build_draft_pick_prompt(
+                        seat, &view, difficulty, card_db, &set_names,
+                    )
+                    .map_err(|e| e.to_string())
+                    .and_then(|request| {
+                        let endpoint = endpoint.as_ref().map_err(Clone::clone)?;
+                        let http = phase_llm::build_chat_request(endpoint, &request.prompt)
+                            .map_err(|e| e.to_string())?;
+                        Ok((request, http))
+                    });
+                    Some(match built {
+                        Ok((request, http)) => LocalLlmPickRequest::Request {
+                            seat,
+                            prompt_id,
+                            fingerprint: request.fingerprint,
+                            option_count: request.option_count,
+                            required_pick_count: request.required_pick_count,
+                            prompt_chars: request.prompt.char_count(),
+                            request: http,
+                        },
+                        Err(error) => LocalLlmPickRequest::Unbuildable {
+                            seat,
+                            prompt_id,
+                            error,
+                        },
+                    })
+                })
+                .collect()
+        });
+        Ok(requests)
+    })
+}
+
+/// Resolve one LLM seat's head with its reply at `now_ms`, then run the bots
+/// that resolution releases.
+///
+/// `resolution_json`: `{ promptId, reply }`, with the prompt id the request
+/// carried and `reply` the provider's `{ fingerprint, provider, status, body }`,
+/// or `null` when no reply came back. It names no seat: the seat is the
+/// prompt's, and a seat that is not an LLM seat holding a live prompt is
+/// refused with no change. The engine alone decides whether the reply is used:
+/// only on the seat's live prompt, against the pack the request was built
+/// over, when it decodes to a selection the engine accepts. Otherwise the
+/// engine bot drafts that seat's live head. Returns `{ view, llmOutcome }`:
+/// seat 0's view and what happened to the reply.
+#[wasm_bindgen]
+pub fn local_fifo_resolve_llm_pick(
+    owner: u32,
+    resolution_json: &str,
+    now_ms: u64,
+) -> Result<JsValue, JsValue> {
+    let (view, outcome) =
+        local_fifo_resolve_llm_pick_inner(LocalOwner::from_raw(owner), resolution_json, now_ms)
+            .map_err(|error| JsValue::from_str(&error))?;
+    Ok(to_js(
+        &serde_json::json!({ "view": view, "llmOutcome": outcome }),
+    ))
+}
+
+/// Pure-Rust core for [`local_fifo_resolve_llm_pick`].
+///
+/// CR 905.2a: there is no priority in a draft, so one seat's choice never
+/// waits on another seat's; this resolves its seat alone and then runs only
+/// the bots it releases. CR 905.1c: the reply is bound to that seat's own
+/// projection. Each application commits whole through `session::apply_at` or
+/// not at all, and the fallback's random draw is kept only when it commits.
+fn local_fifo_resolve_llm_pick_inner(
+    owner: LocalOwner,
+    resolution_json: &str,
+    now_ms: u64,
+) -> Result<(DraftPlayerView, LlmDraftOutcome), String> {
+    let resolution: LocalLlmPickResolution = serde_json::from_str(resolution_json)
+        .map_err(|e| format!("Invalid LLM pick resolution: {e}"))?;
+    with_local_fifo_mut_inner(owner, |session| {
+        let seat = resolution.prompt_id.seat;
+        if !llm_eligible_bot_seats(session).contains(&seat) {
+            return Err(NOT_AN_LLM_HEAD.to_string());
+        }
+        let view = filter_for_player(session, seat);
+        let Some(live) = view.fifo.as_ref().and_then(|fifo| fifo.prompt_id.clone()) else {
+            return Err(NOT_AN_LLM_HEAD.to_string());
+        };
+        let usage = resolution.reply.as_ref().and_then(|reply| {
+            phase_llm::token_usage(
+                phase_llm::LlmProvider::from_label(&reply.provider),
+                &reply.body,
+            )
+        });
+        let difficulty = DIFFICULTY.with(|cell| cell.get());
+        let enhancement = PICK_ENHANCEMENT.with(|cell| cell.get());
+
+        let (used, reasoning, error) = CARD_DB.with(|cell| {
+            let db_borrow = cell.borrow();
+            let card_db = db_borrow.as_ref();
+            let (used, reasoning, error) =
+                match local_llm_selection(&view, &live, &resolution, (card_db, difficulty)) {
+                    Ok((action, reasoning)) => {
+                        match session::apply_at(session, action, None, now_ms) {
+                            Ok(_) => (true, reasoning, None),
+                            Err(refusal) => (
+                                false,
+                                None,
+                                Some(format!("LLM selection refused: {refusal}")),
+                            ),
+                        }
+                    }
+                    Err(error) => (false, None, Some(error)),
+                };
+            if !used {
+                let stored = RNG
+                    .with(|cell| cell.take())
+                    .ok_or_else(|| "RNG not initialized".to_string())?;
+                let mut trial = stored.clone();
+                let applied = fifo_ai_selection(
+                    &view,
+                    seat,
+                    live.clone(),
+                    difficulty,
+                    card_db,
+                    enhancement,
+                    &mut trial,
+                )
+                .ok_or_else(|| format!("no FIFO selection for bot seat {seat}"))
+                .and_then(|action| {
+                    session::apply_at(session, action, None, now_ms)
+                        .map_err(|e| format!("bot seat {seat} selection refused: {e}"))
+                });
+                let kept = if applied.is_ok() { trial } else { stored };
+                RNG.with(|cell| cell.set(Some(kept)));
+                applied?;
+            }
+            Ok::<_, String>((used, reasoning, error))
+        })?;
+
+        run_local_fifo_bot_batch(session, now_ms)?;
+        Ok((
+            filter_for_player(session, LOCAL_HUMAN_SEAT),
+            LlmDraftOutcome {
+                seat,
+                used,
+                reasoning,
+                error,
+                usage,
+            },
+        ))
+    })
+}
+
+/// The selection an LLM seat's reply makes on that seat's live head, with the
+/// model's stated reason, or why it makes none: no reply, a reply for a prompt
+/// that is not live, or a reply that does not bind to the pack the request was
+/// built over. The burns follow the engine's published requirements by the
+/// same rule as the engine bot's ([`fifo_burns`]), and an LLM selection spends
+/// no draft-effect card.
+fn local_llm_selection(
+    view: &DraftPlayerView,
+    live: &DraftPromptId,
+    resolution: &LocalLlmPickResolution,
+    render: (Option<&CardDatabase>, AiDifficulty),
+) -> Result<(DraftAction, Option<String>), String> {
+    let stale = || phase_llm::LlmError::StaleDecision.to_string();
+    let reply = resolution
+        .reply
+        .as_ref()
+        .ok_or_else(|| NO_LLM_REPLY.to_string())?;
+    if resolution.prompt_id != *live {
+        return Err(stale());
+    }
+    let requirements = view.fifo.as_ref().ok_or_else(stale)?.requirements;
+    let (pack, required) = match phase_llm::draft_decision::draft_pick_step(view) {
+        phase_llm::draft_decision::DraftPickStep::Choice { pack, required } => (pack, required),
+        phase_llm::draft_decision::DraftPickStep::NoPack
+        | phase_llm::draft_decision::DraftPickStep::Forced => return Err(stale()),
+    };
+    let selection = phase_llm::select_picks_from_response(
+        live.seat,
+        pack,
+        required,
+        &reply.fingerprint,
+        render,
+        phase_llm::LlmReply {
+            provider: phase_llm::LlmProvider::from_label(&reply.provider),
+            status: reply.status,
+            body: &reply.body,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    let burned_card_instance_ids =
+        fifo_burns(pack, &selection.card_instance_ids, requirements.burns);
+    Ok((
+        DraftAction::Select {
+            seat: live.seat,
+            prompt_id: live.clone(),
+            picked_card_instance_ids: selection.card_instance_ids,
+            burned_card_instance_ids,
+            effect_card_instance_ids: Vec::new(),
+        },
+        selection.reasoning,
+    ))
 }
 
 #[cfg(test)]
@@ -4152,6 +4594,7 @@ mod create_multiplayer_draft_tests {
         PACK_GEN.with(|cell| cell.set(None));
         RNG.with(|cell| cell.set(None));
         CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        LOCAL_LLM_DRAFTING.with(|cell| cell.set(LocalLlmDrafting::EngineBots));
     }
 
     fn persisted_premier_session(layout: SetLayout) -> DraftSession {
@@ -4629,7 +5072,7 @@ mod create_multiplayer_draft_tests {
             cards
         });
         let database = CARD_DB.with(|cell| { let value=cell.borrow();value.as_ref().map(|db| serde_json::json!({"count":db.card_count(),"alpha":db.get_face_by_name("Alpha")})) });
-        serde_json::json!({"session":session,"difficulty":DIFFICULTY.with(|cell|format!("{:?}",cell.get())),"rng":rng,"generator":generated,"database":database,"local_owner":session_cell::local_owner()})
+        serde_json::json!({"session":session,"difficulty":DIFFICULTY.with(|cell|format!("{:?}",cell.get())),"rng":rng,"generator":generated,"database":database,"local_owner":session_cell::local_owner(),"local_llm_drafting":LOCAL_LLM_DRAFTING.with(|cell|format!("{:?}",cell.get()))})
     }
 
     #[test]
@@ -7167,6 +7610,7 @@ mod local_fifo_runtime_tests {
     use draft_core::pack_source::FixturePackSource;
     use engine::types::card::DraftEffect;
     use engine::types::player::PlayerId;
+    use phase_llm::draft_decision::{draft_pick_step, DraftPickStep};
     use rand::RngCore;
 
     /// The instance id [`LibrarianSource`] deals Cogwork Librarian under.
@@ -7301,6 +7745,7 @@ mod local_fifo_runtime_tests {
             "quick-draft".to_string(),
             source,
             difficulty,
+            LocalLlmDrafting::EngineBots,
             1_000,
         )
     }
@@ -8072,12 +8517,16 @@ mod local_fifo_runtime_tests {
         // 8 seats x 3 boosters x 3 cards undrafted, plus one.
         assert_eq!(local_fifo_bot_batch_bound(&session), 73);
 
+        let settings = LocalBotSettings {
+            difficulty: AiDifficulty::Medium,
+            card_db: None,
+            enhancement: bot_ai::PickEnhancement::Off,
+            drafting: LocalLlmDrafting::EngineBots,
+        };
         let mut starved = session.clone();
         let error = drive_local_fifo_bot_batch(
             &mut starved,
-            AiDifficulty::Medium,
-            None,
-            bot_ai::PickEnhancement::Off,
+            &settings,
             &mut ChaCha20Rng::seed_from_u64(1),
             1_000,
             1,
@@ -8090,9 +8539,7 @@ mod local_fifo_runtime_tests {
         let bound = local_fifo_bot_batch_bound(&healthy);
         drive_local_fifo_bot_batch(
             &mut healthy,
-            AiDifficulty::Medium,
-            None,
-            bot_ai::PickEnhancement::Off,
+            &settings,
             &mut ChaCha20Rng::seed_from_u64(1),
             1_000,
             bound,
@@ -8446,6 +8893,785 @@ mod local_fifo_runtime_tests {
         );
         assert_eq!(guard_cells_snapshot(), before);
         assert!(local_fifo_view_inner(a).is_ok());
+        reset();
+    }
+
+    // ── LLM seats ────────────────────────────────────────────────────────────
+
+    /// The standard local shape, 8 seats over `cards_per_pack`-card textless
+    /// `TST` boosters burning `burns_per_pick` per step, whose bot seats are
+    /// LLM drafters from the start.
+    fn start_llm(cards_per_pack: u8, burns_per_pick: u8) -> LocalFifoSession {
+        start_local_fifo_draft(
+            local_quick_config(set_source(), 8, cards_per_pack, burns_per_pick),
+            local_quick_seats(8),
+            "quick-draft".to_string(),
+            &FixturePackSource {
+                set_code: "TST".to_string(),
+                cards_per_pack,
+            },
+            AiDifficulty::Medium,
+            LocalLlmDrafting::LlmSeats,
+            1_000,
+        )
+        .expect("the local Quick shape starts with LLM seats")
+    }
+
+    /// A well-formed OpenAI-compatible reply body choosing option `choice`.
+    fn reply_choosing(choice: usize) -> String {
+        let content = format!(r#"{{"choice": {choice}, "reason": "test"}}"#);
+        serde_json::json!({ "choices": [{ "message": { "role": "assistant", "content": content } }] })
+            .to_string()
+    }
+
+    /// A transport's reply payload: an OpenAI-compatible provider's `status`
+    /// and `body`, carrying the request's `fingerprint`.
+    fn reply(fingerprint: &str, status: u16, body: String) -> serde_json::Value {
+        serde_json::json!({
+            "fingerprint": fingerprint,
+            "provider": "OpenAiCompatible",
+            "status": status,
+            "body": body,
+        })
+    }
+
+    /// The resolution payload for `prompt_id`, with `reply` or `null`.
+    fn resolution_json(prompt_id: &DraftPromptId, reply: Option<serde_json::Value>) -> String {
+        serde_json::json!({ "promptId": prompt_id, "reply": reply }).to_string()
+    }
+
+    /// `seat`'s completed steps in `session`.
+    fn steps(session: &DraftSession, seat: u8) -> u64 {
+        session.fifo.as_ref().expect("a FIFO session").seats[usize::from(seat)].completed_steps
+    }
+
+    /// `seat`'s projected head pack.
+    fn projected_head(view: &DraftPlayerView) -> Vec<DraftCardInstance> {
+        view.current_pack
+            .clone()
+            .expect("the seat holds a head pack")
+    }
+
+    /// The card the engine bot drafts for `seat` on `view`, drawn from a copy
+    /// of the stored random state as the fallback draws it.
+    fn engine_bot_choice(view: &DraftPlayerView, seat: u8) -> String {
+        let mut rng = RNG
+            .with(|cell| {
+                let stored = cell.take();
+                let copy = stored.clone();
+                cell.set(stored);
+                copy
+            })
+            .expect("the random state is installed");
+        let action = fifo_ai_selection(
+            view,
+            seat,
+            live_prompt(view),
+            DIFFICULTY.with(Cell::get),
+            None,
+            PICK_ENHANCEMENT.with(Cell::get),
+            &mut rng,
+        )
+        .expect("the seat holds a head");
+        let DraftAction::Select {
+            picked_card_instance_ids,
+            ..
+        } = &action
+        else {
+            panic!("the engine's selection is a Select, got {action:?}");
+        };
+        picked_card_instance_ids[0].clone()
+    }
+
+    /// The index of the first projected card that is not `avoid`.
+    fn option_other_than(projected: &[DraftCardInstance], avoid: &str) -> usize {
+        projected
+            .iter()
+            .position(|card| card.instance_id != avoid)
+            .expect("a choice head holds more than one card")
+    }
+
+    /// CR 905.2a: there is no priority in a draft, so the human's selection
+    /// never waits on another seat, and under LLM seats no bot seat's choice is
+    /// made by the engine while its drafter has not answered. A pack arriving
+    /// behind a seat's head leaves that seat's prompt as it was.
+    #[test]
+    fn llm_seats_hold_their_heads_while_the_human_selects() {
+        reset();
+        // Paired positive: the same start under engine bots drafts the bots.
+        let engine = start_fixture(AiDifficulty::Medium);
+        assert!(bot_steps(&engine.view) > 0);
+
+        let local = start_llm(3, 0);
+        let session = installed();
+        for seat in 1..8 {
+            let view = filter_for_player(&session, seat);
+            assert_eq!(
+                view.current_pack.as_ref().map(Vec::len),
+                Some(3),
+                "seat {seat}"
+            );
+            assert!(
+                view.fifo
+                    .as_ref()
+                    .and_then(|fifo| fifo.prompt_id.as_ref())
+                    .is_some(),
+                "reach: seat {seat} holds a live prompt"
+            );
+        }
+        assert_eq!(bot_steps(&local.view), 0);
+        // The `StartDraft` commit alone: no bot application.
+        assert_eq!(session.fifo.as_ref().expect("a FIFO session").revision, 1);
+
+        let seat_one_prompt = live_prompt(&filter_for_player(&session, 1));
+        let picked = head_ids(&local.view)[0].clone();
+        let view = local_fifo_select_inner(
+            local.owner,
+            &selection_json(
+                &live_prompt(&local.view),
+                std::slice::from_ref(&picked),
+                &[],
+                &[],
+            ),
+            2_000,
+        )
+        .expect("the human's selection applies while every drafter is out");
+        assert_eq!(ids(&view.pool), vec![picked]);
+        assert_eq!(bot_steps(&view), 0);
+        let seat_one = filter_for_player(&installed(), 1);
+        let fifo = seat_one.fifo.as_ref().expect("a FIFO projection");
+        assert_eq!(fifo.queue_count, 2);
+        assert_eq!(fifo.prompt_id.as_ref(), Some(&seat_one_prompt));
+        reset();
+    }
+
+    /// CR 905.1a: a step that takes every card left is no choice. Two-card
+    /// boosters make one: after seats 1 and 2 each select from their own
+    /// booster, seat 2's next head is seat 1's last card, while seat 3 still
+    /// holds a real choice.
+    #[test]
+    fn a_forced_head_is_taken_by_the_engine_bot_while_choices_wait() {
+        reset();
+        let mut session = DraftSession::new_fifo(
+            local_quick_config(set_source(), 8, 2, 0),
+            local_quick_seats(8),
+            "quick-draft".to_string(),
+            DraftSessionId(CANONICAL_ID.to_string()),
+        )
+        .expect("draft-core admits the configuration");
+        session::apply_at(
+            &mut session,
+            DraftAction::StartDraft,
+            Some(&FixturePackSource {
+                set_code: "TST".to_string(),
+                cards_per_pack: 2,
+            }),
+            1_000,
+        )
+        .expect("the session starts");
+        for seat in [1, 2] {
+            let view = filter_for_player(&session, seat);
+            let first = projected_head(&view)[0].instance_id.clone();
+            session::apply_at(
+                &mut session,
+                DraftAction::Select {
+                    seat,
+                    prompt_id: live_prompt(&view),
+                    picked_card_instance_ids: vec![first],
+                    burned_card_instance_ids: Vec::new(),
+                    effect_card_instance_ids: Vec::new(),
+                },
+                None,
+                1_100,
+            )
+            .expect("a selection from the seat's own booster is legal");
+        }
+
+        let forced = filter_for_player(&session, 2);
+        assert_eq!(forced.current_pack.as_ref().map(Vec::len), Some(1));
+        assert!(matches!(draft_pick_step(&forced), DraftPickStep::Forced));
+        let choice = filter_for_player(&session, 3);
+        assert_eq!(choice.current_pack.as_ref().map(Vec::len), Some(2));
+        assert!(matches!(
+            draft_pick_step(&choice),
+            DraftPickStep::Choice { .. }
+        ));
+        assert_eq!(steps(&session, 2), 1);
+
+        let bound = local_fifo_bot_batch_bound(&session);
+        drive_local_fifo_bot_batch(
+            &mut session,
+            &LocalBotSettings {
+                difficulty: AiDifficulty::Medium,
+                card_db: None,
+                enhancement: bot_ai::PickEnhancement::Off,
+                drafting: LocalLlmDrafting::LlmSeats,
+            },
+            &mut ChaCha20Rng::seed_from_u64(1),
+            1_200,
+            bound,
+        )
+        .expect("the batch takes the forced head");
+        assert_eq!(steps(&session, 2), 2);
+        for seat in 3..8 {
+            assert_eq!(steps(&session, seat), 0, "seat {seat}");
+        }
+        reset();
+    }
+
+    /// CR 905.1c: each request is built from its seat's own projection, only
+    /// for heads that wait for a drafter, and building one changes nothing.
+    #[test]
+    fn requests_are_built_for_held_heads_only_and_change_nothing() {
+        reset();
+        let local = start_llm(3, 0);
+        let session = installed();
+        assert!(
+            filter_for_player(&session, 1)
+                .fifo
+                .as_ref()
+                .and_then(|fifo| fifo.prompt_id.as_ref())
+                .is_some(),
+            "reach: seat 1 holds a live prompt"
+        );
+
+        let before = guard_cells_snapshot();
+        let requests = local_fifo_build_llm_requests_inner(local.owner, ENDPOINT, "{}")
+            .expect("the owner builds the requests");
+        assert_eq!(guard_cells_snapshot(), before);
+        let seats: Vec<u8> = requests
+            .iter()
+            .map(|entry| match entry {
+                LocalLlmPickRequest::Request { seat, .. } => *seat,
+                LocalLlmPickRequest::Unbuildable { seat, error, .. } => {
+                    panic!("seat {seat} is unbuildable: {error}")
+                }
+            })
+            .collect();
+        assert_eq!(seats, (1..8).collect::<Vec<u8>>());
+        for entry in &requests {
+            let LocalLlmPickRequest::Request {
+                seat,
+                prompt_id,
+                fingerprint,
+                option_count,
+                required_pick_count,
+                ..
+            } = entry
+            else {
+                panic!("{entry:?}");
+            };
+            let view = filter_for_player(&session, *seat);
+            assert_eq!(
+                Some(prompt_id),
+                view.fifo.as_ref().and_then(|fifo| fifo.prompt_id.as_ref()),
+                "seat {seat}"
+            );
+            assert_eq!(
+                *fingerprint,
+                phase_llm::pick_fingerprint(*seat, &projected_head(&view)),
+                "seat {seat}"
+            );
+            assert_eq!(*option_count, 3, "seat {seat}");
+            assert_eq!(*required_pick_count, 1, "seat {seat}");
+        }
+        let serialized = serde_json::to_value(&requests[0]).unwrap();
+        assert_eq!(serialized["kind"], "request");
+        assert!(serialized.get("promptId").is_some(), "{serialized}");
+        assert!(serialized.get("optionCount").is_some(), "{serialized}");
+
+        // Paired: the same draft re-imported holds the same heads, but an
+        // import keeps no LLM drafting and runs no bot, so none is requested.
+        let json = export_local_fifo_session_inner(local.owner).expect("the owner exports");
+        let imported = import_local_fifo_session_inner(&json, 2).expect("the export imports");
+        let resumed = installed();
+        for seat in 1..8 {
+            let view = filter_for_player(&resumed, seat);
+            assert!(
+                view.fifo
+                    .as_ref()
+                    .and_then(|fifo| fifo.prompt_id.as_ref())
+                    .is_some(),
+                "reach: seat {seat} holds a live prompt"
+            );
+            assert_eq!(
+                view.current_pack.as_ref().map(Vec::len),
+                Some(3),
+                "seat {seat}"
+            );
+        }
+        assert!(
+            local_fifo_build_llm_requests_inner(imported.owner, ENDPOINT, "{}")
+                .expect("the new owner builds")
+                .is_empty()
+        );
+        reset();
+    }
+
+    #[test]
+    fn an_endpoint_that_cannot_carry_a_request_names_every_held_seat() {
+        reset();
+        let local = start_llm(3, 0);
+        let built = local_fifo_build_llm_requests_inner(local.owner, ENDPOINT, "{}")
+            .expect("the owner builds the requests");
+        assert_eq!(built.len(), 7);
+        assert!(
+            built
+                .iter()
+                .all(|entry| matches!(entry, LocalLlmPickRequest::Request { .. })),
+            "reach: a usable endpoint builds every held head's request"
+        );
+
+        let session = installed();
+        let before = guard_cells_snapshot();
+        let entries = local_fifo_build_llm_requests_inner(local.owner, "{}", "{}")
+            .expect("an endpoint that does not parse refuses no call");
+        assert_eq!(guard_cells_snapshot(), before);
+        assert_eq!(entries.len(), 7);
+        for (entry, expected) in entries.iter().zip(1u8..) {
+            let LocalLlmPickRequest::Unbuildable {
+                seat,
+                prompt_id,
+                error,
+            } = entry
+            else {
+                panic!("{entry:?}");
+            };
+            assert_eq!(*seat, expected);
+            assert!(error.contains("Invalid LLM endpoint config"), "{error}");
+            assert_eq!(
+                Some(prompt_id),
+                filter_for_player(&session, *seat)
+                    .fifo
+                    .as_ref()
+                    .and_then(|fifo| fifo.prompt_id.as_ref()),
+                "seat {seat}"
+            );
+        }
+        reset();
+    }
+
+    #[test]
+    fn a_valid_reply_drafts_the_card_the_model_chose() {
+        reset();
+        let local = start_llm(3, 0);
+        let view = filter_for_player(&installed(), 1);
+        let projected = projected_head(&view);
+        let bot_choice = engine_bot_choice(&view, 1);
+        let choice = option_other_than(&projected, &bot_choice);
+        assert_ne!(projected[choice].instance_id, bot_choice);
+
+        let payload = resolution_json(
+            &live_prompt(&view),
+            Some(reply(
+                &phase_llm::pick_fingerprint(1, &projected),
+                200,
+                reply_choosing(choice),
+            )),
+        );
+        let (_, outcome) = local_fifo_resolve_llm_pick_inner(local.owner, &payload, 2_000)
+            .expect("the owner resolves seat 1's head");
+        assert!(outcome.used, "{:?}", outcome.error);
+        let session = installed();
+        assert_eq!(
+            ids(&session.pools[1]),
+            vec![projected[choice].instance_id.clone()]
+        );
+        assert_eq!(steps(&session, 1), 1);
+        reset();
+    }
+
+    #[test]
+    fn a_reply_for_a_prompt_that_is_not_live_falls_back_for_that_seat_only() {
+        reset();
+        let local = start_llm(3, 0);
+        let session = installed();
+        let view = filter_for_player(&session, 1);
+        let projected = projected_head(&view);
+        let bot_choice = engine_bot_choice(&view, 1);
+        let choice = option_other_than(&projected, &bot_choice);
+        let fingerprint = phase_llm::pick_fingerprint(1, &projected);
+        // Reach: on the live projection this fingerprint and body decode to
+        // the model's card, so only the prompt can refuse the reply.
+        let decoded = phase_llm::select_picks_from_response(
+            1,
+            &projected,
+            1,
+            &fingerprint,
+            (None, DIFFICULTY.with(Cell::get)),
+            phase_llm::LlmReply {
+                provider: phase_llm::LlmProvider::from_label("OpenAiCompatible"),
+                status: 200,
+                body: &reply_choosing(choice),
+            },
+        )
+        .expect("the reply decodes on the live projection");
+        assert_eq!(
+            decoded.card_instance_ids,
+            vec![projected[choice].instance_id.clone()]
+        );
+
+        let live = live_prompt(&view);
+        let not_live = DraftPromptId {
+            generation: live.generation + 1,
+            ..live
+        };
+        let payload = resolution_json(
+            &not_live,
+            Some(reply(&fingerprint, 200, reply_choosing(choice))),
+        );
+        let (_, outcome) = local_fifo_resolve_llm_pick_inner(local.owner, &payload, 2_000)
+            .expect("a reply for a prompt that is not live falls back");
+        assert!(!outcome.used);
+        assert_eq!(
+            outcome.error,
+            Some(phase_llm::LlmError::StaleDecision.to_string())
+        );
+        let after = installed();
+        assert_eq!(ids(&after.pools[1]), vec![bot_choice]);
+        for seat in 2..8 {
+            assert_eq!(steps(&after, seat), steps(&session, seat), "seat {seat}");
+        }
+        reset();
+    }
+
+    #[test]
+    fn a_reply_for_another_pack_falls_back() {
+        reset();
+        let local = start_llm(3, 0);
+        let session = installed();
+        let view = filter_for_player(&session, 1);
+        let bot_choice = engine_bot_choice(&view, 1);
+        let seat_two = filter_for_player(&session, 2);
+        let another_pack = phase_llm::pick_fingerprint(2, &projected_head(&seat_two));
+        let live = live_prompt(&view);
+        assert_eq!(
+            Some(&live),
+            filter_for_player(&installed(), 1)
+                .fifo
+                .as_ref()
+                .and_then(|fifo| fifo.prompt_id.as_ref()),
+            "reach: the resolution answers seat 1's live prompt"
+        );
+
+        let payload = resolution_json(&live, Some(reply(&another_pack, 200, reply_choosing(0))));
+        let (_, outcome) = local_fifo_resolve_llm_pick_inner(local.owner, &payload, 2_000)
+            .expect("a reply for another pack falls back");
+        assert!(!outcome.used);
+        assert_eq!(
+            outcome.error,
+            Some(phase_llm::LlmError::StaleDecision.to_string())
+        );
+        assert_eq!(ids(&installed().pools[1]), vec![bot_choice]);
+        reset();
+    }
+
+    #[test]
+    fn a_missing_or_refused_reply_falls_back() {
+        const REFUSAL: &str = r#"{"error":{"message":"Incorrect API key provided"}}"#;
+        for refused in [false, true] {
+            reset();
+            let local = start_llm(3, 0);
+            let session = installed();
+            let view = filter_for_player(&session, 1);
+            assert_eq!(steps(&session, 1), 0, "reach: seat 1 has not drafted");
+            let bot_choice = engine_bot_choice(&view, 1);
+            let sent = refused.then(|| {
+                reply(
+                    &phase_llm::pick_fingerprint(1, &projected_head(&view)),
+                    401,
+                    REFUSAL.to_string(),
+                )
+            });
+
+            let payload = resolution_json(&live_prompt(&view), sent);
+            let (_, outcome) = local_fifo_resolve_llm_pick_inner(local.owner, &payload, 2_000)
+                .expect("a missing or refused reply falls back");
+            assert!(!outcome.used, "refused: {refused}");
+            let error = outcome.error.expect("the outcome says why");
+            if refused {
+                assert!(error.contains("Incorrect API key provided"), "{error}");
+            } else {
+                assert_eq!(error, NO_LLM_REPLY);
+            }
+            let after = installed();
+            assert_eq!(steps(&after, 1), 1, "refused: {refused}");
+            assert_eq!(ids(&after.pools[1]), vec![bot_choice], "refused: {refused}");
+        }
+        reset();
+    }
+
+    /// CR 905.1c: an LLM drafter answers only for its own bot seat's head, so a
+    /// resolution naming the human's prompt, or a bot seat that holds no head,
+    /// is refused with no change.
+    #[test]
+    fn a_resolution_for_a_seat_with_no_llm_head_changes_nothing() {
+        reset();
+        let local = start_llm(2, 0);
+        // Paired positive: seat 1's own live head resolves.
+        let seat_one_prompt = live_prompt(&filter_for_player(&installed(), 1));
+        local_fifo_resolve_llm_pick_inner(
+            local.owner,
+            &resolution_json(&seat_one_prompt, None),
+            2_000,
+        )
+        .expect("seat 1's live head resolves");
+
+        let session = installed();
+        let human = filter_for_player(&session, LOCAL_HUMAN_SEAT);
+        let human_prompt = live_prompt(&human);
+        assert!(
+            session.head_pack(1).is_none(),
+            "reach: seat 1 holds no head once it resolved"
+        );
+        let human_reply = reply(
+            &phase_llm::pick_fingerprint(LOCAL_HUMAN_SEAT, &projected_head(&human)),
+            200,
+            reply_choosing(0),
+        );
+
+        let before = guard_cells_snapshot();
+        assert_eq!(
+            local_fifo_resolve_llm_pick_inner(
+                local.owner,
+                &resolution_json(&human_prompt, Some(human_reply)),
+                3_000,
+            )
+            .unwrap_err(),
+            NOT_AN_LLM_HEAD
+        );
+        assert_eq!(guard_cells_snapshot(), before);
+        assert_eq!(
+            local_fifo_resolve_llm_pick_inner(
+                local.owner,
+                &resolution_json(&seat_one_prompt, None),
+                3_000,
+            )
+            .unwrap_err(),
+            NOT_AN_LLM_HEAD
+        );
+        assert_eq!(guard_cells_snapshot(), before);
+        reset();
+    }
+
+    /// CR 905.1a: after seat 2 drafts from its own two-card booster, its next
+    /// head is seat 1's last card, a forced step the same call takes.
+    #[test]
+    fn a_resolution_runs_the_bots_it_releases() {
+        reset();
+        let local = start_llm(2, 0);
+        let seat_one_prompt = live_prompt(&filter_for_player(&installed(), 1));
+        local_fifo_resolve_llm_pick_inner(
+            local.owner,
+            &resolution_json(&seat_one_prompt, None),
+            2_000,
+        )
+        .expect("seat 1's head resolves");
+
+        let session = installed();
+        let seat_two = filter_for_player(&session, 2);
+        assert_eq!(
+            seat_two
+                .fifo
+                .as_ref()
+                .expect("a FIFO projection")
+                .queue_count,
+            2
+        );
+        assert_eq!(seat_two.current_pack.as_ref().map(Vec::len), Some(2));
+        let revision = session.fifo.as_ref().expect("a FIFO session").revision;
+
+        local_fifo_resolve_llm_pick_inner(
+            local.owner,
+            &resolution_json(&live_prompt(&seat_two), None),
+            3_000,
+        )
+        .expect("seat 2's head resolves");
+        let after = installed();
+        assert_eq!(steps(&after, 2), 2);
+        // Seat 2's own step, then its forced head: two commits.
+        assert_eq!(
+            after.fifo.as_ref().expect("a FIFO session").revision,
+            revision + 2
+        );
+        reset();
+    }
+
+    #[test]
+    fn declaring_engine_bots_drafts_every_waiting_head() {
+        reset();
+        let local = start_llm(3, 0);
+        assert_eq!(bot_steps(&local.view), 0);
+        let view = local_fifo_set_llm_drafting_inner(local.owner, "\"LlmSeats\"", 2_000)
+            .expect("reach: the owner declares");
+        assert_eq!(bot_steps(&view), 0);
+
+        let before = guard_cells_snapshot();
+        assert!(local_fifo_set_llm_drafting_inner(local.owner, "\"Bots\"", 2_000).is_err());
+        assert_eq!(guard_cells_snapshot(), before);
+
+        let view = local_fifo_set_llm_drafting_inner(local.owner, "\"EngineBots\"", 3_000)
+            .expect("the owner declares");
+        assert!(bot_steps(&view) > 0);
+        assert!(bots_quiescent(&installed()));
+        reset();
+    }
+
+    #[test]
+    fn a_stale_owner_cannot_change_the_llm_drafting() {
+        reset();
+        let a = start_llm(3, 0).owner;
+        let b = start_llm(3, 0);
+        assert!(local_fifo_view_inner(b.owner).is_ok());
+
+        let before = guard_cells_snapshot();
+        assert_eq!(before["local_llm_drafting"], "LlmSeats");
+        assert_eq!(
+            local_fifo_set_llm_drafting_inner(a, "\"EngineBots\"", 2_000).unwrap_err(),
+            STALE_LOCAL_OWNER
+        );
+        assert_eq!(guard_cells_snapshot(), before);
+        let view = local_fifo_select_inner(
+            b.owner,
+            &selection_json(&live_prompt(&b.view), &head_ids(&b.view)[..1], &[], &[]),
+            2_000,
+        )
+        .expect("B's human selects");
+        assert_eq!(bot_steps(&view), 0);
+
+        // Paired positive: B's own declaration releases the heads.
+        let view = local_fifo_set_llm_drafting_inner(b.owner, "\"EngineBots\"", 3_000)
+            .expect("the live owner declares");
+        assert!(bot_steps(&view) > 0);
+        reset();
+    }
+
+    #[test]
+    fn every_local_install_resets_the_llm_drafting() {
+        reset();
+        let local = start_llm(3, 0);
+        assert_eq!(bot_steps(&local.view), 0);
+        assert_eq!(
+            LOCAL_LLM_DRAFTING.with(Cell::get),
+            LocalLlmDrafting::LlmSeats
+        );
+        assert_eq!(
+            head_ids(&local.view).len(),
+            3,
+            "reach: the human's own booster"
+        );
+        live_prompt(&local.view);
+
+        let json = export_local_fifo_session_inner(local.owner).expect("the owner exports");
+        let imported = import_local_fifo_session_inner(&json, 2).expect("the export imports");
+        let view = local_fifo_select_inner(
+            imported.owner,
+            &selection_json(
+                &live_prompt(&imported.view),
+                &head_ids(&imported.view)[..1],
+                &[],
+                &[],
+            ),
+            2_000,
+        )
+        .expect("the human selects after the import");
+        assert!(bot_steps(&view) > 0);
+        reset();
+    }
+
+    /// An LLM seat's selection, like the engine bot's, burns what the
+    /// selection policy requires and spends no draft-effect card: the
+    /// selection it applies carries an empty effect list.
+    #[test]
+    fn an_llm_selection_burns_what_the_policy_requires() {
+        reset();
+        let local = start_llm(3, 1);
+        let session = installed();
+        let view = filter_for_player(&session, 1);
+        let fifo = view.fifo.as_ref().expect("a FIFO projection");
+        assert_eq!(
+            fifo.requirements,
+            DraftSelectionRequirements { picks: 1, burns: 1 }
+        );
+        let pack_id = fifo.head.as_ref().expect("seat 1 holds a head").pack_id;
+        let removed_before = session.fifo.as_ref().expect("a FIFO session").removed.len();
+        let projected = projected_head(&view);
+
+        let payload = resolution_json(
+            &live_prompt(&view),
+            Some(reply(
+                &phase_llm::pick_fingerprint(1, &projected),
+                200,
+                reply_choosing(0),
+            )),
+        );
+        let (_, outcome) = local_fifo_resolve_llm_pick_inner(local.owner, &payload, 2_000)
+            .expect("the owner resolves seat 1's head");
+        assert!(outcome.used, "{:?}", outcome.error);
+        let after = installed();
+        let removed = &after.fifo.as_ref().expect("a FIFO session").removed;
+        assert_eq!(removed.len(), removed_before + 1);
+        let burned = removed.last().expect("one card was burned");
+        assert_eq!(burned.reason, DraftRemovalReason::Burn);
+        assert_eq!(burned.pack_id, pack_id);
+        reset();
+    }
+
+    /// CR 905.2a: a seat drafts at its own pace, so the request states the
+    /// steps that seat has taken in the round, not the pod's step counter.
+    #[test]
+    fn a_request_states_the_seats_own_fifo_position() {
+        reset();
+        let local = start_llm(3, 0);
+        local_fifo_select_inner(
+            local.owner,
+            &selection_json(
+                &live_prompt(&local.view),
+                &head_ids(&local.view)[..1],
+                &[],
+                &[],
+            ),
+            2_000,
+        )
+        .expect("the human selects");
+        let seat_one_prompt = live_prompt(&filter_for_player(&installed(), 1));
+        local_fifo_resolve_llm_pick_inner(
+            local.owner,
+            &resolution_json(&seat_one_prompt, None),
+            3_000,
+        )
+        .expect("seat 1's head resolves");
+
+        let view = filter_for_player(&installed(), 1);
+        assert_eq!(view.pick_number, 0);
+        assert_eq!(
+            view.fifo
+                .as_ref()
+                .expect("a FIFO projection")
+                .progress
+                .round_completed_steps,
+            1
+        );
+        assert_eq!(view.current_pack.as_ref().map(Vec::len), Some(2));
+        assert!(matches!(
+            draft_pick_step(&view),
+            DraftPickStep::Choice { .. }
+        ));
+
+        let requests = local_fifo_build_llm_requests_inner(local.owner, ENDPOINT, "{}")
+            .expect("the owner builds the requests");
+        let body = requests
+            .iter()
+            .find_map(|entry| match entry {
+                LocalLlmPickRequest::Request {
+                    seat: 1, request, ..
+                } => Some(request.body.clone()),
+                LocalLlmPickRequest::Request { .. } | LocalLlmPickRequest::Unbuildable { .. } => {
+                    None
+                }
+            })
+            .expect("seat 1's head is requested");
+        assert!(body.contains("Pack 1 of 3, pick 2"), "{body}");
         reset();
     }
 }

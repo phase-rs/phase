@@ -19,20 +19,28 @@ import {
   type FifoPromptId,
   type LlmDraftResponsePayload,
   type LocalDraftRuntime,
+  type LocalFifoLlmDrafting,
+  type LocalFifoLlmPickRequest,
   type LocalFifoOwner,
   type SetPackSequence,
   type SuggestedDeck,
 } from "../adapter/draft-adapter";
 import { CUSTOM_CUBE_SET_CODE } from "../adapter/draftKinds";
 import {
+  buildLocalFifoLlmRequests,
+  callLlmDrafter,
   cancelLlmDraftRun,
+  recordLlmDraftSeatUsage,
   recordLlmDraftUsage,
   reportLlmDraftOutcomes,
   startLlmDraftRound,
   type LlmDraftRound,
+  type LlmDrafterState,
   type LlmDrafterStatus,
 } from "../services/llm/draftLlm";
 import { loadProviderCatalog } from "../services/llm/catalog";
+import { reportLlmFailure } from "../services/llm/diagnostics";
+import type { LlmDraftOutcome, LlmProfile } from "../services/llm/types";
 import { draftProfile, useLlmStore } from "./llmStore";
 import {
   MAX_MATERIALIZED_VIRTUAL_BASICS,
@@ -290,6 +298,8 @@ function invalidateLifecycle(): number {
   // this, a provider call started for the old draft runs to its full timeout
   // holding a socket, and its reply lands against a pod that no longer exists.
   cancelLlmDraftRun();
+  fifoLlm?.controller.abort();
+  fifoLlm = null;
   return lifecycleGeneration;
 }
 
@@ -910,7 +920,273 @@ function ensureLlmDraftRound(view: DraftPlayerView): Promise<LlmDraftRound | nul
   return round;
 }
 
+/** The shape of `fifoLlm`. */
+interface LocalFifoLlm {
+  readonly lifecycle: number;
+  readonly owner: LocalFifoOwner;
+  /** What the engine was last told. */
+  drafting: LocalFifoLlmDrafting;
+  /**
+   * `"unavailable"` once requests could not be built: the bot seats are handed
+   * to the engine until the player's next accepted selection.
+   */
+  availability: "available" | "unavailable";
+  /** Cuts every call in flight loose; replaced when the engine bots take over. */
+  controller: AbortController;
+  readonly inFlight: Map<number, FifoPromptId>;
+  readonly statuses: Map<number, LlmDrafterState>;
+  /** A view the engine answered while the player's selection was pending. */
+  viewOwed: boolean;
+  /** One sync runs at a time; one asked for meanwhile runs once more after it. */
+  syncing: boolean;
+  syncAgain: boolean;
+}
+
+/** LLM drafting on the local FIFO runtime for one lifecycle: what the engine was told, and each seat's call in flight with the prompt it answers. */
+let fifoLlm: LocalFifoLlm | null = null;
+
+/** Whether the bot seats should be LLM drafters, and through which profile. */
+type LocalFifoLlmDesire =
+  | { readonly drafting: "EngineBots" }
+  | { readonly drafting: "LlmSeats"; readonly profile: LlmProfile };
+
+/**
+ * LLM drafting is opt-in twice over, as for the barrier round: switched on,
+ * and a usable profile configured. With it switched off no catalog is loaded.
+ */
+async function localFifoLlmDrafting(): Promise<LocalFifoLlmDesire> {
+  if (!useLlmStore.getState().draftEnabled) return { drafting: "EngineBots" };
+  const profile = draftProfile(useLlmStore.getState(), await loadProviderCatalog());
+  return profile ? { drafting: "LlmSeats", profile } : { drafting: "EngineBots" };
+}
+
+/** Whether `llm` still belongs to the local draft the store holds. */
+function localFifoLlmOwnsDraft(llm: LocalFifoLlm): boolean {
+  const runtime = useDraftStore.getState().runtime;
+  return fifoLlm === llm
+    && llm.lifecycle === lifecycleGeneration
+    && runtime?.kind === "local-fifo"
+    && runtime.owner === llm.owner;
+}
+
+/**
+ * Each drafter's status, by seat. The labels keep their meaning: picking while
+ * a call is in flight, picked when the engine used the reply, engine pick when
+ * the seat fell back. The player never waits on a drafter on this runtime, so
+ * `awaitingDrafters` is never set here.
+ */
+function publishLocalFifoLlmStatuses(llm: LocalFifoLlm): void {
+  if (!localFifoLlmOwnsDraft(llm)) return;
+  const llmDrafters = [...llm.statuses]
+    .sort(([left], [right]) => left - right)
+    .map(([seat, state]) => ({ seat, state }));
+  useDraftStore.setState({ llmDrafters });
+}
+
+/**
+ * Install a view the engine answered outside the player's own selection. While
+ * that selection is pending, installing would make it stale, so the latest
+ * view is owed instead and fetched once the selection ends.
+ */
+function installLocalFifoView(llm: LocalFifoLlm, view: DraftPlayerView): void {
+  if (!localFifoLlmOwnsDraft(llm)) return;
+  if (exclusiveToken !== null) {
+    llm.viewOwed = true;
+    return;
+  }
+  const state = useDraftStore.getState();
+  if (state.workspaceState === null) return;
+  llm.viewOwed = false;
+  installWorkspace({
+    kind: "state",
+    authoritativeView: view,
+    baseWorkspace: state.workspaceState,
+    patch: { phase: view.status === "Deckbuilding" ? "deckbuilding" : state.phase },
+    persistence: "schedule",
+  });
+}
+
+/**
+ * Tell the engine whether the bot seats are LLM drafters, under a lease of its
+ * own; the engine runs the bots the declaration leaves to it. Handing the
+ * seats to the engine bots first cuts every call loose, so no late reply
+ * reaches the engine. `false` when the declaration did not land.
+ */
+async function declareLocalFifoLlmDrafting(
+  llm: LocalFifoLlm,
+  drafting: LocalFifoLlmDrafting,
+): Promise<boolean> {
+  if (drafting === "EngineBots") {
+    llm.controller.abort();
+    llm.controller = new AbortController();
+    llm.inFlight.clear();
+    llm.statuses.clear();
+    publishLocalFifoLlmStatuses(llm);
+  }
+  let view: DraftPlayerView;
+  try {
+    view = await withDraftEngineOperation((lease) => {
+      if (!localFifoLlmOwnsDraft(llm)) throw new Error("Stale LLM drafting declaration");
+      return lease.localFifoSetLlmDrafting(llm.owner, drafting, Date.now());
+    });
+  } catch (error) {
+    if (localFifoLlmOwnsDraft(llm)) console.warn("[draftStore] LLM drafting declaration failed:", error);
+    return false;
+  }
+  if (!localFifoLlmOwnsDraft(llm)) return false;
+  llm.drafting = drafting;
+  installLocalFifoView(llm, view);
+  return true;
+}
+
+/**
+ * One pass of `syncLocalFifoLlm`: install an owed view, declare the drafting
+ * the player's settings now ask for when it changed, then build the requests
+ * for every held head under one lease and start a call for each head no call
+ * is answering yet.
+ */
+async function syncLocalFifoLlmOnce(llm: LocalFifoLlm): Promise<void> {
+  const current = (): boolean => localFifoLlmOwnsDraft(llm)
+    && useDraftStore.getState().view?.status === "Drafting";
+  if (!current()) return;
+  if (llm.viewOwed && exclusiveToken === null) {
+    const view = await withDraftEngineOperation((lease) => {
+      if (!localFifoLlmOwnsDraft(llm)) throw new Error("Stale local draft view");
+      return lease.localFifoView(llm.owner);
+    });
+    installLocalFifoView(llm, view);
+    if (!current()) return;
+  }
+  const desired: LocalFifoLlmDesire = llm.availability === "unavailable"
+    ? { drafting: "EngineBots" }
+    : await localFifoLlmDrafting();
+  if (!current()) return;
+  if (desired.drafting !== llm.drafting && !(await declareLocalFifoLlmDrafting(llm, desired.drafting))) return;
+  if (desired.drafting !== "LlmSeats" || !current()) return;
+  let entries: LocalFifoLlmPickRequest[];
+  try {
+    entries = await buildLocalFifoLlmRequests(llm.owner, desired.profile);
+  } catch (error) {
+    if (!current()) return;
+    // Once, with no loop: the bot seats go to the engine until the player's
+    // next accepted selection makes the drafters available again.
+    reportLlmFailure("LLM drafters unavailable; using the engine bots", error);
+    llm.availability = "unavailable";
+    await declareLocalFifoLlmDrafting(llm, "EngineBots");
+    return;
+  }
+  if (!current() || llm.drafting !== "LlmSeats") return;
+  for (const entry of entries) {
+    if (sameDraftPrompt(llm.inFlight.get(entry.seat) ?? null, entry.promptId)) continue;
+    llm.inFlight.set(entry.seat, entry.promptId);
+    llm.statuses.set(entry.seat, "picking");
+    void resolveLocalFifoLlmSeat(llm, desired.profile, entry);
+  }
+  publishLocalFifoLlmStatuses(llm);
+}
+
+/**
+ * Keep the local FIFO runtime's LLM seats in step with the store. Runs after
+ * every view change, every player selection and every resolution; one sync
+ * runs at a time, and one asked for while it runs runs once more after it.
+ */
+function syncLocalFifoLlm(): void {
+  const llm = fifoLlm;
+  if (llm === null) return;
+  if (llm.syncing) {
+    llm.syncAgain = true;
+    return;
+  }
+  llm.syncing = true;
+  void (async () => {
+    try {
+      do {
+        llm.syncAgain = false;
+        try {
+          await syncLocalFifoLlmOnce(llm);
+        } catch (error) {
+          if (localFifoLlmOwnsDraft(llm)) console.warn("[draftStore] LLM seat sync failed:", error);
+        }
+      } while (llm.syncAgain && localFifoLlmOwnsDraft(llm));
+    } finally {
+      llm.syncing = false;
+    }
+  })();
+}
+
+/**
+ * One held head's drafter: the provider call with no lease held, then the
+ * reply handed to the engine under a lease of its own. The engine alone
+ * decides whether the reply is used or the seat falls back to the engine bot.
+ * A reply whose draft, call or prompt has been superseded is dropped unsent.
+ */
+async function resolveLocalFifoLlmSeat(
+  llm: LocalFifoLlm,
+  profile: LlmProfile,
+  entry: LocalFifoLlmPickRequest,
+): Promise<void> {
+  const signal = llm.controller.signal;
+  const stale = (): boolean => !localFifoLlmOwnsDraft(llm)
+    || signal.aborted
+    || !sameDraftPrompt(llm.inFlight.get(entry.seat) ?? null, entry.promptId);
+  let reply: { status: number; body: string } | null = null;
+  switch (entry.kind) {
+    case "request":
+      reply = await callLlmDrafter(profile, entry, signal);
+      break;
+    case "unbuildable":
+      // The engine's reason goes to the console only; the game log names the seat.
+      if (!stale()) reportLlmFailure(`LLM drafter (seat ${entry.seat}) unavailable`, entry.error);
+      break;
+  }
+  if (stale()) return;
+  let resolved: { view: DraftPlayerView; llmOutcome: LlmDraftOutcome };
+  try {
+    resolved = await withDraftEngineOperation((lease) => {
+      if (stale()) throw new Error("Stale LLM drafter reply");
+      return lease.localFifoResolveLlmPick(llm.owner, {
+        promptId: entry.promptId,
+        reply: entry.kind === "request" && reply !== null
+          ? { fingerprint: entry.fingerprint, provider: profile.provider, status: reply.status, body: reply.body }
+          : null,
+      }, Date.now());
+    });
+  } catch (error) {
+    if (stale()) return;
+    llm.inFlight.delete(entry.seat);
+    llm.statuses.delete(entry.seat);
+    publishLocalFifoLlmStatuses(llm);
+    reportLlmFailure(`LLM drafter (seat ${entry.seat}) failed`, error);
+    syncLocalFifoLlm();
+    return;
+  }
+  if (stale()) return;
+  const { view, llmOutcome } = resolved;
+  reportLlmDraftOutcomes([llmOutcome]);
+  recordLlmDraftSeatUsage(llmOutcome, entry.kind === "request" ? entry.promptChars : undefined);
+  llm.inFlight.delete(entry.seat);
+  llm.statuses.set(entry.seat, llmOutcome.used ? "ready" : "fallback");
+  publishLocalFifoLlmStatuses(llm);
+  installLocalFifoView(llm, view);
+  syncLocalFifoLlm();
+}
+
+/**
+ * One player selection. On the local FIFO runtime the LLM seats sync after it:
+ * an accepted selection makes drafters available again after requests could
+ * not be built, and a view owed while the selection was pending is installed.
+ */
 async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
+  const outcome = await performPickOnce(request);
+  const llm = fifoLlm;
+  if (llm !== null && localFifoLlmOwnsDraft(llm)) {
+    if (outcome.status === "acknowledged") llm.availability = "available";
+    syncLocalFifoLlm();
+  }
+  return outcome;
+}
+
+async function performPickOnce(request: PickRequest): Promise<DraftPickOutcome> {
   if (!validPickRequest(request)) return { status: "rejected", reason: "invalid-request" };
   if (request.kind === "draft-effect") {
     request = {
@@ -968,8 +1244,9 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
     // live pack below, so a pack that moved on is refused per seat rather than
     // mis-picked.
     //
-    // Only the legacy runtime serves an LLM round: its exports read the legacy
-    // session, which a local FIFO session never is.
+    // The barrier round serves the legacy runtime; a local FIFO draft's LLM
+    // seats answer their own heads (see `syncLocalFifoLlm`). The round's
+    // exports read the legacy session, which a local FIFO session never is.
     const llmRoundForPick = target.kind === "legacy" && request.kind === "pick"
       && useLlmStore.getState().draftEnabled
       ? await ensureLlmDraftRound(view)
@@ -1495,6 +1772,12 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     try {
       const database = await prepareCardDatabase();
       const adapter = new DraftAdapter();
+      // The engine keeps no LLM drafting across installs: the store declares
+      // it, which also runs any bot the saved session left waiting.
+      const fifoResume = meta.localFifoSessionId === undefined
+        ? null
+        : { sessionId: meta.localFifoSessionId, llm: await localFifoLlmDrafting() };
+      if (lifecycle !== lifecycleGeneration) return { status: "none" };
       const restored = await withDraftEngineOperation((lease) => {
         if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft resume");
         lease.loadCardDatabase(database);
@@ -1504,16 +1787,16 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         // An undeclared record keeps the legacy import it was saved for.
         let runtime: LocalDraftRuntime;
         let view: DraftPlayerView;
-        if (meta.localFifoSessionId === undefined) {
+        if (fifoResume === null) {
           runtime = { kind: "legacy" };
           view = lease.importSession(saved.sessionJson, meta.difficulty);
         } else {
           const local = lease.importLocalFifoSession(saved.sessionJson, meta.difficulty);
-          if (draftViewSessionId(local.view) !== meta.localFifoSessionId) {
+          if (draftViewSessionId(local.view) !== fifoResume.sessionId) {
             throw new Error(i18n.t("draft:run.resumeUnavailable"));
           }
           runtime = { kind: "local-fifo", owner: local.owner };
-          view = local.view;
+          view = lease.localFifoSetLlmDrafting(local.owner, fifoResume.llm.drafting, Date.now());
         }
         return {
           runtime,
@@ -1541,6 +1824,20 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       // active run, or "playing" for a terminal one. The run's results vs its
       // limits decide; the meta's phase only matters before a run exists.
       const resumedPhase: DraftPhase = run ? draftRunPhase(run) : meta.phase;
+      if (runtime.kind === "local-fifo" && fifoResume !== null) {
+        fifoLlm = {
+          lifecycle,
+          owner: runtime.owner,
+          drafting: fifoResume.llm.drafting,
+          availability: "available",
+          controller: new AbortController(),
+          inFlight: new Map(),
+          statuses: new Map(),
+          viewOwed: false,
+          syncing: false,
+          syncAgain: false,
+        };
+      }
       installWorkspace({
         kind: "state",
         authoritativeView: view,
@@ -2160,11 +2457,16 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
 // reports a pick for a pack that has already passed.
 useDraftStore.subscribe((state, previous) => {
   if (state.view === previous.view) return;
+  // A local FIFO draft's LLM seats answer their own heads, each at its own
+  // pace, so a new view neither clears their statuses nor starts a round: it
+  // syncs them. The barrier round reads the legacy session only.
+  if (state.runtime?.kind === "local-fifo") {
+    syncLocalFifoLlm();
+    return;
+  }
   if (state.llmDrafters.length > 0 || state.awaitingDrafters) {
     useDraftStore.setState({ llmDrafters: [], awaitingDrafters: false });
   }
-  // The LLM round reads the legacy session; a local FIFO session takes none.
-  if (state.runtime?.kind === "local-fifo") return;
   const view = state.view;
   if (!view || state.phase !== "drafting" || view.status !== "Drafting") return;
   if (!view.current_pack || view.current_pack.length === 0) return;

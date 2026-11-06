@@ -3,6 +3,7 @@ import type { MatchConfig } from "./types";
 import type {
   LlmDraftOutcome,
   LlmDraftPickRequest,
+  LlmHttpRequestSpec,
 } from "../services/llm/types";
 
 /** One seat's LLM reply, handed back to the engine to resolve into a pick. */
@@ -671,6 +672,39 @@ export interface LocalFifoSelection {
   picked_card_instance_ids: string[];
   burned_card_instance_ids: string[];
   effect_card_instance_ids: string[];
+}
+
+// @sync-with: crates/draft-wasm/src/lib.rs
+/** Whether the local runtime's bot seats are LLM drafters, as declared to the engine. */
+export type LocalFifoLlmDrafting = "EngineBots" | "LlmSeats";
+
+// @sync-with: crates/draft-wasm/src/lib.rs
+/**
+ * One head an LLM seat's drafter is answering: the engine-built request, or
+ * the engine's reason it could not build one. Every held head is listed.
+ */
+export type LocalFifoLlmPickRequest =
+  | {
+      kind: "request";
+      seat: number;
+      promptId: FifoPromptId;
+      fingerprint: string;
+      optionCount: number;
+      requiredPickCount: number;
+      /** Characters of prompt the request carries (system + user). */
+      promptChars: number;
+      request: LlmHttpRequestSpec;
+    }
+  | { kind: "unbuildable"; seat: number; promptId: FifoPromptId; error: string };
+
+// @sync-with: crates/draft-wasm/src/lib.rs
+/**
+ * One LLM seat's reply, bound to the prompt its request carried. It names no
+ * seat: the seat is the prompt's. `reply` is `null` when no reply came back.
+ */
+export interface LocalFifoLlmPickResolution {
+  promptId: FifoPromptId;
+  reply: { fingerprint: string; provider: string; status: number; body: string } | null;
 }
 
 /**
@@ -1493,6 +1527,50 @@ export class DraftEngineOperationLease {
   /** Let the engine make the local human's selection on `promptId` at `nowMs`. */
   localFifoAutoSelect(owner: LocalFifoOwner, promptId: FifoPromptId, nowMs: number): DraftPlayerView {
     return this.wasm.local_fifo_auto_select(owner, JSON.stringify(promptId), BigInt(nowMs)) as DraftPlayerView;
+  }
+
+  /** The local draft's current view: seat 0's projection. */
+  localFifoView(owner: LocalFifoOwner): DraftPlayerView {
+    return this.wasm.local_fifo_view(owner) as DraftPlayerView;
+  }
+
+  /** Declare whether the bot seats are LLM drafters at `nowMs`; the engine runs the bots it leaves to itself. */
+  localFifoSetLlmDrafting(
+    owner: LocalFifoOwner,
+    drafting: LocalFifoLlmDrafting,
+    nowMs: number,
+  ): DraftPlayerView {
+    return this.wasm.local_fifo_set_llm_drafting(
+      owner,
+      JSON.stringify(drafting),
+      BigInt(nowMs),
+    ) as DraftPlayerView;
+  }
+
+  /** Engine-built LLM requests for every head an LLM seat's drafter is answering. Read-only. */
+  localFifoBuildLlmRequests(
+    owner: LocalFifoOwner,
+    endpointJson: string,
+    setNames: Record<string, string>,
+  ): LocalFifoLlmPickRequest[] {
+    return this.wasm.local_fifo_build_llm_requests(
+      owner,
+      endpointJson,
+      JSON.stringify(setNames),
+    ) as LocalFifoLlmPickRequest[];
+  }
+
+  /** Hand one LLM seat's reply to the engine at `nowMs`; the engine uses it or falls back for that seat. */
+  localFifoResolveLlmPick(
+    owner: LocalFifoOwner,
+    resolution: LocalFifoLlmPickResolution,
+    nowMs: number,
+  ): { view: DraftPlayerView; llmOutcome: LlmDraftOutcome } {
+    return this.wasm.local_fifo_resolve_llm_pick(
+      owner,
+      JSON.stringify(resolution),
+      BigInt(nowMs),
+    ) as { view: DraftPlayerView; llmOutcome: LlmDraftOutcome };
   }
 
   localFifoSubmitDeck(

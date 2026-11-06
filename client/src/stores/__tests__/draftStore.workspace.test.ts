@@ -71,6 +71,10 @@ const wasm = vi.hoisted(() => ({
   local_fifo_bot_deck: vi.fn(),
   local_fifo_booster_pack_pool_for_game: vi.fn<(_owner: number) => string[] | null>(() => null),
   export_local_fifo_session: vi.fn((_owner: number) => "fifo-export"),
+  local_fifo_set_llm_drafting: vi.fn(),
+  local_fifo_build_llm_requests: vi.fn(),
+  local_fifo_resolve_llm_pick: vi.fn(),
+  local_fifo_view: vi.fn(),
 }));
 
 const persistence = vi.hoisted(() => ({
@@ -307,7 +311,8 @@ function fifoView(options: {
 
 /**
  * Resumes a saved record that declares the local FIFO session, at the pinned
- * time: the engine's local import answers `{ owner, view }`.
+ * time: the engine's local import answers `{ owner, view }`, and the resume's
+ * LLM drafting declaration answers that same view.
  */
 async function resumeFifo(options: {
   view?: DraftPlayerView;
@@ -331,7 +336,9 @@ async function resumeFifo(options: {
   });
   const importError = options.importError;
   if (importError === undefined) {
-    wasm.import_local_fifo_session.mockReturnValue({ owner: options.owner ?? 7, view: options.view ?? fifoView() });
+    const resumed = options.view ?? fifoView();
+    wasm.import_local_fifo_session.mockReturnValue({ owner: options.owner ?? 7, view: resumed });
+    wasm.local_fifo_set_llm_drafting.mockReturnValue(resumed);
   } else {
     wasm.import_local_fifo_session.mockImplementation(() => { throw importError; });
   }
@@ -3971,20 +3978,24 @@ describe("draft store workspace authority", () => {
       expect(localFifoSelection(0)).toMatchObject({ prompt_id: { generation: 5 } });
     });
 
-    it("takes_no_legacy_llm_round_on_a_fifo_session", async () => {
+    it("takes_no_barrier_llm_round_on_a_fifo_session", async () => {
       useLlmStore.setState({ draftEnabled: true });
       await start();
       wasm.submit_pick.mockReturnValue(view([card("legacy-pick")]));
       await expect(useDraftStore.getState().pickCard("legacy-pick")).resolves.toEqual({ status: "acknowledged" });
       expect(loadProviderCatalog).toHaveBeenCalledOnce();
-      vi.mocked(loadProviderCatalog).mockClear();
+      wasm.submit_pick.mockClear();
 
       await resumeFifo({ view: fifoView({ currentPack: [card("pk-a"), card("pk-b"), card("pk-c")] }) });
+      // The catalog offers no usable profile, so the bot seats stay the engine's.
+      expect(wasm.local_fifo_set_llm_drafting).toHaveBeenCalledExactlyOnceWith(
+        7, JSON.stringify("EngineBots"), 1_700_000_000_000n,
+      );
       wasm.local_fifo_select.mockReturnValue(fifoView({ pool: [card("pk-a")], promptGeneration: 4 }));
       await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
 
-      expect(loadProviderCatalog).not.toHaveBeenCalled();
       expect(wasm.local_fifo_select).toHaveBeenCalledOnce();
+      expect(wasm.submit_pick).not.toHaveBeenCalled();
       expect(useDraftStore.getState().awaitingDrafters).toBe(false);
     });
 
