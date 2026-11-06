@@ -6962,6 +6962,9 @@ fn take_route(
     if proposal.period.is_empty() {
         return TakeRoute::Ring;
     }
+    // CR 732.2c: a net-decreasing resource bounds the counting replay and is performed here.
+    // Refunded payments can instead leave the reserve unchanged while advancing its paid
+    // journal, so an unbounded certificate still needs the observed-cost check below.
     if n == 0
         || proposal.shortened_by.is_some()
         || !state.stack.is_empty()
@@ -6973,6 +6976,17 @@ fn take_route(
     // Every accept-time derivation below reads this one driven cycle.
     let frames = drive_one_period_frames(state, &proposal.period, proposal.proposer);
     if adds_restricted_mana(frames.as_ref(), proposal.proposer) || marks_damage(frames.as_ref()) {
+        return TakeRoute::Replay;
+    }
+    // CR 601.2f + CR 107.14 + CR 732.2c: the mark materializes token/counter/life growth but
+    // advances no per-turn journal, so a period that MOVES a journal a live cost modifier
+    // prices on (Blaster Hulk's `EnergyPaidOrLostThisTurn`) would leave a later cast reading a
+    // cost the period already paid for. Perform the period instead. The authority is the same
+    // period-tied one the recurrence gate uses, so a journal NO live modifier reads stays free
+    // to mark — a drain loop's `life_gained_this_turn` is not a cost input on most boards.
+    if frames.as_ref().is_some_and(|(before, after)| {
+        crate::analysis::resource::cost_modifier_reads_changed_projected_resource(before, after)
+    }) {
         return TakeRoute::Replay;
     }
     let growth = PeriodGrowth::derive(frames.as_ref(), proposal.proposer);
@@ -12324,6 +12338,7 @@ fn apply_action(
             }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::DigBottomOrder { .. }
     ) && !ripple_resolution_cast_in_flight(state)
     {
         state.revealed_cards.clear();
@@ -13335,22 +13350,22 @@ fn apply_non_priority_pass_action(
                     Some((permission_index, cleanup))
                 }
             };
-            // CR 701.18b + CR 712.12: under a Play instruction the back face
-            // of a spell//land modal card is a land face. Electing it plays
-            // the land during resolution instead of casting, so no face
-            // mutation happens here; the land-face completion elects the face
-            // itself. A back face whose land play is not admissible falls
-            // through to the cast path below, which rejects it and restores
-            // the object exactly as today.
-            let land_face = back_face
-                && resolution_cleanup.as_ref().is_some_and(|(_, cleanup)| {
-                    casting::resolution_land_face_admission(
-                        state,
-                        *player,
-                        *object_id,
-                        &cleanup.face_policy,
-                    )
-                });
+            // CR 701.18b + CR 712.12: under a Play instruction a land face of a
+            // modal card — the back face of a spell//land card, or either face
+            // of a land//land card — is played during resolution instead of
+            // cast, so no face mutation happens here; the land-face completion
+            // elects the face itself. A face whose land play is not admissible
+            // falls through to the cast path below, which rejects it and
+            // restores the object exactly as today.
+            let land_face = resolution_cleanup.as_ref().is_some_and(|(_, cleanup)| {
+                casting::resolution_land_face_choice_admission(
+                    state,
+                    *player,
+                    *object_id,
+                    &cleanup.face_policy,
+                    casting::ModalCardFace::from_back_face(back_face),
+                )
+            });
             match resolution_cleanup {
                 Some((permission_index, _)) if land_face => {
                     crate::game::engine_resolution_choices::complete_resolution_land_face_choice(
@@ -13359,6 +13374,7 @@ fn apply_non_priority_pass_action(
                         *object_id,
                         *card_id,
                         permission_index,
+                        casting::ModalCardFace::from_back_face(back_face),
                         &mut events,
                     )?
                 }
@@ -16988,6 +17004,20 @@ fn apply_non_priority_pass_action(
             let waiting_for = state.waiting_for.clone();
             engine_stack::handle_multi_target_selection(state, waiting_for, &selected, &mut events)?
         }
+        // CR 702.106a / CR 702.106f: Secret pregame agenda names.
+        (
+            WaitingFor::SecretAgendaChoice {
+                player, object_id, ..
+            },
+            GameAction::ChooseSecretAgendaNames { names },
+        ) => super::conspiracy::handle_secret_agenda_names(
+            state,
+            *player,
+            *object_id,
+            names,
+            &mut events,
+        )
+        .map_err(EngineError::InvalidAction)?,
         // CR 702.139a: Pre-game companion reveal
         (WaitingFor::CompanionReveal { player, .. }, GameAction::DeclareCompanion { choice }) => {
             super::companion::handle_declare_companion(state, *player, choice, &mut events)
@@ -19188,10 +19218,10 @@ fn elect_modal_land_back_face(obj: &mut crate::game::game_object::GameObject) {
 }
 
 /// CR 712.12 + CR 305.2a + CR 305.2b + CR 305.3 + CR 101.2: whether `player` may play the
-/// land back face of the spell//land modal double-faced card `object_id` while
-/// an instructing ability resolves. The object's front face is not a land
-/// (CR 712.8a: outside the battlefield and stack it has only its front face's
-/// characteristics) and its back face is a modal land face. Legality is the
+/// land back face of the modal double-faced card `object_id` — a spell//land
+/// card or a land//land card — while an instructing ability resolves. Its back
+/// face is a modal land face (CR 712.8a: outside the battlefield and stack the
+/// object has only its front face's characteristics). Legality is the
 /// resolution-time land-play authority ([`resolution_land_play_is_legal`]:
 /// turn, prohibitions, allowance) evaluated against the elected land face, on
 /// a projected clone so the real object is not mutated.
@@ -19200,23 +19230,26 @@ pub(crate) fn resolution_back_land_face_play_is_legal(
     player: PlayerId,
     object_id: ObjectId,
 ) -> bool {
-    let Some(obj) = state.objects.get(&object_id) else {
-        return false;
-    };
-    if obj
-        .card_types
-        .core_types
-        .contains(&crate::types::card_type::CoreType::Land)
-        || !modal_land_face_election_available(obj)
-    {
-        return false;
+    project_modal_land_back_face(state, object_id)
+        .is_some_and(|projected| resolution_land_play_is_legal(&projected, player, object_id))
+}
+
+/// CR 712.12: a clone of `state` in which `object_id` presents its elected land
+/// back face — the face that would be played — or `None` when the card has no
+/// modal land back face. Only the face characteristics change; the card's
+/// owner, zone and exile links are untouched, so a filter read on the
+/// projection judges the played face's characteristics and the card's
+/// membership together. The real object is not mutated.
+pub(crate) fn project_modal_land_back_face(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<GameState> {
+    if !modal_land_face_election_available(state.objects.get(&object_id)?) {
+        return None;
     }
     let mut projected = state.clone();
-    let Some(projected_obj) = projected.objects.get_mut(&object_id) else {
-        return false;
-    };
-    elect_modal_land_back_face(projected_obj);
-    resolution_land_play_is_legal(&projected, player, object_id)
+    elect_modal_land_back_face(projected.objects.get_mut(&object_id)?);
+    Some(projected)
 }
 
 /// CR 701.18b + CR 712.12 + CR 305.2a + CR 116.2a: play the land back face of
@@ -19256,16 +19289,18 @@ pub(crate) fn play_land_face_during_resolution(
 /// CR 305.3 "ignore any part of an effect that instructs a player to do so":
 /// nothing happens and nothing is counted.
 ///
-/// No CR 712.12 face prompt is opened here: a land//land modal card bound
-/// outside the graveyard never reaches here from a Play instruction —
-/// `cast_from_zone::resolution_play_route` keeps it on the lingering grant,
-/// whose PlayLand authority (its front face is a Land) opens `ModalFaceChoice`.
-/// A spell//land MDFC never reaches here either: it takes the resolution-owned
-/// face election (`ResolutionPlayRoute::ElectFace`), whose land face is played
-/// by [`play_land_face_during_resolution`]. The `CastFromZone` graveyard route
-/// is excluded from the land//land fallback because base takes the immediate
-/// graveyard route there and never lingers; a graveyard land//land plays its
-/// front face (no printed carrier; its CR 712.12 election is a follow-up).
+/// No CR 712.12 face prompt is opened here: the face, when there is one to
+/// elect, was elected before this is called. A land//land modal card reaches
+/// here by its FRONT face only after the resolution-owned election
+/// (`casting::initiate_resolution_election` / `ModalFaceChoice`) chose it; its
+/// back face, and a spell//land card's land face, are played by
+/// [`play_land_face_during_resolution`]. On the single-card Play route
+/// `cast_from_zone::resolution_play_route` keeps a land//land card outside the
+/// graveyard on the lingering grant, whose PlayLand authority opens
+/// `ModalFaceChoice`; the `CastFromZone` graveyard route is excluded from that
+/// fallback because base takes the immediate graveyard route there and never
+/// lingers, so a graveyard land//land plays its front face (no printed carrier;
+/// moving that route onto the election is a follow-up).
 pub(crate) fn play_land_during_resolution(
     state: &mut GameState,
     player: PlayerId,
@@ -21056,12 +21091,10 @@ pub fn start_game_with_starting_player(
     // If players have cards in their libraries, start mulligan flow
     let has_libraries = state.players.iter().any(|p| !p.library.is_empty());
     let waiting_for = if has_libraries {
-        // CR 702.139a: Check for eligible companions before mulligans.
-        if let Some(companion_wf) = super::companion::check_all_companion_reveals(state) {
-            companion_wf
-        } else {
-            mulligan::start_mulligan(state, &mut events)
-        }
+        // CR 103.2b + CR 103.2e: companion reveals come before conspiracies
+        // enter the command zone and their hidden-agenda names are chosen;
+        // mulligans follow both.
+        super::conspiracy::begin_pregame(state, &mut events)
     } else {
         // No cards to mulligan with, skip straight to game
         crate::game::planechase::reveal_starting_plane(state);

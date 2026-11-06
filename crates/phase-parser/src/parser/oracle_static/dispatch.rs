@@ -940,6 +940,16 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 606.3 + CR 304.5: "You may activate [the] loyalty abilities of
+    // <subject> [on any player's turn] any time you could cast an instant"
+    // (Teferi, Master of Time / Teferi's Talent's emblem). Sibling of the
+    // conditional timing permission above, with the "of <subject>" axis the
+    // limit static below shares; the three shapes are pairwise disjoint
+    // (distinct tails), so order among them is load-free.
+    if let Some(def) = parse_loyalty_timing_permission_of_subject(&tp, &text) {
+        return Some(def);
+    }
+
     if let Some(def) = parse_tagged_ability_activation_timing_permission(&tp, &text) {
         return Some(def);
     }

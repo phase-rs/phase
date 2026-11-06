@@ -2285,6 +2285,11 @@ fn attached_to_host_filter<'a>(
         TargetFilter::ParentTarget => {
             let mut produced_referent = false;
             if let Some(ability) = source.ability {
+                // CR 608.2b: a bound empty host is not an unassigned event
+                // reference, even when no target or creation pin survived.
+                if ability.has_authoritative_empty_binding() {
+                    return false;
+                }
                 if !ability.target_incarnations.is_empty() {
                     // Tier 1 — the creation-time snapshot. Authoritative even
                     // when stale (CR 603.7c + CR 400.7): no event-tier fallback.
@@ -2623,7 +2628,7 @@ pub(crate) fn quantity_expr_contains_filter_prop(
 ) -> bool {
     quantity_expr_grammar_any(expr, &|node| match node {
         FilterGrammarNode::Prop(prop) => predicate(prop),
-        FilterGrammarNode::Filter(_) => false,
+        FilterGrammarNode::Filter(_) | FilterGrammarNode::Player(_) => false,
     })
 }
 
@@ -2686,11 +2691,12 @@ pub(crate) fn quantity_ref_operands_contain(
 }
 
 /// The operand-closed entries' visitor: a `TargetFilter` node is tested
-/// against `leaf`; a `FilterProp` node is only a step of the walk.
+/// against `leaf`; a `FilterProp` or `PlayerFilter` node is only a step of the
+/// walk.
 fn operand_leaf(node: FilterGrammarNode<'_>, leaf: &dyn Fn(&TargetFilter) -> bool) -> bool {
     match node {
         FilterGrammarNode::Filter(filter) => leaf(filter),
-        FilterGrammarNode::Prop(_) => false,
+        FilterGrammarNode::Prop(_) | FilterGrammarNode::Player(_) => false,
     }
 }
 
@@ -3487,6 +3493,7 @@ fn quantity_ref_contains_input(
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -7495,11 +7502,10 @@ fn filter_inner_for_object(
                 triggering_object,
                 granting_object,
             );
-            let chosen_name = source_ctx.chosen_attributes.iter().find_map(|a| match a {
-                ChosenAttribute::CardName(n) => Some(n.as_str()),
-                _ => None,
-            });
-            chosen_name.is_some_and(|name| card_names_match(&obj.name, name))
+            source_ctx.chosen_attributes.iter().any(|a| match a {
+                ChosenAttribute::CardName(n) => card_names_match(&obj.name, n),
+                _ => false,
+            })
         }
         // CR 609.7a: "the chosen source" — match the ObjectId selected by
         // the prior damage-source choice while its continuation resolves.
@@ -7844,11 +7850,10 @@ fn zone_change_filter_inner(
                 triggering_object,
                 ctx.granting_object,
             );
-            let chosen_name = source_ctx.chosen_attributes.iter().find_map(|a| match a {
-                    ChosenAttribute::CardName(n) => Some(n.as_str()),
-                    _ => None,
-            });
-            chosen_name.is_some_and(|name| card_names_match(&record.name, name))
+            source_ctx.chosen_attributes.iter().any(|a| match a {
+                ChosenAttribute::CardName(n) => card_names_match(&record.name, n),
+                _ => false,
+            })
         }
         // CR 607.2d + CR 603.10a + CR 400.7: the remembered object on the
         // leaves-the-battlefield look-back path. The candidate occurrence is the
@@ -9067,8 +9072,8 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::SameNameAsParentTarget
         | FilterProp::SameNameAsExiledBySource
         | FilterProp::NameMatchesAnyPermanent { .. }
-        // CR 903.3d: Commander designation is meaningful for permanents on the
-        // battlefield. The spell-cast record path is not currently plumbed with
+        // CR 903.3d: An effect about casting a commander refers to a spell that is
+        // a commander, but the spell-cast record path is not currently plumbed with
         // commander identity — fail closed until a "cast a commander" use-case
         // requires it (CR 903.8 commander-tax tracking lives elsewhere).
         | FilterProp::IsCommander
@@ -10338,24 +10343,32 @@ fn matches_filter_prop(
         // SameName: matches objects with the same name as the tracked card from context.
         // At runtime, this checks against the source object's name (the event context card).
         FilterProp::SameName => obj.name == source.lki.name,
-        // CR 201.2: Match objects whose name equals the resolving ability's
-        // first object target (the parent target captured by the chained sub-ability).
-        // Falls back to the LKI cache when the targeted object has already left its zone
-        // (e.g., the seed was just exiled by the preceding effect).
+        // CR 201.2 + CR 201.2a: Match objects whose name equals the resolving
+        // ability's first object target (the target captured by the chained
+        // sub-ability). The reference is the move-time name when an earlier
+        // instruction of this ability moved that object. CR 201.2a: a face-down
+        // parent target has no name (CR 708.2a), so it shares its name with
+        // nothing — not with another face-down permanent, and not with itself —
+        // which is what stops the "target creature and all other creatures with
+        // the same name" class (Bile Blight) and the destroy/exile-first class
+        // (Maelstrom Pulse, Deputy of Detention) from sweeping every nameless
+        // permanent. Names are compared through `names_shared`, the single
+        // CR 201.2a name-equality rule.
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
-            .is_some_and(|name| obj.name.eq_ignore_ascii_case(&name)),
+            .is_some_and(|name| names_shared(&obj.name, &name)),
         FilterProp::SameNameAsExiledBySource => {
             crate::game::exile_links::live_links_for_source(state, source.id).any(|link| {
                 state
                     .objects
                     .get(&link.exiled_id)
-                    .is_some_and(|exiled| obj.name.eq_ignore_ascii_case(&exiled.name))
+                    .is_some_and(|exiled| names_shared(&obj.name, &exiled.name))
             })
         }
-        // CR 201.2 + CR 201.2a: Matches if `obj.name` equals the name of any
-        // permanent on the battlefield (optionally narrowed by controller).
-        // Name comparison is case-insensitive per `FilterProp::Named` /
-        // `FilterProp::SameName` conventions.
+        // CR 201.2 + CR 201.2a: Matches if the object's name equals the name of
+        // any permanent on the battlefield (optionally narrowed by controller).
+        // Name equality is `names_shared` — the shared CR 201.2a rule — so an
+        // object with no name (a face-down permanent, CR 708.2a) matches nothing,
+        // "including another object with no name".
         FilterProp::NameMatchesAnyPermanent { controller } => {
             let controller_pid = controller
                 .as_ref()
@@ -10407,7 +10420,7 @@ fn matches_filter_prop(
                     (Some(_), None) => false,
                     (None, _) => true,
                 };
-                controller_ok && perm.name.eq_ignore_ascii_case(&obj.name)
+                controller_ok && names_shared(&perm.name, &obj.name)
             })
         }
         FilterProp::InZone { zone } => obj.zone == *zone,
@@ -11319,10 +11332,12 @@ fn zone_change_record_matches_property(
         FilterProp::PowerGTSource => record.power.unwrap_or(0) > source.lki.power.unwrap_or(0),
         // CR 201.2: Same-name match against the tracked source object.
         FilterProp::SameName => source.lki.name.eq_ignore_ascii_case(&record.name),
-        // CR 201.2: Same-name match against the resolving ability's first object
-        // target (parent target). Mirrors the live-object evaluator.
+        // CR 201.2 + CR 201.2a: Same-name match against the resolving ability's
+        // first object target (parent target). Mirrors the live-object evaluator,
+        // including its CR 201.2a reading: a nameless record (a face-down
+        // permanent that departed, CR 708.2a) shares no name with anything.
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
-            .is_some_and(|name| record.name.eq_ignore_ascii_case(&name)),
+            .is_some_and(|name| names_shared(&record.name, &name)),
         // CR 608.2c + CR 400.7j + CR 608.2h: a departed member judged
         // against the resolving ability's selected target reads the same
         // reference the live door reads — `parent_target_shared_quality_values`,
@@ -11355,12 +11370,15 @@ fn zone_change_record_matches_property(
                 SharedQualityRelation::DoesNotShare => !shares,
             }
         }
+        // CR 201.2 + CR 201.2a: Same-name match against the object this source
+        // exiled. Mirrors the live-object evaluator, including its CR 201.2a
+        // reading: a nameless record or a nameless reference shares no name.
         FilterProp::SameNameAsExiledBySource => {
             crate::game::exile_links::live_links_for_source(state, source.id).any(|link| {
                 state
                     .objects
                     .get(&link.exiled_id)
-                    .is_some_and(|exiled| record.name.eq_ignore_ascii_case(&exiled.name))
+                    .is_some_and(|exiled| names_shared(&record.name, &exiled.name))
             })
         }
 
@@ -11858,19 +11876,51 @@ struct SharedQualitySource<'a> {
     keywords: &'a [Keyword],
 }
 
+/// CR 201.2a: the ONE nameless test. An object with no name — a face-down
+/// permanent carries `""` (CR 708.2a) — names nothing: "An object with no name
+/// doesn't have the same name as any other object, including another object
+/// with no name." Every name comparison, value-set or pairwise, reads this one
+/// function, so the rule has exactly one home. `FilterProp::SameName` still
+/// compares raw names (see its arm).
+fn name_value(name: &str) -> Option<&str> {
+    (!name.is_empty()).then_some(name)
+}
+
+/// CR 201.2a: the name value set of a single name. A nameless object yields the
+/// EMPTY set (via `name_value`, the single nameless test), which
+/// `quality_sets_overlap` can never intersect; a named object yields its
+/// ASCII-folded name. Delegating to `name_value` keeps the value-set answer
+/// identical to `names_shared`.
+fn shared_name_values(name: &str) -> HashSet<String> {
+    match name_value(name) {
+        Some(name) => HashSet::from([name.to_ascii_lowercase()]),
+        None => HashSet::new(),
+    }
+}
+
+/// CR 201.2a: the one same-name test for the object-to-object name predicates
+/// (`NameMatchesAnyPermanent`, `SameNameAsParentTarget`, `SameNameAsExiledBySource`),
+/// live and zone-change-record doors. Every call site is per-candidate inside a
+/// scan, so the pairwise comparator allocates nothing. It matches on
+/// `name_value`, the single nameless test, and folds ASCII-only on both sides,
+/// so it is provably identical to the `shared_name_values` answer that
+/// `FilterProp::SharesQuality` (#10141) and `FilterProp::DifferentNameFrom`
+/// (#10142) use. CR 201.2a "at least one name in common" keeps self-equality
+/// for a named object.
+fn names_shared(left: &str, right: &str) -> bool {
+    match (name_value(left), name_value(right)) {
+        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+        _ => false,
+    }
+}
+
 fn shared_quality_values(
     source: SharedQualitySource<'_>,
     quality: &SharedQuality,
     all_creature_types: &[String],
 ) -> HashSet<String> {
     match quality {
-        SharedQuality::Name => {
-            if source.name.is_empty() {
-                HashSet::new()
-            } else {
-                HashSet::from([source.name.to_ascii_lowercase()])
-            }
-        }
+        SharedQuality::Name => shared_name_values(source.name),
         SharedQuality::ManaValue => HashSet::from([source.mana_value.to_string()]),
         SharedQuality::Power => source
             .power
@@ -12903,16 +12953,17 @@ mod tests {
         filter_contains_filter_prop, filter_prop_contains, player_filter_contains,
         retarget_chosen_card_type_to_creature_type, AbilityDefinition, AbilityKind,
         AggregateFunction, AttachmentKind, ChosenAttribute, CombatHistoryScope, Comparator,
-        ControllerRef, CostPaidObjectSnapshot, DamageKindFilter, Effect, FilterProp,
-        ManaContribution, ManaProduction, PlayerScope, QuantityExpr, QuantityRef,
-        ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
-        ThisWayCause, TriggerDefinition, TypeFilter, TypedFilter,
+        ControllerRef, CostPaidObjectSnapshot, DamageKindFilter, Effect, FaceDownBody,
+        FaceDownCause, FaceDownProfile, FilterProp, ManaContribution, ManaProduction, PlayerScope,
+        QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, StaticDefinition,
+        TargetFilter, TargetRef, ThisWayCause, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        AttachmentSnapshot, LKISnapshot, StackEntry, StackEntryKind, ZoneChangeRecord,
+        AttachmentSnapshot, ExileLink, ExileLinkKind, LKISnapshot, StackEntry, StackEntryKind,
+        ZoneChangeRecord,
     };
     use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::keywords::Keyword;
@@ -19371,6 +19422,566 @@ mod tests {
         assert!(
             !matches_target_filter(&state, nameless, &from_artifacts, source),
             "CR 201.2c: a nameless object never has a different name, even vs. no objects"
+        );
+    }
+
+    /// Build the production face-down shape: snapshot the real face into
+    /// `back_face`, apply the CR 708.2a characteristics, then stash it. A fixture
+    /// that only applies the profile leaves an object production never has — one
+    /// that stays nameless even after it leaves the battlefield.
+    fn apply_face_down_with_stash(
+        state: &mut GameState,
+        id: ObjectId,
+        profile: &crate::types::ability::FaceDownProfile,
+    ) {
+        let stash = crate::game::printed_cards::snapshot_object_base_face(&state.objects[&id]);
+        crate::game::morph::apply_face_down_creature_characteristics(
+            state.objects.get_mut(&id).unwrap(),
+            profile,
+        );
+        state.objects.get_mut(&id).unwrap().back_face = Some(stash);
+    }
+
+    /// CR 201.2 + CR 201.2a + CR 708.2a: `FilterProp::NameMatchesAnyPermanent` —
+    /// "a permanent … has the same name as" (Mitotic Manipulation: "you may put
+    /// a card onto the battlefield if it has the same name as a permanent") —
+    /// must not treat "no name" as a name. A face-down permanent has no name
+    /// (CR 708.2a), so it has the same name as nothing, "including another
+    /// object with no name" (CR 201.2a) — not even itself.
+    ///
+    /// Provenance: no printed card applies this filter to a nameless object
+    /// today — the only producer (`DigFromAmong`'s continuation) evaluates
+    /// library cards — so this row is the filter-level boundary of the defect,
+    /// not a card-level reproduction.
+    ///
+    /// Failure shape before the fix (`perm.name.eq_ignore_ascii_case(&obj.name)`):
+    /// R1 and R1b matched, because `"".eq_ignore_ascii_case("")` is `true`.
+    #[test]
+    fn name_matches_any_permanent_refuses_a_nameless_object() {
+        let mut state = setup();
+        let face_down_a = add_creature(&mut state, PlayerId(0), "Hidden A");
+        apply_face_down_with_stash(&mut state, face_down_a, &FaceDownProfile::vanilla_2_2());
+        let face_down_b = add_creature(&mut state, PlayerId(1), "Hidden B");
+        apply_face_down_with_stash(&mut state, face_down_b, &FaceDownProfile::vanilla_2_2());
+        let elves = add_creature(&mut state, PlayerId(0), "Llanowar Elves");
+        add_creature(&mut state, PlayerId(0), "Grizzly Bears");
+        let forest = add_creature(&mut state, PlayerId(0), "Forest");
+        let island = add_creature(&mut state, PlayerId(1), "Island");
+        // Reach guard: both face-down fixtures really are nameless.
+        assert_eq!(
+            state.objects[&face_down_a].name, "",
+            "face-down is nameless"
+        );
+        assert_eq!(
+            state.objects[&face_down_b].name, "",
+            "face-down is nameless"
+        );
+
+        let any_permanent = |controller: Option<ControllerRef>| {
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .properties(vec![FilterProp::NameMatchesAnyPermanent { controller }]),
+            )
+        };
+        let unscoped = any_permanent(None);
+        let mine = any_permanent(Some(ControllerRef::You));
+
+        let mut library_card = |card_id: u64, name: &str| {
+            create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Library,
+            )
+        };
+        let bears_upper = library_card(101, "GRIZZLY BEARS");
+        let wurm = library_card(102, "Craw Wurm");
+
+        // R1 (CR 201.2a "including itself"): the face-down permanent is on the
+        // battlefield pool, but its nameless name matches nothing — not itself.
+        assert!(
+            !matches_target_filter(&state, face_down_a, &unscoped, face_down_a),
+            "CR 201.2a: a nameless object has the same name as nothing, not even itself"
+        );
+        // R1b (CR 201.2a "including another object with no name"): a second
+        // nameless permanent is not a name match either.
+        assert!(
+            !matches_target_filter(&state, face_down_b, &unscoped, face_down_a),
+            "CR 201.2a: two nameless objects do not share a name"
+        );
+        // R2 reach guard: a named permanent still matches itself, so R1/R1b are
+        // not passing because the pool scan is dead.
+        assert!(
+            matches_target_filter(&state, elves, &unscoped, elves),
+            "CR 201.2a: a named object has its own name in common with itself"
+        );
+
+        // R3 preservation: the comparison still folds ASCII case.
+        assert!(
+            matches_target_filter(&state, bears_upper, &unscoped, elves),
+            "names differing only in case are the same name"
+        );
+        // R4 negative: a different name does not match.
+        assert!(
+            !matches_target_filter(&state, wurm, &unscoped, elves),
+            "a card with a name unlike any permanent matches nothing"
+        );
+        // R5: `controller` narrowing is untouched — P1's "Island" is outside the
+        // `You` pool and inside the unscoped one.
+        let as_p0 = FilterContext::from_source_with_controller(elves, PlayerId(0));
+        assert!(
+            super::matches_target_filter(&state, forest, &mine, &as_p0),
+            "CR 109.5: \"you\" is the source's controller; P0's Forest is in the pool"
+        );
+        assert!(
+            !super::matches_target_filter(&state, island, &mine, &as_p0),
+            "CR 109.5: P1's Island is outside the `You` pool"
+        );
+        assert!(
+            super::matches_target_filter(&state, island, &unscoped, &as_p0),
+            "unqualified \"a permanent\" spans both players"
+        );
+
+        // R7 (CR 201.2a "any other object"): a nameless candidate never matches a
+        // NAMED pool, scoped or not — green before and after. Its own state keeps
+        // the pool free of nameless permanents, which is the reading this row
+        // pins (the face-down pool is R1/R1b's).
+        let mut named_only = setup();
+        let named_elves = add_creature(&mut named_only, PlayerId(0), "Llanowar Elves");
+        let nameless_card = create_object(
+            &mut named_only,
+            CardId(103),
+            PlayerId(0),
+            String::new(),
+            Zone::Library,
+        );
+        assert_eq!(named_only.objects[&nameless_card].name, "");
+        let named_ctx = FilterContext::from_source_with_controller(named_elves, PlayerId(0));
+        assert!(
+            !matches_target_filter(&named_only, nameless_card, &unscoped, named_elves),
+            "CR 201.2a: a nameless object shares no name with a named permanent"
+        );
+        assert!(
+            !super::matches_target_filter(
+                &named_only,
+                nameless_card,
+                &any_permanent(Some(ControllerRef::You)),
+                &named_ctx,
+            ),
+            "CR 201.2a: same under controller narrowing"
+        );
+        // Reach guard: a named candidate matches the same pool, so the two
+        // negatives above are not a dead scan.
+        let named_card = create_object(
+            &mut named_only,
+            CardId(105),
+            PlayerId(0),
+            "Llanowar Elves".to_string(),
+            Zone::Library,
+        );
+        assert!(
+            matches_target_filter(&named_only, named_card, &unscoped, named_elves),
+            "a named candidate still matches the named pool"
+        );
+
+        // R6: with no permanents at all the pool scan matches nothing — there is
+        // no `obj`-empty early return, the scan itself is the answer.
+        let mut empty = setup();
+        let lone = create_object(
+            &mut empty,
+            CardId(104),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        assert!(
+            !super::matches_target_filter(
+                &empty,
+                lone,
+                &any_permanent(None),
+                &FilterContext::from_source(&empty, lone),
+            ),
+            "an empty battlefield holds no permanent with any name"
+        );
+    }
+
+    /// CR 201.2a: `name_value` is the single nameless test. `names_shared` is
+    /// the allocation-free pairwise comparator built on it, and
+    /// `shared_name_values` delegates to it, so the value-set path
+    /// (`SharedQuality::Name`, `SharesQuality`, `DifferentNameFrom`) and the
+    /// pairwise path give the same answer.
+    #[test]
+    fn names_shared_and_shared_name_values_agree_on_the_nameless_test() {
+        assert!(
+            !names_shared("", ""),
+            "a nameless object shares no name, not even with another nameless one"
+        );
+        assert!(
+            names_shared("Grizzly Bears", "grizzly bears"),
+            "names match ASCII-case-insensitively"
+        );
+        assert!(
+            !names_shared("", "Grizzly Bears"),
+            "a nameless object shares no name with a named one"
+        );
+        assert!(
+            shared_name_values("").is_empty(),
+            "a nameless object's name value set is empty"
+        );
+        assert_eq!(
+            shared_name_values("Grizzly Bears"),
+            HashSet::from(["grizzly bears".to_string()]),
+            "a named object's value set carries its ASCII-folded name"
+        );
+    }
+
+    /// CR 201.2 + CR 201.2a + CR 708.2a: `FilterProp::SameNameAsParentTarget`
+    /// reads the parent target's name through the shared `names_shared` rule at
+    /// both doors. Driving card: **Bile Blight** — "Target creature and all other
+    /// creatures with the same name as that creature get -3/-3 until end of
+    /// turn." The pump never moves the target, so the mass leg reads the target's
+    /// LIVE name, which is `""` for a face-down creature (CR 708.2a).
+    ///
+    /// The destroy/exile-first class (Maelstrom Pulse, Deputy of Detention) takes
+    /// the other rung: its chain walker stamps the parent instruction's
+    /// `ZoneChanged` record onto the sub-ability as `effect_context_object`
+    /// (`effects/mod.rs`), and that record carries the pre-exit name — `""` for a
+    /// face-down permanent. R8b pins that rung: the reference is the move-time
+    /// name even though the departed object's live name was restored to its
+    /// printed name on exit (CR 708.9).
+    ///
+    /// Failure shape before the fix (`eq_ignore_ascii_case` against the
+    /// reference): R8, R8b and R12 matched, because `"".eq_ignore_ascii_case("")`
+    /// is `true`. R13 matched at the record door for the same reason.
+    #[test]
+    fn same_name_as_parent_target_shares_no_name_with_a_nameless_target() {
+        let mut state = setup();
+        let target = add_creature(&mut state, PlayerId(1), "Hidden A");
+        apply_face_down_with_stash(&mut state, target, &FaceDownProfile::vanilla_2_2());
+        let sibling = add_creature(&mut state, PlayerId(1), "Hidden B");
+        apply_face_down_with_stash(&mut state, sibling, &FaceDownProfile::vanilla_2_2());
+        let nameless_other = add_creature(&mut state, PlayerId(0), "Hidden C");
+        apply_face_down_with_stash(&mut state, nameless_other, &FaceDownProfile::vanilla_2_2());
+        let bears = add_creature(&mut state, PlayerId(1), "Grizzly Bears");
+        let bears_twin = add_creature(&mut state, PlayerId(1), "Grizzly Bears");
+        let wurm = add_creature(&mut state, PlayerId(1), "Craw Wurm");
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        assert_eq!(state.objects[&target].name, "", "face-down is nameless");
+        assert_eq!(state.objects[&sibling].name, "", "face-down is nameless");
+
+        let same_name = TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::SameNameAsParentTarget]),
+        );
+        // The Bile Blight / Echoing Courage shape: "target creature and all OTHER
+        // creatures with the same name as that creature".
+        let pump_shape = TargetFilter::And {
+            filters: vec![
+                TypedFilter::creature()
+                    .properties(vec![FilterProp::SameNameAsParentTarget])
+                    .into(),
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::ParentTarget),
+                },
+            ],
+        };
+
+        let ability_targeting = |id: ObjectId| {
+            ResolvedAbility::new(
+                Effect::NoOp,
+                vec![TargetRef::Object(id)],
+                source,
+                PlayerId(0),
+            )
+        };
+        let on_nameless = ability_targeting(target);
+        let on_bears = ability_targeting(bears);
+        let matches = |state: &GameState,
+                       candidate: ObjectId,
+                       filter: &TargetFilter,
+                       ability: &ResolvedAbility| {
+            super::matches_target_filter(
+                state,
+                candidate,
+                filter,
+                &FilterContext::from_ability(ability),
+            )
+        };
+
+        // R8 (live rung): the nameless parent target shares its name with no
+        // other nameless creature, so the mass leg excludes the sibling.
+        assert!(
+            !matches(&state, sibling, &pump_shape, &on_nameless),
+            "CR 201.2a: a nameless parent target names nothing"
+        );
+        // R9 reach guard: the mass leg still matches named same-name siblings.
+        assert!(
+            matches(&state, bears_twin, &pump_shape, &on_bears),
+            "two Grizzly Bears share a name"
+        );
+        // R10 negative: a different name does not match.
+        assert!(
+            !matches(&state, wurm, &pump_shape, &on_bears),
+            "Craw Wurm does not share the parent target's name"
+        );
+        // R11: a nameless candidate never matches a NAMED parent target.
+        assert!(
+            !matches(&state, nameless_other, &pump_shape, &on_bears),
+            "CR 201.2a: a nameless object shares no name with a named permanent"
+        );
+        // R12 (CR 201.2a "including itself"): without `Not{ParentTarget}` the
+        // nameless target asked about itself matches nothing.
+        assert!(
+            !matches(&state, target, &same_name, &on_nameless),
+            "CR 201.2a: a nameless object has not even its own name in common"
+        );
+        // R9b: the real "other" in the pump shape is `Not{ParentTarget}`,
+        // concretized by `resolved_object_filter` — the raw arm is unbound on a
+        // freshly-built ability (`target_incarnations` is empty), so the row must
+        // resolve the announced target first. Runs on the NAMED board: the name
+        // leg is true for both Grizzly Bears, so only the concretization decides.
+        let resolved_pump =
+            crate::game::effects::resolved_object_filter(&state, &on_bears, &pump_shape);
+        assert!(
+            !matches(&state, bears, &resolved_pump, &on_bears),
+            "CR 611.2c: the announced target does not receive the modification twice"
+        );
+        assert!(
+            matches(&state, bears_twin, &resolved_pump, &on_bears),
+            "the concretized mass leg still matches the other same-name creature"
+        );
+
+        // R13–R15: the record door reads the same reference and the same rule.
+        let record_named = |name: &str| ZoneChangeRecord {
+            name: name.to_string(),
+            ..ZoneChangeRecord::test_minimal(target, Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        let on_record = |record: &ZoneChangeRecord, ability: &ResolvedAbility| {
+            zone_change_filter_inner(
+                &state,
+                record,
+                record.from_zone,
+                &same_name,
+                &FilterContext::from_ability(ability),
+            )
+        };
+        // R13: a departed nameless member names nothing.
+        assert!(
+            !on_record(&record_named(""), &on_nameless),
+            "CR 201.2a: a nameless zone-change record shares no name"
+        );
+        // R14 preservation: the record door still folds ASCII case.
+        assert!(
+            on_record(&record_named("GRIZZLY BEARS"), &on_bears),
+            "names differing only in case are the same name"
+        );
+        // R15: a nameless parent target names nothing on the record door either.
+        assert!(
+            !on_record(&record_named("Grizzly Bears"), &on_nameless),
+            "CR 201.2a: a nameless reference matches no named record"
+        );
+
+        // R8b (snapshot rung — the destroy/exile-first chain). A face-down
+        // creature leaves the battlefield: CR 708.9 restores its printed name on
+        // exit, but the zone-change record keeps the pre-exit (nameless) name,
+        // and that is the reference the chained sub-ability receives.
+        let mut departed = setup();
+        let gone = add_creature(&mut departed, PlayerId(1), "Hidden Bear");
+        apply_face_down_with_stash(&mut departed, gone, &FaceDownProfile::vanilla_2_2());
+        let gone_sibling = add_creature(&mut departed, PlayerId(1), "Hidden Twin");
+        apply_face_down_with_stash(&mut departed, gone_sibling, &FaceDownProfile::vanilla_2_2());
+        let restored = add_creature(&mut departed, PlayerId(1), "Hidden Bear");
+        assert_eq!(departed.objects[&gone].name, "", "face-down is nameless");
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut departed, gone, Zone::Graveyard, &mut events);
+        assert_eq!(
+            departed.objects[&gone].name, "Hidden Bear",
+            "CR 708.9: the printed name returns when the permanent leaves"
+        );
+        let moved_name = events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged { record, .. } => Some(record.name.clone()),
+                _ => None,
+            })
+            .expect("the move emits a zone-change record");
+        assert_eq!(
+            moved_name, "",
+            "the zone-change record carries the pre-exit nameless name"
+        );
+
+        let mut snapshot_ability = ResolvedAbility::new(
+            Effect::NoOp,
+            vec![TargetRef::Object(gone)],
+            restored,
+            PlayerId(0),
+        );
+        snapshot_ability.effect_context_object = Some(CostPaidObjectSnapshot {
+            object_id: gone,
+            lki: LKISnapshot {
+                name: String::new(),
+                token_image_ref: None,
+                power: Some(2),
+                toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
+                mana_value: 0,
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                card_types: vec![CoreType::Creature],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: false,
+                is_suspected: false,
+                was_prepared: false,
+                attachments: Vec::new(),
+                intensity: 0,
+            },
+            incarnation: departed.objects[&gone].incarnation,
+        });
+        assert!(
+            !matches(&departed, gone_sibling, &same_name, &snapshot_ability),
+            "CR 201.2a: the nameless move-time reference matches no nameless sibling"
+        );
+        // Reach guard: the live name of the departed object IS "Hidden Bear", so
+        // this second clause would flip to `true` if the resolver read it —
+        // proving the reference really came from the snapshot rung.
+        assert!(
+            !matches(&departed, restored, &same_name, &snapshot_ability),
+            "CR 608.2h: the reference is the move-time name, not the restored live name"
+        );
+    }
+
+    /// CR 201.2 + CR 201.2a: `FilterProp::SameNameAsExiledBySource` — the
+    /// Extraplanar Lens class, "a land with the same name as the exiled card" —
+    /// evaluates through the shared `names_shared` rule at both doors. A nameless
+    /// exiled card has no name, so it names no land, "including another object
+    /// with no name" (CR 201.2a).
+    ///
+    /// Reach: doubly latent. The candidates are battlefield lands, and a nameless
+    /// one exists only through the Yedora "it's a Forest land" profile
+    /// (CR 708.2a sentence 2); the reference is a *linked* exiled object, and no
+    /// printed imprint shape exiles a face-down permanent. The row is therefore a
+    /// unit-level boundary built by pushing the link directly.
+    ///
+    /// Failure shape before the fix: R16 and R18's first half matched, because
+    /// `"".eq_ignore_ascii_case("")` is `true`.
+    #[test]
+    fn same_name_as_exiled_by_source_shares_no_name_without_a_name() {
+        let mut state = setup();
+        let lens = add_creature(&mut state, PlayerId(0), "Extraplanar Lens");
+        let nameless_exiled = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            String::new(),
+            Zone::Exile,
+        );
+        let forest_exiled = create_object(
+            &mut state,
+            CardId(202),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Exile,
+        );
+        for exiled in [nameless_exiled, forest_exiled] {
+            state.exile_links.push(ExileLink {
+                exiled_id: exiled,
+                source_id: lens,
+                kind: ExileLinkKind::TrackedBySource,
+            });
+        }
+
+        let mut land = |card_id: u64, name: &str| {
+            let id = create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+            id
+        };
+        let forest = land(203, "Forest");
+        let island = land(204, "Island");
+        // The Yedora profile: a face-down NON-creature land with no name.
+        let nameless_land = land(205, "Yedora's Forest");
+        apply_face_down_with_stash(
+            &mut state,
+            nameless_land,
+            &FaceDownProfile {
+                power: None,
+                toughness: None,
+                body: FaceDownBody::Noncreature,
+                extra_core_types: vec![CoreType::Land],
+                subtypes: vec!["Forest".to_string()],
+                ward: None,
+                cause: FaceDownCause::Manifest,
+            },
+        );
+        assert_eq!(
+            state.objects[&nameless_land].name, "",
+            "face-down is nameless"
+        );
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::SameNameAsExiledBySource]),
+        );
+
+        // R16: a nameless exiled card names no land — not even the nameless one.
+        assert!(
+            !matches_target_filter(&state, nameless_land, &filter, lens),
+            "CR 201.2a: a nameless exiled card names no land"
+        );
+        // R17 reach guard: the named path still works, and discriminates.
+        assert!(
+            matches_target_filter(&state, forest, &filter, lens),
+            "a land with the same name as the exiled card matches"
+        );
+        assert!(
+            !matches_target_filter(&state, island, &filter, lens),
+            "a differently named land does not match"
+        );
+
+        // R18: the record door reads the same rule.
+        let record_nameless =
+            ZoneChangeRecord::test_minimal(nameless_land, Some(Zone::Battlefield), Zone::Graveyard);
+        assert_eq!(record_nameless.name, "", "the minimal record is nameless");
+        let ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), lens, PlayerId(0));
+        assert!(
+            !zone_change_filter_inner(
+                &state,
+                &record_nameless,
+                record_nameless.from_zone,
+                &filter,
+                &FilterContext::from_ability(&ability),
+            ),
+            "CR 201.2a: a nameless record shares no name with a nameless reference"
+        );
+        let record_forest = ZoneChangeRecord {
+            name: "Forest".to_string(),
+            ..ZoneChangeRecord::test_minimal(forest, Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        assert!(
+            zone_change_filter_inner(
+                &state,
+                &record_forest,
+                record_forest.from_zone,
+                &filter,
+                &FilterContext::from_ability(&ability),
+            ),
+            "a named record still matches its same-named exiled card"
         );
     }
 
@@ -27622,8 +28233,8 @@ mod attached_set_host_filter_tests {
     use crate::game::effects::attach::attach_to;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        filter_prop_contains, AttachmentReferent, Effect, FilterProp, ResolvedAbility,
-        TargetFilter, TypedFilter,
+        filter_prop_contains, AttachmentReferent, ControllerRef, Effect, FilterProp,
+        ParentTargetMissingReason, ResolvedAbility, TargetFilter, TargetReadOrigin, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -27711,6 +28322,115 @@ mod attached_set_host_filter_tests {
 
     fn ability(effect: Effect, targets: Vec<TargetRef>) -> ResolvedAbility {
         ResolvedAbility::new(effect, targets, ObjectId(900), PlayerId(0))
+    }
+
+    // Real cards: no printed card exhibits this shape (All oracle_text for '(all|each)
+    // (auras|equipment|permanents) ...attached to (that creature|it)' (40 hits): announced-host
+    // ones (Blastfire Bolt, Eaten by Spiders, Fires of Mount Doom, Hubris) have a single target;
+    // block-event ones (Corrosive Ooze) have none). Shape: A filter for permanents attached to
+    // 'that creature' under a blockers-declared trigger: unassigned it reads the event's blocked
+    // creature, but an unavailable announcement (own or parent) matches nothing attached to that
+    // host. Nearest printed card: Corrosive Ooze ("Whenever this creature blocks or becomes blocked
+    // by an equipped creature, destroy all Equipment attached to that creature at end of combat.");
+    // Blastfire Bolt ("Blastfire Bolt deals 5 damage to target creature. Destroy all Equipment
+    // attached to that creature.") -- Corrosive Ooze reads Equipment attached to the block-event
+    // creature (fallback case); Blastfire Bolt reads attachments of an announced target that
+    // fizzles whole.
+    #[test]
+    fn unavailable_parent_host_does_not_fall_back_to_the_firing_event() {
+        let mut state = state();
+        let host = creature(&mut state, PlayerId(1), "Event host");
+        let att = aura(&mut state, PlayerId(1), "Attached aura");
+        attach_to(&mut state, att, host);
+        let source = creature(&mut state, PlayerId(0), "Trigger source");
+        state.current_trigger_event = Some(GameEvent::BlockersDeclared {
+            assignments: vec![(source, host)],
+        });
+        let filter = host_filter(TargetFilter::ParentTarget);
+        let mut ability = ability(destroyed(), vec![]);
+        ability.source_id = source;
+        assert!(
+            matches_target_filter(&state, att, &filter, &FilterContext::from_ability(&ability),),
+            "unassigned reference still reads the event host"
+        );
+        for origin in [
+            TargetReadOrigin::OwnAnnouncement,
+            TargetReadOrigin::ParentAnnouncement,
+        ] {
+            ability.parent_target_missing_reason =
+                Some(ParentTargetMissingReason::IllegalAnnouncement { origin });
+            assert!(
+                !matches_target_filter(
+                    &state,
+                    att,
+                    &filter,
+                    &FilterContext::from_ability(&ability),
+                ),
+                "unavailable announcement cannot name the event host: {origin:?}"
+            );
+        }
+    }
+
+    // Real cards: no printed card exhibits this shape (Same census as typed_parent_controller test:
+    // 12 parsed ParentTargetController creature filters, all on spells or ETB targets without an
+    // untap/event referent; 0 ParentTargetOwner). Shape: A creature filter 'that player
+    // controls/owns' keyed on the parent target's controller or owner: unassigned it falls back to
+    // the untap event's object, unavailable it matches nothing, populated it matches. Nearest
+    // printed card: Mutiny ("Target creature an opponent controls deals damage equal to its power
+    // to another target creature that player controls."); Declaration in Stone ("Exile target
+    // creature and all other creatures its controller controls with the same name as that creature.
+    // That player investigates for each nontoken creature exiled this way.") -- Both read 'that
+    // player' from the first target's controller; neither resolves under a trigger event that could
+    // supply a wrong fallback.
+    #[test]
+    fn unavailable_parent_possessor_matches_no_players_objects() {
+        let mut state = state();
+        let candidate = creature(&mut state, PlayerId(1), "Event player's creature");
+        state.current_trigger_event = Some(GameEvent::PermanentUntapped {
+            object_id: candidate,
+        });
+        for controller in [
+            ControllerRef::ParentTargetController,
+            ControllerRef::ParentTargetOwner,
+        ] {
+            let filter = TargetFilter::Typed(TypedFilter::creature().controller(controller));
+            let mut ability = ability(destroyed(), vec![]);
+            assert!(
+                matches_target_filter(
+                    &state,
+                    candidate,
+                    &filter,
+                    &FilterContext::from_ability(&ability),
+                ),
+                "unassigned projection retains event fallback"
+            );
+            for origin in [
+                TargetReadOrigin::OwnAnnouncement,
+                TargetReadOrigin::ParentAnnouncement,
+            ] {
+                ability.parent_target_missing_reason =
+                    Some(ParentTargetMissingReason::IllegalAnnouncement { origin });
+                assert!(
+                    !matches_target_filter(
+                        &state,
+                        candidate,
+                        &filter,
+                        &FilterContext::from_ability(&ability),
+                    ),
+                    "unavailable projection cannot select another player's objects"
+                );
+            }
+            ability.set_unpinned_targets(vec![TargetRef::Object(candidate)]);
+            assert!(
+                matches_target_filter(
+                    &state,
+                    candidate,
+                    &filter,
+                    &FilterContext::from_ability(&ability),
+                ),
+                "a populated binding still supplies its controller/owner"
+            );
+        }
     }
 
     fn destroyed() -> Effect {
