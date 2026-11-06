@@ -1,51 +1,117 @@
 #!/usr/bin/env bash
-# Downloads the current Magic: The Gathering Comprehensive Rules text from
-# Wizards of the Coast's official rules page into docs/MagicCompRules.txt.
+# Downloads the Magic: The Gathering Comprehensive Rules text from Wizards of
+# the Coast into docs/MagicCompRules.txt — the edition pinned in
+# docs/MagicCompRules.edition, which is the edition this repository's CR
+# citations are written against.
 #
-# The CR is © Wizards of the Coast LLC. This file is git-ignored — it is
+# The CR is © Wizards of the Coast LLC. The text file is git-ignored — it is
 # downloaded locally for development reference and is not redistributed by
 # this repository.
 #
 # Usage:
-#   ./scripts/fetch-comp-rules.sh
-#
-# The script scrapes magic.wizards.com/en/rules for the latest .txt link
-# rather than hardcoding a date-stamped URL, since Wizards publishes a new
-# CR file at a new URL with each rules update.
+#   ./scripts/fetch-comp-rules.sh            fetch the pinned edition (no-op if already present)
+#   ./scripts/fetch-comp-rules.sh --force    re-download the pinned edition
+#   ./scripts/fetch-comp-rules.sh --latest [--output PATH]
+#       report the edition Wizards currently publishes and whether it differs
+#       from the pin; with --output, also save it to PATH. Never touches
+#       docs/MagicCompRules.txt — moving to a new edition means migrating the
+#       tree's citations and the pin together.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEST="$REPO_ROOT/docs/MagicCompRules.txt"
+PIN="$REPO_ROOT/docs/MagicCompRules.edition"
 RULES_PAGE="https://magic.wizards.com/en/rules"
 
-mkdir -p "$(dirname "$DEST")"
+# shellcheck source=lib/comp-rules-edition.sh
+source "$SCRIPT_DIR/lib/comp-rules-edition.sh"
 
-echo "Looking up current CR URL from $RULES_PAGE..."
-TXT_URL="$(curl -fsSL "$RULES_PAGE" \
-  | grep -oE 'https://media\.wizards\.com/[^"]+MagicCompRules[^"]+\.txt' \
-  | head -n 1)"
+MODE=pinned
+FORCE=0
+OUTPUT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --force) FORCE=1 ;;
+    --latest) MODE=latest ;;
+    --output)
+      [ $# -ge 2 ] || { echo "ERROR: --output needs a path" >&2; exit 2; }
+      OUTPUT="$2"
+      shift
+      ;;
+    -h | --help)
+      sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument '$1' (see --help)" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
 
-if [ -z "${TXT_URL:-}" ]; then
-  echo "ERROR: Could not find Comprehensive Rules .txt link on $RULES_PAGE" >&2
-  echo "       The page structure may have changed. Download manually from:" >&2
-  echo "       $RULES_PAGE" >&2
+PIN_EFFECTIVE="$(cr_pin_field "$PIN" effective)"
+PIN_URL="$(cr_pin_field "$PIN" url)"
+
+TMP="$(mktemp)"
+trap 'rm -f "$TMP" "$TMP.utf8"' EXIT
+
+if [ "$MODE" = latest ]; then
+  echo "Looking up current CR URL from $RULES_PAGE..."
+  LATEST_URL="$(curl -fsSL "$RULES_PAGE" \
+    | grep -oE 'https://media\.wizards\.com/[^"]+MagicCompRules[^"]+\.txt' \
+    | head -n 1)"
+  if [ -z "${LATEST_URL:-}" ]; then
+    echo "ERROR: Could not find Comprehensive Rules .txt link on $RULES_PAGE" >&2
+    echo "       The page structure may have changed. Download manually from:" >&2
+    echo "       $RULES_PAGE" >&2
+    exit 1
+  fi
+  cr_download "$LATEST_URL" "$TMP"
+  LATEST_EFFECTIVE="$(cr_file_effective "$TMP")"
+  echo "Latest published: ${LATEST_EFFECTIVE:-<no effective date found>}"
+  echo "  ${LATEST_URL// /%20}"
+  echo "Pinned:           $PIN_EFFECTIVE"
+  echo "  $PIN_URL"
+  if [ -n "$OUTPUT" ]; then
+    mkdir -p "$(dirname "$OUTPUT")"
+    cp "$TMP" "$OUTPUT"
+    echo "Saved latest edition to $OUTPUT"
+  fi
+  if [ "$LATEST_EFFECTIVE" = "$PIN_EFFECTIVE" ]; then
+    echo "The pin is current."
+  else
+    echo "A newer edition is published. Moving to it means remapping the tree's"
+    echo "CR citations and updating docs/MagicCompRules.edition in one change."
+  fi
+  exit 0
+fi
+
+if [ -n "$OUTPUT" ]; then
+  echo "ERROR: --output applies only to --latest" >&2
+  exit 2
+fi
+
+if [ "$FORCE" -eq 0 ] && [ -f "$DEST" ] \
+  && [ "$(cr_file_effective "$DEST")" = "$PIN_EFFECTIVE" ]; then
+  echo "$DEST is already the pinned edition ($PIN_EFFECTIVE)."
+  exit 0
+fi
+
+echo "Downloading pinned edition ($PIN_EFFECTIVE): $PIN_URL"
+cr_download "$PIN_URL" "$TMP"
+
+GOT_EFFECTIVE="$(cr_file_effective "$TMP")"
+if [ "$GOT_EFFECTIVE" != "$PIN_EFFECTIVE" ]; then
+  echo "ERROR: $PIN_URL declares effective date '${GOT_EFFECTIVE:-<none>}'," >&2
+  echo "       but docs/MagicCompRules.edition pins '$PIN_EFFECTIVE'." >&2
+  echo "       $DEST was left unchanged." >&2
   exit 1
 fi
 
-echo "Downloading $TXT_URL"
-# WotC's published URL may contain unescaped spaces ("MagicCompRules 20260227.txt").
-# Encode spaces so curl can handle it.
-TXT_URL_ENCODED="${TXT_URL// /%20}"
-curl -fsSL "$TXT_URL_ENCODED" -o "$DEST"
-
-# Wizards' CR file is UTF-16 with BOM; convert to UTF-8 if needed for grep.
-if file "$DEST" | grep -qi 'utf-16'; then
-  echo "Converting UTF-16 → UTF-8"
-  iconv -f UTF-16 -t UTF-8 "$DEST" > "$DEST.utf8"
-  mv "$DEST.utf8" "$DEST"
-fi
-
+mkdir -p "$(dirname "$DEST")"
+mv "$TMP" "$DEST"
 LINES="$(wc -l < "$DEST" | tr -d ' ')"
 echo "Wrote $DEST ($LINES lines)"
