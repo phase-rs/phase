@@ -6333,6 +6333,7 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
       ["another game", { full_key: { game_code: "OTHER1", generation: 7 } }, "Server changed the Full session identity"],
       ["another generation", { full_key: { game_code: "GAME01", generation: 8 } }, "Server changed the Full session identity"],
       ["another seat", { your_player: 1 }, "Reconnect attached player 1, expected 0"],
+      ["a missing seat", { your_player: undefined }, "Reconnect attached player undefined, expected 0"],
       ["another token", { player_token: "other-token" }, "Reconnect changed the player token"],
     ])("rejects the join before any bootstrap, cache or session when the reply carries %s", async (_name, overrides, message) => {
       const { join, fallback } = await fallbackWithReply(() => plainStarted(2, overrides));
@@ -6383,6 +6384,62 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
       } finally {
         adapter.dispose();
       }
+    });
+
+    describe("a salvaged Full key that fails validation", () => {
+      const withHeldFullKey = async (generation: number) => {
+        const join = await startJoin();
+        // An identity this adapter already holds makes the salvaged key a change of identity
+        // when its generation differs. Seeded directly: no production route holds a Full key
+        // without the rest of a session before the salvaged admission.
+        (join.adapter as unknown as { fullSessionKey: unknown }).fullSessionKey = {
+          game_code: "GAME01", generation,
+        };
+        await failFirstFull(join, "decodeFailure");
+        return join;
+      };
+
+      it("writes no provisional credential and starts no episode", async () => {
+        const join = await withHeldFullKey(3);
+        const { adapter, raw, events } = join;
+        try {
+          await expect(settledAs(join)).resolves.toMatchObject({
+            code: "WS_ERROR", message: "Server changed the Full session identity", recoverable: false,
+          });
+          // Reach guard: the failed Full carried intact credentials of this join's game, so
+          // only the key check stood between them and the adapter.
+          expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "decodeFailure" });
+          expect(fallbackOf(adapter)).toBe("unused");
+          await vi.advanceTimersByTimeAsync(10_000);
+          expect(MockWebSocket.last).toBe(raw);
+          expect(typesOf(events)).toEqual(["serverHello", "error"]);
+          expect(adapter.gameCode).toBeNull();
+          expect(adapter.playerId).toBeNull();
+          expect((adapter as unknown as { playerToken: unknown }).playerToken).toBeNull();
+          expect(adapter.nativeSession).toBeNull();
+          // The key already held is not replaced by the rejected one.
+          expect((adapter as unknown as { fullSessionKey: unknown }).fullSessionKey)
+            .toEqual({ game_code: "GAME01", generation: 3 });
+        } finally {
+          adapter.dispose();
+        }
+      });
+
+      it("admits the same credentials when the held Full identity agrees", async () => {
+        const join = await withHeldFullKey(7);
+        const { adapter, events } = join;
+        try {
+          const fallback = await snapshotOnlyHandshake("Reconnect", join.raw);
+          expect(fallbackOf(adapter)).toBe("reconnecting");
+          expect(adapter.gameCode).toBe("GAME01");
+          expect(adapter.playerId).toBe(0);
+          expect((adapter as unknown as { playerToken: unknown }).playerToken).toBe("codec-token");
+          expect(sentFrames(fallback, "Reconnect")).toHaveLength(1);
+          expect(episodeEventsOf(events)).toEqual([]);
+        } finally {
+          adapter.dispose();
+        }
+      });
     });
 
     it("still accepts a legacy plain GameStarted without a Full key outside the fallback", async () => {
@@ -7251,6 +7308,7 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
         ["another game", { full_key: { game_code: "OTHER1", generation: 7 } }, "Server changed the Full session identity"],
         ["another generation", { full_key: { game_code: "GAME01", generation: 8 } }, "Server changed the Full session identity"],
         ["another seat", { your_player: 1 }, "Reconnect attached player 1, expected 0"],
+        ["a missing seat", { your_player: undefined }, "Reconnect attached player undefined, expected 0"],
         ["another token", { player_token: "other-token" }, "Reconnect changed the player token"],
       ])("rejects the join before any bootstrap, cache or second session when the in-game reply carries %s", async (_name, overrides, message) => {
         const { join, fallback } = await heldFallback({ waitingSnapshot: true });
@@ -7287,6 +7345,7 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
 
       it.each([
         ["another seat", { your_player: 1 }, "Reconnect attached player 1, expected 0"],
+        ["a missing seat", { your_player: undefined }, "Reconnect attached player undefined, expected 0"],
         ["another token", { player_token: "other-token" }, "Reconnect changed the player token"],
         ["another generation", { full_key: { game_code: "GAME01", generation: 8 } }, "Server changed the Full session identity"],
       ])("applies the strict preflight to the GameStarted that follows a pregame return (%s)", async (_name, overrides, message) => {
@@ -7341,6 +7400,7 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
         it.each([
           ["another game", { game_code: "OTHER1" }, "Reconnect attached game OTHER1, expected GAME01"],
           ["another seat", { player_id: 1 }, "Reconnect attached player 1, expected 0"],
+          ["a missing seat", { player_id: undefined }, "Reconnect attached player undefined, expected 0"],
           ["another token", { player_token: "other-token" }, "Reconnect changed the player token"],
           ["another generation", { full_key: { game_code: "GAME01", generation: 8 } }, "Server changed the Full session identity"],
           ["no Full key", { full_key: undefined }, "Server omitted a valid Full session identity"],
@@ -7351,6 +7411,22 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
             await vi.waitFor(() => expect(pregameReturnOf(join.adapter)).toBe("gameCreated"));
             fallback.dispatchSynthetic("message", sessionAttached(overrides));
             await rejectedAs(join, fallback, message);
+          } finally {
+            join.adapter.dispose();
+          }
+        });
+
+        it("accepts a GameCreated that carries no seat, since the protocol gives it none", async () => {
+          const { join, fallback } = await heldFallback();
+          try {
+            const created = gameCreated();
+            // Reach guard: the frame really is seatless, and it reaches the real handler.
+            expect(JSON.parse(created).data).not.toHaveProperty("player_id");
+            fallback.dispatchSynthetic("message", created);
+            await vi.waitFor(() => expect(pregameReturnOf(join.adapter)).toBe("gameCreated"));
+            expect(join.outcome.value).toBe("never settled");
+            expect(fallbackOf(join.adapter)).toBe("reconnecting");
+            expect(typesOf(join.events)).toEqual([...prefixOf(false), "serverHello"]);
           } finally {
             join.adapter.dispose();
           }

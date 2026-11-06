@@ -2853,10 +2853,17 @@ export class WebSocketAdapter implements EngineAdapter {
     }
 
     if (held === null) {
+      // The Full key is validated before any credential is written, so a
+      // rejection leaves no provisional session behind.
+      const keyError = this.fullSessionKeyRejection(credentials.fullKey, gameCode);
+      if (keyError !== null) {
+        this.rejectSessionIdentity(keyError);
+        return false;
+      }
       this._gameCode = gameCode;
       this._playerId = credentials.yourPlayer;
       this.playerToken = credentials.playerToken;
-      if (!this.acceptFullSessionKey(credentials.fullKey)) return false;
+      this.fullSessionKey = credentials.fullKey;
     } else {
       this.snapshot = null;
       this.cachedStateRevision = null;
@@ -2997,7 +3004,11 @@ export class WebSocketAdapter implements EngineAdapter {
    * Why a fallback reply's identity does not match the retained credentials, or
    * null when it does. Checked in a fixed order: game, Full key, seat, token. A
    * reconnect's GameStarted omits the token (`"optional"`: omitted or exactly the
-   * retained one); the pregame frames always carry it (`"required"`).
+   * retained one); the pregame frames always carry it (`"required"`). The seat is
+   * `"required"` for every reply that names one (GameStarted's `your_player`,
+   * SessionAttached's `player_id`): a missing seat is a mismatch, never a pass.
+   * `"absent"` is only for the seatless GameCreated, whose protocol shape has no
+   * seat to compare.
    */
   private fallbackIdentityMismatch(
     expected: StateCodecJoinCredentials,
@@ -3008,6 +3019,7 @@ export class WebSocketAdapter implements EngineAdapter {
       fullKey?: FullSessionKey;
     },
     token: "optional" | "required",
+    seat: "required" | "absent",
   ): string | null {
     if (frame.gameCode !== undefined && frame.gameCode !== expected.fullKey.game_code) {
       return `Reconnect attached game ${frame.gameCode}, expected ${expected.fullKey.game_code}`;
@@ -3019,7 +3031,7 @@ export class WebSocketAdapter implements EngineAdapter {
     ) {
       return "Server changed the Full session identity";
     }
-    if (frame.playerId !== undefined && frame.playerId !== expected.yourPlayer) {
+    if (seat === "required" && frame.playerId !== expected.yourPlayer) {
       return `Reconnect attached player ${frame.playerId}, expected ${expected.yourPlayer}`;
     }
     if (
@@ -3044,7 +3056,7 @@ export class WebSocketAdapter implements EngineAdapter {
       playerId: frame.your_player,
       playerToken: frame.player_token,
       fullKey: frame.full_key,
-    }, "optional");
+    }, "optional", "required");
     return message === null
       ? true
       : this.rejectSessionIdentity(new AdapterError("WS_ERROR", message, false));
@@ -3097,7 +3109,7 @@ export class WebSocketAdapter implements EngineAdapter {
         playerId: frame.player_id,
         playerToken: frame.player_token,
         fullKey: frame.full_key,
-      }, "required");
+      }, "required", frame.type === "GameCreated" ? "absent" : "required");
     if (message !== null) {
       this.rejectSessionIdentity(new AdapterError("WS_ERROR", message, false));
       return;
@@ -4155,20 +4167,34 @@ export class WebSocketAdapter implements EngineAdapter {
 
   /** Rejects missing or changed Full identities before they can be persisted. */
   private acceptFullSessionKey(key: FullSessionKey | undefined): boolean {
-    if (!key || key.game_code !== this._gameCode || key.generation < 1) {
-      const error = new AdapterError("WS_ERROR", "Server omitted a valid Full session identity", false);
-      return this.rejectSessionIdentity(error);
+    const error = this.fullSessionKeyRejection(key, this._gameCode);
+    if (error !== null) return this.rejectSessionIdentity(error);
+    // No rejection implies a present key; `?? null` only narrows the type.
+    this.fullSessionKey = key ?? null;
+    return true;
+  }
+
+  /**
+   * Why a Full key cannot be adopted for `gameCode`, or null when it can: it is
+   * missing or names another game, or it changes the identity already held.
+   * Reads state only, so a caller can validate a key before it writes any of the
+   * credentials the key belongs to.
+   */
+  private fullSessionKeyRejection(
+    key: FullSessionKey | undefined,
+    gameCode: string | null,
+  ): AdapterError | null {
+    if (!key || key.game_code !== gameCode || key.generation < 1) {
+      return new AdapterError("WS_ERROR", "Server omitted a valid Full session identity", false);
     }
     if (
       this.fullSessionKey
       && (this.fullSessionKey.game_code !== key.game_code
         || this.fullSessionKey.generation !== key.generation)
     ) {
-      const error = new AdapterError("WS_ERROR", "Server changed the Full session identity", false);
-      return this.rejectSessionIdentity(error);
+      return new AdapterError("WS_ERROR", "Server changed the Full session identity", false);
     }
-    this.fullSessionKey = key;
-    return true;
+    return null;
   }
 
   /** Allows legacy follow-up frames only until the server establishes an exact Full identity. */
