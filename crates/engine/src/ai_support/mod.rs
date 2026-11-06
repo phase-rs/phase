@@ -267,7 +267,12 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
             }
         }
         ConvokeMode::Waterbend => {
-            obj.is_waterbend_eligible(*player) && *mana_type == ManaType::Colorless
+            // CR 701.67a: a waterbend tap pays one generic mana of the cost, so
+            // it pays colorless only and is legal only while generic mana is
+            // left for a tap to pay.
+            obj.is_waterbend_eligible(*player)
+                && *mana_type == ManaType::Colorless
+                && crate::game::casting::waterbend_taps_remaining(state, *player) > 0
         }
         ConvokeMode::Improvise => {
             obj.is_improvise_eligible(*player) && *mana_type == ManaType::Colorless
@@ -1504,6 +1509,7 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::ChooseRoomDoor { .. }
         | GameAction::TapForConvoke { .. }
         | GameAction::HarmonizeTap { .. }
+        | GameAction::ChooseSecretAgendaNames { .. }
         | GameAction::DeclareCompanion { .. }
         | GameAction::CompanionToHand
         | GameAction::DiscoverChoice { .. }
@@ -3713,6 +3719,7 @@ mod tests {
             total: 1,
             targets: vec![TargetRef::Object(target)],
             unit: DistributionUnit::Damage,
+            scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
         };
 
         let actions = legal_actions(&state);

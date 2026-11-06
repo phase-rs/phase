@@ -648,6 +648,9 @@
   },
   "zone": {
     "commandZone": "Zona di comando",
+    "conspiracy": "Cospirazione",
+    "conspiracyTitle": "Cospirazione: {{name}}",
+    "turnFaceUp": "Gira {{name}} a faccia in su",
     "emblem": "Emblema",
     "emblemFallback": "Emblema",
     "commander": "Comandante",
@@ -2132,13 +2135,18 @@
   "freeCastWindow": {
     "eyebrow": "Lancio gratuito",
     "title": "Lancia una magia gratuitamente",
+    "titlePlay": "Gioca carte gratuitamente",
     "subtitle": "Scegli una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i). Valore di mana totale rimanente: {{budget}}.",
     "subtitleNoBudget": "Scegli una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i).",
+    "subtitlePlay": "Scegli una terra da giocare o una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i). Valore di mana totale rimanente: {{budget}}.",
+    "subtitleNoBudgetPlay": "Scegli una terra da giocare o una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i).",
     "remainingAny": "un numero qualsiasi",
     "castNamed": "Lancia {{name}}",
+    "playNamed": "Gioca {{name}}",
     "castSuffix": "(senza pagare il suo costo di mana)",
     "done": "Fatto",
-    "doneSuffix": "(smetti di lanciare magie in questo modo)"
+    "doneSuffix": "(smetti di lanciare magie in questo modo)",
+    "doneSuffixPlay": "(smetti di giocare carte in questo modo)"
   },
   "castingVariant": {
     "eyebrow": "Lancia",
@@ -2221,7 +2229,8 @@
     "unitDamage": "danno",
     "unitLife": "vita",
     "title": "Distribuisci {{total}} {{unit}}",
-    "subtitle": "Assegna almeno 1 {{unit}} a ogni bersaglio. Rimanente: {{remaining}}"
+    "subtitle": "Assegna almeno 1 {{unit}} a ogni bersaglio. Rimanente: {{remaining}}",
+    "subtitleAnyNumber": "Assegna almeno 1 {{unit}} a ciascuno di quelli che scegli, tra un numero qualsiasi di essi. Rimanente: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Scegli un sotterraneo",
@@ -2307,6 +2316,8 @@
       "fallback": "Fai una scelta"
     },
     "searchSubtitle": "Digita per cercare tra tutte le carte",
+    "secretAgendaTitle": "Nomina segretamente una carta ({{current}} di {{total}})",
+    "secretAgendaSubtitle": "Nascosto finché non giri a faccia in su questa cospirazione",
     "searchPlaceholder": "Cerca per nome...",
     "noCardsFound": "Nessuna carta trovata",
     "buttonSubtitle": "Seleziona un'opzione",

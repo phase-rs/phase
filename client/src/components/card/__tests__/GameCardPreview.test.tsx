@@ -99,15 +99,20 @@ describe("GameCardPreview", () => {
     expect(screen.getAllByAltText("Pithing Needle").length).toBeGreaterThan(0);
   });
 
-  it("docks a preview opened from a modal even when cursor-follow is preferred", () => {
+  it("docks a preview opened from a modal even when cursor-follow is preferred", async () => {
     inspect(battlefieldObject());
     useUiStore.setState({ previewPlacement: "side" });
 
     const { container } = render(<GameCardPreview />);
 
-    expect(container.querySelector<HTMLElement>("[data-card-preview]")).toHaveStyle({
-      right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
+    fireEvent.mouseMove(window, { clientX: 320, clientY: 240 });
+    await act(async () => {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
     });
+
+    expect(container.querySelector<HTMLElement>("[data-card-preview]")?.style.right).toBe(
+      "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
+    );
   });
 
   it("disables hand pointer interaction and clears a stale hand preview for a board choice", () => {

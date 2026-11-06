@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CastingRestriction gains OnlyFromZones { zones, pool } (an object's own restriction on the zones it may be cast from, CR 113.6f, with the GraveyardPermissionPool scope of 'your graveyard', CR 109.5; Haakon, Stromgald Scourge), and GameObject gains copied_from_zone: Option<CastOrigin> (CR 707.12: the zone a copy of a card was made from and that zone's owner, checked when the copy is cast). Older peers cannot deserialize the new variant in card data or game-object state, and would drop the copy provenance."
+}

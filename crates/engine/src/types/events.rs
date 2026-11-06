@@ -11,7 +11,9 @@ use super::ability::{
     TypedFilter,
 };
 use super::card::PrintedCardRef;
+use super::card_printing::SharedPrinting;
 use super::card_type::{CardType, CoreType, Supertype};
+use super::display_only::DisplayOnly;
 pub use super::event_kinds::{ActivatedAbilityKind, BendingType, ClashResult, PlayerActionKind};
 use super::game_state::{LKISnapshot, TriggerSourceContext, ZoneChangeRecord};
 use super::identifiers::{
@@ -77,6 +79,11 @@ pub struct LibrarySearchCardView {
     pub zone: Zone,
     pub identity: ObjectIncarnationRef,
     pub card_id: CardId,
+    /// The searched card's printing; card-level, so it covers every face. Display-only:
+    /// CR 203.1 + CR 206.1, a printing has no effect on game play, so no rules or AI path
+    /// reads it. Absent from the wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
     pub current_face: LibrarySearchCardFaceView,
     pub front_face: LibrarySearchCardFaceView,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -149,8 +156,8 @@ impl ActivationTriggerState {
 
 /// CR 603.2 + CR 603.5: What observing an activation at its boundary bound.
 /// `Bound` means at least one trigger was admitted for the event — whether its
-/// context was queued or then pruned (a remembered decline still spends a
-/// "triggers only once each turn" limit). A bound observation has consequences
+/// context was queued or then pruned (a remembered accept with no legal target
+/// still spends a "triggers only once each turn" limit). A bound observation has consequences
 /// a mana-tap undo cannot reverse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActivationObservers {
@@ -691,6 +698,7 @@ impl EventObjectSnapshot {
             | TargetFilter::TrackedSet { .. }
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSource
+            | TargetFilter::CastingSpell
             | TargetFilter::EventTarget
             // CR 506.3: needs live combat state (the attacker's current attack target)
             // and may be a planeswalker permanent; unlike `DefendingPlayer` it is not
@@ -998,6 +1006,7 @@ pub enum GameEvent {
     PhaseChanged {
         phase: Phase,
     },
+    /// `player_id` is the player who now receives priority, not the passer.
     PriorityPassed {
         player_id: PlayerId,
     },

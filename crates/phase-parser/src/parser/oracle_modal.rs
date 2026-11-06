@@ -37,7 +37,7 @@ use super::oracle_ir::effect_chain::{
 use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_ir::static_ir::StaticIr;
 use super::oracle_ir::trigger::{
-    ModalIr, ReflexiveParent, ReflexiveParentIr, TriggerBody, TriggerIr,
+    ModalIr, ReflexiveConnector, ReflexiveParent, ReflexiveParentIr, TriggerBody, TriggerIr,
 };
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition as nom_condition;
@@ -1025,7 +1025,57 @@ fn classify_reflexive_modal_parent(trigger_line: String) -> (String, Option<Refl
             Some(ReflexiveModalParent::Mandatory),
         );
     }
+    if let Some((instruction, event)) = strip_terminal_reflexive_event_connector(&trigger_line)
+        .filter(|(instruction, _)| has_trigger_prefix(&instruction.to_lowercase()))
+    {
+        return (
+            instruction.to_string(),
+            Some(ReflexiveModalParent::EventThisWay(Box::new(event))),
+        );
+    }
     (trigger_line, None)
+}
+
+/// CR 603.12: the terminal "When <event> this way" connector of a mandatory
+/// reflexive modal header ("…, put a charge counter on it or remove one from
+/// it. When you remove a counter this way") — the instruction before it, and
+/// the event, parsed by the shared trigger-condition parser. An event the
+/// trigger parser does not recognize declines, so no never-firing reflexive is
+/// built.
+fn strip_terminal_reflexive_event_connector(
+    trigger_line: &str,
+) -> Option<(&str, crate::types::ability::TriggerDefinition)> {
+    let lower = trigger_line.to_lowercase();
+    let mut tail = lower.as_str();
+    let mut connector_start = None;
+    while let Ok((after, _)) =
+        terminated(take_until::<_, _, OracleError<'_>>(". "), tag(". ")).parse(tail)
+    {
+        connector_start = Some(lower.len() - after.len());
+        tail = after;
+    }
+    let connector_start = connector_start?;
+    let tail = tail.trim().trim_end_matches(',').trim();
+    let (_, event_text) = terminated(
+        take_until::<_, _, OracleError<'_>>(" this way"),
+        (tag(" this way"), nom::combinator::eof),
+    )
+    .parse(tail)
+    .ok()?;
+    tag::<_, _, OracleError<'_>>("when ")
+        .parse(event_text)
+        .ok()?;
+    let event_original = trigger_line.get(connector_start..connector_start + event_text.len())?;
+    let (mode, mut event) = super::oracle_trigger::parse_trigger_condition(
+        event_original,
+        &mut ParseContext::default(),
+    );
+    if matches!(mode, TriggerMode::Unknown(_)) {
+        return None;
+    }
+    event.execute = None;
+    let instruction = trigger_line.get(..connector_start - 2)?.trim_end();
+    Some((instruction, event))
 }
 
 /// CR 603.12 + CR 603.4 + CR 608.2a: A reflexive modal can retain an
@@ -1348,9 +1398,11 @@ pub(crate) fn lower_oracle_block_ir(
                                     .body,
                                 ),
                             },
-                            connector: reflexive_connector
-                                .clone()
-                                .expect("reflexive parent has a connector"),
+                            connector: ReflexiveConnector::Condition(
+                                reflexive_connector
+                                    .clone()
+                                    .expect("reflexive parent has a connector"),
+                            ),
                             effect_chain: EffectChainIr::single_clause(
                                 cost_text,
                                 AbilityKind::Spell,
@@ -1376,9 +1428,11 @@ pub(crate) fn lower_oracle_block_ir(
                         Some(TriggerBody::EffectChain(instruction)) => {
                             TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
                                 parent: ReflexiveParent::Mandatory { instruction },
-                                connector: reflexive_connector
-                                    .clone()
-                                    .expect("reflexive parent has a connector"),
+                                connector: ReflexiveConnector::Condition(
+                                    reflexive_connector
+                                        .clone()
+                                        .expect("reflexive parent has a connector"),
+                                ),
                                 effect_chain: payload.marker.clone(),
                                 modal: Some(payload.clone()),
                             }))
@@ -1396,6 +1450,34 @@ pub(crate) fn lower_oracle_block_ir(
                         )
                         | None => TriggerBody::Modal(Box::new(payload.clone())),
                     },
+                    // CR 603.12: an event-keyed reflexive ("When you remove a
+                    // counter this way") rides on the mandatory instruction the
+                    // trigger parser lowered, exactly as the "When you do" arm
+                    // does; an intervening-if guard on it is not modeled.
+                    Some(ReflexiveModalParent::EventThisWay(event)) => {
+                        match (trigger.body.take(), reflexive_connector.as_ref()) {
+                            (
+                                Some(TriggerBody::EffectChain(instruction)),
+                                Some(AbilityCondition::WhenYouDo),
+                            ) => TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
+                                parent: ReflexiveParent::Mandatory { instruction },
+                                connector: ReflexiveConnector::Event(event.clone()),
+                                effect_chain: payload.marker.clone(),
+                                modal: Some(payload.clone()),
+                            })),
+                            _ => TriggerBody::EffectChain(EffectChainIr::single_clause(
+                                &header.raw,
+                                AbilityKind::Spell,
+                                parsed_clause(Effect::unimplemented(
+                                    "modal_reflexive_event",
+                                    &header.raw,
+                                )),
+                                None,
+                                mode_ctx.actor.clone(),
+                                true,
+                            )),
+                        }
+                    }
                     None => TriggerBody::Modal(Box::new(payload.clone())),
                 };
                 trigger.body = Some(body);
@@ -1718,13 +1800,23 @@ pub(crate) fn lower_oracle_block(
                     modal_ability.condition = reflexive_connector.clone();
                     Box::new(modal_ability)
                 }
+                // CR 603.12: an event-keyed reflexive rides on the mandatory
+                // instruction as a reflexive delayed trigger.
+                Some(ReflexiveModalParent::EventThisWay(event)) => Box::new(
+                    super::oracle_trigger::reflexive_event_trigger(event, modal_ability),
+                ),
                 // Plain triggered modal (Pip-Boy): the modal attaches directly.
                 None => Box::new(modal_ability),
             };
 
             for trigger in &mut triggers {
                 match (&reflexive_parent, trigger.execute.take()) {
-                    (Some(ReflexiveModalParent::Mandatory), Some(mut instruction)) => {
+                    (
+                        Some(
+                            ReflexiveModalParent::Mandatory | ReflexiveModalParent::EventThisWay(_),
+                        ),
+                        Some(mut instruction),
+                    ) => {
                         instruction.sub_ability = Some(execute.clone());
                         trigger.execute = Some(instruction);
                     }
@@ -5365,7 +5457,7 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
         };
         assert_eq!(
             reflexive.connector,
-            AbilityCondition::WhenYouDo,
+            ReflexiveConnector::Condition(AbilityCondition::WhenYouDo),
             "Caesar's native IR must retain its printed reflexive connector"
         );
         let modal = reflexive
