@@ -1132,7 +1132,7 @@ async function resolveLocalFifoLlmSeat(
   let reply: { status: number; body: string } | null = null;
   switch (entry.kind) {
     case "request":
-      reply = await callLlmDrafter(profile, entry, signal);
+      reply = await callLlmDrafter(entry, signal);
       break;
     case "unbuildable":
       // The engine's reason goes to the console only; the game log names the seat.

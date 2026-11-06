@@ -79,9 +79,15 @@ async function setNameMap(): Promise<Record<string, string>> {
 export type LlmDrafterState =
   /** Its provider call is in flight. */
   | "picking"
-  /** A reply came back; the engine will read it when the pick is submitted. */
+  /**
+   * A reply came back. In a barrier round the engine reads it when the pick is
+   * submitted; on a local FIFO draft the engine has already used it.
+   */
   | "ready"
-  /** The call failed or timed out; the engine bot drafts this seat's pick. */
+  /**
+   * The engine bot drafts this seat's pick: the call failed or timed out, or,
+   * on a local FIFO draft, the engine did not use the reply.
+   */
   | "fallback";
 
 export interface LlmDrafterStatus {
@@ -230,7 +236,7 @@ export async function collectLlmDraftResponses(
   // multiply the pick's latency by the pod size.
   const settled = await Promise.all(
     requests.map(async (request): Promise<LlmDraftResponsePayload | null> => {
-      const reply = await callLlmDrafter(profile, request, run.signal);
+      const reply = await callLlmDrafter(request, run.signal);
       observer.onSeatSettled?.(request.seat, reply !== null);
       if (reply === null) return null;
       return {
@@ -272,7 +278,6 @@ function cancelRun(run: AbortController): void {
  * the draft cut loose is not the provider failing.
  */
 export async function callLlmDrafter(
-  profile: LlmProfile,
   request: { readonly seat: number; readonly request: LlmHttpRequestSpec },
   signal: AbortSignal,
 ): Promise<{ status: number; body: string } | null> {

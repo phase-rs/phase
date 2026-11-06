@@ -614,8 +614,7 @@ describe("LLM seats on a local FIFO draft", () => {
   let nextRevision = 100;
 
   beforeEach(() => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(FIFO_NOW_MS);
+    vi.spyOn(Date, "now").mockReturnValue(FIFO_NOW_MS);
     resetLlmUsage();
     for (const mock of [
       wasm.import_local_fifo_session,
@@ -641,7 +640,7 @@ describe("LLM seats on a local FIFO draft", () => {
   });
 
   afterEach(() => {
-    vi.useRealTimers();
+    vi.mocked(Date.now).mockRestore();
   });
 
   it.each([

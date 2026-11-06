@@ -412,7 +412,7 @@ describe("LLM drafters", () => {
       const controller = new AbortController();
       llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":2}' });
 
-      await expect(callLlmDrafter(PROFILE, { seat: 1, request: REQUEST }, controller.signal))
+      await expect(callLlmDrafter({ seat: 1, request: REQUEST }, controller.signal))
         .resolves.toEqual({ status: 200, body: '{"choice":2}' });
 
       expect(llmMocks.executeLlmRequest).toHaveBeenCalledExactlyOnceWith(REQUEST, {
@@ -426,7 +426,7 @@ describe("LLM drafters", () => {
       const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
       llmMocks.executeLlmRequest.mockRejectedValue(new Error("network down"));
 
-      await expect(callLlmDrafter(PROFILE, { seat: 1, request: REQUEST }, new AbortController().signal))
+      await expect(callLlmDrafter({ seat: 1, request: REQUEST }, new AbortController().signal))
         .resolves.toBeNull();
       expect(llmMocks.executeLlmRequest).toHaveBeenCalledOnce();
       const logged = debugMocks.debugLog.mock.calls.map((call) => String(call[0]));
@@ -437,7 +437,7 @@ describe("LLM drafters", () => {
       debugMocks.debugLog.mockClear();
       const cancelled = new AbortController();
       cancelled.abort();
-      await expect(callLlmDrafter(PROFILE, { seat: 1, request: REQUEST }, cancelled.signal))
+      await expect(callLlmDrafter({ seat: 1, request: REQUEST }, cancelled.signal))
         .resolves.toBeNull();
       expect(llmMocks.executeLlmRequest).toHaveBeenCalledOnce();
       expect(debugMocks.debugLog).not.toHaveBeenCalled();
