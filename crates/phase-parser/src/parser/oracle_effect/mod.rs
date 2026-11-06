@@ -16155,7 +16155,7 @@ fn try_parse_owner_of_target_shuffle(
     // earlier action followed by a shuffle elsewhere in the clause.
     let predicate_start = subject::find_predicate_start(tp.original)?;
     let subject_text = tp.original[..predicate_start].trim();
-    // CR 108.3 + CR 400.7e + CR 115.10a: the SOURCE's owner as the possessive
+    // CR 108.3 + CR 115.10a: the SOURCE's owner as the possessive
     // subject ("This creature's owner shuffles it into their library" —
     // Cerulean Sphinx) moves the source ITSELF. CR 115.10a: being affected by
     // the ability does not make the object a target, so the clause declares no
@@ -16183,7 +16183,7 @@ fn try_parse_owner_of_target_shuffle(
     // rejects multi-target ("up to N") subjects.
     let target = extract_owner_of_target(tp, ctx)?;
 
-    // CR 108.3 + CR 400.7e + CR 115.10a: an ATTACHED-HOST possessor names a
+    // CR 108.3 + CR 115.10a: an ATTACHED-HOST possessor names a
     // contextual object ("Enchanted creature's owner" — Watery Grasp), not a
     // declared target. The recovered host filter is the single moved object, so
     // this emits no `TargetOnly` declaration and never expands `ParentTarget`
