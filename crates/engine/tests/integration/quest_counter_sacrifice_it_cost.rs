@@ -9,10 +9,18 @@
 //! EVERY permanent the payer controls, and `AbilityActivation::try_resolve`
 //! panics on the surfaced `WaitingFor::PayCost { kind: Sacrifice, .. }` — that
 //! prompt is the defect this module pins.
+//!
+//! The pronoun binds the source only on the source-cost channel (the cost the
+//! source's own text imposes). A resolution-time optional payment such as Gorbag
+//! of Minas Morgul's "you may sacrifice it. When you do, choose one —" names an
+//! object the trigger introduced, so it is pinned below as never bound to the
+//! printed source.
 
 use engine::game::casting::activated_ability_definitions;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::types::ability::{AbilityCost, Effect};
+use engine::types::ability::{
+    AbilityCondition, AbilityCost, AbilityDefinition, Effect, SacrificeCost, TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::counter::{parse_counter_type, CounterType};
 use engine::types::game_state::{PayCostKind, WaitingFor};
@@ -157,7 +165,8 @@ fn exile_cost_index(runner: &GameRunner, source: ObjectId) -> usize {
 /// self-exile cost, not a lost cost. At base the leg lowers to
 /// `EffectCost { ChangeZone { target: ParentTarget } }`, which
 /// `supports_effect_cost_payment` refuses, so the activation is rejected
-/// outright — the reach-guard below is the discriminator.
+/// outright. At base this test fails earlier, in `exile_cost_index`, because
+/// base lowers the cost to an `EffectCost` rather than an `Exile` leg.
 #[test]
 fn activating_trenzalore_clocktower_exiles_itself_not_another_permanent() {
     let mut scenario = GameScenario::new();
@@ -200,4 +209,114 @@ fn activating_trenzalore_clocktower_exiles_itself_not_another_permanent() {
     // CR 701.13a + CR 601.2h: the cost exiled the SOURCE, and only it.
     assert_eq!(runner.state().objects[&tower].zone, Zone::Exile);
     assert_eq!(runner.state().objects[&witness].zone, Zone::Battlefield);
+}
+
+/// Verbatim Scryfall Oracle text (LTR).
+const GORBAG: &str = "Whenever a Goblin or Orc you control deals combat damage to a player, you may sacrifice it. When you do, choose one \u{2014}\n\u{2022} Draw a card.\n\u{2022} Create a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")";
+
+/// True when `cost` (recursing `Composite` / `OneOf`) pays by sacrificing or
+/// exiling the source itself.
+fn cost_binds_source(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Sacrifice(SacrificeCost {
+            target: TargetFilter::SelfRef,
+            ..
+        }) => true,
+        AbilityCost::Exile {
+            filter: Some(TargetFilter::SelfRef),
+            ..
+        } => true,
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            costs.iter().any(cost_binds_source)
+        }
+        _ => false,
+    }
+}
+
+/// Collect every node of `ability` (own effect, `sub_ability`, `else_ability`,
+/// modal `mode_abilities`) whose effect binds the printed source.
+fn source_bound_nodes(ability: &AbilityDefinition, found: &mut Vec<String>) {
+    match ability.effect.as_ref() {
+        Effect::Sacrifice {
+            target: TargetFilter::SelfRef,
+            ..
+        } => found.push(format!("{:?}", ability.effect)),
+        Effect::PayCost { cost, .. } if cost_binds_source(cost) => {
+            found.push(format!("{:?}", ability.effect));
+        }
+        _ => {}
+    }
+    for child in ability
+        .sub_ability
+        .iter()
+        .chain(ability.else_ability.iter())
+    {
+        source_bound_nodes(child, found);
+    }
+    for mode in &ability.mode_abilities {
+        source_bound_nodes(mode, found);
+    }
+}
+
+/// CR 608.2c + CR 603.12 + CR 701.21a: Gorbag of Minas Morgul's "you may
+/// sacrifice it. When you do, choose one —" is a resolution-time optional
+/// payment, not a printed source cost. The cost grammar cannot know the
+/// antecedent of "it" on that channel: it names the object the trigger
+/// introduced — whichever Goblin or Orc dealt the damage, Gorbag himself or
+/// another — so the parse must never bind it to the printed source.
+///
+/// At the unmodified source-cost-only pronoun arm the reflexive marker is
+/// lowered to `PayCost { Sacrifice { SelfRef } }`, which is exactly what the
+/// walker flags.
+#[test]
+fn gorbag_of_minas_morgul_may_sacrifice_it_never_binds_the_source() {
+    let mut scenario = GameScenario::new();
+    let gorbag = scenario
+        .add_creature_from_oracle(P0, "Gorbag of Minas Morgul", 2, 2, GORBAG)
+        .id();
+    let runner = scenario.build();
+    let object = &runner.state().objects[&gorbag];
+
+    // Reach-guards: the production parser produced the optional sacrifice, the
+    // reflexive "When you do" body, and the two-mode choice.
+    assert_eq!(
+        object.trigger_definitions.len(),
+        1,
+        "Gorbag must parse exactly one trigger"
+    );
+    let trigger = object
+        .trigger_definitions
+        .first()
+        .expect("Gorbag trigger exists");
+    let execute = trigger
+        .definition
+        .execute
+        .as_deref()
+        .expect("Gorbag trigger must carry an execute ability");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Sacrifice { .. }) && execute.optional,
+        "the trigger must open with the optional sacrifice: {execute:?}"
+    );
+    let reflexive = execute
+        .sub_ability
+        .as_deref()
+        .expect("the optional sacrifice must carry its reflexive sub_ability");
+    assert_eq!(
+        reflexive.condition,
+        Some(AbilityCondition::WhenYouDo),
+        "the reflexive body must be gated on WhenYouDo"
+    );
+    assert_eq!(
+        reflexive.modal.as_ref().map(|modal| modal.mode_count),
+        Some(2),
+        "the reflexive body must be the two-mode choice: {reflexive:?}"
+    );
+
+    // Discriminator: no node of the parse sacrifices/exiles the printed source.
+    let mut bound = Vec::new();
+    source_bound_nodes(execute, &mut bound);
+    assert!(
+        bound.is_empty(),
+        "the resolution-time pronoun must not be bound to the printed source: {bound:?}"
+    );
 }

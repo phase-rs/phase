@@ -54,6 +54,7 @@ use super::oracle_nom::primitives::{
 };
 use super::oracle_nom::target::parse_chosen_object_reference;
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
+use super::oracle_nom::target::CostChannel;
 use super::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
 use super::oracle_nom::target::{
     parse_owner_hand_possessive, split_counted_return_to_hand_object, CountedReturnObject,
@@ -5298,7 +5299,9 @@ fn split_reflexive_optional_payment(
     }
     let cost_text = effect_text.get(cost_start..cost_start + cost_len)?.trim();
     let body_text = effect_text.get(body_start..)?.trim();
-    let cost = super::oracle_cost::parse_oracle_cost(cost_text);
+    // CR 118.12 + CR 603.12: the optional payment is made as the ability
+    // resolves, so a bare "it" in it is not bound to the printed source.
+    let cost = super::oracle_cost::parse_oracle_cost_in(cost_text, CostChannel::ResolutionPayment);
     if matches!(cost, AbilityCost::Unimplemented { .. })
         || !reflexive_optional_cost_payable_by_resolution_prompt(&cost)
     {
@@ -5388,7 +5391,12 @@ fn is_unsupported_disjunctive_reflexive_optional_payment(effect_text: &str) -> b
     let Some(cost_text) = effect_text.get(cost_start..cost_start + cost_len) else {
         return false;
     };
-    cost_contains_one_of(&super::oracle_cost::parse_oracle_cost(cost_text.trim()))
+    // CR 118.12 + CR 603.12: resolution-time optional payment (see
+    // `split_reflexive_optional_payment`).
+    cost_contains_one_of(&super::oracle_cost::parse_oracle_cost_in(
+        cost_text.trim(),
+        CostChannel::ResolutionPayment,
+    ))
 }
 
 fn cost_contains_one_of(cost: &AbilityCost) -> bool {

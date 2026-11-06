@@ -605,45 +605,76 @@ pub fn parse_granting_object_ref(input: &str) -> OracleResult<'_, TargetFilter> 
 }
 
 /// CR 201.5 / CR 201.5a: Shared self-reference combinator for *cost* positions
-/// ("Sacrifice <self>", "Exile <self>", "Return <self> to its owner's hand",
-/// "Unattach a[n] <type> from <self>").
+/// ("Sacrifice <self>", "Exile <self>", "Return <self> to its owner's hand").
+/// Recognizes the granter placeholder → `GrantingObject` and the host tokens
+/// (`~`, "cardname") → `SelfRef`, in one authority so every cost site routes
+/// through the same logic instead of an ad-hoc per-site `tag("~")` copy.
 ///
-/// Recognizes, in this order, the granter placeholder → `GrantingObject` (so a
-/// granted body's by-name reference to its granting object still wins), the host
-/// tokens (`~`, "cardname") → `SelfRef`, and the bare object pronoun "it" →
-/// `SelfRef`.
-///
-/// The pronoun's antecedent is the source named EARLIER IN THE SAME cost clause:
-/// "Remove three quest counters from this enchantment and sacrifice **it**"
-/// (Ior Ruin Expedition) names the enchantment, then says "it"; "Remove X time
-/// counters from this artifact and exile **it**" (Hourglass of the Lost) does
-/// the same. CR 113.7 identifies that object as the ability's source, which is
-/// the object its cost is paid with — the rule does not itself resolve the
-/// pronoun, and no rule needs to: the clause carries its own antecedent.
-///
-/// The class this serves is named by predicate, not by count: a printed cost
-/// leg whose object phrase is the bare pronoun `it` — `\b(sacrifice|exile)\s+it\b`
-/// in the pre-colon cost clause. The effect channel's `it` is bound elsewhere
-/// (`oracle_effect::resolve_it_pronoun`, and the `parent_target_available` gate
-/// on `oracle_target::parse_anaphoric_target_ref`) and is untouched by this
-/// arm; a cost clause that names something else first is out of scope, and the
-/// only printed shape in the corpus — `behold … and exile it` — is consumed by
-/// `parse_behold_cost` before any cost-leg split (below).
-///
-/// Out of scope — `behold <quality> and exile it` (Champion of the Clachan,
-/// Champion of the Path, Champion of the Weird, Champions of the Perfect,
-/// Champions of the Shoal): the pronoun there is the BEHELD card, and
-/// `oracle_cost::parse_behold_cost` consumes the whole clause as
-/// `BeholdCostAction::ExileChosen` before any cost-leg split, so this arm never
-/// sees it.
+/// This channel-free combinator does not recognize the bare object pronoun
+/// "it"; [`parse_cost_self_reference_for`] owns that, because what "it" names
+/// depends on the [`CostChannel`] the cost text was written on.
 pub fn parse_cost_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
     alt((
         parse_granting_object_ref,
         value(TargetFilter::SelfRef, tag("~")),
         value(TargetFilter::SelfRef, tag("cardname")),
-        parse_it_self_reference,
     ))
     .parse(input)
+}
+
+/// Which grammar position a cost phrase was written in. The same words name
+/// different objects on the two channels, so the cost grammar takes the
+/// channel as an explicit parameter instead of guessing from the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CostChannel {
+    /// A cost the source's own text imposes: the activation cost (everything
+    /// before the colon, CR 602.1a) and the source's additional, alternative
+    /// and keyword costs. In every printed source cost whose leg is a bare "it"
+    /// (the 16 pre-colon lines), the clause names the source first, and CR 113.7
+    /// makes that object the ability's source, so the following "it" names the
+    /// source; `behold … and exile it` is consumed whole by `parse_behold_cost`
+    /// first (see [`parse_cost_self_reference_for`]).
+    SourceCost,
+    /// A cost paid when a spell or ability resolves (CR 118.12), including the
+    /// reflexive form "you may <cost>. When you do, …" (CR 603.12). Callers:
+    /// `oracle_modal`'s `MayPay` arm and
+    /// `oracle_trigger::split_reflexive_optional_payment` /
+    /// `::is_unsupported_disjunctive_reflexive_optional_payment`. A bare "it"
+    /// there names an object the trigger introduced (CR 608.2c) — Gorbag of
+    /// Minas Morgul's "you may sacrifice it" is whichever Goblin or Orc dealt
+    /// the damage, Gorbag himself or another — and the cost grammar cannot know
+    /// that antecedent, so it does not bind the pronoun.
+    ResolutionPayment,
+}
+
+/// [`parse_cost_self_reference`] plus the channel-dependent bare pronoun "it".
+///
+/// On [`CostChannel::SourceCost`] a bare "it" → `SelfRef`: "Remove three quest
+/// counters from this enchantment and sacrifice **it**" (Ior Ruin Expedition)
+/// and "Remove X time counters from this artifact and exile **it**" (Hourglass
+/// of the Lost) name the source, then say "it". The class is named by
+/// predicate, not by count: a printed cost leg whose object phrase is the bare
+/// pronoun `it` — `\b(sacrifice|exile)\s+it\b` in the pre-colon cost clause.
+/// On [`CostChannel::ResolutionPayment`] the pronoun is not recognized, so the
+/// phrase falls through exactly as it did before the channel existed. The
+/// granter placeholder is tried first on both channels (CR 201.5a).
+///
+/// Out of scope — `behold <quality> and exile it` (Champion of the Clachan,
+/// Champion of the Path, Champion of the Weird, Champions of the Perfect,
+/// Champions of the Shoal): the pronoun there is the BEHELD card, and
+/// `oracle_cost::parse_behold_cost` consumes the whole clause as
+/// `BeholdCostAction::ExileChosen` before any cost-leg split, so this combinator
+/// never sees it.
+pub(crate) fn parse_cost_self_reference_for(
+    input: &str,
+    channel: CostChannel,
+) -> OracleResult<'_, TargetFilter> {
+    match channel {
+        CostChannel::SourceCost => {
+            alt((parse_cost_self_reference, parse_it_self_reference)).parse(input)
+        }
+        CostChannel::ResolutionPayment => parse_cost_self_reference(input),
+    }
 }
 
 /// Grammatical number a hand-destination possessive imposes on the returned
@@ -742,12 +773,14 @@ fn parse_non_count_quantity(input: &str) -> OracleResult<'_, &str> {
 /// Parse "it" as a self-reference, requiring a word boundary after "it"
 /// to prevent false matches on words like "item", "iterate".
 ///
-/// This is the single "it" recognition authority for BOTH channels —
-/// [`parse_self_reference`] (effect-target channel, where the caller gates it on
-/// a prior chosen-target referent) and [`parse_cost_self_reference`] (cost
-/// channel, where the clause names its own source before the pronoun). The
+/// Shared by [`parse_self_reference`] and [`parse_cost_self_reference_for`]
+/// (`SourceCost` only, where the clause names its own source before the
+/// pronoun). `parse_target` resolves a bare pronoun through
+/// `resolve_pronoun_target` before it reaches `parse_self_reference`. The
 /// boundary set below is what keeps `item`, `iterate` and `itself` out;
-/// `test_parse_self_reference_it_word_boundary` pins it.
+/// `test_parse_self_reference_it_word_boundary` pins `item`/`iterate` and
+/// `test_cost_self_reference_binds_bare_it_only_on_the_source_channel` pins
+/// `itself`.
 fn parse_it_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, _) = tag("it").parse(input)?;
     match rest.chars().next() {
@@ -2017,26 +2050,42 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_cost_self_reference_it_is_self_ref() {
+    fn test_cost_self_reference_binds_bare_it_only_on_the_source_channel() {
         // A printed cost leg's bare object pronoun "it" names the source the
         // same clause named first ("… from this enchantment and sacrifice it:"
         // / "… from this artifact and exile it:").
-        let (rest, f) = parse_cost_self_reference("it").unwrap();
+        let (rest, f) = parse_cost_self_reference_for("it", CostChannel::SourceCost).unwrap();
         assert_eq!(rest, "");
         assert_eq!(f, TargetFilter::SelfRef);
 
-        // CR 201.5a: the granter placeholder still wins (reach-guard).
+        // On the resolution-time payment channel the antecedent is an object
+        // the trigger introduced, which the cost grammar cannot know.
+        assert!(parse_cost_self_reference_for("it", CostChannel::ResolutionPayment).is_err());
+        // The channel-free combinator never recognizes the bare pronoun.
+        assert!(parse_cost_self_reference("it").is_err());
+
+        // CR 201.5a: the granter placeholder still wins on both channels.
+        for channel in [CostChannel::SourceCost, CostChannel::ResolutionPayment] {
+            assert_eq!(
+                parse_cost_self_reference_for(GRANTING_SELF_PLACEHOLDER, channel)
+                    .unwrap()
+                    .1,
+                TargetFilter::GrantingObject { bound: None }
+            );
+        }
+
+        // Reach-guard: the host token binds on the resolution channel, so the
+        // pronoun rejection above is the pronoun arm, not a dead combinator.
         assert_eq!(
-            parse_cost_self_reference(GRANTING_SELF_PLACEHOLDER)
+            parse_cost_self_reference_for("~", CostChannel::ResolutionPayment)
                 .unwrap()
                 .1,
-            TargetFilter::GrantingObject { bound: None }
+            TargetFilter::SelfRef
         );
 
-        // The word boundary inherited from `parse_it_self_reference` keeps
-        // "item"/"itself" out of the cost channel too.
-        assert!(parse_cost_self_reference("item").is_err());
-        assert!(parse_cost_self_reference("itself").is_err());
+        // The word boundary keeps "item"/"itself" out of the source channel too.
+        assert!(parse_cost_self_reference_for("item", CostChannel::SourceCost).is_err());
+        assert!(parse_cost_self_reference_for("itself", CostChannel::SourceCost).is_err());
     }
 
     #[test]
