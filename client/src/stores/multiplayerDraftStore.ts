@@ -1029,8 +1029,8 @@ async function performPick(request: MultiplayerPickRequest): Promise<DraftPickOu
  * reason: it is a monotone counter of APPLIED decisions, so
  * `after > before` acknowledges a decline and a take alike.
  *
- * Everything else is `performPick`'s machinery unchanged — the
- * `exclusivePickToken` mutual exclusion, the `lifecycleGeneration` /
+ * Everything else is `performPick`'s machinery unchanged — the read-only
+ * refusal, the `exclusivePickToken` mutual exclusion, the `lifecycleGeneration` /
  * adapter-identity `isFresh` guard, and `installWorkspace`. The one further
  * difference: reconciliation is `reconcileWorkspaceState` ALONE, with no
  * `applyDestination`. A decision names no cards, so there is no instance to
@@ -1055,6 +1055,7 @@ async function performSharedStackDecision(
   if (!adapter || !state.view || !state.workspaceState) {
     return { status: "rejected", reason: "invalid-request" };
   }
+  if (draftViewPresentation(state.view).isReadOnly) return { status: "rejected", reason: "invalid-request" };
   // No live pile turn means no decision to make. This is the ENGINE's
   // discriminator (`shared_stack` is `Some` exactly while a pile turn is
   // live), not a kind check.

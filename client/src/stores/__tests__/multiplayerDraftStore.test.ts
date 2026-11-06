@@ -2040,6 +2040,43 @@ describe("multiplayerDraftStore", () => {
       expect(mockHostAdapter.submitSharedStackDecision).not.toHaveBeenCalled();
     });
 
+    // A decision takes the same read-only check as a pick. `Paused` is the
+    // hostile sibling: a legacy paused view presents `podPhase: "drafting"` yet
+    // is read-only, so a check on the pod phase would let it through. The seat
+    // is synthetic -- the engine publishes `shared_stack` only while drafting --
+    // so this row guards the store's own boundary.
+    it.each(["Review", "Paused"] as const)("refuses a host's decision on a read-only %s view that still carries a pile turn", async (status) => {
+      await hostWinstonPod();
+      const view: DraftPlayerView = { ...winstonView(4), status };
+      capturedHostEventHandler!({ type: "viewUpdated", view });
+      mockHostAdapter.submitSharedStackDecision.mockClear();
+
+      // Reach guards: the read-only view is the store's view, it still carries
+      // a live pile turn, and the workspace is installed, so nothing upstream
+      // of the read-only check refuses the call.
+      const seated = useMultiplayerDraftStore.getState();
+      expect(seated.view).toBe(view);
+      expect(seated.view?.shared_stack?.decisions).toBe(4);
+      expect(seated.workspaceState).not.toBeNull();
+      expect(draftViewPresentation(seated.view!).isReadOnly).toBe(true);
+
+      // No adapter answer is queued before this call: a refused call would
+      // leave it for a later row.
+      await expect(useMultiplayerDraftStore.getState().submitSharedStackDecision(0, "Take"))
+        .resolves.toEqual({ status: "rejected", reason: "invalid-request" });
+      // REVERT-FAILING: without the read-only check the host adapter is asked.
+      expect(mockHostAdapter.submitSharedStackDecision).not.toHaveBeenCalled();
+
+      // Positive leg: the same seat back on a drafting view decides normally.
+      capturedHostEventHandler!({ type: "viewUpdated", view: winstonView(4) });
+      mockHostAdapter.submitSharedStackDecision.mockResolvedValueOnce(winstonView(5));
+
+      await expect(useMultiplayerDraftStore.getState().submitSharedStackDecision(0, "Take"))
+        .resolves.toEqual({ status: "acknowledged" });
+      expect(mockHostAdapter.submitSharedStackDecision).toHaveBeenCalledTimes(1);
+      expect(mockHostAdapter.submitSharedStackDecision).toHaveBeenCalledWith(0, "Take");
+    });
+
     it("sends the guest decision and settles on the host's pick acknowledgement", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({
         kind: "new",
@@ -2057,6 +2094,34 @@ describe("multiplayerDraftStore", () => {
 
       await expect(pending).resolves.toEqual({ status: "acknowledged" });
       expect(useMultiplayerDraftStore.getState().view?.shared_stack?.decisions).toBe(8);
+    });
+
+    it("refuses a guest's decision on a read-only Review view that still carries a pile turn", async () => {
+      await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
+        roomCode: "ABCDE",
+        displayName: "Alice",
+      });
+      capturedGuestEventHandler!({ type: "workspaceRestored", workspaceState: null });
+      const view: DraftPlayerView = { ...winstonView(7), status: "Review" };
+      capturedGuestEventHandler!({ type: "viewUpdated", view });
+      mockGuestAdapter.submitSharedStackDecision.mockClear();
+
+      // Reach guards: the read-only view is the store's view, it still carries
+      // a live pile turn, and the workspace is installed.
+      const seated = useMultiplayerDraftStore.getState();
+      expect(seated.view).toBe(view);
+      expect(seated.view?.shared_stack?.decisions).toBe(7);
+      expect(seated.workspaceState).not.toBeNull();
+      expect(draftViewPresentation(seated.view!).isReadOnly).toBe(true);
+
+      const pending = useMultiplayerDraftStore.getState().submitSharedStackDecision(1, "Decline");
+      // REVERT-FAILING, checked before the first await: the guest path sends its
+      // decision synchronously, so without the read-only check the adapter has
+      // already been asked here, and the call would then wait on an
+      // acknowledgement that never comes.
+      expect(mockGuestAdapter.submitSharedStackDecision).not.toHaveBeenCalled();
+      await expect(pending).resolves.toEqual({ status: "rejected", reason: "invalid-request" });
     });
 
     it("saves the pick count of the view the host's own decision broadcasts", async () => {
