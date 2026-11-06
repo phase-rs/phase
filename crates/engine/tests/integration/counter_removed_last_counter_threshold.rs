@@ -391,3 +391,160 @@ fn riftmarked_knight_last_time_counter_casts_it_and_creates_token() {
         .count();
     assert_eq!(tokens, 1, "the printed trigger creates one Knight token");
 }
+
+const REGENERATIONS_RESTORED: &str = "Vanishing 12 (This enchantment enters with twelve time counters on it. At the beginning of your upkeep, remove a time counter from it. When the last is removed, sacrifice it.)\nWhenever one or more time counters are removed from this enchantment, scry 1 and you gain 1 life. Then if this enchantment has no time counters on it, exile it. When you do, take an extra turn after this one.";
+
+/// What happened while P0's upkeep resolved for Regenerations Restored.
+struct RegenerationsUpkeep {
+    scried: bool,
+    ordering_prompted: bool,
+}
+
+/// Drive P0's upkeep through the public action pipeline. When both Regenerations
+/// Restored's own trigger and Vanishing's sacrifice trigger are put on the stack
+/// together (CR 603.3b), the controller orders them: `regen_resolves_first`
+/// places the "Whenever one or more time counters are removed" trigger on top.
+fn run_regenerations_upkeep(
+    runner: &mut GameRunner,
+    regen_resolves_first: bool,
+) -> RegenerationsUpkeep {
+    {
+        let state = runner.state_mut();
+        state.phase = Phase::End;
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+    }
+    runner.advance_to_phase(Phase::Upkeep);
+    assert_eq!(runner.state().phase, Phase::Upkeep, "reach: P0's upkeep");
+    assert_eq!(runner.state().active_player, P0, "reach: P0's turn");
+    let mut report = RegenerationsUpkeep {
+        scried: false,
+        ordering_prompted: false,
+    };
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return report,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::ScryChoice { cards, .. } => {
+                assert_eq!(cards.len(), 1, "scry 1 reveals exactly one card");
+                report.scried = true;
+                // Keep the card on top.
+                runner
+                    .act(GameAction::SelectCards { cards: vec![] })
+                    .expect("answer scry");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                report.ordering_prompted = true;
+                let regen = triggers
+                    .iter()
+                    .position(|t| t.description.starts_with("Whenever one or more time"))
+                    .expect("the Regenerations Restored trigger is being ordered");
+                // Index 0 is placed first (resolves last, CR 405.3).
+                let mut order: Vec<usize> = (0..triggers.len()).filter(|&i| i != regen).collect();
+                if regen_resolves_first {
+                    order.push(regen);
+                } else {
+                    order.insert(0, regen);
+                }
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                runner
+                    .choose_first_legal_target()
+                    .expect("choose the only legal target");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    panic!("the upkeep stack did not resolve");
+}
+
+fn regenerations_scenario(time_counters: u32) -> (GameRunner, ObjectId) {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let regen = sc
+        .add_creature(P0, "Regenerations Restored", 0, 0)
+        .as_enchantment()
+        .from_oracle_text_with_keywords(&["Vanishing"], REGENERATIONS_RESTORED)
+        .id();
+    // The enters-with-twelve-counters replacement is not under test.
+    sc.with_counter(regen, CounterType::Time, time_counters);
+    sc.with_library_top(P0, &["Card A", "Card B", "Card C"]);
+    sc.with_library_top(P1, &["Card D", "Card E", "Card F"]);
+    (sc.build(), regen)
+}
+
+/// CR 122.1 + CR 608.2c: Vanishing's upkeep removal (3 -> 2) triggers
+/// Regenerations Restored: scry 1, gain 1 life, and — because time counters
+/// remain — the "if this enchantment has no time counters" exile does not
+/// happen, so there is no reflexive extra turn (CR 603.12).
+#[test]
+fn regenerations_restored_nonlast_removal_scries_and_gains_life_without_exiling() {
+    let (mut runner, regen) = regenerations_scenario(3);
+    let turns_before = runner.state().extra_turns.len();
+
+    let report = run_regenerations_upkeep(&mut runner, true);
+
+    let s = runner.state();
+    // Reach guards: the removal happened and the trigger's effect chain ran.
+    assert_eq!(counters(s, regen, &CounterType::Time), 2, "one removed");
+    assert!(report.scried, "the scry choice was offered");
+    assert!(
+        !report.ordering_prompted,
+        "a nonlast removal has one trigger"
+    );
+    assert_eq!(life(s, P0), 21, "gain 1 life");
+    // Discriminators: nothing exiled, no extra turn.
+    assert_eq!(s.objects[&regen].zone, Zone::Battlefield);
+    assert_eq!(s.extra_turns.len(), turns_before, "no extra turn");
+}
+
+/// CR 603.3b + CR 608.2c + CR 603.12: removing the last counter triggers both
+/// Regenerations Restored and Vanishing's sacrifice (CR 702.63a). With the
+/// Regenerations Restored trigger ordered to resolve first, the enchantment is
+/// still on the battlefield with no time counters, so it is exiled and the
+/// reflexive "when you do" grants an extra turn.
+#[test]
+fn regenerations_restored_last_removal_exiles_itself_and_grants_extra_turn() {
+    let (mut runner, regen) = regenerations_scenario(1);
+    let turns_before = runner.state().extra_turns.len();
+
+    let report = run_regenerations_upkeep(&mut runner, true);
+
+    let s = runner.state();
+    assert_eq!(counters(s, regen, &CounterType::Time), 0, "last removed");
+    assert!(report.ordering_prompted, "two triggers need ordering");
+    assert!(report.scried, "the scry choice was offered");
+    assert_eq!(life(s, P0), 21, "gain 1 life");
+    assert_eq!(
+        s.objects[&regen].zone,
+        Zone::Exile,
+        "exiled, not sacrificed"
+    );
+    assert_eq!(s.extra_turns.len(), turns_before + 1, "extra turn granted");
+    assert_eq!(s.extra_turns.last().map(|t| t.player), Some(P0));
+}
+
+/// CR 400.7 + CR 603.12: if Vanishing's sacrifice resolves first, the
+/// enchantment is already in the graveyard when Regenerations Restored tries to
+/// exile "it", so the exile does not happen and "when you do" never triggers —
+/// no extra turn. Scry and life gain still occur.
+#[test]
+fn regenerations_restored_sacrificed_first_gets_no_extra_turn() {
+    let (mut runner, regen) = regenerations_scenario(1);
+    let turns_before = runner.state().extra_turns.len();
+
+    let report = run_regenerations_upkeep(&mut runner, false);
+
+    let s = runner.state();
+    assert!(report.ordering_prompted, "two triggers need ordering");
+    assert!(report.scried, "the scry choice was offered");
+    assert_eq!(life(s, P0), 21, "gain 1 life");
+    assert_eq!(s.objects[&regen].zone, Zone::Graveyard, "sacrificed");
+    assert_eq!(s.extra_turns.len(), turns_before, "no extra turn");
+}

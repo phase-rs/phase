@@ -25683,6 +25683,21 @@ fn resolve_chain_body(
                     // continuing this outer walk would double-resolve later siblings.
                     let mut current = Some(next);
                     while let Some(ref sibling) = current {
+                        // CR 603.12: "When you do, ..." is the reflexive trigger
+                        // of the instruction just before it. The gated sub did
+                        // not happen, so its reflexive rider never triggers even
+                        // when the parser links it as a separate-sentence
+                        // sibling (Regenerations Restored's "Then if this
+                        // enchantment has no time counters on it, exile it. When
+                        // you do, take an extra turn after this one.").
+                        if sibling
+                            .condition
+                            .as_ref()
+                            .is_some_and(AbilityCondition::has_when_you_do_marker)
+                        {
+                            current = sibling.sub_ability.as_ref();
+                            continue;
+                        }
                         if starts_independent_instruction(sibling) {
                             let mut sibling_resolved = sibling.as_ref().clone();
                             if should_propagate_parent_targets(ability, &sibling_resolved) {
