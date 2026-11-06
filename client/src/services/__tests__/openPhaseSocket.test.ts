@@ -308,10 +308,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("accepts the literal Full v144 one-time boons protocol", async () => {
+  it("accepts the literal Full v145 one-time boons protocol", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 144 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 145 }));
 
     await expect(promise).resolves.toBeDefined();
     expect(ws.close).not.toHaveBeenCalled();
