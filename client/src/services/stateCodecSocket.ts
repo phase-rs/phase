@@ -26,17 +26,60 @@ export type StateCodecName = typeof STATE_CODEC_V1;
 /** What the owning adapter says about the current attachment's bootstrap. */
 export type StateCodecBootstrap = "pending" | "accepted";
 
-/** Ordered notification from the wrapper to the owning adapter. */
+/** Recovery progress the wrapper reports to the owning adapter. */
 export type StateCodecRecoveryState = "recovering" | "ready";
+
+/**
+ * Why a negotiated codec attachment ended in a codec-specific fatal close. The
+ * closed list of transport-level triggers; ordinary network loss, local close,
+ * identity-policy closes and absent capability are none of these.
+ */
+export type StateCodecFailureReason =
+  /** The decoder rejected the RPC or threw (lifecycle error, trap, timeout). */
+  | "decodeFailure"
+  /** Missing, contradictory, early or late codec confirmation. */
+  | "confirmationFailure"
+  /** A frame was rejected before the application accepted a bootstrap. */
+  | "bootstrapRejection"
+  /** The recovery Full did not arrive within the recovery window. */
+  | "recoveryTimeout"
+  /** The recovery Full was itself rejected. */
+  | "recoveryFullRejection"
+  /** A second established-game recovery completed on the same wrapper. */
+  | "repeatedRecovery";
+
+/** Terminal notification: published once, before the close notification. */
+export interface StateCodecFailure {
+  readonly kind: "failed";
+  readonly reason: StateCodecFailureReason;
+}
+
+/**
+ * Ordered notification from the wrapper to the owning adapter: recovery
+ * progress, or the terminal `failed` outcome of the attachment.
+ */
+export type StateCodecRecoveryNotice = StateCodecRecoveryState | StateCodecFailure;
+
+/**
+ * Per-adapter delivery policy. `snapshotOnly` is sticky for the lifetime of
+ * the owning adapter: a codec failure never re-enables negotiation on the same
+ * adapter, while a fresh adapter starts at `negotiate`.
+ */
+export type StateCodecPolicy =
+  | { readonly kind: "negotiate" }
+  | { readonly kind: "snapshotOnly"; readonly reason: StateCodecFailureReason };
 
 /**
  * One attachment's bootstrap authority, shared by the owning adapters. `socket`
  * is `null` until the attachment's socket is adopted; `status` becomes
  * `accepted` only after a genuine GameStarted passes the adapter's guards.
+ * `failure` is the first terminal codec reason this attachment reported; it is
+ * captured even before adoption so an early failure is not lost.
  */
 export interface StateCodecBootstrapBinding {
   socket: PhaseSocketTransport | null;
   status: StateCodecBootstrap;
+  failure: StateCodecFailureReason | null;
 }
 
 /** Rejection message for a command dropped while codec recovery begins. */
@@ -65,6 +108,39 @@ export class StateCodecAttachment {
   private current: StateCodecBootstrapBinding | null = null;
   /** `null` while delivery is healthy; never holds `"ready"`. */
   private recovery: "recovering" | null = null;
+  /**
+   * Delivery policy of the owning adapter. The first qualifying failure of the
+   * current attachment wins. Binding begin/adopt/reset/accept, recovery
+   * completion, healthy delivery, a new match and reconnect never reset it;
+   * only {@link release} (adapter disposal) does. No clock, global or user
+   * toggle re-enables negotiation.
+   */
+  private policy: StateCodecPolicy = { kind: "negotiate" };
+
+  /** Why this adapter stopped negotiating, or `negotiate`. */
+  get deliveryPolicy(): StateCodecPolicy {
+    return this.policy;
+  }
+
+  /**
+   * The provider an attachment may use right now: the configured one while
+   * negotiating, `null` (snapshot-only, no preparation, no await) once
+   * degraded. `undefined`/default/`null` configuration is the caller's.
+   */
+  selectProvider<P>(configured: P | null): P | null {
+    return this.policy.kind === "negotiate" ? configured : null;
+  }
+
+  /**
+   * Post-preparation lease selection. A lease obtained while the policy was
+   * still `negotiate` but that arrives after the adapter degraded is closed and
+   * replaced by `null`, so the attachment opens as snapshot-only.
+   */
+  selectLease(session: StateCodecSession | null): StateCodecSession | null {
+    if (session === null || this.policy.kind === "negotiate") return session;
+    session.close();
+    return null;
+  }
 
   /**
    * Fresh, still-pending authority for one attach. It is not current until
@@ -72,14 +148,19 @@ export class StateCodecAttachment {
    * and recovery gate.
    */
   begin(): StateCodecBootstrapBinding {
-    return { socket: null, status: "pending" };
+    return { socket: null, status: "pending", failure: null };
   }
 
-  /** The attachment's socket is adopted: retire the previous binding and its recovery gate. */
+  /**
+   * The attachment's socket is adopted: retire the previous binding and its
+   * recovery gate. A failure the attachment reported before adoption is
+   * consumed here, ahead of any server-hello emission or close consumer.
+   */
   adopt(binding: StateCodecBootstrapBinding, socket: PhaseSocketTransport): void {
     binding.socket = socket;
     this.current = binding;
     this.recovery = null;
+    if (binding.failure !== null) this.degrade(binding.failure);
   }
 
   /** Bootstrap status reported to the codec transport for `binding`. */
@@ -107,20 +188,33 @@ export class StateCodecAttachment {
   }
 
   /**
-   * Codec recovery notification for `binding`. On `"recovering"` the gate is
-   * set and the pending command is interrupted BEFORE any listener can run:
-   * the interruption emits synchronously and a listener may submit, which must
+   * Codec notification for `binding`. On `"recovering"` the gate is set and the
+   * pending command is interrupted BEFORE any listener can run: the
+   * interruption emits synchronously and a listener may submit, which must
    * already be refused. `interruptPending` drops the adapter's submission slot
    * and, if it held a command, rejects it with the supplied retryable error.
+   *
+   * A terminal `failed` notice is recorded on `binding` (first reason wins)
+   * even when `binding` is not yet adopted. It degrades the adapter's policy
+   * immediately only when `binding` is current and owns `currentSocket`: a
+   * retired or still-pending attachment never poisons its replacement. It does
+   * not touch the recovery gate, which the close that follows clears.
    */
   handleRecovery(
     binding: StateCodecBootstrapBinding,
-    state: StateCodecRecoveryState,
+    state: StateCodecRecoveryNotice,
     currentSocket: PhaseSocketTransport | null,
     disposed: boolean,
     interruptPending: (error: AdapterError) => void,
   ): void {
     if (disposed) return;
+    if (typeof state === "object") {
+      binding.failure ??= state.reason;
+      if (this.current === binding && binding.socket !== null && currentSocket === binding.socket) {
+        this.degrade(state.reason);
+      }
+      return;
+    }
     if (this.current !== binding) return;
     if (binding.socket === null || currentSocket !== binding.socket) return;
     if (state === "recovering") {
@@ -150,10 +244,15 @@ export class StateCodecAttachment {
     this.recovery = null;
   }
 
-  /** The owning adapter is disposed: no binding or recovery state survives. */
+  /** The owning adapter is disposed: no binding, recovery or policy state survives. */
   release(): void {
     this.recovery = null;
     this.current = null;
+    this.policy = { kind: "negotiate" };
+  }
+
+  private degrade(reason: StateCodecFailureReason): void {
+    if (this.policy.kind === "negotiate") this.policy = { kind: "snapshotOnly", reason };
   }
 }
 
@@ -241,7 +340,17 @@ type CloseNotification = "immediate" | "deferred";
 type Outbound =
   | { kind: "message"; event: MessageEvent<string> }
   | { kind: "close"; event: CloseEvent }
-  | { kind: "recovery"; state: StateCodecRecoveryState };
+  | { kind: "recovery"; state: StateCodecRecoveryNotice };
+
+/**
+ * Established-game recovery cycles one wrapper tolerates. The first completed
+ * recovery restores delivery; the second is delivered and then closes as
+ * `repeatedRecovery`. Two is the smallest bound that tolerates one genuine
+ * corruption while ending an always-rejected-Delta / valid-Full loop. Healthy
+ * Deltas, ordinary Fulls, elapsed time and a new match never reset the count;
+ * only a new wrapper starts at zero.
+ */
+const MAX_COMPLETED_RECOVERIES = 2;
 
 export interface StateCodecSocketOptions {
   inner: PhaseSocketTransport;
@@ -251,7 +360,12 @@ export interface StateCodecSocketOptions {
    * bootstrap, not a valid wire baseline, decides whether recovery is safe.
    */
   bootstrap: () => StateCodecBootstrap;
-  onRecovery?: (state: StateCodecRecoveryState) => void;
+  /**
+   * Recovery progress and the terminal outcome. `failed` is published at most
+   * once, after the transport is invalidated and its lease released and before
+   * the close notification, and never after a local, natural or identity close.
+   */
+  onRecovery?: (state: StateCodecRecoveryNotice) => void;
   /** Actual send accounting for an uncompressed inner transport. */
   onFrameSent?: () => void;
   confirmationTimeoutMs?: number;
@@ -273,12 +387,13 @@ export class StateCodecSocket implements PhaseSocketTransport {
   private sessionReleased = false;
   private readonly consumerWaiters: (() => void)[] = [];
   private pendingClose: Extract<Outbound, { kind: "close" }> | null = null;
+  private completedRecoveries = 0;
   private readonly encoder = new TextEncoder();
 
   constructor(private readonly options: StateCodecSocketOptions) {
     const { inner } = options;
     this.confirmationTimer = setTimeout(
-      () => this.terminate(),
+      () => this.terminate("immediate", "confirmationFailure"),
       options.confirmationTimeoutMs ?? STATE_CODEC_SOCKET_TIMEOUT_MS,
     );
     inner.onopen = (event) => {
@@ -403,7 +518,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
       }
       if (type === "Full" || type === "Delta") {
         // A codec frame cannot precede the confirmation that authorizes it.
-        this.terminate();
+        this.terminate("immediate", "confirmationFailure");
         return;
       }
       await this.waitForConsumer();
@@ -440,7 +555,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
     } catch {
       // Decoder/RPC failure (unknown session, session closed, RPC timeout) is
       // a transport failure, not codec integrity: the socket cannot continue.
-      this.terminate();
+      this.terminate("immediate", "decodeFailure");
       return null;
     }
   }
@@ -451,12 +566,12 @@ export class StateCodecSocket implements PhaseSocketTransport {
       const parsed = JSON.parse(text) as { data?: { selected_state_codec?: unknown } };
       selected = parsed.data?.selected_state_codec;
     } catch {
-      this.terminate();
+      this.terminate("immediate", "confirmationFailure");
       return;
     }
     if (selected !== STATE_CODEC_V1) {
       // Contradictory or missing selection: the peer will not speak the codec.
-      this.terminate();
+      this.terminate("immediate", "confirmationFailure");
       return;
     }
     this.clearConfirmationTimer();
@@ -465,24 +580,30 @@ export class StateCodecSocket implements PhaseSocketTransport {
 
   private beginRecovery(): void {
     if (this.state !== "ready") {
-      // A second rejection, or a rejection inside an open recovery window.
-      this.terminate();
+      // Deltas are suppressed while awaiting the Full, so a rejection inside an
+      // open recovery window is the recovery Full itself.
+      this.terminate("immediate", "recoveryFullRejection");
       return;
     }
+    // Classified before any resync attempt, so a send failure cannot lose the
+    // reason: before application bootstrap there is no state to restore.
+    const bootstrapPending = this.bootstrap() === "pending";
     this.state = "awaitingFull";
     this.recoveryTimer = setTimeout(
-      () => this.terminate(),
+      () => this.terminate("immediate", "recoveryTimeout"),
       this.options.recoveryTimeoutMs ?? STATE_CODEC_SOCKET_TIMEOUT_MS,
     );
     this.notifyRecovery("recovering");
     if (this.closed) return;
-    if (!this.sendResync()) {
-      this.terminate();
+    const resyncSent = this.sendResync();
+    // Request the Full best-effort, then take the fatal close path.
+    if (bootstrapPending) {
+      this.terminate("immediate", "bootstrapRejection");
       return;
     }
-    // Before application bootstrap there is no state to restore: request the
-    // Full best-effort, then take the fatal close path.
-    if (this.bootstrap() === "pending") this.terminate();
+    // A resync that could not be sent on an established game is a transport
+    // problem, not codec evidence.
+    if (!resyncSent) this.terminate();
   }
 
   private finishRecovery(json: string): void {
@@ -502,7 +623,16 @@ export class StateCodecSocket implements PhaseSocketTransport {
   private finishRecoveryDecision(): void {
     if (this.state !== "awaitingFull") return;
     if (this.bootstrap() !== "accepted") {
+      // The delivery reset the application bootstrap: nothing to restore, and
+      // no codec evidence against the stream.
       this.terminate();
+      return;
+    }
+    // The valid Full has been delivered; count the completed recovery. The
+    // second one is still delivered, but it never publishes `ready`.
+    this.completedRecoveries += 1;
+    if (this.completedRecoveries >= MAX_COMPLETED_RECOVERIES) {
+      this.terminate("immediate", "repeatedRecovery");
       return;
     }
     this.clearRecoveryTimer();
@@ -537,8 +667,18 @@ export class StateCodecSocket implements PhaseSocketTransport {
    * Fatal or local close: invalidation, timer cancellation and lease release
    * are immediate, idempotent and independent of the receive queue. Only the
    * close notification may be deferred ("deferred" = local `close()`).
+   *
+   * A codec failure (`failure` set, always an immediate close) additionally
+   * publishes the typed `failed` notice once, after invalidation and before the
+   * close notification. The first terminal path wins: a failure after a local,
+   * natural or earlier fatal close reports nothing. The notice is dispatched
+   * directly because `notifyRecovery` drops everything once closed; a throwing
+   * callback is isolated and never skips the close notification or inner close.
    */
-  private terminate(notification: CloseNotification = "immediate"): void {
+  private terminate(
+    notification: CloseNotification = "immediate",
+    failure: StateCodecFailureReason | null = null,
+  ): void {
     if (this.state === "closed") return;
     this.state = "closed";
     this.clearTimers();
@@ -547,17 +687,23 @@ export class StateCodecSocket implements PhaseSocketTransport {
       this.releaseSession();
     } finally {
       try {
-        const item: Extract<Outbound, { kind: "close" }> = {
-          kind: "close",
-          event: new CloseEvent("close"),
-        };
-        if (notification === "deferred") {
-          queueMicrotask(() => this.deliver(item));
-        } else {
-          this.deliver(item);
+        if (failure !== null) {
+          this.dispatch({ kind: "recovery", state: { kind: "failed", reason: failure } });
         }
       } finally {
-        this.options.inner.close();
+        try {
+          const item: Extract<Outbound, { kind: "close" }> = {
+            kind: "close",
+            event: new CloseEvent("close"),
+          };
+          if (notification === "deferred") {
+            queueMicrotask(() => this.deliver(item));
+          } else {
+            this.deliver(item);
+          }
+        } finally {
+          this.options.inner.close();
+        }
       }
     }
   }
@@ -623,7 +769,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
     }
   }
 
-  private notifyRecovery(state: StateCodecRecoveryState): void {
+  private notifyRecovery(state: StateCodecRecoveryNotice): void {
     if (this.state === "closed") return;
     this.deliver({ kind: "recovery", state });
   }

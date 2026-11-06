@@ -14,7 +14,7 @@ import {
   StateCodecSocket,
   type StateCodecBootstrap,
   type StateCodecName,
-  type StateCodecRecoveryState,
+  type StateCodecRecoveryNotice,
 } from "./stateCodecSocket";
 import type { StateCodecSession } from "../adapter/state-codec-runtime";
 
@@ -97,10 +97,12 @@ export interface OpenOptions<T extends PhaseSocketTransport = WebSocket> {
    */
   stateCodecSession?: StateCodecSession | null;
   /**
-   * Ordered recovery notification from the negotiated codec transport. Absent
-   * for snapshot sockets.
+   * Ordered notification from the negotiated codec transport: recovery
+   * progress (`recovering`, `ready`) and, terminally, `failed` with its typed
+   * reason, published once before the close notification. Absent for snapshot
+   * sockets, which never report codec failures.
    */
-  onStateCodecRecovery?: (state: StateCodecRecoveryState) => void;
+  onStateCodecRecovery?: (state: StateCodecRecoveryNotice) => void;
   /**
    * Attachment-local application-bootstrap authority for the codec transport.
    * Absence is treated as `"pending"`, which makes a rejection before

@@ -823,10 +823,13 @@ export class ServerDraftAdapter implements EngineAdapter {
     // adopted below: until then a still-current older socket keeps its own
     // binding and recovery gate, and `ownsAttachment` tracks supersession.
     try {
-      if (this.stateCodecProvider) {
+      // The policy picks the provider synchronously: a degraded adapter, like a
+      // null opt-out, adds no preparation and no await before opening.
+      const provider = this.stateCodec.selectProvider(this.stateCodecProvider);
+      if (provider) {
         try {
           prepared = await prepareBoundedStateCodecSession(
-            this.stateCodecProvider,
+            provider,
             attachment.controller.signal,
             STATE_CODEC_PREPARATION_TIMEOUT_MS,
           );
@@ -841,8 +844,9 @@ export class ServerDraftAdapter implements EngineAdapter {
         return;
       }
       // Ownership of the lease moves into the handshake helper, which releases
-      // it on every failure path and on non-negotiation.
-      const handed = prepared;
+      // it on every failure path and on non-negotiation. A lease that arrives
+      // after this adapter degraded is closed here and not offered.
+      const handed = this.stateCodec.selectLease(prepared);
       prepared = null;
       socket = await openPhaseSocket(this.serverUrl, {
         signal: attachment.controller.signal,

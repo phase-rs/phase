@@ -1028,7 +1028,11 @@ import type {
   StateCodecDecodeResult,
   StateCodecSession,
 } from "../../adapter/state-codec-runtime";
-import { STATE_CODEC_SOCKET_TIMEOUT_MS, StateCodecAttachment } from "../stateCodecSocket";
+import {
+  STATE_CODEC_SOCKET_TIMEOUT_MS,
+  StateCodecAttachment,
+  type StateCodecRecoveryNotice,
+} from "../stateCodecSocket";
 
 const DECODED_PONG = '{"type":"Pong","data":{"timestamp":11}}';
 
@@ -1225,7 +1229,7 @@ describe("openPhaseSocket — codec stream, recovery and teardown", () => {
     fake: ReturnType<typeof fakeSession>,
     options: {
       bootstrap?: () => "pending" | "accepted";
-      onRecovery?: (state: "recovering" | "ready") => void;
+      onRecovery?: (state: StateCodecRecoveryNotice) => void;
     } = {},
   ) {
     const promise = openPhaseSocket("ws://test", {
@@ -1259,7 +1263,7 @@ describe("openPhaseSocket — codec stream, recovery and teardown", () => {
       frames.push(frame);
       return frames.length === 1 ? { kind: "resyncRequired" } : { kind: "decoded", json: '{"type":"StateUpdate"}' };
     });
-    const recovery: string[] = [];
+    const recovery: StateCodecRecoveryNotice[] = [];
     const { raw, received } = await negotiated(fake, { onRecovery: (state) => recovery.push(state) });
 
     raw.deliverMessage(codecFrame("Delta"));
@@ -1310,7 +1314,11 @@ describe("openPhaseSocket — codec stream, recovery and teardown", () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(fake.decode).toHaveBeenCalledOnce();
     expect(received).not.toHaveBeenCalled();
-    expect(recovery.mock.calls).toEqual([["recovering"]]);
+    // A rejection before application bootstrap is the typed terminal reason.
+    expect(recovery.mock.calls).toEqual([
+      ["recovering"],
+      [{ kind: "failed", reason: "bootstrapRejection" }],
+    ]);
     expect(closed).toHaveBeenCalledOnce();
   });
 
@@ -1451,7 +1459,7 @@ describe("openPhaseSocket — codec stream, recovery and teardown", () => {
       frames.push(frame);
       return frames.length === 1 ? { kind: "resyncRequired" } : { kind: "decoded", json: DECODED_PONG };
     });
-    const recovery: string[] = [];
+    const recovery: StateCodecRecoveryNotice[] = [];
     const { raw, socket } = await negotiated(fake, { onRecovery: (state) => recovery.push(state) });
 
     raw.deliverMessage(codecFrame("Delta"));
@@ -1653,7 +1661,7 @@ describe("codec attachment and deadline boundaries", () => {
       let calls = 0;
       const fake = fakeSession(() => ++calls === 2
         ? { kind: "resyncRequired" } : { kind: "decoded", json: DECODED_PONG });
-      const recovery: string[] = [];
+      const recovery: StateCodecRecoveryNotice[] = [];
       const pending = openPhaseSocket("ws://test", {
         stateCodecSession: fake.session, stateCodecBootstrap: () => bootstrap,
         onStateCodecRecovery: (state) => recovery.push(state),
@@ -1865,6 +1873,82 @@ describe("StateCodecAttachment", () => {
     expect(third.attachment.status(third.binding, socketA, false)).toBe("pending");
   });
 
+  it("selects the provider and lease by policy, and the first failure on the current attachment wins", () => {
+    const { attachment, binding } = adopted();
+    const provider = vi.fn();
+    const lease = { decode: vi.fn(), close: vi.fn() };
+    // Reach guard: while negotiating, both selections pass through.
+    expect(attachment.deliveryPolicy).toEqual({ kind: "negotiate" });
+    expect(attachment.selectProvider(provider)).toBe(provider);
+    expect(attachment.selectProvider(null)).toBeNull();
+    expect(attachment.selectLease(lease)).toBe(lease);
+    expect(lease.close).not.toHaveBeenCalled();
+
+    attachment.handleRecovery(binding, { kind: "failed", reason: "repeatedRecovery" }, socketA, false, vi.fn());
+    attachment.handleRecovery(binding, { kind: "failed", reason: "decodeFailure" }, socketA, false, vi.fn());
+    expect(attachment.deliveryPolicy).toEqual({ kind: "snapshotOnly", reason: "repeatedRecovery" });
+    expect(attachment.selectProvider(provider)).toBeNull();
+    expect(attachment.selectLease(lease)).toBeNull();
+    expect(lease.close).toHaveBeenCalledOnce();
+    expect(attachment.selectLease(null)).toBeNull();
+  });
+
+  it("never resets the policy on begin, adopt, accept, reset, recovery completion or clearRecovery, only on release", () => {
+    const { attachment, binding } = adopted();
+    attachment.handleRecovery(binding, { kind: "failed", reason: "confirmationFailure" }, socketA, false, vi.fn());
+    const degraded = { kind: "snapshotOnly", reason: "confirmationFailure" };
+    expect(attachment.deliveryPolicy).toEqual(degraded);
+
+    attachment.accept(socketA);
+    attachment.reset(socketA);
+    attachment.handleRecovery(binding, "recovering", socketA, false, vi.fn());
+    attachment.handleRecovery(binding, "ready", socketA, false, vi.fn());
+    attachment.clearRecovery();
+    attachment.adopt(attachment.begin(), socketB);
+    expect(attachment.deliveryPolicy).toEqual(degraded);
+
+    attachment.release();
+    expect(attachment.deliveryPolicy).toEqual({ kind: "negotiate" });
+  });
+
+  it("does not let a retired, foreign-socket, disposed or still-pending binding degrade the policy", () => {
+    const { attachment, binding } = adopted();
+    const fail = { kind: "failed", reason: "decodeFailure" } as const;
+    // A failure on a socket that is not the current one, and a disposed adapter.
+    attachment.handleRecovery(binding, fail, socketB, false, vi.fn());
+    expect(attachment.deliveryPolicy).toEqual({ kind: "negotiate" });
+    const disposedBinding = attachment.begin();
+    attachment.handleRecovery(disposedBinding, fail, socketA, true, vi.fn());
+    expect(disposedBinding.failure).toBeNull();
+    // A still-pending replacement records its reason but cannot degrade early.
+    const pending = attachment.begin();
+    attachment.handleRecovery(pending, fail, socketA, false, vi.fn());
+    expect(pending.failure).toBe("decodeFailure");
+    expect(attachment.deliveryPolicy).toEqual({ kind: "negotiate" });
+    // Retired by the adoption of a newer binding, the old one never degrades.
+    attachment.adopt(attachment.begin(), socketB);
+    attachment.handleRecovery(binding, fail, socketB, false, vi.fn());
+    expect(attachment.deliveryPolicy).toEqual({ kind: "negotiate" });
+    // Reach guard: the same notice on the live binding does degrade.
+    const live = attachment.begin();
+    attachment.adopt(live, socketA);
+    attachment.handleRecovery(live, fail, socketA, false, vi.fn());
+    expect(attachment.deliveryPolicy).toEqual({ kind: "snapshotOnly", reason: "decodeFailure" });
+  });
+
+  it("consumes a reason captured before adoption and keeps the first reason on a binding", () => {
+    const attachment = new StateCodecAttachment();
+    const early = attachment.begin();
+    attachment.handleRecovery(early, { kind: "failed", reason: "confirmationFailure" }, null, false, vi.fn());
+    attachment.handleRecovery(early, { kind: "failed", reason: "decodeFailure" }, null, false, vi.fn());
+    expect(early.failure).toBe("confirmationFailure");
+    expect(attachment.deliveryPolicy).toEqual({ kind: "negotiate" });
+    attachment.adopt(early, socketA);
+    expect(attachment.deliveryPolicy).toEqual({ kind: "snapshotOnly", reason: "confirmationFailure" });
+    // A failure does not touch the recovery gate that the close settles.
+    expect(blocked(attachment)).toBe(false);
+  });
+
   function blocked(attachment: StateCodecAttachment): boolean {
     try {
       attachment.assertNotRecovering();
@@ -1874,4 +1958,279 @@ describe("StateCodecAttachment", () => {
       return true;
     }
   }
+});
+
+// ── Typed terminal codec reasons ────────────────────────────────────────
+//
+// Every codec-specific fatal close publishes exactly one typed `failed` notice,
+// after the transport is invalidated and before the close notification. The
+// mutual advertisement in each row is the positive reach guard.
+
+describe("openPhaseSocket — typed terminal codec reasons", () => {
+  type Trace = string[];
+
+  async function open(
+    fake: ReturnType<typeof fakeSession>,
+    options: {
+      bootstrap?: () => "pending" | "accepted";
+      onRecovery?: (state: StateCodecRecoveryNotice) => void;
+      timeoutMs?: number;
+      attachHandlers?: boolean;
+    } = {},
+  ) {
+    const notices: StateCodecRecoveryNotice[] = [];
+    const trace: Trace = [];
+    const promise = openPhaseSocket("ws://test", {
+      stateCodecSession: fake.session,
+      stateCodecBootstrap: options.bootstrap ?? (() => "accepted"),
+      timeoutMs: options.timeoutMs,
+      onStateCodecRecovery: (state) => {
+        notices.push(state);
+        trace.push(typeof state === "string" ? state : `failed:${state.reason}`);
+        options.onRecovery?.(state);
+      },
+    });
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(fullHello());
+    const socket = await promise;
+    // Reach guard: the codec was really advertised, so the wrapper exists.
+    expect(raw.send).toHaveBeenCalledWith(expect.stringContaining('"state_codecs":["StateCodecV1"]'));
+    const closed = vi.fn(() => { trace.push("close"); });
+    const received = vi.fn((event: { data: string }) => { trace.push(`message:${event.data.length}`); });
+    if (options.attachHandlers !== false) {
+      socket.ws.onclose = closed;
+      socket.ws.onmessage = received;
+    }
+    return { raw, socket, notices, trace, closed, received };
+  }
+
+  const ping = (n: number) => JSON.stringify({ type: "Pong", data: { timestamp: n } });
+
+  it("reports decodeFailure before the close and never resyncs", async () => {
+    const fake = fakeSession();
+    fake.decode.mockImplementationOnce(async () => { throw new Error("State codec decode timed out"); });
+    const { raw, notices, trace, closed } = await open(fake);
+    raw.deliverMessage(confirmationFrame());
+    raw.deliverMessage(codecFrame("Full"));
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    expect(notices).toEqual([{ kind: "failed", reason: "decodeFailure" }]);
+    expect(trace).toEqual(["failed:decodeFailure", "close"]);
+    expect(fake.close).toHaveBeenCalledOnce();
+    expect(raw.send).not.toHaveBeenCalledWith('{"type":"ResyncState"}');
+    // Later frames cannot publish another notice (the decoder would accept them).
+    raw.deliverMessage(codecFrame("Delta"));
+    raw.deliverMessage(ping(1));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(notices).toHaveLength(1);
+  });
+
+  it.each([
+    ["a contradictory selection", () => confirmationFrame("OtherCodec")],
+    ["a missing selection", () => JSON.stringify({ type: "ServerHello", data: { server_version: "x" } })],
+  ])("reports confirmationFailure for %s", async (_label, frame) => {
+    const fake = fakeSession();
+    const { raw, notices, closed } = await open(fake);
+    raw.deliverMessage(frame());
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    expect(notices).toEqual([{ kind: "failed", reason: "confirmationFailure" }]);
+    expect(fake.close).toHaveBeenCalledOnce();
+  });
+
+  it("reports confirmationFailure when a codec frame precedes the confirmation, even with no consumer attached", async () => {
+    const fake = fakeSession();
+    const { raw, notices, socket, trace } = await open(fake, { attachHandlers: false });
+    raw.deliverMessage(codecFrame("Full"));
+    await vi.waitFor(() => expect(notices).toEqual([{ kind: "failed", reason: "confirmationFailure" }]));
+    expect(fake.decode).not.toHaveBeenCalled();
+    expect(fake.close).toHaveBeenCalledOnce();
+    // The close is retained for the consumer that attaches later, and still last.
+    const closed = vi.fn(() => { trace.push("close"); });
+    socket.ws.onclose = closed;
+    expect(closed).toHaveBeenCalledOnce();
+    expect(trace).toEqual(["failed:confirmationFailure", "close"]);
+  });
+
+  it("reports confirmationFailure when the confirmation deadline passes", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = fakeSession();
+      const { notices, closed } = await open(fake, { timeoutMs: 1000 });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(notices).toEqual([]);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(notices).toEqual([{ kind: "failed", reason: "confirmationFailure" }]);
+      expect(closed).toHaveBeenCalledOnce();
+      expect(fake.close).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports bootstrapRejection even when the best-effort resync cannot be sent", async () => {
+    let calls = 0;
+    const fake = fakeSession(() => ++calls === 1 ? { kind: "resyncRequired" } : { kind: "decoded", json: DECODED_PONG });
+    const { raw, notices, closed } = await open(fake, { bootstrap: () => "pending" });
+    raw.deliverMessage(confirmationFrame());
+    raw.send.mockImplementation(() => { throw new Error("send failed"); });
+    raw.deliverMessage(codecFrame("Delta"));
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    expect(notices).toEqual(["recovering", { kind: "failed", reason: "bootstrapRejection" }]);
+    expect(raw.send).toHaveBeenCalledWith('{"type":"ResyncState"}');
+  });
+
+  it("does not report a codec reason when the resync of an established game cannot be sent", async () => {
+    const fake = fakeSession(() => ({ kind: "resyncRequired" }));
+    const { raw, notices, closed } = await open(fake);
+    raw.deliverMessage(confirmationFrame());
+    raw.send.mockImplementation(() => { throw new Error("send failed"); });
+    raw.deliverMessage(codecFrame("Delta"));
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    expect(raw.send).toHaveBeenCalledWith('{"type":"ResyncState"}');
+    expect(notices).toEqual(["recovering"]);
+  });
+
+  it("reports recoveryFullRejection when the recovery Full is rejected, once and before the close", async () => {
+    const fake = fakeSession(() => ({ kind: "resyncRequired" }));
+    const { raw, notices, trace, closed } = await open(fake);
+    raw.deliverMessage(confirmationFrame());
+    raw.deliverMessage(codecFrame("Delta"));
+    await vi.waitFor(() => expect(notices).toEqual(["recovering"]));
+    // A Delta inside the window is suppressed, not a rejected recovery Full.
+    raw.deliverMessage(codecFrame("Delta"));
+    raw.deliverMessage(codecFrame("Full"));
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    expect(fake.decode).toHaveBeenCalledTimes(2);
+    expect(trace).toEqual(["recovering", "failed:recoveryFullRejection", "close"]);
+  });
+
+  it("reports recoveryTimeout independently of a hung recovery decode", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const fake = fakeSession();
+      fake.decode.mockImplementation(async (): Promise<StateCodecDecodeResult> => {
+        calls += 1;
+        if (calls === 1) return { kind: "resyncRequired" };
+        return new Promise(() => undefined);
+      });
+      const { raw, notices, closed } = await open(fake, { timeoutMs: 1000 });
+      raw.deliverMessage(confirmationFrame());
+      raw.deliverMessage(codecFrame("Delta"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(notices).toEqual(["recovering"]);
+      raw.deliverMessage(codecFrame("Full"));
+      await vi.advanceTimersByTimeAsync(0);
+      // Reach guard: the recovery Full really is stuck inside the decoder.
+      expect(fake.decode).toHaveBeenCalledTimes(2);
+      expect(closed).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1001);
+      expect(notices).toEqual(["recovering", { kind: "failed", reason: "recoveryTimeout" }]);
+      expect(closed).toHaveBeenCalledOnce();
+      expect(fake.close).toHaveBeenCalledOnce();
+      expect(raw.send.mock.calls.filter(([v]) => v === '{"type":"ResyncState"}')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("tolerates one completed recovery and reports repeatedRecovery on the second, after delivering its Full", async () => {
+    // Frame script: 1 Full ok, 2 Delta rejected, 3 Full ok (recovery 1),
+    // 4 Delta ok (healthy), 5 Delta rejected, 6 Full ok (recovery 2).
+    let calls = 0;
+    const rejected = new Set([2, 5]);
+    const fake = fakeSession(() => ++calls && rejected.has(calls)
+      ? { kind: "resyncRequired" } : { kind: "decoded", json: DECODED_PONG });
+    const { raw, notices, trace, closed } = await open(fake);
+    raw.deliverMessage(confirmationFrame());
+    raw.deliverMessage(codecFrame("Full"));
+    raw.deliverMessage(codecFrame("Delta"));
+    await vi.waitFor(() => expect(notices).toEqual(["recovering"]));
+    raw.deliverMessage(codecFrame("Full"));
+    await vi.waitFor(() => expect(notices).toEqual(["recovering", "ready"]));
+    // Reach guard: the first recovery completed without closing.
+    expect(closed).not.toHaveBeenCalled();
+    raw.deliverMessage(codecFrame("Delta"));
+    raw.deliverMessage(codecFrame("Delta"));
+    await vi.waitFor(() => expect(notices).toEqual(["recovering", "ready", "recovering"]));
+    expect(fake.decode).toHaveBeenCalledTimes(5);
+    raw.deliverMessage(codecFrame("Full"));
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    // The second recovery's Full is delivered, never published as ready, and
+    // the typed reason precedes the close.
+    expect(notices).toEqual(["recovering", "ready", "recovering", { kind: "failed", reason: "repeatedRecovery" }]);
+    expect(trace.slice(-3)).toEqual([expect.stringMatching(/^message:/), "failed:repeatedRecovery", "close"]);
+    expect(fake.close).toHaveBeenCalledOnce();
+    expect(raw.send.mock.calls.filter(([v]) => v === '{"type":"ResyncState"}')).toHaveLength(2);
+  });
+
+  it("does not report a codec reason for a network close, a healthy stream or an identity close during recovery delivery", async () => {
+    const fake = fakeSession();
+    const network = await open(fake);
+    network.raw.deliverMessage(confirmationFrame());
+    network.raw.deliverMessage(codecFrame("Full"));
+    await vi.waitFor(() => expect(network.received).toHaveBeenCalledOnce());
+    network.raw.close();
+    await vi.waitFor(() => expect(network.closed).toHaveBeenCalledOnce());
+    expect(network.notices).toEqual([]);
+
+    // The application resets bootstrap while the recovery Full is delivered.
+    MockWebSocket.instances.length = 0;
+    let calls = 0;
+    let bootstrap: "pending" | "accepted" = "accepted";
+    const lost = fakeSession(() => ++calls === 1
+      ? { kind: "resyncRequired" } : { kind: "decoded", json: DECODED_PONG });
+    const reset = await open(lost, { bootstrap: () => bootstrap });
+    reset.raw.deliverMessage(confirmationFrame());
+    reset.raw.deliverMessage(codecFrame("Delta"));
+    await vi.waitFor(() => expect(reset.notices).toEqual(["recovering"]));
+    reset.socket.ws.onmessage = () => { bootstrap = "pending"; };
+    reset.raw.deliverMessage(codecFrame("Full"));
+    await vi.waitFor(() => expect(reset.closed).toHaveBeenCalledOnce());
+    expect(reset.notices).toEqual(["recovering"]);
+  });
+
+  it("completes the first recovery across Error and StateWithheld frames", async () => {
+    let calls = 0;
+    const fake = fakeSession(() => ++calls === 1
+      ? { kind: "resyncRequired" } : { kind: "decoded", json: DECODED_PONG });
+    const { raw, notices, closed, received } = await open(fake);
+    raw.deliverMessage(confirmationFrame());
+    raw.deliverMessage(codecFrame("Delta"));
+    await vi.waitFor(() => expect(notices).toEqual(["recovering"]));
+    raw.deliverMessage(JSON.stringify({ type: "Error", data: { message: "x" } }));
+    raw.deliverMessage(JSON.stringify({ type: "StateWithheld", data: {} }));
+    await vi.waitFor(() => expect(received).toHaveBeenCalledTimes(2));
+    raw.deliverMessage(codecFrame("Full"));
+    await vi.waitFor(() => expect(notices).toEqual(["recovering", "ready"]));
+    expect(closed).not.toHaveBeenCalled();
+  });
+
+  it("publishes the failed notice before the close even when the failed callback throws", async () => {
+    const fake = fakeSession();
+    fake.decode.mockImplementationOnce(async () => { throw new Error("decode failed"); });
+    const { raw, closed, notices } = await open(fake, {
+      onRecovery: () => { throw new Error("callback"); },
+    });
+    raw.deliverMessage(confirmationFrame());
+    raw.deliverMessage(codecFrame("Full"));
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    expect(notices).toEqual([{ kind: "failed", reason: "decodeFailure" }]);
+    expect(raw.close).toHaveBeenCalledOnce();
+    expect(fake.close).toHaveBeenCalledOnce();
+  });
+
+  it("reports nothing for a local close followed by a late decode rejection", async () => {
+    let reject!: (error: Error) => void;
+    const fake = fakeSession();
+    fake.decode.mockImplementationOnce(() => new Promise((_resolve, rej) => { reject = rej; }));
+    const { raw, socket, notices } = await open(fake);
+    raw.deliverMessage(confirmationFrame());
+    raw.deliverMessage(codecFrame("Full"));
+    await vi.waitFor(() => expect(fake.decode).toHaveBeenCalledOnce());
+    socket.close();
+    reject(new Error("late failure"));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(notices).toEqual([]);
+    expect(fake.close).toHaveBeenCalledOnce();
+  });
 });

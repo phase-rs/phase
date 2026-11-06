@@ -917,7 +917,7 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
     runtime.dispose();
   });
 
-  it("restarts a reconnect on an empty real session: initial Delta fails closed, then a genuine bootstrap restores play", async () => {
+  it("restarts a reconnect on an empty real session: initial Delta fails closed, then snapshot-only play is restored from plain frames", async () => {
     vi.useFakeTimers();
     const stream = realStream(baselineJson());
     const viewer = baselineJson();
@@ -939,22 +939,32 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
       expect(resyncCount(second)).toBe(1);
       expect(second.close).toHaveBeenCalled();
 
-      // The next attempt bootstraps from a genuine GameStarted Full.
+      // The real bootstrap rejection is a terminal codec reason: this adapter's
+      // next attempt is snapshot-only. It does not open a third decoder session,
+      // advertises no codec, and restores play from plain GameStarted and
+      // StateUpdate frames, which are exactly the text the codec would decode to.
       await vi.advanceTimersByTimeAsync(5000);
-      const third = await handshakeSocket("Reconnect", second);
-      expect(sessions).toHaveLength(3);
+      await vi.waitFor(() => expect(IntegrationSocket.last).not.toBe(second));
+      const third = IntegrationSocket.last!;
+      // The server still offers the codec: a snapshot-only client must decline it.
+      third.deliver(SERVER_HELLO);
+      await vi.waitFor(() => expect(sentTypes(third)).toContain("Reconnect"));
+      // Reach guard: the attempt really sent its ClientHello, without a codec.
+      expect(sentTypes(third)).toContain("ClientHello");
+      expect(third.sent.some((raw) => raw.includes("state_codecs"))).toBe(false);
+      expect(sessions).toHaveLength(2);
       const shown = stateChanges(events).length;
-      third.deliver(frameText(stream.started));
+      third.deliver(stream.startedText);
       await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
       expect(resyncCount(third)).toBe(0);
-      third.deliver(frameText(stream.update));
-      third.deliver(frameText(stream.delta));
+      third.deliver(stream.updateText);
+      third.deliver(stream.nextText);
       await vi.waitFor(() => expect(stateChanges(events)).toHaveLength(shown + 3));
       expect((await adapter.getState()).turn_number).toBe(
         (JSON.parse(viewer) as GameState).turn_number + 2,
       );
       expect(resyncCount(third)).toBe(0);
-      expect(sessions[2].closes).toBe(0);
+      expect(sessions).toHaveLength(2);
       adapter.dispose();
     } finally {
       runtime.dispose();

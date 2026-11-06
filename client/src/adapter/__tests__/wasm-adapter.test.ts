@@ -25,7 +25,9 @@ import { AdapterError, AdapterErrorCode } from "../types";
 import {
   STATE_CODEC_DECODE_TIMEOUT_MS,
   StateCodecLifecycleError,
+  StateCodecRuntime,
 } from "../state-codec-runtime";
+import type { EngineModule } from "../engine-queries";
 import { PLAYER_ID } from "../../constants/game";
 import { buildGameState, gameStateFactory } from "../../test/factories/gameStateFactory";
 
@@ -1904,7 +1906,33 @@ describe("WasmAdapter state-codec sessions", () => {
       .toBeInstanceOf(StateCodecLifecycleError);
   });
 
+  // The main-thread fallback runtime is module-level and outlives every facade
+  // (`mainThreadRuntimePromise`), and a decoder trap poisons it for the rest of
+  // that module's life. Every test that drives a RuntimeError through it
+  // therefore evaluates its own copy of the module, so no later test opens a
+  // codec session against a poisoned runtime. There is deliberately no product
+  // reset hook.
+  async function isolatedFallbackModule() {
+    vi.resetModules();
+    const adapterModule = await import("../wasm-adapter");
+    const runtimeModule = await import("../state-codec-runtime");
+    return {
+      WasmAdapter: adapterModule.WasmAdapter,
+      StateCodecLifecycleError: runtimeModule.StateCodecLifecycleError,
+    };
+  }
+
+  function sessionHandle(json: string, free: () => void = vi.fn()) {
+    return {
+      json: () => json,
+      free,
+      clone_handle: () => ({ json: () => "{}", free: vi.fn() }),
+    };
+  }
+
   it("classifies a wasm trap as a lifecycle failure and a codec rejection as resync on the main-thread fallback", async () => {
+    const isolated = await isolatedFallbackModule();
+    const fallback = new isolated.WasmAdapter();
     mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
     const firstFree = vi.fn();
     const thirdFree = vi.fn();
@@ -1925,27 +1953,188 @@ describe("WasmAdapter state-codec sessions", () => {
       .mockImplementationOnce(() => {
         throw new WebAssembly.RuntimeError("unreachable");
       });
-    await subject.initialize();
-    const session = await subject.openStateCodecSession();
+    try {
+      await fallback.initialize();
+      const session = await fallback.openStateCodecSession();
 
-    // Reach guard: the same session decodes normally and reports an ordinary
-    // codec rejection as resyncRequired (dropping the baseline), so the trap
-    // rejection below cannot be a session that never decoded.
-    await expect(session!.decode(new Uint8Array([1]))).resolves.toEqual({
-      kind: "decoded",
-      json: '{"n":1}',
-    });
-    await expect(session!.decode(new Uint8Array([2]))).resolves.toEqual({ kind: "resyncRequired" });
-    expect(firstFree).toHaveBeenCalledOnce();
-    await expect(session!.decode(new Uint8Array([3]))).resolves.toEqual({
-      kind: "decoded",
-      json: '{"n":3}',
-    });
+      // Reach guard: the same session decodes normally and reports an ordinary
+      // codec rejection as resyncRequired (dropping the baseline), so the trap
+      // rejection below cannot be a session that never decoded.
+      await expect(session!.decode(new Uint8Array([1]))).resolves.toEqual({
+        kind: "decoded",
+        json: '{"n":1}',
+      });
+      await expect(session!.decode(new Uint8Array([2]))).resolves.toEqual({ kind: "resyncRequired" });
+      expect(firstFree).toHaveBeenCalledOnce();
+      await expect(session!.decode(new Uint8Array([3]))).resolves.toEqual({
+        kind: "decoded",
+        json: '{"n":3}',
+      });
 
-    await expect(session!.decode(new Uint8Array([4]))).rejects
-      .toBeInstanceOf(StateCodecLifecycleError);
-    expect(thirdFree).toHaveBeenCalledOnce();
-    session!.close();
+      await expect(session!.decode(new Uint8Array([4]))).rejects
+        .toBeInstanceOf(isolated.StateCodecLifecycleError);
+      expect(thirdFree).toHaveBeenCalledOnce();
+      session!.close();
+    } finally {
+      fallback.dispose();
+    }
+  });
+
+  it("poisons the shared fallback runtime on a wasm trap: no new session, no decode on a sibling lease, and facade disposal does not clear it", async () => {
+    const isolated = await isolatedFallbackModule();
+    const fallback = new isolated.WasmAdapter();
+    const successor = new isolated.WasmAdapter();
+    mockWorkerClient.initialize.mockRejectedValue(new Error("worker unavailable"));
+    stateCodecDecodeJs
+      .mockReturnValueOnce(sessionHandle('{"sibling":1}'))
+      .mockImplementationOnce(() => { throw new WebAssembly.RuntimeError("unreachable"); });
+    try {
+      await fallback.initialize();
+      const trapped = await fallback.openStateCodecSession();
+      const sibling = await fallback.openStateCodecSession();
+      // Reach guard: before the trap both leases are live and the decoder runs.
+      await expect(sibling!.decode(new Uint8Array([1]))).resolves
+        .toEqual({ kind: "decoded", json: '{"sibling":1}' });
+
+      await expect(trapped!.decode(new Uint8Array([2]))).rejects
+        .toBeInstanceOf(isolated.StateCodecLifecycleError);
+      const decoderCalls = stateCodecDecodeJs.mock.calls.length;
+      expect(decoderCalls).toBe(2);
+
+      // The sibling lease opened before the trap never re-enters the decoder.
+      await expect(sibling!.decode(new Uint8Array([3]))).rejects
+        .toBeInstanceOf(isolated.StateCodecLifecycleError);
+      // A new session on the same runtime is refused before allocation.
+      await expect(fallback.openStateCodecSession()).rejects
+        .toBeInstanceOf(isolated.StateCodecLifecycleError);
+
+      // Closing the leases and disposing the facade do not clear the poison:
+      // a successor facade shares the module-level runtime.
+      trapped!.close();
+      sibling!.close();
+      fallback.dispose();
+      await successor.initialize();
+      await expect(successor.openStateCodecSession()).rejects
+        .toBeInstanceOf(isolated.StateCodecLifecycleError);
+      expect(stateCodecDecodeJs).toHaveBeenCalledTimes(decoderCalls);
+    } finally {
+      mockWorkerClient.initialize.mockResolvedValue(undefined);
+      fallback.dispose();
+      successor.dispose();
+    }
+  });
+
+  it("opens and decodes healthily on a genuinely new fallback runtime after another runtime trapped", async () => {
+    const trappedModule = await isolatedFallbackModule();
+    const trapped = new trappedModule.WasmAdapter();
+    mockWorkerClient.initialize.mockRejectedValue(new Error("worker unavailable"));
+    stateCodecDecodeJs.mockImplementationOnce(() => { throw new WebAssembly.RuntimeError("unreachable"); });
+    let healthyModule: Awaited<ReturnType<typeof isolatedFallbackModule>> | null = null;
+    let healthy: InstanceType<typeof trappedModule.WasmAdapter> | null = null;
+    try {
+      await trapped.initialize();
+      const lease = await trapped.openStateCodecSession();
+      await expect(lease!.decode(new Uint8Array([1]))).rejects
+        .toBeInstanceOf(trappedModule.StateCodecLifecycleError);
+      await expect(trapped.openStateCodecSession()).rejects
+        .toBeInstanceOf(trappedModule.StateCodecLifecycleError);
+
+      // A re-evaluated module is a new runtime (as a reloaded page or a
+      // replacement worker would be): a positive decode proves it is healthy.
+      healthyModule = await isolatedFallbackModule();
+      healthy = new healthyModule.WasmAdapter();
+      stateCodecDecodeJs.mockReturnValueOnce(sessionHandle('{"healthy":true}'));
+      await healthy.initialize();
+      const session = await healthy.openStateCodecSession();
+      expect(session).not.toBeNull();
+      await expect(session!.decode(new Uint8Array([2]))).resolves
+        .toEqual({ kind: "decoded", json: '{"healthy":true}' });
+    } finally {
+      mockWorkerClient.initialize.mockResolvedValue(undefined);
+      trapped.dispose();
+      healthy?.dispose();
+    }
+  });
+
+  it.each([
+    ["a baseline clone", "clone"],
+    ["reading the decoded text", "json"],
+  ] as const)("poisons the runtime when %s traps, but not when it fails for another reason", async (_label, where) => {
+    const failure = (trap: boolean) => (trap ? new WebAssembly.RuntimeError("unreachable") : new Error("unreadable"));
+    const build = (trap: boolean) => {
+      const handle = (json: string) => ({
+        json: () => {
+          if (where === "json" && json === "second") throw failure(trap);
+          return json;
+        },
+        free: vi.fn(),
+        clone_handle: () => {
+          if (where === "clone") throw failure(trap);
+          return { json: () => "{}", free: vi.fn() };
+        },
+      });
+      let calls = 0;
+      const engine = { state_codec_decode: vi.fn(() => handle(++calls === 1 ? "first" : "second")) };
+      return new StateCodecRuntime(engine as unknown as EngineModule);
+    };
+    const drive = (runtime: StateCodecRuntime) => {
+      const session = runtime.open();
+      // Reach guard: the first decode succeeds and retains a baseline.
+      expect(runtime.decode(session, new Uint8Array([1]))).toEqual({ kind: "decoded", json: "first" });
+      expect(() => runtime.decode(session, new Uint8Array([2]))).toThrow(StateCodecLifecycleError);
+    };
+
+    const trapped = build(true);
+    drive(trapped);
+    expect(trapped.state).toEqual({ kind: "poisoned", reason: "wasmTrap" });
+    expect(() => trapped.open()).toThrow(StateCodecLifecycleError);
+
+    const ordinary = build(false);
+    drive(ordinary);
+    expect(ordinary.state).toEqual({ kind: "ready" });
+    expect(() => ordinary.open()).not.toThrow();
+  });
+
+  it("does not poison the fallback runtime on an integrity rejection or a decode timeout", async () => {
+    const isolated = await isolatedFallbackModule();
+    const fallback = new isolated.WasmAdapter();
+    mockWorkerClient.initialize.mockRejectedValue(new Error("worker unavailable"));
+    stateCodecDecodeJs
+      .mockImplementationOnce(() => { throw new Error("result hash mismatch"); })
+      .mockReturnValue(sessionHandle('{"alive":true}'));
+    try {
+      await fallback.initialize();
+      const session = await fallback.openStateCodecSession();
+      await expect(session!.decode(new Uint8Array([1]))).resolves.toEqual({ kind: "resyncRequired" });
+      // Reach guard: the rejection is followed by a healthy decode, and a new
+      // session still opens on the same runtime.
+      await expect(session!.decode(new Uint8Array([2]))).resolves
+        .toEqual({ kind: "decoded", json: '{"alive":true}' });
+
+      // A decode that merely exceeds the caller deadline executes no trap.
+      let releaseQueue!: (state: unknown) => void;
+      getGameStateJs.mockReturnValueOnce(new Promise((resolve) => { releaseQueue = resolve; }));
+      void fallback.getState();
+      vi.useFakeTimers();
+      const timedOut = session!.decode(new Uint8Array([3])).then(
+        () => "resolved",
+        (error: unknown) => error,
+      );
+      await vi.advanceTimersByTimeAsync(STATE_CODEC_DECODE_TIMEOUT_MS + 1);
+      await expect(timedOut).resolves.toMatchObject({ message: expect.stringMatching(/timed out/) });
+      releaseQueue(buildGameState());
+      await vi.advanceTimersByTimeAsync(0);
+      vi.useRealTimers();
+
+      const next = await fallback.openStateCodecSession();
+      expect(next).not.toBeNull();
+      await expect(next!.decode(new Uint8Array([4]))).resolves
+        .toEqual({ kind: "decoded", json: '{"alive":true}' });
+    } finally {
+      vi.useRealTimers();
+      mockWorkerClient.initialize.mockResolvedValue(undefined);
+      fallback.dispose();
+    }
   });
 
   it("applies the caller-visible decode deadline on the main-thread fallback", async () => {

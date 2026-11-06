@@ -34,8 +34,12 @@ import {
   WebSocketAdapter,
 } from "../ws-adapter";
 import { AdapterError, AdapterErrorCode, supportsMatchConcede, supportsTakeback, supportsTurnRewind } from "../types";
-import type { StateCodecSession } from "../state-codec-runtime";
-import { STATE_CODEC_PREPARATION_TIMEOUT_MS } from "../../services/stateCodecSocket";
+import { StateCodecRuntime, type StateCodecSession } from "../state-codec-runtime";
+import type { EngineModule } from "../engine-queries";
+import {
+  STATE_CODEC_PREPARATION_TIMEOUT_MS,
+  STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE,
+} from "../../services/stateCodecSocket";
 import type { FormatConfig, GameAction, GameState, SubmitResult } from "../types";
 import type {
   InteractionChoiceId,
@@ -5167,5 +5171,328 @@ describe("WebSocketAdapter — negotiated StateCodecV1 spectate", () => {
     } finally {
       adapter.dispose();
     }
+  });
+});
+
+// ── Codec degradation policy ────────────────────────────────────────────
+//
+// A terminal codec failure makes the adapter's later attachments snapshot-only
+// (the provider is not consulted and no codec is advertised); a decoder trap
+// additionally refuses codec sessions on the shared runtime, so a fresh adapter
+// does not negotiate either. Mock decoding proves orchestration; the real-WASM
+// halves live in `stateCodec.integration.test.ts`.
+
+/**
+ * Completes the handshake of the socket created after `previous` against a
+ * server that OFFERS StateCodecV1: a client that is snapshot-only must decline
+ * it, so "no state_codecs in the ClientHello" is a real policy outcome.
+ */
+async function snapshotOnlyHandshake(setupType: string, previous: MockWebSocket | null): Promise<MockWebSocket> {
+  await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(previous));
+  const raw = latestSocket();
+  raw.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+  await vi.waitFor(() => expect(raw.send).toHaveBeenCalledWith(
+    expect.stringContaining(`"type":"${setupType}"`),
+  ));
+  return raw;
+}
+
+/** Whether this socket's ClientHello offered StateCodecV1. */
+function offeredCodec(raw: MockWebSocket): boolean {
+  const hello = raw.send.mock.calls
+    .map(([text]) => JSON.parse(text as string) as { type?: string; data?: { state_codecs?: unknown } })
+    .find((frame) => frame.type === "ClientHello");
+  if (!hello) throw new Error("no ClientHello was sent");
+  return hello.data?.state_codecs !== undefined;
+}
+
+const RECONNECT_SESSION = {
+  gameCode: "GAME01",
+  playerToken: "codec-token",
+  fullKey: REPLY_OWNERSHIP_FULL_KEY,
+  serverUrl: "wss://localhost:9374/ws",
+};
+
+describe("WebSocketAdapter — codec degradation policy", () => {
+  const action = { type: "PassPriority" } as GameAction;
+  const outcomeOf = (promise: Promise<unknown>) => promise.then(() => "resolved" as const, (error: unknown) => error);
+
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  /** A snapshot-only reconnect attachment that restores play from plain frames. */
+  async function restoreFromPlainFrames(
+    adapter: WebSocketAdapter,
+    events: unknown[],
+    previous: MockWebSocket,
+  ) {
+    await vi.advanceTimersByTimeAsync(1000);
+    const reconnect = await snapshotOnlyHandshake("Reconnect", previous);
+    expect(offeredCodec(reconnect)).toBe(false);
+    reconnect.dispatchSynthetic("message", JSON.stringify(codecGameStarted(5, 5)));
+    await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+    const resumed = adapter.submitAction(action, 0);
+    await vi.waitFor(() => expect(submissionTypes(reconnect)).toHaveLength(1));
+    reconnect.dispatchSynthetic("message", JSON.stringify(
+      codecStateUpdate(6, 6, { command_id: lastSubmissionCommandId(reconnect) }),
+    ));
+    await expect(resumed).resolves.toMatchObject({ events: [] });
+    return reconnect;
+  }
+
+  it("reconnects snapshot-only after a decode failure, rejecting the pending command once and not consulting the provider again", async () => {
+    const first = scriptedCodec();
+    const spare = scriptedCodec();
+    const sessions = [first.session, spare.session];
+    const provider = vi.fn(() => Promise.resolve(sessions.shift() ?? null));
+    const { adapter, raw, events } = await establishCodecAdapter(provider);
+    try {
+      // Reach guard: the initial attachment negotiated and consulted the provider.
+      expect(provider).toHaveBeenCalledOnce();
+      expect(offeredCodec(raw)).toBe(true);
+      const outcome = outcomeOf(adapter.submitAction(action, 0));
+      await vi.waitFor(() => expect(submissionTypes(raw)).toHaveLength(1));
+
+      first.decode.mockImplementationOnce(async () => { throw new Error("State codec decode timed out after 60000ms"); });
+      deliverCodec(raw, "Delta", codecStateUpdate(2, 2));
+      await expect(outcome).resolves.toMatchObject({
+        code: "WS_CLOSED", message: "Connection closed during action", recoverable: true,
+      });
+      expect(first.close).toHaveBeenCalledOnce();
+      expect(resyncRequests(raw)).toBe(0);
+
+      await restoreFromPlainFrames(adapter, events, raw);
+      expect(provider).toHaveBeenCalledOnce();
+      expect(spare.close).not.toHaveBeenCalled();
+      expect(spare.decode).not.toHaveBeenCalled();
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("tolerates one completed recovery, delivers the second recovery's Full without ready, then reconnects snapshot-only; a fresh adapter negotiates again", async () => {
+    const first = scriptedCodec();
+    const provider = vi.fn(() => Promise.resolve<StateCodecSession | null>(first.session));
+    const { adapter, raw, events } = await establishCodecAdapter(provider);
+    const probes: string[] = [];
+    let probing = false;
+    adapter.onEvent((event) => {
+      if ((event as { type?: string }).type !== "stateChanged" || !probing) return;
+      // A listener that submits during the Full's delivery must be refused.
+      adapter.submitAction(action, 0).then(() => probes.push("sent"), (error: AdapterError) => probes.push(error.message));
+    });
+    try {
+      // Recovery one: refused while recovering, admitted after ready.
+      first.rejectNext(1);
+      deliverCodec(raw, "Delta", codecStateUpdate(2, 2));
+      await vi.waitFor(() => expect(resyncRequests(raw)).toBe(1));
+      probing = true;
+      deliverCodec(raw, "Full", codecStateUpdate(3, 3));
+      await vi.waitFor(() => expect(probes).toEqual([STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE]));
+      probing = false;
+      const resumed = adapter.submitAction(action, 0);
+      await vi.waitFor(() => expect(submissionTypes(raw)).toHaveLength(1));
+      deliverCodec(raw, "Delta", codecStateUpdate(4, 4, { command_id: lastSubmissionCommandId(raw) }));
+      await expect(resumed).resolves.toMatchObject({ events: [] });
+      expect(raw.close).not.toHaveBeenCalled();
+
+      // Recovery two: its Full is delivered, submissions stay refused, then the stream closes.
+      first.rejectNext(1);
+      deliverCodec(raw, "Delta", codecStateUpdate(5, 5));
+      await vi.waitFor(() => expect(resyncRequests(raw)).toBe(2));
+      expect(raw.close).not.toHaveBeenCalled();
+      probing = true;
+      deliverCodec(raw, "Full", codecStateUpdate(6, 6));
+      await vi.waitFor(() => expect(raw.close).toHaveBeenCalled());
+      expect(probes).toEqual([
+        STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE,
+        STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE,
+      ]);
+      expect((adapter as unknown as { snapshot: { state: GameState } }).snapshot.state.turn_number).toBe(6);
+      expect(first.close).toHaveBeenCalledOnce();
+      probing = false;
+
+      await restoreFromPlainFrames(adapter, events, raw);
+      expect(provider).toHaveBeenCalledOnce();
+    } finally {
+      adapter.dispose();
+    }
+
+    // The policy died with the adapter: a fresh adapter on the same healthy
+    // provider offers the codec and decodes its bootstrap.
+    const next = scriptedCodec();
+    const fresh = await establishCodecAdapter(() => Promise.resolve(next.session));
+    try {
+      expect(offeredCodec(fresh.raw)).toBe(true);
+      expect(next.decode).toHaveBeenCalledOnce();
+    } finally {
+      fresh.adapter.dispose();
+    }
+  });
+
+  it("keeps negotiating across a recovery, a network reconnect and a second recovery on the replacement", async () => {
+    const first = scriptedCodec();
+    const second = scriptedCodec();
+    const sessions = [first.session, second.session];
+    const provider = vi.fn(() => Promise.resolve(sessions.shift() ?? null));
+    const { adapter, raw, events } = await establishCodecAdapter(provider);
+    const turn = () => (adapter as unknown as { snapshot: { state: GameState } }).snapshot.state.turn_number;
+    try {
+      first.rejectNext(1);
+      deliverCodec(raw, "Delta", codecStateUpdate(2, 2));
+      await vi.waitFor(() => expect(resyncRequests(raw)).toBe(1));
+      deliverCodec(raw, "Full", codecStateUpdate(3, 3));
+      await vi.waitFor(() => expect(turn()).toBe(3));
+      expect(raw.close).not.toHaveBeenCalled();
+
+      raw.dispatchSynthetic("close");
+      await vi.advanceTimersByTimeAsync(1000);
+      const reconnect = await codecHandshake("Reconnect", raw);
+      // Reach guard: the first recovery completed without degrading, so the
+      // following attachment still advertises the codec.
+      expect(offeredCodec(reconnect)).toBe(true);
+      deliverCodec(reconnect, "Full", codecGameStarted(5, 5));
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+
+      second.rejectNext(1);
+      deliverCodec(reconnect, "Delta", codecStateUpdate(6, 6));
+      await vi.waitFor(() => expect(resyncRequests(reconnect)).toBe(1));
+      deliverCodec(reconnect, "Full", codecStateUpdate(7, 7));
+      await vi.waitFor(() => expect(turn()).toBe(7));
+      const resumed = adapter.submitAction(action, 0);
+      await vi.waitFor(() => expect(submissionTypes(reconnect)).toHaveLength(1));
+      deliverCodec(reconnect, "Delta", codecStateUpdate(8, 8, { command_id: lastSubmissionCommandId(reconnect) }));
+      await expect(resumed).resolves.toMatchObject({ events: [] });
+      expect(reconnect.close).not.toHaveBeenCalled();
+      expect(second.close).not.toHaveBeenCalled();
+      expect(provider).toHaveBeenCalledTimes(2);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("closes a lease that arrives after the adapter degraded and attaches snapshot-only, settling the reconnect", async () => {
+    const first = scriptedCodec();
+    const late = scriptedCodec();
+    let releasePreparation!: (session: StateCodecSession | null) => void;
+    const providers = [
+      () => Promise.resolve<StateCodecSession | null>(first.session),
+      () => new Promise<StateCodecSession | null>((resolve) => { releasePreparation = resolve; }),
+    ];
+    const { adapter, raw, events } = await establishCodecAdapter(() => providers.shift()!());
+    try {
+      // The replacement attachment is still preparing; A is current.
+      expect(adapter.tryReconnect(RECONNECT_SESSION as never)).toBe(true);
+      expect(releasePreparation).toBeTypeOf("function");
+
+      first.decode.mockImplementationOnce(async () => { throw new Error("decoder trapped"); });
+      deliverCodec(raw, "Delta", codecStateUpdate(2, 2));
+      await vi.waitFor(() => expect(first.close).toHaveBeenCalledOnce());
+      // Reach guard: A is closed and the preparation is still outstanding.
+      expect(late.close).not.toHaveBeenCalled();
+
+      releasePreparation(late.session);
+      const reconnect = await snapshotOnlyHandshake("Reconnect", raw);
+      expect(late.close).toHaveBeenCalledOnce();
+      expect(offeredCodec(reconnect)).toBe(false);
+      reconnect.dispatchSynthetic("message", JSON.stringify(codecGameStarted(5, 5)));
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+      expect(late.decode).not.toHaveBeenCalled();
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("adopts an already-negotiated candidate when the current attachment degrades, then attaches snapshot-only", async () => {
+    const first = scriptedCodec();
+    const second = scriptedCodec();
+    const sessions = [first.session, second.session];
+    const provider = vi.fn(() => Promise.resolve(sessions.shift() ?? null));
+    const { adapter, raw, events } = await establishCodecAdapter(provider);
+    try {
+      // B holds its lease and is mid-handshake while A is still current.
+      expect(adapter.tryReconnect(RECONNECT_SESSION as never)).toBe(true);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+      const candidate = latestSocket();
+      expect(provider).toHaveBeenCalledTimes(2);
+
+      first.decode.mockImplementationOnce(async () => { throw new Error("decoder trapped"); });
+      deliverCodec(raw, "Delta", codecStateUpdate(2, 2));
+      await vi.waitFor(() => expect(first.close).toHaveBeenCalledOnce());
+
+      // B is not retired for A's failure: it negotiates, bootstraps and serves a command.
+      candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+      await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Reconnect"')));
+      expect(offeredCodec(candidate)).toBe(true);
+      candidate.dispatchSynthetic("message", CODEC_CONFIRMATION);
+      deliverCodec(candidate, "Full", codecGameStarted(5, 5));
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+      const resumed = adapter.submitAction(action, 0);
+      await vi.waitFor(() => expect(submissionTypes(candidate)).toHaveLength(1));
+      deliverCodec(candidate, "Full", codecStateUpdate(6, 6, { command_id: lastSubmissionCommandId(candidate) }));
+      await expect(resumed).resolves.toMatchObject({ events: [] });
+      expect(second.close).not.toHaveBeenCalled();
+
+      // The next attachment (C) is plain.
+      candidate.dispatchSynthetic("close");
+      await vi.advanceTimersByTimeAsync(10_000);
+      const third = await snapshotOnlyHandshake("Reconnect", candidate);
+      expect(offeredCodec(third)).toBe(false);
+      expect(provider).toHaveBeenCalledTimes(2);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  describe("after a decoder trap on the shared runtime", () => {
+    function trappingRuntime() {
+      const engine = {
+        state_codec_decode: vi.fn(() => { throw new WebAssembly.RuntimeError("unreachable"); }),
+      };
+      const runtime = new StateCodecRuntime(engine as unknown as EngineModule);
+      // The production lease shape over the real runtime: the poison verdict is not mocked.
+      const provider = vi.fn(async (): Promise<StateCodecSession | null> => {
+        const sessionId = runtime.open();
+        return {
+          decode: async (frame) => runtime.decode(sessionId, frame),
+          close: () => runtime.close(sessionId),
+        };
+      });
+      return { engine, runtime, provider };
+    }
+
+    const newJoin = (provider: () => Promise<StateCodecSession | null>) => new WebSocketAdapter(
+      "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      undefined, undefined, undefined, { stateCodecSessionProvider: provider },
+    );
+
+    it("offers no codec from a fresh adapter on the same runtime, which joins from plain frames", async () => {
+      const { engine, runtime, provider } = trappingRuntime();
+      MockWebSocket.last = null;
+      const first = newJoin(provider);
+      const failed = outcomeOf(first.initialize());
+      const raw = await codecHandshake("JoinGameWithPassword", null);
+      expect(offeredCodec(raw)).toBe(true);
+      deliverCodec(raw, "Full", codecGameStarted(1, 1));
+      await expect(failed).resolves.toMatchObject({ code: "WS_CLOSED" });
+      expect(engine.state_codec_decode).toHaveBeenCalledOnce();
+      expect(runtime.state).toEqual({ kind: "poisoned", reason: "wasmTrap" });
+      first.dispose();
+
+      const second = newJoin(provider);
+      try {
+        const init = second.initialize();
+        const plain = await snapshotOnlyHandshake("JoinGameWithPassword", raw);
+        // The provider was consulted and refused by the runtime itself.
+        expect(provider).toHaveBeenCalledTimes(2);
+        expect(offeredCodec(plain)).toBe(false);
+        plain.dispatchSynthetic("message", JSON.stringify(codecGameStarted(1, 1)));
+        await init;
+        expect((await second.getSnapshot()).state.turn_number).toBe(1);
+        expect(engine.state_codec_decode).toHaveBeenCalledOnce();
+      } finally {
+        second.dispose();
+      }
+    });
   });
 });

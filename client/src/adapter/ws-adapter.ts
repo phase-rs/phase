@@ -1879,11 +1879,10 @@ export class WebSocketAdapter implements EngineAdapter {
    * provider failure select snapshot-only delivery; only an abort (dispose)
    * stops the attachment before it opens a socket.
    */
-  private async prepareStateCodecSession(signal: AbortSignal): Promise<
-    { kind: "session"; session: StateCodecSession | null } | { kind: "aborted" }
-  > {
-    const provider = this.stateCodecProvider;
-    if (!provider) return { kind: "session", session: null };
+  private async prepareStateCodecSession(
+    provider: StateCodecSessionProvider,
+    signal: AbortSignal,
+  ): Promise<{ kind: "session"; session: StateCodecSession | null } | { kind: "aborted" }> {
     try {
       return {
         kind: "session",
@@ -2001,9 +2000,11 @@ export class WebSocketAdapter implements EngineAdapter {
     // this attachment's supersession is tracked by `preparation` alone.
     const bootstrap = this.stateCodec.begin();
     try {
-      // Null/native opt-out must not introduce even a microtask before opening.
-      const prepared = this.stateCodecProvider
-        ? await this.prepareStateCodecSession(preparation.signal)
+      // The policy picks the provider synchronously: a degraded adapter, like a
+      // native/null opt-out, must not introduce even a microtask before opening.
+      const provider = this.stateCodec.selectProvider(this.stateCodecProvider);
+      const prepared = provider
+        ? await this.prepareStateCodecSession(provider, preparation.signal)
         : { kind: "session" as const, session: null };
       if (this.disposed || this.stateCodecPreparation !== preparation || prepared.kind === "aborted") {
         if (prepared.kind === "session") prepared.session?.close();
@@ -2013,7 +2014,8 @@ export class WebSocketAdapter implements EngineAdapter {
       socket = await openPhaseSocket(this.serverUrl, {
         socketFactory: this.nativeSocketOptions()?.socketFactory,
         signal: this.disposeAbort.signal,
-        stateCodecSession: prepared.session,
+        // A lease that arrives after this adapter degraded is closed and not offered.
+        stateCodecSession: this.stateCodec.selectLease(prepared.session),
         stateCodecBootstrap: () => this.stateCodec.status(bootstrap, this.ws, this.disposed),
         onStateCodecRecovery: (state) => this.stateCodec.handleRecovery(
           bootstrap, state, this.ws, this.disposed,
