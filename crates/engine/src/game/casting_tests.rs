@@ -53802,13 +53802,13 @@ fn add_mana_from_source(
 /// SYNTHETIC, and the repo's real-card rule is applied deliberately. These legs
 /// need a cost-only spell at mana value 1 and at mana value 2, cast and discarded
 /// without resolving anything. Printed sorceries with a purely generic mana cost
-/// do exist, but not with that shape: the only `{1}` one is a Mystery Booster
-/// playtest card, and the `{2}` ones each resolve an effect (Aang's Journey —
+/// do exist, but not with that shape: the only `{1}` one is an Unknown Event
+/// playtest card, and all three `{2}` ones resolve an effect (Aang's Journey —
 /// "Search your library for a basic land card…" plus Kicker `{2}`; Environmental
-/// Sciences — the same search). Importing one would drag an effect path into a
-/// pure payment-provenance test, so the fixture keeps a synthetic Sorcery shell
-/// with no ability at all. The nearest printed analogue for the cost shape is
-/// Aang's Journey (`{2}`).
+/// Sciences — the same search; Playtest Wish — playtest wording). Importing one
+/// would drag an effect path into a pure payment-provenance test, so the fixture
+/// keeps a synthetic Sorcery shell with no ability at all. The nearest printed
+/// analogue for the cost shape is Aang's Journey (`{2}`).
 fn create_paid_sorcery(
     state: &mut GameState,
     card_id: CardId,
