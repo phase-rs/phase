@@ -542,6 +542,16 @@ pub struct ParseContext {
     /// First-accept-wins optional scope peeled from this chunk ("any ... may").
     /// Like `clause_player_scope`, it prevents a controller-only bare-choice prompt.
     pub clause_opponent_may_scope: Option<OpponentMayScope>,
+    /// CR 608.2d + CR 115.10a: The printed non-controller subject ("an opponent",
+    /// "target player") whose predicate is being lowered. `TargetOnly`'s
+    /// resolution-time chooser prompts only the ability's controller, so a bare
+    /// choice owned by this subject cannot declare resolution timing. Set by the
+    /// subject-predicate lowering around its predicate and inherited by the
+    /// compound continuations that predicate splits into; a continuation with a
+    /// controller subject of its own clears it for that conjunct. `None` outside
+    /// such a predicate. Set and consumed within a single chunk parse; never
+    /// serialized.
+    pub clause_subject_chooser: Option<TargetFilter>,
     /// CR 608.2c + CR 701.16a: Transient per-chunk `repeat_for` lifted from a
     /// fieldless-effect subject-predicate that carries a "for each <filter> …
     /// this way" SUFFIX count (Declaration in Stone's "investigate for each
@@ -697,8 +707,8 @@ pub struct ParseContext {
     /// accepting-player timing fallback cannot reintroduce `Resolution` on it;
     /// a compound continuation's sub-link in such a chunk is still re-timed by
     /// `target_choice_timing_for_clause_sub`. A non-controller printed subject
-    /// withdraws the declaration from the head and from every `TargetOnly` link
-    /// of the sub-ability chain it owns.
+    /// (`clause_subject_chooser`) keeps the producer from declaring `Resolution`
+    /// on its head and on the compound continuations it owns.
     ///
     /// Set and consumed within a single chunk parse; never serialized. A
     /// speculative sub-parse that discards its cloned context discards this too.

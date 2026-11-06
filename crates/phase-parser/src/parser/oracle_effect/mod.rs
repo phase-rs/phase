@@ -23128,6 +23128,10 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // Keep the primary phrase's announcer on `ctx`; only a chooser printed in
     // the continuation itself may be attached to the chained sub-ability.
     continuation_ctx.target_chooser = None;
+    // CR 608.2d + CR 115.10a: the continuation is part of the same predicate, so a
+    // non-controller subject owns its bare choices too (the anaphoric arm above
+    // builds a blank context that would otherwise drop it).
+    continuation_ctx.clause_subject_chooser = ctx.clause_subject_chooser.clone();
     // CR 608.2c + CR 608.2k: a bare object pronoun in an anaphoric continuation
     // names the object the primary instruction acted on. When that object is the
     // ability's source ("destroy it and all creatures it blocked this turn",
@@ -29949,21 +29953,6 @@ fn declares_exactly_one_player(clause: &ClauseIr) -> bool {
             .is_none_or(|spec| matches!(spec.max, Some(QuantityExpr::Fixed { value: 1 })))
 }
 
-/// CR 608.2d + CR 115.10a: return every `TargetOnly` link of a sub-ability chain to
-/// stack-time selection. `TargetOnly` has no chooser field, so its resolution-time
-/// prompt always goes to the ability's controller; a link owned by a non-controller
-/// subject must therefore not carry the bare-choice producer's `Resolution` stamp.
-fn withdraw_resolution_timing_from_target_only_chain(mut link: Option<&mut AbilityDefinition>) {
-    while let Some(def) = link {
-        if matches!(def.effect.as_ref(), Effect::TargetOnly { .. })
-            && def.target_choice_timing == TargetChoiceTiming::Resolution
-        {
-            def.target_choice_timing = TargetChoiceTiming::Stack;
-        }
-        link = def.sub_ability.as_deref_mut();
-    }
-}
-
 /// CR 601.2c + CR 603.3d: WHO announces this ability's targets, read off the
 /// subject of the sentence that announces them.
 ///
@@ -30539,27 +30528,19 @@ fn lower_subject_predicate_ast_body(
             // predicates keep their original scope.
             // CR 608.2c: both an enclosing source target and an inherited damage
             // tail remain ineligible when the general splitter retries.
+            // CR 608.2d + CR 115.10a: a bare choice owned by a non-controller subject
+            // cannot declare resolution timing, because TargetOnly's resolution chooser
+            // only prompts the controller. The producer reads the subject from the
+            // context, and the compound splitter hands it on to the conjuncts this
+            // predicate splits into. `SelfRef` is exempt because a source object is
+            // never a player chooser.
+            let enclosing_subject_chooser = std::mem::replace(
+                &mut ctx.clause_subject_chooser,
+                (!matches!(affected, TargetFilter::Controller | TargetFilter::SelfRef))
+                    .then(|| affected.clone()),
+            );
             let mut clause = lower_imperative_clause(&text, ctx, damage_context);
-            // CR 608.2d + CR 115.10a: this untargeted choice belongs to the
-            // printed subject, but TargetOnly's resolution chooser only prompts
-            // the controller. Keep stack timing until it can represent that chooser.
-            // `SelfRef` is exempt because a source object is never a player chooser.
-            if !matches!(affected, TargetFilter::Controller | TargetFilter::SelfRef) {
-                if matches!(clause.effect, Effect::TargetOnly { .. })
-                    && ctx.declared_target_choice_timing == Some(TargetChoiceTiming::Resolution)
-                {
-                    ctx.declared_target_choice_timing = None;
-                }
-                // CR 608.2d + CR 115.10a: a compound predicate ("exile target creature
-                // and choose a creature you control") lowers its inherited conjunct in a
-                // continuation context that never sees this subject, so the conjunct's
-                // own bare choice was already stamped Resolution. A `TargetOnly` link's
-                // timing is only ever Resolution through that producer declaration, so
-                // withdraw it on the whole chain the subject owns.
-                withdraw_resolution_timing_from_target_only_chain(
-                    clause.sub_ability.as_deref_mut(),
-                );
-            }
+            ctx.clause_subject_chooser = enclosing_subject_chooser;
             // A subject-led placement names its own follower, which this seam does
             // not resolve to an arranger: no printed card puts an announced target
             // set "in any order" under a subject, so the owner default stands.

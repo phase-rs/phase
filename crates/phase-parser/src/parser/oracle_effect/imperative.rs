@@ -4971,7 +4971,11 @@ fn try_parse_choose_object_and_player(
     if min != 1 || max != Some(1) {
         return None;
     }
-    choice_ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Resolution);
+    // CR 608.2d: a non-controller subject's choice stays at stack time, the same
+    // gate the bare-choose producer applies.
+    if choice_ctx.clause_subject_chooser.is_none() {
+        choice_ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Resolution);
+    }
     choice_ctx.relative_player_scope = Some(ControllerRef::ChosenPlayer {
         index: choice_ctx.chosen_player_count,
     });
@@ -5186,6 +5190,7 @@ pub(super) fn parse_choose_ast(
                 && nom_primitives::parse_article(rest_lower.trim_start()).is_ok()
                 && ctx.target_selection_mode == TargetSelectionMode::Chosen
                 && ctx.clause_player_scope.is_none()
+                && ctx.clause_subject_chooser.is_none()
                 && !nom_primitives::scan_contains(rest_lower, "target ")
                 && is_you_controlled_target(&target)
                 && !target.is_context_ref()
