@@ -18,6 +18,7 @@ use super::super::oracle_nom::target::controller_phrase_among;
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase_folding};
 use super::super::oracle_util::{contains_possessive, parse_count_expr, parse_subtype, TextPair};
 use super::imperative::CHOOSER_DOMAIN_CONTROLLERS;
+use super::lower::WhereXBinding;
 use super::{apply_where_x_to_filter, release_iteration_destination, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
@@ -29,12 +30,13 @@ use crate::parser::oracle_quantity::{
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AttachCardinality, AttachSelection,
     CastingPermission, ChoiceType, Chooser, ContinuousModification, ControllerRef,
-    CopyRetargetPermission, CounterSourceRider, DigRestOrder, DigSource, Duration, Effect,
-    EffectScope, ExcessRecipient, ExileConcealment, FaceDownBody, FaceDownProfile, FilterProp,
-    ForEachCategoryAction, LibraryPosition, ManaSpendRestriction, MultiTargetSpec, ObjectScope,
-    PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
-    SpellStackToGraveyardReplacement, StaticDefinition, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, ThisWayCause, TokenAttackDestination, TypeFilter, TypedFilter,
+    CopyRetargetPermission, CounterSourceRider, DigRestOrder, DigRestRemainder, DigSource,
+    Duration, Effect, EffectScope, ExcessRecipient, ExileConcealment, FaceDownBody,
+    FaceDownProfile, FilterProp, ForEachCategoryAction, LibraryPosition, ManaSpendRestriction,
+    MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
+    QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement, StaticDefinition,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, ThisWayCause, TokenAttackDestination,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -748,7 +750,7 @@ fn parse_put_rest_on_bottom_line(input: &str) -> OracleResult<'_, DigRestOrder> 
         .parse(input)?;
     let (input, rest_order) = opt(alt((
         value(DigRestOrder::Random, tag(" in a random order")),
-        value(DigRestOrder::Preserve, tag(" in any order")),
+        value(DigRestOrder::PlayerChoice, tag(" in any order")),
     )))
     .parse(input)?;
     let (input, _) = opt(tag(".")).parse(input)?;
@@ -2287,6 +2289,23 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         .parse(after_then_lower)
         .is_ok();
         if nom_primitives::scan_contains(&current_lower, "from among") && put_kept_card_tail {
+            return None;
+        }
+        // CR 608.2c + CR 406.3: "<player> looks at the top card of your library,
+        // then exiles it face down" (Vulcan Mind-Meld) — the conjugated "exiles"
+        // continues the SAME named subject's look, so the look and the exile are
+        // one subject-predicate instruction. Splitting would hand the exile to
+        // the ability's controller and drop the subject.
+        let subject_exiles_looked_at_card = (
+            tag::<_, _, OracleError<'_>>("exiles "),
+            alt((tag("it"), tag("them"))),
+            tag(" face down"),
+        )
+            .parse(after_then_lower)
+            .is_ok();
+        if subject_exiles_looked_at_card
+            && nom_primitives::scan_contains(&current_lower, "looks at the top ")
+        {
             return None;
         }
         // CR 701.55a + CR 608.2c: "[subject] does X, then faces a villainous
@@ -5788,6 +5807,7 @@ pub(super) fn apply_clause_continuation(
             rest_destination: rest_dest,
             rest_split_top_count: rest_split_top,
             rest_order: continuation_rest_order,
+            rest_library_position,
             enters_under,
             face_down_profile,
             enter_tapped,
@@ -5839,7 +5859,6 @@ pub(super) fn apply_clause_continuation(
                             "Dig-source face-down from-among with intervening sacrifice \
                              is not yet supported"
                         );
-
                         // 1. Demote the root Dig to look-only (no choice yet).
                         if let Effect::Dig {
                             keep_count,
@@ -5857,6 +5876,24 @@ pub(super) fn apply_clause_continuation(
                             *rest_destination = None;
                             *reveal = false;
                             *up_to = false;
+                        }
+
+                        // CR 401.4: the all-top remainder form ("and the rest on
+                        // top of your library") has no printed card in this
+                        // optional-sacrifice shape, and the PriorLook Digs built
+                        // below carry `count: 0` — they read the looked-at set
+                        // from `private_look_ids`, so there is no count expression
+                        // the top remainder could be clamped from. Fail closed:
+                        // the "if you do" clause becomes the strict unsupported
+                        // receipt instead of a Dig that would bottom the pile.
+                        if rest_library_position.as_deref() == Some(&LibraryPosition::Top)
+                            && rest_split_top.is_none()
+                        {
+                            let mut unsupported =
+                                AbilityDefinition::new(kind, unsupported_rest_split_effect());
+                            unsupported.condition = Some(AbilityCondition::effect_performed());
+                            defs[sac_pos].sub_ability = Some(Box::new(unsupported));
+                            return;
                         }
 
                         // 2. Map quantity → keep_count / up_to for the choice Dig.
@@ -5877,6 +5914,7 @@ pub(super) fn apply_clause_continuation(
                                 filter: TargetFilter::Any,
                                 destination: None,
                                 rest_destination: Some(Zone::Library),
+                                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                                 rest_split_top_count: None,
                                 rest_order: DigRestOrder::Preserve,
                                 reveal: false,
@@ -5901,6 +5939,7 @@ pub(super) fn apply_clause_continuation(
                                 filter: card_filter,
                                 destination: kept_dest,
                                 rest_destination: Some(rest_dest.unwrap_or(Zone::Library)),
+                                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                                 rest_split_top_count: None,
                                 rest_order: continuation_rest_order,
                                 reveal: false,
@@ -5939,13 +5978,16 @@ pub(super) fn apply_clause_continuation(
                 return;
             };
             let previous = &mut defs[dig_pos];
+            let mut unsupported_split = false;
             if let Effect::Dig {
+                count: dig_count,
                 keep_count,
                 keep_count_expr,
                 up_to,
                 filter,
                 destination,
                 rest_destination,
+                rest_remainder,
                 rest_split_top_count,
                 rest_order,
                 reveal,
@@ -6005,10 +6047,46 @@ pub(super) fn apply_clause_continuation(
                 // remainder CLEARS any split a previous continuation set —
                 // the last clause to speak about the remainder owns it
                 // (CR 608.2c, written order).
-                *rest_split_top_count = rest_split_top.map(|boxed| *boxed);
+                //
+                // CR 401.4: "… and the rest on top of your library in any
+                // order" (Diabolic Vision) is the degenerate
+                // all-top remainder, which `rest_destination: Some(Library)`
+                // alone cannot express — the uniform route bottoms the pile.
+                // Encode it with the split the Dig resolver already routes:
+                // the dig's own `count` is an upper bound on the remainder
+                // (`count` minus whatever was kept), and
+                // `split_rest_pile_or_park` clamps the top count to the actual
+                // pile, so the whole remainder lands on top and a 2+ card pile
+                // is handed to its owner for the CR 401.4 arrangement.
+                *rest_split_top_count = rest_split_top.map(|boxed| *boxed).or_else(|| {
+                    (rest_library_position.as_deref() == Some(&LibraryPosition::Top))
+                        .then(|| dig_count.clone())
+                });
                 *rest_order = continuation_rest_order;
+                // CR 701.20e + CR 608.2c: this clause names where the chosen
+                // cards go, so it also declares what happens to the others. A
+                // later "put the rest …" clause re-declares it as a route
+                // (`patch_rest_destination_recursively`).
+                *rest_remainder = declared_selection_remainder(
+                    kept_dest,
+                    new_keep,
+                    *rest_destination,
+                    rest_split_top_count.is_some(),
+                );
                 *dig_enter_tapped = enter_tapped;
                 *dig_enters_attacking = enters_attacking;
+                // CR 401.4: validate the EFFECTIVE remainder this clause
+                // leaves on the Dig (see `unsupported_rest_split`). "Any
+                // number" lowers to `up_to == true`, which takes the ordinary
+                // selection route and carries the split, so only the
+                // deterministic mass route is rejected.
+                unsupported_split = unsupported_rest_split(
+                    rest_split_top_count.is_some(),
+                    *rest_order,
+                    *keep_count,
+                    *up_to,
+                    *destination,
+                );
             } else if let Effect::Mill {
                 destination: mill_destination,
                 ..
@@ -6107,6 +6185,13 @@ pub(super) fn apply_clause_continuation(
                         defs.push(def);
                     }
                 }
+            }
+            if unsupported_split {
+                let previous = &mut defs[dig_pos];
+                *previous.effect = unsupported_rest_split_effect();
+                previous.sub_ability = None;
+                previous.else_ability = None;
+                previous.forward_result = false;
             }
         }
         ContinuationAst::FaceDownProfileSpec { profile } => {
@@ -6298,9 +6383,15 @@ pub(super) fn apply_clause_continuation(
             let Some(previous) = defs.last_mut() else {
                 return;
             };
+            let mut unsupported_split = false;
             if let Effect::Dig {
+                keep_count,
+                up_to,
                 destination,
                 rest_destination,
+                rest_remainder,
+                rest_split_top_count,
+                rest_order,
                 ..
             } = &mut *previous.effect
             {
@@ -6311,6 +6402,27 @@ pub(super) fn apply_clause_continuation(
                     *destination = Some(Zone::Library);
                 }
                 *rest_destination = Some(Zone::Library);
+                // CR 608.2c: this clause places the rest itself, so the
+                // remainder is a route, not the silent one.
+                *rest_remainder = DigRestRemainder::Route;
+                // CR 401.4: defaulting the kept destination to the library
+                // makes this the kept-to-library reorder, which names both
+                // positions and ignores a split an earlier clause installed
+                // (see `unsupported_rest_split`).
+                unsupported_split = unsupported_rest_split(
+                    rest_split_top_count.is_some(),
+                    *rest_order,
+                    *keep_count,
+                    *up_to,
+                    *destination,
+                );
+            }
+            if unsupported_split {
+                *previous.effect = unsupported_rest_split_effect();
+                previous.sub_ability = None;
+                previous.else_ability = None;
+                previous.forward_result = false;
+                return;
             }
             let put_def = AbilityDefinition::new(
                 kind,
@@ -6860,11 +6972,25 @@ pub(super) fn apply_clause_continuation(
                     keep_count,
                     up_to,
                     destination,
+                    rest_destination,
+                    rest_split_top_count,
+                    rest_remainder,
                     ..
                 } => {
                     *keep_count = Some(count);
                     *up_to = false;
                     *destination = Some(Zone::Exile);
+                    // CR 701.20e + CR 608.2c: "exile one of them face down"
+                    // names where the chosen card goes and says nothing about
+                    // the others, which stay in the library until a later
+                    // clause moves them (Siphon Insight: "put the other on the
+                    // bottom of that library").
+                    *rest_remainder = declared_selection_remainder(
+                        *destination,
+                        *keep_count,
+                        *rest_destination,
+                        rest_split_top_count.is_some(),
+                    );
                 }
                 _ => unreachable!(),
             }
@@ -7013,6 +7139,91 @@ fn dig_needs_last_revealed_rest_sibling(effect: &Effect) -> bool {
     }
 }
 
+/// CR 608.2c + CR 701.20a/701.20e: the deterministic "put ALL <filter> from
+/// among them onto [destination]" mass route. Mirrors the dispatch condition in
+/// `resolve_dig` (`raw_keep_num == u32::MAX && !is_up_to`, with a concrete kept
+/// destination): "any number" lowers to the same unbounded sentinel but with
+/// `up_to == true`, so it takes the ordinary selection route instead.
+pub(super) fn is_mass_put_all(
+    keep_count: Option<u32>,
+    up_to: bool,
+    kept_destination: Option<Zone>,
+) -> bool {
+    keep_count == Some(u32::MAX) && !up_to && kept_destination.is_some()
+}
+
+/// CR 401.4: whether a Dig's EFFECTIVE remainder split names a shape the Dig
+/// resolver cannot honor, so the lowering must fail closed rather than let it
+/// silently reach the library bottom or hand the owner an arrangement the card
+/// does not grant. Evaluated on the final fields of the lowered Dig — after
+/// inheritance into an "instead" alternative and after any later "put the rest
+/// …" patch — never on the clause that first spoke about the remainder.
+///
+/// - The mass put-all route places the remainder through the uniform bottom
+///   route and threads no split (`resolve_mass_put_all`).
+/// - A kept-to-library reorder ("put that card on top of your library and the
+///   rest on the bottom", Fertile Thicket) has already named both positions;
+///   the resolver deliberately does not consult a split on that branch.
+/// - A "random order" remainder is shuffled and then parked for the owner's
+///   own arrangement (`split_rest_pile_or_park`). CR 401.4 gives the owner that
+///   arrangement, but the card's "in a random order" overrides it (CR 101.1),
+///   so no arrangement may be offered.
+pub(super) fn unsupported_rest_split(
+    has_split: bool,
+    order: DigRestOrder,
+    keep_count: Option<u32>,
+    up_to: bool,
+    kept_destination: Option<Zone>,
+) -> bool {
+    has_split
+        && (order == DigRestOrder::Random
+            || kept_destination == Some(Zone::Library)
+            || is_mass_put_all(keep_count, up_to, kept_destination))
+}
+
+/// The strict unsupported receipt for [`unsupported_rest_split`] shapes.
+pub(super) fn unsupported_rest_split_effect() -> Effect {
+    Effect::unimplemented(
+        "dig_rest_split_unsupported_shape",
+        "put the rest on top of your library",
+    )
+}
+
+/// CR 701.20e + CR 608.2c: the remainder a selection clause declares for the
+/// look-at Dig it completes (issue #7754, Through the Forest Gate: "put any
+/// number of land cards from among them onto the battlefield tapped, then
+/// shuffle").
+///
+/// Looking at cards does not move them (CR 701.20e). A clause that names where
+/// the chosen cards go — out of the library or back on top of it — and names
+/// no destination or split for the others (`rest_destination` is the remainder
+/// instruction in force after this clause, including one an earlier clause
+/// already declared) leaves those others in the library in their existing
+/// order: `StayInLibrary`. A named remainder, a split, a selection that keeps
+/// nothing, or one that routes no chosen card is a `Route`.
+///
+/// Evaluated where the selection is declared — the `DigFromAmong` and
+/// `ExileLookedAtCardsFaceDown` continuations, and the "instead" alternative
+/// built from a from-among clause (`conditions.rs`) — so the policy is lowered
+/// once, during assembly. A later "put the rest …" clause owns the remainder by
+/// re-declaring it as a route (`patch_rest_destination_recursively`).
+pub(super) fn declared_selection_remainder(
+    kept_destination: Option<Zone>,
+    keep_count: Option<u32>,
+    rest_destination: Option<Zone>,
+    has_rest_split: bool,
+) -> DigRestRemainder {
+    if kept_destination.is_some()
+        && keep_count != Some(0)
+        && rest_destination.is_none()
+        && !has_rest_split
+    {
+        DigRestRemainder::StayInLibrary
+    } else {
+        DigRestRemainder::Route
+    }
+}
+
 /// Recursively patch `rest_destination` on Dig/RevealUntil effects reachable from
 /// `def` via `else_ability`. CR 608.2c: When a preceding def is a conditional
 /// "instead" wrapper (new_def with `else_ability = base_def`), a trailing
@@ -7024,10 +7235,15 @@ fn patch_rest_destination_recursively(
     reorder_all: bool,
     rest_order: DigRestOrder,
 ) {
+    let mut unsupported_split = false;
     match &mut *def.effect {
         Effect::Dig {
+            keep_count,
+            up_to,
             destination: kept_destination,
             rest_destination,
+            rest_remainder,
+            rest_split_top_count,
             rest_order: dig_rest_order,
             ..
         } => {
@@ -7037,7 +7253,22 @@ fn patch_rest_destination_recursively(
             } else if rest_destination.is_none() {
                 *rest_destination = Some(destination);
             }
+            // CR 608.2c: the printed "put the rest …" instruction owns the
+            // remainder, replacing a silent one an earlier from-among clause
+            // declared (Follow the Lumarets patches both of its branches).
+            *rest_remainder = DigRestRemainder::Route;
             *dig_rest_order = rest_order;
+            // CR 401.4: a later order patch can pair a remainder split an
+            // earlier clause installed with a random order the split resolver
+            // cannot honor; validate the effective remainder (see
+            // `unsupported_rest_split`).
+            unsupported_split = unsupported_rest_split(
+                rest_split_top_count.is_some(),
+                *dig_rest_order,
+                *keep_count,
+                *up_to,
+                *kept_destination,
+            );
         }
         Effect::RevealUntil {
             rest_destination,
@@ -7048,6 +7279,9 @@ fn patch_rest_destination_recursively(
             *effect_rest_order = rest_order;
         }
         _ => {}
+    }
+    if unsupported_split {
+        *def.effect = unsupported_rest_split_effect();
     }
     if let Some(sub) = def.sub_ability.as_deref_mut() {
         patch_rest_destination_recursively(sub, destination, reorder_all, rest_order);
@@ -7441,7 +7675,8 @@ pub(super) fn parse_dig_from_among(
 
         let filter = parse_dig_from_among_filter(filter_text, ctx);
         // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-        let filter = apply_where_x_to_filter(filter, where_x_expression.as_deref())?;
+        let filter =
+            apply_where_x_to_filter(filter, WhereXBinding::bare(where_x_expression.as_deref()))?;
 
         // CR 110.2a: "... under your control" routes the kept cards to the
         // ability controller. Scan the FULL clause — the controller phrase
@@ -7467,6 +7702,7 @@ pub(super) fn parse_dig_from_among(
             rest_destination: None,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
+            rest_library_position: None,
             enters_under,
             face_down_profile,
             enter_tapped,
@@ -7539,7 +7775,8 @@ pub(super) fn parse_dig_from_among(
         // CR 202.3 + CR 107.3i: Bind the literal `X` in the filter's `Cmc` bound
         // with the stripped "where X is <expression>" defining clause.
         // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-        let filter = apply_where_x_to_filter(filter, where_x_expression.as_deref())?;
+        let filter =
+            apply_where_x_to_filter(filter, WhereXBinding::bare(where_x_expression.as_deref()))?;
 
         // CR 110.2a + CR 708.2a/708.3: detect "under your control" / "face down" on
         // the full clause for the from-among put-step.
@@ -7563,10 +7800,11 @@ pub(super) fn parse_dig_from_among(
         // shared rest-anaphor matcher so the rest pile is routed correctly instead of
         // falling through to the `None`→Graveyard default. A genuinely separate
         // "Put the rest ..." sentence still patches via its own PutRest continuation.
-        let (rest_destination, rest_order) = parse_of_them_rest_destination(lower)
-            .map_or((None, DigRestOrder::Preserve), |(destination, order)| {
-                (Some(destination), order)
-            });
+        let (rest_destination, rest_order, rest_library_position) =
+            parse_of_them_rest_destination(lower).map_or(
+                (None, DigRestOrder::Preserve, None),
+                |(destination, order, position)| (Some(destination), order, position),
+            );
 
         return Some(ContinuationAst::DigFromAmong {
             quantity,
@@ -7575,6 +7813,7 @@ pub(super) fn parse_dig_from_among(
             rest_destination,
             rest_split_top_count: None,
             rest_order,
+            rest_library_position,
             enters_under,
             face_down_profile,
             enter_tapped,
@@ -7629,10 +7868,11 @@ pub(super) fn parse_dig_from_among(
                 PutCount::up(1)
             };
 
-            let (rest_destination, rest_order) = parse_of_them_rest_destination(lower)
-                .map_or((None, DigRestOrder::Preserve), |(destination, order)| {
-                    (Some(destination), order)
-                });
+            let (rest_destination, rest_order, rest_library_position) =
+                parse_of_them_rest_destination(lower).map_or(
+                    (None, DigRestOrder::Preserve, None),
+                    |(destination, order, position)| (Some(destination), order, position),
+                );
             // CR 401.2 + CR 701.20e: a Telling Time-class clause names both
             // library positions for the remainder rather than one destination
             // for all of it. The split implies the remainder's destination IS
@@ -7652,6 +7892,7 @@ pub(super) fn parse_dig_from_among(
                 rest_destination,
                 rest_split_top_count,
                 rest_order,
+                rest_library_position,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped,
@@ -8034,7 +8275,9 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
 /// rest" generalizes to any remainder count. Both anaphors point to the same
 /// rest_destination semantics, so they share the same downstream zone
 /// classification.
-fn parse_of_them_rest_destination(lower: &str) -> Option<(Zone, DigRestOrder)> {
+fn parse_of_them_rest_destination(
+    lower: &str,
+) -> Option<(Zone, DigRestOrder, Option<Box<LibraryPosition>>)> {
     let (_, (_, after_rest)) = nom_primitives::split_once_on(lower, " and the rest")
         .or_else(|_| nom_primitives::split_once_on(lower, " and the other"))
         .ok()?;
@@ -8046,6 +8289,18 @@ fn parse_of_them_rest_destination(lower: &str) -> Option<(Zone, DigRestOrder)> {
         // Default: bottom of library ("on the bottom", "in any order", etc.)
         Zone::Library
     };
+    // CR 401.4 + CR 701.20e: "on top of [the/that/their] library" and the bare
+    // "on top" (Inzerva, Master of Insights: "... and the rest on top in any
+    // order") are the library rest clauses that do not mean the bottom.
+    // `Zone::Library` alone cannot carry the position, so the caller threads it
+    // into the remainder routing (Diabolic Vision's "… and the rest on top of
+    // your library"). The tail classifier is shared with the standalone
+    // put-the-rest clause.
+    let rest_library_position = if destination == Zone::Library {
+        super::rest_tail_library_position(after_rest).map(Box::new)
+    } else {
+        None
+    };
     let random = opt(preceded(
         take_until::<_, _, OracleError<'_>>(" in a random order"),
         tag(" in a random order"),
@@ -8053,13 +8308,17 @@ fn parse_of_them_rest_destination(lower: &str) -> Option<(Zone, DigRestOrder)> {
     .parse(after_rest)
     .ok()
     .is_some_and(|(_, matched)| matched.is_some());
+    let player_choice = nom_primitives::scan_contains(after_rest, "in any order");
     Some((
         destination,
         if random {
             DigRestOrder::Random
+        } else if player_choice {
+            DigRestOrder::PlayerChoice
         } else {
             DigRestOrder::Preserve
         },
+        rest_library_position,
     ))
 }
 
@@ -8994,6 +9253,7 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 rest_destination: None,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -9019,6 +9279,7 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 rest_split_top_count: None,
                 rest_order: parse_put_one_dig_card_on_top(&lower)
                     .expect("continuation guard just matched"),
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -9109,16 +9370,22 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 face_down,
             })
         }
-        // "put the rest on the bottom" / "put those cards into your graveyard"
-        // after Dig — sets rest_destination on the preceding Dig effect. A move
+        // "put the rest on the bottom" / "put them back" after Dig — sets
+        // rest_destination on the preceding Dig effect. "put those cards" is
+        // deliberately EXCLUDED: after a look-only Dig, "put those cards into
+        // your graveyard" names the whole looked-at set (not a remainder), and
+        // the zero-keep Dig path returns before applying that destination. A move
         // of the revealed cards onto the battlefield is not a rest pile (its
         // destination has no rest-pile reading), so it parses as its own
         // instruction (Game Preserve: "put those cards onto the battlefield").
+        // An optional "you may put …" is likewise its own instruction
+        // (CR 608.2c): folding it into the look would make the choice
+        // unconditional, so it is assembled and bound as a separate clause.
         Effect::Dig { .. }
-            if (nom_primitives::scan_contains(&lower, "put them back")
-                || nom_primitives::scan_contains(&lower, "put the rest")
-                || nom_primitives::scan_contains(&lower, "put those cards"))
-                && !nom_primitives::scan_contains(&lower, "onto the battlefield") =>
+            if !nom_primitives::scan_contains(&lower, "you may")
+                && !nom_primitives::scan_contains(&lower, "onto the battlefield")
+                && (nom_primitives::scan_contains(&lower, "put them back")
+                    || nom_primitives::scan_contains(&lower, "put the rest")) =>
         {
             let destination = if nom_primitives::scan_contains(&lower, "into your graveyard")
                 || nom_primitives::scan_contains(&lower, "into their graveyard")
@@ -9134,7 +9401,17 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
             };
             let rest_order = parse_put_rest_on_bottom_line(&lower)
                 .map(|(_, order)| order)
-                .unwrap_or(DigRestOrder::Preserve);
+                .unwrap_or_else(|_| {
+                    // CR 401.4: "put those cards on the bottom ... in any order" also
+                    // indicates player-chosen order, not just "put the rest on the bottom".
+                    if destination == Zone::Library
+                        && nom_primitives::scan_contains(&lower, "in any order")
+                    {
+                        DigRestOrder::PlayerChoice
+                    } else {
+                        DigRestOrder::Preserve
+                    }
+                });
             Some(ContinuationAst::PutRest {
                 destination,
                 reorder_all: false,
@@ -13147,6 +13424,7 @@ mod tests {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: crate::types::ability::DigRestOrder::Preserve,
             reveal: false,
@@ -13210,7 +13488,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: false,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
             })
         );
     }
@@ -13305,22 +13583,19 @@ mod tests {
         );
     }
 
+    /// CR 608.2c: "put those cards …" names the whole looked-at set, not the
+    /// remainder of a keep, so it is NOT a `PutRest` continuation of the Dig. It
+    /// parses as its own placement over the tracked set (Stomping Slabs /
+    /// Petals of Insight), which a zero-keep Dig would otherwise never apply.
     #[test]
-    fn put_those_cards_on_bottom() {
+    fn put_those_cards_on_bottom_is_not_a_dig_remainder() {
         let dig = make_dig_effect();
         let result = parse_followup_continuation_ast(
             "Put those cards on the bottom of your library in any order.",
             &dig,
             &mut ParseContext::default(),
         );
-        assert_eq!(
-            result,
-            Some(ContinuationAst::PutRest {
-                destination: Zone::Library,
-                reorder_all: false,
-                rest_order: DigRestOrder::Preserve,
-            })
-        );
+        assert_eq!(result, None);
     }
 
     // --- "put N of them" DigFromAmong continuation ---
@@ -13342,7 +13617,8 @@ mod tests {
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
+                rest_library_position: Some(Box::new(LibraryPosition::Bottom)),
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13370,7 +13646,8 @@ mod tests {
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
+                rest_library_position: Some(Box::new(LibraryPosition::Bottom)),
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13404,6 +13681,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: Some(Box::new(LibraryPosition::Bottom)),
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13431,6 +13709,7 @@ mod tests {
                 rest_destination: Some(Zone::Graveyard),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13457,7 +13736,8 @@ mod tests {
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
+                rest_library_position: Some(Box::new(LibraryPosition::Bottom)),
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13487,6 +13767,7 @@ mod tests {
                     rest_destination: None,
                     rest_split_top_count: None,
                     rest_order: DigRestOrder::Preserve,
+                    rest_library_position: None,
                     enters_under: None,
                     face_down_profile: None,
                     enter_tapped: false,
@@ -13788,6 +14069,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -14072,6 +14354,7 @@ mod tests {
                 rest_destination: None,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -14124,6 +14407,7 @@ mod tests {
                 rest_destination: None,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -14194,6 +14478,7 @@ mod tests {
                 rest_destination: None,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -15147,6 +15432,176 @@ mod tests {
     }
 
     #[test]
+    fn test_petals_of_insight_parse() {
+        let def = parse_effect_chain(
+            "Look at the top three cards of your library. You may put those cards on the bottom of your library in any order. If you do, return ~ to its owner's hand. Otherwise, draw three cards.",
+            AbilityKind::Spell,
+        );
+        let Effect::Dig {
+            count,
+            keep_count,
+            destination,
+            rest_destination,
+            source,
+            ..
+        } = def.effect.as_ref()
+        else {
+            panic!("root must be Dig, got {:?}", def.effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
+        assert_eq!(*keep_count, Some(0), "pure peek keeps 0 cards");
+        assert_eq!(*destination, None);
+        assert_eq!(*rest_destination, None);
+        assert_eq!(*source, DigSource::Library);
+
+        let sub = def
+            .sub_ability
+            .as_deref()
+            .expect("must have sub_ability for optional bottom placement");
+        assert!(sub.optional, "must be optional choice");
+        let Effect::Dig {
+            count: sub_count,
+            keep_count: sub_keep,
+            rest_destination: sub_rest,
+            rest_order: sub_rest_order,
+            source: sub_src,
+            ..
+        } = sub.effect.as_ref()
+        else {
+            panic!(
+                "sub_ability effect must be PriorLook Dig, got {:?}",
+                sub.effect
+            );
+        };
+        assert_eq!(*sub_count, QuantityExpr::Fixed { value: 0 });
+        assert_eq!(*sub_keep, Some(0));
+        assert_eq!(*sub_rest, Some(Zone::Library));
+        assert_eq!(
+            *sub_rest_order,
+            crate::types::ability::DigRestOrder::PlayerChoice,
+            "CR 401.4: Petals' \"in any order\" is the player's arrangement choice"
+        );
+        assert_eq!(*sub_src, DigSource::PriorLook);
+
+        let if_you_do = sub
+            .sub_ability
+            .as_deref()
+            .expect("must have if-you-do sub_ability");
+        assert_eq!(
+            if_you_do.condition,
+            Some(AbilityCondition::effect_performed())
+        );
+        let Effect::Bounce { target, .. } = if_you_do.effect.as_ref() else {
+            panic!(
+                "if_you_do effect must be Bounce, got {:?}",
+                if_you_do.effect
+            );
+        };
+        assert_eq!(*target, TargetFilter::SelfRef);
+
+        let otherwise = if_you_do
+            .else_ability
+            .as_deref()
+            .expect("must have otherwise else_ability");
+        let Effect::Draw {
+            count: draw_count, ..
+        } = otherwise.effect.as_ref()
+        else {
+            panic!("otherwise effect must be Draw, got {:?}", otherwise.effect);
+        };
+        assert_eq!(*draw_count, QuantityExpr::Fixed { value: 3 });
+    }
+
+    // SHAPE: The next three tests are synthetic perturbations for the private-look
+    // binding mechanism (CR 608.2c: follow instructions in written order), not
+    // support claims for additional cards. No printed card in the inspected
+    // AtomicCards pool has these exact revealed-look, future-producer or
+    // intervening-Draw sequences. The nearest printed card is Petals of Insight:
+    // "Look at the top three cards of your library. You may put those cards on the
+    // bottom of your library in any order. If you do, return Petals of Insight to
+    // its owner's hand. Otherwise, draw three cards."
+    #[test]
+    fn revealed_look_does_not_bind_prior_look_bottom() {
+        let def = parse_effect_chain(
+            "Reveal the top three cards of your library. You may put those cards on the bottom of your library in any order.",
+            AbilityKind::Spell,
+        );
+        let sub = def.sub_ability.as_deref().expect("must have sub_ability");
+        assert!(
+            !matches!(
+                &*sub.effect,
+                Effect::Dig {
+                    source: DigSource::PriorLook,
+                    ..
+                }
+            ),
+            "revealed top cards must not bind to private PriorLook Dig, got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
+    fn competing_future_producer_does_not_rebind_prior_look_bottom() {
+        let def = parse_effect_chain(
+            "Look at the top three cards of target player's library. You may put those cards on the bottom of that player's library in any order. Look at the top five cards of your library.",
+            AbilityKind::Spell,
+        );
+        let Effect::Dig {
+            player: first_player,
+            source: first_src,
+            ..
+        } = def.effect.as_ref()
+        else {
+            panic!("first effect must be Dig, got {:?}", def.effect);
+        };
+        assert_eq!(*first_src, DigSource::Library);
+        assert_eq!(*first_player, TargetFilter::Player);
+
+        let sub = def.sub_ability.as_deref().expect("must have sub_ability");
+        let Effect::Dig {
+            player: second_player,
+            source: second_src,
+            ..
+        } = sub.effect.as_ref()
+        else {
+            panic!("second effect must be PriorLook Dig, got {:?}", sub.effect);
+        };
+        assert_eq!(*second_src, DigSource::PriorLook);
+        assert_eq!(
+            *second_player,
+            TargetFilter::Player,
+            "must bind preceding producer's target player, not future producer"
+        );
+    }
+
+    #[test]
+    fn intervening_nontransparent_clause_prevents_prior_look_binding() {
+        let def = parse_effect_chain(
+            "Look at the top three cards of your library. Draw a card. You may put those cards on the bottom of your library in any order.",
+            AbilityKind::Spell,
+        );
+        let mut curr = Some(&def);
+        let mut found_prior_look = false;
+        while let Some(node) = curr {
+            if matches!(
+                &*node.effect,
+                Effect::Dig {
+                    source: DigSource::PriorLook,
+                    ..
+                }
+            ) {
+                found_prior_look = true;
+                break;
+            }
+            curr = node.sub_ability.as_deref();
+        }
+        assert!(
+            !found_prior_look,
+            "intervening Draw clause must prevent PriorLook rewrite"
+        );
+    }
+
+    #[test]
     fn choose_from_zone_partitions_chosen_and_rest_destinations() {
         let choose = Effect::ChooseFromZone {
             count: 2,
@@ -15330,6 +15785,7 @@ mod tests {
                 rest_destination: None,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -16987,6 +17443,7 @@ mod tests {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: false,
@@ -17091,6 +17548,27 @@ mod tests {
                 .map(|(_, order)| order),
             Some(DigRestOrder::Preserve)
         );
+    }
+
+    /// CR 401.4: "in any order" is the owner's arrangement instruction on the
+    /// whole-line continuation combinator itself, and stays distinct from the
+    /// randomized "in a random order" mapping pinned above.
+    #[test]
+    fn put_the_rest_on_the_bottom_reads_any_order_as_player_choice() {
+        for text in [
+            "put the rest on the bottom of your library in any order",
+            "put the rest on the bottom of their library in any order",
+            "put the rest on the bottom of that library in any order.",
+            "put the rest on the bottom of that player's library in any order",
+        ] {
+            assert_eq!(
+                parse_put_rest_on_bottom_line(text)
+                    .ok()
+                    .map(|(_, order)| order),
+                Some(DigRestOrder::PlayerChoice),
+                "{text}"
+            );
+        }
     }
 
     /// Black Cat, Cunning Thief: the number axis is the shared `parse_number`, so "two"

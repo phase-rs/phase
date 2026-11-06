@@ -220,11 +220,25 @@ fn drive(runner: &mut GameRunner, first: GameAction, answers: &Answers) -> Trail
             WaitingFor::ModeChoice { .. } => GameAction::SelectModes {
                 indices: answers.modes.clone(),
             },
-            WaitingFor::TargetSelection { selection, .. } => GameAction::ChooseTarget {
-                target: targets
-                    .next()
-                    .map(TargetRef::Object)
-                    .or_else(|| selection.current_legal_targets.first().cloned()),
+            // CR 601.2c + CR 601.2d: scripted targets first. Once they run out,
+            // an optional slot ("any number of targets") is declined rather than
+            // announcing an extra target the scripted division would leave
+            // without its required share; a required slot takes the first legal.
+            WaitingFor::TargetSelection {
+                selection,
+                target_slots,
+                ..
+            } => GameAction::ChooseTarget {
+                target: targets.next().map(TargetRef::Object).or_else(|| {
+                    let optional = target_slots
+                        .get(selection.current_slot)
+                        .is_some_and(|slot| slot.optional);
+                    if optional {
+                        None
+                    } else {
+                        selection.current_legal_targets.first().cloned()
+                    }
+                }),
             },
             WaitingFor::DistributeAmong { .. } => GameAction::DistributeAmong {
                 distribution: answers

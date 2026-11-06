@@ -2226,16 +2226,7 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
         })
         .max();
 
-    // CR 605.1b + CR 106.12a: add aura TapsForMana bonus to the land's yield
-    // so X-value choosers and castability gates account for Wild Growth etc.
-    // Each outer element of `taps_for_mana_aura_bonus` is one aura that adds
-    // exactly one mana unit; the inner vec holds the color alternatives (1 for
-    // Fixed, N for AnyOneColor) — only the count of auras matters here.
-    let aura_bonus = if obj.card_types.core_types.contains(&CoreType::Land) {
-        taps_for_mana_aura_bonus(state, object_id, controller).len() as u32
-    } else {
-        0
-    };
+    let aura_bonus = land_tap_aura_bonus(state, obj, object_id, controller);
 
     match explicit_max {
         Some(amount) => amount + aura_bonus,
@@ -2246,6 +2237,59 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
         }
         None => aura_bonus,
     }
+}
+
+/// CR 605.1b + CR 106.12a: add aura TapsForMana bonus to a land's yield
+/// so X-value choosers and castability gates account for Wild Growth etc.
+/// Each outer element of `taps_for_mana_aura_bonus` is one aura that adds
+/// exactly one mana unit; the inner vec holds the color alternatives (1 for
+/// Fixed, N for AnyOneColor) — only the count of auras matters here.
+/// Non-lands contribute no bonus.
+fn land_tap_aura_bonus(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    object_id: ObjectId,
+    controller: PlayerId,
+) -> u32 {
+    if obj.card_types.core_types.contains(&CoreType::Land) {
+        taps_for_mana_aura_bonus(state, object_id, controller).len() as u32
+    } else {
+        0
+    }
+}
+
+/// Per-permanent upper bound of the mana obtainable for a resolution-time
+/// effect payment (CR 118.1) via mana abilities (CR 605.3a), including the
+/// TapsForMana aura bonus (CR 605.1b + CR 106.12a).
+///
+/// Colour-dependent sources (Nyx Lotus) are covered because
+/// [`CapacityUse::Castability`] does not exclude them; they are sized at their
+/// best colour, unlike [`x_ceiling_mana_capacity`]. Mana-multiplying
+/// replacement effects are NOT included, same as the previous X-based bound.
+/// This is the floor of `casting::effect_payment_ceiling` (which raises it with
+/// the simulated production) and the input that sizes its probe.
+/// Over-estimation is safe because the caller gates every offered amount
+/// through the exact auto-tap affordability check.
+///
+/// The result is the larger of the feasible-capacity branch (adds non-tap
+/// sources such as Treasure / KCI and colour-dependent sources, with the aura
+/// bonus gated on the land's own usable capacity) and [`max_mana_yield`]
+/// (covers subtype-only basics that carry no explicit mana ability).
+pub(crate) fn effect_payment_mana_capacity(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+) -> u32 {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return 0;
+    };
+    let feasible = feasible_mana_capacity(state, object_id, controller, None);
+    let aura_bonus = if feasible > 0 {
+        land_tap_aura_bonus(state, obj, object_id, controller)
+    } else {
+        0
+    };
+    (feasible + aura_bonus).max(max_mana_yield(state, object_id, controller))
 }
 
 /// CR 117.1d + CR 601.2g: Maximum net mana this permanent could contribute via

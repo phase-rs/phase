@@ -13,7 +13,8 @@
   "quantityRef": {
     "highestNumber": "die höchste Zahl",
     "lowestNumber": "die niedrigste Zahl",
-    "chosenNumber": "die gewählte Zahl"
+    "chosenNumber": "die gewählte Zahl",
+    "energyPaidOrLostThisTurn": "in diesem Zug bezahlte oder verlorene Energie"
   },
   "scryOutcome": {
     "title": "Spähen abgeschlossen",
