@@ -12615,8 +12615,9 @@ pub(super) fn parse_counter_ast(
     // the spell phrase to the stack through the shared target parser. Keep this
     // path on that building block and only apply the trailing X definition.
     // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-    // `parse_counter_ast` takes no `ParseContext`, so there is no antecedent to
-    // supply here; the filter bound keeps the legacy seeds.
+    // `WhereXBinding::bare` binds the where-X count with no player antecedents:
+    // this path does not hand the parse context's antecedents to the count, so
+    // the filter bound keeps the legacy seeds.
     let target =
         super::apply_where_x_to_filter(target, WhereXBinding::bare(where_x_expression.as_deref()))?;
     // CR 118.12: Parse "unless its controller pays {X}" for conditional counters
