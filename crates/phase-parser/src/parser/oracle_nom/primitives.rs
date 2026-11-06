@@ -948,9 +948,10 @@ pub fn peek_clause_terminator(input: &str) -> OracleResult<'_, ()> {
 /// first successful match.  This is the generic primitive behind all
 /// `scan_for_*` helpers.
 ///
-/// The combinator is tried at the start of `text`, then at each position
-/// after a space.  Returns `Some(value)` on the first match, `None` if
-/// no word boundary produces a match.
+/// The combinator is tried at the start of `text`, then after each word break
+/// (whitespace or punctuation, but not a hyphen or apostrophe, so a hyphenated
+/// or possessive word stays whole). Returns `Some(value)` on the first match,
+/// `None` if no word boundary produces a match.
 ///
 /// # Example
 /// ```ignore
@@ -961,11 +962,16 @@ pub fn peek_clause_terminator(input: &str) -> OracleResult<'_, ()> {
 /// });
 /// assert_eq!(found, Some("dies"));
 /// ```
+/// Whether `c` separates words for a word-boundary scan. Whitespace and
+/// punctuation do; a hyphen or apostrophe stays inside its word, so
+/// "non-combat" and "you're" are never split into scan candidates.
+fn is_word_break(c: char) -> bool {
+    !c.is_alphanumeric() && c != '-' && c != '\'' && c != '\u{2019}'
+}
+
 fn word_boundary_candidates(text: &str) -> impl Iterator<Item = (usize, &str)> {
     text.char_indices()
-        .filter(move |&(i, _)| {
-            i == 0 || (text.as_bytes()[i - 1] == b' ' && text.as_bytes()[i] != b' ')
-        })
+        .filter(move |&(i, _)| i == 0 || text[..i].chars().next_back().is_some_and(is_word_break))
         .map(move |(i, _)| (i, &text[i..]))
 }
 

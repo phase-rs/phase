@@ -602,4 +602,17 @@ fn the_window_is_measured_between_host_stamps() {
         "each accepted saying restarts the window from its own host stamp"
     );
     assert_eq!((payment.owed, payment.said), (3, 2));
+    // A re-delivery of an accepted sequence is stale even when its instant is
+    // newer: the host sequence, not the timestamp, is the duplicate authority.
+    assert_eq!(
+        payment.observe(
+            SayPhraseObservation {
+                seq: 2,
+                at_ms: 11_500
+            },
+            Some(1_000)
+        ),
+        SayPhraseDisposition::Stale
+    );
+    assert_eq!((payment.owed, payment.said), (3, 2));
 }

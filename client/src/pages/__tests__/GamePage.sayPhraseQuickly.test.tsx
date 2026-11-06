@@ -176,8 +176,9 @@ function setPrompt(next: WaitingFor | null, said: number, owed: number) {
 
 /** Stands in for the engine's spoken-payment bookkeeping: each `SayPhrase` is
  *  one accepted saying, the engine's `said` grows, the sayings still owed
- *  shrink, and the last one closes the prompt. `PayUnlessCost { pay: false }`
- *  declines and retires the instance. */
+ *  shrink, and the last one closes the prompt. `PayUnlessCost` is the explicit
+ *  decline path a player chooses; a lapsed window arrives as a `SayPhrase`
+ *  stamped past the engine's deadline. */
 function acknowledgeSayings() {
   dispatchMock.mockImplementation((action: SayPhraseAttempt) => {
     const current = useGameStore.getState().waitingFor;
@@ -359,7 +360,7 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     expect(new Set(calls.map((call) => call.seq)).size).toBe(2);
   });
 
-  it("declines when the next saying does not follow inside the window", async () => {
+  it("reports a lapsed window as a stamped observation for the engine", async () => {
     setup(2);
     render(gamePageTree());
 
@@ -369,7 +370,13 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     expect(sayPhraseCalls()).toHaveLength(1);
 
     advance(GAP_MS * 4);
-    expect(payUnlessCostCalls()).toEqual([false]);
+    // The client observes the lapse; the engine's stored deadline decides that
+    // it is a pause and applies the sacrifice. The client does not decline the
+    // payment itself.
+    expect(payUnlessCostCalls()).toEqual([]);
+    const calls = sayPhraseCalls();
+    expect(calls).toHaveLength(2);
+    expect(calls[1].seq).toBe(2);
   });
 
   it("arms the window from the click, not from the acknowledgement", async () => {
@@ -396,16 +403,52 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     // own host stamp; not saying anything more is the pause the card punishes.
     acknowledgeNextSaying();
     advance(GAP_MS * 4);
-    expect(payUnlessCostCalls()).toEqual([false]);
+    expect(payUnlessCostCalls()).toEqual([]);
+    const calls = sayPhraseCalls();
+    expect(calls).toHaveLength(3);
+    expect(calls[2].seq).toBe(3);
+  });
+
+  it("continues the host sequence after a reconnect", async () => {
+    setup(2);
+    // Mount into a payment already in progress: the engine accepted saying 1 and
+    // publishes `last_seq`, so the reconnected panel must continue at 2 rather
+    // than replay 1 (which the engine rejects as a duplicate).
+    const state = useGameStore.getState().gameState!;
+    act(() => {
+      useGameStore.setState({
+        waitingFor: toyBoatUnlessPayment(1),
+        gameState: {
+          ...state,
+          say_payment: {
+            ...paymentFor(2, 1),
+            last_seq: 1,
+            last_said_ms: 1_000,
+            deadline_ms: 2_000,
+          },
+        },
+      });
+    });
+    render(gamePageTree());
+
+    expect(await screen.findByText(PHRASE)).toBeInTheDocument();
+    fireEvent.click(phraseBox());
+
+    const calls = sayPhraseCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].seq).toBe(2);
+    expect(calls[0].payment).toBe(PAYMENT_ID);
   });
 
   it("renders the engine's own saying progress", async () => {
     setup(2);
     render(gamePageTree());
 
-    expect(await screen.findByText("0 of 2 said")).toBeInTheDocument();
+    // Longer-than-default waits: the full suite runs this file alongside
+    // hundreds of others, and a 1s default can lapse under that load.
+    expect(await screen.findByText("0 of 2 said", {}, { timeout: 5_000 })).toBeInTheDocument();
     fireEvent.click(phraseBox());
-    expect(await screen.findByText("1 of 2 said")).toBeInTheDocument();
+    expect(await screen.findByText("1 of 2 said", {}, { timeout: 5_000 })).toBeInTheDocument();
   });
 
   it("lets a following prompt start a fresh payment", async () => {

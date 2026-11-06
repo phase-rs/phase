@@ -37352,6 +37352,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         repeat_process_requested: _,
         may_trigger_auto_choices: _,
         un_actions: _,
+        say_payment: _,
         replacement_auto_choices: _,
         replacement_auto_choice_tail: _,
         decision_templates: _,
@@ -37763,6 +37764,7 @@ impl PartialEq for GameState {
             && self.replacement_auto_choice_tail == other.replacement_auto_choice_tail
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.un_actions == other.un_actions
+            && self.say_payment == other.say_payment
             && self.decision_templates == other.decision_templates
             && self.priority_yields == other.priority_yields
             && self.pending_begin_game_abilities == other.pending_begin_game_abilities
