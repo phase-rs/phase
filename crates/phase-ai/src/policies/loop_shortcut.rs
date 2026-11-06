@@ -436,10 +436,11 @@ fn buys_only_mana_and_combats(
 ///   total. A period that pays 1 and gains 1 therefore never kills a proposer above 1 life,
 ///   and one that pays 4 and gains 3 kills a 5-life proposer in its second repetition, after
 ///   netting only 1. The walk itself is `PeriodicDelta::first_life_crossing`, the engine's own
-///   authority over both numbers, so this policy's survival question and the engine's bound are
-///   one reduction by construction rather than by comment. Measured against the net-only rate this replaced, the
-///   check only tightens: each repetition's net and dip are both at least what the period
-///   itself nets off the proposer, so every declare that rate refused is still refused.
+///   authority over both numbers, and the engine's bound reads the same charges through
+///   `declared_seat_life_crossing`, whose stretch reading a unit test holds equal to this walk.
+///   Measured against the net-only rate this replaced, the check only tightens: each
+///   repetition's net and dip are both at least what the period itself nets off the proposer,
+///   so every declare that rate refused is still refused.
 /// - **poison**, CR 704.5c — reaching **10 or more** is the threshold.
 ///
 /// **LIBRARY IS DELIBERATELY EXCLUDED, and that is the non-obvious part of this function.**
