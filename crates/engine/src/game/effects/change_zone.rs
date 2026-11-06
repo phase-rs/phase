@@ -505,9 +505,10 @@ fn resolution_zone_candidates(
 /// would be credited to the caster. A performer distinct from the controller
 /// for these shapes needs an actor axis on `ChangeZoneAll` (a serialized
 /// change); no printed card needs it today. (Thought Lash's "that player
-/// exiles all cards from their library" is not a limit: CR 702.24a makes
-/// cumulative upkeep a trigger of "your upkeep", so only the permanent's
-/// controller can fail to pay and "that player" is always the controller.)
+/// exiles all cards from their library" is the controller's exile in the
+/// ordinary case: CR 702.24a makes cumulative upkeep a trigger of "your
+/// upkeep", so the player who fails to pay is the controller of that trigger,
+/// which is Thought Lash's controller unless control changed in between.)
 fn move_performer(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
@@ -1587,16 +1588,19 @@ pub fn resolve(
 
     let ctx = ChangeZoneIterationCtx {
         source_id: ability.source_id,
-        // CR 601.2c + CR 608.2c: these members were announced as targets by this
-        // instruction's controller, so the controller performs the move — the
-        // subject rule of the pick and mass paths does not apply here
-        // (Froghemoth: "exile up to that many target cards from their
-        // graveyard" is your exile, not theirs). Known limit: under a
+        // CR 601.2c + CR 608.2c: announced targets are moved by the controller
+        // who announced them (Froghemoth: "exile up to that many target cards
+        // from their graveyard" is your exile, not theirs). Known limits, both
+        // the same without this change: (1) this path also moves bound
+        // referents that were not announced as targets, and a referent move
+        // with a named subject still records the controller — Ghastlord of
+        // Fugue's "That player exiles that card." and Knowledge Pool's "that
+        // player exiles it" lower to `ChangeZone { target: ParentTarget |
+        // TriggeringSource }`, which carries no actor; (2) under a
         // `player_scope` fan-out `ability.controller` is the seat
         // (`bind_scoped_seat`), so Battle at the Helvault's "For each player,
         // exile up to one target … that player controls" records each seat
-        // rather than the Saga's controller (CR 608.2c); the same holds
-        // without this change.
+        // rather than the Saga's controller (CR 608.2c).
         controller: ability.controller,
         origin,
         destination: dest_zone,
