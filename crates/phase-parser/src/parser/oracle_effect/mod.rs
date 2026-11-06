@@ -50473,6 +50473,25 @@ fn parse_effect_chain_ir_body(
                                     _ => None,
                                 }
                             }
+                            // CR 701.20a + CR 701.20e + CR 608.2c: the same
+                            // displacement applies to a REVEAL `Dig` whose
+                            // remainder is named after a clause that reads the
+                            // revealed card (Reviving Vapors' "You gain life
+                            // equal to that card's mana value" before "Put all
+                            // other cards revealed this way into your
+                            // graveyard"). The remainder must state its
+                            // destination and may not be owner-ordered, and it
+                            // is never read off a later tracked-set move, so the
+                            // Dig keeps its kept-pile publication for the
+                            // downstream sub_abilities.
+                            // The antecedent's `reveal`/`destination` fields are
+                            // only settled by the continuation that lowers it
+                            // ("put one of them into your hand"), so the
+                            // public-reveal gate belongs to the lowering, where
+                            // the patched effect is in hand.
+                            Effect::Dig { .. } => {
+                                sequence::parse_revealed_remainder_clause(normalized_text)
+                            }
                             _ => None,
                         })
                 })

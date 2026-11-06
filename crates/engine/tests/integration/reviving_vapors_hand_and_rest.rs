@@ -20,6 +20,8 @@ use engine::types::zones::Zone;
 
 const REVIVING_VAPORS: &str = "Reveal the top three cards of your library and put one of them into your hand. You gain life equal to that card's mana value. Put all other cards revealed this way into your graveyard.";
 
+const ZIMONES_EXPERIMENT: &str = "Look at the top five cards of your library. You may reveal up to two creature and/or land cards from among them, then put the rest on the bottom of your library in a random order. Put all land cards revealed this way onto the battlefield tapped and put all creature cards revealed this way into your hand.";
+
 /// Move `id` to the top of its owner's library (mirrors the reveal fixtures'
 /// `put_library_top`).
 fn put_library_top(runner: &mut GameRunner, id: ObjectId) {
@@ -206,6 +208,85 @@ fn reviving_vapors_puts_the_kept_card_in_hand_and_gains_its_mana_value() {
         23,
         "life equal to the kept card's mana value (3), not 0 and not the remainder's"
     );
+}
+
+/// CR 608.2c: the neighbouring class that shares the lowered shapes —
+/// Zimone's Experiment routes the cards the player REVEALED by type. Its
+/// remainder and its selection have the same types, so an implementation that
+/// publishes the unselected pile instead of the selected one hands back the
+/// wrong cards (or none at all when nothing was selected).
+#[test]
+fn zimones_experiment_routes_the_selected_cards_by_type() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_spell_to_hand_from_oracle(P0, "Zimone's Experiment", false, ZIMONES_EXPERIMENT)
+        .with_mana_cost(ManaCost::generic(0));
+    // Four lands and one creature, so the selection and the remainder both hold
+    // creature and/or land cards.
+    let lands: Vec<ObjectId> = (0..4)
+        .map(|_| scenario.add_land_to_library_top(P0, "Forest").id())
+        .collect();
+    let creature = add_carded_creature(&mut scenario, "Hill Giant", 3);
+
+    let mut runner = scenario.build();
+    put_library_top(&mut runner, creature);
+
+    let spell = runner.state().players[P0.0 as usize]
+        .hand
+        .iter()
+        .copied()
+        .find(|id| runner.state().objects[id].name == "Zimone's Experiment")
+        .expect("Zimone's Experiment starts in hand");
+    runner.cast(spell).resolve();
+    let WaitingFor::DigChoice { cards, .. } = &runner.state().waiting_for else {
+        panic!(
+            "Zimone's Experiment must surface a reveal choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(
+        cards.contains(&creature) && lands.iter().all(|land| cards.contains(land)),
+        "all five looked-at cards must be offered: {cards:?}"
+    );
+    let kept_land = lands[0];
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![creature, kept_land],
+        })
+        .expect("revealing a creature and a land is legal");
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the spell must have finished resolving, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the spell must have left the stack: {:?}",
+        runner.state().stack
+    );
+    assert_eq!(
+        runner.state().objects[&creature].zone,
+        Zone::Hand,
+        "the revealed creature goes to its owner's hand"
+    );
+    assert_eq!(
+        runner.state().objects[&kept_land].zone,
+        Zone::Battlefield,
+        "the revealed land goes to the battlefield"
+    );
+    assert!(
+        runner.state().objects[&kept_land].tapped,
+        "the revealed land enters tapped"
+    );
+    for &land in &lands[1..] {
+        assert_eq!(
+            runner.state().objects[&land].zone,
+            Zone::Library,
+            "a land that was not revealed stays in the library"
+        );
+    }
 }
 
 /// CR 608.2c: with a short library the reveal keeps exactly the one card, and

@@ -527,6 +527,29 @@ pub(crate) enum ContinuationAst {
     BecomesPlotted,
     /// CR 702.143d: "It/that card/they become foretold" after an exile effect.
     BecomesForetold,
+    /// CR 701.20a + CR 701.20e + CR 608.2c: "Put all other cards revealed this
+    /// way into your graveyard" (Reviving Vapors) — the complement of a REVEAL
+    /// instruction's selection, named separately from that instruction because
+    /// an intervening clause uses the revealed card first ("You gain life equal
+    /// to that card's mana value").
+    ///
+    /// Lowers to an explicit `ChangeZoneAll { origin: Library, target:
+    /// LastRevealed }`: "the cards the preceding reveal revealed that are still
+    /// in the library". Naming the complement by provenance keeps the reveal's
+    /// own tracked-set publication untouched, so a reveal whose kept cards are
+    /// routed by downstream sub_abilities (Zimone's Experiment: "Put all land
+    /// cards revealed this way onto the battlefield tapped and put all creature
+    /// cards revealed this way into your hand") never has its selected
+    /// population swapped for the unselected one — not even when zero cards
+    /// were selected.
+    RevealedRemainder {
+        destination: Zone,
+        /// CR 401.4 + CR 400.5: only an explicitly randomized library remainder
+        /// is accepted; an owner-ordered one has no prompt on this path and is
+        /// refused at parse time rather than silently kept in place.
+        #[serde(default, skip_serializing_if = "DigRestOrder::is_preserve")]
+        rest_order: DigRestOrder,
+    },
     /// "Put the rest on the bottom/into your graveyard" after Dig/RevealTop —
     /// sets `rest_destination` on the preceding Dig effect. The destination is
     /// parsed from the text (bottom of library, graveyard, hand, etc.).

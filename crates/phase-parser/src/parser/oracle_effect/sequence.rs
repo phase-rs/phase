@@ -660,7 +660,7 @@ fn parse_reveal_until_all_to_zone_continuation(input: &str) -> OracleResult<'_, 
 
 /// CR 701.20a: Detect the rest-pile zone in a `RevealUntil` continuation
 /// chunk. The "rest" subject may be phrased as "the rest" / "all other cards
-/// revealed this way" / "the other cards" — and may be governed by an
+/// revealed this way" — and may be governed by an
 /// imperative verb that itself encodes the zone ("exile all other cards
 /// revealed this way" → Exile).
 ///
@@ -677,7 +677,6 @@ fn parse_reveal_until_rest_zone(lower: &str) -> Option<Zone> {
     // Consultation, Sacred Guide, Spoils of the Vault, Reviving Vapors, etc.
     let has_rest_subject = nom_primitives::scan_contains(lower, "the rest")
         || nom_primitives::scan_contains(lower, "all other cards")
-        || nom_primitives::scan_contains(lower, "the other cards")
         || nom_primitives::scan_contains(lower, "other cards revealed this way");
     if !has_rest_subject {
         return None;
@@ -728,6 +727,107 @@ fn parse_reveal_until_rest_zone_and_order(lower: &str) -> (Option<Zone>, DigRest
         DigRestOrder::Preserve
     };
     (rest_zone, rest_order)
+}
+
+/// CR 701.20a + CR 701.20e + CR 608.2c: The remainder clause of a REVEAL
+/// instruction — "Put all other cards revealed this way into your graveyard"
+/// (Reviving Vapors) — recognized where it stands apart from that instruction
+/// because an intervening clause reads the revealed card first ("You gain life
+/// equal to that card's mana value"). Folding it into the `Dig` would move the
+/// remainder BEFORE the intervening clause, violating CR 608.2c's written
+/// order, so it stays its own instruction and names its population by
+/// provenance: `TargetFilter::LastRevealed` scoped to `origin: Library`, i.e.
+/// "the cards the preceding reveal revealed that are still in the library".
+/// Those are the complement only because the kept cards have already left the
+/// library, so a reveal whose selected cards are routed by downstream
+/// sub_abilities (Zimone's Experiment) is untouched — including when the
+/// player selected nothing.
+///
+/// Refused rather than guessed, leaving the clause unabsorbed:
+///  * a clause whose destination phrase is not explicitly understood;
+///  * a library remainder whose order the owner chooses (CR 401.4): this
+///    instruction owns no ordering prompt of its own.
+pub(super) fn parse_revealed_remainder_clause(input: &str) -> Option<ContinuationAst> {
+    let lower = input.trim().to_lowercase();
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("then "))
+        .parse(lower.as_str())
+        .ok()?;
+    // CR 701.20a: the imperative verb may itself name the zone ("exile all
+    // other cards revealed this way").
+    let (rest, verb_exiles) = alt((
+        value(
+            true,
+            alt((tag::<_, _, OracleError<'_>>("exile "), tag("exiles "))),
+        ),
+        value(false, alt((tag("put "), tag("puts ")))),
+    ))
+    .parse(rest)
+    .ok()?;
+    // CR 608.2c: only the REST subject belongs to this arm. "all cards revealed
+    // this way" names the whole revealed pile and is a different instruction.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("all other cards revealed this way"),
+        tag("the other cards revealed this way"),
+        tag("other cards revealed this way"),
+        tag("all other cards"),
+        tag("the other cards"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, explicit) = opt(parse_revealed_remainder_destination).parse(rest).ok()?;
+    let (destination, rest_order) = match explicit {
+        Some(parsed) => parsed,
+        // CR 701.20a: a bare "exile <the rest>" routes to exile.
+        None if verb_exiles => (Zone::Exile, DigRestOrder::Preserve),
+        None => return None,
+    };
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    rest.is_empty()
+        .then_some(ContinuationAst::RevealedRemainder {
+            destination,
+            rest_order,
+        })
+}
+
+/// CR 608.2c: The destination phrases a "the other cards revealed this way"
+/// clause can state. Only forms this engine fully understands are accepted.
+fn parse_revealed_remainder_destination(input: &str) -> OracleResult<'_, (Zone, DigRestOrder)> {
+    alt((
+        value(
+            (Zone::Graveyard, DigRestOrder::Preserve),
+            alt((
+                tag::<_, _, OracleError<'_>>(" into your graveyard"),
+                tag(" into their graveyard"),
+                tag(" into their owners' graveyards"),
+                tag(" into its owner's graveyard"),
+            )),
+        ),
+        value(
+            (Zone::Hand, DigRestOrder::Preserve),
+            alt((
+                tag::<_, _, OracleError<'_>>(" into your hand"),
+                tag(" into their hand"),
+                tag(" into its owner's hand"),
+            )),
+        ),
+        value(
+            (Zone::Exile, DigRestOrder::Preserve),
+            tag::<_, _, OracleError<'_>>(" into exile"),
+        ),
+        // CR 400.5 + CR 401.4: only an explicitly randomized library remainder
+        // is honored here; an owner-ordered one needs an ordering prompt this
+        // instruction does not own.
+        value(
+            (Zone::Library, DigRestOrder::Random),
+            alt((
+                tag::<_, _, OracleError<'_>>(" on the bottom of your library in a random order"),
+                tag(" on the bottom of their library in a random order"),
+                tag(" into your library in a random order"),
+                tag(" into their library in a random order"),
+            )),
+        ),
+    ))
+    .parse(input)
 }
 
 /// Whole-line dig continuation "put the rest on the bottom of <owner's> library
@@ -5801,6 +5901,62 @@ pub(super) fn apply_clause_continuation(
                 }
             }
         }
+        // CR 701.20a + CR 701.20e + CR 608.2c: the remainder named separately
+        // from the reveal that produced it (Reviving Vapors' trailing "Put all
+        // other cards revealed this way into your graveyard"). It stays its own
+        // instruction, after the clause that reads the revealed card, and
+        // addresses the revealed cards still in the library — the complement,
+        // named by provenance instead of an inferred tracked-set move.
+        ContinuationAst::RevealedRemainder {
+            destination,
+            rest_order,
+        } => {
+            // CR 701.20a: the clause says "revealed this way", so it names the
+            // population of a PUBLIC reveal instruction. A private "look at"
+            // antecedent never publishes a revealed population, so the
+            // reference would read an unrelated earlier reveal — fall back to
+            // the historical rest-destination patch instead of moving cards the
+            // clause never named.
+            let bound = env.resolve(
+                defs,
+                super::assembly::AntecedentSelector::LastWithRole(
+                    super::assembly::AntecedentRole::DigOrRevealUntil,
+                ),
+                None,
+                super::assembly::OnMiss::Ignore,
+            );
+            let public_reveal = bound.is_some_and(|index| {
+                matches!(&*defs[index].effect, Effect::Dig { reveal: true, .. })
+            });
+            if !public_reveal {
+                if let Some(index) = bound {
+                    patch_rest_destination_recursively(
+                        &mut defs[index],
+                        destination,
+                        false,
+                        rest_order,
+                    );
+                }
+                return;
+            }
+            defs.push(AbilityDefinition::new(
+                kind,
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Library),
+                    destination,
+                    target: TargetFilter::LastRevealed,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                    library_position: (destination == Zone::Library)
+                        .then_some(LibraryPosition::Bottom),
+                    library_shuffle: Default::default(),
+                    random_order: matches!(rest_order, DigRestOrder::Random),
+                },
+            ));
+        }
         ContinuationAst::DigFromAmong {
             quantity,
             filter: card_filter,
@@ -7208,6 +7364,10 @@ pub(super) fn continuation_absorbs_current(
         // rider is always absorbed into that effect (never a standalone effect).
         ContinuationAst::ExcessDamageToController { .. } => true,
         ContinuationAst::PutRest { .. } => true,
+        // CR 701.20a + CR 701.20e: recognition is gated on a preceding reveal
+        // instruction, and lowering appends the explicit `LastRevealed`
+        // complement move as its own instruction.
+        ContinuationAst::RevealedRemainder { .. } => true,
         ContinuationAst::ChooseFromExile { .. } => true,
         ContinuationAst::SearchRevealResult => true,
         ContinuationAst::SearchResultClauseHandled => true,
@@ -9249,32 +9409,6 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 });
             Some(ContinuationAst::PutRest {
                 destination,
-                reorder_all: false,
-                rest_order,
-            })
-        }
-        // "all other cards revealed this way" / "the other cards" / "other cards
-        // revealed this way" after a reveal Dig (Reviving Vapors, Spoils of the
-        // Vault, Sacred Guide) — sets rest_destination on the preceding Dig effect.
-        // Delegates to the shared RevealUntil rest-zone/order matcher so both
-        // effect kinds recognize the same destination and ordering phrases.
-        Effect::Dig { reveal: true, .. }
-            if nom_primitives::scan_contains(&lower, "all other cards revealed this way")
-                || nom_primitives::scan_contains(&lower, "the other cards")
-                || nom_primitives::scan_contains(&lower, "other cards revealed this way") =>
-        {
-            // CR 608.2c: a compound clause that ALSO selects the kept cards
-            // ("put one of them into your hand and the other cards into your
-            // graveyard") belongs to the shared from-among parser, which carries
-            // BOTH the selection and the rest destination. This arm only claims
-            // the pure remainder clause, so a supported selection must be handed
-            // over rather than absorbed as a rest-only clause.
-            if let Some(compound) = parse_dig_from_among(&lower, text, ctx) {
-                return Some(compound);
-            }
-            let (destination, rest_order) = parse_reveal_until_rest_zone_and_order(&lower);
-            Some(ContinuationAst::PutRest {
-                destination: destination.unwrap_or(Zone::Library),
                 reorder_all: false,
                 rest_order,
             })

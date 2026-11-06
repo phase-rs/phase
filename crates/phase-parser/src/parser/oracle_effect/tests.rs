@@ -96414,6 +96414,7 @@ fn reviving_vapors_keeps_one_in_hand_and_puts_the_rest_into_the_graveyard() {
             count,
             keep_count,
             destination,
+            rest_destination,
             reveal,
             ..
         } => {
@@ -96422,6 +96423,11 @@ fn reviving_vapors_keeps_one_in_hand_and_puts_the_rest_into_the_graveyard() {
                 crate::types::ability::QuantityExpr::Fixed { value: 3 },
                 "reveal three: {:#?}",
                 def.effect
+            );
+            assert_eq!(
+                *rest_destination, None,
+                "the remainder is its own instruction after the life gain, not an inline \
+                 part of the reveal (CR 608.2c written order)"
             );
             assert_eq!(*keep_count, Some(1), "put one of them into your hand");
             assert!(*reveal, "the cards are revealed, not privately looked at");
@@ -96451,26 +96457,95 @@ fn reviving_vapors_keeps_one_in_hand_and_puts_the_rest_into_the_graveyard() {
         ),
         other => panic!("expected GainLife after the Dig, got {other:#?}"),
     }
-    // CR 701.20a + CR 601.2: the remainder instruction follows the life gain in
-    // written order, so it stays a separate step that moves the revealed
-    // remainder (the dig publishes the unkept pile to it).
+    // CR 701.20a + CR 608.2c: the remainder instruction follows the life gain
+    // in written order, so it stays a separate step. It names its population by
+    // provenance — the cards this reveal revealed that are still in the library
+    // — never by the shape of a later tracked-set move, so a reveal that routes
+    // its SELECTED cards by type (Zimone's Experiment) keeps them.
     let rest = gain
         .sub_ability
         .as_deref()
         .expect("the remainder instruction follows the life gain");
     match &*rest.effect {
         Effect::ChangeZoneAll {
+            origin,
             destination,
-            target: crate::types::ability::TargetFilter::TrackedSetFiltered { filter, .. },
+            target: crate::types::ability::TargetFilter::LastRevealed,
+            random_order,
             ..
         } => {
-            assert_eq!(*destination, crate::types::zones::Zone::Graveyard);
-            assert!(
-                matches!(&**filter, crate::types::ability::TargetFilter::Typed(_)),
-                "the remainder is the revealed-card population: {filter:#?}"
+            assert_eq!(
+                *origin,
+                Some(crate::types::zones::Zone::Library),
+                "the remainder is scoped to revealed cards still in the library"
             );
+            assert_eq!(*destination, crate::types::zones::Zone::Graveyard);
+            assert!(!random_order, "a graveyard remainder has no ordering");
         }
-        other => panic!("expected the remainder move after the life gain, got {other:#?}"),
+        other => panic!(
+            "expected the explicit reveal-remainder move after the life gain, got {other:#?}"
+        ),
+    }
+}
+
+/// CR 701.20a + CR 608.2c: the rest-pile clause of a reveal instruction claims
+/// only destinations it fully understands, and only an explicitly randomized
+/// library remainder (CR 401.4). Everything else is refused, not defaulted to a
+/// library move.
+
+#[test]
+fn revealed_remainder_destinations_are_explicit_or_refused() {
+    use crate::parser::oracle_effect::sequence::parse_revealed_remainder_clause;
+    use crate::parser::oracle_ir::ast::ContinuationAst;
+    use crate::types::ability::DigRestOrder;
+    use crate::types::zones::Zone;
+
+    let accepted = [
+        (
+            "Put all other cards revealed this way into your graveyard.",
+            Zone::Graveyard,
+        ),
+        ("Put the other cards into exile.", Zone::Exile),
+        (
+            "Put all other cards revealed this way into your hand.",
+            Zone::Hand,
+        ),
+        ("Exile all other cards revealed this way.", Zone::Exile),
+        (
+            "Put all other cards revealed this way on the bottom of your library in a random order.",
+            Zone::Library,
+        ),
+    ];
+    for (text, zone) in accepted {
+        match parse_revealed_remainder_clause(text) {
+            Some(ContinuationAst::RevealedRemainder {
+                destination,
+                rest_order,
+            }) => {
+                assert_eq!(destination, zone, "{text}");
+                if zone == Zone::Library {
+                    assert_eq!(rest_order, DigRestOrder::Random, "{text}");
+                }
+            }
+            other => panic!("{text} must parse to an explicit remainder, got {other:?}"),
+        }
+    }
+
+    // CR 401.4: an owner-ordered library remainder needs an ordering prompt this
+    // instruction does not own, so it is refused rather than silently kept in
+    // place.
+    assert!(parse_revealed_remainder_clause(
+        "Put all other cards revealed this way on the bottom of your library."
+    )
+    .is_none());
+    // CR 608.2c: "all cards revealed this way" is the whole revealed pile, a
+    // different instruction; an unreadable destination is refused rather than
+    // defaulted to a library move.
+    for text in [
+        "Put all cards revealed this way into your graveyard.",
+        "Put all other cards revealed this way into the aether.",
+    ] {
+        assert!(parse_revealed_remainder_clause(text).is_none(), "{text}");
     }
 }
 
