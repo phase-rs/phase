@@ -1123,8 +1123,10 @@ fn turn_the_earth_with_one_illegal_target_shuffles_only_the_legal_one_and_keeps_
 // and each trigger shuffles ITS Dragon into ITS OWNER's library, shuffling
 // that owner's library.
 //
-// Would fail with the owner binding reverted: a Dragon would go to its
-// controller's library (both to P0's) and only P0's library would be shuffled.
+// Witness, not a revert-failing row: like
+// `alabaster_dragon_death_shuffles_it_into_its_owners_library` it also passes at
+// base 80170c06d (CR 400.3 already routes each Dragon to its owner's library);
+// it guards the simultaneous-death case against regression.
 #[test]
 fn alabaster_dragons_dying_together_each_shuffle_into_their_owners_library() {
     let mut scenario = GameScenario::new();

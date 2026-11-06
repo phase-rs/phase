@@ -696,7 +696,7 @@ fn shuffled_libraries(events: &[GameEvent]) -> Vec<PlayerId> {
     players
 }
 
-/// CR 608.2d + CR 603.5 + CR 108.3: Audacious Swap's "they may cast it without
+/// CR 608.2d + CR 108.3: Audacious Swap's "they may cast it without
 /// paying its mana cost" is the OWNER's decision. When the owner (P1, not the
 /// caster P0) declines, the exiled card stays in exile and is never cast; the
 /// shuffle and exile-top still happened in the owner's library.
