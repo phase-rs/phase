@@ -644,7 +644,10 @@ pub(crate) enum CostChannel {
     /// there names an object the trigger introduced (CR 608.2c) — Gorbag of
     /// Minas Morgul's "you may sacrifice it" is whichever Goblin or Orc dealt
     /// the damage, Gorbag himself or another — and the cost grammar cannot know
-    /// that antecedent, so it does not bind the pronoun.
+    /// that antecedent, so the sacrifice and self-exile legs do not bind the
+    /// pronoun on this channel (the return-to-hand leg's count-one fallback
+    /// still lowers "return it to its owner's hand" to `SelfRef` on both
+    /// channels, as at base; no printed reflexive payment uses that form).
     ResolutionPayment,
 }
 
