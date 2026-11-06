@@ -434,7 +434,7 @@ interface MultiplayerDraftActions {
   /** Both: submit one complete engine-defined pick step. */
   submitPickStep: (cardInstanceIds: readonly string[], destination?: DraftPickDestination, placementHint?: DraftPickPlacementHint) => Promise<DraftPickOutcome>;
   /** Both: submit a pick using a drafted card's draft-time effect. */
-  submitPickWithDraftEffect: (effectCardInstanceId: string, cardInstanceIds: readonly [string, string], destination?: DraftPickDestination, placementHint?: DraftPickPlacementHint) => Promise<DraftPickOutcome>;
+  submitPickWithDraftEffect: (effectCardInstanceId: string, cardInstanceIds: readonly string[], destination?: DraftPickDestination, placementHint?: DraftPickPlacementHint) => Promise<DraftPickOutcome>;
   /**
    * One whole shared-stack turn decision. No destination and no placement
    * hint: a decision names no cards, so there is nothing to place.
@@ -840,7 +840,7 @@ function exactAddedIds(
 
 type MultiplayerPickRequest =
   | { kind: "pick"; instanceIds: readonly string[]; destination: DraftPickDestination; placementHint?: DraftPickPlacementHint }
-  | { kind: "draft-effect"; effectCardInstanceId: string; instanceIds: readonly [string, string]; destination: DraftPickDestination; placementHint?: DraftPickPlacementHint }
+  | { kind: "draft-effect"; effectCardInstanceId: string; instanceIds: readonly string[]; destination: DraftPickDestination; placementHint?: DraftPickPlacementHint }
   | {
       kind: "auto-pick";
       instanceIds: readonly string[];
@@ -867,8 +867,9 @@ async function performPick(request: MultiplayerPickRequest): Promise<DraftPickOu
   if (request.kind === "auto-pick" && request.instanceIds.length === 0) {
     return { status: "rejected", reason: "invalid-request" };
   }
-  if (request.kind === "draft-effect" && (request.instanceIds[0] === request.instanceIds[1]
-    || request.instanceIds.some((instanceId) => instanceId.length === 0))) {
+  if (request.kind === "draft-effect" && (request.instanceIds.length === 0
+    || request.instanceIds.some((instanceId) => instanceId.length === 0)
+    || new Set(request.instanceIds).size !== request.instanceIds.length)) {
     return { status: "rejected", reason: "invalid-request" };
   }
   const state = useMultiplayerDraftStore.getState();

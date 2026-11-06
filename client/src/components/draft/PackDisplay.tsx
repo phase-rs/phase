@@ -1,9 +1,14 @@
-import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { flushSync } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
-import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
+import {
+  draftSelectionEffectCards,
+  draftSelectionPickCount,
+  type DraftCardInstance,
+  type DraftPlayerView,
+} from "../../adapter/draft-adapter";
 import { useLongPress } from "../../hooks/useLongPress";
 import type {
   DraftPickDestination,
@@ -56,7 +61,7 @@ interface PackDropSourceCommon {
 
 export type PackDropSource = PackDropSourceCommon & (
   | { readonly kind: "pick"; readonly instanceIds: readonly [string] }
-  | { readonly kind: "draft-effect"; readonly instanceIds: readonly [string, string] }
+  | { readonly kind: "draft-effect"; readonly instanceIds: readonly string[] }
 );
 
 export interface PackCompatibilityActivation {
@@ -110,7 +115,7 @@ export interface WorkspacePackController {
   pickCard(instanceId: string, destination: DraftPickDestination, placementHint?: DraftPickPlacementHint): Promise<DraftPickOutcome>;
   pickCardStep(instanceIds: readonly string[], destination: DraftPickDestination, placementHint?: DraftPickPlacementHint): Promise<DraftPickOutcome>;
   confirmPick(destination: DraftPickDestination, placementHint?: DraftPickPlacementHint): Promise<DraftPickOutcome>;
-  pickCardWithDraftEffect(effectCardInstanceId: string, instanceIds: readonly [string, string], destination: DraftPickDestination, placementHint?: DraftPickPlacementHint): Promise<DraftPickOutcome>;
+  pickCardWithDraftEffect(effectCardInstanceId: string, instanceIds: readonly string[], destination: DraftPickDestination, placementHint?: DraftPickPlacementHint): Promise<DraftPickOutcome>;
   autoPickCard(): Promise<DraftPickOutcome>;
 }
 
@@ -123,7 +128,7 @@ interface PodSingleConfirmController {
   readonly interactionLocked: boolean;
   selectCard(instanceId: string | null): void;
   confirmPick(): Promise<void> | void;
-  pickCardWithDraftEffect(effectCardInstanceId: string, instanceIds: [string, string]): Promise<void> | void;
+  pickCardWithDraftEffect(effectCardInstanceId: string, instanceIds: readonly string[]): Promise<void> | void;
   autoPickCard(): Promise<void> | void;
 }
 
@@ -532,7 +537,12 @@ export function PackDisplay({
   const selectedCard = controller.selectedCard;
   const locked = controller.interactionLocked;
   const pack = view?.current_pack ?? [];
-  const draftEffects = view?.draft_effects ?? [];
+  // The draft-effect cards this view offers, from the engine's publication: a
+  // legacy view's `draft_effects`, or a FIFO view's options for its head.
+  const draftEffects = useMemo(() => view === null ? [] : draftSelectionEffectCards(view), [view]);
+  const offeredEffect = activeEffect !== null && draftEffects.some((card) => card.instance_id === activeEffect)
+    ? activeEffect
+    : null;
   const local = controller.kind === "local-workspace" ? controller : null;
   const isOrderedSelection = view?.pick_selection_mode === "Ordered";
   const currentStep = view === null ? null : draftStep(view);
@@ -554,6 +564,10 @@ export function PackDisplay({
     statesRef.current = {};
     setStates({});
     setRetained([]);
+    // A new interaction composes from nothing: a FIFO prompt's head can keep
+    // the same pack and pick numbers, so the step reset below cannot see it.
+    setActiveEffect(null);
+    setAdditionalCards([]);
   }, [localGeneration]);
   useEffect(() => {
     const previousStep = previousStepRef.current;
@@ -687,7 +701,8 @@ export function PackDisplay({
     const card = pack.find((candidate) => candidate.instance_id === id);
     return card === undefined ? [] : [card];
   });
-  const requiredCount = activeEffect === null ? Math.max(1, view.required_pick_count) : 2;
+  // The engine's count for this selection; 0 when the view offers none.
+  const requiredCount = draftSelectionPickCount(view, offeredEffect) ?? 0;
   const armTouchPickSuppression = (
     sourceInstanceId: string,
     step: DraftStep,
@@ -720,13 +735,13 @@ export function PackDisplay({
     return true;
   };
   const chosenCards = (fallback: DraftCardInstance): readonly DraftCardInstance[] => {
-    if (activeEffect === null && requiredCount === 1) return [fallback];
+    if (offeredEffect === null && requiredCount === 1) return [fallback];
     return selectedCards.length === requiredCount && selectedCards.some((card) => card.instance_id === fallback.instance_id)
       ? selectedCards
       : [];
   };
   const request = async (cards: readonly DraftCardInstance[], destination: DraftPickDestination) => {
-    if (local === null || locked || cards.length !== requiredCount) return;
+    if (local === null || locked || cards.length === 0 || cards.length !== requiredCount) return;
     const token = crypto.randomUUID();
     requestOrder.current += 1;
     const generation = local.interactionGeneration;
@@ -734,15 +749,15 @@ export function PackDisplay({
     const ids = cards.map((card) => card.instance_id);
     const indices = cards.map((card) => pack.indexOf(card));
     beginRequest(ids, token, generation);
-    const outcome = activeEffect !== null
-      ? await local.pickCardWithDraftEffect(activeEffect, [ids[0], ids[1]], destination)
+    const outcome = offeredEffect !== null
+      ? await local.pickCardWithDraftEffect(offeredEffect, ids, destination)
       : ids.length === 1
         ? await local.pickCard(ids[0], destination)
         : await local.pickCardStep(ids, destination);
     settle(token, generation, step, cards, indices, cards.map(() => ({ width: 0, height: 0 })), { kind: "outcome", outcome });
   };
   const submitDoublePick = async (card: DraftCardInstance, inputKind: "touch" | "mouse") => {
-    if (activeEffect !== null || requiredCount !== 1) {
+    if (offeredEffect !== null || requiredCount !== 1) {
       await request(chosenCards(card), "deck");
       return;
     }
@@ -779,13 +794,13 @@ export function PackDisplay({
         }
       } else if (additionalCards.includes(id)) {
         setAdditionalCards((current) => current.filter((cardId) => cardId !== id));
-      } else if (additionalCards.length === 0) {
-        setAdditionalCards([id]);
+      } else if (additionalCards.length === 0 || additionalCards.length + 1 < requiredCount) {
+        setAdditionalCards((current) => [...current, id]);
       } else {
         controller.selectCard(additionalCards[0]);
-        setAdditionalCards([id]);
+        setAdditionalCards((current) => [...current.slice(1), id]);
       }
-    } else if (activeEffect === null && requiredCount <= 1) controller.selectCard(id);
+    } else if (offeredEffect === null && requiredCount <= 1) controller.selectCard(id);
     else if (selectedCard === id) {
       if (requiredCount <= 1) controller.selectCard(null);
     } else if (additionalCards.includes(id)) {
@@ -805,7 +820,8 @@ export function PackDisplay({
     || responsiveLayout === "tablet-portrait"
     || responsiveLayout === "tablet-landscape";
   const canConfirmPick = local !== null
-    && activeEffect === null
+    && offeredEffect === null
+    && requiredCount > 0
     && selectedCards.length === requiredCount;
   const slots = [
     ...pack.map((card, sourceIndex) => ({ kind: "live" as const, card, sourceIndex, requestOrder: -1 })),
@@ -830,7 +846,7 @@ export function PackDisplay({
           <span className="text-xs font-semibold text-amber-100">{t("pack.draftEffects")}</span>
           {draftEffects.map((card) => (
             <label key={card.instance_id} className="flex min-h-11 items-center gap-2 text-xs text-white/75">
-              <input type="checkbox" disabled={locked} checked={activeEffect === card.instance_id} onChange={() => {
+              <input type="checkbox" disabled={locked} checked={offeredEffect === card.instance_id} onChange={() => {
                 setAdditionalCards([]);
                 setActiveEffect((current) => current === card.instance_id ? null : card.instance_id);
               }} />
@@ -945,18 +961,19 @@ export function PackDisplay({
               makeDropSource={() => {
                 if (local === null || locked) return null;
                 const cards = chosenCards(card);
-                if (cards.length !== 1 && cards.length !== 2) return null;
-                if (activeEffect === null && requiredCount !== 1) return null;
+                if (cards.length === 0) return null;
+                if (offeredEffect === null && requiredCount !== 1) return null;
                 const ids = cards.map((candidate) => candidate.instance_id);
                 const indices = cards.map((candidate) => pack.indexOf(candidate));
                 const generation = local.interactionGeneration;
                 const step = draftStep(view);
                 let admission: PackDropAdmission | null = null;
+                // Classified by the effect card, never by how many cards it takes.
                 return {
-                  kind: cards.length === 2 ? "draft-effect" : "pick",
-                  authorityId: cards.length === 2 ? activeEffect! : ids[0],
+                  kind: offeredEffect !== null ? "draft-effect" : "pick",
+                  authorityId: offeredEffect ?? ids[0],
                   sourceInstanceId: card.instance_id,
-                  instanceIds: cards.length === 2 ? [ids[0], ids[1]] : [ids[0]],
+                  instanceIds: offeredEffect !== null ? ids : [ids[0]],
                   cards,
                   sourceIndices: indices,
                   interactionGeneration: generation,

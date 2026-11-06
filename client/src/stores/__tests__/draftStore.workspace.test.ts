@@ -7,9 +7,12 @@ import i18n from "i18next";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DraftEngineOperationLease,
+  draftViewPresentation,
   withDraftEngineOperation,
   type DraftCardInstance,
   type DraftPlayerView,
+  type FifoEffectOptions,
+  type FifoSelectionRequirements,
 } from "../../adapter/draft-adapter";
 import {
   MAX_MATERIALIZED_VIRTUAL_BASICS,
@@ -59,6 +62,15 @@ const wasm = vi.hoisted(() => ({
   get_bot_deck: vi.fn(),
   export_draft_session: vi.fn(() => "session"),
   booster_pack_pool_for_game: vi.fn<() => string[] | null | undefined>(() => null),
+  import_local_fifo_session: vi.fn(),
+  local_fifo_select: vi.fn(),
+  local_fifo_auto_select: vi.fn(),
+  local_fifo_submit_deck: vi.fn(),
+  local_fifo_suggest_deck: vi.fn(),
+  local_fifo_suggest_lands: vi.fn(),
+  local_fifo_bot_deck: vi.fn(),
+  local_fifo_booster_pack_pool_for_game: vi.fn<(_owner: number) => string[] | null>(() => null),
+  export_local_fifo_session: vi.fn((_owner: number) => "fifo-export"),
 }));
 
 const persistence = vi.hoisted(() => ({
@@ -106,11 +118,15 @@ vi.mock("../../adapter/wasm-adapter", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../adapter/wasm-adapter")>(),
   getSharedAdapter: () => ({ evaluateDeckFormatGate: formatGate.evaluate }),
 }));
+vi.mock("../../services/llm/catalog", () => ({ loadProviderCatalog: vi.fn(async () => []) }));
 
 import {
   useDraftStore,
   type DraftPickOutcome,
+  type DraftResumeOutcome,
 } from "../draftStore";
+import { loadProviderCatalog } from "../../services/llm/catalog";
+import { useLlmStore } from "../llmStore";
 import {
   awaitSavedDeckLibraryIdle,
   installFifoWebLocks,
@@ -219,6 +235,113 @@ async function settleTimers(): Promise<void> {
   await Promise.resolve();
 }
 
+const llmDraftEnabledAtLoad = useLlmStore.getState().draftEnabled;
+
+/** The engine-issued id of the local FIFO session the saved record declares. */
+const LOCAL_FIFO_SESSION_ID = "local-0123456789abcdef";
+/** Nonzero, so its arrival at the engine as a `bigint` is visible. */
+const FIFO_NOW_MS = 1_700_000_000_000;
+const INVALID_REQUEST = { status: "rejected", reason: "invalid-request" } as const;
+
+/**
+ * Cogwork Librarian (CNS #58), whose Oracle text the engine reads as its one
+ * additional-pick draft effect:
+ *   Draft this card face up.
+ *   As you draft a card, you may draft an additional card from that booster
+ *   pack. If you do, put this card into that booster pack.
+ */
+function cogworkLibrarian(): DraftCardInstance {
+  return {
+    instance_id: "cogwork",
+    name: "Cogwork Librarian",
+    set_code: "CNS",
+    collector_number: "58",
+    rarity: "common",
+    colors: [],
+    cmc: 4,
+    type_line: "Artifact Creature — Construct",
+    draft_effect: "additional_pick",
+  };
+}
+
+/**
+ * Seat 0's view of a local FIFO draft: a literal that passes the client's FIFO
+ * wire check. `promptGeneration: null` is a seat with no head and no prompt.
+ */
+function fifoView(options: {
+  pool?: DraftCardInstance[];
+  currentPack?: DraftCardInstance[];
+  promptGeneration?: number | null;
+  status?: DraftPlayerView["status"];
+  effects?: FifoEffectOptions | null;
+  requirements?: FifoSelectionRequirements;
+  kind?: DraftPlayerView["kind"];
+  sessionId?: string;
+} = {}): DraftPlayerView {
+  const sessionId = options.sessionId ?? LOCAL_FIFO_SESSION_ID;
+  const promptGeneration = options.promptGeneration === undefined ? 3 : options.promptGeneration;
+  return {
+    ...view(options.pool ?? []),
+    status: options.status ?? "Drafting",
+    kind: options.kind ?? "Quick",
+    current_pack: options.currentPack ?? [card("pk-a"), card("pk-b"), card("pk-c")],
+    current_pack_number: 0,
+    pick_number: 0,
+    flow: "FifoAsync",
+    fifo: {
+      state: { session_id: sessionId, revision: promptGeneration ?? 0, paused: null, review_clock: null },
+      progress: { completed_steps: 0, round_completed_steps: 0 },
+      queue_count: promptGeneration === null ? 0 : 1,
+      head: promptGeneration === null
+        ? null
+        : { pack_id: 0, opening_seat: 0, round: 0, original_size: 15 },
+      prompt_id: promptGeneration === null
+        ? null
+        : { session_id: sessionId, seat: 0, generation: promptGeneration },
+      requirements: options.requirements ?? { picks: 1, burns: 0 },
+      effects: options.effects ?? null,
+      clock: null,
+    },
+  } as DraftPlayerView;
+}
+
+/**
+ * Resumes a saved record that declares the local FIFO session, at the pinned
+ * time: the engine's local import answers `{ owner, view }`.
+ */
+async function resumeFifo(options: {
+  view?: DraftPlayerView;
+  owner?: number;
+  meta?: Record<string, unknown>;
+  run?: DraftRunState | null;
+  saved?: boolean;
+  importError?: Error;
+} = {}): Promise<DraftResumeOutcome> {
+  vi.setSystemTime(FIFO_NOW_MS);
+  persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+    id: "fifo-draft", setCode: "TST", setName: "Test", difficulty: 3, kind: "Quick",
+    phase: "drafting", pickCount: 0, updatedAt: FIFO_NOW_MS,
+    localFifoSessionId: LOCAL_FIFO_SESSION_ID,
+    ...options.meta,
+  });
+  persistence.loadDraftRun.mockResolvedValue(options.run ?? null);
+  persistence.loadQuickDraftSession.mockResolvedValue(options.saved === false ? null : {
+    sessionJson: "fifo-saved", mainDeck: [], landCounts: {},
+    poolSortMode: "color", poolPanelOpen: true, workspace: createDraftWorkspaceState(),
+  });
+  const importError = options.importError;
+  if (importError === undefined) {
+    wasm.import_local_fifo_session.mockReturnValue({ owner: options.owner ?? 7, view: options.view ?? fifoView() });
+  } else {
+    wasm.import_local_fifo_session.mockImplementation(() => { throw importError; });
+  }
+  return useDraftStore.getState().resumeDraft();
+}
+
+function localFifoSelection(call: number): Record<string, unknown> {
+  return JSON.parse(wasm.local_fifo_select.mock.calls[call]![1] as string) as Record<string, unknown>;
+}
+
 describe("draft store workspace authority", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -239,6 +362,7 @@ describe("draft store workspace authority", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    useLlmStore.setState({ draftEnabled: llmDraftEnabledAtLoad });
   });
 
   describe("localized draft failures", () => {
@@ -3721,4 +3845,455 @@ describe("draft store workspace authority", () => {
     expect(navigate).toHaveBeenCalledOnce();
   });
 
+  describe("local FIFO session", () => {
+    it("dispatches_a_fifo_pick_bound_to_its_prompt_at_explicit_time", async () => {
+      await resumeFifo();
+      wasm.local_fifo_select.mockReturnValue(fifoView({ pool: [card("pk-a")], promptGeneration: 4 }));
+
+      await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+
+      expect(wasm.local_fifo_select).toHaveBeenCalledExactlyOnceWith(7, expect.any(String), 1_700_000_000_000n);
+      expect(localFifoSelection(0)).toEqual({
+        prompt_id: { session_id: "local-0123456789abcdef", seat: 0, generation: 3 },
+        picked_card_instance_ids: ["pk-a"],
+        burned_card_instance_ids: [],
+        effect_card_instance_ids: [],
+      });
+      expect(wasm.submit_pick).not.toHaveBeenCalled();
+      expect(useDraftStore.getState().workspaceState!.placements["pk-a"].zone).toBe("deck");
+    });
+
+    it.each([
+      { kind: "Quick" as const, picks: 1, added: ["auto-1"] },
+      // CR 903.13b: Commander Draft's count, which no Quick session publishes;
+      // it separates the published count from a literal one.
+      { kind: "CommanderDraft" as const, picks: 2, added: ["auto-1", "auto-2"] },
+    ])("acknowledges_a_fifo_auto_select_by_its_published_pick_count ($picks)", async ({ kind, picks, added }) => {
+      const requirements = { picks, burns: 0 };
+      await resumeFifo({ view: fifoView({ kind, requirements }) });
+      const hints = { "auto-1": { column: 4 }, "auto-2": { column: 5 } };
+      wasm.local_fifo_auto_select.mockReturnValue(fifoView({
+        kind, requirements, pool: added.map((instanceId) => card(instanceId)), promptGeneration: 4,
+      }));
+
+      await expect(useDraftStore.getState().autoPickCard("deck", hints)).resolves.toEqual({ status: "acknowledged" });
+
+      expect(wasm.local_fifo_auto_select).toHaveBeenCalledExactlyOnceWith(
+        7,
+        JSON.stringify({ session_id: "local-0123456789abcdef", seat: 0, generation: 3 }),
+        1_700_000_000_000n,
+      );
+      expect(wasm.auto_pick).not.toHaveBeenCalled();
+      const placements = useDraftStore.getState().workspaceState!.placements;
+      for (const instanceId of added) {
+        expect(placements[instanceId]).toMatchObject({
+          zone: "deck",
+          column: hints[instanceId as keyof typeof hints].column,
+        });
+      }
+    });
+
+    it("refuses_a_fifo_auto_select_that_adds_fewer_cards_than_its_published_count", async () => {
+      const requirements = { picks: 2, burns: 0 };
+      await resumeFifo({ view: fifoView({ kind: "CommanderDraft", requirements }) });
+      const workspace = useDraftStore.getState().workspaceState;
+      wasm.local_fifo_auto_select.mockReturnValue(fifoView({
+        kind: "CommanderDraft", requirements, pool: [card("auto-1")], promptGeneration: 4,
+      }));
+
+      await expect(useDraftStore.getState().autoPickCard()).resolves.toEqual({
+        status: "rejected", reason: "unacknowledged",
+      });
+
+      expect(wasm.local_fifo_auto_select).toHaveBeenCalledOnce();
+      expect(useDraftStore.getState().workspaceState).toBe(workspace);
+    });
+
+    it("keeps_the_view_generation_and_workspace_when_the_engine_refuses_a_fifo_selection", async () => {
+      await resumeFifo();
+      const before = useDraftStore.getState();
+      wasm.local_fifo_select.mockImplementationOnce(() => { throw new Error("stale prompt"); });
+
+      await expect(before.pickCard("pk-a")).resolves.toEqual({ status: "rejected", reason: "adapter" });
+
+      expect(wasm.local_fifo_select).toHaveBeenCalledOnce();
+      const after = useDraftStore.getState();
+      expect(after.view).toBe(before.view);
+      expect(after.workspaceState).toBe(before.workspaceState);
+      expect(after.interactionGeneration).toBe(before.interactionGeneration);
+      await settleTimers();
+      expect(wasm.export_local_fifo_session).not.toHaveBeenCalled();
+    });
+
+    it("refuses_fifo_selection_without_a_prompt", async () => {
+      await expect(resumeFifo({ view: fifoView({ promptGeneration: null, currentPack: [] }) }))
+        .resolves.toEqual({ status: "resumed", draftId: "fifo-draft" });
+      const state = useDraftStore.getState();
+      expect(state.runtime).toEqual({ kind: "local-fifo", owner: 7 });
+      expect(draftViewPresentation(state.view!).isReadOnly).toBe(false);
+
+      await expect(state.pickCard("pk-a")).resolves.toEqual(INVALID_REQUEST);
+      await expect(state.autoPickCard()).resolves.toEqual(INVALID_REQUEST);
+
+      expect(wasm.local_fifo_select).not.toHaveBeenCalled();
+      expect(wasm.local_fifo_auto_select).not.toHaveBeenCalled();
+    });
+
+    it("blocks_selection_on_a_read_only_fifo_view", async () => {
+      // The engine publishes neither a prompt nor effect options outside
+      // Drafting; both are present here so neither refusal answers first.
+      await resumeFifo({
+        view: fifoView({
+          status: "Review",
+          promptGeneration: 5,
+          pool: [cogworkLibrarian()],
+          effects: { card_instance_ids: ["cogwork"], requirements: [{ picks: 2, burns: 0 }] },
+        }),
+      });
+      const actions = useDraftStore.getState();
+
+      await expect(actions.pickCard("pk-a")).resolves.toEqual(INVALID_REQUEST);
+      await expect(actions.pickCardWithDraftEffect("cogwork", ["pk-a", "pk-b"])).resolves.toEqual(INVALID_REQUEST);
+      await expect(actions.autoPickCard()).resolves.toEqual(INVALID_REQUEST);
+      actions.selectCard("pk-a");
+
+      expect(useDraftStore.getState().selectedCard).toBeNull();
+      expect(wasm.local_fifo_select).not.toHaveBeenCalled();
+      expect(wasm.local_fifo_auto_select).not.toHaveBeenCalled();
+
+      useDraftStore.setState({ view: { ...useDraftStore.getState().view!, status: "Drafting" } });
+      useDraftStore.getState().selectCard("pk-a");
+      expect(useDraftStore.getState().selectedCard).toBe("pk-a");
+      wasm.local_fifo_select.mockReturnValue(fifoView({
+        pool: [cogworkLibrarian(), card("pk-a")], promptGeneration: 6,
+      }));
+      await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+      expect(localFifoSelection(0)).toMatchObject({ prompt_id: { generation: 5 } });
+    });
+
+    it("takes_no_legacy_llm_round_on_a_fifo_session", async () => {
+      useLlmStore.setState({ draftEnabled: true });
+      await start();
+      wasm.submit_pick.mockReturnValue(view([card("legacy-pick")]));
+      await expect(useDraftStore.getState().pickCard("legacy-pick")).resolves.toEqual({ status: "acknowledged" });
+      expect(loadProviderCatalog).toHaveBeenCalledOnce();
+      vi.mocked(loadProviderCatalog).mockClear();
+
+      await resumeFifo({ view: fifoView({ currentPack: [card("pk-a"), card("pk-b"), card("pk-c")] }) });
+      wasm.local_fifo_select.mockReturnValue(fifoView({ pool: [card("pk-a")], promptGeneration: 4 }));
+      await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+
+      expect(loadProviderCatalog).not.toHaveBeenCalled();
+      expect(wasm.local_fifo_select).toHaveBeenCalledOnce();
+      expect(useDraftStore.getState().awaitingDrafters).toBe(false);
+    });
+
+    it("uses_the_owner_of_the_latest_import", async () => {
+      await resumeFifo({ owner: 7 });
+      await resumeFifo({ owner: 8 });
+      wasm.local_fifo_select.mockReturnValue(fifoView({ pool: [card("pk-a")], promptGeneration: 4 }));
+
+      await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+
+      expect(wasm.local_fifo_select).toHaveBeenCalledOnce();
+      expect(wasm.local_fifo_select.mock.calls[0]![0]).toBe(8);
+    });
+
+    it("binds_each_selection_to_the_prompt_it_was_composed_on", async () => {
+      await resumeFifo();
+      wasm.local_fifo_select.mockReturnValueOnce(fifoView({
+        pool: [card("pk-a")], promptGeneration: 4, currentPack: [card("pk-b"), card("pk-c")],
+      }));
+      wasm.local_fifo_select.mockReturnValueOnce(fifoView({
+        pool: [card("pk-a"), card("pk-b")], promptGeneration: 5, currentPack: [card("pk-c")],
+      }));
+
+      await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+      await expect(useDraftStore.getState().pickCard("pk-b")).resolves.toEqual({ status: "acknowledged" });
+
+      expect(localFifoSelection(0)).toMatchObject({ prompt_id: { generation: 3 } });
+      expect(localFifoSelection(1)).toMatchObject({ prompt_id: { generation: 4 } });
+    });
+
+    it.each(["a new head", "a head with the same ids"] as const)(
+      "moves_the_interaction_generation_with_the_prompt (%s)",
+      async (head) => {
+        const before = [card("pk-a"), card("pk-b"), card("pk-c")];
+        await resumeFifo({ view: fifoView({ currentPack: before }) });
+        useDraftStore.getState().selectCard("pk-b");
+        const generation = useDraftStore.getState().interactionGeneration;
+        wasm.local_fifo_select.mockReturnValue(fifoView({
+          pool: [card("pk-a")],
+          promptGeneration: 4,
+          currentPack: head === "a new head" ? [card("pk-d"), card("pk-e")] : before.map((entry) => ({ ...entry })),
+        }));
+
+        await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+
+        expect(useDraftStore.getState().interactionGeneration).not.toBe(generation);
+        expect(useDraftStore.getState().selectedCard).toBeNull();
+      },
+    );
+
+    it("keeps_the_interaction_generation_across_a_legacy_pick", async () => {
+      await start();
+      const generation = useDraftStore.getState().interactionGeneration;
+      const returned = { ...view([card("legacy-pick")]), current_pack: [card("next-1"), card("next-2")] };
+      wasm.submit_pick.mockReturnValue(returned);
+
+      await expect(useDraftStore.getState().pickCard("legacy-pick")).resolves.toEqual({ status: "acknowledged" });
+
+      expect(useDraftStore.getState().view).toBe(returned);
+      expect(useDraftStore.getState().interactionGeneration).toBe(generation);
+    });
+
+    it("keeps_the_interaction_generation_across_a_workspace_edit_on_a_fifo_view", async () => {
+      await resumeFifo({ view: fifoView({ pool: [card("human", "Forest")] }) });
+      const generation = useDraftStore.getState().interactionGeneration;
+      const placement = useDraftStore.getState().workspaceState!.placements.human;
+
+      useDraftStore.getState().setWorkspacePlacement("human", { ...placement, zone: "sideboard" });
+
+      expect(useDraftStore.getState().workspaceState!.placements.human.zone).toBe("sideboard");
+      expect(useDraftStore.getState().interactionGeneration).toBe(generation);
+    });
+
+    it("never_reissues_an_interaction_generation_after_prompt_moves", async () => {
+      const generations: number[] = [];
+      let previous = useDraftStore.getState().interactionGeneration;
+      const unsubscribe = useDraftStore.subscribe((state) => {
+        if (state.interactionGeneration !== previous) {
+          previous = state.interactionGeneration;
+          generations.push(previous);
+        }
+      });
+
+      await resumeFifo();
+      wasm.local_fifo_select.mockReturnValue(fifoView({ pool: [card("pk-a")], promptGeneration: 4 }));
+      await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+      await expect(useDraftStore.getState().endRun("fifo-draft")).resolves.toBeUndefined();
+      useDraftStore.getState().reset();
+      unsubscribe();
+
+      expect(generations).toHaveLength(5);
+      expect(generations.every((generation, index) => (
+        index === 0 || generation > generations[index - 1]!
+      ))).toBe(true);
+    });
+
+    it("persists_a_fifo_session_through_its_owner_with_its_declared_identity", async () => {
+      await resumeFifo();
+      wasm.local_fifo_select.mockReturnValue(fifoView({ pool: [card("pk-a")], promptGeneration: 4 }));
+      await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+      await settleTimers();
+
+      expect(wasm.export_local_fifo_session).toHaveBeenCalledWith(7);
+      expect(wasm.export_draft_session).not.toHaveBeenCalled();
+      expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledWith(
+        "fifo-draft",
+        "fifo-export",
+        expect.any(Object),
+        expect.objectContaining({ localFifoSessionId: "local-0123456789abcdef" }),
+      );
+
+      persistence.persistQuickDraftSnapshot.mockClear();
+      await start([card("legacy", "Legacy")]);
+      await settleTimers();
+      expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledOnce();
+      const [, , , legacyMeta] = persistence.persistQuickDraftSnapshot.mock.calls[0]!;
+      expect(legacyMeta).not.toHaveProperty("localFifoSessionId");
+    });
+
+    it("routes_a_declared_record_to_the_local_fifo_import", async () => {
+      await expect(resumeFifo()).resolves.toEqual({ status: "resumed", draftId: "fifo-draft" });
+
+      expect(wasm.import_local_fifo_session).toHaveBeenCalledExactlyOnceWith("fifo-saved", 3);
+      expect(wasm.import_draft_session).not.toHaveBeenCalled();
+      expect(wasm.local_fifo_booster_pack_pool_for_game).toHaveBeenCalledWith(7);
+      expect(wasm.booster_pack_pool_for_game).not.toHaveBeenCalled();
+      expect(useDraftStore.getState()).toMatchObject({
+        runtime: { kind: "local-fifo", owner: 7 },
+        localFifoSessionId: "local-0123456789abcdef",
+      });
+    });
+
+    it("keeps_a_declared_snapshot_the_engine_refuses", async () => {
+      const outcome = await resumeFifo({ importError: new Error("This draft is not a local FIFO Quick draft") });
+
+      expect(wasm.import_local_fifo_session).toHaveBeenCalledOnce();
+      expect(outcome).toEqual({
+        status: "unavailable", draftId: "fifo-draft", reason: "This draft is not a local FIFO Quick draft",
+      });
+      await settleTimers();
+      expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+      expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+      expect(useDraftStore.getState().runtime).toBeNull();
+    });
+
+    it("refuses_an_import_that_answers_another_session", async () => {
+      const outcome = await resumeFifo({ view: fifoView({ sessionId: "local-fedcba9876543210" }) });
+
+      expect(wasm.import_local_fifo_session).toHaveBeenCalledExactlyOnceWith("fifo-saved", 3);
+      expect(outcome).toEqual({
+        status: "unavailable", draftId: "fifo-draft", reason: i18n.t("draft:run.resumeUnavailable"),
+      });
+      await settleTimers();
+      expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+      expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+      expect(useDraftStore.getState().runtime).toBeNull();
+    });
+
+    it("keeps_the_declared_identity_through_a_run_only_resume", async () => {
+      const run: DraftRunState = {
+        format: "run", results: [], playerDeck: ["Player"], opponentDeck: ["Opponent"], usedBotSeats: [1],
+      };
+      await expect(resumeFifo({ meta: { phase: "playing", runFormat: "run" }, run, saved: false }))
+        .resolves.toEqual({ status: "resumed", draftId: "fifo-draft" });
+      expect(useDraftStore.getState().runtime).toBeNull();
+      expect(wasm.import_local_fifo_session).not.toHaveBeenCalled();
+
+      await useDraftStore.getState().launchNextMatch(vi.fn());
+
+      expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+      const [[published]] = persistence.publishStagedDraftMatch.mock.calls as unknown as Array<[{ meta: ActiveQuickDraftMeta }]>;
+      expect(published.meta.localFifoSessionId).toBe("local-0123456789abcdef");
+    });
+
+    it("suggests_a_fifo_deck_through_its_owner", async () => {
+      await resumeFifo({ view: fifoView({ pool: [card("kept", "Kept"), card("cut", "Cut")] }) });
+      wasm.local_fifo_suggest_deck.mockReturnValue({ main_deck: ["Kept"], lands: {}, commander: [] });
+
+      await useDraftStore.getState().autoSuggestDeck();
+
+      expect(wasm.local_fifo_suggest_deck).toHaveBeenCalledExactlyOnceWith(7);
+      expect(wasm.suggest_deck).not.toHaveBeenCalled();
+      const placements = useDraftStore.getState().workspaceState!.placements;
+      expect(placements.kept.zone).toBe("deck");
+      expect(placements.cut.zone).toBe("sideboard");
+    });
+
+    it("suggests_fifo_lands_through_its_owner", async () => {
+      await resumeFifo({ view: fifoView({ pool: [card("human", "Forest")] }) });
+      const state = useDraftStore.getState();
+      const mainDeck = projectWorkspaceMainDeck(state.workspaceState!, state.view!.pool);
+      wasm.local_fifo_suggest_lands.mockReturnValue({ Plains: 1 });
+
+      await useDraftStore.getState().autoSuggestLands();
+
+      expect(wasm.local_fifo_suggest_lands).toHaveBeenCalledExactlyOnceWith(7, JSON.stringify(mainDeck));
+      expect(wasm.suggest_lands).not.toHaveBeenCalled();
+      expect(projectWorkspaceLandCounts(useDraftStore.getState().workspaceState!)).toEqual({ Plains: 1 });
+    });
+
+    it("submits_a_fifo_deck_through_its_owner_at_explicit_time", async () => {
+      await resumeFifo({ view: fifoView({ pool: [card("human", "Forest")] }) });
+      const state = useDraftStore.getState();
+      const main = projectWorkspaceMainDeck(state.workspaceState!, state.view!.pool);
+      const submitted = {
+        ...fifoView({ pool: [card("human", "Forest")], promptGeneration: null, currentPack: [] }),
+        status: "Pairing" as const,
+      };
+      wasm.local_fifo_submit_deck.mockReturnValue(submitted);
+      vi.setSystemTime(FIFO_NOW_MS);
+
+      await useDraftStore.getState().submitDeck();
+
+      expect(wasm.local_fifo_submit_deck).toHaveBeenCalledExactlyOnceWith(7, JSON.stringify(main), "[]", 1_700_000_000_000n);
+      expect(wasm.submit_deck).not.toHaveBeenCalled();
+      expect(useDraftStore.getState()).toMatchObject({ view: submitted, phase: "launching" });
+    });
+
+    it("launches_a_fifo_match_through_its_owner", async () => {
+      await resumeFifo({ view: fifoView({ pool: [card("human", "Forest")] }) });
+      useDraftStore.setState({ phase: "launching" });
+      persistence.loadDraftRun.mockResolvedValue(null);
+      wasm.local_fifo_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+
+      await useDraftStore.getState().launchMatch(vi.fn());
+
+      expect(wasm.export_local_fifo_session).toHaveBeenCalledWith(7);
+      expect(wasm.local_fifo_booster_pack_pool_for_game).toHaveBeenCalledWith(7);
+      expect(wasm.local_fifo_bot_deck).toHaveBeenCalledWith(7, 1);
+      expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+      const published = persistence.publishInitialDraftMatch.mock.calls[0]![0] as unknown as {
+        sessionJson: string;
+        meta: ActiveQuickDraftMeta;
+      };
+      expect(published.sessionJson).toBe("fifo-export");
+      expect(published.meta.localFifoSessionId).toBe("local-0123456789abcdef");
+      expect(wasm.export_draft_session).not.toHaveBeenCalled();
+      expect(wasm.booster_pack_pool_for_game).not.toHaveBeenCalled();
+      expect(wasm.get_bot_deck).not.toHaveBeenCalled();
+    });
+
+    it.each(["staged-retry", "next-match"] as const)(
+      "launches_a_staged_or_next_fifo_match_through_its_owner (%s)",
+      async (branch) => {
+        await resumeFifo({ view: fifoView({ pool: [card("human", "Forest")] }) });
+        const staged: DraftRunState = {
+          format: "run", results: [], playerDeck: ["Forest"], opponentDeck: ["Opponent"], usedBotSeats: [1],
+          activeMatch: {
+            draftId: "fifo-draft", gameId: "staged", format: "run", resultCountAtLaunch: 0,
+            botSeat: 1, opponentDeck: ["Opponent"],
+          },
+        };
+        if (branch === "staged-retry") useDraftStore.setState({ phase: "launching" });
+        else {
+          staged.results = [{ gameId: "finished", result: "win" }];
+          staged.activeMatch = undefined;
+          useDraftStore.setState({ phase: "playing", runState: staged });
+          wasm.local_fifo_bot_deck.mockReturnValue({ main_deck: ["New Opponent"], lands: {} });
+        }
+        persistence.loadDraftRun.mockResolvedValue(staged);
+        // The resume read the same pool through the same export.
+        wasm.local_fifo_booster_pack_pool_for_game.mockClear();
+        const navigate = vi.fn();
+
+        await (branch === "staged-retry"
+          ? useDraftStore.getState().launchMatch(navigate)
+          : useDraftStore.getState().launchNextMatch(navigate));
+
+        expect(wasm.local_fifo_booster_pack_pool_for_game).toHaveBeenCalledExactlyOnceWith(7);
+        expect(wasm.booster_pack_pool_for_game).not.toHaveBeenCalled();
+        expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+        expect(wasm.local_fifo_booster_pack_pool_for_game.mock.invocationCallOrder[0])
+          .toBeLessThan(persistence.publishStagedDraftMatch.mock.invocationCallOrder[0]!);
+        if (branch === "next-match") {
+          expect(wasm.local_fifo_bot_deck).toHaveBeenCalledWith(7, 1);
+          expect(wasm.get_bot_deck).not.toHaveBeenCalled();
+        }
+      },
+    );
+
+    it("sizes_a_fifo_effect_selection_by_its_published_requirement", async () => {
+      // CR 903.13b: Commander Draft drafts two cards per pick, so Cogwork
+      // Librarian's additional card makes three; Quick's would be two.
+      await resumeFifo({
+        view: fifoView({
+          kind: "CommanderDraft",
+          pool: [cogworkLibrarian()],
+          currentPack: [card("a"), card("b"), card("c"), card("d")],
+          requirements: { picks: 2, burns: 0 },
+          effects: { card_instance_ids: ["cogwork"], requirements: [{ picks: 3, burns: 0 }] },
+        }),
+      });
+      const actions = useDraftStore.getState();
+
+      await expect(actions.pickCardWithDraftEffect("cogwork", ["a", "b"])).resolves.toEqual(INVALID_REQUEST);
+      await expect(actions.pickCardWithDraftEffect("unpublished", ["a", "b", "c"])).resolves.toEqual(INVALID_REQUEST);
+      expect(wasm.local_fifo_select).not.toHaveBeenCalled();
+
+      wasm.local_fifo_select.mockReturnValue(fifoView({
+        kind: "CommanderDraft", pool: [card("a"), card("b"), card("c")], promptGeneration: 4, currentPack: [card("d")],
+      }));
+      await expect(actions.pickCardWithDraftEffect("cogwork", ["a", "b", "c"])).resolves.toEqual({ status: "acknowledged" });
+
+      expect(wasm.local_fifo_select).toHaveBeenCalledOnce();
+      expect(localFifoSelection(0)).toMatchObject({
+        picked_card_instance_ids: ["a", "b", "c"],
+        burned_card_instance_ids: [],
+        effect_card_instance_ids: ["cogwork"],
+      });
+    });
+  });
 });

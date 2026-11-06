@@ -215,4 +215,23 @@ describe("quick draft persistence coordinator", () => {
     expect(idb.records.get(`${DRAFT_RUN_KEY_PREFIX}draft`)).not.toHaveProperty("activeMatch");
     expect(loadActiveQuickDraft()?.phase).toBe("complete");
   });
+
+  it.each([7, ""])("round_trips_a_declared_local_identity_and_cleans_a_malformed_one (%j)", async (malformed) => {
+    const meta = {
+      id: "fifo",
+      setCode: "TST",
+      difficulty: 3,
+      phase: "drafting" as const,
+      pickCount: 0,
+      updatedAt: Date.now(),
+    };
+    const declared = { ...meta, localFifoSessionId: "local-0123456789abcdef" };
+    localStorage.setItem(ACTIVE_QUICK_DRAFT_KEY, JSON.stringify(declared));
+    await expect(inspectActiveQuickDraftLifecycle("inspect")).resolves.toEqual(declared);
+    expect(localStorage.getItem(ACTIVE_QUICK_DRAFT_KEY)).toBe(JSON.stringify(declared));
+
+    localStorage.setItem(ACTIVE_QUICK_DRAFT_KEY, JSON.stringify({ ...meta, localFifoSessionId: malformed }));
+    await expect(inspectActiveQuickDraftLifecycle("inspect")).resolves.toBeNull();
+    expect(localStorage.getItem(ACTIVE_QUICK_DRAFT_KEY)).toBeNull();
+  });
 });

@@ -7,10 +7,19 @@ import {
   DraftAdapter,
   distinctJoined,
   drainDraftEngineOperations,
+  draftSelectionPickCount,
+  draftViewPresentation,
+  draftViewPrompt,
+  draftViewSessionId,
+  sameDraftPrompt,
   withDraftEngineOperation,
   type CubeDraftSettings,
+  type DraftEngineOperationLease,
   type DraftPlayerView,
+  type FifoPromptId,
   type LlmDraftResponsePayload,
+  type LocalDraftRuntime,
+  type LocalFifoOwner,
   type SetPackSequence,
   type SuggestedDeck,
 } from "../adapter/draft-adapter";
@@ -133,7 +142,7 @@ export type PendingDraftPickIntent =
     }
   | {
       kind: "draft-effect";
-      instanceIds: readonly [string, string];
+      instanceIds: readonly string[];
       destination: DraftPickDestination;
       placementHint?: DraftPickPlacementHint;
     }
@@ -142,6 +151,10 @@ export type PendingDraftPickIntent =
 interface DraftStoreState {
   draftId: string | null;
   adapter: DraftAdapter | null;
+  /** The engine runtime holding this draft's session; set together with `adapter`. */
+  runtime: LocalDraftRuntime | null;
+  /** The saved record's declared local FIFO session id, mirrored from its meta. */
+  localFifoSessionId: string | null;
   view: DraftPlayerView | null;
   selectedCard: string | null;
   phase: DraftPhase;
@@ -184,7 +197,7 @@ interface DraftStoreActions {
   ): Promise<DraftPickOutcome>;
   pickCardWithDraftEffect(
     effectCardInstanceId: string,
-    cardInstanceIds: readonly [string, string],
+    cardInstanceIds: readonly string[],
     destination?: DraftPickDestination,
     placementHint?: DraftPickPlacementHint,
   ): Promise<DraftPickOutcome>;
@@ -212,6 +225,8 @@ interface DraftStoreActions {
 const initialState: DraftStoreState = {
   draftId: null,
   adapter: null,
+  runtime: null,
+  localFifoSessionId: null,
   view: null,
   selectedCard: null,
   phase: "setup",
@@ -239,6 +254,13 @@ function validDifficulty(value: number): boolean {
 }
 
 let lifecycleGeneration = 0;
+/**
+ * Source of every published `interactionGeneration`: one monotone counter for
+ * lifecycle resets and prompt moves alike, so a value is never issued twice.
+ * Separate from `lifecycleGeneration`, which gates in-flight operations and
+ * must not move when an accepted selection installs a new prompt.
+ */
+let interactionGenerationCounter = 0;
 let workspaceRevision = 0;
 let persistenceGeneration = 0;
 let suggestionToken = 0;
@@ -284,9 +306,14 @@ function publishInitialState(generation: number): void {
   }));
 }
 
+function nextInteractionGeneration(): number {
+  interactionGenerationCounter += 1;
+  return interactionGenerationCounter;
+}
+
 function beginLifecycle(): number {
   const generation = invalidateLifecycle();
-  publishInitialState(generation);
+  publishInitialState(nextInteractionGeneration());
   return generation;
 }
 
@@ -350,8 +377,8 @@ async function persistDraft(
   options: { propagateFailure?: boolean; canPersist?: () => boolean } = {},
 ): Promise<void> {
   const state = useDraftStore.getState();
-  const { adapter, draftId, view, workspaceState, selectedSet, phase } = state;
-  if (!adapter || !draftId || !view || !workspaceState || !selectedSet
+  const { adapter, runtime, draftId, view, workspaceState, selectedSet, phase } = state;
+  if (!adapter || !runtime || !draftId || !view || !workspaceState || !selectedSet
     || phase === "setup" || phase === "playing" || phase === "complete"
     || endRunOwnsExclusive()
     || options.canPersist?.() === false) return;
@@ -363,7 +390,7 @@ async function persistDraft(
         || revision !== workspaceRevision || useDraftStore.getState().adapter !== adapter) {
         throw new Error("Stale draft persistence request");
       }
-      return lease.exportSession();
+      return lease.quickSession(runtime).exportSession();
     });
     if (options.canPersist?.() === false || endRunOwnsExclusive()) return;
     if (generation !== persistenceGeneration || lifecycle !== lifecycleGeneration
@@ -401,6 +428,7 @@ function makeMeta(state: DraftStoreState, phase: ActiveQuickDraftMeta["phase"], 
     runLosses: state.runState?.results.filter((entry) => entry.result === "loss").length ?? 0,
     runDraws: state.runState?.results.filter((entry) => entry.result === "draw").length ?? 0,
     currentGameId: gameId,
+    ...(state.localFifoSessionId === null ? {} : { localFifoSessionId: state.localFifoSessionId }),
   };
 }
 
@@ -453,7 +481,7 @@ type WorkspaceInstallOperation =
       readonly kind: "acknowledged-pick";
       readonly authoritativeView: DraftPlayerView;
       readonly baseWorkspace: DraftWorkspaceState;
-      readonly placeInstanceIds: readonly [string] | readonly [string, string];
+      readonly placeInstanceIds: readonly string[];
       readonly destination: DraftPickDestination;
       readonly placementHint?: DraftPickPlacementHint;
       readonly patch: WorkspaceInstallPatch;
@@ -463,8 +491,8 @@ type WorkspaceInstallOperation =
       readonly kind: "acknowledged-auto-pick";
       readonly authoritativeView: DraftPlayerView;
       readonly baseWorkspace: DraftWorkspaceState;
-      readonly addedInstanceId: string;
-      readonly placementHint?: DraftPickPlacementHint;
+      readonly addedInstanceIds: readonly string[];
+      readonly placementHints?: DraftAutoPickPlacementHints;
       readonly patch: WorkspaceInstallPatch;
       readonly persistence: "schedule";
     };
@@ -500,7 +528,9 @@ function operationResolvesOwnPlacement(operation: WorkspaceInstallOperation): re
         ? operation.placeInstanceIds
         : [];
     case "acknowledged-auto-pick":
-      return operation.placementHint !== undefined ? [operation.addedInstanceId] : [];
+      return operation.addedInstanceIds.filter(
+        (instanceId) => operation.placementHints?.[instanceId] !== undefined,
+      );
   }
 }
 
@@ -548,20 +578,32 @@ function installWorkspace(operation: WorkspaceInstallOperation): void {
       );
       break;
     case "acknowledged-auto-pick":
-      workspace = applyDestination(
-        workspace,
-        operation.authoritativeView.pool,
-        [operation.addedInstanceId],
-        "deck",
-        operation.placementHint,
-      );
+      for (const instanceId of operation.addedInstanceIds) {
+        workspace = applyDestination(
+          workspace,
+          operation.authoritativeView.pool,
+          [instanceId],
+          "deck",
+          operation.placementHints?.[instanceId],
+        );
+      }
       break;
   }
   invalidateWorkspaceDependents();
+  // The interaction generation follows the engine's prompt, never card ids: a
+  // FIFO view's new prompt is a new interaction even when its head shows the
+  // same cards, and a legacy view carries no prompt. Published in the same
+  // update as the view, so an observer sees the unlock and the move together.
+  const previous = useDraftStore.getState().view;
+  const promptMoved = !sameDraftPrompt(
+    previous === null ? null : draftViewPrompt(previous),
+    draftViewPrompt(operation.authoritativeView),
+  );
   useDraftStore.setState({
     ...operation.patch,
     view: operation.authoritativeView,
     workspaceState: workspace,
+    ...(promptMoved ? { interactionGeneration: nextInteractionGeneration() } : {}),
   });
   if (operation.persistence === "schedule") schedulePersistence(0);
 }
@@ -601,6 +643,8 @@ async function startLocalDraft(input: {
       patch: {
         draftId: crypto.randomUUID(),
         adapter,
+        runtime: { kind: "legacy" },
+        localFifoSessionId: null,
         phase: input.kind === "Sealed" ? "opening" : "drafting",
         difficulty: input.difficulty,
         selectedSet: input.setCode,
@@ -650,7 +694,7 @@ type PickRequest =
   | {
       readonly kind: "draft-effect";
       readonly effectCardInstanceId: string;
-      readonly instanceIds: readonly [string, string];
+      readonly instanceIds: readonly string[];
       readonly destination: DraftPickDestination;
       readonly placementHint?: DraftPickPlacementHint;
     }
@@ -697,14 +741,20 @@ function validPickRequest(request: PickRequest): boolean {
         && request.instanceId.length > 0
         && validPlacementHint(request.placementHint);
     case "draft-effect": {
-      if (!Array.isArray(request.instanceIds) || request.instanceIds.length !== 2
+      if (!Array.isArray(request.instanceIds)
         || typeof request.effectCardInstanceId !== "string"
         || request.effectCardInstanceId.length === 0
         || !validPlacementHint(request.placementHint)) return false;
-      const [first, second] = request.instanceIds;
-      return typeof first === "string" && typeof second === "string"
-        && first.length > 0 && second.length > 0 && first !== second
-        && first !== request.effectCardInstanceId && second !== request.effectCardInstanceId;
+      // The selection's size is the view's published count for this effect
+      // card; a view that publishes none for it offers no such selection.
+      const view = useDraftStore.getState().view;
+      const count = view === null ? null : draftSelectionPickCount(view, request.effectCardInstanceId);
+      return count !== null
+        && request.instanceIds.length === count
+        && request.instanceIds.every((instanceId) => typeof instanceId === "string"
+          && instanceId.length > 0
+          && instanceId !== request.effectCardInstanceId)
+        && new Set(request.instanceIds).size === request.instanceIds.length;
     }
     case "auto-pick":
       return request.destination === "deck" && validAutoPickPlacementHints(request.placementHints);
@@ -725,21 +775,73 @@ function acknowledgesRequestedId(
   return (before.get(instanceId) ?? 0) === 0 && (after.get(instanceId) ?? 0) === 1;
 }
 
-function acknowledgedAutoPickId(
+/**
+ * The ids the pool gained, each going from absent to exactly one copy; `null`
+ * when any id changed in another way.
+ */
+function acknowledgedAddedIds(
   before: ReadonlyMap<string, number>,
   after: ReadonlyMap<string, number>,
-): string | null {
-  const ids = new Set([...before.keys(), ...after.keys()]);
-  let addedInstanceId: string | null = null;
-  for (const instanceId of ids) {
+): string[] | null {
+  const added: string[] = [];
+  for (const instanceId of new Set([...before.keys(), ...after.keys()])) {
     const previous = before.get(instanceId) ?? 0;
     const current = after.get(instanceId) ?? 0;
-    const delta = current - previous;
-    if (delta === 0) continue;
-    if (delta !== 1 || previous !== 0 || addedInstanceId !== null) return null;
-    addedInstanceId = instanceId;
+    if (current === previous) continue;
+    if (previous !== 0 || current !== 1) return null;
+    added.push(instanceId);
   }
-  return addedInstanceId;
+  return added;
+}
+
+/**
+ * Where an admitted selection goes: the legacy runtime, or the local FIFO
+ * runtime's owner and the prompt the selection was composed on.
+ */
+type PickEngineTarget =
+  | { readonly kind: "legacy" }
+  | { readonly kind: "local-fifo"; readonly owner: LocalFifoOwner; readonly prompt: FifoPromptId };
+
+/** `null` when a FIFO view publishes no prompt: there is nothing to select on. */
+function pickEngineTarget(runtime: LocalDraftRuntime, view: DraftPlayerView): PickEngineTarget | null {
+  switch (runtime.kind) {
+    case "legacy":
+      return { kind: "legacy" };
+    case "local-fifo": {
+      const prompt = draftViewPrompt(view);
+      return prompt === null ? null : { kind: "local-fifo", owner: runtime.owner, prompt };
+    }
+  }
+}
+
+/**
+ * One admitted selection through the local FIFO exports, bound to the prompt
+ * it was composed on. The time is read here, immediately before the export.
+ */
+function submitLocalFifoSelection(
+  lease: DraftEngineOperationLease,
+  target: Extract<PickEngineTarget, { readonly kind: "local-fifo" }>,
+  request: PickRequest,
+): DraftPlayerView {
+  const nowMs = Date.now();
+  switch (request.kind) {
+    case "pick":
+      return lease.localFifoSelect(target.owner, {
+        prompt_id: target.prompt,
+        picked_card_instance_ids: [request.instanceId],
+        burned_card_instance_ids: [],
+        effect_card_instance_ids: [],
+      }, nowMs);
+    case "draft-effect":
+      return lease.localFifoSelect(target.owner, {
+        prompt_id: target.prompt,
+        picked_card_instance_ids: [...request.instanceIds],
+        burned_card_instance_ids: [],
+        effect_card_instance_ids: [request.effectCardInstanceId],
+      }, nowMs);
+    case "auto-pick":
+      return lease.localFifoAutoSelect(target.owner, target.prompt, nowMs);
+  }
 }
 
 function pendingIntentFor(request: PickRequest): PendingDraftPickIntent {
@@ -813,14 +915,23 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
   if (request.kind === "draft-effect") {
     request = {
       ...request,
-      instanceIds: [request.instanceIds[0], request.instanceIds[1]],
+      instanceIds: [...request.instanceIds],
     };
   }
   const token = admitExclusive("pick");
   if (!token) return { status: "ignored", reason: "busy" };
   const state = useDraftStore.getState();
-  const { adapter, draftId, workspaceState, view } = state;
-  if (!adapter || !draftId || !workspaceState || !view) {
+  const { adapter, runtime, draftId, workspaceState, view } = state;
+  if (!adapter || !runtime || !draftId || !workspaceState || !view) {
+    retireExclusive(token);
+    return { status: "rejected", reason: "invalid-request" };
+  }
+  if (draftViewPresentation(view).isReadOnly) {
+    retireExclusive(token);
+    return { status: "rejected", reason: "invalid-request" };
+  }
+  const target = pickEngineTarget(runtime, view);
+  if (target === null) {
     retireExclusive(token);
     return { status: "rejected", reason: "invalid-request" };
   }
@@ -856,7 +967,11 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
     // fingerprint it was built from and the engine re-validates it against the
     // live pack below, so a pack that moved on is refused per seat rather than
     // mis-picked.
-    const llmRoundForPick = request.kind === "pick" && useLlmStore.getState().draftEnabled
+    //
+    // Only the legacy runtime serves an LLM round: its exports read the legacy
+    // session, which a local FIFO session never is.
+    const llmRoundForPick = target.kind === "legacy" && request.kind === "pick"
+      && useLlmStore.getState().draftEnabled
       ? await ensureLlmDraftRound(view)
       : null;
     if (!isFresh()) {
@@ -885,22 +1000,27 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
       if (!isFresh()) {
         throw new Error("Stale draft pick request");
       }
-      switch (request.kind) {
-        case "pick": {
-          if (llmResponses.length > 0 && llmRoundForPick) {
-            const outcome = lease.submitPickWithLlmBotPicks(request.instanceId, llmResponses);
-            reportLlmDraftOutcomes(outcome.llmOutcomes);
-            recordLlmDraftUsage(llmRoundForPick, outcome.llmOutcomes);
-            return outcome.view;
+      switch (target.kind) {
+        case "local-fifo":
+          return submitLocalFifoSelection(lease, target, request);
+        case "legacy":
+          switch (request.kind) {
+            case "pick": {
+              if (llmResponses.length > 0 && llmRoundForPick) {
+                const outcome = lease.submitPickWithLlmBotPicks(request.instanceId, llmResponses);
+                reportLlmDraftOutcomes(outcome.llmOutcomes);
+                recordLlmDraftUsage(llmRoundForPick, outcome.llmOutcomes);
+                return outcome.view;
+              }
+              return lease.submitPick(request.instanceId);
+            }
+            case "draft-effect": {
+              const adapterInstanceIds = [...request.instanceIds];
+              return lease.submitPickWithDraftEffect(request.effectCardInstanceId, adapterInstanceIds);
+            }
+            case "auto-pick":
+              return lease.autoPick();
           }
-          return lease.submitPick(request.instanceId);
-        }
-        case "draft-effect": {
-          const adapterInstanceIds = [...request.instanceIds];
-          return lease.submitPickWithDraftEffect(request.effectCardInstanceId, adapterInstanceIds);
-        }
-        case "auto-pick":
-          return lease.autoPick();
       }
     });
     if (!isFresh()) return { status: "ignored", reason: "stale" };
@@ -950,8 +1070,10 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
         };
         break;
       case "auto-pick": {
-        const addedInstanceId = acknowledgedAutoPickId(before, after);
-        if (addedInstanceId === null) {
+        // Acknowledged when the pool gains exactly the selection's published
+        // count of new cards: one for every legacy Quick view.
+        const addedInstanceIds = acknowledgedAddedIds(before, after);
+        if (addedInstanceIds === null || addedInstanceIds.length !== draftSelectionPickCount(view, null)) {
           cleanup();
           return { status: "rejected", reason: "unacknowledged" };
         }
@@ -959,8 +1081,8 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
           kind: "acknowledged-auto-pick",
           authoritativeView: nextView,
           baseWorkspace: workspaceState,
-          addedInstanceId,
-          placementHint: request.placementHints?.[addedInstanceId],
+          addedInstanceIds,
+          placementHints: request.placementHints,
           patch: {
             phase: nextView.status === "Deckbuilding" ? "deckbuilding" : "drafting",
             selectedCard: null,
@@ -1191,6 +1313,7 @@ function expandSuggestedDeck(deck: SuggestedDeck): string[] {
 }
 
 async function selectViableOpponent(
+  runtime: LocalDraftRuntime,
   playerDeck: string[],
   usedSeats: readonly number[],
   view: DraftPlayerView,
@@ -1208,7 +1331,7 @@ async function selectViableOpponent(
     try {
       botDeck = await withDraftEngineOperation((lease) => {
         if (!fresh()) throw new Error("Stale draft match launch");
-        return lease.getBotDeck(botSeat);
+        return lease.quickSession(runtime).botDeck(botSeat);
       });
     } catch (error) {
       if (!fresh()) throw new Error("Stale draft match launch");
@@ -1349,7 +1472,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         return unavailable(i18n.t("draft:run.resumeUnavailable"));
       }
       set({
-        draftId: meta.id, adapter: null, view: null, workspaceState: null,
+        draftId: meta.id, adapter: null, runtime: null, view: null, workspaceState: null,
+        localFifoSessionId: meta.localFifoSessionId ?? null,
         phase: draftRunPhase(run), difficulty: meta.difficulty,
         selectedSet: meta.setCode, selectedSetName: meta.setName ?? null,
         kind: meta.kind ?? "Quick", runFormat: run.format, runState: run,
@@ -1376,13 +1500,29 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         lease.loadCardDatabase(database);
         lease.setPickEnhancements(usePreferencesStore.getState().draftPickEnhancements);
         if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft resume");
+        // The record's declaration routes it; the engine's import is the check.
+        // An undeclared record keeps the legacy import it was saved for.
+        let runtime: LocalDraftRuntime;
+        let view: DraftPlayerView;
+        if (meta.localFifoSessionId === undefined) {
+          runtime = { kind: "legacy" };
+          view = lease.importSession(saved.sessionJson, meta.difficulty);
+        } else {
+          const local = lease.importLocalFifoSession(saved.sessionJson, meta.difficulty);
+          if (draftViewSessionId(local.view) !== meta.localFifoSessionId) {
+            throw new Error(i18n.t("draft:run.resumeUnavailable"));
+          }
+          runtime = { kind: "local-fifo", owner: local.owner };
+          view = local.view;
+        }
         return {
-          view: lease.importSession(saved.sessionJson, meta.difficulty),
-          boosterPackPool: lease.boosterPackPoolForGame(),
+          runtime,
+          view,
+          boosterPackPool: lease.quickSession(runtime).boosterPackPoolForGame(),
         };
       });
       if (lifecycle !== lifecycleGeneration) return { status: "none" };
-      const { view } = restored;
+      const { runtime, view } = restored;
       if (run) {
         const upgraded = withBoosterPackPool(run, restored.boosterPackPool, view, meta.id);
         if (!validRun(upgraded, meta.id, meta.setCode)) {
@@ -1408,6 +1548,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         patch: {
           draftId: meta.id,
           adapter,
+          runtime,
+          localFifoSessionId: meta.localFifoSessionId ?? null,
           phase: phaseForView(view, resumedPhase),
           difficulty: meta.difficulty,
           selectedSet: meta.setCode,
@@ -1511,7 +1653,9 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
   },
 
   selectCard: (selectedCard) => {
-    if (get().pickInteractionLocked) return;
+    const state = get();
+    if (state.pickInteractionLocked) return;
+    if (state.view !== null && draftViewPresentation(state.view).isReadOnly) return;
     set({ selectedCard });
   },
 
@@ -1548,7 +1692,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
 
   autoSuggestDeck: async () => {
     const state = get();
-    if (workspaceMutationBlocked(state) || !state.adapter || !state.workspaceState || !state.view) return;
+    const runtime = state.runtime;
+    if (workspaceMutationBlocked(state) || !state.adapter || !runtime || !state.workspaceState || !state.view) return;
     const token = ++suggestionToken;
     const lifecycle = lifecycleGeneration;
     const revision = workspaceRevision;
@@ -1566,7 +1711,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     try {
       result = await withDraftEngineOperation((lease) => {
         if (!fresh()) throw new Error("Stale draft suggestion");
-        return lease.suggestDeck();
+        return lease.quickSession(runtime).suggestDeck();
       });
     } catch (error) {
       if (!fresh()) return;
@@ -1596,7 +1741,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
 
   autoSuggestLands: async () => {
     const state = get();
-    if (workspaceMutationBlocked(state) || !state.adapter || !state.workspaceState || !state.view) return;
+    const runtime = state.runtime;
+    if (workspaceMutationBlocked(state) || !state.adapter || !runtime || !state.workspaceState || !state.view) return;
     const token = ++suggestionToken;
     const lifecycle = lifecycleGeneration;
     const revision = workspaceRevision;
@@ -1614,7 +1760,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     try {
       lands = await withDraftEngineOperation((lease) => {
         if (!fresh()) throw new Error("Stale draft suggestion");
-        return lease.suggestLands(workspaceFacades(state.workspaceState!, state.view!).mainDeck);
+        return lease.quickSession(runtime).suggestLands(workspaceFacades(state.workspaceState!, state.view!).mainDeck);
       });
     } catch (error) {
       if (!fresh()) return;
@@ -1634,7 +1780,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     const token = admitExclusive("submit");
     if (!token) return;
     const state = get();
-    if (!state.adapter || !state.workspaceState || !state.view) {
+    const runtime = state.runtime;
+    if (!state.adapter || !runtime || !state.workspaceState || !state.view) {
       retireExclusive(token);
       return;
     }
@@ -1656,7 +1803,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       if (!fresh()) throw new Error("Stale draft deck submission");
       const view = await withDraftEngineOperation((lease) => {
         if (!fresh()) throw new Error("Stale draft deck submission");
-        return lease.submitDeck(partition.mainDeck, []);
+        return lease.quickSession(runtime).submitDeck(partition.mainDeck, [], Date.now());
       });
       if (!isExclusive(token, "submit") || lifecycle !== lifecycleGeneration) return;
       retireExclusive(token);
@@ -1694,7 +1841,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     if (!token) return;
     cancelScheduledPersistence();
     const state = get();
-    if (!state.adapter || !state.draftId || !state.selectedSet || !state.workspaceState || !state.view) {
+    const runtime = state.runtime;
+    if (!state.adapter || !runtime || !state.draftId || !state.selectedSet || !state.workspaceState || !state.view) {
       retireExclusive(token);
       return;
     }
@@ -1728,20 +1876,23 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       if (durableRun) {
         if (!unresolvedStageMatches(durableRun, state.draftId, selectedRunFormat, playerDeck)
           || durableRun.results.length !== 0) throw new Error(i18n.t("draft:run.startUnavailable"));
-        const boosterPackPool = await withDraftEngineOperation((lease) => lease.boosterPackPoolForGame());
+        const boosterPackPool = await withDraftEngineOperation(
+          (lease) => lease.quickSession(runtime).boosterPackPoolForGame(),
+        );
         if (!fresh()) throw new Error("Stale draft match launch");
         run = withBoosterPackPool(durableRun, boosterPackPool, state.view, state.draftId);
       } else {
         const prepared = await withDraftEngineOperation((lease) => {
           if (!fresh()) throw new Error("Stale draft match launch");
+          const session = lease.quickSession(runtime);
           return {
-            sessionJson: lease.exportSession(),
-            boosterPackPool: lease.boosterPackPoolForGame(),
+            sessionJson: session.exportSession(),
+            boosterPackPool: session.boosterPackPoolForGame(),
           };
         });
         sessionJson = prepared.sessionJson;
         const { botSeat, opponentDeck } = await selectViableOpponent(
-          playerDeck, [], state.view, codes, selectedMatchType, fresh,
+          runtime, playerDeck, [], state.view, codes, selectedMatchType, fresh,
         );
         if (!fresh()) throw new Error("Stale draft match launch");
         const gameId = crypto.randomUUID();
@@ -1872,7 +2023,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       retireExclusive(token);
       throw new Error(i18n.t("draft:run.resumeUnavailable"));
     }
-    const runOnly = !state.adapter || !state.view || !state.workspaceState;
+    const runOnly = !state.adapter || !state.runtime || !state.view || !state.workspaceState;
     const lifecycle = lifecycleGeneration;
     const revision = workspaceRevision;
     const selectedRunFormat = state.runFormat;
@@ -1886,7 +2037,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       const savedRun = await loadDraftRun(state.draftId);
       if (!savedRun) throw new Error(i18n.t("draft:run.resumeUnavailable"));
       const boosterPackPool = runOnly ? undefined
-        : await withDraftEngineOperation((lease) => lease.boosterPackPoolForGame());
+        : await withDraftEngineOperation((lease) => lease.quickSession(state.runtime!).boosterPackPoolForGame());
       if (!fresh()) return;
       const durableRun = withBoosterPackPool(savedRun, boosterPackPool, state.view, state.draftId);
       if (!validRun(durableRun, state.draftId, state.selectedSet)
@@ -1910,7 +2061,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         const { botSeat, opponentDeck } = runOnly
           ? { botSeat: retainedSeat!, opponentDeck: durableRun.opponentDeck }
           : await selectViableOpponent(
-              playerDeck, durableRun.usedBotSeats, state.view!, codes, selectedMatchType, fresh,
+              state.runtime!, playerDeck, durableRun.usedBotSeats, state.view!, codes, selectedMatchType, fresh,
             );
         if (!fresh()) throw new Error("Stale next match launch");
         const gameId = crypto.randomUUID();
@@ -1974,16 +2125,17 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       reject = rejectPromise;
     });
     const generation = invalidateLifecycle();
+    const interaction = nextInteractionGeneration();
     const token = admitExclusive("end")!;
     const operation = { draftId: id, promise };
     endingRun = operation;
-    useDraftStore.setState({ interactionGeneration: generation });
+    useDraftStore.setState({ interactionGeneration: interaction });
 
     void Promise.resolve().then(() => cleanupQuickDraftLifecycle(id)).then(
       () => {
         if (generation === lifecycleGeneration && isExclusive(token, "end")) {
           retireExclusive(token);
-          publishInitialState(generation);
+          publishInitialState(interaction);
         }
         if (endingRun === operation) endingRun = null;
         resolve();
@@ -2011,6 +2163,8 @@ useDraftStore.subscribe((state, previous) => {
   if (state.llmDrafters.length > 0 || state.awaitingDrafters) {
     useDraftStore.setState({ llmDrafters: [], awaitingDrafters: false });
   }
+  // The LLM round reads the legacy session; a local FIFO session takes none.
+  if (state.runtime?.kind === "local-fifo") return;
   const view = state.view;
   if (!view || state.phase !== "drafting" || view.status !== "Drafting") return;
   if (!view.current_pack || view.current_pack.length === 0) return;

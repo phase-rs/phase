@@ -208,7 +208,7 @@ function placementHint(target: TargetResolution): DraftPickPlacementHint {
 function expectedIntent(source: PackDropSource, target: TargetResolution): PendingDraftPickIntent {
   const hint = placementHint(target);
   if (source.kind === "draft-effect") {
-    return { kind: "draft-effect", instanceIds: source.instanceIds as readonly [string, string], destination: target.zone, placementHint: hint };
+    return { kind: "draft-effect", instanceIds: source.instanceIds, destination: target.zone, placementHint: hint };
   }
   return { kind: "pick", instanceIds: source.instanceIds as readonly [string], destination: target.zone, placementHint: hint };
 }
@@ -495,6 +495,19 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
 
     const settlement = settlementRef.current;
     if (settlement === null || settlement.terminal) return;
+    // The observation that releases this drop's own lock ends the drop whatever
+    // generation it carries: an accepted selection can install a new prompt in
+    // the same update that unlocks. The dispatch's outcome decides how it settles.
+    if (
+      settlement.admission.kind === "owned"
+      && !observation.pickInteractionLocked
+      && observation.pendingPickIntent === null
+      && observation.order > settlement.admission.lockTrueOrder
+    ) {
+      settlement.unlocked = true;
+      finishSettlement();
+      return;
+    }
     if (observation.interactionGeneration !== settlement.generation) {
       conflictSettlement();
       return;

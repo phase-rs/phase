@@ -649,6 +649,52 @@ export interface FifoSpectatorDraftViewArm {
   fifo: FifoPublicView;
 }
 
+/**
+ * The owner draft-wasm issues to the local FIFO runtime's session on import.
+ * Only an engine answer mints one; every local FIFO export refuses any other.
+ */
+export type LocalFifoOwner = number & { readonly __brand: "LocalFifoOwner" };
+
+/** What `import_local_fifo_session` returns: the issued owner and seat 0's view. */
+export interface LocalFifoSession {
+  owner: LocalFifoOwner;
+  view: DraftPlayerView;
+}
+
+// @sync-with: crates/draft-wasm/src/lib.rs
+/**
+ * The local human's composed selection on one prompt, exactly the four fields
+ * the engine accepts. It names no seat: the seat is the owner's.
+ */
+export interface LocalFifoSelection {
+  prompt_id: FifoPromptId;
+  picked_card_instance_ids: string[];
+  burned_card_instance_ids: string[];
+  effect_card_instance_ids: string[];
+}
+
+/**
+ * Which draft-wasm runtime holds the Quick route's session: the legacy
+ * runtime, or the local FIFO runtime under the owner it issued.
+ */
+export type LocalDraftRuntime =
+  | { readonly kind: "legacy" }
+  | { readonly kind: "local-fifo"; readonly owner: LocalFifoOwner };
+
+/**
+ * The session operations both Quick runtimes serve, bound to one runtime by
+ * `DraftEngineOperationLease.quickSession`. `nowMs` is read by the local FIFO
+ * runtime only.
+ */
+export interface QuickDraftSession {
+  exportSession(): string;
+  boosterPackPoolForGame(): string[] | null;
+  botDeck(botSeat: number): SuggestedDeck;
+  suggestDeck(): SuggestedDeck;
+  suggestLands(spells: string[]): Record<string, number>;
+  submitDeck(mainDeck: string[], commanders: string[], nowMs: number): DraftPlayerView;
+}
+
 export type DraftViewPodPhase =
   | "lobby"
   | "drafting"
@@ -766,6 +812,71 @@ export function draftViewPresentation(view: DraftPlayerView): DraftViewPresentat
     case "Abandoned":
       return { podPhase: "error", isReadOnly: true };
   }
+}
+
+/** The prompt a FIFO view publishes for its seat; `null` for every other view. */
+export function draftViewPrompt(view: DraftPlayerView): FifoPromptId | null {
+  return isFifoPlayerView(view) ? view.fifo.prompt_id : null;
+}
+
+/** The engine-issued session id of a FIFO view; `null` for every other view. */
+export function draftViewSessionId(view: DraftPlayerView): string | null {
+  return isFifoPlayerView(view) ? view.fifo.state.session_id : null;
+}
+
+/** Whether two engine prompt identities are the same prompt (both absent included). */
+export function sameDraftPrompt(left: FifoPromptId | null, right: FifoPromptId | null): boolean {
+  if (left === null || right === null) return left === right;
+  return left.session_id === right.session_id
+    && left.seat === right.seat
+    && left.generation === right.generation;
+}
+
+/**
+ * CR 905.1a + CR 905.2: the legacy reducer takes exactly two cards for its one
+ * face-up draft-effect card, Cogwork Librarian ("As you draft a card, you may
+ * draft an additional card from that booster pack."). Restored legacy sessions
+ * keep that rule; a FIFO view publishes its own count.
+ */
+// @sync-with: crates/draft-core/src/pick_pass.rs
+const LEGACY_DRAFT_EFFECT_PICKS = 2;
+
+/**
+ * The draft-effect cards a selection may use on this view, in the engine's
+ * order: a legacy view's `draft_effects`, or the pool cards a FIFO view
+ * publishes as eligible on its head. Empty when the view offers none.
+ */
+export function draftSelectionEffectCards(view: DraftPlayerView): DraftCardInstance[] {
+  if (view.flow === undefined && view.fifo === undefined) return view.draft_effects;
+  if (!isFifoPlayerView(view)) return [];
+  const effects = view.fifo.effects;
+  if (effects === null || effects.requirements.length === 0) return [];
+  return effects.card_instance_ids.flatMap((instanceId) => {
+    const card = view.pool.find((candidate) => candidate.instance_id === instanceId);
+    return card === undefined ? [] : [card];
+  });
+}
+
+/**
+ * How many cards one selection takes on this view, with no draft-effect card
+ * or with `effectCardInstanceId`. `null` when the view offers no such
+ * selection: a FIFO view that fails the wire check, or an effect card the
+ * view does not publish.
+ */
+export function draftSelectionPickCount(
+  view: DraftPlayerView,
+  effectCardInstanceId: string | null,
+): number | null {
+  if (view.flow === undefined && view.fifo === undefined) {
+    return effectCardInstanceId === null
+      ? Math.max(1, view.required_pick_count)
+      : LEGACY_DRAFT_EFFECT_PICKS;
+  }
+  if (!isFifoPlayerView(view)) return null;
+  if (effectCardInstanceId === null) return view.fifo.requirements.picks;
+  const effects = view.fifo.effects;
+  if (effects === null || !effects.card_instance_ids.includes(effectCardInstanceId)) return null;
+  return effects.requirements[0]?.picks ?? null;
 }
 
 export interface SpectatorDraftViewFields {
@@ -1366,6 +1477,81 @@ export class DraftEngineOperationLease {
 
   importSession(json: string, difficulty: number): DraftPlayerView {
     return this.wasm.import_draft_session(json, difficulty) as DraftPlayerView;
+  }
+
+  /** Restore a local FIFO draft from its export; the engine issues a new owner. */
+  importLocalFifoSession(json: string, difficulty: number): LocalFifoSession {
+    return this.wasm.import_local_fifo_session(json, difficulty) as LocalFifoSession;
+  }
+
+  /** Apply the local human's selection on its prompt at `nowMs`. */
+  localFifoSelect(owner: LocalFifoOwner, selection: LocalFifoSelection, nowMs: number): DraftPlayerView {
+    return this.wasm.local_fifo_select(owner, JSON.stringify(selection), BigInt(nowMs)) as DraftPlayerView;
+  }
+
+  /** Let the engine make the local human's selection on `promptId` at `nowMs`. */
+  localFifoAutoSelect(owner: LocalFifoOwner, promptId: FifoPromptId, nowMs: number): DraftPlayerView {
+    return this.wasm.local_fifo_auto_select(owner, JSON.stringify(promptId), BigInt(nowMs)) as DraftPlayerView;
+  }
+
+  localFifoSubmitDeck(
+    owner: LocalFifoOwner,
+    mainDeck: string[],
+    commanders: string[],
+    nowMs: number,
+  ): DraftPlayerView {
+    return this.wasm.local_fifo_submit_deck(
+      owner,
+      JSON.stringify(mainDeck),
+      JSON.stringify(commanders),
+      BigInt(nowMs),
+    ) as DraftPlayerView;
+  }
+
+  localFifoSuggestDeck(owner: LocalFifoOwner): SuggestedDeck {
+    return this.wasm.local_fifo_suggest_deck(owner) as SuggestedDeck;
+  }
+
+  localFifoSuggestLands(owner: LocalFifoOwner, spells: string[]): Record<string, number> {
+    return this.wasm.local_fifo_suggest_lands(owner, JSON.stringify(spells)) as Record<string, number>;
+  }
+
+  localFifoBotDeck(owner: LocalFifoOwner, botSeat: number): SuggestedDeck {
+    return this.wasm.local_fifo_bot_deck(owner, botSeat) as SuggestedDeck;
+  }
+
+  localFifoBoosterPackPoolForGame(owner: LocalFifoOwner): string[] | null {
+    return this.wasm.local_fifo_booster_pack_pool_for_game(owner) as string[] | null;
+  }
+
+  exportLocalFifoSession(owner: LocalFifoOwner): string {
+    return this.wasm.export_local_fifo_session(owner);
+  }
+
+  /** The session operations of the runtime that holds the Quick route's session. */
+  quickSession(runtime: LocalDraftRuntime): QuickDraftSession {
+    switch (runtime.kind) {
+      case "legacy":
+        return {
+          exportSession: () => this.exportSession(),
+          boosterPackPoolForGame: () => this.boosterPackPoolForGame(),
+          botDeck: (botSeat) => this.getBotDeck(botSeat),
+          suggestDeck: () => this.suggestDeck(),
+          suggestLands: (spells) => this.suggestLands(spells),
+          submitDeck: (mainDeck, commanders) => this.submitDeck(mainDeck, commanders),
+        };
+      case "local-fifo": {
+        const owner = runtime.owner;
+        return {
+          exportSession: () => this.exportLocalFifoSession(owner),
+          boosterPackPoolForGame: () => this.localFifoBoosterPackPoolForGame(owner),
+          botDeck: (botSeat) => this.localFifoBotDeck(owner, botSeat),
+          suggestDeck: () => this.localFifoSuggestDeck(owner),
+          suggestLands: (spells) => this.localFifoSuggestLands(owner, spells),
+          submitDeck: (mainDeck, commanders, nowMs) => this.localFifoSubmitDeck(owner, mainDeck, commanders, nowMs),
+        };
+      }
+    }
   }
 
   allPicksSubmitted(): boolean {

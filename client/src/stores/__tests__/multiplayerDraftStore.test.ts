@@ -2743,6 +2743,35 @@ describe("multiplayerDraftStore", () => {
       expect(mockHostAdapter.updateWorkspace).toHaveBeenCalledTimes(1);
     });
 
+    it("forwards_a_draft_effect_list_whole_and_refuses_a_repeated_card", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "viewUpdated", view: { ...mockView("Drafting"), pool: [] } });
+      mockHostAdapter.submitPickWithDraftEffect.mockResolvedValueOnce({
+        ...mockView("Drafting"), pool: [card("card-1"), card("card-2"), card("card-3")],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitPickWithDraftEffect(
+        "cogwork-1", ["card-1", "card-2", "card-3"], "sideboard",
+      )).resolves.toEqual({ status: "acknowledged" });
+      expect(mockHostAdapter.submitPickWithDraftEffect).toHaveBeenCalledExactlyOnceWith(
+        "cogwork-1",
+        ["card-1", "card-2", "card-3"],
+      );
+
+      mockHostAdapter.submitPickWithDraftEffect.mockClear();
+      await expect(useMultiplayerDraftStore.getState().submitPickWithDraftEffect(
+        "cogwork-1", ["card-1", "card-2", "card-1"], "sideboard",
+      )).resolves.toEqual({ status: "rejected", reason: "invalid-request" });
+      expect(mockHostAdapter.submitPickWithDraftEffect).not.toHaveBeenCalled();
+    });
+
     // The pod twin of the solo store's
     // `appends_a_hint_less_deck_draft_effect_pick_in_request_order`, and the
     // sibling above cannot stand in for it: that one sends `"sideboard"`, which
