@@ -95757,3 +95757,19 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
         );
     }
 }
+
+#[test]
+fn test_reviving_vapors_parse() {
+    let text = "Reveal the top three cards of your library and put one of them into your hand. You gain life equal to that card's mana value. Put all other cards revealed this way into your graveyard.";
+    println!("Parsing: {}", text);
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    println!("Parsed effect: {:?}", def.effect);
+    if let Some(sub) = def.sub_ability.as_ref() {
+        println!("Sub ability: {:?}", sub.effect);
+    }
+    if let Some(else_ability) = def.else_ability.as_ref() {
+        println!("Else ability: {:?}", else_ability.effect);
+    }
+    // Also check the full chain
+    println!("Full def: {:?}", def);
+}

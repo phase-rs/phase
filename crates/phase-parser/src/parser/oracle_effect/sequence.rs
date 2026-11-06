@@ -9137,6 +9137,23 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 rest_order,
             })
         }
+        // "all other cards revealed this way" / "the other cards" / "other cards
+        // revealed this way" after a reveal Dig (Reviving Vapors, Spoils of the
+        // Vault, Sacred Guide) — sets rest_destination on the preceding Dig effect.
+        // Delegates to the shared RevealUntil rest-zone/order matcher so both
+        // effect kinds recognize the same destination and ordering phrases.
+        Effect::Dig { reveal: true, .. }
+            if nom_primitives::scan_contains(&lower, "all other cards revealed this way")
+                || nom_primitives::scan_contains(&lower, "the other cards")
+                || nom_primitives::scan_contains(&lower, "other cards revealed this way") =>
+        {
+            let (destination, rest_order) = parse_reveal_until_rest_zone_and_order(&lower);
+            Some(ContinuationAst::PutRest {
+                destination: destination.unwrap_or(Zone::Library),
+                reorder_all: false,
+                rest_order,
+            })
+        }
         // CR 608.2c + CR 701.20b (Portent of Calamity / Sanar class): "Put the
         // rest into your graveyard" after a per-category exile from among the
         // revealed cards. The rest are the revealed cards still in the library
