@@ -9,18 +9,19 @@ use crate::parser::oracle_ir::doc::PrintedTriggerIndex;
 use crate::parser::oracle_ir::effect_chain::PlayerScopeRewrite;
 use crate::parser::test_support::assert_no_unimplemented;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
-    AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource, CastingPermission,
-    ChooseOneOfKind, CoinFlipRun, CombatHistoryScope, Comparator, ContinuousModification,
-    ControllerRef, CopyChooseScope, CopyRetargetPermission, CountScope, CounterTransferMode,
-    DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageModification, DamageSource,
-    DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope, FilterProp,
-    ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice, ObjectProperty,
-    ObjectScope, PerPlayerScope, PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope,
-    PropertyAggregate, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RoundingMode,
-    SeatDirection, SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter,
-    TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, XModification,
-    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner, ZoneRef,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
+    AggregateFunction, AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource,
+    CastingPermission, ChooseOneOfKind, CoinFlipRun, CombatHistoryScope, Comparator,
+    ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission, CountScope,
+    CounterTransferMode, DamageAmountScope, DamageAmountThreshold, DamageChannel,
+    DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect,
+    EffectScope, FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice,
+    ObjectProperty, ObjectScope, PerPlayerScope, PerpetualGrantModification, PerpetualModification,
+    PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat, PtValue, PtValueScope,
+    QuantityExpr, QuantityRef, RoundingMode, SeatDirection, SharedQuality, SiblingCondition,
+    SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition,
+    TurnJournalKind, TypeFilter, TypedFilter, XModification, ZoneChoiceCandidateSource,
+    ZoneChoiceChooser, ZoneOwner, ZoneRef,
 };
 use crate::types::ability::{
     IllegalTargetsDisposition, NumberQuality, Parity, SpentColor, StaticCondition, StaticDefinition,
@@ -11661,6 +11662,62 @@ fn strip_constraint_does_not_affect_effect() {
 }
 
 #[test]
+fn strip_constraint_leaves_a_quoted_granted_restriction_in_place() {
+    // CR 113.1a + CR 603.1: the quoted sentence belongs to the granted ability.
+    let text = "return it to the battlefield. it perpetually gains \"whenever this creature becomes the target of a spell or ability, draw a card. this ability triggers only once each turn.\"";
+    assert_eq!(strip_constraint_sentences(text), text);
+}
+
+/// At Knifepoint's trigger (verbatim Scryfall Oracle text): a quoted granted
+/// ability with its own restriction, followed by the trigger's own unquoted
+/// "This ability triggers only once each turn."
+#[test]
+fn at_knifepoint_unquoted_limit_is_the_triggers_and_the_quoted_one_is_the_tokens() {
+    let trigger = parse_trigger_line(
+        "Whenever you commit a crime, create a 1/1 red Mercenary creature token with \"{T}: Target creature you control gets +1/+0 until end of turn. Activate only as a sorcery.\" This ability triggers only once each turn.",
+        "At Knifepoint",
+    );
+    // CR 603.1: the unquoted sentence restricts this trigger.
+    assert_eq!(
+        trigger.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering,
+        })
+    );
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    assert!(
+        execute.sub_ability.is_none(),
+        "the constraint sentence must not become a sub-ability: {:?}",
+        execute.sub_ability
+    );
+    let Effect::Token {
+        static_abilities, ..
+    } = &*execute.effect
+    else {
+        panic!("expected the token, got {:?}", execute.effect);
+    };
+    let granted = static_abilities
+        .iter()
+        .flat_map(|def| def.modifications.iter())
+        .find_map(|modification| match modification {
+            ContinuousModification::GrantAbility { definition } => Some(definition),
+            _ => None,
+        })
+        .expect("the token's granted activated ability");
+    // CR 602.5d: the quoted "Activate only as a sorcery." stays with the
+    // token's granted ability.
+    assert_eq!(
+        granted.activation_restrictions,
+        vec![ActivationRestriction::AsSorcery]
+    );
+    assert!(
+        matches!(*granted.effect, Effect::Pump { .. }),
+        "{:?}",
+        granted.effect
+    );
+}
+
+#[test]
 fn strip_constraint_preserves_plain_effect() {
     let result = strip_constraint_sentences("put a +1/+1 counter on ~");
     assert_eq!(result, "put a +1/+1 counter on ~");
@@ -18783,6 +18840,42 @@ fn trigger_unless_intervening_controls_creature() {
         },
         other => panic!("expected Some(Not), got {:?}", other),
     }
+}
+
+/// CR 608.2c: an "unless" bound to a LATER instruction gates only that
+/// instruction. Hoisting it onto the trigger would also skip the earlier
+/// instruction. Splitskin Doll, verbatim Oracle text (Scryfall).
+///
+/// The ", then " branch of `unless_binds_to_later_instruction` is covered by
+/// printed cards in `oracle_effect/tests.rs`: `cyclone_paid_continuation_fails_closed`
+/// and `phantasmal_sphere_unless_binds_to_the_sacrifice`.
+#[test]
+fn trigger_unless_bound_to_later_instruction_is_not_hoisted() {
+    let def = parse_trigger_line(
+        "When this creature enters, draw a card. Then discard a card unless you control \
+another creature with power 2 or less.",
+        "Splitskin Doll",
+    );
+    assert!(
+        def.condition.is_none(),
+        "later-instruction unless must not gate the trigger"
+    );
+    let execute = def.execute.as_ref().expect("trigger effect");
+    assert!(
+        matches!(*execute.effect, Effect::Draw { .. }),
+        "draw stays the unconditional first instruction"
+    );
+    assert!(execute.condition.is_none(), "draw is unconditional");
+    let discard = execute.sub_ability.as_ref().expect("discard instruction");
+    assert!(matches!(*discard.effect, Effect::Discard { .. }));
+    assert!(
+        matches!(
+            discard.condition,
+            Some(AbilityCondition::Not { .. }) | Some(AbilityCondition::QuantityCheck { .. })
+        ),
+        "the unless gate attaches to the discard: {:?}",
+        discard.condition
+    );
 }
 
 #[test]
@@ -42763,6 +42856,157 @@ fn stack_spell_copy_cast_indicated_action_strict_fails() {
     );
 }
 
+/// CR 608.2c + CR 118.12a: Indoraptor's Enrage — "that player" (damage
+/// recipient) and "they" (unless-payer) both name the opponent chosen at random,
+/// not the triggering player or the controller.
+#[test]
+fn indoraptor_enrage_binds_damage_and_payer_to_chosen_opponent() {
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose an opponent at random. ~ deals damage equal to its power to that player unless they sacrifice a nontoken creature of their choice.",
+        "Indoraptor, the Perfect Hybrid",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::Choose {
+            choice_type: crate::types::ability::ChoiceType::Opponent { .. },
+            selection: crate::types::ability::TargetSelectionMode::Random,
+            ..
+        }
+    ));
+    let chosen = TargetFilter::Typed(
+        TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
+    );
+    let damage = execute.sub_ability.as_ref().expect("damage sub-ability");
+    let Effect::DealDamage { target, .. } = damage.effect.as_ref() else {
+        panic!("expected DealDamage, got {:?}", damage.effect);
+    };
+    assert_eq!(*target, chosen);
+    let unless_pay = damage.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, chosen);
+    assert!(matches!(unless_pay.cost, AbilityCost::Sacrifice(_)));
+}
+
+/// CR 608.2c + CR 118.12a: the chosen-player unless-payer rebind is a FALLBACK
+/// for an anaphoric "they"/"that player". The shared building block covers the
+/// mana and non-mana unless-payment forms over either choice type, and a clause
+/// that declares its own player subject keeps that nearer antecedent.
+///
+/// SHAPE: these are synthetic combined grammar probes, with no known exact
+/// printed witness. The nearest printed anchors are Indoraptor, the Perfect
+/// Hybrid and Vial Smasher the Fierce for chosen-player damage; neither prints
+/// the declared-recipient/unless conflict isolated here. These rows pin the
+/// preserve-nearer-declared-player fallback invariant, not new card coverage.
+#[test]
+fn chosen_player_unless_payer_rebind_covers_the_grammar() {
+    let chosen = TargetFilter::Typed(
+        TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
+    );
+
+    // Non-mana alternative cost after "choose a player at random": the
+    // anaphoric "they" names the resolution-chosen player.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose a player at random. That player discards a card unless they sacrifice a creature.",
+        "Rebind Probe",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::Choose {
+            choice_type: crate::types::ability::ChoiceType::Player { .. },
+            selection: crate::types::ability::TargetSelectionMode::Random,
+            ..
+        }
+    ));
+    let discard = execute.sub_ability.as_ref().expect("discard clause");
+    let unless_pay = discard.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, chosen);
+
+    // Mana alternative cost: the "they pay" arm is the same anaphor.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose an opponent at random. That player sacrifices a creature unless they pay {2}.",
+        "Rebind Probe",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    let sacrifice = execute.sub_ability.as_ref().expect("sacrifice clause");
+    let unless_pay = sacrifice.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, chosen);
+    assert!(matches!(unless_pay.cost, AbilityCost::Mana { .. }));
+
+    // Nearer declared player subject: "Target player loses 3 life unless they
+    // discard a card" names its own player, so the earlier random choice must
+    // not capture the payer.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose an opponent at random. Target player loses 3 life unless they discard a card.",
+        "Rebind Probe",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    let lose_life = execute.sub_ability.as_ref().expect("lose-life clause");
+    let unless_pay = lose_life.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::Player);
+
+    // Nearer declared player RECIPIENT: "deals 3 damage to target player"
+    // declares its own player after the verb, so "they" is that target, not
+    // the opponent chosen earlier in the chain.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose an opponent at random. ~ deals 3 damage to target player unless they pay {2}.",
+        "Rebind Probe",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    let damage = execute.sub_ability.as_ref().expect("damage clause");
+    let Effect::DealDamage { target, .. } = damage.effect.as_ref() else {
+        panic!("expected DealDamage, got {:?}", damage.effect);
+    };
+    assert_eq!(*target, TargetFilter::Player);
+    let unless_pay = damage.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::Player);
+
+    // Compound declared recipients still introduce a player target even when
+    // the target grammar also permits an object in the same slot.
+    for recipient in [
+        "target player or planeswalker",
+        "target permanent or player",
+    ] {
+        let text = format!(
+            "Whenever ~ is dealt damage, choose an opponent at random. ~ deals 3 damage to {recipient} unless they pay {{2}}."
+        );
+        let def = parse_trigger_line(&text, "Rebind Probe");
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(matches!(
+            execute.effect.as_ref(),
+            Effect::Choose {
+                choice_type: crate::types::ability::ChoiceType::Opponent { .. },
+                selection: crate::types::ability::TargetSelectionMode::Random,
+                ..
+            }
+        ));
+        let damage = execute.sub_ability.as_ref().expect("damage clause");
+        let Effect::DealDamage { target, .. } = damage.effect.as_ref() else {
+            panic!("expected DealDamage, got {:?}", damage.effect);
+        };
+        assert!(matches!(
+            target,
+            TargetFilter::Or { filters }
+                if filters.iter().any(|filter| matches!(filter, TargetFilter::Player))
+        ));
+        let unless_pay = damage.unless_pay.as_ref().expect("unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Player);
+        assert!(matches!(unless_pay.cost, AbilityCost::Mana { .. }));
+    }
+
+    // An explicitly named payer is never rebound: "unless its controller
+    // pays" keeps the damaged permanent's controller even after the chain
+    // chose an opponent at random.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose an opponent at random. ~ deals 3 damage to target creature unless its controller pays {2}.",
+        "Rebind Probe",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    let damage = execute.sub_ability.as_ref().expect("damage clause");
+    let unless_pay = damage.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
+}
+
 // CR 122.1 + CR 603.2: an active-voice "you remove a <kind> counter" trigger
 // fires only for that kind, so the kind lives in `counter_filter` (the field
 // `match_counter_removed` reads), not only in the description. Watcher of Hours
@@ -42895,6 +43139,159 @@ fn peel_trailing_cast_mana_source_splits_only_a_trailing_self_reference() {
     assert_eq!(
         peel_trailing_cast_mana_source("spell using mana produced by a treasure"),
         ("spell using mana produced by a treasure", None)
+    );
+}
+
+/// Q, Stacking the Deck (verbatim Scryfall Oracle text). Three trigger-level
+/// readings the granted quoted ability must not disturb:
+/// - CR 201.5c: the one-letter short name "Q" is a self-reference, so the
+///   trigger is a self-ETB (`SelfRef`), not "whenever a Q creature enters";
+/// - CR 603.2 + CR 602.5c: the quoted "Activate only during your turn"
+///   restricts the GRANTED ability, never this trigger;
+/// - CR 608.2c: "That nonland card" names the card the exile-until loop found,
+///   so the grant does not bind the trigger source (`TriggeringSource`).
+#[test]
+fn q_stacking_the_deck_trigger_reads_self_etb_and_grants_to_the_found_card() {
+    let text = "When Q enters, shuffle your library, then exile cards from the top of your library until you exile a nonland card. That nonland card gains \"Exile a card from your hand: Create a copy of this card. You may cast the copy. Activate only during your turn and only if this card is exiled.\"";
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let parsed = parse_oracle_text(
+        text,
+        "Q, Stacking the Deck",
+        &[],
+        &owned(&["Legendary", "Creature"]),
+        &owned(&["Q"]),
+    );
+    assert_eq!(parsed.triggers.len(), 1, "{:?}", parsed.triggers);
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(trigger.constraint, None);
+
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    let exile_until = execute.sub_ability.as_deref().expect("exile-until link");
+    assert!(
+        matches!(*exile_until.effect, Effect::ExileFromTopUntil { .. }),
+        "{:?}",
+        exile_until.effect
+    );
+    let grant = exile_until.sub_ability.as_deref().expect("grant link");
+    let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = &*grant.effect
+    else {
+        panic!("expected the grant, got {:?}", grant.effect);
+    };
+    assert_eq!(*target, None, "the grant inherits the found card");
+    assert_eq!(
+        static_abilities[0].affected,
+        Some(TargetFilter::ParentTarget)
+    );
+}
+
+/// Q, Stacking the Deck: the granted ability's body ("Create a copy of this
+/// card. You may cast the copy.") still parses as `Effect::Unimplemented`.
+/// This pins that gap so coverage keeps the card unsupported until the body is
+/// actually implemented; when it is, update this test with the real effect.
+#[test]
+fn q_stacking_the_deck_granted_ability_body_stays_unimplemented() {
+    let text = "When Q enters, shuffle your library, then exile cards from the top of your library until you exile a nonland card. That nonland card gains \"Exile a card from your hand: Create a copy of this card. You may cast the copy. Activate only during your turn and only if this card is exiled.\"";
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let parsed = parse_oracle_text(
+        text,
+        "Q, Stacking the Deck",
+        &[],
+        &owned(&["Legendary", "Creature"]),
+        &owned(&["Q"]),
+    );
+    let execute = parsed.triggers[0].execute.as_deref().expect("trigger body");
+    let grant = execute
+        .sub_ability
+        .as_deref()
+        .and_then(|exile_until| exile_until.sub_ability.as_deref())
+        .expect("grant link");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*grant.effect
+    else {
+        panic!("expected the grant, got {:?}", grant.effect);
+    };
+    let granted = static_abilities
+        .iter()
+        .flat_map(|def| def.modifications.iter())
+        .find_map(|modification| match modification {
+            ContinuousModification::GrantAbility { definition } => Some(definition),
+            _ => None,
+        })
+        .expect("granted activated ability");
+    assert!(
+        matches!(*granted.effect, Effect::Unimplemented { .. }),
+        "the granted body must stay Unimplemented so Q remains unsupported, got {:?}",
+        granted.effect
+    );
+}
+
+/// Niambi, Beloved Protector (verbatim Scryfall Oracle text). CR 113.1a +
+/// CR 603.1: the quoted "This ability triggers only once each turn." is part of
+/// the GRANTED trigger's own text. It must not restrict Niambi's ETB, and it must
+/// survive constraint-sentence stripping so the granted trigger carries it.
+#[test]
+fn niambi_quoted_once_each_turn_restricts_only_the_granted_trigger() {
+    let text = "Flash\nWhen Niambi, Beloved Protector enters, if you cast it, choose target nonlegendary creature card in your graveyard that was put there from the battlefield this turn. Return it to the battlefield. It perpetually gains \"Whenever this creature becomes the target of a spell or ability, draw a card. This ability triggers only once each turn.\"";
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let parsed = parse_oracle_text(
+        text,
+        "Niambi, Beloved Protector",
+        &owned(&["Flash"]),
+        &owned(&["Legendary", "Creature"]),
+        &owned(&["Human", "Cleric"]),
+    );
+    assert_eq!(parsed.triggers.len(), 1, "{:?}", parsed.triggers);
+    let etb = &parsed.triggers[0];
+    assert_eq!(etb.constraint, None, "the quoted limit is not the ETB's");
+
+    let mut node = etb.execute.as_deref();
+    let granted = std::iter::from_fn(|| {
+        let current = node?;
+        node = current.sub_ability.as_deref();
+        Some(current)
+    })
+    .find_map(|ability| match &*ability.effect {
+        Effect::ApplyPerpetual { modification, .. } => Some(modification),
+        _ => None,
+    })
+    .expect("perpetual grant in the ETB chain");
+    let granted_trigger = match granted {
+        PerpetualModification::GrantAbility { modifications } => modifications
+            .iter()
+            .find_map(|modification| match modification {
+                PerpetualGrantModification::GrantTrigger { trigger } => Some(trigger),
+                _ => None,
+            })
+            .expect("granted trigger"),
+        other => panic!("expected a granted ability, got {other:?}"),
+    };
+    assert_eq!(granted_trigger.mode, TriggerMode::BecomesTarget);
+    assert_eq!(
+        granted_trigger.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering,
+        })
+    );
+    assert!(
+        matches!(
+            granted_trigger.execute.as_deref().map(|e| &*e.effect),
+            Some(Effect::Draw { .. })
+        ),
+        "{:?}",
+        granted_trigger.execute
+    );
+    assert!(
+        granted_trigger
+            .execute
+            .as_deref()
+            .is_some_and(|e| e.sub_ability.is_none()),
+        "the restriction must not leak into the granted body"
     );
 }
 
