@@ -3123,6 +3123,22 @@ pub(crate) fn append_to_pending_continuation(
         return;
     };
 
+    // CR 608.2c: the producer tail waits below the whole staged population.
+    if let Some(anchor) = state.staged_population_parent.take() {
+        if state
+            .resolution_stack
+            .batch_at_captured_depth(anchor.group, anchor.batch_depth)
+        {
+            state
+                .insert_ability_continuation_parent_at_child_boundary(
+                    PendingContinuation::new(tail, state),
+                    anchor.batch_depth,
+                )
+                .expect("staged population parent accepts the producer tail");
+            return;
+        }
+    }
+
     if let Some(active_occurrence) = state
         .active_ability_continuation()
         .map(|frame| frame.return_result_occurrence)
@@ -21142,7 +21158,11 @@ pub fn resolve_ability_chain(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<(), EffectError> {
-    resolve_ability_chain_step(state, ability, events, depth).map(|_| ())
+    let result = resolve_ability_chain_step(state, ability, events, depth).map(|_| ());
+    if depth == 0 {
+        state.staged_population_parent = None;
+    }
+    result
 }
 
 pub(crate) fn resolve_ability_chain_step(

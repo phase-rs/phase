@@ -875,6 +875,10 @@ pub(crate) struct BatchMemberDeliveryOwner {
     pub group: LogicalZoneChangeGroupId,
     pub member: ObjectIncarnationRef,
     pub expected_event: Option<ProposedEvent>,
+    /// Retained authority installed after the Aura-host consult.
+    pub population_devour_snapshot: Option<HashSet<ObjectId>>,
+    /// Retained authority installed after the Aura-host consult.
+    pub approved_post_replacement: Option<crate::types::game_state::PostReplacementDrainStack>,
 }
 
 fn move_batch_member_with_terminal(
@@ -1531,6 +1535,8 @@ fn deliver_batch(
                 group: logical_zone_change_group.logical_group_id,
                 member: paused.member,
                 expected_event: None,
+                population_devour_snapshot: None,
+                approved_post_replacement: None,
             });
         match move_batch_member_with_terminal(state, req, owner, events) {
             ZoneMoveTerminalResult::Completed(completion) => {
@@ -1675,6 +1681,7 @@ fn new_staged_batch(state: &GameState, reqs: &[ZoneMoveRequest]) -> StagedBatchD
                 terminal: None,
                 operation: StagedMemberOperation::ZoneMove,
                 outer_destroy_approved: false,
+                approved_post_replacement: None,
             }
         })
         .collect();
@@ -1684,6 +1691,7 @@ fn new_staged_batch(state: &GameState, reqs: &[ZoneMoveRequest]) -> StagedBatchD
         cursor: 0,
         arrangements: Vec::new(),
         arrangement_cursor: 0,
+        population_devour_snapshot: None,
     }
 }
 
@@ -1891,8 +1899,10 @@ fn consult_next_staged_member(
     };
     let cursor = member.announcement_index as usize;
     set_staged_member_state(owner, cursor, StagedBatchMemberState::InnerConsulting);
+    let drain_point = state.resolution_stack.consult_drain_point();
     match replacement::replace_event(state, prepared.proposed.clone(), events) {
         ReplacementResult::Execute(event) => {
+            retain_member_drain(state, owner, cursor, drain_point);
             record_staged_member_approval(owner, cursor, event);
             StagedConsult::Continue
         }
@@ -1980,9 +1990,11 @@ fn consult_staged_destroy_outer(
         applied: HashSet::new(),
     };
     set_staged_member_state(owner, cursor, StagedBatchMemberState::OuterConsulting);
+    let drain_point = state.resolution_stack.consult_drain_point();
     match replacement::replace_event(state, proposed.clone(), events) {
         ReplacementResult::Execute(event) => {
             if matches!(event, ProposedEvent::Destroy { .. }) {
+                retain_member_drain(state, owner, cursor, drain_point);
                 if let Some(member) = owner
                     .staged
                     .as_mut()
@@ -2076,8 +2088,10 @@ fn consult_staged_destroy_inner(
         Some(operation.source),
     );
     set_staged_member_state(owner, cursor, StagedBatchMemberState::InnerConsulting);
+    let drain_point = state.resolution_stack.consult_drain_point();
     match replacement::replace_event(state, proposed.clone(), events) {
         ReplacementResult::Execute(event) => {
+            retain_member_drain(state, owner, cursor, drain_point);
             record_staged_member_approval(owner, cursor, event);
             StagedConsult::Continue
         }
@@ -2200,6 +2214,7 @@ fn mark_staged_member_terminal(
                     Some((member.identity.object_id, member.approved_event.clone()));
             }
             member.state = StagedBatchMemberState::Terminal;
+            member.approved_post_replacement = None;
             member.terminal = Some(terminal);
             member.pending_outcome = None;
         }
@@ -2491,10 +2506,38 @@ fn deliver_staged_members(
         };
         let explicit_index = staged_arrangement_slot(state, owner, &member);
         let delivery_start = events.len();
+        // CR 614.13a + CR 616.1: hand the population snapshot and the retained
+        // drain to the aura-host delivery, which reinstalls them on Deliver.
+        let to_battlefield = matches!(
+            &event,
+            ProposedEvent::ZoneChange {
+                to: Zone::Battlefield,
+                ..
+            }
+        );
+        let population_devour_snapshot = (to_battlefield
+            && crate::game::engine_replacement::object_has_devour_replacement(
+                state,
+                member.identity.object_id,
+            ))
+        .then(|| {
+            owner
+                .staged
+                .as_ref()
+                .and_then(|staged| staged.population_devour_snapshot.clone())
+        })
+        .flatten();
+        let approved_post_replacement = owner
+            .staged
+            .as_mut()
+            .and_then(|staged| staged.members.get_mut(cursor))
+            .and_then(|member| member.approved_post_replacement.take());
         let delivery_owner = Some(BatchMemberDeliveryOwner {
             group: owner.logical_zone_change_group.logical_group_id,
             member: member.identity,
             expected_event: Some(event.clone()),
+            population_devour_snapshot,
+            approved_post_replacement,
         });
         match deliver_replaced_zone_change_with_aura_host(
             state,
@@ -2515,6 +2558,8 @@ fn deliver_staged_members(
         ) {
             AuraAwareZoneDelivery::Completed(completion) => {
                 mark_staged_member_terminal(state, owner, cursor, completion, events);
+                // CR 614.13a: retire this completed member's eligibility frame.
+                state.clear_completed_active_devour_snapshot();
             }
             AuraAwareZoneDelivery::NeedsChoice(_) | AuraAwareZoneDelivery::NeedsAuraHostChoice => {
                 // Keep the authoritative parked boundary and retain this
@@ -2534,6 +2579,40 @@ fn deliver_staged_members(
                 sync_staged_requests(owner);
                 return StagedStop::Paused;
             }
+        }
+    }
+}
+
+/// CR 616.1: retain the approved consultation's post-replacement drain
+/// on the member.
+fn retain_member_drain(
+    state: &mut GameState,
+    owner: &mut PendingBatchDeliveries,
+    cursor: usize,
+    point: (crate::types::resolution::ChildStackDepth, Option<usize>),
+) {
+    let Some(drain) = state
+        .resolution_stack
+        .retain_consultation_post_replacement(point)
+    else {
+        return;
+    };
+    attach_member_drain(owner, cursor, drain);
+}
+
+fn attach_member_drain(
+    owner: &mut PendingBatchDeliveries,
+    cursor: usize,
+    drain: crate::types::game_state::PostReplacementDrainStack,
+) {
+    if let Some(member) = owner
+        .staged
+        .as_mut()
+        .and_then(|staged| staged.members.get_mut(cursor))
+    {
+        match member.approved_post_replacement.as_mut() {
+            Some(existing) => existing.append_retained(drain),
+            None => member.approved_post_replacement = Some(drain),
         }
     }
 }
@@ -2680,12 +2759,10 @@ pub(crate) fn deliver_staged_destroy_batch(
         ability: Box::new(ability.clone()),
         settled_destroyed: None,
     });
+    let boundary = state.resolution_stack.capture_child_boundary();
     match run_staged_batch(state, &mut owner, events) {
         StagedStop::Paused | StagedStop::Arranging => {
-            state
-                .resolution_stack
-                .park_batch_owner(owner)
-                .expect("paused staged destroy batch parks its exact owner");
+            state.repark_batch_owner_below_children(owner, boundary);
             StagedFamilyOutcome::Paused
         }
         StagedStop::Delivered => {
@@ -2732,24 +2809,11 @@ pub(crate) fn deliver_staged_change_zone_batch(
 ) -> StagedChangeZoneOutcome {
     let event_start = events.len();
     let group_id = logical_zone_change_group.logical_group_id;
-    let staged = new_staged_batch(state, &reqs);
-    // CR 614.13a: absorb a Devour-only frame for this exact move; the marker
-    // replaces it (and keeps its eligibility snapshot across a pause).
-    let devour_eligible_snapshot = if state.active_change_zone_frame().is_some_and(|frame| {
-        frame.pending.is_none()
-            && frame.awaiting_batch.is_none()
-            && frame.devour_eligible_snapshot.is_some()
-    }) {
-        let snapshot = state
-            .active_change_zone_frame()
-            .and_then(|frame| frame.devour_eligible_snapshot.clone());
-        let _ = state
-            .take_active_change_zone_frame()
-            .expect("the absorbed Devour-only frame is active");
-        snapshot
-    } else {
-        None
-    };
+    let mut staged = new_staged_batch(state, &reqs);
+    // Each first-run population owns its transient producer-tail anchor.
+    state.staged_population_parent = None;
+    // CR 614.13a: freeze eligibility before any population member enters.
+    staged.population_devour_snapshot = state.install_change_zone_batch_marker(group_id, &reqs);
     let child_stack_start = state.resolution_stack.capture_child_boundary();
     let mut owner = new_staged_owner(state, &reqs, logical_zone_change_group, staged);
     owner.completion = Some(BatchCompletion::ChangeZonePopulationSettled {
@@ -2758,32 +2822,20 @@ pub(crate) fn deliver_staged_change_zone_batch(
     });
     match run_staged_batch(state, &mut owner, events) {
         StagedStop::Paused | StagedStop::Arranging => {
-            // R4c addendum (a): the batch owner must sit BELOW the delivery
-            // child stack (an ETB-counter direct-choice child owns the stack
-            // top), and the ChangeZone marker immediately below it.
-            let after_run = state.resolution_stack.capture_child_boundary();
-            if after_run > child_stack_start {
-                state
-                    .resolution_stack
-                    .insert_parent_at_child_boundary(
-                        crate::types::resolution::ResolutionFrame::BatchDelivery(Box::new(owner)),
-                        child_stack_start,
-                    )
-                    .expect("paused staged ChangeZone batch inserts below its child stack");
-            } else {
-                state
-                    .resolution_stack
-                    .park_batch_owner(owner)
-                    .expect("paused staged ChangeZone batch parks its exact owner");
-            }
-            state.insert_change_zone_batch_parent_at_child_boundary(
-                group_id,
-                devour_eligible_snapshot,
-                child_stack_start,
-            );
+            state.repark_batch_owner_below_children(owner, child_stack_start);
+            state.staged_population_parent =
+                Some(crate::types::game_state::StagedPopulationParent {
+                    group: group_id,
+                    batch_depth: child_stack_start,
+                });
             StagedChangeZoneOutcome::Paused
         }
         StagedStop::Delivered => {
+            let retired = state.take_change_zone_batch_marker(group_id);
+            debug_assert!(
+                retired,
+                "a synchronously delivered staged ChangeZone retires its marker"
+            );
             record_staged_terminals_for_settlement(&mut owner);
             let mut group = owner.logical_zone_change_group;
             let members = owner
@@ -2875,10 +2927,21 @@ pub(crate) fn record_staged_batch_consultation_result(
     outcome: StagedMemberOutcome,
     events: &mut Vec<GameEvent>,
 ) -> StagedConsultationHandback {
+    // CR 616.1: detach the approved drain before checking for its batch owner.
+    let mut retained = if matches!(outcome, StagedMemberOutcome::Approved(_)) {
+        state
+            .resolution_stack
+            .take_ready_post_replacement_above_batch(group_id)
+    } else {
+        None
+    };
     if state
         .active_batch_delivery()
         .is_none_or(|pending| pending.logical_zone_change_group.logical_group_id != group_id)
     {
+        if let Some(drain) = retained.take() {
+            state.resolution_stack.push_post_replacement(drain);
+        }
         return StagedConsultationHandback::NotOwned;
     }
     let Some(mut owner) = state
@@ -2887,64 +2950,72 @@ pub(crate) fn record_staged_batch_consultation_result(
         .ok()
         .flatten()
     else {
+        if let Some(drain) = retained.take() {
+            state.resolution_stack.push_post_replacement(drain);
+        }
         return StagedConsultationHandback::NotOwned;
     };
+    let boundary = state.resolution_stack.capture_child_boundary();
     let live_child = state.pending_replacement.is_some()
         || !matches!(
             state.waiting_for,
             WaitingFor::Priority { .. } | WaitingFor::ReplacementChoice { .. }
         );
-    let Some(staged) = owner.staged.as_mut() else {
-        state
-            .resolution_stack
-            .park_batch_owner(owner)
-            .expect("staged batch re-parks its exact owner");
-        return StagedConsultationHandback::NotOwned;
-    };
-    if staged.stage != BatchDeliveryStage::Approving {
-        state
-            .resolution_stack
-            .park_batch_owner(owner)
-            .expect("staged batch re-parks its exact owner");
+    let refuse =
+        |state: &mut GameState,
+         owner: PendingBatchDeliveries,
+         retained: Option<crate::types::game_state::PostReplacementDrainStack>| {
+            state.repark_batch_owner_below_children(owner, boundary);
+            if let Some(drain) = retained {
+                state.resolution_stack.push_post_replacement(drain);
+            }
+        };
+    let approving = owner
+        .staged
+        .as_ref()
+        .is_some_and(|staged| staged.stage == BatchDeliveryStage::Approving);
+    if !approving {
+        refuse(state, owner, retained);
         return StagedConsultationHandback::NotOwned;
     }
+    let staged = owner.staged.as_mut().expect("checked staged");
     let cursor = staged.cursor;
     let Some(member) = staged.members.get_mut(cursor) else {
-        state
-            .resolution_stack
-            .park_batch_owner(owner)
-            .expect("staged batch re-parks its exact owner");
+        refuse(state, owner, retained);
         return StagedConsultationHandback::NotOwned;
     };
     if member.pending_outcome.is_some() {
         let waiting = state.waiting_for.clone();
-        state
-            .resolution_stack
-            .park_batch_owner(owner)
-            .expect("staged batch re-parks its exact owner");
+        refuse(state, owner, retained);
         return StagedConsultationHandback::Parked(waiting);
     }
     member.pending_outcome = Some(outcome.clone());
     if live_child {
+        if let Some(drain) = retained.take() {
+            attach_member_drain(&mut owner, cursor, drain);
+        }
         if matches!(outcome, StagedMemberOutcome::Prevented) {
-            member.state = StagedBatchMemberState::PreventedWithChild;
+            if let Some(member) = owner
+                .staged
+                .as_mut()
+                .and_then(|staged| staged.members.get_mut(cursor))
+            {
+                member.state = StagedBatchMemberState::PreventedWithChild;
+            }
         }
         let waiting = state.waiting_for.clone();
-        state
-            .resolution_stack
-            .park_batch_owner(owner)
-            .expect("staged batch re-parks its exact owner");
+        state.repark_batch_owner_below_children(owner, boundary);
         return StagedConsultationHandback::Parked(waiting);
     }
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
     if !finalize_staged_pending_outcome_on(state, &mut owner, events) {
-        state
-            .resolution_stack
-            .park_batch_owner(owner)
-            .expect("staged batch re-parks its exact owner");
+        refuse(state, owner, retained);
         return StagedConsultationHandback::Parked(state.waiting_for.clone());
+    }
+    if let Some(drain) = retained.take() {
+        attach_member_drain(&mut owner, cursor, drain);
     }
     let stop = run_staged_batch(state, &mut owner, events);
     if stop == StagedStop::Delivered {
@@ -2956,10 +3027,7 @@ pub(crate) fn record_staged_batch_consultation_result(
             StagedConsultationHandback::Parked(state.waiting_for.clone())
         }
     } else {
-        state
-            .resolution_stack
-            .park_batch_owner(owner)
-            .expect("staged batch re-parks its exact owner");
+        state.repark_batch_owner_below_children(owner, boundary);
         StagedConsultationHandback::Parked(state.waiting_for.clone())
     }
 }
@@ -3029,6 +3097,7 @@ fn finalize_staged_pending_outcome_on(
                 }
                 _ => None,
             };
+            member.approved_post_replacement = None;
             member.terminal = Some(ZoneMoveCompletion::Prevented);
             member.state = StagedBatchMemberState::Terminal;
             member.pending_outcome = None;
@@ -3120,6 +3189,7 @@ pub(crate) fn submit_staged_batch_arrangement(
         .take_active_batch_delivery()
         .map_err(|error| format!("{error:?}"))?
         .ok_or_else(|| "batch-owned arrangement lost its staged frame".to_string())?;
+    let boundary = state.resolution_stack.capture_child_boundary();
     let validated: Result<(usize, Vec<MassLibraryOrderMember>, bool), String> = (|| {
         let staged = owner
             .staged
@@ -3179,10 +3249,7 @@ pub(crate) fn submit_staged_batch_arrangement(
     let (index, submitted, has_next) = match validated {
         Ok(validated) => validated,
         Err(message) => {
-            state
-                .resolution_stack
-                .park_batch_owner(owner)
-                .expect("staged batch re-parks its exact owner");
+            state.repark_batch_owner_below_children(owner, boundary);
             return Err(message);
         }
     };
@@ -3201,10 +3268,7 @@ pub(crate) fn submit_staged_batch_arrangement(
     }
     if has_next {
         let _ = publish_next_staged_arrangement(state, &mut owner);
-        state
-            .resolution_stack
-            .park_batch_owner(owner)
-            .expect("staged batch re-parks its exact owner");
+        state.repark_batch_owner_below_children(owner, boundary);
         return Ok(());
     }
     state.waiting_for = WaitingFor::Priority {
@@ -3216,10 +3280,7 @@ pub(crate) fn submit_staged_batch_arrangement(
             settle_batch_owner(state, owner, deferred_events, events);
         }
         StagedStop::Paused | StagedStop::Arranging => {
-            state
-                .resolution_stack
-                .park_batch_owner(owner)
-                .expect("staged batch re-parks its exact owner");
+            state.repark_batch_owner_below_children(owner, boundary);
         }
     }
     Ok(())
@@ -3244,6 +3305,7 @@ pub(crate) fn prune_staged_member_for_player_left(
         return;
     };
     let owner = &mut staged.members[index];
+    owner.approved_post_replacement = None;
     owner.state = StagedBatchMemberState::Abandoned;
     owner.approved_event = None;
     owner.pending_outcome = None;
@@ -3310,6 +3372,7 @@ pub(crate) fn reconcile_staged_batch_after_departure(
         let Ok(Some(mut owner)) = state.resolution_stack.take_active_batch_delivery() else {
             return Ok(crate::game::engine_resolution_choices::DepartureSettlement::NotSettled);
         };
+        let boundary = state.resolution_stack.capture_child_boundary();
         if reconcile_staged_owner(state, &mut owner, identity.group, events) {
             // Settle against the batch's own buffer only: the caller's events
             // belong to the departure sweep and include unrelated ZoneChanged
@@ -3323,10 +3386,7 @@ pub(crate) fn reconcile_staged_batch_after_departure(
             // part instead of being retired as an unanswered question.
             return Ok(crate::game::engine_resolution_choices::DepartureSettlement::Settled);
         }
-        state
-            .resolution_stack
-            .park_batch_owner(owner)
-            .expect("reconciled staged batch re-parks its exact owner");
+        state.repark_batch_owner_below_children(owner, boundary);
         return Ok(crate::game::engine_resolution_choices::DepartureSettlement::NotSettled);
     }
 
@@ -4723,10 +4783,33 @@ pub(crate) fn deliver_replaced_zone_change_with_aura_host(
     track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
     explicit_library_index: Option<usize>,
-    owner: Option<BatchMemberDeliveryOwner>,
+    mut owner: Option<BatchMemberDeliveryOwner>,
     events: &mut Vec<GameEvent>,
 ) -> AuraAwareZoneDelivery {
     let host = consult_aura_host_post_replace(state, &mut event, source_id);
+    // CR 303.4g + CR 614.6: retain entry work only when delivery or a host
+    // choice remains possible; an impossible Aura entry drops both pieces.
+    let retained_snapshot = owner
+        .as_mut()
+        .and_then(|owner| owner.population_devour_snapshot.take());
+    let retained_drain = owner
+        .as_mut()
+        .and_then(|owner| owner.approved_post_replacement.take());
+    if matches!(
+        host,
+        AuraHostPostReplaceOutcome::Deliver | AuraHostPostReplaceOutcome::NeedsHost { .. }
+    ) {
+        let had_snapshot = retained_snapshot.is_some();
+        if let Some(snapshot) = retained_snapshot {
+            state.push_devour_change_zone_snapshot(snapshot);
+        }
+        if let Some(drain) = retained_drain {
+            state.resolution_stack.push_post_replacement(drain);
+        }
+        if had_snapshot {
+            debug_assert!(state.active_devour_eligible_snapshot().is_some());
+        }
+    }
     let pending_host = match host {
         AuraHostPostReplaceOutcome::Deliver => None,
         AuraHostPostReplaceOutcome::Remained => {
@@ -5357,6 +5440,106 @@ mod entering_aura_attachment_tests {
         obj.keywords.push(Keyword::Enchant(enchant_creature()));
         obj.base_keywords = obj.keywords.clone();
         id
+    }
+
+    // CR 303.4g + CR 614.6: an impossible Aura entry cannot execute retained
+    // replacement work. Deliver and the pending-host choice must both keep it.
+    #[test]
+    fn aura_host_remained_drops_retained_drain_and_population_snapshot() {
+        use crate::types::ability::{PostReplacementContinuation, QuantityExpr};
+        use crate::types::game_state::{
+            PostReplacementDrain, PostReplacementDrainStack, ResidentDrainPolicy,
+        };
+        for (origin, host_count) in [
+            (Zone::Graveyard, 0),
+            (Zone::Stack, 0),
+            (Zone::Graveyard, 1),
+            (Zone::Graveyard, 2),
+        ] {
+            let mut state = GameState::new_two_player(8);
+            let aura = card_aura(&mut state, P0, origin);
+            let hosts: Vec<_> = (0..host_count)
+                .map(|_| creature(&mut state, P0, "Host"))
+                .collect();
+            let member = ObjectIncarnationRef::from_object(&state.objects[&aura]);
+            let group = state
+                .allocate_logical_zone_change_group(&[aura])
+                .logical_group_id;
+            let event = ProposedEvent::zone_change(aura, origin, Zone::Battlefield, Some(aura));
+            let mut drains = PostReplacementDrainStack::default();
+            assert!(drains.install(
+                PostReplacementDrain::ready(PostReplacementContinuation::Resolved(Box::new(
+                    ResolvedAbility::new(
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                        Vec::new(),
+                        aura,
+                        P0
+                    ),
+                ))),
+                ResidentDrainPolicy::KeepResident
+            ));
+            let life = state.players[0].life;
+            let mut events = Vec::new();
+            let result = deliver_replaced_zone_change_with_aura_host(
+                &mut state,
+                aura,
+                member,
+                event.clone(),
+                Some(aura),
+                None,
+                None,
+                false,
+                None,
+                None,
+                Some(BatchMemberDeliveryOwner {
+                    group,
+                    member,
+                    expected_event: Some(event),
+                    population_devour_snapshot: Some(hosts.iter().copied().collect()),
+                    approved_post_replacement: Some(drains),
+                }),
+                &mut events,
+            );
+            if host_count == 0 {
+                let expected = if origin == Zone::Stack {
+                    Zone::Graveyard
+                } else {
+                    origin
+                };
+                assert_eq!(state.objects[&aura].zone, expected);
+                assert_eq!(state.players[0].life, life);
+                assert!(state.resolution_stack.is_empty());
+                assert!(matches!(
+                    result,
+                    AuraAwareZoneDelivery::Completed(
+                        ZoneMoveCompletion::Remained | ZoneMoveCompletion::Moved
+                    )
+                ));
+                assert!(!events.iter().any(|event| matches!(event, GameEvent::ZoneChanged { object_id, to: Zone::Battlefield, .. } if *object_id == aura)));
+            } else {
+                assert_eq!(state.objects[&aura].zone, Zone::Battlefield);
+                assert_eq!(state.players[0].life, life + 1);
+                if host_count == 1 {
+                    assert!(matches!(
+                        result,
+                        AuraAwareZoneDelivery::Completed(ZoneMoveCompletion::Moved)
+                    ));
+                    assert_eq!(
+                        state.objects[&aura].attached_to,
+                        Some(AttachTarget::Object(hosts[0]))
+                    );
+                } else {
+                    assert!(matches!(result, AuraAwareZoneDelivery::NeedsAuraHostChoice));
+                    assert!(
+                        matches!(&state.waiting_for, WaitingFor::ReturnAsAuraTarget { legal_targets, .. }
+                        if legal_targets == &hosts.iter().copied().map(TargetRef::Object).collect::<Vec<_>>())
+                    );
+                }
+            }
+        }
     }
 
     /// A Curse-shaped card-backed Aura in `zone`: `enchant player`, so its only
@@ -11555,6 +11738,7 @@ mod staged_batch_tests {
             terminal: None,
             operation: StagedMemberOperation::ZoneMove,
             outer_destroy_approved: false,
+            approved_post_replacement: None,
         }
     }
 
@@ -11611,6 +11795,7 @@ mod staged_batch_tests {
             members,
             arrangements: Vec::new(),
             arrangement_cursor: 0,
+            population_devour_snapshot: None,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             component_delivery_parent: None,
@@ -12046,6 +12231,7 @@ mod staged_batch_tests {
             members,
             arrangements: Vec::new(),
             arrangement_cursor: 0,
+            population_devour_snapshot: None,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             component_delivery_parent: None,

@@ -399,3 +399,252 @@ fn single_pick_devour_does_not_leak_snapshot_to_later_sacrifice() {
          sacrifice — pool must be the FULL controller creature set; pool={cards:?}"
     );
 }
+
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::game_state::CastPaymentMode;
+use engine::types::phase::Phase;
+
+// Full printed Oracle text from data/mtgjson/AtomicCards.json.
+const TWILIGHTS_CALL: &str = "You may cast this spell as though it had flash if you pay {2} \
+more to cast it. (You may cast it any time you could cast an instant.)\nEach player returns \
+all creature cards from their graveyard to the battlefield.";
+const THUNDER_THRASH_ELDER: &str = "Devour 3 (As this creature enters, you may sacrifice any \
+number of creatures. It enters with three times that many +1/+1 counters on it.)";
+const PHYREXIAN_CENSOR: &str = "Each player can't cast more than one non-Phyrexian spell \
+each turn.\nNon-Phyrexian creatures enter tapped.";
+const RISE_OF_THE_DARK_REALMS: &str =
+    "Put all creature cards from all graveyards onto the battlefield under your control.";
+
+fn add_elder(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    scenario
+        .add_creature_to_graveyard(player, "Thunder-Thrash Elder", 1, 1)
+        .from_oracle_text_with_keywords(&["Devour"], THUNDER_THRASH_ELDER)
+        .with_subtypes(vec!["Lizard", "Warrior"])
+        .id()
+}
+
+fn cast_reanimation(scenario: GameScenario, name: &str, oracle: &str) -> GameRunner {
+    let mut scenario = scenario;
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, name, false, oracle)
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id: runner.state().objects[&spell].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast reanimation from hand");
+    advance_reanimation(&mut runner);
+    runner
+}
+
+fn advance_reanimation(runner: &mut GameRunner) {
+    for _ in 0..12 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            || runner.state().stack.is_empty()
+        {
+            return;
+        }
+        runner.act(GameAction::PassPriority).expect("resolve spell");
+    }
+    panic!("reanimation did not reach its next choice");
+}
+
+fn apply_censor_first(runner: &mut GameRunner) {
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected entry ordering, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    let index = candidates
+        .iter()
+        .position(|candidate| candidate.source_name == "Phyrexian Censor")
+        .expect("Censor is an applicable entry replacement");
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("apply Censor before Devour");
+}
+
+fn devour_pool(runner: &GameRunner, expected_player: PlayerId) -> Vec<ObjectId> {
+    let WaitingFor::EffectZoneChoice { player, cards, .. } = &runner.state().waiting_for else {
+        panic!("expected Devour, got {:?}", runner.state().waiting_for);
+    };
+    assert_eq!(*player, expected_player);
+    cards.clone()
+}
+
+fn select_devour(runner: &mut GameRunner, cards: Vec<ObjectId>) {
+    runner
+        .act(GameAction::SelectCards { cards })
+        .expect("answer Devour");
+    advance_reanimation(runner);
+}
+
+fn elder_counters(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0)
+}
+
+fn assert_reanimation_settled(runner: &GameRunner) {
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(runner.state().pending_replacement.is_none());
+    assert!(runner.state().staged_population_parent.is_none());
+}
+
+// CR 614.13a + CR 616.1: retained member drains share the pre-entry population,
+// even when both replacement-ordering choices happen before either delivery.
+#[test]
+fn twilights_call_two_devourers_under_censor_each_order_then_devour() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P1, "Phyrexian Censor", 3, 3, PHYREXIAN_CENSOR)
+        .with_subtypes(vec!["Phyrexian", "Wizard"]);
+    let a = add_elder(&mut scenario, P0);
+    let b = add_elder(&mut scenario, P0);
+    let f1 = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let f2 = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mut runner = cast_reanimation(scenario, "Twilight's Call", TWILIGHTS_CALL);
+    apply_censor_first(&mut runner);
+    apply_censor_first(&mut runner);
+    assert_eq!(devour_pool(&runner, P0), vec![f1, f2]);
+    select_devour(&mut runner, vec![f1]);
+    assert_eq!(devour_pool(&runner, P0), vec![f2]);
+    select_devour(&mut runner, vec![f2]);
+    for id in [a, b] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+        assert!(runner.state().objects[&id].tapped);
+        assert_eq!(elder_counters(&runner, id), 3);
+    }
+    for id in [f1, f2] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Graveyard);
+    }
+    assert_reanimation_settled(&runner);
+}
+
+// CR 608.2c: the next player's iteration cannot overtake P0's second entrant.
+#[test]
+fn twilights_call_two_devourers_one_fodder_keeps_producer_tail_below_batch() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let a = add_elder(&mut scenario, P0);
+    let b = add_elder(&mut scenario, P0);
+    let c = add_elder(&mut scenario, P1);
+    let f = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let g = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let mut runner = cast_reanimation(scenario, "Twilight's Call", TWILIGHTS_CALL);
+    let mut players = Vec::new();
+    let mut pools = Vec::new();
+    let mut p0_choices = [vec![], vec![f]].into_iter();
+    for _ in 0..3 {
+        let WaitingFor::EffectZoneChoice { player, cards, .. } = &runner.state().waiting_for else {
+            break;
+        };
+        let player = *player;
+        players.push(player);
+        pools.push(cards.clone());
+        let choice = if player == P0 {
+            p0_choices.next().expect("at most two P0 Devour prompts")
+        } else {
+            assert_eq!(player, P1);
+            vec![g]
+        };
+        select_devour(&mut runner, choice);
+    }
+    assert_eq!(players, vec![P0, P0, P1]);
+    assert_eq!(pools, vec![vec![f], vec![f], vec![g]]);
+    assert_eq!(elder_counters(&runner, a), 0);
+    assert_eq!(elder_counters(&runner, b), 3);
+    assert_eq!(elder_counters(&runner, c), 3);
+    for id in [a, b, c] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+    }
+    for id in [f, g] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Graveyard);
+    }
+    assert_reanimation_settled(&runner);
+}
+
+// CR 614.13a: the second retained drain must not recapture the first entrant.
+#[test]
+fn twilights_call_two_devourers_empty_pool_cannot_offer_each_other() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let a = add_elder(&mut scenario, P0);
+    let b = add_elder(&mut scenario, P0);
+    let runner = cast_reanimation(scenario, "Twilight's Call", TWILIGHTS_CALL);
+    for id in [a, b] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+        assert_eq!(elder_counters(&runner, id), 0);
+    }
+    assert_reanimation_settled(&runner);
+}
+
+// CR 608.2c: a producer without an iteration tail leaves no transient anchor.
+#[test]
+fn rise_two_devourers_one_fodder() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let a = add_elder(&mut scenario, P0);
+    let b = add_elder(&mut scenario, P0);
+    let f = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mut runner = cast_reanimation(scenario, "Rise of the Dark Realms", RISE_OF_THE_DARK_REALMS);
+    assert!(runner.state().staged_population_parent.is_none());
+    assert_eq!(devour_pool(&runner, P0), vec![f]);
+    select_devour(&mut runner, vec![]);
+    assert_eq!(devour_pool(&runner, P0), vec![f]);
+    select_devour(&mut runner, vec![f]);
+    assert_eq!(elder_counters(&runner, a), 0);
+    assert_eq!(elder_counters(&runner, b), 3);
+    for id in [a, b] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+    }
+    assert_eq!(runner.state().objects[&f].zone, Zone::Graveyard);
+    assert_reanimation_settled(&runner);
+}
+
+#[test]
+fn rise_two_devourers_under_censor() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P1, "Phyrexian Censor", 3, 3, PHYREXIAN_CENSOR)
+        .with_subtypes(vec!["Phyrexian", "Wizard"]);
+    let a = add_elder(&mut scenario, P0);
+    let b = add_elder(&mut scenario, P0);
+    let f1 = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let f2 = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mut runner = cast_reanimation(scenario, "Rise of the Dark Realms", RISE_OF_THE_DARK_REALMS);
+    assert!(runner.state().staged_population_parent.is_none());
+    apply_censor_first(&mut runner);
+    apply_censor_first(&mut runner);
+    assert_eq!(devour_pool(&runner, P0), vec![f1, f2]);
+    select_devour(&mut runner, vec![f1]);
+    assert_eq!(devour_pool(&runner, P0), vec![f2]);
+    select_devour(&mut runner, vec![f2]);
+    for id in [a, b] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+        assert!(runner.state().objects[&id].tapped);
+        assert_eq!(elder_counters(&runner, id), 3);
+    }
+    for id in [f1, f2] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Graveyard);
+    }
+    assert_reanimation_settled(&runner);
+}

@@ -1283,7 +1283,7 @@ pub fn resolve(
             // pause arm above returned before reaching here.
             if state
                 .active_change_zone_frame()
-                .is_some_and(|frame| frame.pending.is_none())
+                .is_some_and(|frame| frame.pending.is_none() && frame.awaiting_batch.is_none())
             {
                 let _ = state
                     .take_active_change_zone_frame()
@@ -1363,7 +1363,7 @@ pub fn resolve(
             // pause arm above returned before reaching here.
             if state
                 .active_change_zone_frame()
-                .is_some_and(|frame| frame.pending.is_none())
+                .is_some_and(|frame| frame.pending.is_none() && frame.awaiting_batch.is_none())
             {
                 let _ = state
                     .take_active_change_zone_frame()
@@ -1720,7 +1720,7 @@ pub fn resolve(
     // clear the pre-entry Devour snapshot (its lifetime = this entry event).
     if state
         .active_change_zone_frame()
-        .is_some_and(|frame| frame.pending.is_none())
+        .is_some_and(|frame| frame.pending.is_none() && frame.awaiting_batch.is_none())
     {
         let _ = state
             .take_active_change_zone_frame()
@@ -3552,7 +3552,7 @@ pub fn resolve_all(
     // sacrifice + remaining co-entering members still need it).
     if state
         .active_change_zone_frame()
-        .is_some_and(|frame| frame.pending.is_none())
+        .is_some_and(|frame| frame.pending.is_none() && frame.awaiting_batch.is_none())
     {
         let _ = state
             .take_active_change_zone_frame()

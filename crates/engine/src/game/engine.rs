@@ -2488,6 +2488,7 @@ fn finish_action_boundary_with_lifecycle(
         *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
         return Err(EngineError::LifeChangeUnrepresentable { player });
     }
+    state.staged_population_parent = None;
     #[cfg(debug_assertions)]
     super::perf_counters::outside_take_cost(|| debug_assert_runtime_resolution_invariants(state));
     let lifecycle_facts = if reversed {

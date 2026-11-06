@@ -6757,7 +6757,7 @@ pub(super) fn handle_resolution_choice(
                 && state.active_devour_eligible_snapshot().is_some()
                 && state
                     .active_change_zone_frame()
-                    .is_some_and(|frame| frame.pending.is_none())
+                    .is_some_and(|frame| frame.pending.is_none() && frame.awaiting_batch.is_none())
             {
                 let _ = state
                     .take_active_change_zone_frame()

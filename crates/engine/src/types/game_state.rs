@@ -6834,6 +6834,9 @@ impl PendingBatchDeliveries {
         let Some(staged) = &self.staged else {
             return Ok(());
         };
+        if staged.population_devour_snapshot.is_some() && !self.is_change_zone_population() {
+            return Err("only a ChangeZone population owns a Devour snapshot".to_string());
+        }
         let members = &staged.members;
         if members.is_empty() {
             return Err("staged batch delivery has no members".to_string());
@@ -6931,6 +6934,31 @@ impl PendingBatchDeliveries {
             ProposedEvent::Destroy { object_id, .. } => *object_id == member.identity.object_id,
             _ => false,
         };
+        if let Some(drains) = &member.approved_post_replacement {
+            let approved = match member.state {
+                StagedBatchMemberState::Approved => true,
+                StagedBatchMemberState::OuterConsulting
+                | StagedBatchMemberState::InnerConsulting => {
+                    matches!(
+                        member.pending_outcome,
+                        Some(StagedMemberOutcome::Approved(_))
+                    )
+                }
+                StagedBatchMemberState::Unconsulted
+                | StagedBatchMemberState::PreventedWithChild
+                | StagedBatchMemberState::Terminal
+                | StagedBatchMemberState::Abandoned => false,
+            };
+            if !approved
+                || drains.is_empty()
+                || drains.frame_id().is_some()
+                || drains
+                    .drains()
+                    .any(|drain| drain.ready_continuation().is_none())
+            {
+                return Err("retained replacement work requires an approved member and unstamped Ready drains".to_string());
+            }
+        }
         let is_destroy = matches!(member.operation, StagedMemberOperation::Destroy(_));
         if member.outer_destroy_approved && !is_destroy {
             return Err("a zone-move staged member carries the destroy approval flag".to_string());
@@ -7372,6 +7400,13 @@ pub struct StagedBatchDelivery {
     pub arrangements: Vec<StagedLibraryArrangement>,
     /// Next arrangement group to prompt (`Arranging`).
     pub arrangement_cursor: usize,
+    /// CR 614.13a: pre-entry eligibility shared by every population member.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::deterministic_serde::option_hash_set"
+    )]
+    pub population_devour_snapshot: Option<HashSet<ObjectId>>,
 }
 
 /// CR 400.7 + CR 608.2c: the legacy per-member ChangeZone bookkeeping the
@@ -7438,6 +7473,9 @@ pub struct StagedBatchMember {
     /// this flag is the exact emission witness.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub outer_destroy_approved: bool,
+    /// CR 616.1: approved replacement work retained until member delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_post_replacement: Option<PostReplacementDrainStack>,
 }
 
 /// The charter's current-member states. `OuterConsulting` is produced only by
@@ -24441,6 +24479,9 @@ declare_game_state! {
     /// Cleared the moment it is observed. Transient — never serialized.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replacement_may_cost_paused: bool,
+    /// CR 608.2c: transient insertion anchor for the population producer tail.
+    #[serde(skip)]
+    pub staged_population_parent: Option<StagedPopulationParent>,
     /// CR 614.6 + CR 616.1: When an optional CreateToken replacement defers a
     /// `ChooseOneOf` post-effect (Jinnie Fay class), the chosen branch's token
     /// event must inherit the originating event's applied replacement ids so
@@ -29491,6 +29532,13 @@ pub struct PostReplacementDrain {
     pub controller: Option<crate::types::player::PlayerId>,
 }
 
+/// CR 608.2c: where the producer tail waits for its staged population.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StagedPopulationParent {
+    pub group: crate::types::identifiers::LogicalZoneChangeGroupId,
+    pub batch_depth: ChildStackDepth,
+}
+
 /// CR 616.1g: what an install does when a continuation is already resident.
 ///
 /// This is an explicit parameter because the three production install paths
@@ -29651,6 +29699,29 @@ impl PostReplacementDrainStack {
         self.drains
             .iter()
             .any(|drain| matches!(drain.status, DrainStatus::Ready(_)))
+    }
+
+    /// Take unstamped Ready drains appended by the current consultation.
+    pub(crate) fn take_trailing_ready(&mut self, from_len: usize) -> Option<Self> {
+        if self.id.is_some() || self.drains.len() <= from_len {
+            return None;
+        }
+        if self.drains[from_len..]
+            .iter()
+            .any(|drain| !matches!(drain.status, DrainStatus::Ready(_)))
+        {
+            return None;
+        }
+        let tail = self.drains.split_off(from_len);
+        Some(Self {
+            drains: tail,
+            id: None,
+        })
+    }
+
+    /// Append later approved consultation drains in order.
+    pub(crate) fn append_retained(&mut self, mut other: Self) {
+        self.drains.append(&mut other.drains);
     }
 
     /// The innermost drain, whatever its status. Event-context reads (CR 615.5)
@@ -31464,27 +31535,43 @@ impl GameState {
         }
     }
 
-    /// CR 101.4 + CR 608.2c: install the ChangeZone family's structural parent
-    /// for one staged batch child. The depth was captured before the batch was
-    /// parked, so the marker lands immediately below the child.
-    pub fn insert_change_zone_batch_parent_at_child_boundary(
+    /// CR 614.13a: install a detached marker before the first population run
+    /// and return the population's Devour snapshot.
+    pub fn install_change_zone_batch_marker(
         &mut self,
         group_id: crate::types::identifiers::LogicalZoneChangeGroupId,
-        devour_eligible_snapshot: Option<HashSet<ObjectId>>,
-        child_stack_start: ChildStackDepth,
-    ) {
-        self.resolution_stack
-            .insert_parent_at_child_boundary(
-                crate::types::resolution::ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
-                    pending: None,
-                    devour_eligible_snapshot,
-                    awaiting_batch: Some(crate::types::resolution::ChangeZoneBatchMarker {
-                        group_id,
-                    }),
-                })),
-                child_stack_start,
-            )
-            .expect("staged ChangeZone batch parent must be inserted below its child");
+        reqs: &[crate::game::zone_pipeline::ZoneMoveRequest],
+    ) -> Option<HashSet<ObjectId>> {
+        let marker = ChangeZoneFrame {
+            pending: None,
+            devour_eligible_snapshot: None,
+            awaiting_batch: Some(crate::types::resolution::ChangeZoneBatchMarker {
+                group_id,
+                residency: crate::types::resolution::BatchMarkerResidency::Detached,
+            }),
+        };
+        if self.active_change_zone_frame().is_some_and(|frame| {
+            frame.pending.is_none()
+                && frame.awaiting_batch.is_none()
+                && frame.devour_eligible_snapshot.is_some()
+        }) {
+            let snapshot = self
+                .active_change_zone_frame_mut()
+                .and_then(|frame| frame.devour_eligible_snapshot.take());
+            self.replace_active_change_zone_frame(marker)
+                .expect("Devour-only frame converts in place");
+            return snapshot;
+        }
+        let devour = reqs.iter().any(|req| {
+            req.to == crate::types::zones::Zone::Battlefield
+                && crate::game::engine_replacement::object_has_devour_replacement(
+                    self,
+                    req.object_id,
+                )
+        });
+        let snapshot = devour.then(|| self.battlefield.iter().copied().collect());
+        self.push_change_zone_frame(marker);
+        snapshot
     }
 
     /// CR 101.4 + CR 608.2c: re-park a detached staged batch owner after a run
@@ -31506,10 +31593,7 @@ impl GameState {
         {
             std::cmp::Ordering::Greater => self
                 .resolution_stack
-                .insert_parent_at_child_boundary(
-                    crate::types::resolution::ResolutionFrame::BatchDelivery(Box::new(owner)),
-                    boundary,
-                )
+                .insert_batch_owner_at_child_boundary(owner, boundary)
                 .expect("re-parked staged batch inserts below its delivery child stack"),
             std::cmp::Ordering::Less | std::cmp::Ordering::Equal => self
                 .resolution_stack
@@ -34641,6 +34725,7 @@ impl GameState {
             pending_liminal_entry_resume: None,
             entering_aura_authority: None,
             replacement_may_cost_paused: false,
+            staged_population_parent: None,
             post_replacement_token_choice_applied: None,
             post_replacement_token_substitution_count: None,
             deferred_entry_events: Vec::new(),
@@ -38431,6 +38516,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     `pending_discard_batch` sibling below.
         pending_combat_lifelink: _,
         replacement_may_cost_paused: _,
+        staged_population_parent: _,
         post_replacement_token_choice_applied: _,
         deferred_entry_events: _,
         pending_token_battlefield_entry: _,
@@ -53207,6 +53293,7 @@ mod tests {
                 cant_regenerate: false,
             }),
             outer_destroy_approved: true,
+            approved_post_replacement: None,
         };
         PendingBatchDeliveries::validate_staged_member(&member)
             .expect("concession-pruned destroy member with its outer approval is legal");
@@ -53257,7 +53344,123 @@ mod tests {
             terminal,
             operation: StagedMemberOperation::ZoneMove,
             outer_destroy_approved: false,
+            approved_post_replacement: None,
         }
+    }
+
+    #[test]
+    fn staged_member_retains_post_replacement_until_delivery() {
+        let continuation = PostReplacementContinuation::Resolved(Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(999),
+            PlayerId(0),
+        )));
+        let mut ready = PostReplacementDrainStack::default();
+        assert!(ready.install(
+            PostReplacementDrain::ready(continuation),
+            ResidentDrainPolicy::KeepResident
+        ));
+        let event = ProposedEvent::zone_change(
+            ObjectId(1),
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Some(ObjectId(999)),
+        );
+        for member_state in [
+            StagedBatchMemberState::Unconsulted,
+            StagedBatchMemberState::OuterConsulting,
+            StagedBatchMemberState::InnerConsulting,
+            StagedBatchMemberState::Approved,
+            StagedBatchMemberState::PreventedWithChild,
+            StagedBatchMemberState::Terminal,
+            StagedBatchMemberState::Abandoned,
+        ] {
+            let mut member = cursor_member(
+                1,
+                member_state,
+                (member_state == StagedBatchMemberState::Terminal)
+                    .then_some(ZoneMoveCompletion::Remained),
+                member_state == StagedBatchMemberState::Approved,
+            );
+            match member_state {
+                StagedBatchMemberState::OuterConsulting => {
+                    member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
+                        source: ObjectId(999),
+                        cant_regenerate: false,
+                    });
+                    member.pending_outcome =
+                        Some(StagedMemberOutcome::Approved(ProposedEvent::Destroy {
+                            object_id: ObjectId(1),
+                            source: Some(ObjectId(999)),
+                            cant_regenerate: false,
+                            applied: HashSet::new(),
+                        }));
+                }
+                StagedBatchMemberState::InnerConsulting => {
+                    member.pending_outcome = Some(StagedMemberOutcome::Approved(event.clone()));
+                }
+                StagedBatchMemberState::PreventedWithChild => {
+                    member.pending_outcome = Some(StagedMemberOutcome::Prevented);
+                }
+                StagedBatchMemberState::Unconsulted
+                | StagedBatchMemberState::Approved
+                | StagedBatchMemberState::Terminal
+                | StagedBatchMemberState::Abandoned => {}
+            }
+            PendingBatchDeliveries::validate_staged_member(&member)
+                .expect("base member state is coherent");
+            member.approved_post_replacement = Some(ready.clone());
+            let may_retain = matches!(
+                member_state,
+                StagedBatchMemberState::Approved
+                    | StagedBatchMemberState::OuterConsulting
+                    | StagedBatchMemberState::InnerConsulting
+            );
+            assert_eq!(
+                PendingBatchDeliveries::validate_staged_member(&member).is_ok(),
+                may_retain,
+                "{member_state:?}"
+            );
+            if matches!(
+                member_state,
+                StagedBatchMemberState::OuterConsulting | StagedBatchMemberState::InnerConsulting
+            ) {
+                member.pending_outcome = None;
+                assert!(PendingBatchDeliveries::validate_staged_member(&member).is_err());
+                member.pending_outcome = Some(StagedMemberOutcome::Prevented);
+                assert!(PendingBatchDeliveries::validate_staged_member(&member).is_err());
+            }
+        }
+        let mut member = cursor_member(1, StagedBatchMemberState::Approved, None, true);
+        member.approved_post_replacement = Some(PostReplacementDrainStack::default());
+        assert!(
+            PendingBatchDeliveries::validate_staged_member(&member).is_err(),
+            "empty work is not a retained drain"
+        );
+        let mut stamped = ready.clone();
+        stamped.stamp_frame_id(PostReplacementFrameId(9));
+        member.approved_post_replacement = Some(stamped);
+        assert!(
+            PendingBatchDeliveries::validate_staged_member(&member).is_err(),
+            "active frame identities cannot be retained"
+        );
+        let mut paused = ready.clone();
+        let (_, dispatch) = paused.begin_dispatch().unwrap();
+        member.approved_post_replacement = Some(paused.clone());
+        assert!(
+            PendingBatchDeliveries::validate_staged_member(&member).is_err(),
+            "dispatching work cannot be retained"
+        );
+        assert!(paused.pause_dispatch(dispatch));
+        member.approved_post_replacement = Some(paused);
+        assert!(
+            PendingBatchDeliveries::validate_staged_member(&member).is_err(),
+            "paused work cannot be retained"
+        );
     }
 
     fn cursor_validation_deliveries(
@@ -53295,6 +53498,7 @@ mod tests {
                 cursor,
                 arrangements: Vec::new(),
                 arrangement_cursor: 0,
+                population_devour_snapshot: None,
             }),
         }
     }

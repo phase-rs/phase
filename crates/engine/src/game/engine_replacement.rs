@@ -905,6 +905,8 @@ fn handle_replacement_choice_inner(
                     group: batch.logical_zone_change_group.logical_group_id,
                     member: paused.member,
                     expected_event: Some(paused.expected_event.clone()),
+                    population_devour_snapshot: None,
+                    approved_post_replacement: None,
                 },
             )
     });

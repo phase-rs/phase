@@ -5633,6 +5633,7 @@ mod r4b_staged_elimination_tests {
             terminal: None,
             operation: StagedMemberOperation::ZoneMove,
             outer_destroy_approved: false,
+            approved_post_replacement: None,
         }
     }
 
@@ -5677,6 +5678,7 @@ mod r4b_staged_elimination_tests {
             members,
             arrangements,
             arrangement_cursor: 0,
+            population_devour_snapshot: None,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             component_delivery_parent: None,
@@ -5814,6 +5816,7 @@ mod r4b_staged_elimination_tests {
                 members,
                 arrangements,
                 arrangement_cursor: 0,
+                population_devour_snapshot: None,
             }),
         });
         state.waiting_for = WaitingFor::new_dig_rest_split_for_batch(
