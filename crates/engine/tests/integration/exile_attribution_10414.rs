@@ -43,10 +43,10 @@
 //!     SYNTHETIC optional replacement on a move into exile raises the prompt;
 //!     every other card in the row is a real printed card.
 //!
-//! Class premise for R8/R9: every printed `ChangeZoneAll` scoped by
+//! Class premise for R8/R9: every parsed `ChangeZoneAll` scoped by
 //! `ParentTargetController` is a subjectless sweep (Declaration in Stone,
 //! Deputy of Detention, Eradicate, Counterbore, Legions to Ashes), and every
-//! printed `ChangeZone` scoped by it is a subject-form pick (Ashiok, Nightmare
+//! parsed `ChangeZone` scoped by it is a subject-form pick (Ashiok, Nightmare
 //! Muse -3; Isildur's Fateful Strike; Azula, Cunning Usurper; Struggle for
 //! Sanity's "That player exiles a card from it, then you exile a card from it").
 //!

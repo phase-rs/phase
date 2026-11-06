@@ -1585,12 +1585,15 @@ pub fn resolve(
     let ctx = ChangeZoneIterationCtx {
         source_id: ability.source_id,
         // CR 601.2c + CR 608.2c: these members were announced as targets by this
-        // instruction's controller, so the (possibly seat-bound) controller
-        // performs the move — the subject rule of the pick and mass paths does
-        // not apply here (Froghemoth: "exile up to that many target cards from
-        // their graveyard" is your exile, not theirs; Battle at the Helvault's
-        // "that player controls" under a player_scope fan-out is likewise the
-        // seat-bound controller).
+        // instruction's controller, so the controller performs the move — the
+        // subject rule of the pick and mass paths does not apply here
+        // (Froghemoth: "exile up to that many target cards from their
+        // graveyard" is your exile, not theirs). Known limit: under a
+        // `player_scope` fan-out `ability.controller` is the seat
+        // (`bind_scoped_seat`), so Battle at the Helvault's "For each player,
+        // exile up to one target … that player controls" records each seat
+        // rather than the Saga's controller (CR 608.2c); the same holds
+        // without this change.
         controller: ability.controller,
         origin,
         destination: dest_zone,
@@ -3372,7 +3375,12 @@ pub fn resolve_all(
                         source_id: ability.source_id,
                         // CR 608.2h + CR 608.2c: the performer, carried across a
                         // replacement/aura pause so every resumed member of this
-                        // mass move records the same one.
+                        // mass move records the same one. Known limit: the
+                        // CR 800.4a elimination sweep reads this field as the
+                        // resolving family's controller, so a performer other
+                        // than the controller (only reachable through a
+                        // replacement on a move into exile; none is printed)
+                        // would be matched against the wrong player there.
                         controller: performer,
                         origin: None,
                         destination: dest_zone,
@@ -3437,7 +3445,12 @@ pub fn resolve_all(
                         source_id: ability.source_id,
                         // CR 608.2h + CR 608.2c: the performer, carried across a
                         // replacement/aura pause so every resumed member of this
-                        // mass move records the same one.
+                        // mass move records the same one. Known limit: the
+                        // CR 800.4a elimination sweep reads this field as the
+                        // resolving family's controller, so a performer other
+                        // than the controller (only reachable through a
+                        // replacement on a move into exile; none is printed)
+                        // would be matched against the wrong player there.
                         controller: performer,
                         origin: None,
                         destination: dest_zone,
