@@ -25,8 +25,34 @@ use crate::config::{AiConfig, OpponentModel};
 use crate::eval::{
     evaluate_for_planner, evaluate_state, strategic_intent, threat_level, StrategicIntent,
 };
+use crate::policies::activation_patience::{root_held_line, HeldLine};
 use crate::policies::context::{PolicyContext, PriorsEnv, SearchDepth};
-use crate::policies::PolicyRegistry;
+use crate::policies::registry::PolicyScore;
+use crate::policies::{PolicyId, PolicyRegistry};
+
+/// The policy whose root verdict the search root applies unweighted. Its hold on an activation
+/// also says whether PassPriority may inherit the line (`activation_patience::root_held_line`,
+/// `search::lend_deferral_witness`).
+pub(crate) const DEFERRAL_POLICY: PolicyId = PolicyId::ActivationPatience;
+
+/// A root candidate's tactical score, split around [`DEFERRAL_POLICY`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RootTacticalScore {
+    /// Every other term: the hint, the other policies and the class adjustment.
+    pub weighted: f64,
+    /// [`DEFERRAL_POLICY`]'s hold, when its delta is non-zero.
+    pub deferral: Option<Deferral>,
+}
+
+/// ActivationPatience's hold on a root candidate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Deferral {
+    /// The verdict's delta, added at the root at full strength beside the weighted tactical term.
+    pub penalty: f64,
+    /// Whether PassPriority may inherit the held line: the root's answer, so every hold at a
+    /// root carries the same one.
+    pub line: HeldLine,
+}
 
 #[derive(Debug, Clone)]
 pub struct RankedCandidate {
@@ -37,6 +63,11 @@ pub struct RankedCandidate {
     /// ordinary one-action root simulation. It is an alternative continuation
     /// witness, not a tactical policy score.
     pub(crate) continuation_witness: Option<f64>,
+    /// ActivationPatience's hold on this activation (its only non-neutral verdict). The root
+    /// adds the penalty at full strength beside `score * tactical_weight`, because the beam
+    /// cannot see past the window the hold is about. Its `line` says whether PassPriority may
+    /// inherit the continuation (`search::lend_deferral_witness`).
+    pub(crate) deferral: Option<Deferral>,
 }
 
 impl RankedCandidate {
@@ -46,6 +77,7 @@ impl RankedCandidate {
             score,
             payment_successor: None,
             continuation_witness: None,
+            deferral: None,
         }
     }
 
@@ -59,12 +91,29 @@ impl RankedCandidate {
             score,
             payment_successor: Some(state),
             continuation_witness: None,
+            deferral: None,
         }
     }
 
     pub(crate) fn with_continuation_witness(mut self, value: f64) -> Self {
         self.continuation_witness = value.is_finite().then_some(value);
         self
+    }
+
+    pub(crate) fn with_deferral(mut self, deferral: Option<Deferral>) -> Self {
+        self.deferral = deferral;
+        self
+    }
+
+    /// The tactical score with the deferral added unweighted.
+    pub(crate) fn tactical_total(&self) -> f64 {
+        self.deferral.map_or(self.score, |d| self.score + d.penalty)
+    }
+
+    /// The root's tactical term: `score * tactical_weight`, plus the deferral at full strength.
+    pub(crate) fn root_tactical(&self, tactical_weight: f64) -> f64 {
+        let weighted = self.score * tactical_weight;
+        self.deferral.map_or(weighted, |d| weighted + d.penalty)
     }
 
     /// Preserve any proven continuation through the existing tactical-score
@@ -74,14 +123,16 @@ impl RankedCandidate {
     pub(crate) fn beam_priority(&self) -> f64 {
         self.continuation_witness
             .filter(|witness| witness.is_finite())
-            .map_or(self.score, |witness| self.score.max(witness))
+            .map_or(self.tactical_total(), |witness| {
+                self.tactical_total().max(witness)
+            })
     }
 
     pub(crate) fn root_score(&self, tactical_weight: f64) -> f64 {
         self.continuation_witness
             .filter(|witness| witness.is_finite())
-            .map_or(self.score * tactical_weight, |witness| {
-                (self.score * tactical_weight).max(witness)
+            .map_or(self.root_tactical(tactical_weight), |witness| {
+                self.root_tactical(tactical_weight).max(witness)
             })
     }
 }
@@ -1776,6 +1827,47 @@ impl<'a> PlannerServices<'a> {
         scoring_player: PlayerId,
         search_depth: SearchDepth,
     ) -> f64 {
+        self.tactical_score_parts(state, ctx, candidate, scoring_player, search_depth, None)
+            .0
+    }
+
+    /// The root's [`Self::tactical_score`], with [`DEFERRAL_POLICY`]'s verdict split out as the
+    /// unweighted `deferral` (`RankedCandidate::deferral`).
+    pub(crate) fn root_tactical_score(
+        &self,
+        state: &GameState,
+        ctx: &AiDecisionContext,
+        candidate: &CandidateAction,
+        scoring_player: PlayerId,
+    ) -> RootTacticalScore {
+        let (weighted, held) = self.tactical_score_parts(
+            state,
+            ctx,
+            candidate,
+            scoring_player,
+            SearchDepth::Root,
+            Some(DEFERRAL_POLICY),
+        );
+        RootTacticalScore {
+            weighted,
+            deferral: (held != 0.0).then(|| Deferral {
+                penalty: held,
+                line: root_held_line(state, scoring_player, &ctx.candidates),
+            }),
+        }
+    }
+
+    /// [`Self::tactical_score`]'s terms, with policy `held`'s verdict returned apart as the
+    /// second element (0.0 when `held` is `None`).
+    fn tactical_score_parts(
+        &self,
+        state: &GameState,
+        ctx: &AiDecisionContext,
+        candidate: &CandidateAction,
+        scoring_player: PlayerId,
+        search_depth: SearchDepth,
+        held: Option<PolicyId>,
+    ) -> (f64, f64) {
         let cast_facts = cast_facts_for_action(state, &candidate.action, scoring_player);
         let mut score = should_play_now_with_facts(
             state,
@@ -1794,7 +1886,14 @@ impl<'a> PlannerServices<'a> {
             cast_facts,
             search_depth,
         };
-        score += self.policies.score(&policy_ctx);
+        let policy_score = match held {
+            Some(held) => self.policies.score_holding_out(&policy_ctx, held),
+            None => PolicyScore {
+                rest: self.policies.score(&policy_ctx),
+                held: 0.0,
+            },
+        };
+        score += policy_score.rest;
 
         match candidate.metadata.tactical_class {
             TacticalClass::Pass => {
@@ -1813,7 +1912,7 @@ impl<'a> PlannerServices<'a> {
             _ => {}
         }
 
-        score
+        (score, policy_score.held)
     }
 
     pub fn policy_priors(
@@ -6914,6 +7013,74 @@ pub(crate) mod tests {
             },
             score,
         )
+    }
+
+    /// The root's tactical term carries `deferral` unweighted, in the floor (`root_score`) and
+    /// the beam order (`beam_priority`) alike; with no deferral both are today's values, bit
+    /// for bit. A continuation witness still takes the max over the deferred term.
+    #[test]
+    fn root_tactical_applies_deferral_at_full_strength() {
+        let tw = 0.35;
+        let score = 2.0;
+        let penalty = -1.5;
+        let deferral = Deferral {
+            penalty,
+            line: HeldLine::Reproducible,
+        };
+
+        let plain = ranked_candidate(GameAction::PassPriority, score);
+        assert_eq!(plain.root_score(tw), score * tw);
+        assert_eq!(plain.beam_priority(), score);
+        assert_eq!(plain.root_tactical(tw), score * tw);
+
+        let held = ranked_candidate(GameAction::PassPriority, score).with_deferral(Some(deferral));
+        assert_eq!(held.root_tactical(tw), score * tw + penalty);
+        assert_eq!(held.root_score(tw), score * tw + penalty);
+        assert_eq!(held.tactical_total(), score + penalty);
+        assert_eq!(held.beam_priority(), score + penalty);
+
+        for witness in [-5.0, 0.0, 5.0] {
+            let witnessed = ranked_candidate(GameAction::PassPriority, score)
+                .with_deferral(Some(deferral))
+                .with_continuation_witness(witness);
+            assert_eq!(
+                witnessed.root_score(tw),
+                (score * tw + penalty).max(witness),
+                "witness {witness}"
+            );
+            assert_eq!(
+                witnessed.beam_priority(),
+                (score + penalty).max(witness),
+                "witness {witness}"
+            );
+        }
+    }
+
+    /// The strategy-adjusted planner value of a finished game stays in the terminal band
+    /// `eval::terminal_outcome` reads: a won `GameOver` is a win, a lost one a loss.
+    #[test]
+    fn planner_value_of_a_won_leaf_is_a_terminal_win() {
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let services = hard_services(&config, &policies);
+
+        let mut won = make_state();
+        won.waiting_for = WaitingFor::GameOver {
+            winner: Some(PlayerId(0)),
+        };
+        assert_eq!(
+            crate::eval::terminal_outcome(services.evaluate_state(&won)),
+            Some(crate::eval::TerminalOutcome::Won)
+        );
+
+        let mut lost = make_state();
+        lost.waiting_for = WaitingFor::GameOver {
+            winner: Some(PlayerId(1)),
+        };
+        assert_eq!(
+            crate::eval::terminal_outcome(services.evaluate_state(&lost)),
+            Some(crate::eval::TerminalOutcome::Lost)
+        );
     }
 
     // V1: a beta cutoff records the cutting move as the ply's primary killer.

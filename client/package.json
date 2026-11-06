@@ -92,7 +92,7 @@
     "fake-indexeddb": "^6.2.5",
     "fishery": "^2.4.0",
     "globals": "^16.0.0",
-    "happy-dom": "^20.8.9",
+    "happy-dom": "^21.0.4",
     "i18next-parser": "^9.4.0",
     "jsdom": "^26.0.0",
     "storybook": "10.6.2",

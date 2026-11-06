@@ -197,6 +197,9 @@ function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
     switch (meta.phase) {
       case "lobby": return t("podPhase.lobby");
       case "drafting": return t("podPhase.drafting");
+      // Review remains on the existing drafting workspace, so use its existing
+      // localized label rather than adding a locale surface here.
+      case "review": return t("podPhase.drafting");
       case "deckbuilding": return t("podPhase.deckbuilding");
       case "pairing": return t("podPhase.pairing");
       case "matchInProgress": return t("podPhase.matchInProgress");
