@@ -16510,10 +16510,32 @@ impl GameState {
             }
         }
 
-        let mut offender: Option<Option<ObjectId>> = None;
-        if let Some(pending) = self.pending_cast.as_deref() {
-            if cast_unknown(pending) {
-                offender = Some(Some(pending.object_id));
+        /// CR 601.2h: a commit-time cost prompt parks the cast on the prompt
+        /// itself — `CostResume::Spell` / `CostResume::SpellCost` carry the same
+        /// `PendingCast` whose `prepaid_finalization` holds the checks. This is the
+        /// commonest park, not an edge case: the sacrifice-arrangement and
+        /// hand-discard prompts both use it.
+        fn prompt_unknown(waiting_for: &WaitingFor) -> Option<Option<ObjectId>> {
+            let spell = match waiting_for {
+                WaitingFor::PayCost {
+                    resume: CostResume::Spell { spell },
+                    ..
+                }
+                | WaitingFor::PayCost {
+                    resume: CostResume::SpellCost { spell, .. },
+                    ..
+                } => Some(spell),
+                _ => None,
+            }?;
+            cast_unknown(spell).then_some(Some(spell.object_id))
+        }
+
+        let mut offender: Option<Option<ObjectId>> = prompt_unknown(&self.waiting_for);
+        if offender.is_none() {
+            if let Some(pending) = self.pending_cast.as_deref() {
+                if cast_unknown(pending) {
+                    offender = Some(Some(pending.object_id));
+                }
             }
         }
         if offender.is_none() {
@@ -16529,18 +16551,23 @@ impl GameState {
         }
         if offender.is_none() {
             match self.pending_cost_move_resume.as_ref() {
+                // The nested `pending` carries its own `prepaid_finalization`, which
+                // is unchecked when `completion` is a variant this walk does not
+                // classify — so both are inspected.
                 Some(PendingCostMoveResume::Cast {
                     pending,
                     completion,
                     ..
-                }) if move_unknown(completion) => {
+                }) if move_unknown(completion) || pending.as_deref().is_some_and(cast_unknown) => {
                     offender = Some(pending.as_ref().map(|p| p.object_id));
                 }
                 Some(PendingCostMoveResume::SacrificeForCost {
                     pending,
                     completion,
                     ..
-                }) if sacrifice_unknown(completion) => {
+                }) if sacrifice_unknown(completion)
+                    || pending.as_deref().is_some_and(cast_unknown) =>
+                {
                     offender = Some(pending.as_ref().map(|p| p.object_id));
                 }
                 _ => {}

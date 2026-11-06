@@ -13836,7 +13836,17 @@ fn finalize_cast_with_phyrexian_choices_inner(
     let committed_target_facts = deferred_life_resume_pending
         .and_then(|pending| pending.committed_target_facts.clone())
         .or(committed_target_facts)
-        .unwrap_or_default();
+        .unwrap_or_else(|| {
+            // Unreachable in a playable state: `prepare_for_restore` refuses every
+            // parked carrier whose facts are unknown. Failing loudly here (debug and
+            // test builds) is what stops an uncovered carrier from silently writing a
+            // CR 601.2i record that claims the cast declared nothing.
+            debug_assert!(
+                false,
+                "a parked cast reached the history write without announced-target facts"
+            );
+            Vec::new()
+        });
 
     if prepaid_actual_mana_spent.is_none() {
         let resume_at_resolution_depth = state.resolution_stack.len();

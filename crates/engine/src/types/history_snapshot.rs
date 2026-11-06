@@ -346,6 +346,18 @@ impl CompactLki {
 /// form always writes `"name"`.
 fn decode_snapshot(value: serde_json::Value) -> Result<LKISnapshot, serde_json::Error> {
     let compact_spelling = value.get("n").is_some();
+    if !compact_spelling {
+        // The verbose `LKISnapshot` requires these; only the compact spelling may
+        // omit them. Accepting a verbose payload without them would turn a decode
+        // error into a silently defaulted characteristic.
+        for required in ["power", "toughness", "mana_value", "controller", "owner"] {
+            if value.get(required).is_none() {
+                return Err(serde::de::Error::custom(format!(
+                    "verbose LKISnapshot is missing required field `{required}`"
+                )));
+            }
+        }
+    }
     let mut compact = CompactLki::deserialize(&value)?;
     if !compact_spelling {
         let omitted =

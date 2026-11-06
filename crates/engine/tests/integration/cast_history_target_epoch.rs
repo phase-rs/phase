@@ -35,7 +35,7 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
     ActivationTargetFact, CastPaymentMode, GameState, PersistedGameState, PersistedRestoreError,
-    PersistedRestoreFinalization, SpellCastRecord, WaitingFor,
+    SpellCastRecord, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -333,14 +333,15 @@ fn a_persisted_first_cast_sacrifice_pause_keeps_its_announced_targets_or_is_refu
     let json = serde_json::to_value(&persisted).expect("the park serializes");
 
     // (a) A park that carries its announced targets is admitted.
-    let admitted = serde_json::from_value::<PersistedGameState>(json.clone())
+    // `into_game_state` is `prepare_for_restore(Immediate)` + finalize, so an `Ok`
+    // here is the admission decision itself.
+    let restored_state = serde_json::from_value::<PersistedGameState>(json.clone())
         .expect("the park decodes")
-        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated);
-    assert!(
-        admitted.is_ok(),
-        "a parked cast carrying its announced targets must be admitted: {:?}",
-        admitted.err()
-    );
+        .into_game_state()
+        .map_err(|error| {
+            format!("a parked cast carrying its announced targets must be admitted: {error:?}")
+        })
+        .expect("admitted");
 
     // (b) The same park written before the latch existed cannot prove what the
     // spell declared, so it is refused at the shared restore boundary rather than
@@ -367,7 +368,7 @@ fn a_persisted_first_cast_sacrifice_pause_keeps_its_announced_targets_or_is_refu
     );
     let refused = serde_json::from_value::<PersistedGameState>(legacy)
         .expect("the legacy park decodes")
-        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated);
+        .into_game_state();
     assert!(
         matches!(
             refused,
@@ -377,28 +378,40 @@ fn a_persisted_first_cast_sacrifice_pause_keeps_its_announced_targets_or_is_refu
         refused.err()
     );
 
-    // (c) The admitted park resumes to a correct history: the announced target is
-    // the surviving creature, and it answers the gate predicate Head of the Class
-    // counts.
-    runner
+    // (c) The ADMITTED SAVE — not the in-memory park it was taken from — resumes to
+    // a correct history. This is the half that would catch an admission which lets a
+    // carrier through and then writes a falsely known-empty record.
+
+    let mut restored = GameRunner::from_state(restored_state);
+    assert_eq!(
+        restored.state().objects[&survivor].zone,
+        Zone::Battlefield,
+        "reach guard: the announced target is a distinct survivor, still on the battlefield"
+    );
+    restored
         .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("order the replacement");
+        .expect("order the replacement on the restored save");
     for _ in 0..16 {
-        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+        if matches!(restored.state().waiting_for, WaitingFor::Priority { .. }) {
             break;
         }
-        runner.act(GameAction::PassPriority).expect("settle");
+        restored.act(GameAction::PassPriority).expect("settle");
     }
-    let fact = declared_object_fact(runner.state(), spell);
+    let fact = declared_object_fact(restored.state(), spell);
     let ActivationTargetFact::Object { id, .. } = &fact else {
         panic!("the record declares an object target: {fact:?}");
     };
     assert_eq!(
         *id, survivor,
-        "the resumed history names the announced target, not the sacrificed fodder"
+        "the RESUMED SAVE's history names the announced target, not the sacrificed fodder"
     );
     assert!(
-        record_answers_targets_a_creature(runner.state(), spell),
-        "the resumed record answers `targets a creature`"
+        fact_core_types(&fact).contains(&CoreType::Creature),
+        "the resumed save keeps the selection-time creature: {:?}",
+        fact_core_types(&fact)
+    );
+    assert!(
+        record_answers_targets_a_creature(restored.state(), spell),
+        "the resumed save's record answers `targets a creature`"
     );
 }
