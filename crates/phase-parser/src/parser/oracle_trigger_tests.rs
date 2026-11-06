@@ -28198,7 +28198,7 @@ fn trigger_one_or_more_counters_removed_batched_survives_unimplemented_effect() 
 // with its own noun and sets `batched` from the quantifier: "one or more
 // counters" fires once per recipient per batch, "a [type] counter" once per
 // counter removed.
-// Synthetic: no printed card has a top-level "whenever you remove ... counter(s) from <subject>" trigger; nearest printed: Watcher of Hours (with an unmodelled exile tail, out of scope) and Immard's reflexive "When you remove a counter this way".
+// Synthetic: no printed card has this frame without an unmodelled rider; nearest printed: Watcher of Hours ("Whenever you remove a time counter from this card while it's exiled", rider out of scope) and Immard's reflexive "When you remove a counter this way".
 #[test]
 fn trigger_active_counter_removed_quantifier_pairs_noun_and_sets_batched() {
     let one_or_more = parse_trigger_line(

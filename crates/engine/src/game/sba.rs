@@ -2178,8 +2178,8 @@ fn check_illegal_attachment_unattach(
         // Deliberately hand-mutates rather than routing through
         // `effects::attach::unattach`: that helper flushes layers per object and
         // records a CR 733 journal command, and neither existing SBA unattach
-        // path journals or flushes. SBAs are deterministic sweeps that replay
-        // re-executes, so journaling here would double-record.
+        // path journals or flushes. (The counter and cease SBAs, by contrast, do
+        // journal through their own removal paths.)
         if let Some(old_target) = old_target
             .as_ref()
             .filter(|target| should_emit_sba_unattached_event(state, target))

@@ -1817,7 +1817,8 @@ fn matching_damage_received_whole_event_events(
 }
 
 /// CR 603.2c + CR 120.4b: firing granularity is once per simultaneous batch for
-/// BOTH "one or more" subject batching and whole-event damage aggregation.
+/// "one or more" subject batching, whole-event damage aggregation, and the
+/// "the last [type] counter is removed" threshold class.
 ///
 /// Deliberately separate from `TriggerDefinition.batched`, which conflates two
 /// concerns: firing granularity (read at the batch-dedup skip) and subject
