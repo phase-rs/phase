@@ -2287,7 +2287,8 @@ pub fn fallback_action(
         // revealed order (any permutation is legal; order at the bottom of the
         // library carries no tactical weight).
         WaitingFor::RippleBottomOrder { cards, .. }
-        | WaitingFor::RevealUntilBottomOrder { cards, .. } => Some(GameAction::SelectCards {
+        | WaitingFor::RevealUntilBottomOrder { cards, .. }
+        | WaitingFor::DigBottomOrder { cards, .. } => Some(GameAction::SelectCards {
             cards: cards.clone(),
         }),
         // CR 608.2g + CR 601.2: Invoke Calamity's free-cast window — finish the
@@ -2679,6 +2680,11 @@ pub fn fallback_action(
         )
         .into_iter()
         .next(),
+
+        // CR 702.106a: the agenda names are a required answer, offered as one action.
+        WaitingFor::SecretAgendaChoice { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .next(),
 
         // Companion reveal: decline.
         WaitingFor::CompanionReveal { .. } => Some(GameAction::DeclareCompanion {
@@ -17882,6 +17888,7 @@ mod tests {
             selectable_cards: pool,
             kept_destination: None,
             rest_destination: None,
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: engine::types::ability::DigRestOrder::Preserve,
             source_id: None,
@@ -18009,6 +18016,7 @@ mod tests {
                 selectable_cards: vec![pool[0]],
                 kept_destination: None,
                 rest_destination: None,
+                rest_remainder: engine::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: engine::types::ability::DigRestOrder::Preserve,
                 source_id: None,
@@ -19281,6 +19289,7 @@ mod tests {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: Some(QuantityExpr::Fixed { value: 0 }),
             rest_order: engine::types::ability::DigRestOrder::Preserve,
             reveal,
