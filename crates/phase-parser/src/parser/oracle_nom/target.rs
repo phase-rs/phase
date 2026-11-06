@@ -651,11 +651,11 @@ pub(crate) enum CostChannel {
     /// pronoun on this channel. The return-to-hand leg is not channel-aware:
     /// the count-one fallback in `try_parse_return_to_hand_cost` lowers a bare
     /// "return it to its owner's hand" / "return it to your hand" to `SelfRef`
-    /// on both channels, as at base. The one printed resolution payment of that
-    /// shape, Circus of the Sun's "you may return it to your hand. If you do,
-    /// …" (whose "it" is the creature that dealt the damage), is refused by
-    /// `split_reflexive_optional_payment`'s payability filter, which admits no
-    /// `ReturnToHand`, so no cost is lowered from it.
+    /// on both channels, as at base. The one printed optional resolution payment
+    /// of that shape, Circus of the Sun's "you may return it to your hand. If
+    /// you do, …" (whose "it" is the creature that dealt the damage), is refused
+    /// by `split_reflexive_optional_payment`'s payability filter, which admits
+    /// no `ReturnToHand`, so no cost is lowered from it.
     ResolutionPayment,
 }
 
@@ -674,8 +674,9 @@ pub(crate) enum CostChannel {
 /// Out of scope — `behold <quality> and exile it` (Champion of the Clachan,
 /// Champion of the Path, Champion of the Weird, Champions of the Perfect,
 /// Champions of the Shoal): the pronoun there is the BEHELD card, and
-/// `oracle_cost::parse_behold_cost` consumes the whole clause as
-/// `BeholdCostAction::ExileChosen` before any cost-leg split, so this combinator
+/// `oracle_casting::parse_additional_cost_line` passes the whole clause to
+/// `parse_single_cost`, whose `parse_behold_cost` arm consumes it as
+/// `BeholdCostAction::ExileChosen` before any leg arm runs, so this combinator
 /// never sees it.
 pub(crate) fn parse_cost_self_reference_for(
     input: &str,

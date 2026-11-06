@@ -44,13 +44,16 @@ use crate::types::zones::Zone;
 ///
 /// CR 602.1a: this is the source-cost channel ([`CostChannel::SourceCost`]) —
 /// a cost the source's own text imposes; in its sacrifice and exile legs a bare
-/// "it" names the source the same clause named first (`behold … and exile it` is
-/// consumed whole by `parse_behold_cost` first). A resolving ability's own optional payment ("you
-/// may <cost>. When/If you do, …", CR 118.12 + CR 603.12), whose object pronoun
-/// names something that ability's text introduced, must go through
-/// [`parse_oracle_cost_in`] with [`CostChannel::ResolutionPayment`]; a keyword's
-/// printed [cost] paid at resolution (echo, cumulative upkeep) is still the
-/// source's own cost.
+/// "it" names the source the same clause named first. The five `behold … and
+/// exile it` additional costs, whose "it" is the beheld card, never reach this
+/// function: `parse_additional_cost_line` hands them whole to
+/// [`parse_single_cost`], whose `parse_behold_cost` arm consumes them before any
+/// leg arm runs (here `split_cost_parts` would split them at " and " first). A
+/// resolving ability's own optional payment ("you may <cost>. When/If you do,
+/// …", CR 118.12 + CR 603.12), whose object pronoun names something that
+/// ability's text introduced, must go through [`parse_oracle_cost_in`] with
+/// [`CostChannel::ResolutionPayment`]; a keyword's printed [cost] paid at
+/// resolution (echo, cumulative upkeep) is still the source's own cost.
 pub fn parse_oracle_cost(text: &str) -> AbilityCost {
     parse_oracle_cost_in(text, CostChannel::SourceCost)
 }
@@ -2150,10 +2153,10 @@ fn parse_sacrifice_cost_filter(filter_text: &str) -> Option<TargetFilter> {
 /// oracle_trigger::split_reflexive_optional_payment /
 /// ::is_unsupported_disjunctive_reflexive_optional_payment, Flaxen Intruder's
 /// "you may sacrifice it. When you do, destroy target artifact or
-/// enchantment.", which that caller's payability filter then declines), where the grammar
-/// deliberately does not bind the pronoun and the phrase lowers to this
-/// information-free filter exactly as before; on `SourceCost` it lowers to
-/// `SelfRef` upstream.
+/// enchantment.", which `split_reflexive_optional_payment`'s payability filter
+/// then declines), where the grammar deliberately does not bind the pronoun and
+/// the phrase lowers to this information-free filter exactly as before; on
+/// `SourceCost` it lowers to `SelfRef` upstream.
 ///
 /// EXEMPTION 2 — a tail that opens a NEW CLAUSE (`,` `.` `;` or a leading
 /// conjunction) rather than modifying the noun. "sacrifice a creature, discard a
