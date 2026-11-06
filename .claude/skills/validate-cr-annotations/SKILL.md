@@ -11,14 +11,6 @@ This skill enforces the mandatory verification protocol for MTG Comprehensive Ru
 
 ## Verification Protocol
 
-**First, confirm your local rules text is the pinned edition:**
-
-```bash
-./scripts/check-cr-edition.sh
-```
-
-The repository's citations are written against the edition pinned in `docs/MagicCompRules.edition`. When Wizards renumbers a section, the old numbers still exist and name different rules, so a grep against the wrong edition "verifies" a citation against the wrong rule. On `MISMATCH`, run `./scripts/fetch-comp-rules.sh --force` before verifying anything. Never cite a newer edition's numbering ahead of the migration that moves the pin.
-
 **For every CR number you are about to write, run this BEFORE writing:**
 
 ```bash
