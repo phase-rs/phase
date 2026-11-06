@@ -50,7 +50,11 @@ import {
 import { draftIntergameDigest } from "../intergameCommandLedger";
 import type { DraftHostSessionLoadResult, PersistedDraftHostSession } from "../draftPersistence";
 import { P2PDraftHost } from "../../adapter/p2p-draft-host";
-import { preflightDraftPodHostRecovery, type DraftPodHostRecoveryInput } from "../../adapter/draftPodHostAdapter";
+import {
+  preflightDraftPodHostRecovery,
+  UnreadableSavedDraftError,
+  type DraftPodHostRecoveryInput,
+} from "../../adapter/draftPodHostAdapter";
 import { DRAFT_KINDS, DraftAdapter, type RestorableDraftSessionVerdict } from "../../adapter/draft-adapter";
 import * as compatibility from "../../adapter/draft-compatibility";
 import { Draft27IncompatibilityError, classifyDraft27Compatibility } from "../../adapter/draft-compatibility";
@@ -405,7 +409,7 @@ describe("draftPersistence", () => {
         expect(check).toHaveBeenCalledWith(text);
       });
 
-      it("admits a saved session in Review whose flow the draft engine cannot read", async () => {
+      it("refuses as unreadable a saved session in Review whose flow the draft engine cannot read", async () => {
         const { text, verdict } = savedSession("legacy_review_unknown_flow");
         const raw = { ...testSession, draftSessionJson: text };
         const session = JSON.parse(text) as SavedSessionFields;
@@ -416,18 +420,22 @@ describe("draftPersistence", () => {
         expect(verdict).toEqual({ type: "Unreadable" });
         const check = engineAnswers(verdict);
 
-        expect(await preflightDraftPodHostRecovery({ session: raw })).toEqual({ type: "admitted" });
+        const preflight = await preflightDraftPodHostRecovery({ session: raw });
+        expect(preflight.type).toBe("unreadable");
+        expect(preflight.type === "unreadable" && preflight.error).toBeInstanceOf(UnreadableSavedDraftError);
         expect(check).toHaveBeenCalledOnce();
         expect(check).toHaveBeenCalledWith(text);
       });
 
-      it("admits a saved session the client admits and the draft engine cannot read", async () => {
+      it("refuses as unreadable a saved session the client admits and the draft engine cannot read", async () => {
         const raw = startedHost();
         // Reach: the client's top-level check admits the saved host.
         expect(classifyDraft27Compatibility(raw).ok).toBe(true);
         engineAnswers({ type: "Unreadable" });
 
-        expect(await preflightDraftPodHostRecovery({ session: raw })).toEqual({ type: "admitted" });
+        const preflight = await preflightDraftPodHostRecovery({ session: raw });
+        expect(preflight.type).toBe("unreadable");
+        expect(preflight.type === "unreadable" && preflight.error).toBeInstanceOf(UnreadableSavedDraftError);
       });
 
       it.each([
@@ -442,7 +450,7 @@ describe("draftPersistence", () => {
           { clock_policy: { pick: { type: "Off" }, review_duration_ms: 0, extra: 1 } },
           (config: Record<string, unknown>) => (config.clock_policy as Record<string, unknown>).extra === 1,
         ],
-      ] as const)("admits a saved session with %s that the draft engine cannot read", async (_label, config, carried) => {
+      ] as const)("loads a saved session with %s by its status, then refuses it as unreadable once the draft engine cannot read it", async (_label, config, carried) => {
         const raw = startedHost(config);
         // Reach: the saved session carries that configuration.
         expect(carried(JSON.parse(raw.draftSessionJson).config)).toBe(true);
@@ -453,7 +461,9 @@ describe("draftPersistence", () => {
           type: "admitted",
           session: { ...raw, perSeatWorkspaceSnapshots: {} },
         });
-        expect(await preflightDraftPodHostRecovery({ session: raw })).toEqual({ type: "admitted" });
+        const preflight = await preflightDraftPodHostRecovery({ session: raw });
+        expect(preflight.type).toBe("unreadable");
+        expect(preflight.type === "unreadable" && preflight.error).toBeInstanceOf(UnreadableSavedDraftError);
       });
 
       it("types the recovery input as the parsed session alone", () => {

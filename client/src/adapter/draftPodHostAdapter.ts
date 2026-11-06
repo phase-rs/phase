@@ -181,16 +181,26 @@ export interface DraftPodHostRecoveryInput {
   handover?: () => Promise<AbortSignal>;
 }
 
+/** The draft engine reads a saved draft's session text as no draft session. */
+export class UnreadableSavedDraftError extends Error {
+  constructor() {
+    super("The draft engine cannot read this saved draft.");
+    this.name = "UnreadableSavedDraftError";
+  }
+}
+
 export type DraftPodHostRecoveryPreflight =
   | { type: "admitted" }
-  | { type: "incompatible"; error: Draft27IncompatibilityError };
+  | { type: "incompatible"; error: Draft27IncompatibilityError }
+  | { type: "unreadable"; error: UnreadableSavedDraftError };
 
 /**
  * Allocation-free.  The lifecycle store awaits this before it detaches an
  * installed owner; initialize repeats it as its own boundary.  A started
  * session is decided by the draft engine's own legacy admission alone, asked
- * without restoring it.  A check that cannot answer rejects, so it admits
- * nothing.
+ * without restoring it.  A session the engine cannot read is refused here as
+ * well, before any allocation: its restore could only fail, after the
+ * handover.  A check that cannot answer rejects, so it admits nothing.
  */
 export async function preflightDraftPodHostRecovery(
   recovery: DraftPodHostRecoveryInput | undefined,
@@ -201,10 +211,9 @@ export async function preflightDraftPodHostRecovery(
   const verdict = await new DraftAdapter().checkRestorableSession(sessionJson);
   switch (verdict.type) {
     case "Admitted":
-    case "Unreadable":
-      // An unreadable session is not refused here; it meets the restore's own
-      // failure.
       return { type: "admitted" };
+    case "Unreadable":
+      return { type: "unreadable", error: new UnreadableSavedDraftError() };
     case "Incompatible":
       return { type: "incompatible", error: draftEngineRefusal() };
     default:
@@ -285,9 +294,15 @@ export class DraftPodHostAdapter {
       this.setStatus("error");
       throw error;
     }
-    if (recoveryPreflight.type === "incompatible") {
-      this.setStatus("error");
-      throw recoveryPreflight.error;
+    switch (recoveryPreflight.type) {
+      case "admitted":
+        break;
+      case "incompatible":
+      case "unreadable":
+        this.setStatus("error");
+        throw recoveryPreflight.error;
+      default:
+        assertNever(recoveryPreflight);
     }
     let finishInitialization!: () => void;
     const initializationSettled = new Promise<void>((resolve) => {

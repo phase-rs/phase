@@ -63,6 +63,7 @@ import { useGameStore } from "./gameStore";
 import {
   DraftPodHostAdapter,
   preflightDraftPodHostRecovery,
+  UnreadableSavedDraftError,
   type DraftPodHostConfig,
   type DraftPodHostEvent,
   type DraftPodHostStatus,
@@ -121,6 +122,8 @@ export const DRAFT_OFFLINE_ERROR = "offline.startUnavailable";
 export const DRAFT_RECOVERY_INCOMPATIBLE_ERROR = "podError.incompatible";
 /** The pod store's error key for a recovery that could not connect or start. */
 export const DRAFT_RECOVERY_CONNECTION_ERROR = "podError.connection";
+/** The pod store's error key for a saved pod the draft engine cannot read. */
+export const DRAFT_RECOVERY_UNREADABLE_ERROR = "podError.unreadable";
 
 export type GuestDraftResumeOutcome = "resumed" | "absent" | "invalid" | "failed" | "offline" | "superseded";
 
@@ -144,6 +147,7 @@ export interface HostedDraftRecoveryAttempt {
 export type HostedDraftRecoveryOutcome =
   | "resumed"
   | "incompatible"
+  | "unreadable"
   | "initializationFailure"
   | "aborted"
   | "offline"
@@ -1874,7 +1878,16 @@ export const useMultiplayerDraftStore = create<
       if (attempt.config.signal?.aborted) return "aborted";
       return "initializationFailure";
     }
-    if (preflight.type === "incompatible") return "incompatible";
+    switch (preflight.type) {
+      case "admitted":
+        break;
+      case "incompatible":
+        return "incompatible";
+      case "unreadable":
+        return "unreadable";
+      default:
+        return assertNever(preflight);
+    }
     if (!attempt.isCurrent()) return "superseded";
     if (attempt.config.signal?.aborted) return "aborted";
 
@@ -1984,6 +1997,7 @@ export const useMultiplayerDraftStore = create<
       if (committedEpoch === null) await disposeProvisional();
       else await endCommittedRecovery();
       if (error instanceof Draft27IncompatibilityError) return "incompatible";
+      if (error instanceof UnreadableSavedDraftError) return "unreadable";
       if (attempt.config.signal?.aborted) return "aborted";
       if (!attempt.isCurrent()) return "superseded";
       if (getEffectiveOffline()) return "offline";

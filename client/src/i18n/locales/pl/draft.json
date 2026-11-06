@@ -655,6 +655,7 @@
     "hostLeft": "Gospodarz opuścił draft",
     "connection": "Błąd połączenia",
     "incompatible": "Ten draft nie jest zgodny z twoją wersją protokołu.",
+    "unreadable": "Nie można odczytać tego zapisanego draftu, więc nie można go wznowić.",
     "retry": "Spróbuj połączyć ponownie"
   },
   "winston": {

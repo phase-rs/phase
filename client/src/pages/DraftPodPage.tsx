@@ -73,6 +73,7 @@ import {
   DRAFT_OFFLINE_ERROR,
   DRAFT_RECOVERY_CONNECTION_ERROR,
   DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
+  DRAFT_RECOVERY_UNREADABLE_ERROR,
   intergamePromptKey,
   isDraftPodWorkspacePhase,
   isMultiplayerDraftPodLive,
@@ -121,9 +122,9 @@ function subscribePickInteraction(listener: () => void): () => void {
 const POD_PASSWORD_MAX_LENGTH = 32;
 
 /** The offline key `DRAFT_OFFLINE_ERROR` and the host recovery keys
- *  `DRAFT_RECOVERY_INCOMPATIBLE_ERROR` and `DRAFT_RECOVERY_CONNECTION_ERROR`
- *  are translation keys and are translated; any other message is shown as
- *  written. */
+ *  `DRAFT_RECOVERY_INCOMPATIBLE_ERROR`, `DRAFT_RECOVERY_CONNECTION_ERROR` and
+ *  `DRAFT_RECOVERY_UNREADABLE_ERROR` are translation keys and are translated;
+ *  any other message is shown as written. */
 function usePodErrorMessage(error: string | null): string | null {
   const { t } = useTranslation("draft");
   return error === DRAFT_OFFLINE_ERROR
@@ -132,7 +133,26 @@ function usePodErrorMessage(error: string | null): string | null {
       ? t("podError.incompatible")
       : error === DRAFT_RECOVERY_CONNECTION_ERROR
         ? t("podError.connection")
-        : error;
+        : error === DRAFT_RECOVERY_UNREADABLE_ERROR
+          ? t("podError.unreadable")
+          : error;
+}
+
+/** What a failed host recovery shows: its message, and whether a retry can succeed. */
+function hostRecoveryFailurePresentation(kind: HostedPodRecoveryFailure["kind"]): {
+  messageKey: "podError.incompatible" | "podError.unreadable" | "podError.connection";
+  offersRetry: boolean;
+} {
+  switch (kind) {
+    case "incompatible":
+      return { messageKey: "podError.incompatible", offersRetry: true };
+    // A retry reads the same saved draft, which the engine still cannot read.
+    case "unreadable":
+      return { messageKey: "podError.unreadable", offersRetry: false };
+    case "readFailure":
+    case "initializationFailure":
+      return { messageKey: "podError.connection", offersRetry: true };
+  }
 }
 
 function PodSetup() {
@@ -1538,26 +1558,28 @@ function PodErrorView({
   const { t } = useTranslation("draft");
   const recoveryFailure = useMultiplayerDraftStore((s) => s.guestRecoveryFailure);
   const reason = usePodErrorMessage(useMultiplayerDraftStore((s) => s.error));
+  const hostPresentation = hostRecoveryFailure ? hostRecoveryFailurePresentation(hostRecoveryFailure.kind) : null;
   // A host recovery failure names itself: a session it covers keeps its own
-  // messages for its own screen. A guest's recovery failure wins over the store
-  // error, because a retry that fails offline writes the offline sentinel while
-  // the recovery failure and its retry stay. A guest's compatibility refusal
-  // carries its code and shows the translated incompatibility message instead;
-  // its English message stays in the failure and the store error.
+  // messages for its own screen. A save the draft engine cannot read offers no
+  // retry. A guest's recovery failure wins over the store error, because a
+  // retry that fails offline writes the offline sentinel while the recovery
+  // failure and its retry stay. A guest's compatibility refusal carries its
+  // code and shows the translated incompatibility message instead; its English
+  // message stays in the failure and the store error.
   const message =
     phase === "kicked"
       ? t("podError.kicked")
       : phase === "hostLeft"
         ? t("podError.hostLeft")
-        : hostRecoveryFailure
-          ? t(hostRecoveryFailure.kind === "incompatible" ? "podError.incompatible" : "podError.connection")
+        : hostPresentation
+          ? t(hostPresentation.messageKey)
           : recoveryFailure?.kind === "incompatible" && recoveryFailure.code !== undefined
             ? t("podError.incompatible")
             : recoveryFailure?.message ?? reason ?? t("podError.connection");
   return (
     <div className="flex flex-col items-center justify-center gap-4 py-24">
       <div className="text-xl font-medium text-red-300">{message}</div>
-      {phase === "error" && (hostRecoveryFailure || recoveryFailure?.kind === "retryable") && (
+      {phase === "error" && (hostPresentation ? hostPresentation.offersRetry : recoveryFailure?.kind === "retryable") && (
         <button
           onClick={onRetry}
           className={menuButtonClass({ tone: "emerald", size: "md" })}

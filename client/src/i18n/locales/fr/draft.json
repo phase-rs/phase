@@ -655,6 +655,7 @@
     "hostLeft": "L'hôte a quitté le draft",
     "connection": "Erreur de connexion",
     "incompatible": "Ce draft n’est pas compatible avec votre version du protocole.",
+    "unreadable": "Ce draft enregistré est illisible et ne peut donc pas être repris.",
     "retry": "Réessayer la connexion"
   },
   "winston": {

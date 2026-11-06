@@ -310,6 +310,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
   describe("a recovery whose draft engine check refuses or cannot answer", () => {
     afterEach(() => {
       vi.restoreAllMocks();
+      checkRestorableSession.mockReset();
     });
 
     const recovered: PersistedDraftHostSession = {
@@ -372,6 +373,44 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       expect(installedPeer.destroy).not.toHaveBeenCalled();
       expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "installed-owner" });
       expect(checkRestorableSession).toHaveBeenCalledWith(recovered.draftSessionJson);
+    });
+
+    it("reports an unreadable saved session as unreadable before it builds a host or touches the installed one", async () => {
+      // The draft engine answers one session text alike at every check.
+      checkRestorableSession.mockResolvedValue({ type: "Unreadable" });
+
+      const { outcome, initialize, installedPeer } = await recoverBesideInstalledHost();
+
+      expect(outcome).toBe("unreadable");
+      expect(initialize).not.toHaveBeenCalled();
+      // The installed host's own peer is the only one allocated.
+      expect(hostRoom).toHaveBeenCalledOnce();
+      expect(installedPeer.destroy).not.toHaveBeenCalled();
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "installed-owner" });
+      expect(checkRestorableSession).toHaveBeenCalledOnce();
+      expect(checkRestorableSession).toHaveBeenCalledWith(recovered.draftSessionJson);
+    });
+
+    it("reports an unreadable answer at the host wrapper's own check as unreadable before it allocates a peer", async () => {
+      // The draft engine's check reads no state, so two answers for one session
+      // text cannot occur in production. This row admits the session at the
+      // lifecycle's check to drive the host wrapper's own check, which is its
+      // own boundary.
+      checkRestorableSession
+        .mockResolvedValueOnce({ type: "Admitted" })
+        .mockResolvedValueOnce({ type: "Unreadable" });
+
+      const { outcome, initialize, installedPeer } = await recoverBesideInstalledHost();
+
+      expect(outcome).toBe("unreadable");
+      // Reach: the host wrapper ran its own check.
+      expect(initialize).toHaveBeenCalledOnce();
+      expect(checkRestorableSession).toHaveBeenCalledTimes(2);
+      expect(checkRestorableSession).toHaveBeenNthCalledWith(2, recovered.draftSessionJson);
+      // The installed host's own peer is the only one allocated.
+      expect(hostRoom).toHaveBeenCalledOnce();
+      expect(installedPeer.destroy).not.toHaveBeenCalled();
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "installed-owner" });
     });
 
     it("reports an unanswered check as an initialization failure before it builds a host or touches the installed one", async () => {

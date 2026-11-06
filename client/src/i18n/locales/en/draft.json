@@ -663,6 +663,7 @@
     "hostLeft": "Host left the draft",
     "connection": "Connection Error",
     "incompatible": "This draft is incompatible with your protocol version.",
+    "unreadable": "This saved draft cannot be read, so it cannot be resumed.",
     "retry": "Try Reconnecting"
   },
   "spectator": {

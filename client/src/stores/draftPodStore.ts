@@ -37,6 +37,7 @@ import {
   DRAFT_OFFLINE_ERROR,
   DRAFT_RECOVERY_CONNECTION_ERROR,
   DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
+  DRAFT_RECOVERY_UNREADABLE_ERROR,
   useMultiplayerDraftStore,
   type DraftRole,
   type DraftSessionOpenOutcome,
@@ -63,13 +64,14 @@ export type HostedPodResumeOutcome =
   | "terminal"
   | "invalid"
   | "incompatible"
+  | "unreadable"
   | "readFailure"
   | "initializationFailure"
   | "offline"
   | "superseded";
 
 export interface HostedPodRecoveryFailure {
-  kind: "incompatible" | "readFailure" | "initializationFailure";
+  kind: "incompatible" | "unreadable" | "readFailure" | "initializationFailure";
   capture: ActiveDraftPodMetaCapture;
   /** The route and store generation that were current when this became visible. */
   routeToken: number;
@@ -1296,13 +1298,29 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           });
           return "initializationFailure";
         }
-        if (preflight.type === "incompatible") {
-          if (!isCurrentCapture()) return "superseded";
-          set({
-            hostRecoveryFailure: failure("incompatible", capture),
-            configError: DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
-          });
-          return "incompatible";
+        switch (preflight.type) {
+          case "admitted":
+            break;
+          case "incompatible":
+            if (!isCurrentCapture()) return "superseded";
+            set({
+              hostRecoveryFailure: failure("incompatible", capture),
+              configError: DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
+            });
+            return "incompatible";
+          // The draft engine cannot read the saved draft, so its restore could
+          // only fail. The recovery ends here, before any allocation or
+          // handover; the saved pod stays its source and a held session runs
+          // on. No retry can succeed while the save is unchanged.
+          case "unreadable":
+            if (!isCurrentCapture()) return "superseded";
+            set({
+              hostRecoveryFailure: failure("unreadable", capture),
+              configError: DRAFT_RECOVERY_UNREADABLE_ERROR,
+            });
+            return "unreadable";
+          default:
+            return assertNever(preflight);
         }
 
         // Build, but do not publish, the recovered pod state: it is published
@@ -1372,10 +1390,21 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           case "superseded":
             return "superseded";
           case "incompatible":
+            set({
+              hostRecoveryFailure: failure(hosted, validatedCapture),
+              configError: DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
+            });
+            return hosted;
+          case "unreadable":
+            set({
+              hostRecoveryFailure: failure(hosted, validatedCapture),
+              configError: DRAFT_RECOVERY_UNREADABLE_ERROR,
+            });
+            return hosted;
           case "initializationFailure":
             set({
               hostRecoveryFailure: failure(hosted, validatedCapture),
-              configError: hosted === "incompatible" ? DRAFT_RECOVERY_INCOMPATIBLE_ERROR : DRAFT_RECOVERY_CONNECTION_ERROR,
+              configError: DRAFT_RECOVERY_CONNECTION_ERROR,
             });
             return hosted;
           case "resumed":

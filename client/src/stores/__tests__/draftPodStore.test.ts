@@ -117,7 +117,11 @@ vi.mock("../../adapter/draft-adapter", async (importOriginal) => ({
 import { isHostedPodRecoveryInFlight, useDraftPodStore } from "../draftPodStore";
 import type { DraftSessionOpenOutcome, HostedDraftRecoveryOutcome } from "../multiplayerDraftStore";
 import { useConnectivityStore } from "../connectivityStore";
-import { DRAFT_RECOVERY_CONNECTION_ERROR, useMultiplayerDraftStore } from "../multiplayerDraftStore";
+import {
+  DRAFT_RECOVERY_CONNECTION_ERROR,
+  DRAFT_RECOVERY_UNREADABLE_ERROR,
+  useMultiplayerDraftStore,
+} from "../multiplayerDraftStore";
 
 // Ordinary unit cases below intentionally replace actions on this real Zustand
 // store. Retain the genuine closures before any case can overwrite them so
@@ -834,6 +838,30 @@ describe("draftPodStore", () => {
       expect(useDraftPodStore.getState().hostRecoveryFailure).toMatchObject({ kind: "readFailure" });
     });
 
+    it("keeps a saved pod the draft engine cannot read as its recovery source and asks no lifecycle to host it", async () => {
+      const saved = savedSession("legacy_review_unknown_flow");
+      const raw = { ...persistedSession, draftStarted: true, draftSessionJson: saved.text };
+      mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: raw });
+      // Reach: the draft engine's recorded answer for this saved session is that
+      // it cannot read it.
+      expect(saved.verdict).toEqual({ type: "Unreadable" });
+      mocks.checkRestorableSession.mockResolvedValue(saved.verdict);
+
+      await expect(useDraftPodStore.getState().resumeHostedPod({ routeToken: 68 })).resolves.toBe("unreadable");
+
+      expect(mocks.checkRestorableSession).toHaveBeenCalledOnce();
+      expect(mocks.checkRestorableSession).toHaveBeenCalledWith(saved.text);
+      expect(mocks.draftProcedure).not.toHaveBeenCalled();
+      expect(mocks.multiplayerState.resumeHostedDraft).not.toHaveBeenCalled();
+      expect(mocks.clearActiveDraftPodIfCurrent).not.toHaveBeenCalled();
+      expect(useDraftPodStore.getState().hostRecoveryFailure).toMatchObject({
+        kind: "unreadable",
+        capture: { id: "draft-1", roomCode: "ABCDE" },
+      });
+      expect(useDraftPodStore.getState().configError).toBe(DRAFT_RECOVERY_UNREADABLE_ERROR);
+    });
+
     it("does not host when the recovery procedure lookup fails", async () => {
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
       mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: persistedSession });
@@ -1163,6 +1191,17 @@ describe("draftPodStore", () => {
           () => expect(mocks.checkRestorableSession).toHaveBeenCalledWith(savedHost.draftSessionJson),
         ],
         [
+          "unreadable engine check",
+          () => {
+            mocks.checkRestorableSession.mockResolvedValueOnce({ type: "Unreadable" });
+          },
+          "unreadable",
+          () => {
+            expect(mocks.checkRestorableSession).toHaveBeenCalledWith(savedHost.draftSessionJson);
+            expect(useDraftPodStore.getState().configError).toBe(DRAFT_RECOVERY_UNREADABLE_ERROR);
+          },
+        ],
+        [
           "procedure lookup",
           () => {
             mocks.draftProcedure.mockRejectedValue(new Error("wasm unavailable"));
@@ -1177,6 +1216,17 @@ describe("draftPodStore", () => {
           },
           "incompatible",
           () => expect(mocks.multiplayerState.resumeHostedDraft).toHaveBeenCalledOnce(),
+        ],
+        [
+          "lifecycle unreadable",
+          () => {
+            mocks.multiplayerState.resumeHostedDraft.mockResolvedValueOnce("unreadable");
+          },
+          "unreadable",
+          () => {
+            expect(mocks.multiplayerState.resumeHostedDraft).toHaveBeenCalledOnce();
+            expect(useDraftPodStore.getState().configError).toBe(DRAFT_RECOVERY_UNREADABLE_ERROR);
+          },
         ],
         [
           "lifecycle start",

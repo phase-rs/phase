@@ -335,6 +335,7 @@ describe("DraftPodPage offline admission", () => {
   const hostRecoveryKeys = [
     ["podError.incompatible", "This draft is incompatible with your protocol version."],
     ["podError.connection", "Connection Error"],
+    ["podError.unreadable", "This saved draft cannot be read, so it cannot be resumed."],
   ] as const;
 
   it.each(hostRecoveryKeys)("translates the stored %s key on the host form", (key, text) => {

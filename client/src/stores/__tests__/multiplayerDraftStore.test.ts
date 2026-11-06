@@ -571,6 +571,7 @@ describe("multiplayerDraftStore", () => {
       const outcomes: HostedDraftRecoveryOutcome[] = [
         "resumed",
         "incompatible",
+        "unreadable",
         "initializationFailure",
         "aborted",
         "offline",
@@ -584,7 +585,7 @@ describe("multiplayerDraftStore", () => {
       // @ts-expect-error a hosted recovery never reports an invalid saved pod
       const invalid: HostedDraftRecoveryOutcome = "invalid";
 
-      expect(new Set(outcomes).size).toBe(6);
+      expect(new Set(outcomes).size).toBe(7);
       expect([readFailure, invalid]).toEqual(["readFailure", "invalid"]);
     });
   });

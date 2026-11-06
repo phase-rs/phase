@@ -655,6 +655,7 @@
     "hostLeft": "Der Host hat den Draft verlassen",
     "connection": "Verbindungsfehler",
     "incompatible": "Dieser Draft ist mit deiner Protokollversion nicht kompatibel.",
+    "unreadable": "Dieser gespeicherte Draft kann nicht gelesen und daher nicht fortgesetzt werden.",
     "retry": "Erneut verbinden"
   },
   "winston": {

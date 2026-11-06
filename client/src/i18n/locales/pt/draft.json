@@ -655,6 +655,7 @@
     "hostLeft": "O anfitrião saiu do draft",
     "connection": "Erro de Conexão",
     "incompatible": "Este draft não é compatível com sua versão do protocolo.",
+    "unreadable": "Este draft salvo não pode ser lido, então não pode ser retomado.",
     "retry": "Tentar reconectar"
   },
   "winston": {
