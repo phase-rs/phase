@@ -203,6 +203,7 @@ mod parser_oracle;
 mod parser_oracle_effect;
 mod part_in_friendship_conditional_reveal;
 mod pass_priority_structural_legality;
+mod pay_x_effect_payment_ceiling;
 mod period_confirm_rows;
 mod perpetual_gains;
 mod perrie_the_pulverizer_attack_trigger_6219;

@@ -6,7 +6,7 @@ use crate::types::ability::{is_pay_any_amount, AbilityCost, Effect};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, ManaAmountComposition, PayableResource, WaitingFor};
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::ManaCost;
+use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::player::PlayerId;
 
 use super::{EffectError, ResolvedAbility};
@@ -390,6 +390,11 @@ fn resolve_ability_cost_payment(
 /// payable, X = 0 is payable too. The downward search below therefore never
 /// needs to re-check 0 separately — reaching `max == 0` and failing there is
 /// exactly the "not even 0 works" case.
+///
+/// The search starts at `casting::effect_payment_ceiling` (the larger of the
+/// simulated production and the announcement-time `max_x_value` estimate) and
+/// descends to the largest X at or below it that the unchanged single-pass exact
+/// check accepts; see `resolution_mana_per_unit_max` for the contract.
 fn resolution_mana_x_max(
     state: &GameState,
     payer: PlayerId,
@@ -398,20 +403,32 @@ fn resolution_mana_x_max(
 ) -> Option<u32> {
     // Resolution-time X costs are not spell casts — convoke/improvise/waterbend
     // tap-payments do not apply, so no spell object is passed.
-    let mut max = casting_costs::max_x_value(state, payer, cost, None);
+    //
+    // CR 118.1 + CR 605.3a + CR 106.12b: the starting point is the larger of the
+    // simulated production (which counts replacement multipliers such as
+    // Nyxbloom Ancient and TapsForMana bonuses) and the announcement-time
+    // `max_x_value` estimate, which stays the floor and is itself untouched.
+    // The exact check below still gates every candidate, so an over-estimate is
+    // never offered.
+    let legacy = casting_costs::max_x_value(state, payer, cost, None);
+    let mut max = casting::effect_payment_ceiling(state, payer, source_id, legacy, |x| {
+        x_concrete_checked(cost, x)
+    });
     loop {
-        let mut concrete = cost.clone();
-        concrete.concretize_x(max);
+        // `None` (X not representable) counts as not payable.
+        let concrete = x_concrete_checked(cost, max);
         // CR 605.3b + CR 616.1: the chosen amount is paid through
         // `pay_unless_cost`, which has no resume root, so the offered range must
         // not count a mana source whose own cost would pause.
-        if casting::can_pay_effect_mana_cost_after_auto_tap(
-            state,
-            payer,
-            source_id,
-            &concrete,
-            casting::PausedManaPayment::Unresumable,
-        ) {
+        if concrete.as_ref().is_some_and(|concrete| {
+            casting::can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                payer,
+                source_id,
+                concrete,
+                casting::PausedManaPayment::Unresumable,
+            )
+        }) {
             return Some(max);
         }
         if max == 0 {
@@ -419,6 +436,26 @@ fn resolution_mana_x_max(
         }
         max -= 1;
     }
+}
+
+/// `cost` with every `{X}` concretized to `x` (`ManaCost::concretize_x`), or
+/// `None` when the resulting generic amount is not representable in `u32`.
+/// `concretize_x` multiplies and adds unchecked, so the width is checked here
+/// before the cost is built.
+fn x_concrete_checked(cost: &ManaCost, x: u32) -> Option<ManaCost> {
+    if let ManaCost::Cost { shards, generic } = cost {
+        let x_count = u32::try_from(
+            shards
+                .iter()
+                .filter(|shard| matches!(shard, ManaCostShard::X))
+                .count(),
+        )
+        .ok()?;
+        generic.checked_add(x.checked_mul(x_count)?)?;
+    }
+    let mut concrete = cost.clone();
+    concrete.concretize_x(x);
+    Some(concrete)
 }
 
 /// CR 107.1c + CR 118.1: Largest N for which `per_unit` repeated N times
@@ -4853,5 +4890,40 @@ mod ceiling_tests {
         };
         assert!(per_unit_scaled_checked(&wide, u32::MAX).is_none());
         assert!(per_unit_scaled_checked(&wide, 3).is_some());
+    }
+
+    /// K4b: `x_concrete_checked` concretizes every `{X}` like
+    /// `ManaCost::concretize_x`, and returns `None` rather than a wrapped or
+    /// panicking cost when the generic amount does not fit in `u32`.
+    #[test]
+    fn x_concrete_checked_scales_every_x_and_detects_overflow() {
+        let double_x = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::X, ManaCostShard::Red],
+            generic: 1,
+        };
+        assert_eq!(
+            x_concrete_checked(&double_x, 3),
+            Some(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 7,
+            })
+        );
+        assert!(x_concrete_checked(&double_x, u32::MAX).is_none());
+        // The multiplication fits but the added fixed generic does not.
+        let single_x = ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 1,
+        };
+        assert!(x_concrete_checked(&single_x, u32::MAX).is_none());
+        assert_eq!(
+            x_concrete_checked(&single_x, u32::MAX - 1),
+            Some(ManaCost::Cost {
+                shards: vec![],
+                generic: u32::MAX,
+            })
+        );
+        // No `{X}`: the cost is unchanged whatever `x` is.
+        let fixed = red_unit();
+        assert_eq!(x_concrete_checked(&fixed, u32::MAX), Some(fixed));
     }
 }
