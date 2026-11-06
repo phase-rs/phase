@@ -184,7 +184,9 @@ fn explicit_target_spell_prompts_at_cast_and_excludes_shroud() {
 }
 
 /// Synthetic Oracle: no printed card pairs a bare choose in a later chunk with a
-/// distinct later printed target through this path; there is no printed analogue.
+/// distinct later printed target through this path. The nearest printed card is
+/// Crush Underfoot ("Choose a Giant creature you control. It deals damage equal
+/// to its power to target creature."), whose choice opens the spell.
 /// Pins two facts (CR 115.10a + CR 608.2d): a bare choose in a LATER chunk
 /// resolves at resolution time, with no cast-time prompt of its own, and the later
 /// printed target (CR 601.2c) is still the only cast-time prompt. At resolution

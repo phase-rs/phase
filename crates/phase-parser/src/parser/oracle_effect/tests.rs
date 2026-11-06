@@ -78945,6 +78945,8 @@ fn compound_choice_c3_declines_and_preserves_existing_choose_shapes() {
 
 /// SHAPE: a prior instruction cannot erase the compound object/player producer's
 /// resolution-time object choice.
+/// Synthetic Oracle: the clause is Risky Move's ("... choose a creature you
+/// control and an opponent."); no printed card puts it after another instruction.
 #[test]
 fn compound_choice_prefixed_object_and_player_keeps_resolution_timing() {
     let head = parse_effect_chain(
@@ -79230,6 +79232,10 @@ fn bare_choose_later_chunk_printed_cards_use_resolution_timing() {
 /// CR 608.2d: it is announced as the effect is applied). The later printed
 /// "target creature you don't control" damage recipient stays stack-time
 /// (CR 601.2c) in both rows.
+/// Synthetic Oracle: no printed card has this shape through this producer; the
+/// nearest printed card is Crush Underfoot ("Choose a Giant creature you control.
+/// It deals damage equal to its power to target creature."), whose damage
+/// recipient is mis-lowered on main.
 #[test]
 fn bare_choose_resolves_at_any_chain_position_and_keeps_later_printed_target_at_stack() {
     for (text, choice_index) in [
@@ -79342,6 +79348,9 @@ fn bare_choose_third_party_printed_choices_keep_stack_timing() {
 }
 
 /// SHAPE: a partially parsed object phrase cannot establish resolution timing.
+/// Synthetic Oracle: no printed bare choose carries "that hasn't attacked this
+/// turn"; the nearest printed card is Final Showdown ("Choose a creature you
+/// control.").
 #[test]
 fn bare_choose_partial_object_phrase_keeps_stack_timing() {
     let rest = "a creature you control that hasn't attacked this turn";
@@ -79559,6 +79568,9 @@ fn bare_choose_exact_count_does_not_declare_resolution_timing() {
 }
 
 /// SHAPE: a random object selection must not enter the controller-choice path.
+/// Synthetic Oracle: no printed card chooses "a creature you control at random";
+/// the nearest printed card is Last One Standing ("Choose a creature at random,
+/// then destroy the rest.").
 #[test]
 fn bare_choose_random_object_keeps_stack_timing() {
     let def = parse_effect_chain(

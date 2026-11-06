@@ -5183,9 +5183,7 @@ pub(super) fn parse_choose_ast(
                 // the fallback rather than merely withholding Resolution.
                 ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Stack);
             } else if remainder.trim().is_empty()
-                && alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
-                    .parse(rest_lower.trim_start())
-                    .is_ok()
+                && nom_primitives::parse_article(rest_lower.trim_start()).is_ok()
                 && ctx.target_selection_mode == TargetSelectionMode::Chosen
                 && ctx.clause_player_scope.is_none()
                 && !nom_primitives::scan_contains(rest_lower, "target ")
