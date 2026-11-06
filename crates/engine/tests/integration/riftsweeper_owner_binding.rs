@@ -1208,3 +1208,293 @@ fn alabaster_dragons_dying_together_each_shuffle_into_their_owners_library() {
         "both owners' libraries are shuffled"
     );
 }
+
+const CATHARTIC_PARTING: &str = "The owner of target artifact or enchantment an opponent controls shuffles it into their library. You may shuffle up to four target cards from your graveyard into your library.";
+const FLAME_SLASH: &str = "Flame Slash deals 4 damage to target creature.";
+const SOL_RING: &str = "{T}: Add {C}{C}.";
+
+/// Pass priority until the stack is empty, answering every optional-effect
+/// prompt (CR 608.2d) with `accept` through the real `DecideOptionalEffect`
+/// action. Returns every emitted event and how many optional prompts were
+/// answered.
+fn settle_answering_optionals(runner: &mut GameRunner, accept: bool) -> (Vec<GameEvent>, usize) {
+    let mut events = vec![];
+    let mut prompts = 0;
+    for _ in 0..8 {
+        match &runner.state().waiting_for {
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                assert_eq!(*player, P0, "the caster makes the 'you may' choice");
+                prompts += 1;
+                events.extend(
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept })
+                        .expect("the optional-effect answer is accepted")
+                        .events,
+                );
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => events.extend(
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority passes while the spell resolves")
+                    .events,
+            ),
+            other => panic!("unexpected prompt while resolving Cathartic Parting: {other:?}"),
+        }
+    }
+    (events, prompts)
+}
+
+// CR 608.2b + CR 701.24a + CR 108.3: Cathartic Parting has two separate target
+// groups ("target artifact or enchantment an opponent controls" and "up to four
+// target cards from your graveyard"). The artifact is OWNED by P2 and controlled
+// by P1 (an opponent of the caster P0), so the owner binding is observable. When
+// only one group's targets are illegal at resolution, the other group's part
+// still happens and the illegal group is untouched.
+#[test]
+fn cathartic_parting_resolves_the_legal_target_group_when_the_other_group_is_illegal() {
+    for first_group_illegal in [true, false] {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let artifact = scenario
+            .add_artifact_from_oracle(P2, "Sol Ring", SOL_RING)
+            .controlled_by(P1)
+            .id();
+        let grave_a = scenario
+            .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+            .id();
+        let grave_b = scenario
+            .add_creature_to_graveyard(P0, "Runeclaw Bear", 2, 2)
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Cathartic Parting", false, CATHARTIC_PARTING)
+            .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+            .id();
+        scenario.with_library_top(P0, &["P0 Card"]);
+        scenario.with_library_top(P1, &["P1 Card"]);
+        scenario.with_library_top(P2, &["P2 Card"]);
+        scenario.with_mana_pool(
+            P0,
+            (0..2)
+                .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        assert_eq!(runner.state().objects[&artifact].owner, P2);
+        assert_eq!(runner.state().objects[&artifact].controller, P1);
+
+        let mut events = runner
+            .cast(spell)
+            .target_objects(&[artifact, grave_a, grave_b])
+            .commit()
+            .events()
+            .to_vec();
+        // Reach guard: all three targets were declared and the spell is on the
+        // stack, awaiting resolution.
+        assert_eq!(runner.state().stack.len(), 1);
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+
+        // In response, one whole target group leaves its zone (CR 608.2b).
+        let doomed: &[ObjectId] = if first_group_illegal {
+            &[artifact]
+        } else {
+            &[grave_a, grave_b]
+        };
+        for id in doomed {
+            engine::game::zones::move_to_zone(runner.state_mut(), *id, Zone::Exile, &mut vec![]);
+            assert_eq!(runner.state().objects[id].zone, Zone::Exile);
+        }
+
+        let (resolved, prompts) = settle_answering_optionals(&mut runner, true);
+        events.extend(resolved);
+        finished(&runner);
+
+        let owner_library = |player: PlayerId| &runner.state().players[player.0 as usize].library;
+        if first_group_illegal {
+            // The graveyard group still resolves: P0's chosen cards are shuffled
+            // into P0's library through the real "you may" prompt.
+            assert_eq!(prompts, 1, "the 'you may shuffle' prompt was offered once");
+            assert_eq!(distinct_shuffles(&events), vec![P0]);
+            for id in [grave_a, grave_b] {
+                assert_eq!(runner.state().objects[&id].zone, Zone::Library);
+                assert!(owner_library(P0).contains(&id));
+            }
+            // The illegal artifact is untouched and its owner's (P2's) and
+            // controller's (P1's) libraries are not shuffled on its account.
+            assert_eq!(runner.state().objects[&artifact].zone, Zone::Exile);
+            assert!(!owner_library(P2).contains(&artifact));
+            assert!(!owner_library(P1).contains(&artifact));
+            assert!(!distinct_shuffles(&events).contains(&P2));
+            assert!(!distinct_shuffles(&events).contains(&P1));
+        } else {
+            // The artifact group still resolves: the OWNER (P2, not the
+            // controller P1 and not the caster P0) shuffles it into their library.
+            assert_eq!(runner.state().objects[&artifact].zone, Zone::Library);
+            assert!(owner_library(P2).contains(&artifact));
+            assert!(!owner_library(P1).contains(&artifact));
+            assert!(!owner_library(P0).contains(&artifact));
+            // The caster's library may or may not be shuffled for the all-illegal
+            // "you may shuffle" sentence (CR 701.24c); this row does not pin that
+            // separate question, only that the artifact's OWNER is shuffled and the
+            // controller (P1) is not.
+            let shuffled = distinct_shuffles(&events);
+            assert!(shuffled.contains(&P2));
+            assert!(!shuffled.contains(&P1));
+            // The illegal graveyard cards are untouched.
+            for id in [grave_a, grave_b] {
+                assert_eq!(runner.state().objects[&id].zone, Zone::Exile);
+                assert!(!owner_library(P0).contains(&id));
+            }
+        }
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    }
+}
+
+// CR 400.7 + CR 701.24c: "When this creature dies, shuffle it into its owner's
+// library." The Dragon is owned by P1 and controlled by P0. With its death
+// trigger on the stack it is exiled from the graveyard, becoming a new object
+// (CR 400.7). The trigger cannot find it, yet the owner's library is still
+// shuffled (CR 701.24c), and never the controller's.
+#[test]
+fn alabaster_dragon_exiled_in_response_stays_exiled_but_its_owner_still_shuffles() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dragon = scenario
+        .add_creature(P1, "Alabaster Dragon", 4, 4)
+        .controlled_by(P0)
+        .with_subtypes(vec!["Dragon"])
+        .from_oracle_text_with_keywords(&["Flying"], ALABASTER_DRAGON)
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{B}{B}"))
+        .id();
+    scenario.with_library_top(P0, &["P0 Card"]);
+    scenario.with_library_top(P1, &["P1 Card"]);
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().objects[&dragon].owner, P1);
+    assert_eq!(runner.state().objects[&dragon].controller, P0);
+
+    let mut events = runner
+        .cast(murder)
+        .target_object(dragon)
+        .commit()
+        .events()
+        .to_vec();
+    for _ in 0..4 {
+        if runner.state().stack.len() == 1
+            && runner.state().objects[&murder].zone == Zone::Graveyard
+        {
+            break;
+        }
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+
+    // Reach guards: the Dragon died and its death trigger (not Murder) is the
+    // only thing on the stack.
+    assert!(events.iter().any(|event| matches!(event,
+        GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Graveyard, .. }
+        if *object_id == dragon)));
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].source_id, dragon);
+    assert_eq!(runner.state().objects[&dragon].zone, Zone::Graveyard);
+
+    // In response, the Dragon is exiled from the graveyard (a new object).
+    let before = runner.state().objects[&dragon].incarnation;
+    engine::game::zones::move_to_zone(runner.state_mut(), dragon, Zone::Exile, &mut vec![]);
+    assert_eq!(runner.state().objects[&dragon].zone, Zone::Exile);
+    assert_ne!(runner.state().objects[&dragon].incarnation, before);
+
+    let mut resolved = vec![];
+    for _ in 0..4 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        resolved.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    finished(&runner);
+
+    // The trigger could not find the Dragon: it stays in exile, in no library.
+    assert_eq!(runner.state().objects[&dragon].zone, Zone::Exile);
+    assert!(!runner.state().players[0].library.contains(&dragon));
+    assert!(!runner.state().players[1].library.contains(&dragon));
+    // CR 701.24c: the owner's library is shuffled anyway, never the controller's.
+    assert_eq!(distinct_shuffles(&resolved), vec![P1]);
+}
+
+// CR 111.7 + CR 603.10a + CR 701.24c: an Alabaster Dragon TOKEN dies; its death
+// trigger still triggers before the token ceases to exist, resolves, finds no
+// object to move, and still shuffles the owner's (its creator's) library.
+#[test]
+fn alabaster_dragon_token_death_trigger_resolves_and_still_shuffles_its_owner() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let token = scenario
+        .add_creature(P0, "Alabaster Dragon", 4, 4)
+        .with_subtypes(vec!["Dragon"])
+        .from_oracle_text_with_keywords(&["Flying"], ALABASTER_DRAGON)
+        .id();
+    let slash = scenario
+        .add_spell_to_hand_from_oracle(P0, "Flame Slash", false, FLAME_SLASH)
+        .with_mana_cost(parse_mtgjson_mana_cost("{R}"))
+        .id();
+    scenario.with_library_top(P0, &["P0 Card A", "P0 Card B"]);
+    scenario.with_library_top(P1, &["P1 Card"]);
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+    );
+    let mut runner = scenario.build();
+    runner.state_mut().objects.get_mut(&token).unwrap().is_token = true;
+    assert_eq!(runner.state().objects[&token].owner, P0);
+    let library_before = runner.state().players[0].library.len();
+
+    let mut events = runner
+        .cast(slash)
+        .target_object(token)
+        .commit()
+        .events()
+        .to_vec();
+    for _ in 0..4 {
+        if runner.state().stack.len() == 1 && runner.state().objects[&slash].zone == Zone::Graveyard
+        {
+            break;
+        }
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+
+    // Reach guards: the token died (battlefield to graveyard) and its death
+    // trigger is on the stack before the token ceases to exist.
+    assert!(events.iter().any(|event| matches!(event,
+        GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Graveyard, .. }
+        if *object_id == token)));
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].source_id, token);
+
+    let mut resolved = vec![];
+    for _ in 0..4 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        resolved.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    finished(&runner);
+
+    // The token is gone: it is in no library and P0's library did not grow.
+    assert!(!runner.state().players[0].library.contains(&token));
+    assert!(!runner.state().players[1].library.contains(&token));
+    assert_eq!(runner.state().players[0].library.len(), library_before);
+    assert!(runner
+        .state()
+        .objects
+        .get(&token)
+        .is_none_or(|object| object.zone != Zone::Library));
+    // CR 701.24c: the owner's library is still shuffled, and only theirs.
+    assert_eq!(distinct_shuffles(&resolved), vec![P0]);
+}
