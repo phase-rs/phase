@@ -277,14 +277,7 @@ pub(crate) struct BoundedOfferParts {
 fn seat_refusal(body: &[TraceEntry], holder: PlayerId) -> Option<OfferRefusal> {
     let mut seats: Vec<PlayerId> = body
         .iter()
-        .filter(|entry| match &entry.kind {
-            // CR 117.1a + CR 117.1b: casting a spell or activating an ability is optional.
-            EntryKind::Play { .. } => true,
-            EntryKind::Answer { optional, .. } => *optional == AnswerOptionality::Optional,
-            // CR 603.5: a stored preference's answer is still its seat's optional choice.
-            EntryKind::Remembered { .. } => true,
-            EntryKind::Resolution { .. } => false,
-        })
+        .filter(|entry| optional_choice(entry))
         .map(|entry| entry.seat)
         .collect();
     seats.sort_unstable();
@@ -294,6 +287,18 @@ fn seat_refusal(body: &[TraceEntry], holder: PlayerId) -> Option<OfferRefusal> {
         [seat] if seat == holder => None,
         [seat] => Some(OfferRefusal::ForeignSeat { seat }),
         _ => Some(OfferRefusal::Fragmented { seats }),
+    }
+}
+
+/// Whether `entry` is its seat's optional choice.
+fn optional_choice(entry: &TraceEntry) -> bool {
+    match &entry.kind {
+        // CR 117.1a + CR 117.1b: casting a spell or activating an ability is optional.
+        EntryKind::Play { .. } => true,
+        EntryKind::Answer { optional, .. } => *optional == AnswerOptionality::Optional,
+        // CR 603.5: a stored preference's answer is still its seat's optional choice.
+        EntryKind::Remembered { .. } => true,
+        EntryKind::Resolution { .. } => false,
     }
 }
 
@@ -2163,6 +2168,21 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
                     }) =>
         {
             period_sign_check(&s_n, &s_n1, holder, library_cost)
+        }
+        // CR 603.5 + CR 104.4b: a period of answers alone, one of them optional, is no mandatory
+        // loop, so it is a finite proposal with its answers pinned (CR 732.2a) that each other
+        // player may shorten (CR 732.2b).
+        Err(OfferRefusal::NoAxis)
+            if play_trace::span_entries(frame, span).is_some_and(|entries| {
+                let body = || entries.iter().skip(span.start).take(span.end - span.start);
+                !body().any(|entry| matches!(entry.kind, EntryKind::Play { .. }))
+                    && body().any(optional_choice)
+            }) =>
+        {
+            Ok(PeriodSign::Unbounded(Box::new((
+                ResourceVector::period(prior, current),
+                None,
+            ))))
         }
         sign => sign,
     };

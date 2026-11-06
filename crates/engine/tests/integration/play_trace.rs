@@ -1426,6 +1426,8 @@ fn play_trace_keys_a_delayed_trigger_by_its_creator_across_cycles() {
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
     cast(&mut runner, animate, vec![dragon], CastPaymentMode::Auto);
+    // Nodes are keyed per trace, and declining the offer discards the decliner's trace.
+    let mut trace = 0;
     let (mut delayed, mut animate_printed) = (Vec::new(), Vec::new());
     for _ in 0..60 {
         let state = runner.state();
@@ -1441,37 +1443,56 @@ fn play_trace_keys_a_delayed_trigger_by_its_creator_across_cycles() {
                     }
                     _ => None,
                 };
-                let before = trace_of(state).entries.len();
+                let before = play_trace_view(state).map_or(0, |view| view.entries.len());
                 act(&mut runner, GameAction::PassPriority);
-                let resolved = trace_of(runner.state()).entries[before..]
-                    .iter()
-                    .find_map(|e| match e.kind {
-                        EntryKind::Resolution { node } => Some(node),
-                        _ => None,
-                    });
+                let resolved = play_trace_view(runner.state()).and_then(|view| {
+                    view.entries
+                        .get(before..)?
+                        .iter()
+                        .find_map(|e| match e.kind {
+                            EntryKind::Resolution { node } => Some(node),
+                            _ => None,
+                        })
+                });
                 match (top, resolved) {
-                    (Some(true), Some(node)) => delayed.push(node),
-                    (Some(false), Some(node)) => animate_printed.push(node),
+                    (Some(true), Some(node)) => delayed.push((trace, node)),
+                    (Some(false), Some(node)) => animate_printed.push((trace, node)),
                     _ => {}
                 }
             }
-            WaitingFor::LoopShortcut { .. } => act(&mut runner, GameAction::DeclineShortcut),
+            WaitingFor::LoopShortcut { .. } => {
+                trace += 1;
+                act(&mut runner, GameAction::DeclineShortcut);
+            }
             _ => answer(&mut runner, &names(&[dragon])),
         }
     }
+    let in_trace = |nodes: &[(usize, usize)], at: usize| -> Vec<usize> {
+        nodes
+            .iter()
+            .filter(|(of, _)| *of == at)
+            .map(|(_, node)| *node)
+            .collect()
+    };
     assert!(
-        delayed.len() >= 2 && !animate_printed.is_empty(),
-        "reach: two cycles of Animate Dead's delayed and enters triggers resolved: \
+        (0..=trace).any(|at| in_trace(&delayed, at).len() >= 2) && !animate_printed.is_empty(),
+        "reach: one trace saw two cycles of Animate Dead's delayed trigger resolve: \
          {delayed:?} {animate_printed:?}"
     );
-    assert!(
-        delayed.iter().all(|&node| node == delayed[0]),
-        "CR 603.7a: one creator's delayed ability is one node across cycles: {delayed:?}"
-    );
-    assert!(
-        !animate_printed.contains(&delayed[0]),
-        "the delayed ability is not its creator's printed trigger: {delayed:?} {animate_printed:?}"
-    );
+    for at in 0..=trace {
+        let nodes = in_trace(&delayed, at);
+        assert!(
+            nodes.iter().all(|&node| node == nodes[0]),
+            "CR 603.7a: one creator's delayed ability is one node across cycles: {delayed:?}"
+        );
+        assert!(
+            nodes
+                .first()
+                .is_none_or(|node| !in_trace(&animate_printed, at).contains(node)),
+            "the delayed ability is not its creator's printed trigger: {delayed:?} \
+             {animate_printed:?}"
+        );
+    }
 }
 
 /// CR 603.5 + CR 707.10: P0's stored accept of Soul's Attendant's "may" answers its trigger and

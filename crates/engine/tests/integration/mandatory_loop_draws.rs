@@ -16,7 +16,7 @@ use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
 };
 use engine::game::perf_counters::play_trace_counters;
-use engine::game::period_confirm::mandatory_reading_for_tests;
+use engine::game::period_confirm::{confirm_for_tests, mandatory_reading_for_tests, OfferRefusal};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
@@ -42,6 +42,7 @@ use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::zones::Zone;
 use rand::Rng;
 
+use crate::fantastic_four_bounded_loop::MAX_SHORTCUT_CYCLES_MIRROR;
 use crate::support::shared_card_db;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -911,9 +912,9 @@ fn assert_out_offer(run: &Run, leg: &str) {
 }
 
 /// CR 104.4b + CR 603.5: P0 answers Leonin Snarecaster's "may" every cycle beside P1's Bolt, so
-/// the period holds an optional action and is neither drawn nor offered.
+/// the period holds an optional action and is offered as a finite proposal, not drawn.
 #[test]
-fn a_may_beside_an_out_is_not_offered() {
+fn a_may_beside_an_out_is_offered() {
     let board = Board {
         optional: true,
         ..snarecaster(May::Prompted { accept: true })
@@ -923,10 +924,10 @@ fn a_may_beside_an_out_is_not_offered() {
         let Some(run) = run(board, LoopDetectionMode::Interactive, drive, 40) else {
             return;
         };
-        assert_runs_on(&run, &leg);
+        assert_may_loop_offered(&run, P0, &leg);
         assert!(
-            run.prompted("OptionalEffectChoice") >= 2,
-            "{leg}: reach: the may was asked across cycles"
+            run.prompted("OptionalEffectChoice") >= 1,
+            "{leg}: reach: the may was asked"
         );
     }
 }
@@ -938,6 +939,78 @@ fn snarecaster(may: May) -> Board {
         snarecaster: Some(may),
         ..PLAIN
     }
+}
+
+/// Asserts the run stopped at `proposer`'s offer of its may loop as a finite proposal with no
+/// winner and no draw (CR 104.4b + CR 732.2a), and returns the offered board.
+fn assert_may_offer<'a>(run: &'a Run, proposer: PlayerId, leg: &str) -> &'a GameState {
+    assert_eq!(
+        run.terminal,
+        Terminal::Offer {
+            predicted_winner: None,
+            mandatory: false
+        },
+        "{leg}"
+    );
+    let state = run.state();
+    match &state.waiting_for {
+        WaitingFor::LoopShortcut {
+            proposer: offered_by,
+            schema,
+            ..
+        } => {
+            assert_eq!(*offered_by, proposer, "{leg}");
+            assert_eq!(
+                (&schema.iteration_count, schema.measured_repetition_bound),
+                (&IterationCount::Fixed(MAX_SHORTCUT_CYCLES_MIRROR), None),
+                "{leg}: no threshold bounds the period, so the count is the repetition budget"
+            );
+        }
+        other => panic!("{leg}: no offer: {other:?}"),
+    }
+    state
+}
+
+/// [`assert_may_offer`], and a smaller count the proposer names (CR 732.2a) is performed and the
+/// game goes on.
+fn assert_may_loop_offered(run: &Run, proposer: PlayerId, leg: &str) -> Vec<GameEvent> {
+    let offered = assert_may_offer(run, proposer, leg);
+    let (proposed, _) = admitted(offered, proposer, declare(IterationCount::Fixed(3)), leg);
+    let WaitingFor::RespondToShortcut { player, .. } = proposed.waiting_for else {
+        panic!("{leg}: no response window: {:?}", proposed.waiting_for);
+    };
+    let (taken, events) = admitted(
+        &proposed,
+        player,
+        GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        },
+        leg,
+    );
+    assert_eq!(repetitions(&events), 3, "{leg}");
+    assert!(
+        matches!(taken.waiting_for, WaitingFor::Priority { .. }),
+        "{leg}: the game goes on; {:?}",
+        taken.waiting_for
+    );
+    events
+}
+
+/// The taps each repetition the take's record keeps performed.
+fn taps_per_kept_repetition(events: &[GameEvent]) -> Vec<usize> {
+    let mut taps = Vec::new();
+    for event in events {
+        match event {
+            GameEvent::ShortcutRepetition { .. } => taps.push(0),
+            GameEvent::PermanentTapped { .. } => {
+                if let Some(last) = taps.last_mut() {
+                    *last += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    taps
 }
 
 /// Asserts the loop ran its beats without being declared while the Dragon kept entering.
@@ -952,7 +1025,9 @@ fn assert_runs_on(run: &Run, leg: &str) {
 }
 
 /// CR 104.4b + CR 603.5: Leonin Snarecaster's "you may tap" is answered every cycle, so the
-/// loop holds an optional action and is no draw, whichever way it is answered.
+/// loop holds an optional action and is no draw, whichever way it is answered. Under Interactive
+/// it is offered with the answer pinned (CR 732.2a), and a responder holding a game choice may
+/// shorten it (CR 732.2b); Off runs on.
 #[test]
 fn a_may_answered_every_cycle_is_not_a_draw() {
     for accept in [true, false] {
@@ -962,11 +1037,43 @@ fn a_may_answered_every_cycle_is_not_a_draw() {
                 let Some(run) = run(snarecaster(May::Prompted { accept }), mode, drive, 40) else {
                     return;
                 };
-                assert_runs_on(&run, &leg);
+                if mode == LoopDetectionMode::Off {
+                    assert_runs_on(&run, &leg);
+                    assert!(
+                        run.prompted("OptionalEffectChoice") >= 2,
+                        "{leg}: reach: the may was asked across cycles"
+                    );
+                    continue;
+                }
                 assert!(
-                    run.prompted("OptionalEffectChoice") >= 2,
-                    "{leg}: reach: the may was asked across cycles"
+                    run.prompted("OptionalEffectChoice") >= 1,
+                    "{leg}: reach: the may was asked"
                 );
+                let taken = assert_may_loop_offered(&run, P0, &leg);
+                assert_eq!(
+                    taps_per_kept_repetition(&taken),
+                    vec![usize::from(accept); 2],
+                    "{leg}: CR 603.5: each repetition answers the may as pinned"
+                );
+                if drive != Drive::Pass {
+                    continue;
+                }
+                let offered = run.state();
+                let (proposed, _) = admitted(
+                    &armed(offered),
+                    P0,
+                    declare(IterationCount::Fixed(MAX_SHORTCUT_CYCLES_MIRROR)),
+                    &leg,
+                );
+                let (shortened, _) = admitted(&proposed, P1, shorten_at(0), &leg);
+                assert!(
+                    priority_to(&shortened, P1),
+                    "{leg}: CR 732.2b: the shortener holds priority; {:?}",
+                    shortened.waiting_for
+                );
+                if accept {
+                    accepted_take(offered, MAX_SHORTCUT_CYCLES_MIRROR, &leg);
+                }
             }
         }
     }
@@ -1021,7 +1128,12 @@ fn remembered_may_runs_on(legs: &[(Board, LoopDetectionMode, Drive)]) {
         let Some(run) = run(board, mode, drive, 40) else {
             return;
         };
-        assert_runs_on(&run, &leg);
+        match mode {
+            LoopDetectionMode::Off => assert_runs_on(&run, &leg),
+            _ => {
+                assert_may_loop_offered(&run, P0, &leg);
+            }
+        }
         assert_eq!(
             run.prompted("OptionalEffectChoice"),
             1,
@@ -1057,7 +1169,12 @@ fn remembered_prevention_runs_on(drive: Drive) {
         let Some(run) = run(board, mode, drive, 30) else {
             return;
         };
-        assert_runs_on(&run, &leg);
+        match mode {
+            LoopDetectionMode::Off => assert_runs_on(&run, &leg),
+            _ => {
+                assert_may_loop_offered(&run, P1, &leg);
+            }
+        }
         assert_eq!(
             run.prompted("ReplacementChoice"),
             1,
@@ -1465,31 +1582,28 @@ fn a_capped_auto_pass_drive_over_a_mandatory_loop_draws() {
     );
 }
 
-/// An auto-pass drive that reaches its iteration cap hands control back, so under
-/// Interactive the action returns even when the loop it ran is not declared.
+/// CR 732.2a: under Interactive, the may loop's offer interrupts the capped auto-pass drive.
 #[test]
 fn a_capped_auto_pass_action_returns_after_a_remembered_accept() {
-    capped_drive_runs_on(snarecaster(May::Remembered { accept: true }));
+    capped_drive_is_offered(snarecaster(May::Remembered { accept: true }));
 }
 
 #[test]
 fn a_capped_auto_pass_action_returns_after_a_remembered_decline() {
-    capped_drive_runs_on(snarecaster(May::Remembered { accept: false }));
+    capped_drive_is_offered(snarecaster(May::Remembered { accept: false }));
 }
 
-fn capped_drive_runs_on(board: Board) {
+fn capped_drive_is_offered(board: Board) {
     let leg = format!("{:?}", board.snarecaster);
-    let Some((terminal, max_entries_per_action, prompts)) =
-        full_yield_drive_returns(board, 12, capped_reading)
-    else {
+    let Some(run) = run(board, LoopDetectionMode::Interactive, Drive::FullYields, 12) else {
         return;
     };
-    assert_eq!(terminal, Terminal::BeatsExhausted, "{leg}");
-    assert!(
-        max_entries_per_action >= 16,
-        "{leg}: reach: one action reached the iteration cap, got {max_entries_per_action}"
+    assert_may_offer(&run, P0, &leg);
+    assert_eq!(
+        run.prompted("OptionalEffectChoice"),
+        1,
+        "{leg}: reach: one remembered answer"
     );
-    assert_eq!(prompts, 1, "{leg}: reach: one remembered answer");
 }
 
 fn capped_reading(run: Run) -> (Terminal, usize, usize) {
@@ -1837,7 +1951,21 @@ fn a_drain_with_an_out_outside_the_loop_is_offered_not_won() {
         assert_eq!(won.terminal, Terminal::GameOver(Some(P1)), "{drive:?}");
         assert!(won.life(P0) > 0, "{drive:?}: won before the drain ended");
 
-        let Some(offered) = run(with_out, LoopDetectionMode::Interactive, drive, 60) else {
+        let mut no_axis = 0;
+        let Some(offered) = run_observed(
+            with_out,
+            LoopDetectionMode::Interactive,
+            drive,
+            60,
+            |state| {
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    no_axis += confirm_for_tests(state)
+                        .into_iter()
+                        .filter(|(_, verdict)| *verdict == Err(OfferRefusal::NoAxis))
+                        .count();
+                }
+            },
+        ) else {
             return;
         };
         assert_eq!(
@@ -1847,6 +1975,11 @@ fn a_drain_with_an_out_outside_the_loop_is_offered_not_won() {
                 mandatory: false
             },
             "{drive:?}"
+        );
+        assert!(
+            no_axis > 0,
+            "{drive:?}: CR 104.4b: the drain's mandatory spans hold no optional answer, so they \
+             stay refused rather than offered as a may loop"
         );
         let leg = format!("{drive:?}");
         let state = &armed(offered.state());
