@@ -4858,6 +4858,15 @@ pub(super) fn strip_routed_suffix_conditional(
         return (general(cond), effect_text);
     }
 
+    // CR 608.2c + CR 608.2h: a condition on the declared object target's
+    // controller gates its own instruction as it resolves (Skulking Killer,
+    // Unified Will) — never an intervening-if (CR 603.4).
+    if let Some(cond) =
+        parse_target_controller_control_condition_text(condition_core, effect_prefix, ctx)
+    {
+        return (general(cond), effect_text);
+    }
+
     if let Some(cond) = parse_no_mana_spent_to_cast_target_condition_text(condition_core) {
         return (general(cond), effect_text);
     }
@@ -5132,6 +5141,188 @@ fn parse_target_controller_poison_threshold(input: &str) -> OracleResult<'_, i32
         ),
     ))
     .parse(input)
+}
+
+/// The player a trailing condition names as the controller of the gated
+/// instruction's declared object target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetControllerReferent {
+    /// "that opponent" — bound only when the target's own type phrase
+    /// introduced the opponent ("target creature an opponent controls").
+    IntroducedOpponent,
+    /// "its controller" / "that spell's | creature's | permanent's controller".
+    ObjectController,
+}
+
+/// CR 608.2c: the subject of a trailing condition that names the controller of
+/// the instruction's declared object target.
+fn parse_target_controller_referent(input: &str) -> OracleResult<'_, TargetControllerReferent> {
+    alt((
+        value(
+            TargetControllerReferent::IntroducedOpponent,
+            tag("that opponent"),
+        ),
+        value(
+            TargetControllerReferent::ObjectController,
+            terminated(
+                alt((
+                    tag("its"),
+                    recognize((
+                        tag("that "),
+                        alt((tag("spell"), tag("creature"), tag("permanent"))),
+                        nom_condition::parse_apostrophe_s,
+                    )),
+                )),
+                tag(" controller"),
+            ),
+        ),
+    ))
+    .parse(input)
+}
+
+/// The single declared object target of an instruction, with the controller
+/// its own type phrase introduced ("… an opponent controls").
+struct DeclaredObjectTarget {
+    introduced_controller: Option<ControllerRef>,
+}
+
+/// CR 115.1: the instruction `effect_text` lowers to declares exactly one
+/// object target (not a context reference, the untyped `Any` fallback, a
+/// player, or a multi-target slot). Parsed on a throwaway context so the
+/// caller's is untouched.
+fn declared_single_object_target(
+    effect_text: &str,
+    ctx: &ParseContext,
+) -> Option<DeclaredObjectTarget> {
+    let clause = parse_effect_clause_inner(effect_text, &mut ctx.clone_throwaway());
+    if clause.multi_target.is_some() {
+        return None;
+    }
+    let filter = clause.effect.target_filter()?;
+    if filter.is_context_ref()
+        || matches!(filter, TargetFilter::Any)
+        || super::is_player_scoped_filter(filter)
+    {
+        return None;
+    }
+    let introduced_controller = match filter {
+        TargetFilter::Typed(tf) => tf.controller.clone(),
+        _ => None,
+    };
+    Some(DeclaredObjectTarget {
+        introduced_controller,
+    })
+}
+
+/// CR 608.2c: whether the condition's subject has an antecedent in the gated
+/// instruction. "that opponent" refers back only to an opponent the target's
+/// type phrase introduced; "its controller" always names the target's
+/// controller.
+fn referent_is_bound(referent: TargetControllerReferent, target: &DeclaredObjectTarget) -> bool {
+    match referent {
+        TargetControllerReferent::IntroducedOpponent => {
+            target.introduced_controller == Some(ControllerRef::Opponent)
+        }
+        TargetControllerReferent::ObjectController => true,
+    }
+}
+
+/// CR 109.4: the permanents the declared target's controller controls.
+fn target_controller_population(filter: TargetFilter) -> TargetFilter {
+    nom_condition::inject_controller(filter, ControllerRef::ParentTargetController)
+}
+
+/// A non-empty typed type phrase consuming the whole input ("creatures").
+fn parse_counted_type_phrase(input: &str) -> OracleResult<'_, TypedFilter> {
+    let (filter, rest) = parse_type_phrase_folding(input);
+    match filter {
+        TargetFilter::Typed(tf) if !tf.type_filters.is_empty() && rest.is_empty() => Ok((rest, tf)),
+        _ => Err(oracle_err(input)),
+    }
+}
+
+/// CR 608.2c + CR 608.2h + CR 109.4: a trailing condition comparing what the
+/// controller of the instruction's declared object target controls, checked
+/// as the instruction resolves:
+/// - "<subject> controls no [other] <type>" (Skulking Killer) → that player's
+///   count is zero; "other" excludes the target itself.
+/// - "you control more <type> than <subject>" (Unified Will) → your count
+///   exceeds that player's count.
+fn parse_target_controller_control_condition(
+    input: &str,
+) -> OracleResult<'_, (TargetControllerReferent, AbilityCondition)> {
+    alt((
+        parse_target_controller_controls_no,
+        parse_you_control_more_than_target_controller,
+    ))
+    .parse(input)
+}
+
+fn parse_target_controller_controls_no(
+    input: &str,
+) -> OracleResult<'_, (TargetControllerReferent, AbilityCondition)> {
+    let (rest, referent) =
+        terminated(parse_target_controller_referent, tag(" controls no ")).parse(input)?;
+    let (rest, other) = opt(value(
+        FilterProp::DistinctFrom {
+            reference: Box::new(TargetFilter::ParentTarget),
+        },
+        tag("other "),
+    ))
+    .parse(rest)?;
+    let (rest, mut tf) = parse_counted_type_phrase(rest)?;
+    tf.properties.extend(other);
+    let condition = AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: target_controller_population(TargetFilter::Typed(tf)),
+            },
+        },
+        comparator: Comparator::EQ,
+        rhs: QuantityExpr::Fixed { value: 0 },
+    };
+    Ok((rest, (referent, condition)))
+}
+
+fn parse_you_control_more_than_target_controller(
+    input: &str,
+) -> OracleResult<'_, (TargetControllerReferent, AbilityCondition)> {
+    let (rest, type_text) =
+        preceded(tag("you control more "), take_until(" than ")).parse(input)?;
+    let (rest, referent) = preceded(tag(" than "), parse_target_controller_referent).parse(rest)?;
+    let (_, tf) = all_consuming(parse_counted_type_phrase).parse(type_text)?;
+    let filter = TargetFilter::Typed(tf);
+    let condition = AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: inject_controller_you(filter.clone()),
+            },
+        },
+        comparator: Comparator::GT,
+        rhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: target_controller_population(filter),
+            },
+        },
+    };
+    Ok((rest, (referent, condition)))
+}
+
+/// CR 608.2c: a trailing condition on the controller of the gated
+/// instruction's single declared object target, returned only when its
+/// subject has an antecedent in that instruction (Skulking Killer, Unified
+/// Will).
+fn parse_target_controller_control_condition_text(
+    condition_text: &str,
+    effect_text: &str,
+    ctx: &ParseContext,
+) -> Option<AbilityCondition> {
+    let lower = condition_text.to_lowercase();
+    let (referent, condition) = nom_parse_lower(&lower, |input| {
+        all_consuming(parse_target_controller_control_condition).parse(input)
+    })?;
+    let target = declared_single_object_target(effect_text, ctx)?;
+    referent_is_bound(referent, &target).then_some(condition)
 }
 
 /// CR 601.2 + CR 608.2c: `parse_condition_text` for a clause in a known parse
@@ -10769,6 +10960,123 @@ mod tests {
         let unrelated =
             parse_target_controller_poisoned_condition_text("its controller controls a Swamp");
         assert!(unrelated.is_none());
+    }
+
+    fn target_controller_count(filter: TargetFilter) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: nom_condition::inject_controller(
+                    filter,
+                    ControllerRef::ParentTargetController,
+                ),
+            },
+        }
+    }
+
+    /// CR 608.2c + CR 109.4: Skulking Killer — "that opponent controls no other
+    /// creatures" counts the creatures the target's controller controls other
+    /// than the target, and the "until end of turn" body survives the strip.
+    #[test]
+    fn target_controller_controls_no_other_condition_binds_target_controller() {
+        let mut ctx = ParseContext {
+            in_trigger: true,
+            ..Default::default()
+        };
+        let (cond, text) = strip_suffix_conditional(
+            "target creature an opponent controls gets -2/-2 until end of turn if that opponent controls no other creatures",
+            &mut ctx,
+        );
+        assert_eq!(
+            text,
+            "target creature an opponent controls gets -2/-2 until end of turn"
+        );
+        let expected = AbilityCondition::QuantityCheck {
+            lhs: target_controller_count(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![FilterProp::DistinctFrom {
+                    reference: Box::new(TargetFilter::ParentTarget),
+                }],
+            ))),
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        };
+        assert_eq!(cond, Some(expected));
+    }
+
+    /// CR 608.2c + CR 109.4: Unified Will — "you control more creatures than
+    /// that spell's controller" compares your count to the target's controller's.
+    #[test]
+    fn you_control_more_than_target_controller_condition() {
+        let (cond, text) = strip_suffix_conditional(
+            "Counter target spell if you control more creatures than that spell's controller",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "Counter target spell");
+        let creatures = TargetFilter::Typed(TypedFilter::creature());
+        let expected = AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: inject_controller_you(creatures.clone()),
+                },
+            },
+            comparator: Comparator::GT,
+            rhs: target_controller_count(creatures),
+        };
+        assert_eq!(cond, Some(expected));
+    }
+
+    /// Combinator shape: the "its controller" subject with no "other" counts
+    /// every creature the target's controller controls.
+    #[test]
+    fn its_controller_controls_no_condition_omits_distinct_from() {
+        let (cond, text) = strip_suffix_conditional(
+            "Destroy target artifact if its controller controls no creatures",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "Destroy target artifact");
+        let expected = AbilityCondition::QuantityCheck {
+            lhs: target_controller_count(TargetFilter::Typed(TypedFilter::creature())),
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        };
+        assert_eq!(cond, Some(expected));
+    }
+
+    /// Fail-closed: the subject must have an antecedent in a single declared
+    /// object target. Each condition still parses as a combinator (reach
+    /// guard), but the full strip declines.
+    #[test]
+    fn target_controller_control_condition_declines_without_antecedent() {
+        let ctx = ParseContext {
+            in_trigger: true,
+            ..Default::default()
+        };
+        for (effect, condition) in [
+            // No opponent introduced by the target's type phrase.
+            (
+                "Target creature gets -2/-2 until end of turn",
+                "that opponent controls no other creatures",
+            ),
+            // A player target is not an object target.
+            (
+                "Target opponent loses 2 life",
+                "that opponent controls no creatures",
+            ),
+            // A multi-target slot has no single target controller.
+            (
+                "Up to two target creatures an opponent controls get -2/-2 until end of turn",
+                "that opponent controls no other creatures",
+            ),
+        ] {
+            assert!(
+                parse_target_controller_control_condition(condition).is_ok(),
+                "reach guard: {condition}"
+            );
+            assert_eq!(
+                parse_target_controller_control_condition_text(condition, effect, &ctx),
+                None,
+                "{effect} if {condition}"
+            );
+        }
     }
 
     /// CR 608.2d + CR 107.4 + CR 202.1: Omnath, Locus of All — "you may reveal
