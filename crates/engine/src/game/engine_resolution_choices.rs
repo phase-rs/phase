@@ -1232,6 +1232,31 @@ fn dig_continuation_needs_full_looked_at_tracked_set(ability: &ResolvedAbility) 
 /// correctly means "count the KEPT pile" for a sibling card (Search for Blex:
 /// "you lose 3 life for each card you put into your HAND this way"), which
 /// must keep reading the unchanged default kept-pile publish.
+/// CR 608.2c + CR 701.20a: A reveal-Dig whose own trailing instruction moves
+/// the revealed remainder itself — "Put all other cards revealed this way into
+/// your graveyard" (Reviving Vapors) — parses as a `ChangeZoneAll` over the
+/// published tracked set, sitting AFTER any intervening instruction such as the
+/// life gain that reads "that card". The downstream move names the REST
+/// partition, so the dig must publish the unkept looked-at cards for it rather
+/// than the unchanged kept-pile default (which would sweep the kept card out of
+/// the hand it was just put into).
+fn dig_continuation_moves_the_rest_pile(ability: &ResolvedAbility) -> bool {
+    let mut current = Some(ability);
+    while let Some(sub) = current {
+        if matches!(
+            &sub.effect,
+            Effect::ChangeZoneAll {
+                target: crate::types::ability::TargetFilter::TrackedSetFiltered { .. },
+                ..
+            }
+        ) {
+            return true;
+        }
+        current = sub.sub_ability.as_deref();
+    }
+    false
+}
+
 fn dig_continuation_wants_rest_pile_for_count(ability: &ResolvedAbility) -> bool {
     let mut wants_rest = false;
     let mut current = Some(ability);
@@ -5081,6 +5106,13 @@ pub(super) fn handle_resolution_choice(
                             unkept.clone(),
                             Some(crate::types::ability::ThisWayCause::PutIntoGraveyard),
                         )
+                    } else if state
+                        .active_ability_continuation()
+                        .is_some_and(|cont| dig_continuation_moves_the_rest_pile(&cont.chain))
+                    {
+                        // CR 608.2c: the trailing "all other cards revealed this
+                        // way ..." move names the remainder, not the kept card.
+                        (unkept.clone(), None)
                     } else if kept.is_empty() {
                         (Vec::new(), None)
                     } else {
@@ -5189,6 +5221,13 @@ pub(super) fn handle_resolution_choice(
                     unkept.clone(),
                     Some(crate::types::ability::ThisWayCause::PutIntoGraveyard),
                 )
+            } else if state
+                .active_ability_continuation()
+                .is_some_and(|cont| dig_continuation_moves_the_rest_pile(&cont.chain))
+            {
+                // CR 608.2c: the trailing "all other cards revealed this way ..."
+                // move names the remainder, not the kept card.
+                (unkept.clone(), None)
             } else if kept.is_empty() {
                 (Vec::new(), None)
             } else {
@@ -10975,6 +11014,24 @@ pub(crate) fn run_batch_completion(
             // its own completed outcome only after both tails have finished.
             let kept_completed = kept_delivery.completed_ids();
             let rest_completed = rest_delivery.completed_ids();
+            // CR 608.2c: a later instruction that reads the card this Dig put
+            // into its kept destination ("that card's mana value") names THAT
+            // card. Bind the settled kept selection here, ahead of the
+            // event-derived referent below: once the rest pile has also moved,
+            // the batch's events can describe a single REST card instead, and an
+            // event-derived snapshot would then hand the continuation the wrong
+            // object (a three-card reveal with two cards moved would yield no
+            // snapshot at all).
+            let settled_kept_snapshot = kept_delivery
+                .destination
+                .is_some()
+                .then(|| kept_delivery.completed_ids())
+                .and_then(|ids| ids.first().copied())
+                .and_then(|id| {
+                    state.entering_or_live_object(id).map(|obj| {
+                        CostPaidObjectSnapshot::capture(obj, obj.snapshot_public_characteristics())
+                    })
+                });
             if let Some(kept) = publish_tracked_set {
                 let published = if !kept.is_empty()
                     && rest_delivery.destination.is_some()
@@ -11044,7 +11101,9 @@ pub(crate) fn run_batch_completion(
                     subject: reveal_until_hit_snapshot,
                 });
             }
-            if let Some(snapshot) = effects::parent_referent_context_from_events(state, events) {
+            if let Some(snapshot) = settled_kept_snapshot
+                .or_else(|| effects::parent_referent_context_from_events(state, events))
+            {
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
                     frame
                         .pending

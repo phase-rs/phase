@@ -219,6 +219,7 @@ mod resolve_all_consent;
 mod rev_tithe_extractor_facedown_cast;
 mod reveal_pick_visibility;
 mod reveal_until_that_many;
+mod reviving_vapors_hand_and_rest;
 mod ring_equipped_creature_color_condition;
 mod rules;
 mod screaming_nemesis_combat_damage_multi_trigger;

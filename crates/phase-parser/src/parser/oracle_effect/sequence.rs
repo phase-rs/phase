@@ -677,6 +677,7 @@ fn parse_reveal_until_rest_zone(lower: &str) -> Option<Zone> {
     // Consultation, Sacred Guide, Spoils of the Vault, Reviving Vapors, etc.
     let has_rest_subject = nom_primitives::scan_contains(lower, "the rest")
         || nom_primitives::scan_contains(lower, "all other cards")
+        || nom_primitives::scan_contains(lower, "the other cards")
         || nom_primitives::scan_contains(lower, "other cards revealed this way");
     if !has_rest_subject {
         return None;
@@ -9262,6 +9263,15 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 || nom_primitives::scan_contains(&lower, "the other cards")
                 || nom_primitives::scan_contains(&lower, "other cards revealed this way") =>
         {
+            // CR 608.2c: a compound clause that ALSO selects the kept cards
+            // ("put one of them into your hand and the other cards into your
+            // graveyard") belongs to the shared from-among parser, which carries
+            // BOTH the selection and the rest destination. This arm only claims
+            // the pure remainder clause, so a supported selection must be handed
+            // over rather than absorbed as a rest-only clause.
+            if let Some(compound) = parse_dig_from_among(&lower, text, ctx) {
+                return Some(compound);
+            }
             let (destination, rest_order) = parse_reveal_until_rest_zone_and_order(&lower);
             Some(ContinuationAst::PutRest {
                 destination: destination.unwrap_or(Zone::Library),
