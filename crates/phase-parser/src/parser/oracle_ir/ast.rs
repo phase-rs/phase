@@ -589,7 +589,7 @@ pub(crate) enum ContinuationAst {
         /// rest route defaults to the bottom — so the patch arm turns this into
         /// the degenerate all-top remainder split the Dig resolver already
         /// routes (and, for a 2+ card pile, hands to the owner for the CR 401.4
-        /// arrangement). `Bottom` keeps the uniform bottom route.
+        /// arrangement). `None` (no position named) and `Some(Bottom)` keep the uniform bottom route; only `Some(Top)` lowers to the all-top split.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rest_library_position: Option<LibraryPosition>,
         /// CR 110.2a: Controller override for the kept cards' battlefield entry
