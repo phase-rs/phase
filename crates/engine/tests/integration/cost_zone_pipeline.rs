@@ -12144,15 +12144,35 @@ fn put_on_top_batch_redirects_and_preserves_chosen_order_without_redirects() {
     );
     let first_redirect = redirected
         .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("choosing the first top-placement redirect delivers that card");
+        .expect("choosing the first redirect advances the batch's approval");
     let redirected_id = [first, second]
         .into_iter()
         .find(|id| !parked_order.contains(id))
         .expect("the attempted top card is outside the parked suffix");
     assert_eq!(
         redirected.state().objects[&redirected_id].zone,
-        Zone::Graveyard,
-        "the replacement suppresses placement at the old top position"
+        Zone::Hand,
+        "approved members wait for the entire batch's replacement consultation"
+    );
+    // CR 616.1: consult every member before delivering the modified batch event.
+    assert_eq!(
+        redirected.state().objects[&parked_order[0]].zone,
+        Zone::Hand
+    );
+    assert_eq!(
+        redirected.state().players[P0.0 as usize].library.front(),
+        Some(&marker)
+    );
+    assert_eq!(
+        redirected
+            .state()
+            .active_batch_delivery()
+            .expect("the approving batch remains parked")
+            .staged
+            .as_ref()
+            .expect("top placement uses staged delivery")
+            .stage,
+        engine::types::game_state::BatchDeliveryStage::Approving
     );
     assert!(
         matches!(
@@ -12173,6 +12193,11 @@ fn put_on_top_batch_redirects_and_preserves_chosen_order_without_redirects() {
     let completed = redirected
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("the now-unredirected top-placement suffix drains");
+    assert_eq!(
+        redirected.state().objects[&redirected_id].zone,
+        Zone::Graveyard,
+        "the first approved redirect is delivered when the batch settles"
+    );
     assert_eq!(
         redirected.state().players[P0.0 as usize]
             .library
@@ -12199,6 +12224,7 @@ fn put_on_top_batch_redirects_and_preserves_chosen_order_without_redirects() {
         1,
         "PutAtLibraryPosition completes exactly once after the whole batch settles"
     );
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
 }
 
 /// W-L2: A declined Discover keeps its hit and chain tail parked until the

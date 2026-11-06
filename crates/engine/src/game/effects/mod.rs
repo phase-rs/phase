@@ -11503,27 +11503,51 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
     }
 }
 
+/// CR 608.2c: owner-seat instructions after a shuffle stay in that owner's iteration.
+fn effect_acts_for_owner_seat(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::RevealTop {
+            player: TargetFilter::ScopedPlayer,
+            ..
+        } | Effect::ExileTop {
+            player: TargetFilter::ScopedPlayer,
+            ..
+        } | Effect::ChooseOneOf {
+            chooser: PlayerFilter::ParentObjectTargetOwner,
+            ..
+        } | Effect::Draw {
+            target: TargetFilter::ScopedPlayer,
+            ..
+        } | Effect::Discard {
+            target: TargetFilter::ScopedPlayer,
+            ..
+        } | Effect::Mill {
+            target: TargetFilter::ScopedPlayer,
+            ..
+        } | Effect::LoseLife {
+            target: Some(TargetFilter::ScopedPlayer),
+            ..
+        }
+    )
+}
+
 fn is_player_scope_local_continuation(
     parent: &Effect,
     child: &Effect,
     scope: &PlayerFilter,
 ) -> bool {
-    // CR 608.2c + CR 701.20a: an owner-relative top-card instruction follows
-    // that owner's terminal shuffle inside the published owner iteration.
-    // Other player populations do not acquire this continuation authority.
+    // CR 608.2c: owner-relative instructions follow the terminal shuffle inside
+    // the published owner iteration. Other player populations do not acquire
+    // this continuation authority.
     if is_owner_library_shuffle_scope(scope)
         && matches!(
-            (parent, child),
-            (
-                Effect::Shuffle {
-                    target: TargetFilter::ScopedPlayer,
-                },
-                Effect::RevealTop {
-                    player: TargetFilter::ScopedPlayer,
-                    ..
-                }
-            )
+            parent,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            }
         )
+        && effect_acts_for_owner_seat(child)
     {
         return true;
     }

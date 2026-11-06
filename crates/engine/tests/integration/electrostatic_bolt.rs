@@ -10,7 +10,11 @@
 
 use engine::game::scenario::GameScenario;
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{AbilityCondition, Effect, EffectKind, TargetFilter, TypeFilter};
+use engine::types::ability::{
+    AbilityCondition, Effect, EffectKind, MassLibraryShuffleMode, PlayerFilter, PlayerRelation,
+    PossessionAxis, TargetFilter, ThisWayCause, TypeFilter,
+};
+use engine::types::actions::GameAction;
 use engine::types::events::PlayerActionKind;
 use engine::types::game_state::WaitingFor;
 use engine::types::mana::ManaCost;
@@ -246,23 +250,30 @@ fn target_plus_revealed_preserves_revealed_card_type() {
         &[],
     );
     assert_eq!(swap_parsed.abilities.len(), 1);
-    let shuffle_into_lib = &swap_parsed.abilities[0];
-    let Effect::ChangeZone {
-        destination: Zone::Library,
-        owner_library: true,
+    let target_only = &swap_parsed.abilities[0];
+    let Effect::TargetOnly {
         target: ref target_filter,
-        ..
-    } = *shuffle_into_lib.effect
+    } = *target_only.effect
     else {
-        panic!(
-            "expected ChangeZone to owner library, got {:?}",
-            shuffle_into_lib.effect
-        );
+        panic!("expected TargetOnly, got {:?}", target_only.effect);
     };
     assert!(
         matches!(target_filter, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Permanent)
             && tf.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Enchantment))))
     );
+    let shuffle_into_lib = target_only
+        .sub_ability
+        .as_deref()
+        .expect("target acquisition chains to the terminal library move");
+    assert!(matches!(
+        *shuffle_into_lib.effect,
+        Effect::ChangeZoneAll {
+            target: TargetFilter::ParentTarget,
+            destination: Zone::Library,
+            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            ..
+        }
+    ));
 
     let shuffle = shuffle_into_lib
         .sub_ability
@@ -271,9 +282,18 @@ fn target_plus_revealed_preserves_revealed_card_type() {
     assert!(matches!(
         *shuffle.effect,
         Effect::Shuffle {
-            target: TargetFilter::ParentTargetOwner
+            target: TargetFilter::ScopedPlayer
         }
     ));
+    assert_eq!(
+        shuffle.player_scope,
+        Some(PlayerFilter::TrackedSetPossessor {
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+        })
+    );
 
     let exile_top = shuffle
         .sub_ability
@@ -282,7 +302,7 @@ fn target_plus_revealed_preserves_revealed_card_type() {
     assert!(matches!(
         *exile_top.effect,
         Effect::ExileTop {
-            player: TargetFilter::ParentTargetOwner,
+            player: TargetFilter::ScopedPlayer,
             ..
         }
     ));
@@ -294,6 +314,7 @@ fn target_plus_revealed_preserves_revealed_card_type() {
     assert!(matches!(
         *land_branch.effect,
         Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
             destination: Zone::Battlefield,
             ..
         }
@@ -361,12 +382,31 @@ fn audacious_swap_runtime_distinguishes_nonland_from_land() {
             .cast(swap)
             .target_object(target)
             .commit()
-            .accept_optional()
+            .stop_at_optional()
             .resolve();
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::OptionalEffectChoice { player: P1, .. }
+        ));
+        let mut events = outcome.events().to_vec();
+        events.extend(
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .expect("the target's owner accepts the free cast")
+                .events,
+        );
+        for _ in 0..2 {
+            events.extend(
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("resolve the spell cast from exile")
+                    .events,
+            );
+        }
 
         // 1. Target nonenchantment permanent shuffled into owner's library.
         assert!(
-            outcome.events().iter().any(|e| matches!(
+            events.iter().any(|e| matches!(
                 e,
                 GameEvent::PlayerPerformedAction {
                     player_id,
@@ -379,7 +419,7 @@ fn audacious_swap_runtime_distinguishes_nonland_from_land() {
 
         // 2. Nonland card (Target Bear) is exiled from library and cast via Otherwise branch.
         assert!(
-            outcome.events().iter().any(|e| matches!(
+            events.iter().any(|e| matches!(
                 e,
                 GameEvent::EffectResolved {
                     kind: EffectKind::ExileTop,
@@ -389,7 +429,7 @@ fn audacious_swap_runtime_distinguishes_nonland_from_land() {
             "ExileTop effect must resolve"
         );
         assert!(
-            outcome.events().iter().any(|e| matches!(
+            events.iter().any(|e| matches!(
                 e,
                 GameEvent::EffectResolved {
                     kind: EffectKind::CastFromZone,
@@ -399,18 +439,18 @@ fn audacious_swap_runtime_distinguishes_nonland_from_land() {
             "CastFromZone effect must resolve for nonland card"
         );
         assert!(
-            outcome.events().iter().any(
+            events.iter().any(
                 |e| matches!(e, GameEvent::SpellCast { object_id, .. } if *object_id == target)
             ),
             "Target Bear must be cast from exile"
         );
         assert_eq!(
-            outcome.zone_of(target),
+            runner.state().objects[&target].zone,
             Zone::Battlefield,
             "Target Bear resolves from the stack and enters the battlefield"
         );
         assert_eq!(
-            outcome.final_waiting_for(),
+            &runner.state().waiting_for,
             &WaitingFor::Priority { player: P0 },
             "priority returns to active player after resolution"
         );

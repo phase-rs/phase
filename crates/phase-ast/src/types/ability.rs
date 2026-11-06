@@ -25980,12 +25980,26 @@ fn effect_introduces_per_player_chosen_card_referent(effect: &Effect) -> bool {
     effect_parks_reveal_card_choice(effect)
 }
 
+/// CR 608.2c: exiling a single top card introduces the object referent for
+/// subsequent instructions in the same player iteration.
+fn effect_introduces_per_player_exiled_card_referent(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ExileTop {
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Top,
+            ..
+        }
+    )
+}
+
 /// CR 608.2c: single authority for "this clause introduces a per-iteration object
 /// referent" — consumed by the player-scope co-scope split and by the swallow
 /// audit's per-player-iteration evidence.
 pub fn effect_introduces_per_iteration_referent(effect: &Effect) -> bool {
     effect_introduces_per_player_object_referent(effect)
         || effect_introduces_per_player_chosen_card_referent(effect)
+        || effect_introduces_per_player_exiled_card_referent(effect)
 }
 
 pub fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {

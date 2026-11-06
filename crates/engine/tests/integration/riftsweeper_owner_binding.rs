@@ -258,6 +258,43 @@ fn chaos_warp_owner_shuffle_reveals_and_deploys_the_permanent() {
     finished(&runner);
 }
 
+// CR 108.3 + CR 608.2c: the target's owner shuffles and draws, not its controller.
+#[test]
+fn oblation_owner_draws_two_after_the_shuffle() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let target = scenario
+        .add_creature(P1, "Grizzly Bears", 2, 2)
+        .controlled_by(P0)
+        .id();
+    for _ in 0..20 {
+        scenario.add_card_to_library_top(P1, "Island");
+        scenario.add_card_to_library_top(P0, "Plains");
+    }
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Oblation",
+            true,
+            "The owner of target nonland permanent shuffles it into their library, then draws two cards.",
+        )
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{W}"))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    let outcome = runner.cast(spell).target_object(target).resolve();
+    outcome.assert_hand_drawn(P1, 2);
+    outcome.assert_hand_drawn(P0, 0);
+    outcome.assert_zone(&[target], Zone::Library);
+    assert!(outcome.state().players[1].library.contains(&target));
+    finished(&runner);
+}
+
 // CR 701.24d: a designated player's empty graveyard still causes a shuffle.
 #[test]
 fn clear_the_mind_preserves_target_player_and_empty_mass_population() {
