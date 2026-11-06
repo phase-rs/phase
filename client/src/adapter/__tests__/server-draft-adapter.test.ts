@@ -7,6 +7,7 @@ import { AdapterError, AdapterErrorCode } from "../types";
 import type { DraftPlayerView } from "../draft-adapter";
 import type { GameAction, GameLogEntry, GameState, LegalActionsResult, ObjectAction, SubmitResult } from "../types";
 import { StateCodecRuntime, type StateCodecSession } from "../state-codec-runtime";
+import { STATE_CODEC_SOCKET_TIMEOUT_MS } from "../../services/stateCodecSocket";
 import type { EngineModule } from "../engine-queries";
 import type * as OpenPhaseSocketModule from "../../services/openPhaseSocket";
 import type {
@@ -3368,6 +3369,76 @@ describe("ServerDraftAdapter — codec degradation policy", () => {
     await reattached;
     return replacement;
   }
+
+  // The confirmation has no wall-clock deadline (the heartbeat owns liveness),
+  // so an initial attachment whose second hello is slow still completes and
+  // is not degraded: a deadline would fail it after the create/join request
+  // was sent, orphaning the seat whose credentials arrive in the reply.
+  it.each(["create", "join"] as const)(
+    "completes an initial %s whose confirmation hello arrives after the former deadline, leaving the policy negotiating",
+    async (kind) => {
+      vi.useFakeTimers();
+      const session = draftCodecSession(decodeEnvelope);
+      const provider = vi.fn(async () => session.session);
+      MockWebSocket.last = null;
+      const adapter = new ServerDraftAdapter("ws://localhost:9374/ws", {
+        stateCodecSessionProvider: provider,
+      });
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      try {
+        const attachment = kind === "create"
+          ? adapter.createDraft({
+            displayName: "Alice", setCodes: ["MKM"], kind: "Premier", public: true,
+            tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+          })
+          : adapter.joinDraft("ABCD12", "Alice");
+        const outcome = attachment.then(
+          () => "resolved" as const,
+          (error: unknown) => error,
+        );
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+        const ws = MockWebSocket.last!;
+        ws.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        const setupType = kind === "create" ? "CreateDraftWithSettings" : "JoinDraftWithPassword";
+        await vi.waitFor(() => expect(ws.send).toHaveBeenCalledWith(
+          expect.stringContaining(`"type":"${setupType}"`)));
+        // Reach guard: the codec was offered and the setup request is on the wire.
+        expect(offeredCodec(ws)).toBe(true);
+
+        await vi.advanceTimersByTimeAsync(STATE_CODEC_SOCKET_TIMEOUT_MS + 1000);
+        expect(ws.close).not.toHaveBeenCalled();
+        expect(session.close).not.toHaveBeenCalled();
+        expect(policyOf(adapter)).toEqual({ kind: "negotiate" });
+        // The settlement helpers below wait on real macrotasks.
+        vi.useRealTimers();
+
+        ws.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+        if (kind === "create") {
+          receive(ws, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
+        } else {
+          receive(ws, "DraftJoined", {
+            draft_code: "ABCD12", player_token: "tok123", seat_index: 0, view: createMockDraftView(),
+          });
+        }
+        // The owner is settled with the reply, not rejected.
+        expect(await outcome).toBe("resolved");
+        expect(ws.close).not.toHaveBeenCalled();
+        expect(session.close).not.toHaveBeenCalled();
+
+        // The match start (a GameStarted Full) bootstraps through the codec.
+        await enterCodecMatch(ws, events);
+        expect(session.decode).toHaveBeenCalledTimes(2);
+        await completeDraftCommand(adapter, ws, "slow-confirmation-command", "codec");
+        expect(session.decode).toHaveBeenCalledTimes(3);
+        expect(policyOf(adapter)).toEqual({ kind: "negotiate" });
+        expect(provider).toHaveBeenCalledOnce();
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("tolerates one completed recovery, closes after the second and reattaches snapshot-only; a fresh adapter negotiates", async () => {
     const session = draftCodecSession(decodeEnvelope);

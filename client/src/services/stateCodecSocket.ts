@@ -258,7 +258,7 @@ export class StateCodecAttachment {
 
 /** Bounded optional preparation budget (event-loop time, not network). */
 export const STATE_CODEC_PREPARATION_TIMEOUT_MS = 5_000;
-/** Confirmation and recovery window; the same value bounds both. */
+/** Recovery window: how long a requested recovery Full may take. */
 export const STATE_CODEC_SOCKET_TIMEOUT_MS = 5_000;
 
 export type StateCodecSessionProvider = () => Promise<StateCodecSession | null>;
@@ -368,7 +368,6 @@ export interface StateCodecSocketOptions {
   onRecovery?: (state: StateCodecRecoveryNotice) => void;
   /** Actual send accounting for an uncompressed inner transport. */
   onFrameSent?: () => void;
-  confirmationTimeoutMs?: number;
   recoveryTimeoutMs?: number;
 }
 
@@ -382,7 +381,6 @@ export class StateCodecSocket implements PhaseSocketTransport {
   private readonly closeListeners = new Map<CloseListener, boolean>();
   private queue: Promise<void> = Promise.resolve();
   private state: ConnectionState = "awaitingConfirmation";
-  private confirmationTimer: ReturnType<typeof setTimeout> | null = null;
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private sessionReleased = false;
   private readonly consumerWaiters: (() => void)[] = [];
@@ -392,10 +390,6 @@ export class StateCodecSocket implements PhaseSocketTransport {
 
   constructor(private readonly options: StateCodecSocketOptions) {
     const { inner } = options;
-    this.confirmationTimer = setTimeout(
-      () => this.terminate("immediate", "confirmationFailure"),
-      options.confirmationTimeoutMs ?? STATE_CODEC_SOCKET_TIMEOUT_MS,
-    );
     inner.onopen = (event) => {
       try {
         this.onopen?.(event);
@@ -574,7 +568,6 @@ export class StateCodecSocket implements PhaseSocketTransport {
       this.terminate("immediate", "confirmationFailure");
       return;
     }
-    this.clearConfirmationTimer();
     this.state = "ready";
   }
 
@@ -653,7 +646,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
   private handleNaturalClose(event: CloseEvent): void {
     if (this.state === "closed") return;
     this.state = "closed";
-    this.clearTimers();
+    this.clearRecoveryTimer();
     this.wakeConsumers();
     try {
       this.releaseSession();
@@ -681,7 +674,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
   ): void {
     if (this.state === "closed") return;
     this.state = "closed";
-    this.clearTimers();
+    this.clearRecoveryTimer();
     this.wakeConsumers();
     try {
       this.releaseSession();
@@ -799,23 +792,11 @@ export class StateCodecSocket implements PhaseSocketTransport {
     }
   }
 
-  private clearConfirmationTimer(): void {
-    if (this.confirmationTimer !== null) {
-      clearTimeout(this.confirmationTimer);
-      this.confirmationTimer = null;
-    }
-  }
-
   private clearRecoveryTimer(): void {
     if (this.recoveryTimer !== null) {
       clearTimeout(this.recoveryTimer);
       this.recoveryTimer = null;
     }
-  }
-
-  private clearTimers(): void {
-    this.clearConfirmationTimer();
-    this.clearRecoveryTimer();
   }
 
   private releaseSession(): void {

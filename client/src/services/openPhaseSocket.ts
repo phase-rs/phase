@@ -423,8 +423,9 @@ export function openPhaseSocket(
               bootstrap: opts.stateCodecBootstrap ?? (() => "pending" as StateCodecBootstrap),
               onRecovery: opts.onStateCodecRecovery,
               onFrameSent: gzip ? undefined : opts.onFrameSent,
-              // Confirmation and recovery share the handshake timeout.
-              confirmationTimeoutMs: timeoutMs,
+              // Recovery shares the handshake timeout. The confirmation has no
+              // deadline of its own: the server queues it before any
+              // application frame, and liveness is the heartbeat's job.
               recoveryTimeoutMs: timeoutMs,
             });
             // Ownership moved into the transport; it releases exactly once.

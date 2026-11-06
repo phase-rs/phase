@@ -1203,7 +1203,56 @@ describe("openPhaseSocket — negotiated StateCodecV1", () => {
     expect(fake.close).toHaveBeenCalledOnce();
   });
 
-  it("closes when confirmation never arrives", async () => {
+  // The confirmation has no wall-clock deadline: the server queues it before
+  // any application frame, and liveness is the heartbeat's job. A deadline
+  // here could fail an initial join after JoinGameWithPassword was sent,
+  // orphaning the seat whose player_token only arrives in the GameStarted.
+  it("tolerates a slow confirmation: no close, frames flow, the lease is held, a late confirmation enables the codec", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = fakeSession();
+      const promise = openPhaseSocket("ws://test", { stateCodecSession: fake.session });
+      const raw = MockWebSocket.instances[0];
+      raw.deliverMessage(fullHello());
+      const socket = await promise;
+      const closed = vi.fn();
+      const received = vi.fn();
+      socket.ws.onclose = closed;
+      socket.ws.onmessage = received;
+
+      await vi.advanceTimersByTimeAsync(STATE_CODEC_SOCKET_TIMEOUT_MS * 10);
+      expect(closed).not.toHaveBeenCalled();
+      expect(raw.close).not.toHaveBeenCalled();
+      expect(fake.close).not.toHaveBeenCalled();
+
+      // Reach guard: the transport is alive and still delivering plain frames
+      // after the elapsed time, so the assertions above are not vacuous.
+      raw.deliverMessage(JSON.stringify({ type: "Pong", data: { timestamp: 3 } }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(received).toHaveBeenCalledOnce();
+      expect(received.mock.calls[0][0].data).toBe('{"type":"Pong","data":{"timestamp":3}}');
+      expect(fake.close).not.toHaveBeenCalled();
+
+      // The late, valid confirmation still enables the codec.
+      raw.deliverMessage(confirmationFrame());
+      raw.deliverMessage(codecFrame("Full"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fake.decode).toHaveBeenCalledOnce();
+      expect(received).toHaveBeenCalledTimes(2);
+      expect(received.mock.calls[1][0].data).toBe(DECODED_PONG);
+      expect(closed).not.toHaveBeenCalled();
+
+      // The lease is released exactly once, on the eventual close.
+      raw.close();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(closed).toHaveBeenCalledOnce();
+      expect(fake.close).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases the lease exactly once on a natural close while still awaiting the confirmation", async () => {
     vi.useFakeTimers();
     try {
       const fake = fakeSession();
@@ -1213,11 +1262,44 @@ describe("openPhaseSocket — negotiated StateCodecV1", () => {
       const socket = await promise;
       const closed = vi.fn();
       socket.ws.onclose = closed;
+      socket.ws.onmessage = vi.fn();
 
-      await vi.advanceTimersByTimeAsync(STATE_CODEC_SOCKET_TIMEOUT_MS + 1);
+      await vi.advanceTimersByTimeAsync(STATE_CODEC_SOCKET_TIMEOUT_MS * 10);
+      // Reach guard: nothing closed or released while the confirmation was pending.
+      expect(closed).not.toHaveBeenCalled();
+      expect(fake.close).not.toHaveBeenCalled();
+
+      raw.close();
+      await vi.advanceTimersByTimeAsync(0);
       expect(closed).toHaveBeenCalledOnce();
       expect(fake.close).toHaveBeenCalledOnce();
-      expect(raw.close).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still fails a codec frame that precedes a slow confirmation", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = fakeSession();
+      const promise = openPhaseSocket("ws://test", { stateCodecSession: fake.session });
+      const raw = MockWebSocket.instances[0];
+      raw.deliverMessage(fullHello());
+      const socket = await promise;
+      const closed = vi.fn();
+      socket.ws.onclose = closed;
+      socket.ws.onmessage = vi.fn();
+
+      await vi.advanceTimersByTimeAsync(STATE_CODEC_SOCKET_TIMEOUT_MS * 10);
+      // Reach guard: still open and holding the lease after the elapsed time.
+      expect(closed).not.toHaveBeenCalled();
+      expect(fake.close).not.toHaveBeenCalled();
+
+      raw.deliverMessage(codecFrame("Delta"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(closed).toHaveBeenCalledOnce();
+      expect(fake.close).toHaveBeenCalledOnce();
+      expect(fake.decode).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -1597,7 +1679,13 @@ describe("codec attachment and deadline boundaries", () => {
       const raw = MockWebSocket.instances[0];
       raw.deliverMessage(fullHello());
       const socket = await pending;
-      await vi.advanceTimersByTimeAsync(5000);
+      // The early fatal close is a codec frame ahead of the confirmation: the
+      // confirmation has no deadline, and this failure needs no consumer.
+      raw.deliverMessage(codecFrame("Full"));
+      await vi.advanceTimersByTimeAsync(0);
+      // Reach guard: the transport failed and released before any handler attached.
+      expect(fake.close).toHaveBeenCalledOnce();
+      expect(raw.close).toHaveBeenCalledOnce();
       const closed = vi.fn(() => { throw new Error("consumer"); });
       socket.ws.onclose = closed;
       expect(closed).toHaveBeenCalledOnce();
@@ -2050,14 +2138,18 @@ describe("openPhaseSocket — typed terminal codec reasons", () => {
     expect(trace).toEqual(["failed:confirmationFailure", "close"]);
   });
 
-  it("reports confirmationFailure when the confirmation deadline passes", async () => {
+  it("reports no failure while the confirmation is merely slow, and still reports a violation after the wait", async () => {
     vi.useFakeTimers();
     try {
       const fake = fakeSession();
-      const { notices, closed } = await open(fake, { timeoutMs: 1000 });
-      await vi.advanceTimersByTimeAsync(999);
+      const { raw, notices, closed } = await open(fake, { timeoutMs: 1000 });
+      await vi.advanceTimersByTimeAsync(10_000);
       expect(notices).toEqual([]);
-      await vi.advanceTimersByTimeAsync(2);
+      expect(closed).not.toHaveBeenCalled();
+      expect(fake.close).not.toHaveBeenCalled();
+      // Reach guard: the transport is still live, so the silence above is real.
+      raw.deliverMessage(codecFrame("Full"));
+      await vi.advanceTimersByTimeAsync(0);
       expect(notices).toEqual([{ kind: "failed", reason: "confirmationFailure" }]);
       expect(closed).toHaveBeenCalledOnce();
       expect(fake.close).toHaveBeenCalledOnce();

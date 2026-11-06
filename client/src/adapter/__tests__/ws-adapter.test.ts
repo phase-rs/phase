@@ -39,6 +39,7 @@ import type { EngineModule } from "../engine-queries";
 import {
   STATE_CODEC_PREPARATION_TIMEOUT_MS,
   STATE_CODEC_RECOVERY_SUBMISSION_BLOCKED_MESSAGE,
+  STATE_CODEC_SOCKET_TIMEOUT_MS,
 } from "../../services/stateCodecSocket";
 import type { FormatConfig, GameAction, GameState, SubmitResult } from "../types";
 import type {
@@ -5280,6 +5281,58 @@ describe("WebSocketAdapter — codec degradation policy", () => {
     await expect(resumed).resolves.toMatchObject({ events: [] });
     return reconnect;
   }
+
+  // The confirmation has no wall-clock deadline (the heartbeat owns liveness).
+  // A deadline would fail an initial join AFTER JoinGameWithPassword was sent,
+  // and the joiner's player_token only arrives inside the GameStarted that a
+  // failed attachment never delivers, orphaning the seat.
+  it("completes an initial join whose confirmation hello arrives after the former deadline, leaving the policy negotiating", async () => {
+    const codec = scriptedCodec();
+    const provider = vi.fn(() => Promise.resolve<StateCodecSession | null>(codec.session));
+    MockWebSocket.last = null;
+    const adapter = new WebSocketAdapter(
+      "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      undefined, undefined, undefined, { stateCodecSessionProvider: provider },
+    );
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    const init = adapter.initialize();
+    const initOutcome = init.then(() => "resolved" as const, (error: unknown) => error);
+    try {
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      const raw = MockWebSocket.last!;
+      raw.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+      await vi.waitFor(() => expect(raw.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"JoinGameWithPassword"'),
+      ));
+      // Reach guard: the codec was offered and the join request is on the wire.
+      expect(offeredCodec(raw)).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(STATE_CODEC_SOCKET_TIMEOUT_MS + 1000);
+      expect(raw.close).not.toHaveBeenCalled();
+      expect(codec.close).not.toHaveBeenCalled();
+      expect(policyOf(adapter)).toEqual({ kind: "negotiate" });
+
+      raw.dispatchSynthetic("message", CODEC_CONFIRMATION);
+      deliverCodec(raw, "Full", codecGameStarted(1, 1));
+      // The owner is settled by the GameStarted, not rejected by the attachment.
+      expect(await initOutcome).toBe("resolved");
+      expect((await adapter.getSnapshot()).state.turn_number).toBe(1);
+      expect(codec.decode).toHaveBeenCalledOnce();
+      expect(raw.close).not.toHaveBeenCalled();
+      expect(codec.close).not.toHaveBeenCalled();
+      expect(policyOf(adapter)).toEqual({ kind: "negotiate" });
+
+      // The next attachment still negotiates the codec.
+      raw.dispatchSynthetic("close");
+      await vi.advanceTimersByTimeAsync(1000);
+      const reconnect = await codecHandshake("Reconnect", raw);
+      expect(offeredCodec(reconnect)).toBe(true);
+      expect(provider).toHaveBeenCalledTimes(2);
+    } finally {
+      adapter.dispose();
+    }
+  });
 
   it("reconnects snapshot-only after a decode failure, rejecting the pending command once and not consulting the provider again", async () => {
     const first = scriptedCodec();
