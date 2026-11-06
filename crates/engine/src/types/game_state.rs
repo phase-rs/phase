@@ -25587,7 +25587,7 @@ declare_game_state! {
     ///
     /// COMPARED — by value, live-only and arena-insensitively — by `loop_states_equal` and by
     /// `analysis::resource::eq_except_growable`, both through `pending_shields_loop_eq`; the
-    /// spent entries (CR 615.3 / CR 609.7b) are not part of the position, so the two
+    /// spent entries (CR 615.3 + CR 614.3) are not part of the position, so the two
     /// comparators share one predicate and no growth axis. `impl PartialEq` still skips the
     /// whole field so generic state equality and AI-search dedup keep their
     /// allocation-history-free meaning.
@@ -36633,8 +36633,8 @@ const LOOP_DETECT_RING_CAP: usize = 16;
 /// `normalize_for_loop`d. Reuses `PartialEq` for the non-object fields, supplements its
 /// `objects.len()`-only object check with per-object content equality, and supplements its
 /// deliberate omission of `pending_damage_replacements` with [`pending_shields_loop_eq`]
-/// (CR 615.5: a state is not the same loop point when its LIVE floating shields differ; a
-/// spent shield is not part of the position).
+/// (CR 104.4b + CR 615.3: a state is not the same loop point when its LIVE floating shields
+/// differ; a spent shield is not part of the position).
 pub(crate) fn loop_states_equal(a: &GameState, b: &GameState) -> bool {
     a.is_loop_comparable()
         && b.is_loop_comparable()
@@ -36644,7 +36644,7 @@ pub(crate) fn loop_states_equal(a: &GameState, b: &GameState) -> bool {
         && pending_shields_loop_eq(a, b)
 }
 
-/// CR 615.3 + CR 609.7b: the LIVE floating shields in `state`, in registry order — the
+/// CR 615.3 + CR 614.3: the LIVE floating shields in `state`, in registry order — the
 /// sequence [`pending_shields_loop_eq`] compares. A used-up shield can no longer apply at a
 /// priority beat, so it is not part of the position; production agrees, with one bounded
 /// exception that cannot span a sample: `find_applicable_replacements` skips a spent floating
@@ -36663,14 +36663,14 @@ fn live_shields(state: &GameState) -> impl Iterator<Item = &ReplacementDefinitio
         .filter(|def| !def.is_consumed)
 }
 
-/// CR 104.4b + CR 615.5: the LIVE floating replacement registry
+/// CR 104.4b + CR 615.3: the LIVE floating replacement registry
 /// (`pending_damage_replacements`), compared BY VALUE with multiplicities tolerated. This is
 /// ONE predicate for both comparators that ask about shields — `loop_states_equal`'s strict
 /// CR 104.4b recurrence and `analysis::resource::eq_except_growable`'s CR 732.2a history
 /// cover. `impl PartialEq for GameState` deliberately skips this field, so without this
 /// predicate two positions differing only in the shields compare equal.
 ///
-/// SPENT SHIELDS ARE NOT POSITION (CR 615.3, CR 609.7b). Both sides are filtered through
+/// SPENT SHIELDS ARE NOT POSITION (CR 615.3 + CR 614.3). Both sides are filtered through
 /// [`live_shields`] before any comparison, so a consumed definition — which can never apply to
 /// a later damage event — cannot break equality, however much its content differs from the
 /// shield it replaces. Without that filter the CR 732.2a cover would be unreachable for the
@@ -36694,13 +36694,14 @@ fn live_shields(state: &GameState) -> impl Iterator<Item = &ReplacementDefinitio
 /// `UntilPlayerNextTurn` retain, and `execute_cleanup`'s `EndOfTurn|EndOfCombat` retain).
 /// Both comparators require `turn_number` and `phase` equality through `PartialEq`, so a
 /// pair that straddles a prune is already rejected. `is_consumed` is the one in-place edit
-/// that also SHORTENS the live sequence, so the tail rule is reachable mid-phase; it stays
-/// safe because a consumed entry cannot apply at a priority beat (see [`live_shields`]), so
-/// a tolerated shrink differs only in spent entries — or in the multiplicity this rule
-/// already exempts. A new mid-phase registry REMOVAL site would invalidate the phase-transition
+/// that also SHORTENS the live sequence. The comparison is symmetric: it tolerates a change
+/// in identical live-shield multiplicity in either direction. This is a loop-comparison
+/// policy, not a claim that different shield counts have equal future damage capacity;
+/// callers must still establish the loop's decision and recurrence conditions. A new
+/// mid-phase registry REMOVAL site would invalidate the phase-transition
 /// half of this argument. A LIVE shield whose amount, expiry, source anchors
-/// or rider differ is still content (CR 615.5): the common-prefix compare below refuses that
-/// pair before the tail rule is reached.
+/// or rider differ is still content (CR 615.7 for amounts; CR 615.5 for riders): the
+/// common-prefix compare below refuses that pair before the tail rule is reached.
 ///
 /// ARENA-INSENSITIVE: `shield_content_eq` resolves each side's `runtime_execute` rider
 /// through `split_replacement_rider` in that side's own `replacement_continuations` arena,

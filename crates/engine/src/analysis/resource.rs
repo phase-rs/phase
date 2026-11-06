@@ -6408,7 +6408,7 @@ fn grown_objects_are_inert(current: &GameState, grown: &HashSet<ObjectId>) -> bo
 /// `loop_states_equal` uses, so the cover adds no second shield semantics. It narrows only:
 /// alongside `PartialEq` it can never turn an unequal pair equal. What it tolerates is
 /// identical LIVE-shield growth, and it ignores spent shields entirely, because a consumed
-/// definition (CR 615.3 / CR 609.7b) can never apply to a later damage event and so is not
+/// definition (CR 615.3 + CR 614.3) can never apply to a later damage event and so is not
 /// part of the game position. That is exactly why the pinned cover row
 /// `loop_period_remade_token_source::copy_effects_used_up_inside_each_spawn_period_leave_the_periods_covered`
 /// passes: its periods append only used-up `Mystic Reflection` copies — each naming a
@@ -6502,9 +6502,9 @@ fn eq_except_growable(pa: &GameState, pb: &GameState, grown: &HashSet<ObjectId>)
     a == b
         && a.post_replacement_token_substitution_count
             == b.post_replacement_token_substitution_count
-        // CR 104.4b + CR 615.5: `PartialEq` skips the floating registry, so this gate asks
+        // CR 104.4b + CR 615.3: `PartialEq` skips the floating registry, so this gate asks
         // the same `pending_shields_loop_eq` as `loop_states_equal`; it compares only LIVE
-        // shields (a spent one can never apply again, CR 615.3 / CR 609.7b), so identical
+        // shields (a spent one can never apply again, CR 615.3 + CR 614.3), so identical
         // live growth covers and any differing live shield does not.
         && crate::types::game_state::pending_shields_loop_eq(&a, &b)
 }
@@ -29533,11 +29533,10 @@ mod tests {
         );
     }
 
-    /// CR 614.3 + CR 732.2a: the shield class a re-cast copy effect installs — an inline
-    /// `execute` naming `id`, which is the shape the pinned `Mystic Reflection` cover row
-    /// grows with, one period naming a different Spawn token each time. The caller marks the
-    /// entries SPENT (`is_consumed`): a copy effect already used up inside its period cannot
-    /// apply again.
+    /// CR 614.3 + CR 732.2a: synthetic spent-entry fixture with an inline `execute` naming
+    /// `id`. It isolates the differing inline-payload axis of the Mystic Reflection cover
+    /// regression, not that card's event/filter definition. The caller marks each definition
+    /// consumed before comparison; the fixture is never applied to an event.
     fn copy_effect_naming(id: ObjectId) -> ReplacementDefinition {
         ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone)
             .execute(AbilityDefinition::new(
@@ -29552,14 +29551,14 @@ mod tests {
             ))
     }
 
-    /// CR 615.3 + CR 609.7b: the same definition, USED UP — `find_applicable_replacements`
+    /// CR 615.3 + CR 614.3: the same definition, USED UP — `find_applicable_replacements`
     /// skips it, so it is not part of the position either comparator reads.
     fn spent(mut def: ReplacementDefinition) -> ReplacementDefinition {
         def.is_consumed = true;
         def
     }
 
-    /// CR 615.7 + CR 609.7b: a shield's AMOUNT is content — "the next 5 damage" and "the next
+    /// CR 615.7: a shield's AMOUNT is content — "the next 5 damage" and "the next
     /// 3 damage" are different loop positions.
     #[test]
     fn loop_comparators_refuse_a_differing_floating_shield_amount() {
@@ -29568,7 +29567,7 @@ mod tests {
         assert_shield_frames_differ(&a, &b);
     }
 
-    /// CR 615.3 + CR 609.7b: a SPENT shield is not part of the position. Both comparators
+    /// CR 615.3 + CR 614.3: a SPENT shield is not part of the position. Both comparators
     /// ignore consumed entries — the live-only reading `analysis::resource::replacement_def_is_live`
     /// gives the loop firewall — so two registries whose spent entries differ in content are
     /// the same loop point, and so is a spent entry against an empty registry. `PartialEq`
@@ -29590,7 +29589,7 @@ mod tests {
         assert_shield_frames_match(&empty, &a);
     }
 
-    /// CR 615.3 + CR 609.7b: mixed registries compare as if only their LIVE entries existed.
+    /// CR 615.3 + CR 614.3: mixed registries compare as if only their LIVE entries existed.
     /// A spent entry beside live ones is invisible; a differing LIVE entry still refuses
     /// through the common-prefix compare. The two comparators share the predicate, so both
     /// verdicts are pinned by the shared helpers.
@@ -29616,8 +29615,9 @@ mod tests {
         assert_shield_frames_differ(&a, &b);
     }
 
-    /// CR 615.7: the fail-closed lone-install rule reads the LIVE sequence, so one live shield
-    /// against a registry whose entries are all spent still refuses (the live registry is
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: the fail-closed
+    /// lone-install rule reads the LIVE sequence, so one live shield against a registry whose
+    /// entries are all spent still refuses (the live registry is
     /// empty on one side), while two identical live instalments accept.
     #[test]
     fn loop_comparators_refuse_a_live_floating_shield_against_a_spent_only_registry() {
@@ -29703,9 +29703,9 @@ mod tests {
         assert_shield_frames_match(&a, &b);
     }
 
-    /// CR 615.7: within a turn the registry is append-only, so one identical shield growing
-    /// into two is the same loop position. Both comparators must accept it, and `PartialEq`
-    /// (blind to the whole registry) already does.
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: one identical
+    /// live shield growing into two is accepted by the loop comparator's multiplicity policy.
+    /// Both comparators must accept it, and `PartialEq` (blind to the whole registry) already does.
     #[test]
     fn loop_comparators_accept_an_identical_floating_shield_multiplicity() {
         let shield = prevention_shield(5);
@@ -29717,8 +29717,9 @@ mod tests {
         assert_shield_frames_match(&a, &b);
     }
 
-    /// CR 615.7: an appended LIVE shield of a DIFFERENT class breaks the recurrence — the
-    /// tail rule only tolerates repeats of the class the shorter live registry ended on.
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: an appended LIVE
+    /// shield of a DIFFERENT class breaks the recurrence — the tail rule only tolerates repeats
+    /// of the class the shorter live registry ended on.
     #[test]
     fn loop_comparators_refuse_an_appended_differing_floating_shield() {
         let a = shield_frames(&[prevention_shield(5)]);
@@ -29726,9 +29727,10 @@ mod tests {
         assert_shield_frames_differ(&a, &b);
     }
 
-    /// CR 615.7: with no live shield observed yet the comparator cannot infer a class, so a
-    /// single install is refused (fail-closed, delays a draw by at most one cycle) while two
-    /// identical installs are accepted. Empty versus empty is the regression row for the
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: with no live
+    /// shield observed yet the comparator cannot infer a class, so a single install is refused
+    /// (fail-closed, delays a draw by at most one cycle) while two identical installs are accepted.
+    /// Empty versus empty is the regression row for the
     /// short-circuit: without it every shield-free loop in the engine would stop drawing.
     #[test]
     fn loop_comparators_refuse_a_lone_floating_shield_against_an_empty_registry() {
@@ -29740,8 +29742,9 @@ mod tests {
         assert_shield_frames_match(&empty, &shield_frames(&[]));
     }
 
-    /// CR 615.7: the registry is an append log, so order is content. Growth that repeats the
-    /// last class is still accepted.
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: the comparator
+    /// conservatively preserves live registry order. Growth that repeats the last class is
+    /// still accepted.
     #[test]
     fn loop_comparators_refuse_reordered_floating_shields() {
         let a = shield_frames(&[prevention_shield(5), prevention_shield(3)]);
@@ -29755,11 +29758,12 @@ mod tests {
         assert_shield_frames_match(&a, &grown);
     }
 
-    /// CR 614.3 + CR 615.3 + CR 732.2a: the pinned `Mystic Reflection` shape — each period
-    /// appends one more USED-UP copy effect whose inline `execute` names a DIFFERENT
-    /// per-period Spawn token, so the raw registries grow in length AND differ in content.
+    /// CR 614.3 + CR 615.3 + CR 732.2a: the differing spent-payload axis of the pinned
+    /// `Mystic Reflection` regression — each period appends one more USED-UP copy effect whose
+    /// inline `execute` names a DIFFERENT per-period Spawn token, so the raw registries grow in
+    /// length AND differ in content.
     /// Neither difference is part of the position: the appended definitions are spent
-    /// (CR 615.3 / CR 609.7b), so the live sequences are empty on both sides and both
+    /// (CR 615.3 + CR 614.3), so the live sequences are empty on both sides and both
     /// comparators accept. This is the unit-level discriminator for the pinned integration
     /// row `loop_period_remade_token_source::copy_effects_used_up_inside_each_spawn_period_leave_the_periods_covered`.
     #[test]
