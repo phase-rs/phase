@@ -630,7 +630,8 @@ fn filter_names_library_owner(filter: &TargetFilter) -> bool {
 
 /// CR 608.2c + CR 701.23a: a mass move announces no subject through
 /// `ParentTargetController` — "all other creatures its controller controls"
-/// (Declaration in Stone, Deputy of Detention) and "search its controller's
+/// (Declaration in Stone; Deputy of Detention: "all other nonland permanents
+/// that player controls") and "search its controller's
 /// graveyard, hand, and library … and exile them" (Eradicate, Counterbore)
 /// name whose objects are swept; the spell's controller follows the
 /// instruction. A pick with the same scope is the subject form ("then that
