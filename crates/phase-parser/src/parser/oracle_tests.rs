@@ -33496,13 +33496,12 @@ fn printed_subject_of_a_choosing_sentence_becomes_the_target_chooser() {
     use crate::types::ability::ControllerRef;
 
     // Announcer rows: `(name, oracle, expected chooser)`.
-    for (name, oracle, expected) in [
-        (
+    {
+        let (name, oracle, expected) = (
             "Oath of Druids",
             "At the beginning of each player's upkeep, that player chooses target player who controls more creatures than they do and is their opponent. The first player may reveal cards from the top of their library until they reveal a creature card.",
             TargetFilter::ScopedPlayer,
-        ),
-    ] {
+        );
         let parsed = parse(oracle, name, &[], &["Enchantment"], &[]);
         let trigger = parsed
             .triggers

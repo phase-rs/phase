@@ -811,7 +811,12 @@ fn an_optional_that_player_instruction_is_offered_to_the_declared_player() {
 }
 
 const GATE_THEN_TWO_DECLARATIONS: &str = "You may discard a card. If you do, you gain 5 life. Target player gains 2 life. Target opponent gains 2 life.";
-const DECLARE_THEN_CHOOSE_OPPONENT: &str = "Target player draws a card. Choose target opponent who has more life than you do as you cast this spell. This spell deals 2 damage to that player.";
+// The choosing sentence omits the "who has more life than you do as you cast this spell" restriction a
+// printed card would carry: the parser does not understand it, and a choose clause with an unparsed
+// restriction is an honest `Unimplemented` (not a bare `TargetOnly`), which would end the row before
+// the carry it exercises. The carry mechanic does not depend on the restriction.
+const DECLARE_THEN_CHOOSE_OPPONENT: &str =
+    "Target player draws a card. Choose target opponent. This spell deals 2 damage to that player.";
 
 /// CR 118.12 + CR 608.2c: the "if you do" rider governs only its own sentence, so declining the
 /// discard still leaves both later declarations in force.
@@ -966,7 +971,9 @@ fn a_they_instruction_after_a_declared_player_belongs_to_that_player() {
 
 const CHOOSE_THEN_THEY_MAY: &str =
     "Choose target player. They may discard up to two cards. Then they draw a card for each card discarded this way.";
-const DECLARE_CHOOSE_THEN_THEY_MAY: &str = "Target player draws a card. Choose target opponent who has more life than you do as you cast this spell. They may discard a card.";
+// Same omission as `DECLARE_THEN_CHOOSE_OPPONENT`: no unparsed restriction on the choosing sentence.
+const DECLARE_CHOOSE_THEN_THEY_MAY: &str =
+    "Target player draws a card. Choose target opponent. They may discard a card.";
 
 /// CR 608.2d: a reader of a chosen-clause declaration keeps `ParentTarget` in its effect slot, but
 /// its "may" is offered to the chosen player.

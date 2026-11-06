@@ -26362,11 +26362,12 @@ mod tests {
         // Both are unsupported gaps until a follow-up parses the dropped
         // restriction; see
         // `choose_target_with_unparsed_restriction_is_an_honest_gap_on_printed_cards`.
-        for (name, text, types) in [(
-            "Hive Mind",
-            "Whenever a player casts an instant or sorcery spell, each other player copies that spell. Each of those players may choose new targets for their copy.",
-            vec!["Enchantment".to_string()],
-        )] {
+        {
+            let (name, text, types) = (
+                "Hive Mind",
+                "Whenever a player casts an instant or sorcery spell, each other player copies that spell. Each of those players may choose new targets for their copy.",
+                vec!["Enchantment".to_string()],
+            );
             let parsed = parse_oracle_text(text, name, &[], &types, &[]);
             assert!(
                 !parsed.abilities.is_empty() || !parsed.triggers.is_empty(),
