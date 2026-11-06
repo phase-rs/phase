@@ -299,14 +299,15 @@ pub fn add_mana_cost(base: &ManaCost, extra: &ManaCost) -> ManaCost {
 /// objects (tokens, emblems) lack one. Tests that exercise this helper without
 /// having gone through the cast pipeline default the missing zone to
 /// `Zone::Hand` — the canonical fallback used elsewhere by `SpellCastRecord`.
-/// `committed_targets` is the cast's committed declared-target list (CR 601.2c);
-/// an empty slice is a claim that the cast declared none.
+/// `committed_targets` is the cast's committed declared-target facts, captured
+/// at target settlement (CR 601.2c); an empty slice is a claim that the cast
+/// declared none.
 pub fn record_spell_cast(
     state: &mut crate::types::game_state::GameState,
     player: PlayerId,
     obj: &GameObject,
     cast_variant: crate::types::game_state::CastingVariant,
-    committed_targets: &[crate::types::ability::TargetRef],
+    committed_targets: &[crate::types::game_state::ActivationTargetFact],
 ) -> Result<CastOccurrence, crate::types::resolved_commands::ResolvedLedgerEditReplayInvariantError>
 {
     record_spell_cast_from_zone(
@@ -411,25 +412,24 @@ pub(crate) fn spell_cast_record_for(
     }
 }
 
-/// CR 601.2i + CR 601.2c: every caller must pass the cast's committed
-/// declared-target list; an empty list is a claim that the cast declared none.
+/// CR 601.2c + CR 601.2i: every caller must pass the cast's committed
+/// declared-target facts, **captured at target settlement** (CR 601.2c), not
+/// derived at this write. The write happens at CR 601.2i, after the cost has
+/// been paid (CR 601.2h), and paying it can change or remove a target; reading
+/// the targets' characteristics here would record what they had become rather
+/// than what they were when committed. An empty slice is a claim that the cast
+/// declared none.
 pub fn record_spell_cast_from_zone(
     state: &mut crate::types::game_state::GameState,
     player: PlayerId,
     obj: &GameObject,
     from_zone: Zone,
     cast_variant: crate::types::game_state::CastingVariant,
-    committed_targets: &[crate::types::ability::TargetRef],
+    committed_targets: &[crate::types::game_state::ActivationTargetFact],
 ) -> Result<CastOccurrence, crate::types::resolved_commands::ResolvedLedgerEditReplayInvariantError>
 {
     // CR 117.1: Record spell characteristics for general-purpose filtered counting.
-    let record = spell_cast_record_for(
-        obj,
-        from_zone,
-        cast_variant,
-        false,
-        &crate::game::casting::capture_target_facts(state, committed_targets),
-    );
+    let record = spell_cast_record_for(obj, from_zone, cast_variant, false, committed_targets);
     crate::game::ledger::record_spell_cast(state, player, record)
 }
 

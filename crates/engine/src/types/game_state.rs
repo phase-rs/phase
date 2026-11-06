@@ -1548,6 +1548,15 @@ pub struct SpellCastRecord {
     /// `#[serde(default)]`: a record predating this field deserializes to empty,
     /// which honestly means it cannot prove which targets the spell declared.
     /// An empty list never satisfies "targets [something]" (CR 115.9).
+    ///
+    /// Note the one thing that flattening cannot express: an empty list is both
+    /// "this cast declared no target" and "this record predates the field", and
+    /// the two are indistinguishable here. Both answers are fail-closed for the
+    /// positive predicates this feeds, so the cost is confined to a *negated*
+    /// read — `Not { Targets }` over unproven provenance answers true — and that
+    /// is acceptable only because this field postdates every persisted game, so
+    /// no payload can reach the loader with it absent. A future second reader
+    /// must not assume absent provenance is evidence of absence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<ActivationTargetFact>,
 }

@@ -139,10 +139,13 @@ pub(crate) fn commit_copy_cast(
     // `None` is a copy of a card with no spell ability — a cast that declared nothing,
     // because the same ability is what a target walk reads a slot from. A *missing* entry is
     // refused above, because no walk could have declared anything for it.
-    let declared = entry
-        .ability()
-        .map(declared_targets_in_chain)
-        .unwrap_or_default();
+    let committed_target_facts = crate::game::casting::capture_target_facts(
+        state,
+        &entry
+            .ability()
+            .map(declared_targets_in_chain)
+            .unwrap_or_default(),
+    );
     events.push(GameEvent::SpellCast {
         card_id: copy.card_id,
         controller,
@@ -155,7 +158,7 @@ pub(crate) fn commit_copy_cast(
         &copy,
         origin,
         crate::types::game_state::CastingVariant::Normal,
-        &declared,
+        &committed_target_facts,
     )
     .map_err(finalized_spell_cast_ledger_error)?;
     // CR 707.12: a cast copy is a new object created for this cast, not the
@@ -13785,6 +13788,16 @@ fn finalize_cast_with_phyrexian_choices_inner(
         obj.fused_split_spell = casting_variant == CastingVariant::Fuse;
     }
 
+    // CR 601.2c + CR 400.7: snapshot the declared targets HERE — at target
+    // settlement and before the cost is paid — not at the record write below.
+    // The record is written at CR 601.2i, after CR 601.2h, and paying can change
+    // or remove a target: reading their characteristics there would record what
+    // they had become rather than what they were when committed, which is the
+    // state every history predicate is defined over (CR 115.9's selection-time
+    // reading). The facts are carried down to the write unchanged.
+    let committed_target_facts =
+        super::casting::capture_target_facts(state, &declared_targets_in_chain(&ability));
+
     if prepaid_actual_mana_spent.is_none() {
         let resume_at_resolution_depth = state.resolution_stack.len();
         match super::casting::pay_mana_cost_with_choices_and_resume(
@@ -14676,11 +14689,12 @@ fn finalize_cast_with_phyrexian_choices_inner(
         &obj,
         source_zone,
         casting_variant,
-        // CR 115.1 + CR 601.2c: `announced_targets` is `declared_targets_in_chain(&ability)`
-        // captured above, before `ability` moved into `stack_ability`; a placeholder
-        // cast (no ability) necessarily declares none, which is what
-        // `is_placeholder`'s `ability.targets.is_empty()` conjunct already encodes.
-        &announced_targets,
+        // CR 115.1 + CR 601.2c: `committed_target_facts` was captured above at
+        // target settlement, before the cost was paid, and is passed here
+        // unchanged; a placeholder cast (no ability) necessarily declares none,
+        // which is what `is_placeholder`'s `ability.targets.is_empty()` conjunct
+        // already encodes.
+        &committed_target_facts,
     )
     .map_err(finalized_spell_cast_ledger_error)?;
     stamp_cast_occurrence_on_stack_spell(state, object_id, occurrence, cast_card)?;
