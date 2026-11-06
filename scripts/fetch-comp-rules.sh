@@ -32,6 +32,10 @@ source "$SCRIPT_DIR/lib/comp-rules-edition.sh"
 MODE=pinned
 FORCE=0
 OUTPUT=""
+# The EXIT trap deletes these; clear any value inherited from the
+# environment so it can only ever remove what this run created.
+TMP_DIR=""
+CR_CONVERT_TMP=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) FORCE=1 ;;
