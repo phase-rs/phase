@@ -795,7 +795,7 @@ fn ceiling_r5_nyxbloom_with_fertile_ground() {
         Some(AttachTarget::Object(ids[1])),
         "reach: Fertile Ground is attached to the Mountain"
     );
-    assert!(max >= 4, "3 from the Mountain plus the Aura's mana: {max}");
+    assert_eq!(max, 4, "3 from the Mountain plus the Aura's untripled mana: {max}");
     assert_offer_is_payable(&mut runner, max);
     assert!(tapped(&runner, ids[1]), "the enchanted Mountain was tapped");
     assert_all_red_spent(&runner);
