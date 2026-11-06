@@ -2859,26 +2859,36 @@ pub(crate) fn staged_approval_owner_for(
     ))
 }
 
-/// CR 614.5 + CR 616.1: the engine-replacement handback for one staged
-/// consultation. The result is retained, never delivered here. The approval
-/// driver then continues with the next unconsulted member, which may pause.
+/// Whether the staged owner still has work before the shared Execute epilogue.
+pub(crate) enum StagedConsultationHandback {
+    NotOwned,
+    Parked(WaitingFor),
+    Settled,
+}
+
+/// CR 614.6 + CR 616.1: retain one staged consultation result, then continue
+/// approval and delivery for its whole population. Report settlement only when
+/// the completion left no live prompt for the shared Execute epilogue to preserve.
 pub(crate) fn record_staged_batch_consultation_result(
     state: &mut GameState,
     group_id: LogicalZoneChangeGroupId,
     outcome: StagedMemberOutcome,
     events: &mut Vec<GameEvent>,
-) -> Option<WaitingFor> {
+) -> StagedConsultationHandback {
     if state
         .active_batch_delivery()
         .is_none_or(|pending| pending.logical_zone_change_group.logical_group_id != group_id)
     {
-        return None;
+        return StagedConsultationHandback::NotOwned;
     }
-    let mut owner = state
+    let Some(mut owner) = state
         .resolution_stack
         .take_active_batch_delivery()
         .ok()
-        .flatten()?;
+        .flatten()
+    else {
+        return StagedConsultationHandback::NotOwned;
+    };
     let live_child = state.pending_replacement.is_some()
         || !matches!(
             state.waiting_for,
@@ -2889,14 +2899,14 @@ pub(crate) fn record_staged_batch_consultation_result(
             .resolution_stack
             .park_batch_owner(owner)
             .expect("staged batch re-parks its exact owner");
-        return None;
+        return StagedConsultationHandback::NotOwned;
     };
     if staged.stage != BatchDeliveryStage::Approving {
         state
             .resolution_stack
             .park_batch_owner(owner)
             .expect("staged batch re-parks its exact owner");
-        return None;
+        return StagedConsultationHandback::NotOwned;
     }
     let cursor = staged.cursor;
     let Some(member) = staged.members.get_mut(cursor) else {
@@ -2904,7 +2914,7 @@ pub(crate) fn record_staged_batch_consultation_result(
             .resolution_stack
             .park_batch_owner(owner)
             .expect("staged batch re-parks its exact owner");
-        return None;
+        return StagedConsultationHandback::NotOwned;
     };
     if member.pending_outcome.is_some() {
         let waiting = state.waiting_for.clone();
@@ -2912,7 +2922,7 @@ pub(crate) fn record_staged_batch_consultation_result(
             .resolution_stack
             .park_batch_owner(owner)
             .expect("staged batch re-parks its exact owner");
-        return Some(waiting);
+        return StagedConsultationHandback::Parked(waiting);
     }
     member.pending_outcome = Some(outcome.clone());
     if live_child {
@@ -2924,7 +2934,7 @@ pub(crate) fn record_staged_batch_consultation_result(
             .resolution_stack
             .park_batch_owner(owner)
             .expect("staged batch re-parks its exact owner");
-        return Some(waiting);
+        return StagedConsultationHandback::Parked(waiting);
     }
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
@@ -2934,28 +2944,24 @@ pub(crate) fn record_staged_batch_consultation_result(
             .resolution_stack
             .park_batch_owner(owner)
             .expect("staged batch re-parks its exact owner");
-        return Some(state.waiting_for.clone());
+        return StagedConsultationHandback::Parked(state.waiting_for.clone());
     }
     let stop = run_staged_batch(state, &mut owner, events);
     if stop == StagedStop::Delivered {
         let deferred_events = owner.deferred_events.clone();
         settle_batch_owner(state, owner, deferred_events, events);
-        // CR 608.2c: the resumed consultation completed the whole population,
-        // so the parked chained continuation ("create that many", the
-        // owner-shuffle consumer) must run against the settled count/records.
-        // This is the legacy epilogue's order after `drain_pending_change_zone_
-        // iteration`; the staged resume path otherwise stops at Priority with
-        // that continuation still parked.
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-            crate::game::effects::drain_pending_continuation(state, events);
+            StagedConsultationHandback::Settled
+        } else {
+            StagedConsultationHandback::Parked(state.waiting_for.clone())
         }
     } else {
         state
             .resolution_stack
             .park_batch_owner(owner)
             .expect("staged batch re-parks its exact owner");
+        StagedConsultationHandback::Parked(state.waiting_for.clone())
     }
-    Some(state.waiting_for.clone())
 }
 
 /// The only child-settlement entry for Approving. Moves the retained outcome
@@ -12436,6 +12442,81 @@ mod staged_batch_tests {
             state.waiting_for,
             WaitingFor::DigRestSplitChoice { .. }
         ));
+    }
+
+    /// CR 608.2c + CR 608.2d: settlement may itself expose the completion's
+    /// ordering choice; only that answer may resume the shared epilogue.
+    #[test]
+    fn staged_settle_with_live_completion_prompt_returns_parked() {
+        use crate::types::ability::DigRestOrder;
+        use crate::types::game_state::DigDeliveryStage;
+
+        // Abundance's printed remainder: "put all other cards revealed this
+        // way on the bottom of your library in any order." This isolates its
+        // existing RevealRestPile completion after the kept card's consultation.
+        let mut state = GameState::new_two_player(0x326);
+        let source = effect_source(&mut state);
+        let kept = library_card(&mut state, 1);
+        let misses = vec![library_card(&mut state, 2), library_card(&mut state, 3)];
+        let member = staged_member(
+            &state,
+            kept,
+            None,
+            StagedBatchMemberState::InnerConsulting,
+            Zone::Hand,
+            None,
+        );
+        let group_id =
+            push_approved_staged(&mut state, vec![member], BatchDeliveryStage::Approving);
+        let mut owner = take_owner(&mut state, group_id);
+        owner.completion = Some(BatchCompletion::RevealRestPile {
+            delivery_stage: DigDeliveryStage::Rest,
+            player: PlayerId(0),
+            source_id: Some(source),
+            rest_cards: misses.clone(),
+            rest_destination: Zone::Library,
+            rest_order: DigRestOrder::PlayerChoice,
+            rest_split_top_count: None,
+            clear_markers: misses.clone(),
+            publish_tracked_set: None,
+            publish_tracked_set_cause: None,
+            emit_reveal_until_resolved: None,
+            reveal_until_hit_snapshot: None,
+            manifested_for_continuation: None,
+            kept_delivery: Default::default(),
+            continuation_targets: Vec::new(),
+            rest_delivery: Default::default(),
+        });
+        put_owner(&mut state, owner);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let handback = record_staged_batch_consultation_result(
+            &mut state,
+            group_id,
+            StagedMemberOutcome::Approved(ProposedEvent::zone_change(
+                kept,
+                Zone::Library,
+                Zone::Hand,
+                Some(source),
+            )),
+            &mut Vec::new(),
+        );
+        let StagedConsultationHandback::Parked(waiting) = handback else {
+            panic!("settlement must preserve the live completion prompt");
+        };
+        let WaitingFor::RevealUntilBottomOrder { player, cards, .. } = &waiting else {
+            panic!("expected remainder ordering, got {waiting:?}");
+        };
+        assert_eq!(*player, PlayerId(0));
+        assert_eq!(cards, &misses);
+        assert_eq!(state.waiting_for, waiting);
+        assert_eq!(state.objects[&kept].zone, Zone::Hand);
+        assert!(misses
+            .iter()
+            .all(|id| state.objects[id].zone == Zone::Library));
+        assert!(state.active_batch_delivery().is_none());
     }
 
     #[test]

@@ -188,6 +188,30 @@ pub(super) fn handle_replacement_choice(
     index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 616.1: retire the answered prompt once, before any nested consultation.
+    let placeholder = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    let answered = std::mem::replace(&mut state.waiting_for, placeholder.clone());
+    match handle_replacement_choice_body(state, index, events) {
+        Ok(waiting_for) => {
+            state.waiting_for = waiting_for.clone();
+            Ok(waiting_for)
+        }
+        Err(error) => {
+            if state.waiting_for == placeholder {
+                state.waiting_for = answered;
+            }
+            Err(error)
+        }
+    }
+}
+
+fn handle_replacement_choice_body(
+    state: &mut GameState,
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     let action_event_start = events.len();
     // A record stamped for rejection came from an action-ingress player-resource
     // change. Resume it inside an ingress window so every life, player-counter
@@ -289,6 +313,465 @@ pub(crate) fn resume_paused_player_scope_sacrifice(
             })
         }
     }
+}
+
+struct ReplacementExecuteEpilogue {
+    zone_change_object_id: Option<ObjectId>,
+    enters_battlefield: bool,
+    parked_single_discard: Option<crate::types::game_state::PendingSingleDiscard>,
+    parked_affected_object_id: Option<ObjectId>,
+    pending_phase_drain_life_loser: Option<PlayerId>,
+    action_event_start: usize,
+}
+
+/// CR 616.1 + CR 608.2c: settle a delivered replacement or a whole staged batch
+/// through the same ordered drains before resuming its producer.
+fn finish_replacement_execute_epilogue(
+    state: &mut GameState,
+    epilogue: ReplacementExecuteEpilogue,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let ReplacementExecuteEpilogue {
+        zone_change_object_id,
+        enters_battlefield,
+        parked_single_discard,
+        parked_affected_object_id,
+        pending_phase_drain_life_loser,
+        action_event_start: replacement_action_event_start,
+    } = epilogue;
+    let mut waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    state.waiting_for = waiting_for.clone();
+
+    // CR 701.9a + CR 614.6: the replaced discard still happened; record it
+    // now that its move has been delivered, before post-replacement and
+    // `waiting_for`-gated drains run. Gated on the carrier latched before
+    // `continue_replacement` so a carrier installed during this answer
+    // (a different discard's, owed to a later answer) is not consumed here.
+    if parked_single_discard.is_some()
+        && state.pending_single_discard.as_deref().copied() == parked_single_discard
+    {
+        effects::settle_paused_single_discard(state, events);
+    }
+
+    let mut replacement_ctx = None;
+    if zone_change_object_id.is_some_and(|object_id| {
+        state
+            .active_spell_resolution()
+            .is_some_and(|ctx| object_id == ctx.object_id)
+    }) {
+        let ctx = state
+            .take_active_spell_resolution()
+            .expect("matching spell-resolution context was checked above");
+        if enters_battlefield {
+            apply_pending_spell_resolution(state, &ctx, events);
+        }
+        replacement_ctx = Some(ctx);
+    }
+
+    if state.has_post_replacement_drain() {
+        // CR 614.12a + CR 614.1c: For ZoneChange events the post-effect
+        // resolves against the zone-changing object, not the replacement
+        // source — drop the source slot so it doesn't leak into an
+        // unrelated later replacement. For non-ZoneChange events
+        // (Draw/Damage/Mill/etc.) there is no enterer, so the source
+        // slot is the only handle on the replacement's host (e.g.,
+        // Abundance for "you may instead choose ... reveal cards" —
+        // CR 614.6 + CR 614.11). Preserve it in that case so
+        // `apply_post_replacement_effect` resolves the chain against
+        // Abundance's controller, not `ObjectId(0)` / active_player.
+        let is_zone_change = zone_change_object_id.is_some();
+        if is_zone_change {
+            state.clear_post_replacement_source();
+        }
+        if let Some(next_waiting_for) = apply_pending_post_replacement_effect(
+            state,
+            zone_change_object_id,
+            replacement_ctx.as_ref(),
+            Some(ReplacementEvent::Moved),
+            events,
+        ) {
+            waiting_for = next_waiting_for;
+            // CR 614.6 + CR 500.5: the substitute of the replacement
+            // chosen for the phase drain's loss paused, and the drain
+            // may not advance until that substitute finishes. Park it
+            // exactly as the `Prevented` arm does: the shared resumer
+            // then finishes the transition once the substitute
+            // terminally drains, and a loss the substitute raises is
+            // not mistaken for the drain's own
+            // (`pending_phase_drain_life_loser` needs Ready).
+            if pending_phase_drain_life_loser.is_some() {
+                super::turns::mark_phase_transition_awaiting_post_replacement(state);
+            }
+        }
+    }
+
+    // CR 702.143a-c + CR 614.1 + CR 616.1: A Foretell cost move may
+    // deliver its card and then surface an interactive post-replacement
+    // effect. Complete the special action at the delivery boundary,
+    // before preserving that non-priority prompt, so the card cannot be
+    // left face up or with a stranded cost continuation.
+    if zone_change_object_id.is_some_and(|object_id| {
+        matches!(
+            state.pending_cost_move_resume.as_ref(),
+            Some(PendingCostMoveResume::Foretell {
+                object_id: pending_object_id,
+                ..
+            }) if *pending_object_id == object_id
+        )
+    }) {
+        super::casting::complete_foretell_cost_move(state, events);
+    }
+
+    // CR 805.4b: a draw-step draw that paused on the choice just
+    // resolved above may have queued teammate(s) still owed their
+    // own draw this step (`turns::execute_draw` seeds the queue; the
+    // `ProposedEvent::Draw` arm above already popped the
+    // just-completed player off the FRONT so this drain doesn't
+    // redraw them; `drain_pending_team_draw_step` is the single
+    // authority that empties the rest). Drain before falling through
+    // to the generic Priority reset so a 2HG teammate's mandatory
+    // draw is never silently dropped when the active player's own
+    // draw needed a CR 616.1 competing-replacement choice.
+    if matches!(waiting_for, WaitingFor::Priority { .. })
+        && !state.pending_team_draw_step.is_empty()
+    {
+        if let Some(wf) = super::turns::drain_pending_team_draw_step(state, events) {
+            waiting_for = wf;
+        }
+    }
+
+    // CR 121.6b: a draw instruction (`Effect::Draw{count: N}`) paused
+    // mid-sequence because a per-unit replacement (Dredge, Notion Thief,
+    // Hullbreacher, a count-doubling static, etc.) needed this choice. The
+    // just-resolved unit was settled above (Draw arm); resume the frame to
+    // drive its remaining units. `resume_draw_sequence` leaves the frame
+    // parked and sets `state.waiting_for` (via `draw_through_replacement`)
+    // if the next unit surfaces its own choice, so an arbitrary number of
+    // sequential re-pauses compose — each resume re-addresses the same
+    // frame by ID.
+    while matches!(waiting_for, WaitingFor::Priority { .. }) {
+        let Some(frame_id) = state.active_draw_sequence().map(|frame| frame.frame_id) else {
+            break;
+        };
+        let _ = crate::game::effects::draw::resume_draw_sequence(state, frame_id, events);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            waiting_for = state.waiting_for.clone();
+            break;
+        }
+        if state
+            .active_draw_sequence()
+            .is_some_and(|frame| frame.frame_id == frame_id)
+        {
+            // No frame completed or paused; avoid retrying a stalled frame.
+            break;
+        }
+    }
+
+    // CR 701.50a + CR 614.5 + CR 616.1f: resume a deferred connive whose
+    // leading Draw link parked this just-resolved ReplacementChoice. The
+    // draw fully delivered above (Draw arm), so "draw a card, THEN that
+    // creature connives" (CR 701.50a) order is honored. `propose_connive`
+    // re-enters with the already-applied rids excluded (CR 614.5) so the
+    // CR 616.1f repeat covers the remaining connive replacements; it sets a
+    // parked ConniveDiscard / fresh ReplacementChoice on state.waiting_for,
+    // which we surface instead of the Priority reset. Drained from the
+    // DEDICATED slot so the leading draw's DeliveryTail could not consume it.
+    if matches!(waiting_for, WaitingFor::Priority { .. }) {
+        if let Some(wf) = drain_pending_connive_reentry(state, events) {
+            waiting_for = wf;
+        }
+    }
+
+    if matches!(waiting_for, WaitingFor::Priority { .. }) && state.active_counter_moves().is_some()
+    {
+        effects::counters::drain_pending_counter_moves(state, events);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            waiting_for = state.waiting_for.clone();
+        }
+    }
+
+    // CR 107.1c + CR 608.2h: a "remove any number of counters" batch
+    // (Rhys, Tetravus) paused mid-removal because a per-removal
+    // replacement needed a choice. The chosen event was applied above;
+    // drain the parked tail (which re-parks if the next removal surfaces
+    // its own choice, setting state.waiting_for for us to propagate).
+    if matches!(waiting_for, WaitingFor::Priority { .. })
+        && state.active_counter_removals().is_some()
+    {
+        effects::counters::drain_pending_counter_removals(state, events);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            waiting_for = state.waiting_for.clone();
+        }
+    }
+
+    if matches!(waiting_for, WaitingFor::Priority { .. })
+        && state.active_counter_additions().is_some()
+    {
+        effects::counters::drain_pending_counter_additions(state, events);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            waiting_for = state.waiting_for.clone();
+        }
+    }
+
+    if matches!(waiting_for, WaitingFor::Priority { .. })
+        && state.active_life_total_assignment().is_some()
+    {
+        drain_pending_life_total_assignment(state, events);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            waiting_for = state.waiting_for.clone();
+        }
+    }
+
+    // CR 603.10a + CR 616.1: A simultaneous zone-move batch (mill or
+    // mass bounce) paused mid-delivery because an object's Moved
+    // replacements needed an ordering choice (Rest in Peace + Leyline of
+    // the Void class). The chosen event was delivered by the ZoneChange
+    // arm above; drain the parked tail. The drain may re-park when the
+    // next object surfaces its own prompt — in that case it sets
+    // `state.waiting_for` for us to propagate.
+    if matches!(waiting_for, WaitingFor::Priority { .. }) && state.active_batch_delivery().is_some()
+    {
+        crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            waiting_for = state.waiting_for.clone();
+        }
+    }
+
+    // CR 614.6 + CR 616.1: settling a batch parked above its member's
+    // delivery-tail child exposes that child's counter-removal queue. Finish
+    // it here, in the same order as the queue drain above, before any parked
+    // cost root resumes below.
+    if matches!(waiting_for, WaitingFor::Priority { .. })
+        && state.active_counter_removals().is_some()
+    {
+        effects::counters::drain_pending_counter_removals(state, events);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            waiting_for = state.waiting_for.clone();
+        }
+    }
+
+    if matches!(waiting_for, WaitingFor::Priority { .. }) && state.active_copy_token().is_some() {
+        effects::token_copy::drain_pending_copy_token_resolution(state, events);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            waiting_for = state.waiting_for.clone();
+        }
+    }
+
+    if matches!(waiting_for, WaitingFor::Priority { .. })
+        && state.pending_player_scope_sacrifice_choice.is_some()
+    {
+        // CR 101.4: a simultaneous each-player sacrifice paused by a
+        // CR 616.1 replacement choice resumes the already-announced
+        // remaining sacrifices before any parked continuation can run.
+        // CR 603.2: the completed batch lies inside this action's buffer,
+        // which the post-action pipeline scans; it is not collected here.
+        if let Some(next) = resume_paused_player_scope_sacrifice(state, events)?.next_wait {
+            waiting_for = next;
+        }
+    }
+
+    // CR 608.2c: a discard instruction parked mid-batch by a
+    // replacement-application choice finishes what it still owes BEFORE
+    // any parked continuation runs. The resolving effect follows its
+    // instructions in written order, so later instructions cannot resume
+    // until this action has settled and published its terminal result.
+    if matches!(waiting_for, WaitingFor::Priority { .. }) && state.pending_discard_batch.is_some() {
+        match effects::drain_pending_discard_batch(state, events)
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+        {
+            effects::PendingDiscardBatchOutcome::Idle => {}
+            effects::PendingDiscardBatchOutcome::PausedForReplacement => {
+                waiting_for = state.waiting_for.clone();
+                super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                    state,
+                    events,
+                    replacement_action_event_start,
+                );
+            }
+            effects::PendingDiscardBatchOutcome::Completed => {
+                effects::drain_pending_continuation(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                    super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                        state,
+                        events,
+                        replacement_action_event_start,
+                    );
+                }
+            }
+        }
+    }
+
+    if matches!(waiting_for, WaitingFor::Priority { .. })
+                && (state.active_ability_continuation().is_some()
+                    || state.active_change_zone_frame().is_some())
+                // CR 118.12 + CR 605.3b + CR 616.1: A mana-source cost pause
+                // owns the unpaid cost suffix.  Do not drain the ordinary
+                // effect rider before that typed root has settled it.
+                && !matches!(
+                    state.pending_cost_move_resume,
+                    Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+                )
+    {
+        // CR 614.12b + CR 614.1c + CR 614.13: drain BOTH the chained
+        // continuation and the multi-target ChangeZone iteration that
+        // paused on this replacement choice (issue #535). This runs
+        // AFTER a collected simultaneous sacrifice queue: CR 101.4
+        // requires every already-announced sacrifice to finish before
+        // the original ability's later instructions resume.
+        effects::drain_pending_continuation(state, events);
+        // CR 616.1e: The continuation may itself pause on another replacement
+        // (e.g., the second direction of fight damage hitting the same shield),
+        // in which case it sets `state.waiting_for` to the next ReplacementChoice.
+        // Propagate that back so the engine surfaces the correct prompt.
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            waiting_for = state.waiting_for.clone();
+        }
+    }
+
+    // CR 101.4 + CR 616.1: An `EachPlayerCopyChosen` per-player step
+    // paused on a replacement choice for its inner token copy or its
+    // +1/+1 counter placement. Both primitives drained above (copy at the
+    // copy-token block, counters at the counter-additions block); this
+    // hook then drives the counter step (copy-pause resume) or advances
+    // the APNAP walk (counter-pause resume). The `drain_pending` guards
+    // re-park if either primitive re-paused under a second replacement.
+    if matches!(waiting_for, WaitingFor::Priority { .. })
+        && state.active_each_player_copy_chosen().is_some()
+        && state.active_copy_token().is_none()
+        && state.active_counter_additions().is_none()
+    {
+        effects::each_player_copy_chosen::drain_pending(state, events);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            waiting_for = state.waiting_for.clone();
+        }
+    }
+
+    // CR 616.1e + CR 703.4q: An EmptyManaPool resume may leave more
+    // players in the APNAP queue. Drain the next player(s); the
+    // drain may itself pause on another CR 616.1 choice, in which
+    // case it sets `state.waiting_for` for us to propagate.
+    if matches!(waiting_for, WaitingFor::Priority { .. })
+        && state.pending_phase_transition_progress.is_some()
+    {
+        super::turns::drain_pending_phase_transition_progress(state, events);
+        if state.pending_phase_transition_progress.is_some() {
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                waiting_for = state.waiting_for.clone();
+            }
+        } else if let Some(resumed) =
+            // CR 513.1 + CR 603.3b: a CR 616.1 mana-pool choice can defer completion of
+            // `enter_phase`, and the shared authority resumes only that bail — not an
+            // `advance_phase` that paused the drain on its own (unit tests).
+            super::turns::resume_deferred_step_triggers(state, events)
+        {
+            waiting_for = resumed;
+        }
+    }
+
+    // CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: A delivered cost
+    // move resumes through the single typed dispatcher after the first
+    // continuation drain, which defers unpaid ManaAbilityPayment roots.
+    // Foretell completed at its dedicated delivery boundary above.
+    if matches!(waiting_for, WaitingFor::Priority { .. }) {
+        if let Some(resumed) = super::engine::drain_pending_cost_move_resume(
+            state,
+            events,
+            super::engine::CostMoveDrainBoundary::ReplacementDelivered {
+                action_event_start: replacement_action_event_start,
+            },
+        )? {
+            waiting_for = resumed;
+        }
+    }
+
+    // CR 118.12 + CR 605.3b + CR 616.1: The ordinary effect rider may
+    // resume only after the whole typed mana-cost root has either paid
+    // or failed its suffix.  This mirrors the prevention path below.
+    if matches!(waiting_for, WaitingFor::Priority { .. })
+        && (state.active_ability_continuation().is_some()
+            || state.active_change_zone_frame().is_some())
+    {
+        effects::drain_pending_continuation(state, events);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            waiting_for = state.waiting_for.clone();
+        }
+    }
+
+    // CR 601.2h + CR 605.3b + CR 608.2c + CR 616.1: a counter-cost root
+    // deferred at the delivery drain above because its replacement subtree
+    // was live: the continuation drain above stops at the moment the subtree
+    // retires (`counter_cost_root_is_due`), and the root resumes here, before
+    // any outer frame work and before any outer cast or activation it is
+    // paying for (a mana ability paying a spell's cost) is finished below.
+    if matches!(waiting_for, WaitingFor::Priority { .. })
+        && state.counter_cost_root_subtree() == CounterCostRootSubtree::Retired
+    {
+        if let Some(resumed) = super::engine::drain_pending_cost_move_resume(
+            state,
+            events,
+            super::engine::CostMoveDrainBoundary::ReplacementDelivered {
+                action_event_start: replacement_action_event_start,
+            },
+        )? {
+            waiting_for = resumed;
+        }
+    }
+
+    // CR 601.2h + CR 602.2b + CR 616.1: Resume a non-move cast or
+    // activation cost payment paused during discard or sacrifice. Never
+    // under a counter-cost root whose replacement subtree is still live:
+    // the common boundary below finishes that subtree and the root first.
+    if matches!(waiting_for, WaitingFor::Priority { .. })
+        && (state.pending_cast.is_some() || state.pending_discard_for_cost.is_some())
+        && state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
+    {
+        let resume_cost_event_start = state
+            .pending_discard_for_cost
+            .is_some()
+            .then_some(replacement_action_event_start);
+        waiting_for = super::casting_costs::resume_interrupted_cost_payment(
+            state,
+            events,
+            resume_cost_event_start,
+        )?;
+    }
+
+    // CR 614.6 + CR 500.5: Finish every terminal replacement-choice
+    // Execute path through the shared continuation boundary. In
+    // particular, a nested non-preventing LifeLoss ordering choice can
+    // be the last child of an interactive substitute that owns a
+    // parked APNAP phase transition; the direct phase drain above
+    // deliberately rejects that cursor while it is Awaiting. The
+    // shared resumer first retires the outer continuation/frame, then
+    // advances the typed phase owner exactly once.
+    if matches!(waiting_for, WaitingFor::Priority { .. }) {
+        state.waiting_for = waiting_for;
+
+        // CR 608.3a + CR 616.1f: the parked entry context is the structural PARENT
+        // of every drain stage above. Complete it only once they have all retired
+        // and it owns the top — after the counter/batch/copy-token/continuation
+        // stages, and before the shared continuation boundary, which must not
+        // observe a frame no priority-time drain is allowed to touch.
+        //
+        // Placed AFTER the line above, deliberately: this arm reconciles
+        // `state.waiting_for` with its arm-local ONLY there, and three stages
+        // between the counter drain and this block assign a returned value
+        // straight into the arm-local (the deferred-step-trigger resume, the cost
+        // move resume, and the interrupted cost payment). Before that line the
+        // helper's `state.waiting_for` guard would be reading a value stale by up
+        // to three stages; after it, the guard reads this arm's settled
+        // authority. The helper's own guard remains the single settle authority —
+        // this call site adds none.
+        finish_spell_resolution_exposed_by_child(state, parked_affected_object_id, events);
+
+        super::engine::resume_pending_continuation_if_priority(state, events)?;
+        waiting_for = state.waiting_for.clone();
+    }
+
+    Ok(waiting_for)
 }
 
 fn handle_replacement_choice_inner(
@@ -515,19 +998,34 @@ fn handle_replacement_choice_inner(
                     // final event; delivery happens only after every member has
                     // been consulted.
                     if let Some((group, fresh)) = staged_approval_owner {
-                        if fresh {
-                            if let Some(waiting) =
-                                crate::game::zone_pipeline::record_staged_batch_consultation_result(
+                        if !fresh {
+                            return Ok(state.waiting_for.clone());
+                        }
+                        return match crate::game::zone_pipeline::record_staged_batch_consultation_result(
+                            state,
+                            group,
+                            StagedMemberOutcome::Approved(event),
+                            events,
+                        ) {
+                            crate::game::zone_pipeline::StagedConsultationHandback::NotOwned => {
+                                Ok(state.waiting_for.clone())
+                            }
+                            crate::game::zone_pipeline::StagedConsultationHandback::Parked(waiting) => Ok(waiting),
+                            crate::game::zone_pipeline::StagedConsultationHandback::Settled => {
+                                finish_replacement_execute_epilogue(
                                     state,
-                                    group,
-                                    StagedMemberOutcome::Approved(event),
+                                    ReplacementExecuteEpilogue {
+                                        zone_change_object_id: None,
+                                        enters_battlefield: false,
+                                        parked_single_discard,
+                                        parked_affected_object_id,
+                                        pending_phase_drain_life_loser,
+                                        action_event_start: replacement_action_event_start,
+                                    },
                                     events,
                                 )
-                            {
-                                return Ok(waiting);
                             }
-                        }
-                        return Ok(state.waiting_for.clone());
+                        };
                     }
                     let (object_id, to, cause, discard_frame) = match &event {
                         ProposedEvent::ZoneChange {
@@ -1107,19 +1605,34 @@ fn handle_replacement_choice_inner(
                 // `state.waiting_for` and we propagate it back below.
                 destroy @ ProposedEvent::Destroy { .. } => {
                     if let Some((group, fresh)) = staged_destroy_approval_owner {
-                        if fresh {
-                            if let Some(waiting) =
-                                crate::game::zone_pipeline::record_staged_batch_consultation_result(
+                        if !fresh {
+                            return Ok(state.waiting_for.clone());
+                        }
+                        return match crate::game::zone_pipeline::record_staged_batch_consultation_result(
+                            state,
+                            group,
+                            StagedMemberOutcome::Approved(destroy),
+                            events,
+                        ) {
+                            crate::game::zone_pipeline::StagedConsultationHandback::NotOwned => {
+                                Ok(state.waiting_for.clone())
+                            }
+                            crate::game::zone_pipeline::StagedConsultationHandback::Parked(waiting) => Ok(waiting),
+                            crate::game::zone_pipeline::StagedConsultationHandback::Settled => {
+                                finish_replacement_execute_epilogue(
                                     state,
-                                    group,
-                                    StagedMemberOutcome::Approved(destroy),
+                                    ReplacementExecuteEpilogue {
+                                        zone_change_object_id: None,
+                                        enters_battlefield: false,
+                                        parked_single_discard,
+                                        parked_affected_object_id,
+                                        pending_phase_drain_life_loser,
+                                        action_event_start: replacement_action_event_start,
+                                    },
                                     events,
                                 )
-                            {
-                                return Ok(waiting);
                             }
-                        }
-                        return Ok(state.waiting_for.clone());
+                        };
                     }
                     if !apply_destroy_after_replacement(state, destroy, events) {
                         return Ok(state.waiting_for.clone());
@@ -1230,446 +1743,18 @@ fn handle_replacement_choice_inner(
                 }
             }
 
-            let mut waiting_for = WaitingFor::Priority {
-                player: state.active_player,
-            };
-            state.waiting_for = waiting_for.clone();
-
-            // CR 701.9a + CR 614.6: the replaced discard still happened; record it
-            // now that its move has been delivered, before post-replacement and
-            // `waiting_for`-gated drains run. Gated on the carrier latched before
-            // `continue_replacement` so a carrier installed during this answer
-            // (a different discard's, owed to a later answer) is not consumed here.
-            if parked_single_discard.is_some()
-                && state.pending_single_discard.as_deref().copied() == parked_single_discard
-            {
-                effects::settle_paused_single_discard(state, events);
-            }
-
-            let mut replacement_ctx = None;
-            if zone_change_object_id.is_some_and(|object_id| {
-                state
-                    .active_spell_resolution()
-                    .is_some_and(|ctx| object_id == ctx.object_id)
-            }) {
-                let ctx = state
-                    .take_active_spell_resolution()
-                    .expect("matching spell-resolution context was checked above");
-                if enters_battlefield {
-                    apply_pending_spell_resolution(state, &ctx, events);
-                }
-                replacement_ctx = Some(ctx);
-            }
-
-            if state.has_post_replacement_drain() {
-                // CR 614.12a + CR 614.1c: For ZoneChange events the post-effect
-                // resolves against the zone-changing object, not the replacement
-                // source — drop the source slot so it doesn't leak into an
-                // unrelated later replacement. For non-ZoneChange events
-                // (Draw/Damage/Mill/etc.) there is no enterer, so the source
-                // slot is the only handle on the replacement's host (e.g.,
-                // Abundance for "you may instead choose ... reveal cards" —
-                // CR 614.6 + CR 614.11). Preserve it in that case so
-                // `apply_post_replacement_effect` resolves the chain against
-                // Abundance's controller, not `ObjectId(0)` / active_player.
-                let is_zone_change = zone_change_object_id.is_some();
-                if is_zone_change {
-                    state.clear_post_replacement_source();
-                }
-                if let Some(next_waiting_for) = apply_pending_post_replacement_effect(
-                    state,
+            finish_replacement_execute_epilogue(
+                state,
+                ReplacementExecuteEpilogue {
                     zone_change_object_id,
-                    replacement_ctx.as_ref(),
-                    Some(ReplacementEvent::Moved),
-                    events,
-                ) {
-                    waiting_for = next_waiting_for;
-                    // CR 614.6 + CR 500.5: the substitute of the replacement
-                    // chosen for the phase drain's loss paused, and the drain
-                    // may not advance until that substitute finishes. Park it
-                    // exactly as the `Prevented` arm does: the shared resumer
-                    // then finishes the transition once the substitute
-                    // terminally drains, and a loss the substitute raises is
-                    // not mistaken for the drain's own
-                    // (`pending_phase_drain_life_loser` needs Ready).
-                    if pending_phase_drain_life_loser.is_some() {
-                        super::turns::mark_phase_transition_awaiting_post_replacement(state);
-                    }
-                }
-            }
-
-            // CR 702.143a-c + CR 614.1 + CR 616.1: A Foretell cost move may
-            // deliver its card and then surface an interactive post-replacement
-            // effect. Complete the special action at the delivery boundary,
-            // before preserving that non-priority prompt, so the card cannot be
-            // left face up or with a stranded cost continuation.
-            if zone_change_object_id.is_some_and(|object_id| {
-                matches!(
-                    state.pending_cost_move_resume.as_ref(),
-                    Some(PendingCostMoveResume::Foretell {
-                        object_id: pending_object_id,
-                        ..
-                    }) if *pending_object_id == object_id
-                )
-            }) {
-                super::casting::complete_foretell_cost_move(state, events);
-            }
-
-            // CR 805.4b: a draw-step draw that paused on the choice just
-            // resolved above may have queued teammate(s) still owed their
-            // own draw this step (`turns::execute_draw` seeds the queue; the
-            // `ProposedEvent::Draw` arm above already popped the
-            // just-completed player off the FRONT so this drain doesn't
-            // redraw them; `drain_pending_team_draw_step` is the single
-            // authority that empties the rest). Drain before falling through
-            // to the generic Priority reset so a 2HG teammate's mandatory
-            // draw is never silently dropped when the active player's own
-            // draw needed a CR 616.1 competing-replacement choice.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && !state.pending_team_draw_step.is_empty()
-            {
-                if let Some(wf) = super::turns::drain_pending_team_draw_step(state, events) {
-                    waiting_for = wf;
-                }
-            }
-
-            // CR 121.6b: a draw instruction (`Effect::Draw{count: N}`) paused
-            // mid-sequence because a per-unit replacement (Dredge, Notion Thief,
-            // Hullbreacher, a count-doubling static, etc.) needed this choice. The
-            // just-resolved unit was settled above (Draw arm); resume the frame to
-            // drive its remaining units. `resume_draw_sequence` leaves the frame
-            // parked and sets `state.waiting_for` (via `draw_through_replacement`)
-            // if the next unit surfaces its own choice, so an arbitrary number of
-            // sequential re-pauses compose — each resume re-addresses the same
-            // frame by ID.
-            while matches!(waiting_for, WaitingFor::Priority { .. }) {
-                let Some(frame_id) = state.active_draw_sequence().map(|frame| frame.frame_id)
-                else {
-                    break;
-                };
-                let _ = crate::game::effects::draw::resume_draw_sequence(state, frame_id, events);
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    waiting_for = state.waiting_for.clone();
-                    break;
-                }
-                if state
-                    .active_draw_sequence()
-                    .is_some_and(|frame| frame.frame_id == frame_id)
-                {
-                    // No frame completed or paused; avoid retrying a stalled frame.
-                    break;
-                }
-            }
-
-            // CR 701.50a + CR 614.5 + CR 616.1f: resume a deferred connive whose
-            // leading Draw link parked this just-resolved ReplacementChoice. The
-            // draw fully delivered above (Draw arm), so "draw a card, THEN that
-            // creature connives" (CR 701.50a) order is honored. `propose_connive`
-            // re-enters with the already-applied rids excluded (CR 614.5) so the
-            // CR 616.1f repeat covers the remaining connive replacements; it sets a
-            // parked ConniveDiscard / fresh ReplacementChoice on state.waiting_for,
-            // which we surface instead of the Priority reset. Drained from the
-            // DEDICATED slot so the leading draw's DeliveryTail could not consume it.
-            if matches!(waiting_for, WaitingFor::Priority { .. }) {
-                if let Some(wf) = drain_pending_connive_reentry(state, events) {
-                    waiting_for = wf;
-                }
-            }
-
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.active_counter_moves().is_some()
-            {
-                effects::counters::drain_pending_counter_moves(state, events);
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    waiting_for = state.waiting_for.clone();
-                }
-            }
-
-            // CR 107.1c + CR 608.2h: a "remove any number of counters" batch
-            // (Rhys, Tetravus) paused mid-removal because a per-removal
-            // replacement needed a choice. The chosen event was applied above;
-            // drain the parked tail (which re-parks if the next removal surfaces
-            // its own choice, setting state.waiting_for for us to propagate).
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.active_counter_removals().is_some()
-            {
-                effects::counters::drain_pending_counter_removals(state, events);
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    waiting_for = state.waiting_for.clone();
-                }
-            }
-
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.active_counter_additions().is_some()
-            {
-                effects::counters::drain_pending_counter_additions(state, events);
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    waiting_for = state.waiting_for.clone();
-                }
-            }
-
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.active_life_total_assignment().is_some()
-            {
-                drain_pending_life_total_assignment(state, events);
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    waiting_for = state.waiting_for.clone();
-                }
-            }
-
-            // CR 603.10a + CR 616.1: A simultaneous zone-move batch (mill or
-            // mass bounce) paused mid-delivery because an object's Moved
-            // replacements needed an ordering choice (Rest in Peace + Leyline of
-            // the Void class). The chosen event was delivered by the ZoneChange
-            // arm above; drain the parked tail. The drain may re-park when the
-            // next object surfaces its own prompt — in that case it sets
-            // `state.waiting_for` for us to propagate.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.active_batch_delivery().is_some()
-            {
-                crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    waiting_for = state.waiting_for.clone();
-                }
-            }
-
-            // CR 614.6 + CR 616.1: settling a batch parked above its member's
-            // delivery-tail child exposes that child's counter-removal queue. Finish
-            // it here, in the same order as the queue drain above, before any parked
-            // cost root resumes below.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.active_counter_removals().is_some()
-            {
-                effects::counters::drain_pending_counter_removals(state, events);
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    waiting_for = state.waiting_for.clone();
-                }
-            }
-
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.active_copy_token().is_some()
-            {
-                effects::token_copy::drain_pending_copy_token_resolution(state, events);
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    waiting_for = state.waiting_for.clone();
-                }
-            }
-
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.pending_player_scope_sacrifice_choice.is_some()
-            {
-                // CR 101.4: a simultaneous each-player sacrifice paused by a
-                // CR 616.1 replacement choice resumes the already-announced
-                // remaining sacrifices before any parked continuation can run.
-                // CR 603.2: the completed batch lies inside this action's buffer,
-                // which the post-action pipeline scans; it is not collected here.
-                if let Some(next) = resume_paused_player_scope_sacrifice(state, events)?.next_wait {
-                    waiting_for = next;
-                }
-            }
-
-            // CR 608.2c: a discard instruction parked mid-batch by a
-            // replacement-application choice finishes what it still owes BEFORE
-            // any parked continuation runs. The resolving effect follows its
-            // instructions in written order, so later instructions cannot resume
-            // until this action has settled and published its terminal result.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.pending_discard_batch.is_some()
-            {
-                match effects::drain_pending_discard_batch(state, events)
-                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
-                {
-                    effects::PendingDiscardBatchOutcome::Idle => {}
-                    effects::PendingDiscardBatchOutcome::PausedForReplacement => {
-                        waiting_for = state.waiting_for.clone();
-                        super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
-                            state,
-                            events,
-                            replacement_action_event_start,
-                        );
-                    }
-                    effects::PendingDiscardBatchOutcome::Completed => {
-                        effects::drain_pending_continuation(state, events);
-                        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                            waiting_for = state.waiting_for.clone();
-                            super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
-                                state,
-                                events,
-                                replacement_action_event_start,
-                            );
-                        }
-                    }
-                }
-            }
-
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && (state.active_ability_continuation().is_some()
-                    || state.active_change_zone_frame().is_some())
-                // CR 118.12 + CR 605.3b + CR 616.1: A mana-source cost pause
-                // owns the unpaid cost suffix.  Do not drain the ordinary
-                // effect rider before that typed root has settled it.
-                && !matches!(
-                    state.pending_cost_move_resume,
-                    Some(PendingCostMoveResume::ManaAbilityPayment { .. })
-                )
-            {
-                // CR 614.12b + CR 614.1c + CR 614.13: drain BOTH the chained
-                // continuation and the multi-target ChangeZone iteration that
-                // paused on this replacement choice (issue #535). This runs
-                // AFTER a collected simultaneous sacrifice queue: CR 101.4
-                // requires every already-announced sacrifice to finish before
-                // the original ability's later instructions resume.
-                effects::drain_pending_continuation(state, events);
-                // CR 616.1e: The continuation may itself pause on another replacement
-                // (e.g., the second direction of fight damage hitting the same shield),
-                // in which case it sets `state.waiting_for` to the next ReplacementChoice.
-                // Propagate that back so the engine surfaces the correct prompt.
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    waiting_for = state.waiting_for.clone();
-                }
-            }
-
-            // CR 101.4 + CR 616.1: An `EachPlayerCopyChosen` per-player step
-            // paused on a replacement choice for its inner token copy or its
-            // +1/+1 counter placement. Both primitives drained above (copy at the
-            // copy-token block, counters at the counter-additions block); this
-            // hook then drives the counter step (copy-pause resume) or advances
-            // the APNAP walk (counter-pause resume). The `drain_pending` guards
-            // re-park if either primitive re-paused under a second replacement.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.active_each_player_copy_chosen().is_some()
-                && state.active_copy_token().is_none()
-                && state.active_counter_additions().is_none()
-            {
-                effects::each_player_copy_chosen::drain_pending(state, events);
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    waiting_for = state.waiting_for.clone();
-                }
-            }
-
-            // CR 616.1e + CR 703.4q: An EmptyManaPool resume may leave more
-            // players in the APNAP queue. Drain the next player(s); the
-            // drain may itself pause on another CR 616.1 choice, in which
-            // case it sets `state.waiting_for` for us to propagate.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.pending_phase_transition_progress.is_some()
-            {
-                super::turns::drain_pending_phase_transition_progress(state, events);
-                if state.pending_phase_transition_progress.is_some() {
-                    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                        waiting_for = state.waiting_for.clone();
-                    }
-                } else if let Some(resumed) =
-                    // CR 513.1 + CR 603.3b: a CR 616.1 mana-pool choice can defer completion of
-                    // `enter_phase`, and the shared authority resumes only that bail — not an
-                    // `advance_phase` that paused the drain on its own (unit tests).
-                    super::turns::resume_deferred_step_triggers(state, events)
-                {
-                    waiting_for = resumed;
-                }
-            }
-
-            // CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: A delivered cost
-            // move resumes through the single typed dispatcher before ordinary
-            // effect continuations. Foretell completed above at its dedicated
-            // delivery boundary and is intentionally ineligible here.
-            if matches!(waiting_for, WaitingFor::Priority { .. }) {
-                if let Some(resumed) = super::engine::drain_pending_cost_move_resume(
-                    state,
-                    events,
-                    super::engine::CostMoveDrainBoundary::ReplacementDelivered {
-                        action_event_start: replacement_action_event_start,
-                    },
-                )? {
-                    waiting_for = resumed;
-                }
-            }
-
-            // CR 118.12 + CR 605.3b + CR 616.1: The ordinary effect rider may
-            // resume only after the whole typed mana-cost root has either paid
-            // or failed its suffix.  This mirrors the prevention path below.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && (state.active_ability_continuation().is_some()
-                    || state.active_change_zone_frame().is_some())
-            {
-                effects::drain_pending_continuation(state, events);
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    waiting_for = state.waiting_for.clone();
-                }
-            }
-
-            // CR 601.2h + CR 605.3b + CR 608.2c + CR 616.1: a counter-cost root
-            // deferred at the delivery drain above because its replacement subtree
-            // was live: the continuation drain above stops at the moment the subtree
-            // retires (`counter_cost_root_is_due`), and the root resumes here, before
-            // any outer frame work and before any outer cast or activation it is
-            // paying for (a mana ability paying a spell's cost) is finished below.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.counter_cost_root_subtree() == CounterCostRootSubtree::Retired
-            {
-                if let Some(resumed) = super::engine::drain_pending_cost_move_resume(
-                    state,
-                    events,
-                    super::engine::CostMoveDrainBoundary::ReplacementDelivered {
-                        action_event_start: replacement_action_event_start,
-                    },
-                )? {
-                    waiting_for = resumed;
-                }
-            }
-
-            // CR 601.2h + CR 602.2b + CR 616.1: Resume a non-move cast or
-            // activation cost payment paused during discard or sacrifice. Never
-            // under a counter-cost root whose replacement subtree is still live:
-            // the common boundary below finishes that subtree and the root first.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && (state.pending_cast.is_some() || state.pending_discard_for_cost.is_some())
-                && state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
-            {
-                let resume_cost_event_start = state
-                    .pending_discard_for_cost
-                    .is_some()
-                    .then_some(replacement_action_event_start);
-                waiting_for = super::casting_costs::resume_interrupted_cost_payment(
-                    state,
-                    events,
-                    resume_cost_event_start,
-                )?;
-            }
-
-            // CR 614.6 + CR 500.5: Finish every terminal replacement-choice
-            // Execute path through the shared continuation boundary. In
-            // particular, a nested non-preventing LifeLoss ordering choice can
-            // be the last child of an interactive substitute that owns a
-            // parked APNAP phase transition; the direct phase drain above
-            // deliberately rejects that cursor while it is Awaiting. The
-            // shared resumer first retires the outer continuation/frame, then
-            // advances the typed phase owner exactly once.
-            if matches!(waiting_for, WaitingFor::Priority { .. }) {
-                state.waiting_for = waiting_for;
-
-                // CR 608.3a + CR 616.1f: the parked entry context is the structural PARENT
-                // of every drain stage above. Complete it only once they have all retired
-                // and it owns the top — after the counter/batch/copy-token/continuation
-                // stages, and before the shared continuation boundary, which must not
-                // observe a frame no priority-time drain is allowed to touch.
-                //
-                // Placed AFTER the line above, deliberately: this arm reconciles
-                // `state.waiting_for` with its arm-local ONLY there, and three stages
-                // between the counter drain and this block assign a returned value
-                // straight into the arm-local (the deferred-step-trigger resume, the cost
-                // move resume, and the interrupted cost payment). Before that line the
-                // helper's `state.waiting_for` guard would be reading a value stale by up
-                // to three stages; after it, the guard reads this arm's settled
-                // authority. The helper's own guard remains the single settle authority —
-                // this call site adds none.
-                finish_spell_resolution_exposed_by_child(state, parked_affected_object_id, events);
-
-                super::engine::resume_pending_continuation_if_priority(state, events)?;
-                waiting_for = state.waiting_for.clone();
-            }
-
-            Ok(waiting_for)
+                    enters_battlefield,
+                    parked_single_discard,
+                    parked_affected_object_id,
+                    pending_phase_drain_life_loser,
+                    action_event_start: replacement_action_event_start,
+                },
+                events,
+            )
         }
         super::replacement::ReplacementResult::NeedsChoice(player) => {
             // The proposed event retains its canonical placement across parks.
@@ -1726,23 +1811,40 @@ fn handle_replacement_choice_inner(
             {
                 state.pending_single_discard = None;
             }
-            // CR 101.4 + CR 614.5: a staged prevention is a retained terminal
+            // CR 101.4 + CR 614.6: a staged prevention is a retained terminal
             // (or a `PreventedWithChild` while its own child prompt is live),
             // never an immediate delivery or logical-group recording.
             if let Some((group, fresh)) = staged_consult_owner {
-                if fresh {
-                    if let Some(waiting) =
-                        crate::game::zone_pipeline::record_staged_batch_consultation_result(
+                if !fresh {
+                    return Ok(state.waiting_for.clone());
+                }
+                return match crate::game::zone_pipeline::record_staged_batch_consultation_result(
+                    state,
+                    group,
+                    StagedMemberOutcome::Prevented,
+                    events,
+                ) {
+                    crate::game::zone_pipeline::StagedConsultationHandback::NotOwned => {
+                        Ok(state.waiting_for.clone())
+                    }
+                    crate::game::zone_pipeline::StagedConsultationHandback::Parked(waiting) => {
+                        Ok(waiting)
+                    }
+                    crate::game::zone_pipeline::StagedConsultationHandback::Settled => {
+                        finish_replacement_execute_epilogue(
                             state,
-                            group,
-                            StagedMemberOutcome::Prevented,
+                            ReplacementExecuteEpilogue {
+                                zone_change_object_id: None,
+                                enters_battlefield: false,
+                                parked_single_discard,
+                                parked_affected_object_id,
+                                pending_phase_drain_life_loser,
+                                action_event_start: replacement_action_event_start,
+                            },
                             events,
                         )
-                    {
-                        return Ok(waiting);
                     }
-                }
-                return Ok(state.waiting_for.clone());
+                };
             }
             if let Some(paused) = parked_zone_change_delivery.as_ref() {
                 state.capture_paused_zone_change_delivery(
@@ -4763,6 +4865,89 @@ mod tests {
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Creature);
         id
+    }
+
+    /// CR 614.12a + CR 616.1: the paid entry cost retires its DiscardChoice
+    /// before re-parking the remaining, noncommuting entry replacements.
+    #[test]
+    fn may_cost_discard_answer_reparks_ordering_and_publishes_it() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+
+        let mut scenario = GameScenario::new();
+        let mox = scenario
+            .add_creature_to_graveyard(P0, "Mox Diamond", 0, 0)
+            .as_artifact()
+            .from_oracle_text("If this artifact would enter, you may discard a land card instead. If you do, put this artifact onto the battlefield. If you don't, put it into its owner's graveyard.\n{T}: Add one mana of any color.")
+            .id();
+        let root = scenario
+            .add_enchantment_from_oracle(P0, "Root Maze", "Artifacts and lands enter tapped.")
+            .id();
+        let archelos = scenario
+            .add_creature_from_oracle(P1, "Archelos, Lagoon Mystic", 2, 4,
+                "As long as Archelos is tapped, other permanents enter tapped.\nAs long as Archelos is untapped, other permanents enter untapped.")
+            .id();
+        let forest = scenario
+            .add_land_to_hand(P0, "Forest")
+            .from_oracle_text("({T}: Add {G}.)")
+            .id();
+        let island = scenario
+            .add_land_to_hand(P0, "Island")
+            .from_oracle_text("({T}: Add {U}.)")
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        assert!(matches!(
+            move_object(
+                state,
+                ZoneMoveRequest::effect(mox, Zone::Battlefield, mox),
+                &mut Vec::new()
+            ),
+            ZoneMoveResult::NeedsChoice(P0)
+        ));
+        let index = state
+            .pending_replacement
+            .as_ref()
+            .unwrap()
+            .candidates
+            .iter()
+            .position(|rid| rid.source == mox)
+            .expect("Mox competes with both entry writes");
+        apply_as_current(state, GameAction::ChooseReplacement { index }).expect("choose Mox");
+        apply_as_current(state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept MayCost");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::DiscardChoice { player: P0, .. }
+        ));
+        assert!(state.pending_replacement.as_ref().unwrap().may_cost_paid);
+
+        let outcome = apply_as_current(
+            state,
+            GameAction::SelectCards {
+                cards: vec![forest],
+            },
+        )
+        .expect("answer the paid replacement's discard");
+        assert!(matches!(
+            outcome.waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ));
+        assert_eq!(outcome.waiting_for, state.waiting_for);
+        let pending = state
+            .pending_replacement
+            .as_ref()
+            .expect("remaining ordering is parked");
+        assert_eq!(
+            pending
+                .candidates
+                .iter()
+                .map(|rid| rid.source)
+                .collect::<HashSet<_>>(),
+            HashSet::from([root, archelos])
+        );
+        assert_eq!(state.objects[&mox].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&forest].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&island].zone, Zone::Hand);
     }
 
     #[test]

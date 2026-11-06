@@ -13557,6 +13557,9 @@ fn continue_replacement_impl(
         let reparked_library_placement = pending.library_placement.clone();
         let reparked_sacrifice_provenance = pending.sacrifice_provenance;
         let reparked_choice_player = pending.choice_player;
+        // CR 614.12a + CR 616.1: preserve the unanswered delivery boundary
+        // before marking the accepted replacement on the re-parked proposal.
+        pending.pin_delivery_boundary();
         let reparked_delivery_boundary = pending.delivery_boundary.clone();
         let reparked_unrepresentable_life_change = pending.unrepresentable_life_change;
         let mut proposed = pending.proposed.clone();
