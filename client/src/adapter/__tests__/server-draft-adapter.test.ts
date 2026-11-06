@@ -3370,7 +3370,7 @@ describe("ServerDraftAdapter — codec degradation policy", () => {
     return replacement;
   }
 
-  // The confirmation has no wall-clock deadline (the heartbeat owns liveness),
+  // Confirmation has no deadline and heartbeat does not bound the wait,
   // so an initial attachment whose second hello is slow still completes and
   // is not degraded: a deadline would fail it after the create/join request
   // was sent, orphaning the seat whose credentials arrive in the reply.

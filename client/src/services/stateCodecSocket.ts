@@ -37,7 +37,7 @@ export type StateCodecRecoveryState = "recovering" | "ready";
 export type StateCodecFailureReason =
   /** The decoder rejected the RPC or threw (lifecycle error, trap, timeout). */
   | "decodeFailure"
-  /** Missing, contradictory, early or late codec confirmation. */
+  /** Missing or contradictory selection, or a codec frame before confirmation. */
   | "confirmationFailure"
   /** A frame was rejected before the application accepted a bootstrap. */
   | "bootstrapRejection"
@@ -258,7 +258,10 @@ export class StateCodecAttachment {
 
 /** Bounded optional preparation budget (event-loop time, not network). */
 export const STATE_CODEC_PREPARATION_TIMEOUT_MS = 5_000;
-/** Recovery window: how long a requested recovery Full may take. */
+/**
+ * Default recovery window: how long a requested recovery Full may take.
+ * `openPhaseSocket` passes its handshake timeout instead (also 5 s by default).
+ */
 export const STATE_CODEC_SOCKET_TIMEOUT_MS = 5_000;
 
 export type StateCodecSessionProvider = () => Promise<StateCodecSession | null>;

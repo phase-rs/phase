@@ -5282,7 +5282,7 @@ describe("WebSocketAdapter — codec degradation policy", () => {
     return reconnect;
   }
 
-  // The confirmation has no wall-clock deadline (the heartbeat owns liveness).
+  // Confirmation has no deadline; heartbeat does not close a silent socket.
   // A deadline would fail an initial join AFTER JoinGameWithPassword was sent,
   // and the joiner's player_token only arrives inside the GameStarted that a
   // failed attachment never delivers, orphaning the seat.

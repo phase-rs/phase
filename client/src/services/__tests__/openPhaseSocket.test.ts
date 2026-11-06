@@ -1203,10 +1203,10 @@ describe("openPhaseSocket — negotiated StateCodecV1", () => {
     expect(fake.close).toHaveBeenCalledOnce();
   });
 
-  // The confirmation has no wall-clock deadline: the server queues it before
-  // any application frame, and liveness is the heartbeat's job. A deadline
-  // here could fail an initial join after JoinGameWithPassword was sent,
-  // orphaning the seat whose player_token only arrives in the GameStarted.
+  // Confirmation has no deadline; the server queues it before application
+  // frames. Heartbeat does not bound this wait. A confirmation deadline
+  // could fail an initial join after JoinGameWithPassword was sent,
+  // orphaning the seat whose player_token only arrives in GameStarted.
   it("tolerates a slow confirmation: no close, frames flow, the lease is held, a late confirmation enables the codec", async () => {
     vi.useFakeTimers();
     try {

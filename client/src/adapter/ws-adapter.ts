@@ -3097,8 +3097,10 @@ export class WebSocketAdapter implements EngineAdapter {
           this.gameStartedReject = null;
         }
         // The attachment is bootstrapped now: every identity guard above
-        // passed and the snapshot is cached. Recorded before the final emit so
-        // a throwing listener cannot leave a bootstrapped socket pending.
+        // passed and the snapshot is cached. Recorded before the final emit;
+        // `emit` does not isolate listener exceptions (pre-existing), so a
+        // listener that throws in the emits above this point still leaves the
+        // attachment pending.
         this.stateCodec.accept(this.ws);
         // Always an array, never `undefined`: on this transport `undefined`
         // would mean "this transport does not publish", which is false here —
