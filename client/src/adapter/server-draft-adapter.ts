@@ -119,6 +119,20 @@ export type ServerDraftAdapterEvent =
 
 type ServerDraftAdapterEventListener = (event: ServerDraftAdapterEvent) => void;
 
+/** The state-bearing fields shared by the `GameStarted` and `StateUpdate` payloads. */
+interface StateBearingPayload {
+  state: GameState;
+  legal_actions?: GameAction[];
+  auto_pass_recommended?: boolean;
+  end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"];
+  mana_payment_shortcut_actions?: GameAction[];
+  spell_costs?: Record<string, ManaCost>;
+  legal_actions_by_object?: Record<string, ObjectAction[]>;
+  activation_block_reasons?: Record<string, AbilityBlockEntry[]>;
+  viewer_interaction?: LegalActionsResult["viewerInteraction"];
+  derived?: GameState["derived"];
+}
+
 interface DraftInit {
   kind: "create" | "reconnect";
   resolve: () => void;
@@ -199,6 +213,8 @@ export class ServerDraftAdapter implements EngineAdapter {
    * `getState`/`getLegalActions` can never straddle two updates.
    */
   private snapshot: EngineSnapshot | null = null;
+  /** The transport whose frame produced {@link snapshot}; null when there is none. */
+  private snapshotSource: PhaseSocketTransport | null = null;
   private _playerId: PlayerId | null = null;
   private activeMatchId: string | null = null;
   private _gameCode: string | null = null;
@@ -444,9 +460,39 @@ export class ServerDraftAdapter implements EngineAdapter {
 
   /** Rebuild the cached pair from an inbound state-bearing message, stamping
    *  it with a fresh globally-monotonic seq at arrival. */
-  private cacheSnapshot(state: GameState, legalResult: LegalActionsResult): EngineSnapshot {
+  private cacheSnapshot(
+    state: GameState,
+    legalResult: LegalActionsResult,
+    source: PhaseSocketTransport,
+  ): EngineSnapshot {
     this.snapshot = { state, legalResult, seq: nextSnapshotSeq() };
+    this.snapshotSource = source;
     return this.snapshot;
+  }
+
+  /** Drop the cached pair together with the record of which transport produced it. */
+  private clearSnapshot(): void {
+    this.snapshot = null;
+    this.snapshotSource = null;
+  }
+
+  /** Turn a state-bearing payload into the pair {@link cacheSnapshot} stores. */
+  private static snapshotPair(
+    data: StateBearingPayload,
+  ): { state: GameState; legalResult: LegalActionsResult } {
+    return {
+      state: { ...data.state, derived: data.derived ?? data.state.derived },
+      legalResult: {
+        actions: data.legal_actions ?? [],
+        autoPassRecommended: data.auto_pass_recommended ?? false,
+        endContinuousEffectOffers: data.end_continuous_effect_offers ?? [],
+        manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
+        spellCosts: data.spell_costs,
+        legalActionsByObject: data.legal_actions_by_object,
+        activationBlockReasons: data.activation_block_reasons,
+        viewerInteraction: data.viewer_interaction,
+      },
+    };
   }
 
   restoreState(): void {
@@ -774,14 +820,18 @@ export class ServerDraftAdapter implements EngineAdapter {
   /**
    * A retired socket's StateUpdate is withheld from game delivery, but it still
    * answers the command that was claimed on it, exactly as it did before the
-   * replacement. It never touches the snapshot, which the replacement owns.
+   * replacement. Callers read the snapshot as soon as the command resolves, so
+   * the reply's own state is cached first, but only while the replacement has
+   * delivered no game state: once it has, the snapshot is the replacement's and
+   * a late retired frame must not roll it back. The reply never emits a game
+   * event and never touches the accepted Full-session key.
    */
   private settleRetiredCompletion(
     retired: PhaseSocketTransport,
     msg: { data?: unknown; command_id?: unknown },
   ): void {
     if (this.submissionSocket !== retired) return;
-    const data = (msg.data ?? {}) as {
+    const data = (msg.data ?? {}) as Partial<StateBearingPayload> & {
       events?: GameEvent[];
       log_entries?: GameLogEntry[];
       full_key?: FullSessionKey;
@@ -791,6 +841,12 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (!fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) return;
     const pending = this.submission.take(msg.command_id);
     if (!pending) return;
+    if (data.state && this.snapshotSource !== this.ws) {
+      const { state, legalResult } = ServerDraftAdapter.snapshotPair(
+        data as StateBearingPayload,
+      );
+      this.cacheSnapshot(state, legalResult, retired);
+    }
     pending.resolve({ events: data.events ?? [], log_entries: data.log_entries });
     this.emit({ type: "actionPendingChanged", pending: false });
   }
@@ -1056,7 +1112,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           && this._playerId === data.your_player
           && fullSessionKeysEqual(this.activeFullKey, data.full_key);
         if (!sameMatch) {
-          this.snapshot = null;
+          this.clearSnapshot();
           this.acceptedFullKey = null;
           // A new match needs its own GameStarted: reset before any listener
           // can observe the transition.
@@ -1152,19 +1208,8 @@ export class ServerDraftAdapter implements EngineAdapter {
           break;
         }
         this.acceptedFullKey = data.full_key ?? null;
-        const startedSnapshot = this.cacheSnapshot(
-          { ...data.state, derived: data.derived ?? data.state.derived },
-          {
-            actions: data.legal_actions ?? [],
-            autoPassRecommended: data.auto_pass_recommended ?? false,
-            endContinuousEffectOffers: data.end_continuous_effect_offers ?? [],
-            manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
-            spellCosts: data.spell_costs,
-            legalActionsByObject: data.legal_actions_by_object,
-            activationBlockReasons: data.activation_block_reasons,
-            viewerInteraction: data.viewer_interaction,
-          },
-        );
+        const started = ServerDraftAdapter.snapshotPair(data);
+        const startedSnapshot = this.cacheSnapshot(started.state, started.legalResult, sourceSocket);
         this._playerId = data.your_player;
         // Accepted after the match/player/full-key guards above and after the
         // snapshot is cached, but before the listener emit.
@@ -1197,19 +1242,8 @@ export class ServerDraftAdapter implements EngineAdapter {
         if (!fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
           break;
         }
-        const updateSnapshot = this.cacheSnapshot(
-          { ...data.state, derived: data.derived ?? data.state.derived },
-          {
-            actions: data.legal_actions ?? [],
-            autoPassRecommended: data.auto_pass_recommended ?? false,
-            endContinuousEffectOffers: data.end_continuous_effect_offers ?? [],
-            manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
-            spellCosts: data.spell_costs,
-            legalActionsByObject: data.legal_actions_by_object,
-            activationBlockReasons: data.activation_block_reasons,
-            viewerInteraction: data.viewer_interaction,
-          },
-        );
+        const updated = ServerDraftAdapter.snapshotPair(data);
+        const updateSnapshot = this.cacheSnapshot(updated.state, updated.legalResult, sourceSocket);
         // A peer's StateUpdate is not an acknowledgement of our command.
         const pending = this.submission.take(msg.command_id);
         if (pending) {
@@ -1368,7 +1402,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         this._gameCode = null;
         this.activeFullKey = null;
         this.acceptedFullKey = null;
-        this.snapshot = null;
+        this.clearSnapshot();
         this.emit({ type: "actionPendingChanged", pending: false });
         this.emit({
           type: "gameOver",
@@ -1531,7 +1565,7 @@ export class ServerDraftAdapter implements EngineAdapter {
       this.ws.close();
       this.ws = null;
     }
-    this.snapshot = null;
+    this.clearSnapshot();
     this._playerId = null;
     this._gameCode = null;
     this.draftCode = null;

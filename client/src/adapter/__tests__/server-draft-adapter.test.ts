@@ -4068,6 +4068,117 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
     },
   );
 
+  describe("snapshot paired with a retired socket's answer", () => {
+    const passPriority = { type: "PassPriority" } as GameAction;
+    const labelOf = async (adapter: ServerDraftAdapter) =>
+      (await adapter.getSnapshot()).state as unknown as { label: string };
+
+    it("caches the retired reply's state before the command resolves while the replacement has delivered none", async () => {
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+
+      const claimed = adapter.submitAction(passPriority, 0);
+      const observed = trackRejection(claimed);
+      const claimedId = lastSubmissionCommandId(ws);
+      await replaceSocket(adapter, provider, ws);
+      // Reach guard: the replacement delivered no game state, so the only
+      // snapshot is still the retired socket's earlier one.
+      expect(await labelOf(adapter)).toMatchObject({ label: "accepted-update" });
+      events.length = 0;
+
+      ws.dispatchSynthetic("message", draftFrame("Delta", {
+        type: "StateUpdate", command_id: claimedId,
+        data: {
+          state: matchState("retired-answer"), events: [{ marker: "retired-answer" }],
+          legal_actions: [passPriority], full_key: FULL_KEY,
+        },
+      }));
+      // The caller reads the snapshot in the same turn the command resolves.
+      const result = await claimed;
+      expect(result.events).toEqual([{ marker: "retired-answer" }]);
+      expect(await labelOf(adapter)).toMatchObject({ label: "retired-answer" });
+      expect((await adapter.getLegalActions()).actions).toEqual([passPriority]);
+      expect(await observed()).toMatchObject({ resolvedWith: { events: [{ marker: "retired-answer" }] } });
+      // The retired socket still never delivers game state.
+      expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "gameStateUpdated" }));
+      adapter.dispose();
+    });
+
+    it("keeps the replacement's own state when the retired reply arrives after it", async () => {
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+
+      const claimed = adapter.submitAction(passPriority, 0);
+      const claimedId = lastSubmissionCommandId(ws);
+      const { replacement } = await replaceSocket(adapter, provider, ws);
+      await enterCodecMatch(replacement, events);
+      replacement.dispatchSynthetic("message", draftFrame("Delta", {
+        type: "StateUpdate",
+        data: { state: matchState("replacement-own"), events: [], full_key: FULL_KEY },
+      }));
+      await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+        type: "gameStateUpdated", state: expect.objectContaining({ label: "replacement-own" }),
+      })));
+      // Reach guard: the replacement owns the snapshot before the retired reply.
+      expect(await labelOf(adapter)).toMatchObject({ label: "replacement-own" });
+      events.length = 0;
+
+      ws.dispatchSynthetic("message", draftFrame("Delta", {
+        type: "StateUpdate", command_id: claimedId,
+        data: { state: matchState("retired-answer"), events: [{ marker: "retired-answer" }], full_key: FULL_KEY },
+      }));
+      const result = await claimed;
+      // The command still resolves with the retired reply's events, positively
+      // proving the frame was processed, yet the snapshot does not roll back.
+      expect(result.events).toEqual([{ marker: "retired-answer" }]);
+      expect(await labelOf(adapter)).toMatchObject({ label: "replacement-own" });
+      expect(events).toContainEqual({ type: "actionPendingChanged", pending: false });
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "gameStateUpdated" }));
+      adapter.dispose();
+    });
+
+    it("lets the replacement's later state supersede the retired reply's cached state", async () => {
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+
+      const claimed = adapter.submitAction(passPriority, 0);
+      const claimedId = lastSubmissionCommandId(ws);
+      const { replacement } = await replaceSocket(adapter, provider, ws);
+      ws.dispatchSynthetic("message", draftFrame("Delta", {
+        type: "StateUpdate", command_id: claimedId,
+        data: { state: matchState("retired-answer"), events: [{ marker: "retired-answer" }], full_key: FULL_KEY },
+      }));
+      await claimed;
+      // Reach guard: the retired reply's state was cached.
+      expect(await labelOf(adapter)).toMatchObject({ label: "retired-answer" });
+      events.length = 0;
+
+      await enterCodecMatch(replacement, events);
+      expect(await labelOf(adapter)).toMatchObject({ label: "accepted-update" });
+      replacement.dispatchSynthetic("message", draftFrame("Delta", {
+        type: "StateUpdate",
+        data: { state: matchState("replacement-newer"), events: [{ marker: "newer" }], full_key: FULL_KEY },
+      }));
+      await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+        type: "gameStateUpdated",
+        state: expect.objectContaining({ label: "replacement-newer" }),
+        events: [{ marker: "newer" }],
+      })));
+      expect(await labelOf(adapter)).toMatchObject({ label: "replacement-newer" });
+      adapter.dispose();
+    });
+  });
+
   it.each([
     ["omits the Full-session key", undefined],
     ["carries another generation's key", { ...FULL_KEY, generation: FULL_KEY.generation + 1 }],
