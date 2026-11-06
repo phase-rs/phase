@@ -11,7 +11,7 @@
 //! (`deal_damage::resolve`, exactly as `awe_strike_prevention.rs` does for the
 //! producer side), and would fail with a fixed `Next(1)` shield.
 //!
-//! CR 107.3a + CR 107.3i + CR 107.3k + CR 615.1a + CR 615.3 + CR 615.7.
+//! CR 107.3a + CR 107.3c + CR 107.3i + CR 107.3k + CR 608.2h + CR 615.1a + CR 615.3 + CR 615.7.
 
 use std::io::Cursor;
 
@@ -24,11 +24,12 @@ use engine::types::ability::{
     AbilityDefinition, Effect, PreventionAmount, QuantityExpr, QuantityRef, ResolvedAbility,
     ShieldKind, TargetFilter, TargetRef,
 };
+use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -43,6 +44,8 @@ const TEMPER: &str = "Prevent the next X damage that would be dealt to target cr
 const BATTLEFIELD_MEDIC: &str =
     "{T}: Prevent the next X damage that would be dealt to target creature this turn, where X is the number of Clerics on the battlefield.";
 const SERRAS_HYMN: &str = "At the beginning of your upkeep, you may put a verse counter on this enchantment.\nSacrifice this enchantment: Prevent the next X damage that would be dealt this turn to any number of targets, divided as you choose, where X is the number of verse counters on this enchantment.";
+
+const MURDER: &str = "Destroy target creature.";
 
 fn mana(kind: ManaType, count: usize) -> Vec<ManaUnit> {
     (0..count)
@@ -111,6 +114,24 @@ fn hosted_prevention_shields(runner: &GameRunner) -> Vec<PreventionAmount> {
             _ => None,
         })
         .collect()
+}
+
+/// Clerics on the battlefield, read from live state. A reach guard for the
+/// Battlefield Medic board before and after the mid-stack change, not the
+/// expected shield (that is derived from the card's text).
+fn clerics_on_battlefield(runner: &GameRunner) -> usize {
+    let state = runner.state();
+    state
+        .battlefield
+        .iter()
+        .filter(|&&id| {
+            state.objects[&id]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Cleric")
+        })
+        .count()
 }
 
 fn assert_priority(outcome: &engine::game::scenario::Outcome) {
@@ -411,6 +432,189 @@ fn battlefield_medic_where_x_binder_overrides_the_word_x() {
         runner.state().objects[&target].damage_marked,
         1,
         "4 damage minus the 3-point shield leaves 1 marked on the target"
+    );
+}
+
+/// R11: the where-X count changes while the Medic's ability is on the stack.
+/// CR 107.3c: an X defined by the ability's text "may change while that spell
+/// or ability is on the stack"; CR 608.2h: information from the game is
+/// "determined only once, when the effect is applied". Murder destroys one of
+/// the three Clerics in response (CR 701.8a), so the shield is 2 — a count
+/// fixed at activation would install 3.
+#[test]
+fn battlefield_medic_where_x_count_is_read_at_resolution_not_activation() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Murder's printed {1}{B}{B}.
+    let mut pool = mana(ManaType::Colorless, 1);
+    pool.extend(mana(ManaType::Black, 2));
+    scenario.with_mana_pool(P0, pool);
+    let medic = scenario
+        .add_creature_from_oracle(P0, "Battlefield Medic", 1, 1, BATTLEFIELD_MEDIC)
+        .with_subtypes(vec!["Human", "Cleric"])
+        .id();
+    let target = scenario.add_creature(P1, "Shielded", 2, 2).id();
+    let doomed = scenario
+        .add_creature(P1, "Cleric One", 1, 1)
+        .with_subtypes(vec!["Cleric"])
+        .id();
+    scenario
+        .add_creature(P1, "Cleric Two", 1, 1)
+        .with_subtypes(vec!["Cleric"])
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    assert_eq!(
+        clerics_on_battlefield(&runner),
+        3,
+        "reach: the Medic and two other Clerics are on the battlefield at activation"
+    );
+
+    // CR 602.2b: activate through the public action path. `activate(..)`
+    // drives straight through resolution, so it cannot open the response window.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: medic,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Battlefield Medic's ability activates");
+    match &runner.state().waiting_for {
+        WaitingFor::TargetSelection {
+            player,
+            target_slots,
+            ..
+        } => {
+            assert_eq!(*player, P0, "the activator chooses the target");
+            assert!(
+                target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(target)),
+                "the non-Cleric 2/2 is a legal target"
+            );
+        }
+        other => panic!("the Medic's ability must ask for its creature target, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(target)),
+        })
+        .expect("the 2/2 is a legal target");
+
+    // CR 117.3c: the activator receives priority with the ability on the stack.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ),
+        "the activator holds priority over the ability, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .map(|entry| entry.source_id)
+            .collect::<Vec<_>>(),
+        vec![medic],
+        "reach: the Medic's ability is the only object on the stack"
+    );
+    let mut installed = prevention_shields(&runner);
+    installed.extend(hosted_prevention_shields(&runner));
+    assert!(
+        installed.is_empty(),
+        "no shield exists before the ability resolves"
+    );
+
+    // In response, Murder destroys one Cleric. CR 405.5: the top object
+    // resolves first, leaving the Medic's ability on the stack.
+    runner.cast(murder).target_object(doomed).commit();
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "Murder waits above the Medic's ability"
+    );
+    assert!(
+        runner.state().stack.iter().any(|entry| entry.id == murder),
+        "reach: Murder is on the stack"
+    );
+    runner.resolve_top();
+    assert_eq!(
+        runner.state().objects[&doomed].zone,
+        Zone::Graveyard,
+        "reach: Murder destroyed the Cleric"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .map(|entry| entry.source_id)
+            .collect::<Vec<_>>(),
+        vec![medic],
+        "reach: the Medic's ability is still waiting on the stack"
+    );
+    assert_eq!(
+        clerics_on_battlefield(&runner),
+        2,
+        "reach: two Clerics remain when the ability resolves"
+    );
+    let mut installed = prevention_shields(&runner);
+    installed.extend(hosted_prevention_shields(&runner));
+    assert!(
+        installed.is_empty(),
+        "still no shield before the ability resolves"
+    );
+
+    runner.resolve_top();
+    assert!(
+        runner.state().stack.is_empty(),
+        "the Medic's ability resolved"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must return priority, got {:?}",
+        runner.state().waiting_for
+    );
+    let mut installed = prevention_shields(&runner);
+    installed.extend(hosted_prevention_shields(&runner));
+    assert_eq!(
+        installed,
+        vec![PreventionAmount::Next(2)],
+        "X is the two Clerics left when the effect is applied, not the three at activation"
+    );
+
+    // 3 damage against the 2-point shield: 2 prevented, 1 marked (CR 615.7).
+    let mut events = Vec::new();
+    deal_damage::resolve(
+        runner.state_mut(),
+        &damage_ability(medic, TargetRef::Object(target), 3),
+        &mut events,
+    )
+    .expect("damage event resolves");
+    let prevented: u32 = events
+        .iter()
+        .filter_map(|e| match e {
+            GameEvent::DamagePrevented { amount, .. } => Some(*amount),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(
+        prevented, 2,
+        "the 2-point shield prevents two, got {events:?}"
+    );
+    assert_eq!(
+        runner.state().objects[&target].damage_marked,
+        1,
+        "3 damage minus the 2-point shield leaves 1 marked on the target"
     );
 }
 
