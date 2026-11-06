@@ -458,6 +458,20 @@ fn live_search_found_ids(
         .collect()
 }
 
+/// CR 701.20a + CR 701.20e + CR 401.2: a reveal lasts only as long as the
+/// instruction that caused it. A Dig looks at its window (a `reveal: true` dig
+/// makes those cards public) and a silent remainder (CR 701.20e) never moves the
+/// unchosen ones: they stay in the library. Leaving their `revealed_cards`
+/// markers in place would publish the POSITIONS they hold after the same
+/// instruction's own shuffle, disclosing the library order CR 401.2 keeps from
+/// every player. The reveal therefore ends here, at the boundary where the
+/// instruction stops needing those cards — without moving them.
+pub(crate) fn end_reveal_for_cards_left_in_library(state: &mut GameState, cards: &[ObjectId]) {
+    for card_id in cards {
+        state.revealed_cards.remove(card_id);
+    }
+}
+
 /// CR 614.6 + CR 701.23a: reveal only cards whose original found event still
 /// occurs. A replacement-modified card is delivered independently and never
 /// becomes part of the printed search instruction's reveal event or public
@@ -1129,6 +1143,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::RippleRevealChoice { .. }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::DigBottomOrder { .. }
             | WaitingFor::CastOffer {
                 kind: CastOfferKind::FreeCastWindow { .. },
                 ..
@@ -2609,6 +2624,7 @@ pub(super) fn handle_resolution_choice(
                             source_id: Some(source_id),
                             rest_cards: graveyard_cards,
                             rest_destination: Zone::Graveyard,
+                            rest_remainder: crate::types::ability::DigRestRemainder::Route,
                             rest_order: DigRestOrder::Preserve,
                             rest_split_top_count: None,
                             clear_markers: cards.clone(),
@@ -2916,6 +2932,7 @@ pub(super) fn handle_resolution_choice(
                                     kept_delivery: Default::default(),
                                     continuation_targets: Vec::new(),
                                     rest_delivery: Default::default(),
+                                    rest_remainder: crate::types::ability::DigRestRemainder::Route,
                                 },
                             );
                             return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -3014,6 +3031,7 @@ pub(super) fn handle_resolution_choice(
                     kept_delivery: Default::default(),
                     continuation_targets: Vec::new(),
                     rest_delivery: Default::default(),
+                    rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 }),
                 events,
             ) {
@@ -3322,6 +3340,7 @@ pub(super) fn handle_resolution_choice(
                 source_id: Some(source_id),
                 rest_cards: Vec::new(),
                 rest_destination: Zone::Library,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_order: DigRestOrder::Preserve,
                 rest_split_top_count: None,
                 clear_markers,
@@ -3343,6 +3362,62 @@ pub(super) fn handle_resolution_choice(
                 events,
             );
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        // CR 701.20e + CR 608.2c: In a PriorLook Dig where the player chooses to
+        // put all looked-at cards on the bottom of the library "in any order",
+        // the controller announces the order. `order` must be a permutation of
+        // the offered pile.
+        (
+            WaitingFor::DigBottomOrder {
+                player,
+                source_id,
+                cards,
+            },
+            GameAction::SelectCards { cards: order },
+        ) => {
+            if order.len() != cards.len()
+                || order.iter().collect::<std::collections::HashSet<_>>().len() != order.len()
+                || !order.iter().all(|id| cards.contains(id))
+            {
+                return Err(EngineError::InvalidAction(
+                    "Dig bottom order must be a permutation of the looked-at cards".to_string(),
+                ));
+            }
+            // Move the cards to the bottom of the library in the chosen order.
+            // The cards are currently in private_look_ids (still in the library).
+            let result = crate::game::zone_pipeline::move_objects_simultaneously_then(
+                state,
+                order
+                    .iter()
+                    .map(|&obj_id| {
+                        crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                            obj_id,
+                            Zone::Library,
+                            source_id,
+                        )
+                        .at_library_position(crate::types::ability::LibraryPosition::Bottom)
+                    })
+                    .collect(),
+                Some(
+                    crate::types::game_state::BatchCompletion::DigPriorLookRestComplete {
+                        player,
+                        source_id,
+                    },
+                ),
+                events,
+            );
+            // If the move completed synchronously, the DigPriorLookRestComplete completion
+            // has already run finish_with_continuation and updated state.waiting_for.
+            // If it paused (NeedsChoice), state.waiting_for is still DigBottomOrder and
+            // will be updated when the batch drains.
+            match result {
+                crate::game::zone_pipeline::BatchMoveResult::Done => {
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
+                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
+            }
         }
         // CR 608.2g + CR 601.2 + CR 202.3: Invoke Calamity's free-cast window —
         // the controller either picks one candidate to cast for free or declines
@@ -4741,6 +4816,7 @@ pub(super) fn handle_resolution_choice(
                 selectable_cards,
                 kept_destination,
                 rest_destination,
+                rest_remainder,
                 rest_split_top_count,
                 rest_order,
                 enter_tapped,
@@ -4799,8 +4875,20 @@ pub(super) fn handle_resolution_choice(
                         .iter_mut()
                         .find(|candidate| candidate.id == holder)
                         .expect("player exists");
+                    // CR 701.20e: a ROUTED remainder is lifted out with the kept
+                    // cards so it can be re-delivered (bottom or another zone). A
+                    // SILENT remainder is never moved, so only the kept cards leave
+                    // their slots — the unchosen ones keep the positions they
+                    // already had, relative to every card the instruction never
+                    // touched.
                     // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
-                    player_state.library.retain(|id| !cards.contains(id));
+                    player_state.library.retain(|id| {
+                        if rest_remainder.is_route() {
+                            !cards.contains(id)
+                        } else {
+                            !kept.contains(id)
+                        }
+                    });
                     for (index, &card_id) in kept.iter().enumerate() {
                         // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
                         player_state.library.insert(index, card_id);
@@ -4827,6 +4915,11 @@ pub(super) fn handle_resolution_choice(
                             None
                         }
                         Some(zone) => Some(zone),
+                        // CR 701.20e: a silent remainder is never moved, so the
+                        // graveyard default does not apply to it. The unchosen
+                        // cards were never lifted out of the library above, so
+                        // they are already back in the positions they had.
+                        None if !rest_remainder.is_route() => None,
                         None => Some(Zone::Graveyard),
                     }
                 };
@@ -4834,6 +4927,13 @@ pub(super) fn handle_resolution_choice(
                 // information boundary as the shared reorder helper. Advance
                 // product knowledge before any unkept cards leave the library.
                 state.advance_library_knowledge_epoch(library_owner);
+                if !rest_remainder.is_route() {
+                    // CR 701.20a + CR 701.20e: the unchosen looked-at cards stay
+                    // in the library, so their reveal ends with the instruction
+                    // that caused it rather than publishing whatever positions a
+                    // later shuffle gives them (CR 401.2).
+                    end_reveal_for_cards_left_in_library(state, &unkept);
+                }
                 // CR 401.5 + CR 611.3a: Dig kept cards on top by editing the
                 // library directly, so a `TopOfLibraryMatches` static must be
                 // re-evaluated (self-gated on liveness).
@@ -4876,6 +4976,7 @@ pub(super) fn handle_resolution_choice(
                                     source_id: dig_source_id,
                                     rest_cards: Vec::new(),
                                     rest_destination: zone,
+                                    rest_remainder: crate::types::ability::DigRestRemainder::Route,
                                     rest_order: DigRestOrder::Preserve,
                                     rest_split_top_count: None,
                                     clear_markers: Vec::new(),
@@ -4930,6 +5031,16 @@ pub(super) fn handle_resolution_choice(
                 let defer_rest_routing = state.active_ability_continuation().is_some_and(|cont| {
                     dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
                 });
+                // CR 701.20a + CR 701.20e: a silent remainder stays in the
+                // library, so its reveal has to end with the instruction that
+                // caused it. Hand those cards to the completion's marker
+                // cleanup, which runs once the kept delivery has settled and
+                // survives any replacement re-park in between.
+                let silent_remainder_markers = if rest_remainder.is_route() {
+                    Vec::new()
+                } else {
+                    unkept.clone()
+                };
                 let reqs = kept
                     .iter()
                     .map(|&obj_id| {
@@ -4954,12 +5065,13 @@ pub(super) fn handle_resolution_choice(
                         delivery_stage: crate::types::game_state::DigDeliveryStage::Kept,
                         player,
                         source_id: dig_source_id,
-                        rest_cards: if defer_rest_routing {
+                        rest_cards: if defer_rest_routing || !rest_remainder.is_route() {
                             Vec::new()
                         } else {
                             unkept
                         },
                         rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
+                        rest_remainder,
                         rest_order,
                         // CR 401.2 + CR 701.20e: carry the Telling Time-class
                         // remainder split onto the kept delivery. The split
@@ -4969,7 +5081,7 @@ pub(super) fn handle_resolution_choice(
                         // survives an arbitrary number of replacement re-parks
                         // in between.
                         rest_split_top_count,
-                        clear_markers: Vec::new(),
+                        clear_markers: silent_remainder_markers,
                         publish_tracked_set: Some(publish_set),
                         publish_tracked_set_cause: publish_cause,
                         emit_reveal_until_resolved: None,
@@ -5025,9 +5137,13 @@ pub(super) fn handle_resolution_choice(
             // can pause this batch, so the tracked-set publication and
             // continuation wiring stay below the result match: neither may see
             // a pre-redirect rest pile.
-            let defer_rest_routing = state
-                .active_ability_continuation()
-                .is_some_and(|cont| dig_continuation_needs_full_looked_at_tracked_set(&cont.chain));
+            // CR 701.20e: a silent remainder is never moved, so the rest mover
+            // below is not reached and the tail (tracked-set publication +
+            // continuation) runs immediately.
+            let defer_rest_routing = !rest_remainder.is_route()
+                || state.active_ability_continuation().is_some_and(|cont| {
+                    dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
+                });
             if !defer_rest_routing {
                 let rest_destination = rest_destination.unwrap_or(Zone::Graveyard);
                 let mut ordered_unkept = unkept.clone();
@@ -5055,6 +5171,7 @@ pub(super) fn handle_resolution_choice(
                         ordered_unkept.clone(),
                         rest_destination,
                     ),
+                    rest_remainder,
                 };
                 // CR 401.2 + CR 701.20e: the same Telling Time-class split the
                 // kept-delivery completion applies, for the reveal-only dig
@@ -5096,6 +5213,13 @@ pub(super) fn handle_resolution_choice(
                         }
                     },
                 ));
+            }
+            if !rest_remainder.is_route() {
+                // CR 701.20a + CR 701.20e: this arm keeps the unchosen looked-at
+                // cards in the library, so end their reveal before any later
+                // step of the same resolution shuffles the library — the markers
+                // would otherwise pair each name with its new position (CR 401.2).
+                end_reveal_for_cards_left_in_library(state, &unkept);
             }
             effects::publish_fresh_tracked_set(state, publish_set);
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
@@ -9337,6 +9461,7 @@ fn route_kept_card_or_defer(
                     source_id: Some(cx.source_id),
                     rest_cards: cx.misses.to_vec(),
                     rest_destination: cx.rest_destination,
+                    rest_remainder: crate::types::ability::DigRestRemainder::Route,
                     rest_order: cx.rest_order,
                     rest_split_top_count: None,
                     clear_markers,
@@ -10569,6 +10694,7 @@ pub(crate) fn run_batch_completion(
             source_id,
             rest_cards,
             rest_destination,
+            rest_remainder,
             rest_order,
             rest_split_top_count,
             clear_markers,
@@ -10581,13 +10707,17 @@ pub(crate) fn run_batch_completion(
             continuation_targets,
             rest_delivery,
         } => {
+            // CR 701.20e: a silent remainder is never moved. The pile is still
+            // reported so the drain knows what the instruction covered, but it
+            // contributes no card to the rest mover and the arm falls straight
+            // through to the reveal-marker cleanup, tracked-set publication, and
+            // continuation below.
+            let routes_rest = rest_remainder.is_route() && !rest_cards.is_empty();
             // CR 608.2c + CR 614.1 + CR 616.1: A kept Dig delivery can pause
             // before its rest pile starts. Keep its completion in the same
             // typed carrier, then advance it to the rest stage before routing
             // the unkept cards so replacement re-parks retain the full tail.
-            if delivery_stage == crate::types::game_state::DigDeliveryStage::Kept
-                && !rest_cards.is_empty()
-            {
+            if delivery_stage == crate::types::game_state::DigDeliveryStage::Kept && routes_rest {
                 let mut ordered_rest_cards = rest_cards.clone();
                 if rest_destination == Zone::Library && rest_order == DigRestOrder::Random {
                     ordered_rest_cards.shuffle(state.rng.draw(RandomDraw::Placement));
@@ -10613,6 +10743,7 @@ pub(crate) fn run_batch_completion(
                         ordered_rest_cards.clone(),
                         rest_destination,
                     ),
+                    rest_remainder,
                 };
                 // CR 401.2 + CR 701.20e + CR 608.2c: Telling Time-class
                 // remainder. The pile is fixed now that the kept cards have
@@ -10659,7 +10790,7 @@ pub(crate) fn run_batch_completion(
             // reveal-until path routes through `move_rest_then`, including
             // Library-bottom placement and any CR 616.1 pause. Dispatch on the
             // dig-only payload so each site keeps its synchronous semantics.
-            if publish_tracked_set.is_some() && !rest_cards.is_empty() {
+            if publish_tracked_set.is_some() && routes_rest {
                 let mut ordered_rest_cards = rest_cards.clone();
                 if rest_destination == Zone::Library && rest_order == DigRestOrder::Random {
                     ordered_rest_cards.shuffle(state.rng.draw(RandomDraw::Placement));
@@ -10685,6 +10816,7 @@ pub(crate) fn run_batch_completion(
                         ordered_rest_cards.clone(),
                         rest_destination,
                     ),
+                    rest_remainder,
                 };
                 return route_rest_partition_then(
                     state,
@@ -10694,7 +10826,7 @@ pub(crate) fn run_batch_completion(
                     Some(cleanup),
                     events,
                 );
-            } else if !rest_cards.is_empty() {
+            } else if routes_rest {
                 // CR 701.20a + CR 608.2d: If the rest cards are being placed on the bottom
                 // of the library in any order (PlayerChoice) and there are 2 or more cards,
                 // pause for the controller to announce their permutation.
@@ -10734,6 +10866,7 @@ pub(crate) fn run_batch_completion(
                     kept_delivery,
                     continuation_targets,
                     rest_delivery,
+                    rest_remainder,
                 };
                 return effects::reveal_until::move_rest_then(
                     state,
@@ -14379,6 +14512,7 @@ mod tests {
                 selectable_cards: vec![black, white],
                 kept_destination: Some(Zone::Library),
                 rest_destination: Some(Zone::Library),
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 source_id: None,
@@ -14463,6 +14597,7 @@ mod tests {
                 selectable_cards: vec![keep, rest[0], rest[1], rest[2]],
                 kept_destination: Some(Zone::Library),
                 rest_destination: Some(Zone::Library),
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Random,
                 source_id: None,
@@ -14504,6 +14639,7 @@ mod tests {
                 selectable_cards: vec![keep, rest[0], rest[1], rest[2]],
                 kept_destination: Some(Zone::Library),
                 rest_destination: Some(Zone::Library),
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 source_id: None,
@@ -15760,7 +15896,8 @@ mod random_result_resolution_context_tests {
                 .unwrap();
             state.rng = GameRng::seed_from_u64(seed);
         }
-        let ability = ResolvedAbility::new(effect, vec![], source, P0);
+        let mut ability = ResolvedAbility::new(effect, vec![], source, P0);
+        crate::game::ability_utils::materialize_coin_branches(&mut ability);
         match boundary {
             Boundary::Coin => {
                 effects::flip_coin::resolve(&mut state, &ability, &mut vec![]).unwrap()

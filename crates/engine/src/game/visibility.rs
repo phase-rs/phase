@@ -23,11 +23,8 @@ pub const HIDDEN_CARD_NAME: &str = "Hidden Card";
 /// public prompt and the card identities they are otherwise allowed to see.
 fn redact_parent_target_iteration_members(ability: &mut crate::types::ability::ResolvedAbility) {
     ability.context.parent_target_iteration_members = None;
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        redact_parent_target_iteration_members(sub_ability);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        redact_parent_target_iteration_members(else_ability);
+    for (_, child) in ability.child_links_mut() {
+        redact_parent_target_iteration_members(child);
     }
 }
 
@@ -158,6 +155,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::RevealUntilBottomOrder { .. }
+        | WaitingFor::DigBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::CoinFlipKeepChoice { .. }
@@ -2444,6 +2442,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         ref selectable_cards,
         kept_destination,
         rest_destination,
+        rest_remainder,
         rest_split_top_count,
         rest_order,
         source_id,
@@ -2461,6 +2460,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 selectable_cards: selectable_cards.iter().map(|_| ObjectId(0)).collect(),
                 kept_destination,
                 rest_destination,
+                rest_remainder,
                 // The split SIZE is public (it is printed on the card); only
                 // the identities of the cards are private, and those are
                 // blanked above.
@@ -2519,6 +2519,34 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             source_id,
             None,
         );
+    }
+
+    // CR 701.20e: the private-look ledger names exactly which library cards the
+    // looker saw; a viewer without the looker's private access must not learn
+    // those ids (the `DigSource::PriorLook` window stays open across the
+    // `OptionalEffectChoice` and `DigBottomOrder` prompts).
+    if !state
+        .private_look_player
+        .is_some_and(&can_view_private_for_player)
+    {
+        filtered.private_look_ids.clear();
+    }
+
+    // CR 701.20e: the looked-at cards are known only to the looking player, so
+    // every other viewer gets placeholder ids (same shape as `ScryChoice`).
+    if let WaitingFor::DigBottomOrder {
+        player,
+        source_id,
+        ref cards,
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::DigBottomOrder {
+                player,
+                source_id,
+                cards: cards.iter().map(|_| ObjectId(0)).collect(),
+            };
+        }
     }
 
     if let WaitingFor::ScryChoice {
@@ -4293,11 +4321,8 @@ fn redact_ability_payment(
     if let Some(context) = ability.trigger_source.as_mut() {
         redact_source_context_hidden_members(context, hidden_ids);
     }
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        redact_ability_payment(sub_ability, hidden_ids);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        redact_ability_payment(else_ability, hidden_ids);
+    for (_, child) in ability.child_links_mut() {
+        redact_ability_payment(child, hidden_ids);
     }
 }
 
@@ -4324,12 +4349,8 @@ fn ability_payment_names_hidden_source(
         .as_ref()
         .is_some_and(|context| source_context_names_hidden_member(context, hidden_ids))
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(|sub_ability| ability_payment_names_hidden_source(sub_ability, hidden_ids))
-        || ability.else_ability.as_deref().is_some_and(|else_ability| {
-            ability_payment_names_hidden_source(else_ability, hidden_ids)
-        })
+            .child_links()
+            .any(|(_, child)| ability_payment_names_hidden_source(child, hidden_ids))
 }
 
 /// A paused cast keeps its spell ability; blank only its hidden-source payment entries and
@@ -5144,11 +5165,8 @@ fn redact_hidden_library_ability(
     {
         ability.effect_context_object = None;
     }
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        redact_hidden_library_ability(sub_ability, hidden_library);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        redact_hidden_library_ability(else_ability, hidden_library);
+    for (_, child) in ability.child_links_mut() {
+        redact_hidden_library_ability(child, hidden_library);
     }
 }
 
@@ -10061,6 +10079,38 @@ mod tests {
         assert!(matches!(
             opponent_view.waiting_for,
             WaitingFor::ScryChoice { cards, .. } if cards == vec![ObjectId(0)]
+        ));
+    }
+
+    #[test]
+    fn dig_bottom_order_ids_are_redacted_for_an_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let cards: Vec<ObjectId> = (1..=2)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(i),
+                    PlayerId(0),
+                    format!("Looked {i}"),
+                    Zone::Library,
+                )
+            })
+            .collect();
+        state.waiting_for = WaitingFor::DigBottomOrder {
+            player: PlayerId(0),
+            source_id: ObjectId(99),
+            cards: cards.clone(),
+        };
+
+        let own_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert!(matches!(
+            own_view.waiting_for,
+            WaitingFor::DigBottomOrder { cards: ref c, .. } if *c == cards
+        ));
+        let opponent_view = filter_state_for_viewer(&state, PlayerId(1));
+        assert!(matches!(
+            opponent_view.waiting_for,
+            WaitingFor::DigBottomOrder { cards: ref c, .. } if *c == vec![ObjectId(0); 2]
         ));
     }
 

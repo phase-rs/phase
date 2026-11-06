@@ -583,7 +583,7 @@ impl DraftSession {
             .ok_or_else(|| snapshot_error("missing FIFO state"))
     }
 
-    /// The sole pack reader; FIFO tails are never actionable.
+    /// The sole pack reader; no FIFO tail card is actionable or shown (CR 905.1c / CR 903.13d).
     pub fn head_pack(&self, seat: u8) -> Option<&DraftPack> {
         match self.config.flow {
             DraftFlow::LegacyBarrier => self.current_pack.get(usize::from(seat))?.as_ref(),
@@ -1211,6 +1211,7 @@ pub(crate) fn open_fifo_round(
     now_ms: u64,
 ) -> Result<(), DraftError> {
     session.current_pack_number = round;
+    // CR 905.1b / CR 903.13c: the first and third rounds pass left, the second passes right.
     session.pass_direction = PassDirection::for_pack(round);
     session.status = DraftStatus::Drafting;
     session.fifo_mut()?.review = None;
@@ -1253,7 +1254,7 @@ pub(crate) fn finish_fifo_round(
         .any(|seat| !seat.queue.is_empty())
     {
         crate::clock::reconcile_prompts(session, now_ms)?;
-        return Ok(vec![DraftDelta::PackPassed]);
+        return Ok(Vec::new());
     }
     crate::clock::reconcile_prompts(session, now_ms)?;
     let exhausted_round = session.current_pack_number;

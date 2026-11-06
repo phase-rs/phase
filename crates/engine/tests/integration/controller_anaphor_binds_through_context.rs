@@ -39,6 +39,7 @@ use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 use engine::types::StaticDefinition;
 
@@ -901,6 +902,211 @@ fn acidic_soil_counts_each_players_own_lands() {
 
     assert_eq!(outcome.life_delta(P1), -2, "P1's two lands");
     assert_eq!(outcome.life_delta(P0), -1, "P0's one land");
+}
+
+// ---------------------------------------------------------------------------
+// CR 107.3c: the per-player antecedent class, reached through a where-X clause.
+//
+// The rows above pin a controller anaphor sitting in a DIRECT amount — the
+// per-player class (Acidic Soil, Price of Progress) and the declared-target
+// class (Anathemancer). The row below is the per-player one's `", where X is …"`
+// sibling: the anaphor sits inside a count the where-clause DEFINES rather than
+// in the amount itself, so it reaches the binder down a separate lowering path
+// (`WhereXBinding`) that supplied no antecedents at all before issue #6508.
+//
+// SCOPE, stated honestly: the DECLARED-TARGET half of the where-X row is NOT
+// covered here. Measurement showed it splits further — a target declared by a
+// PRIOR clause (Curious Herd) and one declared by the clause's OWN subject
+// (Jovial Evil; the chained sibling of Pact of the Serpent) — and the latter is
+// resolved inside the ctx-free `oracle_nom::quantity` combinator layer, which
+// binds the anaphor to `You` with no antecedent reachable and discards it, so it
+// cannot be rebound downstream. Covering it means threading antecedents through
+// that pure-combinator layer; tracked separately, not attempted here. The
+// pronoun is NOT the discriminator in any of these — both halves print both
+// "they" and "that player" — so no hard-coded scope is right for the set.
+// ---------------------------------------------------------------------------
+
+const CITADEL_OF_PAIN: &str = "At the beginning of each player's end step, this enchantment deals X damage to that player, where X is the number of untapped lands they control.";
+const PSYCHIC_ALLERGY: &str = "As this enchantment enters, choose a color.\nAt the beginning of each opponent's upkeep, this enchantment deals X damage to that player, where X is the number of nontoken permanents of the chosen color they control.\nAt the beginning of your upkeep, destroy this enchantment unless you sacrifice two Islands.";
+
+/// CR 107.3 + CR 608.2c: Citadel of Pain's where-X count says "they control"
+/// of the player whose end step it is, so each player is dealt damage equal to
+/// THEIR OWN untapped lands. The per-player sibling of the Curious Herd row —
+/// same grammar, different antecedent.
+///
+/// The board gives the two players different untapped-land counts, so the
+/// opponent's end step separates the three readings: the correct one (the
+/// opponent takes their own count), a count bound to the enchantment's
+/// controller (the opponent takes the controller's count), and a trigger that
+/// fires only on the controller's own end step (the opponent takes nothing).
+#[test]
+fn citadel_of_pain_hits_each_player_for_their_own_untapped_lands() {
+    const CONTROLLER_LANDS: i32 = 5;
+    const OPPONENT_LANDS: i32 = 2;
+
+    let mut scenario = main_phase_scenario(2);
+    for &player in &[P0, P1] {
+        scenario.with_library_top(player, &["Lib A", "Lib B", "Lib C", "Lib D"]);
+    }
+    let citadel = scenario
+        .add_enchantment_from_oracle(P0, "Citadel of Pain", CITADEL_OF_PAIN)
+        .id();
+    for _ in 0..CONTROLLER_LANDS {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    for _ in 0..OPPONENT_LANDS {
+        scenario.add_basic_land(P1, ManaColor::Blue);
+    }
+    let mut runner = scenario.build();
+
+    // CR 603.2: reach-guard — the end-step trigger must exist at all, so a
+    // "takes nothing" assertion below cannot pass by the card not parsing.
+    assert!(
+        runner.state().objects[&citadel]
+            .trigger_definitions
+            .iter_unchecked()
+            .any(|entry| {
+                entry.definition.mode == TriggerMode::Phase
+                    && entry.definition.phase == Some(Phase::End)
+            }),
+        "reach-guard: Citadel of Pain's Oracle text must provide its end-step trigger"
+    );
+    let (p0_start, p1_start) = (life(&runner, P0), life(&runner, P1));
+
+    runner.advance_to_end_step();
+    assert!(
+        runner.state().active_player == P0 && runner.state().phase == Phase::End,
+        "must reach P0's end step; stopped at {:?} of {:?}'s turn on {:?}",
+        runner.state().phase,
+        runner.state().active_player,
+        runner.state().waiting_for
+    );
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        life(&runner, P0),
+        p0_start - CONTROLLER_LANDS,
+        "on P0's end step, P0 takes damage equal to the untapped lands P0 controls"
+    );
+    assert_eq!(
+        life(&runner, P1),
+        p1_start,
+        "P1 takes nothing on P0's end step"
+    );
+
+    pass_priority_into_end_step_of(&mut runner, P1);
+    // CR 603.2: it fires again on the opponent's end step. The ability is
+    // controlled by P0, but "that player" and "they" are the end-step player.
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == citadel && entry.controller == P0),
+        "Citadel's P0-controlled trigger must be on the stack at P1's end step; stack={:?}",
+        runner.state().stack
+    );
+    runner.advance_until_stack_empty();
+
+    // CR 120.3a: damage to a player causes that much life loss.
+    assert_eq!(
+        life(&runner, P1),
+        p1_start - OPPONENT_LANDS,
+        "on P1's end step, P1 takes damage equal to the untapped lands P1 controls \
+         ({OPPONENT_LANDS}), not the lands its controller controls ({CONTROLLER_LANDS})"
+    );
+    assert_eq!(
+        life(&runner, P0),
+        p0_start - CONTROLLER_LANDS,
+        "the controller takes nothing more on the opponent's end step"
+    );
+}
+
+/// A player's current life total.
+fn life(runner: &GameRunner, player: PlayerId) -> i32 {
+    runner.state().players[player.0 as usize].life
+}
+
+/// Pass priority on the real action path until `player`'s end step has begun.
+///
+/// `GameRunner::advance_to_phase` re-enters the turn interpreter for the step it
+/// is already in, which re-runs that step's beginning-of-step triggers when it
+/// is called with priority open. Walking with `PassPriority` is what a client
+/// does, so each end step fires Citadel of Pain exactly once.
+fn pass_priority_into_end_step_of(runner: &mut GameRunner, player: PlayerId) {
+    for _ in 0..60 {
+        let state = runner.state();
+        if state.active_player == player && state.phase == Phase::End {
+            return;
+        }
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "unexpected prompt while advancing: {:?}",
+            state.waiting_for
+        );
+        runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority must be accepted");
+    }
+    panic!(
+        "did not reach {player:?}'s end step; stopped at {:?} of {:?}'s turn",
+        runner.state().phase,
+        runner.state().active_player
+    );
+}
+
+/// Coverage honesty (CR 107.3c): Psychic Allergy's where-X count is the same
+/// per-player anaphor as Citadel of Pain's, but its filter reads the colour
+/// chosen as the enchantment entered — which the engine cannot represent. The
+/// antecedent threading must NOT flip that count to falsely-supported; the
+/// clause stays an honest `where_x_binding` gap.
+///
+/// This is the row that keeps the fix from buying coverage it did not earn.
+#[test]
+fn psychic_allergy_where_x_chosen_colour_count_stays_an_honest_gap() {
+    let parsed = parse_oracle_text(
+        PSYCHIC_ALLERGY,
+        "Psychic Allergy",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    // Both of this card's triggers are `Phase::Upkeep` ("each opponent's" and
+    // "your"), so picking one by phase alone would be ambiguous. Assert over the
+    // whole parse instead: the damage clause must be absent and the gap present.
+    let upkeep_triggers: Vec<_> = parsed
+        .triggers
+        .iter()
+        .filter(|trigger| {
+            trigger.mode == TriggerMode::Phase && trigger.phase == Some(Phase::Upkeep)
+        })
+        .collect();
+    assert_eq!(
+        upkeep_triggers.len(),
+        2,
+        "reach-guard: both upkeep triggers must parse, so the assertions below \
+         cannot pass by the card failing to parse at all: {parsed:?}"
+    );
+    let effects: Vec<&Effect> = parsed
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .map(|ability| ability.effect.as_ref())
+        .collect();
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Unimplemented { name, .. } if name == "where_x_binding"
+        )),
+        "the chosen-colour count has no typed home, so the clause must stay an \
+         honest where_x_binding gap: {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::DealDamage { .. })),
+        "a lowered DealDamage here would mean the chosen-colour count was bound \
+         anyway and silently resolves to 0 while reading as supported: {effects:?}"
+    );
 }
 
 /// CR 109.4 + CR 608.2c: Alpha Brawl's "that player" is the controller of the

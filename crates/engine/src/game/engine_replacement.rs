@@ -498,6 +498,9 @@ fn handle_replacement_choice_inner(
                         } => (*object_id, *to, *cause, *discard_frame),
                         _ => unreachable!("arm pattern guarantees ZoneChange"),
                     };
+                    // CR 616.1: the approved resume event carries the chosen
+                    // replacement's modifications; keep it for the paused-key match.
+                    let event_for_capture = event.clone();
                     let Ok(approved) =
                         crate::game::zone_pipeline::ApprovedZoneChange::approve_post_replacement(
                             event,
@@ -506,7 +509,7 @@ fn handle_replacement_choice_inner(
                         unreachable!("arm pattern guarantees a ZoneChange payload");
                     };
                     let delivery_start = events.len();
-                    match crate::game::zone_pipeline::deliver(
+                    let delivery = crate::game::zone_pipeline::deliver(
                         state,
                         approved,
                         crate::game::zone_pipeline::DeliveryCtx {
@@ -525,7 +528,60 @@ fn handle_replacement_choice_inner(
                             library_placement: parked_library_placement.clone(),
                         },
                         events,
-                    ) {
+                    );
+                    // CR 616.1 + CR 614.1c + CR 400.7: the resumed segment IS the
+                    // parked member's terminal delivery history whether or not the
+                    // delivery's own tail parks again. Record the classification
+                    // BEFORE either terminal, using the same pre-move key and the
+                    // same single-authority classifier as the synchronous path, or
+                    // a tail park returns early and the batch owner later reaches
+                    // `drain_pending_batch_deliveries` with `terminal_completion:
+                    // None` (issue #10431). A pre-move park (merge leave) pushes a
+                    // child batch frame that owns the pause; the member has not
+                    // moved, so its classification is `Remained`, the exact path
+                    // sees only the child, and the occurrence-level walk (gated on
+                    // `Moved`) records nothing for the parent.
+                    if let Some(paused) = parked_zone_change_delivery.as_ref() {
+                        let completion =
+                            crate::game::zone_pipeline::zone_move_completion_from_delivery(
+                                paused.member,
+                                &events[delivery_start..],
+                            );
+                        // Exact boundary match first (the historical path every
+                        // shipped park uses), then the occurrence-level match for a
+                        // resume whose approved event carries the chosen
+                        // replacement's modifications (controller/counter override
+                        // or a CR 614.6 zone redirect).
+                        let matched = state.capture_paused_zone_change_delivery(
+                            paused.member,
+                            &paused.expected_event,
+                            &events[delivery_start..],
+                            completion,
+                        ) || (completion
+                            == crate::types::game_state::ZoneMoveCompletion::Moved
+                            && state.capture_resumed_paused_zone_change_delivery(
+                                paused.member,
+                                &event_for_capture,
+                                &events[delivery_start..],
+                                completion,
+                            ));
+                        if matched
+                            && matches!(
+                                &delivery,
+                                crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_)
+                            )
+                        {
+                            // CR 614.6: the replaced move's terminal `ZoneChanged` is
+                            // already in this slice, so the forwarded-result marker
+                            // settles against the same record the Done path uses.
+                            effects::settle_replaced_forwarded_zone_delivery(
+                                state,
+                                paused.member,
+                                &events[delivery_start..],
+                            );
+                        }
+                    }
+                    match delivery {
                         crate::game::zone_pipeline::ZoneDeliveryResult::Done => {}
                         // CR 614.1c / CR 614.12a: the delivery tail parked a
                         // counter-replacement or devour prompt and stashed the
@@ -570,15 +626,6 @@ fn handle_replacement_choice_inner(
                         }
                     }
                     if let Some(paused) = parked_zone_change_delivery.as_ref() {
-                        state.capture_paused_zone_change_delivery(
-                            paused.member,
-                            &paused.expected_event,
-                            &events[delivery_start..],
-                            crate::game::zone_pipeline::zone_move_completion_from_delivery(
-                                paused.member,
-                                &events[delivery_start..],
-                            ),
-                        );
                         effects::settle_replaced_forwarded_zone_delivery(
                             state,
                             paused.member,
