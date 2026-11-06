@@ -3024,11 +3024,10 @@ pub(crate) fn deliver_staged_destroy_batch(
 
 /// CR 608.2c + CR 603.10a: the ChangeZone family's synchronous delivery result.
 ///
-/// `Settled` carries the delivered group and its member terminals inline. The
-/// synchronous path consumes this value immediately at its single call site
-/// and never retains a population, so boxing the two vectors would add a heap
-/// indirection (and an allocation per settled move) while saving no retained
-/// state.
+/// `Settled` carries the delivered group and its member terminals inline.
+/// Synchronous callers consume this result immediately rather than retaining
+/// the population, so boxing the payload would add a heap indirection and an
+/// allocation per settled move without saving retained state.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum StagedChangeZoneOutcome {
     Settled {
@@ -3617,8 +3616,8 @@ pub(crate) fn reconcile_staged_batch_after_departure(
         };
         let boundary = state.resolution_stack.capture_child_boundary();
         // CR 101.4 + CR 800.4a: reconciliation may deliver surviving batch
-        // members. Keep that exact segment separate from the departure sweep,
-        // and give settlement the same owned event slice as the ordinary drain.
+        // members. If it settles, give settlement only that delivery segment,
+        // not the departure sweep; otherwise append the segment and re-park.
         let mut batch_events = Vec::new();
         if reconcile_staged_owner(state, &mut owner, identity.group, &mut batch_events) {
             let deferred_events = std::mem::take(&mut owner.deferred_events);

@@ -7,13 +7,13 @@
 //!   * a co-entering second devourer (CR 614.12a + CR 614.13a — both choices are
 //!     made before either devourer "enters", so neither can devour the other).
 //!
-//! Both tests drive the REAL production `change_zone::resolve_all` path (the same
-//! path a "put all creature cards exiled this way onto the battlefield" /
-//! reanimation-style `ChangeZoneAll` flows through) with synthetic objects, so
-//! they need no card-data and exercise the engine end-to-end. The Devour
-//! replacement is constructed to match `database::synthesis::synthesize_devour`.
+//! Both tests dispatch `ChangeZoneAll` through the depth-zero ability-chain
+//! boundary used by production reanimation, then drive its public choices.
+//! Synthetic objects avoid card-data while the Devour replacement mirrors
+//! `database::synthesis::synthesize_devour`.
 
-use engine::game::effects::change_zone::{resolve, resolve_all};
+use engine::game::effects::change_zone::resolve;
+use engine::game::effects::resolve_ability_chain;
 use engine::game::effects::sacrifice;
 use engine::game::engine::apply_as_current;
 use engine::game::zones::create_object;
@@ -145,7 +145,7 @@ fn devour_cannot_eat_simultaneous_co_arrival() {
     );
 
     let mut events = Vec::new();
-    resolve_all(&mut state, &ability, &mut events).unwrap();
+    resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
 
     // The devourer's as-enters sacrifice must surface its eligible-pool prompt.
     let WaitingFor::EffectZoneChoice { cards, .. } = &state.waiting_for else {
@@ -228,7 +228,7 @@ fn two_devourers_cannot_eat_each_other() {
     );
 
     let mut events = Vec::new();
-    resolve_all(&mut state, &ability, &mut events).unwrap();
+    resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
 
     // Devourer A's prompt appears first.
     let WaitingFor::EffectZoneChoice { cards, .. } = &state.waiting_for else {
@@ -504,7 +504,10 @@ fn assert_reanimation_settled(runner: &GameRunner) {
     assert!(runner.state().stack.is_empty());
     assert!(runner.state().resolution_stack.is_empty());
     assert!(runner.state().pending_replacement.is_none());
-    assert!(runner.state().staged_population_parent.is_none());
+    // The transient anchor is retired at the action boundary, not checked for
+    // leaks. In-action routing is witnessed by
+    // twilights_call_two_devourers_one_fodder_keeps_producer_tail_below_batch
+    // (prompt order P0, P0, P1), not by a post-action None assertion.
 }
 
 // CR 614.13a + CR 616.1: retained member drains share the pre-entry population,
@@ -605,7 +608,6 @@ fn rise_two_devourers_one_fodder() {
     let b = add_elder(&mut scenario, P0);
     let f = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let mut runner = cast_reanimation(scenario, "Rise of the Dark Realms", RISE_OF_THE_DARK_REALMS);
-    assert!(runner.state().staged_population_parent.is_none());
     assert_eq!(devour_pool(&runner, P0), vec![f]);
     select_devour(&mut runner, vec![]);
     assert_eq!(devour_pool(&runner, P0), vec![f]);
@@ -631,7 +633,6 @@ fn rise_two_devourers_under_censor() {
     let f1 = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let f2 = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let mut runner = cast_reanimation(scenario, "Rise of the Dark Realms", RISE_OF_THE_DARK_REALMS);
-    assert!(runner.state().staged_population_parent.is_none());
     apply_censor_first(&mut runner);
     apply_censor_first(&mut runner);
     assert_eq!(devour_pool(&runner, P0), vec![f1, f2]);

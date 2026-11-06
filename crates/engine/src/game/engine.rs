@@ -2488,6 +2488,12 @@ fn finish_action_boundary_with_lifecycle(
         *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
         return Err(EngineError::LifeChangeUnrepresentable { player });
     }
+    // This transient, nonserialized producer-tail anchor expires at the first
+    // action boundary at the latest; depth-zero ability-chain exit retires it
+    // earlier for direct chains. Clearing here is retirement, not leak detection.
+    // In-action behavior is covered by devour_co_entry_regression's
+    // twilights_call_two_devourers_one_fodder_keeps_producer_tail_below_batch
+    // and twilights_call_two_devourers_under_censor_each_order_then_devour.
     state.staged_population_parent = None;
     #[cfg(debug_assertions)]
     super::perf_counters::outside_take_cost(|| debug_assert_runtime_resolution_invariants(state));

@@ -1872,14 +1872,12 @@ fn handle_replacement_choice_inner(
             // that live prompt. Surface it instead of clobbering it with
             // `Priority`; the prompt's own resolution finishes the parked work.
             //
-            // A bare `ReplacementChoice` whitelist is insufficient: it cannot
-            // tell the JUST-RESOLVED ordering prompt (already consumed) from a
-            // freshly-parked nested one. `continue_replacement` `.take()`-consumed
-            // the prior pending record at its start, so a `pending_replacement`
-            // that is still `Some` here is necessarily the applier's freshly-
-            // parked nested ordering choice — surface it so the next
-            // `ChooseReplacement` resumes the CR 616.1f repeat instead of orphaning
-            // the record and dropping replacements C onward.
+            // The wrapper retired the answered prompt before this body ran.
+            // `continue_replacement` also took the prior pending record, so a
+            // remaining `pending_replacement` belongs to a fresh nested ordering
+            // choice. Preserve it, as well as other live replacing-action
+            // prompts, so the next answer resumes the CR 616.1f repeat rather
+            // than orphaning the nested work.
             if state.pending_replacement.is_some()
                 || !matches!(
                     state.waiting_for,

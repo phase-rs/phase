@@ -16163,6 +16163,11 @@ fn try_parse_owner_of_target_shuffle(
         _ => return None,
     };
     let tail = if let Some(conjunct) = conjunct {
+        // Map nom's recognized suffix back to the original text before recursion.
+        let conjunct = tp
+            // allow-noncombinator: TextPair maps a suffix already recognized by nom, not parsing dispatch.
+            .strip_prefix(&tp.lower[..tp.lower.len() - conjunct.len()])?
+            .original;
         let mut clause = parse_effect_clause(&subject::deconjugate_verb(conjunct), &mut trial);
         if !bind_player_recipient_to_possessive_actor(&mut clause.effect, &TargetFilter::Owner) {
             return None;

@@ -1169,6 +1169,95 @@ fn d8_staged_destroy_pause_round_trips_and_resumes() {
     );
 }
 
+/// CR 616.1: retain an outer-approved Destroy rider across an inner choice
+/// and a persisted-state round trip, then retire the batch at public priority.
+/// FU-6: the printed "instead sacrifice this Aura and that land gains
+/// indestructible" clause does not prevent destruction because `destroy_applier`
+/// preserves non-regeneration Destroy events. This pre-existing defect is not
+/// fixed here; this row deliberately does not assert the land's final zone.
+#[test]
+fn emergence_destroy_replacement_inner_choice_round_trips() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let land = scenario
+        .add_land_from_oracle(P0, "Mountain", "{T}: Add {R}.")
+        .id();
+    let aura = scenario
+        .add_enchantment_from_oracle(
+            P0,
+            "Crackling Emergence",
+            "Enchant land you control\nEnchanted land is a 3/3 red Spirit creature with haste. It's still a land.\nIf enchanted land would be destroyed, instead sacrifice this Aura and that land gains indestructible until end of turn.",
+        )
+        .with_subtypes(vec!["Aura"])
+        .id();
+    scenario.add_creature(P0, "Other Bear", 2, 2);
+    scenario.add_enchantment_from_oracle(
+        P0,
+        "Rest in Peace",
+        "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.",
+    );
+    scenario.add_enchantment_from_oracle(
+        P1,
+        "Leyline of the Void",
+        "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.",
+    );
+    let day = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&aura)
+        .unwrap()
+        .attached_to = Some(land.into());
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&land)
+        .unwrap()
+        .attachments
+        .push(aura);
+    runner.state_mut().layers_dirty.mark_full();
+    let mut commit = runner.cast(day).commit();
+    for _ in 0..6 {
+        if matches!(
+            commit.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            break;
+        }
+        commit
+            .act(GameAction::PassPriority)
+            .expect("resolve Day of Judgment");
+    }
+    assert!(matches!(
+        commit.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    commit
+        .state()
+        .resolution_stack
+        .validate_at_rest(&commit.state().waiting_for)
+        .expect("the inner replacement choice is a valid public boundary");
+    let wire = serde_json::to_value(PersistedGameState::capture(commit.state().clone()))
+        .expect("the inner replacement choice serializes");
+    let mut restored = serde_json::from_value::<PersistedGameState>(wire)
+        .expect("the inner replacement choice decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+        .expect("the inner replacement choice prepares")
+        .finalize_immediately()
+        .expect("the inner replacement choice finalizes");
+    for _ in 0..8 {
+        if !matches!(restored.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+            break;
+        }
+        apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 0 })
+            .expect("answer the competing graveyard replacements");
+    }
+    assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
+    assert!(restored.stack.is_empty());
+    assert!(restored.resolution_stack.is_empty());
+}
+
 /// C9 (negatives): an empty mass population is a no-op with no synthetic
 /// events, while a singleton keeps the legacy path (already pinned by D9).
 #[test]

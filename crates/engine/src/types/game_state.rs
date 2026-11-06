@@ -7056,12 +7056,24 @@ impl PendingBatchDeliveries {
         if let Some(drains) = &member.approved_post_replacement {
             let approved = match member.state {
                 StagedBatchMemberState::Approved => true,
-                StagedBatchMemberState::OuterConsulting
-                | StagedBatchMemberState::InnerConsulting => {
+                StagedBatchMemberState::OuterConsulting => matches!(
+                    member.pending_outcome,
+                    Some(StagedMemberOutcome::Approved(_))
+                ),
+                // CR 616.1: an approved outer Destroy consult owns its rider
+                // while the independent inner zone-change choice is unresolved.
+                StagedBatchMemberState::InnerConsulting => {
                     matches!(
                         member.pending_outcome,
                         Some(StagedMemberOutcome::Approved(_))
-                    )
+                    ) || (member.pending_outcome.is_none()
+                        && matches!(
+                            member.operation,
+                            StagedMemberOperation::Destroy(StagedDestroyOperation {
+                                outer: StagedDestroyOuterApproval::Approved,
+                                ..
+                            })
+                        ))
                 }
                 StagedBatchMemberState::Unconsulted
                 | StagedBatchMemberState::PreventedWithChild
@@ -7654,10 +7666,9 @@ pub struct StagedBatchMember {
     pub approved_post_replacement: Option<PostReplacementDrainStack>,
 }
 
-/// The charter's current-member states. `OuterConsulting` is produced only by
-/// the later outer-event adapters; this stage never writes it, but the wire
-/// enum carries it now so extending the carriers does not change the saved
-/// enum a second time.
+/// The current-member consultation and delivery states. The Destroy adapter
+/// uses `OuterConsulting` for its destruction event before `InnerConsulting`
+/// consults the resulting zone move; ordinary zone moves use only the latter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StagedBatchMemberState {
     Unconsulted,
@@ -7685,11 +7696,13 @@ pub enum StagedMemberOutcome {
 }
 
 /// CR 401.4 + CR 101.4: one private owner/position arrangement group derived
-/// from final approvals. Only `Top` and `Bottom` are grouped; other positions
-/// stay on the ordinary per-member placement path.
+/// from final approvals. `Top`, `Bottom`, and domain-gated `NthFromTop`
+/// positions are grouped. Numbered groups exclude library-origin removals and
+/// competing grouped positions in that library; other positions stay on the
+/// ordinary per-member placement path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StagedLibraryArrangement {
-    /// Only `Top` and `Bottom` are grouped (see the phase scope note).
+    /// `Top`, `Bottom`, or `NthFromTop` admitted by `staged_arrangement_groups`.
     pub position: LibraryPosition,
     /// Reused vocabulary: `owner` is the library owner, `arranger: None`
     /// means CR 401.4 owner arranging, and `members` holds the final order for
@@ -53644,6 +53657,18 @@ mod tests {
                 assert!(PendingBatchDeliveries::validate_staged_member(&member).is_err());
                 member.pending_outcome = Some(StagedMemberOutcome::Prevented);
                 assert!(PendingBatchDeliveries::validate_staged_member(&member).is_err());
+                if member_state == StagedBatchMemberState::InnerConsulting {
+                    // CR 616.1: the outer Destroy consult can approve retained
+                    // work before the independent inner zone-change choice.
+                    member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
+                        source: ObjectId(999),
+                        cant_regenerate: false,
+                        outer: StagedDestroyOuterApproval::Approved,
+                    });
+                    member.pending_outcome = None;
+                    PendingBatchDeliveries::validate_staged_member(&member)
+                        .expect("outer-approved Destroy retains work during its inner choice");
+                }
             }
         }
         let mut member = cursor_member(1, StagedBatchMemberState::Approved, None, true);
