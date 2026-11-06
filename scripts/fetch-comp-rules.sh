@@ -32,9 +32,8 @@ source "$SCRIPT_DIR/lib/comp-rules-edition.sh"
 MODE=pinned
 FORCE=0
 OUTPUT=""
-# The EXIT trap deletes these; clear any value inherited from the
+# The EXIT trap deletes this; clear any value inherited from the
 # environment so it can only ever remove what this run created.
-TMP_DIR=""
 CR_CONVERT_TMP=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -96,18 +95,14 @@ if [ "$MODE" = pinned ]; then
     echo "$DEST is already the pinned edition ($PIN_EFFECTIVE)."
     exit 0
   fi
-  # Stage beside DEST so the final mv is a same-filesystem rename: a partial
-  # file can never appear at DEST.
-  mkdir -p "$(dirname "$DEST")"
-  TMP="$(mktemp "$DEST.tmp.XXXXXX")"
-else
-  # A private (0700) directory, so no other user can replace the download or
-  # its UTF-16 conversion file, even in a shared temp directory that lacks
-  # the sticky bit.
-  TMP_DIR="$(mktemp -d)"
-  TMP="$(mktemp "$TMP_DIR/MagicCompRules.XXXXXX")"
 fi
-trap 'rm -f "$TMP" "${CR_CONVERT_TMP:-}"; [ -z "${TMP_DIR:-}" ] || rm -rf "$TMP_DIR"' EXIT
+# Stage every download (and its UTF-16 conversion file) beside DEST, never in
+# a shared temp directory: the checkout belongs to this user, so no one else
+# can replace a staged file, and the pinned mv is a same-filesystem rename
+# that can never leave a partial file at DEST.
+mkdir -p "$(dirname "$DEST")"
+TMP="$(mktemp "$DEST.tmp.XXXXXX")"
+trap 'rm -f "$TMP" "${CR_CONVERT_TMP:-}"' EXIT
 # mktemp creates the file 0600; curl -o, mv and cp keep that mode, which would
 # leave the rules text unreadable to any other uid sharing the checkout.
 chmod 644 "$TMP"
