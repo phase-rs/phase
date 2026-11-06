@@ -7761,6 +7761,19 @@ impl TypedFilter {
             || !self.properties.is_empty()
     }
 
+    /// Whether best-effort target parsing retained no standalone selection constraint.
+    ///
+    /// CR 115.1a + CR 115.1c: a target phrase describes the affected object or
+    /// player. An empty filter or `Another` alone does not preserve that
+    /// description; the latter only excludes a relative referent. CR 115.4:
+    /// damage-target wording has its own domain, which this filter alone
+    /// cannot establish. Every other property remains a real constraint.
+    pub fn lacks_standalone_selection_constraint(&self) -> bool {
+        self.type_filters.is_empty()
+            && self.controller.is_none()
+            && matches!(self.properties.as_slice(), [] | [FilterProp::Another])
+    }
+
     pub fn normalized(mut self) -> Self {
         self.type_filters = normalized_type_filters(self.type_filters);
         self.properties = normalized_filter_props(self.properties);
@@ -43092,6 +43105,38 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn typed_filter_standalone_selection_constraint() {
+        for (filter, lacks_constraint) in [
+            (TypedFilter::default(), true),
+            (
+                TypedFilter::default().properties(vec![FilterProp::Another]),
+                true,
+            ),
+            (
+                TypedFilter::default()
+                    .properties(vec![FilterProp::Another, FilterProp::IsCommander]),
+                false,
+            ),
+            (
+                TypedFilter::default().properties(vec![FilterProp::IsCommander]),
+                false,
+            ),
+            (TypedFilter::default().controller(ControllerRef::You), false),
+            (TypedFilter::creature(), false),
+            (
+                TypedFilter::default().properties(vec![FilterProp::Another, FilterProp::Another]),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                filter.lacks_standalone_selection_constraint(),
+                lacks_constraint,
+                "{filter:?}"
+            );
+        }
+    }
 
     #[test]
     fn phase_out_context_union_extracts_no_new_target() {

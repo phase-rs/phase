@@ -11544,7 +11544,7 @@ fn parse_effect_clause_inner_with_damage_context(
             let (target, remainder) = parse_target_with_ctx(target_input, ctx);
             if remainder.trim().is_empty()
                 && !matches!(&target, TargetFilter::Typed(filter)
-                    if *filter == TypedFilter::default())
+                    if filter.lacks_standalone_selection_constraint())
             {
                 let mut clause = parsed_clause(Effect::TargetOnly { target });
                 clause.multi_target = Some(multi);

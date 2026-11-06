@@ -96978,6 +96978,48 @@ fn forge_of_heroes_property_only_commander_declaration() {
 }
 
 #[test]
+fn another_only_target_fragments_keep_unparsed_argument_gaps() {
+    for (name, oracle, keywords, types) in [
+        (
+            "Comet Storm",
+            "Multikicker {1} (You may pay an additional {1} any number of times as you cast this spell.)\nChoose any target, then choose another target for each time this spell was kicked. Comet Storm deals X damage to each of them.",
+            vec!["Multikicker"],
+            vec!["Instant"],
+        ),
+        (
+            "You, Iterative Playtester",
+            "{T}: Choose another target playtest card. Increase or decrease a number of your choice on it by 1 for as long as it remains on the stack or battlefield. (You can change numerals or number words.)\n{W}{U}{B}{R}{G}: Reveal the top eight cards of your library. Put each playtest card among them into your hand. Put the rest on the bottom of your library in a random order.",
+            vec![],
+            vec!["Creature"],
+        ),
+    ] {
+        let parsed = parse_card(oracle, name, &keywords, &types);
+        let mut definitions = Vec::new();
+        collect_parsed_roots(&parsed, true, &mut definitions);
+        assert!(
+            definitions.iter().any(|definition| matches!(
+                definition.effect.as_ref(),
+                Effect::Unimplemented { name, description }
+                    if name == "unparsed_verb_arguments"
+                        && description.as_deref().is_some_and(|text|
+                            text.to_lowercase().contains("choose another target"))
+            )),
+            "{name} must retain the unsupported target declaration: {parsed:#?}"
+        );
+        assert!(
+            !definitions.iter().any(|definition| matches!(
+                definition.effect.as_ref(),
+                Effect::TargetOnly { target: TargetFilter::Typed(filter) }
+                    if filter.type_filters.is_empty()
+                        && filter.controller.is_none()
+                        && filter.properties == [FilterProp::Another]
+            )),
+            "{name} must not invent an Another-only target slot: {parsed:#?}"
+        );
+    }
+}
+
+#[test]
 fn weeping_angel_owner_prevention_keeps_damaged_creature_anaphor() {
     let parsed = parse_card(
         "Flash\nFirst strike, vigilance\nWhenever an opponent casts a creature spell, this creature isn't a creature until end of turn.\nIf this creature would deal combat damage to a creature, prevent that damage and that creature's owner shuffles it into their library.",
