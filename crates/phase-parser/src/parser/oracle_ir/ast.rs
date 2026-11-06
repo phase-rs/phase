@@ -531,7 +531,9 @@ pub(crate) enum ContinuationAst {
     /// way into your graveyard" (Reviving Vapors) — the complement of a REVEAL
     /// instruction's selection, named separately from that instruction because
     /// an intervening clause uses the revealed card first ("You gain life equal
-    /// to that card's mana value").
+    /// to that card's mana value"). Bound only to a PROVED public reveal
+    /// (`Dig { reveal: true, .. }`): a private "look at" never publishes a
+    /// revealed population, so it cannot absorb this clause.
     ///
     /// Lowers to an explicit `ChangeZoneAll { origin: Library, target:
     /// LastRevealed }`: "the cards the preceding reveal revealed that are still

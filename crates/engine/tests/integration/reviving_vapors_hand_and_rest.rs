@@ -222,6 +222,11 @@ fn zimones_experiment_routes_the_selected_cards_by_type() {
     scenario
         .add_spell_to_hand_from_oracle(P0, "Zimone's Experiment", false, ZIMONES_EXPERIMENT)
         .with_mana_cost(ManaCost::generic(0));
+    // One untouched card beneath the looked-at five. It must finish ABOVE the
+    // remainder, which is what separates "the remainder was put on the bottom"
+    // from "the remainder never moved": a zone-only check cannot tell them
+    // apart.
+    let deeper = scenario.add_land_to_library_top(P0, "Island").id();
     // Four lands and one creature, so the selection and the remainder both hold
     // creature and/or land cards.
     let lands: Vec<ObjectId> = (0..4)
@@ -285,6 +290,34 @@ fn zimones_experiment_routes_the_selected_cards_by_type() {
             runner.state().objects[&land].zone,
             Zone::Library,
             "a land that was not revealed stays in the library"
+        );
+    }
+
+    // CR 401.4 + CR 608.2c: "put the rest on the bottom of your library" moves
+    // the unselected lands to the bottom. Assert their POSITION, not just their
+    // zone: each unselected land must have only unselected lands below it, and
+    // the untouched deeper card must sit above all of them.
+    let library: Vec<ObjectId> = runner.state().players[P0.0 as usize]
+        .library
+        .iter()
+        .copied()
+        .collect();
+    let deeper_position = library
+        .iter()
+        .position(|&id| id == deeper)
+        .unwrap_or_else(|| panic!("the untouched deeper card stays in the library: {library:?}"));
+    for &land in &lands[1..] {
+        let position = library
+            .iter()
+            .position(|&id| id == land)
+            .unwrap_or_else(|| panic!("the unselected land stays in the library: {library:?}"));
+        assert!(
+            deeper_position < position,
+            "the untouched deeper card must stay above the remainder: {library:?}"
+        );
+        assert!(
+            library[position..].iter().all(|id| lands[1..].contains(id)),
+            "each unselected land must sit at the bottom, below every non-remainder card: {library:?}"
         );
     }
 }

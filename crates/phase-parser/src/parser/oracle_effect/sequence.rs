@@ -789,45 +789,23 @@ pub(super) fn parse_revealed_remainder_clause(input: &str) -> Option<Continuatio
         })
 }
 
-/// CR 608.2c: The destination phrases a "the other cards revealed this way"
-/// clause can state. Only forms this engine fully understands are accepted.
+/// CR 608.2c: The destination a "the other cards revealed this way" clause
+/// states, read through the shared partition-destination grammar
+/// ([`parse_choice_partition_destination`]) so this path cannot drift from the
+/// engine's single authority for "into your graveyard" / "into their hand" /
+/// "on the bottom of ... library" spellings.
+///
+/// CR 400.5 + CR 401.4: a library remainder is accepted only with an explicit
+/// randomization instruction. An owner-ordered remainder needs an ordering
+/// prompt this instruction does not own, so it stays refused (the caller sees a
+/// parse miss) rather than silently kept in place.
 fn parse_revealed_remainder_destination(input: &str) -> OracleResult<'_, (Zone, DigRestOrder)> {
-    alt((
-        value(
-            (Zone::Graveyard, DigRestOrder::Preserve),
-            alt((
-                tag::<_, _, OracleError<'_>>(" into your graveyard"),
-                tag(" into their graveyard"),
-                tag(" into their owners' graveyards"),
-                tag(" into its owner's graveyard"),
-            )),
-        ),
-        value(
-            (Zone::Hand, DigRestOrder::Preserve),
-            alt((
-                tag::<_, _, OracleError<'_>>(" into your hand"),
-                tag(" into their hand"),
-                tag(" into its owner's hand"),
-            )),
-        ),
-        value(
-            (Zone::Exile, DigRestOrder::Preserve),
-            tag::<_, _, OracleError<'_>>(" into exile"),
-        ),
-        // CR 400.5 + CR 401.4: only an explicitly randomized library remainder
-        // is honored here; an owner-ordered one needs an ordering prompt this
-        // instruction does not own.
-        value(
-            (Zone::Library, DigRestOrder::Random),
-            alt((
-                tag::<_, _, OracleError<'_>>(" on the bottom of your library in a random order"),
-                tag(" on the bottom of their library in a random order"),
-                tag(" into your library in a random order"),
-                tag(" into their library in a random order"),
-            )),
-        ),
-    ))
-    .parse(input)
+    let (input, destination) = parse_choice_partition_destination(input)?;
+    if destination != Zone::Library {
+        return Ok((input, (destination, DigRestOrder::Preserve)));
+    }
+    let (input, _) = tag::<_, _, OracleError<'_>>(" in a random order").parse(input)?;
+    Ok((input, (Zone::Library, DigRestOrder::Random)))
 }
 
 /// Whole-line dig continuation "put the rest on the bottom of <owner's> library
@@ -869,6 +847,14 @@ pub(super) fn parse_choice_partition_destination(
     input: &str,
 ) -> Result<(&str, Zone), nom::Err<OracleError<'_>>> {
     alt((
+        // CR 400.3: "their owners' graveyards" is the plural-owner form of the
+        // same destination (Dance, Pathetic Marionette): each card goes to its
+        // own owner's graveyard. Its own arm keeps the plural noun from pairing
+        // with a singular possessive.
+        value(
+            Zone::Graveyard,
+            tag::<_, _, OracleError<'_>>(" into their owners' graveyards"),
+        ),
         preceded(
             (
                 tag::<_, _, OracleError<'_>>(" into "),
@@ -5912,31 +5898,34 @@ pub(super) fn apply_clause_continuation(
             rest_order,
         } => {
             // CR 701.20a: the clause says "revealed this way", so it names the
-            // population of a PUBLIC reveal instruction. A private "look at"
-            // antecedent never publishes a revealed population, so the
-            // reference would read an unrelated earlier reveal — fall back to
-            // the historical rest-destination patch instead of moving cards the
-            // clause never named.
-            let bound = env.resolve(
-                defs,
-                super::assembly::AntecedentSelector::LastWithRole(
-                    super::assembly::AntecedentRole::DigOrRevealUntil,
-                ),
-                None,
-                super::assembly::OnMiss::Ignore,
-            );
-            let public_reveal = bound.is_some_and(|index| {
-                matches!(&*defs[index].effect, Effect::Dig { reveal: true, .. })
-            });
+            // population of a PUBLIC reveal instruction. The binding step admits
+            // this continuation only for `Dig { reveal: true, .. }`, so a
+            // private "look at" can never absorb it — the clause keeps its
+            // written position instead of being folded in ahead of an
+            // intervening instruction (CR 608.2c). This arm re-checks the bound
+            // node against that contract and fails closed with an explicit gap
+            // rather than dropping the instruction or patching a look's rest
+            // destination.
+            let public_reveal = env
+                .resolve(
+                    defs,
+                    super::assembly::AntecedentSelector::LastWithRole(
+                        super::assembly::AntecedentRole::DigOrRevealUntil,
+                    ),
+                    None,
+                    super::assembly::OnMiss::Ignore,
+                )
+                .is_some_and(|index| {
+                    matches!(&*defs[index].effect, Effect::Dig { reveal: true, .. })
+                });
             if !public_reveal {
-                if let Some(index) = bound {
-                    patch_rest_destination_recursively(
-                        &mut defs[index],
-                        destination,
-                        false,
-                        rest_order,
-                    );
-                }
+                defs.push(AbilityDefinition::new(
+                    kind,
+                    Effect::unimplemented(
+                        "revealed_remainder_without_reveal",
+                        "all other cards revealed this way",
+                    ),
+                ));
                 return;
             }
             defs.push(AbilityDefinition::new(

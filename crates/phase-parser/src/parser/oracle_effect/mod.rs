@@ -50390,6 +50390,13 @@ fn parse_effect_chain_ir_body(
                     .replace_with_gap("search_result_condition");
                 break 'source_clause;
             }
+            // CR 701.20a: "revealed this way" names a PUBLIC reveal's
+            // population. When a remainder clause's only candidate antecedent is
+            // a private "look at", it cannot be bound; record the refusal so the
+            // clause is kept at its written position as an honest gap (below)
+            // instead of lowering to a tracked-set complement move that names
+            // cards no reveal published.
+            let mut revealed_remainder_without_public_reveal = false;
             let mut followup_continuation = effective_prev_effect
                 .as_ref()
                 .and_then(|eff| {
@@ -50474,9 +50481,9 @@ fn parse_effect_chain_ir_body(
                                 }
                             }
                             // CR 701.20a + CR 701.20e + CR 608.2c: the same
-                            // displacement applies to a REVEAL `Dig` whose
-                            // remainder is named after a clause that reads the
-                            // revealed card (Reviving Vapors' "You gain life
+                            // displacement applies to a PUBLIC reveal `Dig`
+                            // whose remainder is named after a clause that reads
+                            // the revealed card (Reviving Vapors' "You gain life
                             // equal to that card's mana value" before "Put all
                             // other cards revealed this way into your
                             // graveyard"). The remainder must state its
@@ -50484,13 +50491,30 @@ fn parse_effect_chain_ir_body(
                             // is never read off a later tracked-set move, so the
                             // Dig keeps its kept-pile publication for the
                             // downstream sub_abilities.
-                            // The antecedent's `reveal`/`destination` fields are
-                            // only settled by the continuation that lowers it
-                            // ("put one of them into your hand"), so the
-                            // public-reveal gate belongs to the lowering, where
-                            // the patched effect is in hand.
-                            Effect::Dig { .. } => {
+                            // CR 701.20a: "revealed this way" names the
+                            // population of a PUBLIC reveal; a private "look at"
+                            // never publishes one. A `reveal: false` Dig is not
+                            // an antecedent, so the clause keeps its written
+                            // position as an honest gap instead of being
+                            // absorbed into the look. Absorption would move the
+                            // remainder ahead of an intervening instruction
+                            // ("Draw a card") and change which card the draw
+                            // reaches, violating CR 608.2c's written order.
+                            Effect::Dig { reveal: true, .. } => {
                                 sequence::parse_revealed_remainder_clause(normalized_text)
+                            }
+                            // CR 701.20a: a private look never publishes a
+                            // revealed population, so it is not an antecedent
+                            // for "revealed this way". Refuse the clause rather
+                            // than patch the look's rest destination (which
+                            // would move the remainder ahead of an intervening
+                            // instruction) or bind it anywhere else.
+                            Effect::Dig { reveal: false, .. }
+                                if sequence::parse_revealed_remainder_clause(normalized_text)
+                                    .is_some() =>
+                            {
+                                revealed_remainder_without_public_reveal = true;
+                                None
                             }
                             _ => None,
                         })
@@ -50547,6 +50571,17 @@ fn parse_effect_chain_ir_body(
                 });
             if search_reveal_owners.is_some() {
                 followup_continuation = Some(ContinuationAst::SearchResultClauseHandled);
+            }
+            // CR 701.20a + CR 608.2c: the clause names a reveal remainder, but
+            // no public reveal antecedent was proved (only a private look). Keep
+            // it at its written position as an honest unsupported boundary —
+            // never absorbed into the look (which would reorder it) and never
+            // lowered to a move of cards no reveal published.
+            if revealed_remainder_without_public_reveal && followup_continuation.is_none() {
+                clause.effect = Effect::unimplemented(
+                    "revealed_remainder_without_public_reveal",
+                    normalized_text,
+                );
             }
             // CR 608.2c + CR 109.5: a reveal choice is the controller's only when the
             // consuming instruction addresses the controller ("you" / imperative).

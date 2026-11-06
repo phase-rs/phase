@@ -96488,6 +96488,68 @@ fn reviving_vapors_keeps_one_in_hand_and_puts_the_rest_into_the_graveyard() {
     }
 }
 
+/// CR 701.20a + CR 608.2c: "revealed this way" names a PUBLIC reveal's
+/// population, so a private "look at" cannot absorb the remainder clause. If it
+/// did, lowering would patch the look's rest destination and move those cards
+/// BEFORE the intervening "Draw a card" — the player would draw a different card
+/// than the written order gives.
+#[test]
+fn revealed_remainder_is_not_absorbed_into_a_private_look_across_a_draw() {
+    let def = parse_effect_chain(
+        "Look at the top three cards of your library. Put one of them into your hand. \
+         Draw a card. Put all other cards revealed this way into your graveyard.",
+        AbilityKind::Spell,
+    );
+    match &*def.effect {
+        Effect::Dig {
+            reveal,
+            rest_destination,
+            ..
+        } => {
+            assert!(!reveal, "the look is private: {:#?}", def.effect);
+            assert_eq!(
+                *rest_destination, None,
+                "the private look must not absorb the later remainder clause: {:#?}",
+                def.effect
+            );
+        }
+        other => panic!("expected the private look Dig head, got {other:#?}"),
+    }
+
+    // Walk the written chain: the look is followed by the draw, then by the
+    // remainder clause — unabsorbed, and an honest gap rather than a move of
+    // cards no reveal published.
+    let mut chain: Vec<&AbilityDefinition> = Vec::new();
+    let mut cursor = Some(&def);
+    while let Some(node) = cursor {
+        chain.push(node);
+        cursor = node.sub_ability.as_deref();
+    }
+    assert!(
+        matches!(
+            chain.get(1).map(|node| &*node.effect),
+            Some(Effect::Draw { .. })
+        ),
+        "the draw must follow the look in written order: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+    assert!(
+        matches!(
+            chain.get(2).map(|node| &*node.effect),
+            Some(Effect::Unimplemented { .. })
+        ),
+        "the refused remainder must survive after the draw as an honest gap: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+    assert!(
+        chain
+            .iter()
+            .all(|node| !matches!(&*node.effect, Effect::ChangeZoneAll { .. })),
+        "nothing may move the remainder as a tracked-set or revealed-set move: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+}
+
 /// CR 701.20a + CR 608.2c: the rest-pile clause of a reveal instruction claims
 /// only destinations it fully understands, and only an explicitly randomized
 /// library remainder (CR 401.4). Everything else is refused, not defaulted to a
@@ -96509,6 +96571,12 @@ fn revealed_remainder_destinations_are_explicit_or_refused() {
         (
             "Put all other cards revealed this way into your hand.",
             Zone::Hand,
+        ),
+        // CR 400.3: plural-owner graveyard form (Dance, Pathetic Marionette),
+        // read through the shared partition-destination grammar.
+        (
+            "Put all other cards revealed this way into their owners' graveyards.",
+            Zone::Graveyard,
         ),
         ("Exile all other cards revealed this way.", Zone::Exile),
         (
