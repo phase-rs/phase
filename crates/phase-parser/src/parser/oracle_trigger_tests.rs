@@ -27981,24 +27981,47 @@ fn trigger_singular_typed_counter_removed_sets_counter_filter() {
 // and an unmodelled subject tail instead of silently dropping text.
 #[test]
 fn trigger_counter_removed_passive_grammar_declines_malformed_forms() {
+    // Synthetic: no printed card has a quantifier/noun number mismatch; nearest printed: Protean Hydra ("Whenever a +1/+1 counter is removed from this creature").
     let agreement = parse_trigger_line(
         "Whenever a loyalty counters is removed from ~, you gain 1 life.",
         "Test Walker",
     );
     assert_ne!(agreement.mode, TriggerMode::CounterRemoved);
 
+    // Synthetic: no printed card has this tail; the printed unmodelled tail is Magma Pummeler's reflexive "this way" (CR 603.12), asserted below.
     let tail = parse_trigger_line(
         "Whenever a time counter is removed from ~ during your upkeep, you gain 1 life.",
         "Test Card",
     );
     assert_ne!(tail.mode, TriggerMode::CounterRemoved);
 
-    // Reach guard: the same frame without the malformed part parses.
+    // Synthetic same-frame reach guard.
     let control = parse_trigger_line(
         "Whenever a time counter is removed from ~, you gain 1 life.",
         "Test Card",
     );
     assert_eq!(control.mode, TriggerMode::CounterRemoved);
+
+    // Printed negative: Magma Pummeler's reflexive "removed from this creature
+    // this way" (CR 603.12) is not a top-level counter-removal trigger.
+    let pummeler = parse_trigger_line(
+        "When one or more counters are removed from this creature this way, it deals that much damage to any target.",
+        "Magma Pummeler",
+    );
+    assert_ne!(pummeler.mode, TriggerMode::CounterRemoved);
+
+    // Printed positive: Dinosaurs on a Spaceship's singular exiled-card form.
+    let dinosaurs = parse_trigger_line(
+        "Whenever a time counter is removed from this card while it's exiled, create a 2/2 red and white Dinosaur creature token with flying and haste.",
+        "Dinosaurs on a Spaceship",
+    );
+    assert_eq!(dinosaurs.mode, TriggerMode::CounterRemoved);
+    assert_eq!(
+        dinosaurs.counter_filter,
+        typed_counter_filter(CounterType::Time)
+    );
+    assert_eq!(dinosaurs.trigger_zones, vec![Zone::Exile]);
+    assert!(!dinosaurs.batched);
 }
 
 fn last_counter_filter(
@@ -28057,26 +28080,28 @@ fn trigger_last_typed_counter_removed_sets_zero_threshold() {
 // and a fully consumed subject; each malformed form declines.
 #[test]
 fn trigger_last_counter_removed_declines_malformed_forms() {
+    // Synthetic: no printed "the last counter" without a kind; nearest printed: Orcish Mine ("the last ore counter").
     let untyped = parse_trigger_line(
         "When the last counter is removed from ~, you gain 1 life.",
         "Test Card",
     );
     assert_ne!(untyped.mode, TriggerMode::CounterRemoved);
 
+    // Synthetic: no printed plural "the last ... counters are removed"; nearest printed: Riftmarked Knight.
     let plural = parse_trigger_line(
         "When the last time counters are removed from ~, you gain 1 life.",
         "Test Card",
     );
     assert_ne!(plural.mode, TriggerMode::CounterRemoved);
 
+    // Synthetic tail; the printed unmodelled shape is Seer of the Bright Side's "removed this way", asserted below.
     let tail = parse_trigger_line(
         "When the last time counter is removed from ~ during your upkeep, you gain 1 life.",
         "Test Card",
     );
     assert_ne!(tail.mode, TriggerMode::CounterRemoved);
 
-    // Reach guard: the same frame with a kind, a singular noun, and no tail
-    // parses with the zero threshold.
+    // Synthetic same-frame reach guard.
     let control = parse_trigger_line(
         "When the last time counter is removed from ~, you gain 1 life.",
         "Test Card",
@@ -28086,13 +28111,36 @@ fn trigger_last_counter_removed_declines_malformed_forms() {
         control.counter_filter,
         last_counter_filter(CounterType::Time)
     );
+
+    // Printed negative: Seer of the Bright Side's reflexive "removed this way"
+    // (CR 603.12) is not a top-level counter-removal trigger.
+    let seer = parse_trigger_line(
+        "When the last cage counter is removed this way, destroy target creature an opponent controls.",
+        "Seer of the Bright Side",
+    );
+    assert_ne!(seer.mode, TriggerMode::CounterRemoved);
+
+    // Printed positive: Riftmarked Knight's exiled-card "the last" form.
+    let knight = parse_trigger_line(
+        "When the last time counter is removed from this card while it's exiled, create a 2/2 black Knight creature token with flanking, protection from white, and haste.",
+        "Riftmarked Knight",
+    );
+    assert_eq!(knight.mode, TriggerMode::CounterRemoved);
+    assert_eq!(
+        knight.counter_filter,
+        last_counter_filter(CounterType::Time)
+    );
+    assert_eq!(knight.trigger_zones, vec![Zone::Exile]);
+    assert!(!knight.batched);
 }
 
-// CR 603.2c: `lower_trigger_ir` re-gates the batched flag on the lowered
-// effect — a typed effect keeps it (Regenerations Restored's scry/gain-life
-// chain), an `Unimplemented` effect drops it.
+// CR 603.2c: for `CounterRemoved`, `batched` is the phrasing's granularity and
+// `lower_trigger_ir` never re-gates it — a typed effect (Regenerations
+// Restored's scry/gain-life chain) and an `Unimplemented` effect both keep it.
+// The `CounterAdded` re-gate is unchanged: an `Unimplemented` "one or more
+// counters are put" trigger is still forced non-batched (control below).
 #[test]
-fn trigger_one_or_more_counters_removed_batched_regate() {
+fn trigger_one_or_more_counters_removed_batched_survives_unimplemented_effect() {
     let restored = parse_trigger_line(
         "Whenever one or more time counters are removed from this enchantment, scry 1 and you gain 1 life. Then if this enchantment has no time counters on it, exile it. When you do, take an extra turn after this one.",
         "Regenerations Restored",
@@ -28110,6 +28158,7 @@ fn trigger_one_or_more_counters_removed_batched_regate() {
     assert!(!matches!(*execute.effect, Effect::Unimplemented { .. }));
     assert!(restored.batched);
 
+    // Synthetic: every printed "one or more ... counters are removed" card (Chandra, Cloudsculpt Armorer, Regenerations Restored) lowers a typed effect; nearest printed: Regenerations Restored (above).
     let unsupported = parse_trigger_line(
         "Whenever one or more time counters are removed from ~, florble the zorbit.",
         "Test Card",
@@ -28123,7 +28172,61 @@ fn trigger_one_or_more_counters_removed_batched_regate() {
         matches!(*execute.effect, Effect::Unimplemented { .. }),
         "reach guard: the effect must be unimplemented: {execute:?}"
     );
-    assert!(!unsupported.batched);
+    assert!(
+        unsupported.batched,
+        "the removal phrasing flag survives an Unimplemented effect"
+    );
+
+    // Synthetic: nearest printed: Bold Plagiarist / Captain Marvel, Apex Avenger.
+    let added = parse_trigger_line(
+        "Whenever one or more counters are put on ~, florble the zorbit.",
+        "Test Card",
+    );
+    assert_eq!(added.mode, TriggerMode::CounterAdded);
+    let execute = added.execute.as_ref().expect("the trigger has an effect");
+    assert!(
+        matches!(*execute.effect, Effect::Unimplemented { .. }),
+        "reach guard: the effect must be unimplemented: {execute:?}"
+    );
+    assert!(
+        !added.batched,
+        "the CounterAdded re-gate still drops batched for an Unimplemented effect"
+    );
+}
+
+// CR 603.2c + CR 122.1: the active "you remove ..." arm pairs each quantifier
+// with its own noun and sets `batched` from the quantifier: "one or more
+// counters" fires once per recipient per batch, "a [type] counter" once per
+// counter removed.
+// Synthetic: no printed card has a top-level "whenever you remove ... counter(s) from <subject>" trigger; nearest printed: Watcher of Hours (with an unmodelled exile tail, out of scope) and Immard's reflexive "When you remove a counter this way".
+#[test]
+fn trigger_active_counter_removed_quantifier_pairs_noun_and_sets_batched() {
+    let one_or_more = parse_trigger_line(
+        "Whenever you remove one or more counters from ~, you gain 1 life.",
+        "Test Card",
+    );
+    assert_eq!(one_or_more.mode, TriggerMode::CounterRemoved);
+    assert!(one_or_more.batched);
+    assert_eq!(one_or_more.counter_filter, None);
+
+    let singular = parse_trigger_line(
+        "Whenever you remove a +1/+1 counter from ~, you gain 1 life.",
+        "Test Card",
+    );
+    assert_eq!(singular.mode, TriggerMode::CounterRemoved);
+    assert!(!singular.batched);
+    assert_eq!(
+        singular.counter_filter,
+        typed_counter_filter(CounterType::Plus1Plus1)
+    );
+
+    // Pairing: a singular quantifier with a plural noun declines (reach guard:
+    // the two positive rows above parse through the same arm).
+    let mismatch = parse_trigger_line(
+        "Whenever you remove a counters from ~, you gain 1 life.",
+        "Test Card",
+    );
+    assert_ne!(mismatch.mode, TriggerMode::CounterRemoved);
 }
 
 // -----------------------------------------------------------------------

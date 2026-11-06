@@ -1560,7 +1560,11 @@ fn attack_fires_per_defending_player(trig_def: &TriggerDefinition) -> bool {
 /// "one or more counters on a <singular recipient>" form (set by
 /// `try_parse_counter_trigger`, re-gated off for still-`Unimplemented` effects by
 /// `lower_trigger_ir`); the removal mirror is "one or more [type] counters are
-/// removed from <subject>" (`try_parse_counter_removed`, same re-gate). Under
+/// removed from <subject>" (`try_parse_counter_removed`). The removal flag is
+/// never re-gated: it always states the phrasing's granularity, and the
+/// non-batched removal forms either split per counter
+/// (`counter_removal_fires_per_counter`) or fold once per batch
+/// (`counter_removal_threshold_fires_once_per_recipient`). Under
 /// CR 603.2c a single event that places counters on
 /// several recipients "contains multiple occurrences", so the ability triggers
 /// once for EACH recipient — while a multi-KIND placement on ONE recipient folds
@@ -1586,6 +1590,41 @@ fn counter_event_fires_per_recipient(trig_def: &TriggerDefinition) -> bool {
             trig_def.mode,
             TriggerMode::CounterAdded | TriggerMode::CounterRemoved
         )
+}
+
+/// CR 603.2c + CR 122.1: a singular "Whenever a [type] counter is removed from
+/// <subject>" trigger fires once for EACH counter removed. One removal event
+/// that removes N counters contains N occurrences (Protean Hydra ruling: "If
+/// multiple +1/+1 counters are removed from Protean Hydra at once, its last
+/// ability will trigger that many times").
+///
+/// Excludes the batched "one or more" form (one firing per recipient, see
+/// `counter_event_fires_per_recipient`) and the thresholded "the last [type]
+/// counter" form (`counter_removal_threshold_fires_once_per_recipient`).
+/// `TriggerMode::CounterRemovedOnce` is a different mode and never reaches here.
+fn counter_removal_fires_per_counter(trig_def: &TriggerDefinition) -> bool {
+    trig_def.mode == TriggerMode::CounterRemoved
+        && !trig_def.batched
+        && trig_def
+            .counter_filter
+            .as_ref()
+            .is_none_or(|filter| filter.threshold.is_none())
+}
+
+/// CR 603.2c + CR 122.1 + CR 310.12b: "When the last [type] counter is removed from <subject>" (`threshold: Some(0)`)
+/// is one occurrence per recipient per simultaneous batch: several removal events that together leave none of that
+/// kind (two attackers' combat damage to one Siege, CR 510.2) remove "the last" counter once. Like
+/// `damage_received_aggregates_whole_event`, the definition stays `batched: false` (no subject count) but fires once
+/// per batch (`fires_once_per_batch`).
+/// Known limit (no printed producer): one resolution that drops a kind to 0, re-adds it and removes it again fires
+/// once (and one that drops to 0 then re-adds fires zero times), because the matcher reads the live count after the batch.
+fn counter_removal_threshold_fires_once_per_recipient(trig_def: &TriggerDefinition) -> bool {
+    trig_def.mode == TriggerMode::CounterRemoved
+        && !trig_def.batched
+        && trig_def
+            .counter_filter
+            .as_ref()
+            .is_some_and(|filter| filter.threshold == Some(0))
 }
 
 /// CR 603.2c: a "one or more … deal damage to a player" trigger fires once for
@@ -1787,8 +1826,17 @@ fn matching_damage_received_whole_event_events(
 /// SUBJECT HEADCOUNT and outranks the event amount in the `EventContextAmount`
 /// cascade (`game/quantity.rs`). Setting `trig_def.batched = true` here would
 /// fix the dedup and simultaneously corrupt "that much".
+///
+/// CR 603.2c + CR 310.12b: the second non-batched member is the "the last
+/// [type] counter is removed" class
+/// (`counter_removal_threshold_fires_once_per_recipient`): several removal
+/// events in one batch that together leave none of that kind remove "the
+/// last" counter once, so it shares the once-per-batch dedup while
+/// `subject_match_count` stays `None`.
 fn fires_once_per_batch(trig_def: &TriggerDefinition) -> bool {
-    trig_def.batched || damage_received_aggregates_whole_event(trig_def)
+    trig_def.batched
+        || damage_received_aggregates_whole_event(trig_def)
+        || counter_removal_threshold_fires_once_per_recipient(trig_def)
 }
 
 /// CR 508.1 + CR 603.2: Split an attack declaration into the singleton event
@@ -1850,7 +1898,9 @@ pub(super) fn declaration_records_for_attackers(
 /// (`collect_triggers_for_event`) and multi-fire delayed triggers
 /// (`collect_matching_delayed_triggers`), so a trigger fires the same number of
 /// times whether it is printed or created by an effect. Batched ("one or more")
-/// triggers are decided before this is consulted, by both callers.
+/// triggers are decided before this is consulted, by both callers. A singular
+/// counter-removal trigger fans one removal of N counters out into N
+/// single-counter occurrences.
 fn occurrence_trigger_events(
     event: &GameEvent,
     trig_def: &TriggerDefinition,
@@ -1927,6 +1977,11 @@ fn occurrence_trigger_events(
             .into_iter()
             .collect(),
         ),
+        // CR 603.2c + CR 122.1: one removal event of N counters contains N
+        // occurrences of a singular "a [type] counter is removed" trigger.
+        TriggerMode::CounterRemoved if counter_removal_fires_per_counter(trig_def) => {
+            Some(split_counter_removed_per_counter(event))
+        }
         _ if m::listens_on_aggregate_combat_damage_done(trig_def)
             && matches!(event, GameEvent::CombatDamageDealtToPlayer { .. }) =>
         {
@@ -2004,12 +2059,15 @@ impl FiringGroup {
 /// (`collect_matching_delayed_triggers`), so the same trigger fires the same
 /// number of times, with the same narrowed contexts, whichever way it exists.
 ///
-/// The shapes, in precedence order: per-recipient counters, the whole-event
-/// received-damage fold, per-player-recipient damage, per-attacked-player
-/// attack batches ("one or more creatures attack <player>"), batched ("one or
-/// more") subjects, the per-occurrence fan-out, the event-source force-block
-/// singleton fallback, and the single event. The first five read the whole
-/// batch, so a caller asks for them once per batch (`fires_once_per_batch`).
+/// The shapes, in precedence order: per-recipient counters (the batched "one
+/// or more" counter forms and the "the last [type] counter is removed" form),
+/// the whole-event received-damage fold, per-player-recipient damage,
+/// per-attacked-player attack batches ("one or more creatures attack
+/// <player>"), batched ("one or more") subjects, the per-occurrence fan-out
+/// (including the per-counter split of a singular counter-removal trigger),
+/// the event-source force-block singleton fallback, and the single event. The
+/// first five read the whole batch, so a caller asks for them once per batch
+/// (`fires_once_per_batch`).
 ///
 /// Conditions are checked where the printed path always checked them: on the
 /// raw event before expansion (except for `Attacks`-mode triggers, whose
@@ -2045,12 +2103,18 @@ fn trigger_firing_groups(
     let indexed_groups = |groups: Vec<Vec<(usize, GameEvent)>>| -> Vec<FiringGroup> {
         groups.into_iter().map(FiringGroup::from_indexed).collect()
     };
-    let groups = if counter_event_fires_per_recipient(trig_def) {
+    let groups = if counter_event_fires_per_recipient(trig_def)
+        || counter_removal_threshold_fires_once_per_recipient(trig_def)
+    {
         // CR 603.2c: the "one or more counters on a <singular recipient>"
         // class fires once per recipient object, folding that recipient's
         // whole kind-multiset into one firing. A class-level property of the
         // trigger phrasing (see `counter_event_fires_per_recipient`), not of
-        // the effect leaf.
+        // the effect leaf. CR 310.12b: "the last [type] counter is removed"
+        // joins it, so several removal events that together empty one
+        // recipient fire once; the matcher's live `== 0` gate is the same for
+        // every candidate in the batch, so per-candidate matching + fold is
+        // exact.
         let recipients = matching_counter_added_events_by_recipient(
             state,
             event_batch,
@@ -2198,6 +2262,28 @@ fn split_attack_event_into_singletons(event: &GameEvent) -> Option<Vec<GameEvent
         matching_attacks,
         declaration_records_for_attackers(event, &matching_attackers),
     ))
+}
+
+/// CR 603.2c + CR 122.1: split one `CounterRemoved { count: N }` into N
+/// single-counter occurrences, one per counter removed, for the singular
+/// removal trigger class (`counter_removal_fires_per_counter`). Any other event
+/// passes through unchanged.
+fn split_counter_removed_per_counter(event: &GameEvent) -> Vec<GameEvent> {
+    let GameEvent::CounterRemoved {
+        object_id,
+        counter_type,
+        count,
+    } = event
+    else {
+        return vec![event.clone()];
+    };
+    (0..*count)
+        .map(|_| GameEvent::CounterRemoved {
+            object_id: *object_id,
+            counter_type: counter_type.clone(),
+            count: 1,
+        })
+        .collect()
 }
 
 fn contextual_batched_trigger_event(
@@ -3674,14 +3760,19 @@ fn collect_matching_triggers_inner(
                     // is deliberately NOT `trig_def.batched`, which additionally
                     // means "count subjects" — see `fires_once_per_batch`.
                     //
-                    // WIDENING THIS FIELD TOUCHES EIGHT CONSUMERS, not just the
-                    // `batched_this_pass` inserts: those five inserts, the
-                    // `RecordBatchedZoneChanges` gate, the batched zone-change
-                    // replay recorder, and the `debug_assert!(!matched.batched)`
-                    // on the settlement path. The two zone-change consumers are
-                    // additionally gated on `batched_zone_change_batch`, which is
-                    // false for a `DamageDealt` batch, so all eight are safe for
-                    // this axis today — but re-check every one before widening.
+                    // Widening this field touches every `matched.batched`
+                    // reader, i.e. each `batched_this_pass.insert` gated on it,
+                    // the `RecordBatchedZoneChanges` gate in `record_match`,
+                    // `record_matched_batched_zone_change_replay`, and the
+                    // settlement `debug_assert!`; regenerate with
+                    // `grep -n "matched.batched" triggers.rs`. The two
+                    // zone-change consumers are additionally gated on
+                    // `batched_zone_change_batch`, which is false for a
+                    // `DamageDealt` batch and for a `CounterRemoved` batch, and
+                    // segments/settlement are `ZoneChanged`-only, so both
+                    // audited axes (whole-event damage and the threshold-0
+                    // "the last [type] counter is removed" class) are safe
+                    // today — but re-check every reader before widening.
                     batched: fires_once_per_batch(trig_def),
                     constraint: trig_def.constraint.clone(),
                 });

@@ -345,7 +345,7 @@ fn run_state_based_actions(
             }
 
             // CR 704.5q: +1/+1 and -1/-1 counters on the same permanent cancel in pairs.
-            check_counter_cancellation(state, &mut any_performed, &battlefield_snapshot);
+            check_counter_cancellation(state, events, &mut any_performed, &battlefield_snapshot);
         }
 
         // CR 704.5d: Tokens in zones other than the battlefield cease to exist.
@@ -2413,13 +2413,20 @@ fn check_saga_sacrifice(
 /// only one type remains.
 /// CR 702.26b: Phased-out permanents are treated as though they don't exist;
 /// their counters aren't touched by this SBA.
+///
+/// The removal goes through `apply_counter_removal`, the single counter-removal
+/// authority: it journals the edit, prunes zero entries, marks the layers dirty
+/// (P/T counters, CR 613.4c), retires "for as long as it has a +1/+1 counter"
+/// durations (CR 611.2b), and emits one `CounterRemoved` event per kind so
+/// counter-removal triggers see the annihilation (Protean Hydra ruling).
 fn check_counter_cancellation(
     state: &mut GameState,
+    events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
     battlefield_snapshot: &[ObjectId],
 ) {
     for &obj_id in battlefield_snapshot {
-        let Some(obj) = live_battlefield_object_mut(state, &obj_id) else {
+        let Some(obj) = live_battlefield_object(state, &obj_id) else {
             continue;
         };
         let p1p1 = obj
@@ -2435,12 +2442,23 @@ fn check_counter_cancellation(
         let cancel = p1p1.min(m1m1);
         if cancel > 0 {
             // CR 704.5q: Remove N of each where N = min(+1/+1, -1/-1)
-            obj.counters.insert(CounterType::Plus1Plus1, p1p1 - cancel);
-            obj.counters
-                .insert(CounterType::Minus1Minus1, m1m1 - cancel);
-            obj.counters.retain(|_, v| *v > 0);
-            state.layers_dirty.mark_full(); // P/T affected via Layer 7d
-            *any_performed = true;
+            let removed_p1p1 = crate::game::effects::counters::apply_counter_removal(
+                state,
+                obj_id,
+                CounterType::Plus1Plus1,
+                cancel,
+                events,
+            );
+            let removed_m1m1 = crate::game::effects::counters::apply_counter_removal(
+                state,
+                obj_id,
+                CounterType::Minus1Minus1,
+                cancel,
+                events,
+            );
+            if removed_p1p1 > 0 || removed_m1m1 > 0 {
+                *any_performed = true;
+            }
         }
     }
 }
@@ -5907,6 +5925,52 @@ mod tests {
             0,
             "Should have 0 -1/-1 counters remaining"
         );
+    }
+
+    /// CR 704.5q: the annihilation goes through the counter-removal authority,
+    /// so it emits exactly one `CounterRemoved` per kind, each carrying the
+    /// cancelled amount N = min(+1/+1, -1/-1). Discriminator: before the SBA
+    /// routed through `apply_counter_removal` it emitted no event.
+    #[test]
+    fn counter_cancellation_emits_one_removal_event_per_kind() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.counters.insert(CounterType::Plus1Plus1, 3);
+        obj.counters.insert(CounterType::Minus1Minus1, 2);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // Reach guard: the SBA annihilated the pairs.
+        let obj = state.objects.get(&id).unwrap();
+        assert_eq!(obj.counters.get(&CounterType::Plus1Plus1).copied(), Some(1));
+        assert!(!obj.counters.contains_key(&CounterType::Minus1Minus1));
+
+        let removals_of = |kind: CounterType| -> Vec<u32> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::CounterRemoved {
+                        object_id,
+                        counter_type,
+                        count,
+                    } if *object_id == id && *counter_type == kind => Some(*count),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(removals_of(CounterType::Plus1Plus1), vec![2]);
+        assert_eq!(removals_of(CounterType::Minus1Minus1), vec![2]);
     }
 
     #[test]

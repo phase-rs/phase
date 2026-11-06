@@ -13,6 +13,17 @@
 //! removed, her first ability has her deal damage even though she's left the
 //! battlefield.").
 //!
+//! CR 603.2c + CR 122.1: a singular "Whenever a [type] counter is removed"
+//! trigger fires once for EACH counter removed — one removal event of N
+//! counters contains N occurrences (Protean Hydra ruling: "If multiple +1/+1
+//! counters are removed from Protean Hydra at once, its last ability will
+//! trigger that many times."). CR 704.5q: the +1/+1 / -1/-1 annihilation
+//! state-based action removes counters through the counter-removal authority,
+//! so it emits `CounterRemoved` events and these triggers see it (Protean Hydra
+//! ruling: "that -1/-1 counter and a +1/+1 counter will be removed from it as a
+//! state-based action. This will cause Protean Hydra's last ability to
+//! trigger.").
+//!
 //! Note (code reading, no test): `apply_counter_removal` pushes no
 //! `CounterRemoved` event when a replacement leaves nothing to remove, so a
 //! fully prevented removal never reaches these triggers.
@@ -380,9 +391,10 @@ fn hexmage_remove_all_counters(
     events
 }
 
-/// Row 5: the singular typed form fires only for its named counter kind. A
-/// shield counter removed from Protean Hydra does not trigger it; a +1/+1
-/// counter removed in the same way does.
+/// Row 5: the singular typed form fires only for its named counter kind, once
+/// per counter of that kind removed (CR 603.2c). A shield counter removed from
+/// Protean Hydra does not trigger it; two +1/+1 counters removed in the same
+/// way trigger it twice.
 #[test]
 fn singular_typed_removal_trigger_fires_only_for_its_kind() {
     // Negative: only a shield counter is removed.
@@ -396,6 +408,7 @@ fn singular_typed_removal_trigger_fires_only_for_its_kind() {
     scenario.with_counter(hydra, CounterType::Shield, 1);
     let mut runner = scenario.build();
     let events = hexmage_remove_all_counters(&mut runner, hexmage, hydra);
+    drain_order_triggers_with_identity(runner.state_mut());
     assert!(
         counter_removed_from(&events, hydra),
         "reach guard: the shield counter was removed from the Hydra"
@@ -417,11 +430,209 @@ fn singular_typed_removal_trigger_fires_only_for_its_kind() {
     scenario.with_counter(hydra, CounterType::Plus1Plus1, 2);
     let mut runner = scenario.build();
     let events = hexmage_remove_all_counters(&mut runner, hexmage, hydra);
+    drain_order_triggers_with_identity(runner.state_mut());
     assert!(counter_removed_from(&events, hydra));
     assert_eq!(
         triggers_from(&runner, hydra).len(),
-        1,
-        "the +1/+1 removal triggers the Hydra (the shield removal does not)"
+        2,
+        "each of the two +1/+1 counters removed triggers the Hydra (the shield removal does not)"
+    );
+}
+
+fn plus_one_counters(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Build a P0 Protean Hydra with `counters` +1/+1 counters and Lightning Bolt
+/// in P0's hand, cast Bolt at the Hydra and pass priority until Bolt has left
+/// the stack, then place any triggers (identity order) without passing
+/// priority. Returns the runner, the Hydra and the collected events.
+fn bolt_protean_hydra(counters: u32) -> (GameRunner, ObjectId, Vec<GameEvent>) {
+    let mut scenario = main_phase();
+    let hydra = scenario
+        .add_creature_from_oracle(P0, "Protean Hydra", 0, 1, PROTEAN_HYDRA)
+        .id();
+    scenario.with_counter(hydra, CounterType::Plus1Plus1, counters);
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, LIGHTNING_BOLT)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(bolt).target_object(hydra).commit();
+    let mut events = Vec::new();
+    pass_until(&mut runner, &mut events, |r| {
+        !r.state().stack.iter().any(|entry| entry.source_id == bolt)
+    });
+    drain_order_triggers_with_identity(runner.state_mut());
+    (runner, hydra, events)
+}
+
+/// Pass priority through the rest of the turn (no attackers, no blockers,
+/// identity trigger order) until `done` holds.
+fn drive_turn_until(
+    runner: &mut GameRunner,
+    events: &mut Vec<GameEvent>,
+    done: impl Fn(&GameRunner) -> bool,
+) {
+    for _ in 0..200 {
+        if done(runner) {
+            return;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => act(runner, GameAction::PassPriority, events),
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                let result = runner
+                    .declare_attackers(&[])
+                    .expect("an empty attack declaration must be accepted");
+                events.extend(result.events);
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                let result = runner
+                    .declare_blockers(&[])
+                    .expect("no-block declaration must be accepted");
+                events.extend(result.events);
+            }
+            other => panic!("turn driver stopped at an unexpected prompt: {other:?}"),
+        }
+    }
+    panic!("turn driver never reached its goal");
+}
+
+/// Row 8 (U4 discriminator): Protean Hydra's own prevention removes three
+/// +1/+1 counters in ONE removal event, and its singular trigger fires once
+/// per counter removed (CR 603.2c; ruling: "If multiple +1/+1 counters are
+/// removed from Protean Hydra at once, its last ability will trigger that many
+/// times."). The damage is prevented (CR 615.1), so none is marked. Each
+/// firing puts two +1/+1 counters on it at the next end step: 5 - 3 + 6 = 8.
+/// Sibling: with only 2 counters, Bolt's 3 removes both (ruling: "all the
+/// +1/+1 counters on Protean Hydra are removed from it"), firing twice, and
+/// the damage is still fully prevented.
+#[test]
+fn singular_removal_trigger_fires_once_per_counter_removed_by_damage_prevention() {
+    let (mut runner, hydra, mut events) = bolt_protean_hydra(5);
+    // Reach guards: the prevention replacement removed counters, no damage.
+    assert!(
+        counter_removed_from(&events, hydra),
+        "reach guard: the prevention removed +1/+1 counters from the Hydra"
+    );
+    assert_eq!(plus_one_counters(&runner, hydra), 2, "reach guard: 5 - 3");
+    assert_eq!(
+        runner.state().objects[&hydra].damage_marked,
+        0,
+        "reach guard: the damage was prevented"
+    );
+    // Discriminator: one trigger per counter removed.
+    assert_eq!(
+        triggers_from(&runner, hydra).len(),
+        3,
+        "three +1/+1 counters removed at once trigger the Hydra three times"
+    );
+
+    pass_until(&mut runner, &mut events, |r| r.state().stack.is_empty());
+    assert!(runner.state().stack.is_empty());
+    drive_turn_until(&mut runner, &mut events, |r| {
+        r.state().phase == Phase::End
+            && r.state().stack.is_empty()
+            && r.state().delayed_triggers.is_empty()
+    });
+    assert_eq!(
+        plus_one_counters(&runner, hydra),
+        8,
+        "three delayed triggers each put two +1/+1 counters on it: 2 + 6"
+    );
+
+    // Sibling: fewer counters than damage removes them all.
+    let (runner, hydra, events) = bolt_protean_hydra(2);
+    assert!(counter_removed_from(&events, hydra));
+    assert_eq!(
+        plus_one_counters(&runner, hydra),
+        0,
+        "all the +1/+1 counters are removed"
+    );
+    assert_eq!(
+        runner.state().objects[&hydra].damage_marked,
+        0,
+        "the damage is still fully prevented"
+    );
+    assert_eq!(
+        triggers_from(&runner, hydra).len(),
+        2,
+        "two +1/+1 counters removed trigger the Hydra twice"
+    );
+}
+
+/// Row 9 (U7 discriminator): CR 704.5q annihilates 2 +1/+1 and 2 -1/-1
+/// counters on Protean Hydra (3 and 2 before). The removal goes through the
+/// counter-removal authority, so the Hydra's typed +1/+1 trigger fires once per
+/// +1/+1 counter removed (2); the -1/-1 removals do not match it. The
+/// `with_counter` setup is the CR 704.5q precondition, not a shortcut around
+/// the producer under test (the SBA).
+#[test]
+fn annihilation_removing_two_plus_one_counters_triggers_the_hydra_twice() {
+    let mut scenario = main_phase();
+    let hydra = scenario
+        .add_creature_from_oracle(P0, "Protean Hydra", 0, 1, PROTEAN_HYDRA)
+        .id();
+    scenario.with_counter(hydra, CounterType::Plus1Plus1, 3);
+    scenario.with_counter(hydra, CounterType::Minus1Minus1, 2);
+    let mut runner = scenario.build();
+
+    // The SBA sweep runs before P1 receives priority.
+    let mut events = Vec::new();
+    act(&mut runner, GameAction::PassPriority, &mut events);
+    drain_order_triggers_with_identity(runner.state_mut());
+
+    // Reach guards: CR 704.5q ran.
+    assert_eq!(plus_one_counters(&runner, hydra), 1, "reach guard: 3 - 2");
+    assert!(
+        !runner.state().objects[&hydra]
+            .counters
+            .contains_key(&CounterType::Minus1Minus1),
+        "reach guard: every -1/-1 counter was annihilated"
+    );
+    assert_eq!(
+        triggers_from(&runner, hydra).len(),
+        2,
+        "two +1/+1 counters annihilated trigger the Hydra twice"
+    );
+}
+
+/// Row 10 (U7): CR 704.5q on a permanent P0 controls removes one +1/+1 and one
+/// -1/-1 counter: two removal events on one recipient in one batch, so
+/// Cloudsculpt Armorer's batched "one or more counters" trigger fires once,
+/// carrying both counters (`Some(2)`).
+#[test]
+fn annihilation_on_a_permanent_you_control_triggers_cloudsculpt_armorer_once() {
+    let mut scenario = main_phase();
+    let armorer = scenario
+        .add_creature_from_oracle(P0, "Cloudsculpt Armorer", 2, 2, CLOUDSCULPT_ARMORER)
+        .id();
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    scenario.with_counter(bear, CounterType::Plus1Plus1, 1);
+    scenario.with_counter(bear, CounterType::Minus1Minus1, 1);
+    let mut runner = scenario.build();
+
+    // The SBA sweep runs before P1 receives priority.
+    let mut events = Vec::new();
+    act(&mut runner, GameAction::PassPriority, &mut events);
+    drain_order_triggers_with_identity(runner.state_mut());
+
+    // Reach guard: both counters were annihilated.
+    assert!(
+        runner.state().objects[&bear].counters.is_empty(),
+        "reach guard: CR 704.5q removed both counters: {:?}",
+        runner.state().objects[&bear].counters
+    );
+    assert_eq!(
+        triggers_from(&runner, armorer),
+        vec![Some(2)],
+        "one Armorer trigger for the one recipient, carrying both counters"
     );
 }
 
