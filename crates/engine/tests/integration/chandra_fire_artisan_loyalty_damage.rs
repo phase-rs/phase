@@ -538,6 +538,7 @@ fn singular_removal_trigger_fires_once_per_counter_removed_by_damage_prevention(
     assert!(runner.state().stack.is_empty());
     drive_turn_until(&mut runner, &mut events, |r| {
         r.state().phase == Phase::End
+            && matches!(r.state().waiting_for, WaitingFor::Priority { .. })
             && r.state().stack.is_empty()
             && r.state().delayed_triggers.is_empty()
     });
