@@ -2270,6 +2270,43 @@ fn attack_declaration_attacker_matches(
     }
 }
 
+/// CR 508.3a + CR 603.2: whether declaring `attacker` as attacking `target`
+/// would match `trigger`, an attack trigger on the functioning `source` — the
+/// per-attacker checks [`matching_attack_events`] applies to each declared
+/// attacker (its attacker-side filter, then its attack-target restriction such
+/// as "attacks a player"), for a caller weighing an attack before it is
+/// declared. A player-scope subject ("whenever you attack", CR 508.3d) or the
+/// "whenever [player] is attacked" shape — a `valid_target` with no
+/// attacker-side filter, CR 508.3b — answers once per declaration rather than
+/// per attacker, so such a trigger answers false. A `valid_target` beside an
+/// attacker-side filter ("whenever this creature attacks the player with the
+/// most life") is checked per attacker like any other.
+pub fn attack_trigger_matches_attack(
+    state: &GameState,
+    source: &crate::game::game_object::GameObject,
+    trigger: &TriggerDefinition,
+    attacker: ObjectId,
+    target: crate::game::combat::AttackTarget,
+) -> bool {
+    if trigger
+        .valid_source
+        .as_ref()
+        .is_some_and(|filter| filter.is_player_scope())
+        || (trigger.valid_target.is_some()
+            && trigger.valid_card.is_none()
+            && trigger.valid_source.is_none())
+    {
+        return false;
+    }
+    let Some(defending_player) = crate::game::combat::defending_player_for_target(state, target)
+    else {
+        return false;
+    };
+    let source_context = super::triggers::trigger_source_context_for_latch(state, source);
+    attack_declaration_attacker_matches(trigger, state, attacker, &source_context)
+        && attack_target_matches(trigger, state, target, defending_player, &source_context)
+}
+
 /// CR 508.3d + CR 508.5a: expand one `AttackersDeclared` event into one
 /// narrowed context per ATTACKED player, each carrying that player's complete
 /// matching attacker set — the antecedent of the followed clause's "those
