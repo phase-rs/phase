@@ -856,7 +856,9 @@ mod map_key_pairs {
 /// it finds here, the second asks whether the period charges this point's slot — and each binds
 /// the magnitude to `_`. The **magnitude** is read by
 /// [`PeriodicDelta::declared_seat_life_charges`], which charges a seat every slot a declaration
-/// may newly land on it (the AI's bounded-declare veto is its production caller). It is also the
+/// may newly land on it (in production, the engine's `PeriodicDelta::seat_crossing` and the AI's
+/// bounded-declare veto both read those charges through
+/// [`PeriodicDelta::declared_seat_life_crossing`]). It is also the
 /// wire witness of the mint's magnitude derivation, the only place
 /// [`ResourceVector::worst_seat_life_loss`]' output is observable off the certificate, and the
 /// accepted row pinning that derivation asserts against it. Narrowing the shape to a slot list
@@ -1543,10 +1545,14 @@ impl PeriodicDelta {
     /// engine did not write: a hand-written `DeclareShortcut`, a remote client's included (the
     /// server's payload guard bounds the schedule's length and passes it through), or a restored
     /// save, whose offer declaration and proposal template deserialize their pins verbatim.
+    ///
+    /// `pub` so `phase-ai`'s proposer veto (`cycles_to_proposer_elimination`) asks this reader as
+    /// `PeriodicDelta::seat_crossing` does, rather than stepping through the charges itself: the
+    /// veto and the cascade's life axis are one reduction.
     // Each parameter is a separate authority the caller states, for the reason
     // `PeriodicDelta::seat_crossing` gives.
     #[allow(clippy::too_many_arguments)]
-    fn declared_seat_life_crossing(
+    pub fn declared_seat_life_crossing(
         &self,
         seat: PlayerId,
         declaration: Option<&DecisionTemplate>,
