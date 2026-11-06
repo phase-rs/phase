@@ -699,11 +699,8 @@ fn shuffled_libraries(events: &[GameEvent]) -> Vec<PlayerId> {
 /// CR 608.2d + CR 108.3: Audacious Swap's "they may cast it without
 /// paying its mana cost" is the OWNER's decision. When the owner (P1, not the
 /// caster P0) declines, the exiled card stays in exile and is never cast; the
-/// shuffle and exile-top still happened in the owner's library.
-///
-/// Boundary case: it also holds without the owner-iteration fix for the
-/// decline outcome itself; the prompt-actor assertion (`Some(P1)`) is the part
-/// that fails if the optional were asked of the caster.
+/// shuffle and exile-top still happened in the owner's library. The prompt-actor
+/// assertion (`Some(P1)`) fails if the optional were asked of the caster.
 #[test]
 fn audacious_swap_owner_declining_the_free_cast_leaves_the_card_exiled() {
     let mut scenario = GameScenario::new();
@@ -793,11 +790,6 @@ fn audacious_swap_owner_declining_the_free_cast_leaves_the_card_exiled() {
 /// library: the owner is derived from each spell's own target, never from the
 /// caster (P0) nor from the other spell's target. The copy is not cast
 /// (CR 707.10: a copy of a spell is not cast).
-///
-/// Would fail with the owner-iteration fix reverted: the original's and the
-/// copy's owner populations would not be bound to their own targets (the
-/// shuffle / optional prompt would go to the wrong player, or to one of the
-/// two owners twice).
 #[test]
 fn audacious_swap_casualty_copy_resolves_each_target_through_its_own_owner() {
     let mut scenario = GameScenario::new_n_player(3, 42);
