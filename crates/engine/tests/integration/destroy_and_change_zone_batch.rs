@@ -55,13 +55,11 @@ use engine::types::zones::Zone;
 const DAY_OF_JUDGMENT: &str = "Destroy all creatures.";
 const HEX: &str = "Destroy six target creatures.";
 const FINAL_JUDGMENT: &str = "Exile all creatures.";
-// Full printed Oracle text: the row must exercise the printed "that many"
-// count consumer, not just the return instruction. Flashback is a cast-mode
-// concern and is not part of this resolution row.
-const VENGEFUL_REGROWTH: &str = "Return up to three target land cards from your graveyard to the battlefield tapped. Create that many 4/2 green Plant Warrior creature tokens with reach.";
-// C10 observes the LAST instruction's zone-change ledger, so it keeps a
-// return-only fixture. The printed token continuation and its "that many" count
-// consumer are covered by C5 with the full card above.
+// Full printed Oracle, including the alternate casting mode.
+const VENGEFUL_REGROWTH: &str = "Return up to three target land cards from your graveyard to the battlefield tapped. Create that many 4/2 green Plant Warrior creature tokens with reach.\nFlashback {6}{G}{G} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+// Infrastructure exception: Vengeful Regrowth is the printed analogue. C10
+// isolates its return instruction to observe the LAST instruction's zone-change
+// ledger; the full printed token consumer is exercised by C5 below.
 const VENGEFUL_REGROWTH_RETURN_ONLY: &str =
     "Return up to three target land cards from your graveyard to the battlefield tapped.";
 
@@ -304,9 +302,20 @@ fn c1_mass_change_zone_exiles_every_member() {
 fn c5_targeted_change_zone_counts_actual_arrivals() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_artifact_from_oracle(
+        P0,
+        "Grafdigger's Cage",
+        "Creature cards in graveyards and libraries can't enter the battlefield.\nPlayers can't cast spells from graveyards or libraries.",
+    );
     let a = scenario.add_land_to_graveyard(P0, "Forest").id();
     let b = scenario.add_land_to_graveyard(P0, "Island").id();
-    let c = scenario.add_land_to_graveyard(P0, "Mountain").id();
+    let c = scenario
+        .add_creature_to_graveyard(P0, "Dryad Arbor", 1, 1)
+        .as_land()
+        .as_creature()
+        .with_subtypes(vec!["Forest", "Dryad"])
+        .from_oracle_text("(This land isn't a spell, it's affected by summoning sickness, and it has \"{T}: Add {G}.\")")
+        .id();
     let regrowth = scenario
         .add_spell_to_hand_from_oracle(P0, "Vengeful Regrowth", false, VENGEFUL_REGROWTH)
         .with_mana_cost(ManaCost::zero())
@@ -315,21 +324,22 @@ fn c5_targeted_change_zone_counts_actual_arrivals() {
     let mut runner = scenario.build();
     let outcome = runner.cast(regrowth).target_objects(&[a, b, c]).resolve();
 
-    for id in [a, b, c] {
+    for id in [a, b] {
         assert_eq!(
             zone_of(&outcome, id),
             Zone::Battlefield,
             "each targeted card arrives on the battlefield"
         );
     }
+    assert_eq!(zone_of(&outcome, c), Zone::Graveyard);
     assert_eq!(
         outcome.state().last_effect_count,
-        Some(3),
+        Some(2),
         "the targeted policy counts actual arrivals"
     );
 
-    // The printed continuation consumes that same count: exactly three 4/2
-    // green Plant Warrior tokens with reach.
+    // CR 608.2c: only the two actual arrivals feed the printed token consumer;
+    // Grafdigger's Cage prevents the land creature from entering.
     let tokens: Vec<ObjectId> = outcome
         .state()
         .battlefield
@@ -344,7 +354,7 @@ fn c5_targeted_change_zone_counts_actual_arrivals() {
         .collect();
     assert_eq!(
         tokens.len(),
-        3,
+        2,
         "\"Create that many ...\" creates one token per returned land"
     );
     for token in tokens {
@@ -371,6 +381,12 @@ fn c5_targeted_change_zone_counts_actual_arrivals() {
             object.keywords
         );
     }
+    assert!(matches!(
+        outcome.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    assert!(outcome.state().resolution_stack.is_empty());
 }
 
 /// Oracle texts used by the rows below (raw, as a player would read them).
@@ -1477,6 +1493,8 @@ fn c13a_mass_hand_exile_counts_only_moved_members() {
 /// admitted count, the arrival this-way stamp, and the exact moved ledger in
 /// announcement order (the defect was an empty ledger from the battlefield-only
 /// occurrence projection).
+/// Infrastructure exception: Vengeful Regrowth is the printed analogue; this
+/// return-only fixture isolates the ledger before its printed token consumer.
 #[test]
 fn c10_paused_targeted_population_pins_count_stamp_and_moved_ledger() {
     let mut scenario = GameScenario::new();
@@ -1585,20 +1603,15 @@ fn c10_paused_mass_population_pins_non_abandoned_count_and_ledger() {
 /// C12 (F6): a `forward_result` ChangeZone over two members pauses on the first
 /// member's entry replacement. The marker records the staged group; after
 /// settlement the chained referent is bound to the exact battlefield arrivals.
-/// Exact reproduction fixture from the rows executor (see r4c-c12-fixture.md).
-/// Infrastructure/helper evidence: this row installs `forward_result` and the
-/// sub-ability on a directly constructed `ResolvedAbility` and drives
-/// `resolve_ability_chain`; it is not a public producer path.
-///
-/// Permitted exception, stated explicitly: no printed card in the reviewed
-/// corpus produces this exact shape (a staged ChangeZone whose forwarded result
-/// a chained referent consumes after a replacement pause), so there is no
-/// full-card witness to substitute. The row is retained as infrastructure
-/// evidence because the consumer it exercises — `settle_forwarded_zone_result`
-/// plus the ChangeZone completion's marker retirement — is the engine's real
-/// implementation, not a test double; the public producers of that completion
-/// are the mass/targeted/choice ChangeZone paths covered by C1, C5, C10 and
-/// C13a.
+/// Infrastructure exception: Necrotic Plague is the nearest printed
+/// `forward_result` producer, lowered by
+/// `assembly.rs::stamp_forward_result_on_battlefield_attach_return`.
+/// It returns one Aura attached to the chosen creature; no printed card in the
+/// reviewed corpus forwards this two-member population. This row constructs a
+/// `ResolvedAbility` and drives `resolve_ability_chain` to isolate the real
+/// `settle_forwarded_zone_result` consumer and marker retirement, not to claim
+/// a public full-card witness. Public ChangeZone completion producers are
+/// covered by C1, C5, C10 and C13a.
 #[test]
 fn c12_forwarded_zone_result_binds_staged_arrivals_after_pause() {
     fn graveyard_creature(

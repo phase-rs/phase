@@ -102,10 +102,7 @@ fn rhythm_of_the_wild_grants_riot_on_library_to_battlefield_put() {
     resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0).unwrap();
 
     assert_riot_replacement_choice(&runner);
-    // R4c: exactly one resume representation is parked. A one-member
-    // population keeps the legacy carrier; a multi-member population parks the
-    // staged marker + batch child. Accepting either here without counting would
-    // let both — or neither — pass.
+    // A singleton must retain the legacy carrier, never a staged batch.
     let legacy_carrier = usize::from(runner.state().active_change_zone_frame().is_some());
     let staged_carrier = usize::from(runner.state().resolution_stack.iter().any(|frame| {
         matches!(
@@ -114,10 +111,9 @@ fn rhythm_of_the_wild_grants_riot_on_library_to_battlefield_put() {
                 if batch.is_change_zone_population()
         )
     }));
-    assert_eq!(
-        legacy_carrier + staged_carrier,
-        1,
-        "the real ChangeZone delivery must park exactly one resume carrier at the replacement choice"
+    assert!(
+        legacy_carrier == 1 && staged_carrier == 0,
+        "singleton resume carriers: legacy={legacy_carrier}, staged={staged_carrier}"
     );
 
     runner
@@ -149,6 +145,12 @@ fn rhythm_of_the_wild_grants_riot_on_library_to_battlefield_put() {
         Some(1),
         "accepting Riot should make the creature enter with a +1/+1 counter"
     );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
 }
 
 #[test]

@@ -170,6 +170,62 @@ fn riftsweeper_without_face_up_exile_has_no_owner_action() {
     assert_eq!(outcome.zone_of(source), Zone::Battlefield);
     assert!(shuffles(outcome.events()).is_empty());
     finished(&runner);
+
+    // Two legal face-up cards force a real announcement instead of the
+    // unique-target shortcut; selecting P1's card must not shuffle P0's card.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_to_hand(P0, "Riftsweeper", 2, 2)
+        .with_subtypes(vec!["Elf", "Shaman"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+        .from_oracle_text(RIFTSWEEPER)
+        .id();
+    let target = scenario.add_land_to_exile(P1, "Island").id();
+    let other = scenario.add_land_to_exile(P0, "Forest").id();
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    runner.cast(source).commit();
+    runner.advance_until_stack_empty();
+    let WaitingFor::TriggerTargetSelection {
+        player,
+        target_slots,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected exile target announcement: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(target_slots.len(), 1);
+    assert_eq!(target_slots[0].legal_targets.len(), 2);
+    for candidate in [target, other] {
+        assert!(target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(candidate)));
+    }
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(target)),
+        })
+        .unwrap();
+    let mut events = Vec::new();
+    while !runner.state().stack.is_empty() {
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    assert_eq!(runner.state().objects[&target].zone, Zone::Library);
+    assert!(runner.state().players[1].library.contains(&target));
+    assert_eq!(runner.state().objects[&other].zone, Zone::Exile);
+    assert_eq!(shuffles(&events), vec![P1]);
+    finished(&runner);
+    assert!(runner.state().resolution_stack.is_empty());
 }
 
 // CR 701.24a: complete successive spells must publish only their own owners.
