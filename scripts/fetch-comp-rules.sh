@@ -57,6 +57,9 @@ PIN_URL="$(cr_pin_field "$PIN" url)"
 
 TMP="$(mktemp)"
 trap 'rm -f "$TMP" "$TMP.utf8"' EXIT
+# mktemp creates the file 0600; curl -o, mv and cp keep that mode, which would
+# leave the rules text unreadable to any other uid sharing the checkout.
+chmod 644 "$TMP"
 
 if [ "$MODE" = latest ]; then
   echo "Looking up current CR URL from $RULES_PAGE..."
