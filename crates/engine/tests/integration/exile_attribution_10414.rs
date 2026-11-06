@@ -31,8 +31,11 @@
 //!     the subject form and records that player.
 //!   * R10 — Mudhole: a public-action subject-form mass exile that parks on a
 //!     `ReplacementChoice` records the subject for the paused member and for the
-//!     member resumed from the pending frame, then settles. No printed card
-//!     replaces a move into exile; the nearest printed cards are Rest in Peace
+//!     member resumed from the pending frame, then settles. No printed card the
+//!     engine supports replaces a move into exile (Yawgmoth's Testament, "If a
+//!     card would be put into your graveyard or exile from anywhere this turn,
+//!     put it on the bottom of your library instead.", is not parsed); the
+//!     nearest supported printed cards are Rest in Peace
 //!     ("If a card or token would be put into a graveyard from anywhere, exile
 //!     it instead.") and Dauthi Voidwalker ("If a card would be put into an
 //!     opponent's graveyard from anywhere, instead exile it with a void counter
@@ -798,7 +801,10 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
     // second sits in the pending frame, carrying the subject as its performer.
     match outcome.final_waiting_for() {
         WaitingFor::ReplacementChoice { player, kind, .. } => {
-            assert_eq!(*player, P1, "the affected card's owner chooses (CR 616.1)");
+            assert_eq!(
+                *player, P1,
+                "the engine routes the optional-branch prompt to the affected card's owner"
+            );
             assert_eq!(*kind, ReplacementChoiceKind::OptionalBranch);
         }
         other => panic!("expected the first replacement prompt; got {other:?}"),

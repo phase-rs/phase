@@ -1134,7 +1134,7 @@ pub fn resolve(
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(state, ability, target_filter);
     // CR 608.2c: who performs this move, decided once per instruction beside the
-    // chooser (see `move_performer` for the two shapes where they differ).
+    // chooser (see `move_performer` for the three shapes where they differ).
     let performer = move_performer(ability, target_filter, dest_zone, filter_controller);
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
@@ -1584,7 +1584,7 @@ pub fn resolve(
 
     let ctx = ChangeZoneIterationCtx {
         source_id: ability.source_id,
-        // CR 601.2c + 608.2c: these members were announced as targets by this
+        // CR 601.2c + CR 608.2c: these members were announced as targets by this
         // instruction's controller, so the (possibly seat-bound) controller
         // performs the move — the subject rule of the pick and mass paths does
         // not apply here (Froghemoth: "exile up to that many target cards from
@@ -3370,7 +3370,7 @@ pub fn resolve_all(
                             })
                             .collect(),
                         source_id: ability.source_id,
-                        // CR 608.2h + 608.2c: the performer, carried across a
+                        // CR 608.2h + CR 608.2c: the performer, carried across a
                         // replacement/aura pause so every resumed member of this
                         // mass move records the same one.
                         controller: performer,
@@ -3435,7 +3435,7 @@ pub fn resolve_all(
                             })
                             .collect(),
                         source_id: ability.source_id,
-                        // CR 608.2h + 608.2c: the performer, carried across a
+                        // CR 608.2h + CR 608.2c: the performer, carried across a
                         // replacement/aura pause so every resumed member of this
                         // mass move records the same one.
                         controller: performer,
@@ -13305,8 +13305,8 @@ mod tests {
     /// is encoded — encoding A (typed `controller: ScopedPlayer` + library) and
     /// encoding B (`Owned { ScopedPlayer }` + library) name the same relation.
     ///
-    /// Revert sensitivity: HEAD's `Owned`-only classifier records P1 for
-    /// encoding A.
+    /// Revert sensitivity: an `Owned`-only library classifier (the pre-fix
+    /// form) records P1 for encoding A.
     #[test]
     fn library_owner_leg_mass_performer_matches_across_encodings() {
         let a = mass_library_exile_outcome(library_leg_encoding_a());
@@ -13351,8 +13351,8 @@ mod tests {
     /// CR 608.2c + CR 109.4: the same equivalence on the pick path, which has no
     /// owner-scope normaliser (`resolve`), so the classifier alone carries it.
     ///
-    /// Revert sensitivity: HEAD's `Owned`-only classifier records P1 for
-    /// encoding A.
+    /// Revert sensitivity: an `Owned`-only library classifier (the pre-fix
+    /// form) records P1 for encoding A.
     #[test]
     fn library_owner_leg_pick_performer_matches_across_encodings() {
         let a = pick_library_exile_outcome(library_leg_encoding_a());
