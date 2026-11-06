@@ -635,8 +635,9 @@ pub(crate) enum CostChannel {
     /// source; `behold … and exile it` is consumed whole by `parse_behold_cost`
     /// first (see [`parse_cost_self_reference_for`]).
     SourceCost,
-    /// A cost paid when a spell or ability resolves (CR 118.12), including the
-    /// reflexive form "you may <cost>. When you do, …" (CR 603.12). Callers:
+    /// An optional payment a resolving ability's own instruction offers
+    /// (CR 118.12), including the reflexive form "you may <cost>. When you do,
+    /// …" (CR 603.12). Callers:
     /// `oracle_modal`'s `MayPay` arm and
     /// `oracle_trigger::split_reflexive_optional_payment` /
     /// `::is_unsupported_disjunctive_reflexive_optional_payment`. A bare "it"

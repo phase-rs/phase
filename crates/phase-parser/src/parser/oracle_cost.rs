@@ -44,9 +44,12 @@ use crate::types::zones::Zone;
 ///
 /// CR 602.1a: this is the source-cost channel ([`CostChannel::SourceCost`]) —
 /// a cost the source's own text imposes, where a bare "it" names the source the
-/// same clause named first. Costs paid when an effect resolves (CR 118.12,
-/// CR 603.12) must go through [`parse_oracle_cost_in`] with
-/// [`CostChannel::ResolutionPayment`].
+/// same clause named first. A resolving ability's own optional payment ("you
+/// may <cost>. When/If you do, …", CR 118.12 + CR 603.12), whose object pronoun
+/// names something that ability's text introduced, must go through
+/// [`parse_oracle_cost_in`] with [`CostChannel::ResolutionPayment`]; a keyword's
+/// printed [cost] paid at resolution (echo, cumulative upkeep) is still the
+/// source's own cost.
 pub fn parse_oracle_cost(text: &str) -> AbilityCost {
     parse_oracle_cost_in(text, CostChannel::SourceCost)
 }

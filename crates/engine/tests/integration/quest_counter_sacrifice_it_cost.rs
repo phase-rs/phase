@@ -265,9 +265,10 @@ fn source_bound_nodes(ability: &AbilityDefinition, found: &mut Vec<String>) {
 /// introduced — whichever Goblin or Orc dealt the damage, Gorbag himself or
 /// another — so the parse must never bind it to the printed source.
 ///
-/// At the unmodified source-cost-only pronoun arm the reflexive marker is
-/// lowered to `PayCost { Sacrifice { SelfRef } }`, which is exactly what the
-/// walker flags.
+/// Before the pronoun arm was bound to the source-cost channel (the reflexive
+/// `MayPay` caller parsing its cost like a printed source cost), the reflexive
+/// marker was lowered to `PayCost { Sacrifice { SelfRef } }`, which is exactly
+/// what the walker flags.
 #[test]
 fn gorbag_of_minas_morgul_may_sacrifice_it_never_binds_the_source() {
     let mut scenario = GameScenario::new();
