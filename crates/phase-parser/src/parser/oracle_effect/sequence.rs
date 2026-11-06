@@ -8288,12 +8288,14 @@ fn parse_of_them_rest_destination(
         // Default: bottom of library ("on the bottom", "in any order", etc.)
         Zone::Library
     };
-    // CR 401.4 + CR 701.20e: "on top of [the/that/their] library" is the one
-    // library rest clause that does not mean the bottom. `Zone::Library` alone
-    // cannot carry the position, so the caller threads it into the remainder
-    // routing (Diabolic Vision's "… and the rest on top of your library").
+    // CR 401.4 + CR 701.20e: "on top of [the/that/their] library" and the bare
+    // "on top" (Inzerva, Master of Insights: "... and the rest on top in any
+    // order") are the library rest clauses that do not mean the bottom.
+    // `Zone::Library` alone cannot carry the position, so the caller threads it
+    // into the remainder routing (Diabolic Vision's "… and the rest on top of
+    // your library").
     let rest_library_position =
-        if destination == Zone::Library && nom_primitives::scan_contains(after_rest, "on top of") {
+        if destination == Zone::Library && nom_primitives::scan_contains(after_rest, "on top") {
             RestLibraryPosition::Top
         } else {
             RestLibraryPosition::Bottom

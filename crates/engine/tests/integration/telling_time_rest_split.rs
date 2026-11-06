@@ -2378,3 +2378,33 @@ fn a_chosen_cards_library_position_patch_cannot_pair_with_the_all_top_split() {
     let effects = chain_effects(&parsed);
     assert_split_receipt(&effects, "a chosen-cards library-position patch");
 }
+
+/// CR 401.4: the bare "on top" rest clause names the library top exactly like
+/// "on top of your library" does, so it must not fall through to the uniform
+/// bottom route. Nearest printed card: Inzerva, Master of Insights ("-2: Look
+/// at the top two cards of each other player's library, then put any number of
+/// them on the bottom of that library and the rest on top in any order."), whose
+/// look clause does not parse today; the fixture uses Diabolic Vision's
+/// controller-library look so the remainder clause is what is under test.
+#[test]
+fn a_bare_on_top_remainder_is_an_all_top_split() {
+    let parsed = parse_sorcery(
+        "Look at the top five cards of your library. Put one of them into your hand \
+         and the rest on top in any order.",
+    );
+    let effects = chain_effects(&parsed);
+    let Some(Effect::Dig {
+        rest_split_top_count,
+        ..
+    }) = effects
+        .iter()
+        .find(|effect| matches!(effect, Effect::Dig { .. }))
+    else {
+        panic!("a bare on-top remainder must stay a Dig, got {effects:?}");
+    };
+    assert_eq!(
+        *rest_split_top_count,
+        Some(QuantityExpr::Fixed { value: 5 }),
+        "\"on top\" must carry the all-top split, not bottom the pile"
+    );
+}
