@@ -23,10 +23,21 @@ cr_file_effective() {
 
 # Download URL to DEST, converting Wizards' UTF-16 encoding to UTF-8 if needed.
 cr_download() {
-  local url="$1" dest="$2"
+  local url="$1" dest="$2" tool kind
+  for tool in curl file iconv; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "ERROR: '$tool' is required to download the Comprehensive Rules" >&2
+      return 1
+    fi
+  done
   # WotC's published URL may contain unescaped spaces ("MagicCompRules 20260227.txt").
   curl -fsSL "${url// /%20}" -o "$dest"
-  if file "$dest" | grep -qi 'utf-16'; then
+  # A failed `file` must not read as "not UTF-16".
+  kind="$(file -b "$dest")" || {
+    echo "ERROR: could not determine the encoding of $dest" >&2
+    return 1
+  }
+  if printf '%s\n' "$kind" | grep -qi 'utf-16'; then
     iconv -f UTF-16 -t UTF-8 "$dest" > "$dest.utf8"
     mv "$dest.utf8" "$dest"
   fi

@@ -166,7 +166,10 @@ fi
 if ! ./scripts/check-cr-edition.sh >/dev/null 2>&1; then
   echo ""
   echo "Fetching MTG Comprehensive Rules (local dev reference only)..."
-  ./scripts/fetch-comp-rules.sh --force || echo "  (skipped — run ./scripts/fetch-comp-rules.sh later)"
+  ./scripts/fetch-comp-rules.sh --force || {
+    echo "  (skipped — run ./scripts/fetch-comp-rules.sh later)"
+    ./scripts/check-cr-edition.sh || :
+  }
 fi
 
 # --- Frontend deps (parallel-safe with cargo work below) ---

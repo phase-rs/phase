@@ -55,7 +55,36 @@ done
 PIN_EFFECTIVE="$(cr_pin_field "$PIN" effective)"
 PIN_URL="$(cr_pin_field "$PIN" url)"
 
-TMP="$(mktemp)"
+if [ -n "$OUTPUT" ]; then
+  if [ "$MODE" != latest ]; then
+    echo "ERROR: --output applies only to --latest" >&2
+    exit 2
+  fi
+  # The pinned copy must only ever hold the pinned edition. -ef catches an
+  # existing file reached through a symlink or hard link; the resolved-path
+  # comparison catches a not-yet-existing DEST named by another spelling.
+  OUT_DIR="$(dirname "$OUTPUT")"
+  if [ "$OUTPUT" -ef "$DEST" ] || { [ -d "$OUT_DIR" ] \
+    && [ "$(cd "$OUT_DIR" && pwd -P)/$(basename "$OUTPUT")" \
+      = "$(cd "$(dirname "$DEST")" && pwd -P)/$(basename "$DEST")" ]; }; then
+    echo "ERROR: --output must not be $DEST, which holds the pinned edition" >&2
+    exit 2
+  fi
+fi
+
+if [ "$MODE" = pinned ]; then
+  if [ "$FORCE" -eq 0 ] && [ -f "$DEST" ] \
+    && [ "$(cr_file_effective "$DEST")" = "$PIN_EFFECTIVE" ]; then
+    echo "$DEST is already the pinned edition ($PIN_EFFECTIVE)."
+    exit 0
+  fi
+  # Stage beside DEST so the final mv is a same-filesystem rename: a partial
+  # file can never appear at DEST.
+  mkdir -p "$(dirname "$DEST")"
+  TMP="$(mktemp "$DEST.tmp.XXXXXX")"
+else
+  TMP="$(mktemp)"
+fi
 trap 'rm -f "$TMP" "$TMP.utf8"' EXIT
 # mktemp creates the file 0600; curl -o, mv and cp keep that mode, which would
 # leave the rules text unreadable to any other uid sharing the checkout.
@@ -92,17 +121,6 @@ if [ "$MODE" = latest ]; then
   exit 0
 fi
 
-if [ -n "$OUTPUT" ]; then
-  echo "ERROR: --output applies only to --latest" >&2
-  exit 2
-fi
-
-if [ "$FORCE" -eq 0 ] && [ -f "$DEST" ] \
-  && [ "$(cr_file_effective "$DEST")" = "$PIN_EFFECTIVE" ]; then
-  echo "$DEST is already the pinned edition ($PIN_EFFECTIVE)."
-  exit 0
-fi
-
 echo "Downloading pinned edition ($PIN_EFFECTIVE): $PIN_URL"
 cr_download "$PIN_URL" "$TMP"
 
@@ -114,7 +132,6 @@ if [ "$GOT_EFFECTIVE" != "$PIN_EFFECTIVE" ]; then
   exit 1
 fi
 
-mkdir -p "$(dirname "$DEST")"
 mv "$TMP" "$DEST"
 LINES="$(wc -l < "$DEST" | tr -d ' ')"
 echo "Wrote $DEST ($LINES lines)"
