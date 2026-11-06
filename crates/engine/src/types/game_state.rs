@@ -32481,13 +32481,35 @@ impl GameState {
         )
     }
 
-    /// CR 400.7: Clear object-incarnation-scoped reveal state at the zone
-    /// boundary. The future Zone command will invoke this same final mutation
-    /// primitive while owning the enclosing zone-change command and journal
-    /// entry; this legacy boundary intentionally does not create one itself.
+    /// CR 400.7 + CR 701.20a: Clear object-incarnation-scoped reveal state at
+    /// the zone boundary. The future Zone command will invoke this same final
+    /// mutation primitive while owning the enclosing zone-change command and
+    /// journal entry; this legacy boundary intentionally does not create one
+    /// itself.
+    ///
+    /// `destination` decides whether a PUBLIC reveal survives the move, because
+    /// the two hidden-zone classes answer differently:
+    ///
+    ///  * CR 701.20a: "To reveal a card, show that card to all players." Once
+    ///    the table has seen a card, putting it into a hand does not unshow it
+    ///    — the move is a later part of the same instruction that revealed it
+    ///    (Malevolent Rumble, Narset, Parter of Veils: "reveal … and put it
+    ///    into your hand"), so opponents must still be able to tell WHICH card
+    ///    was taken. The publication therefore survives the move, and the
+    ///    hand identity leaf of `is_visible_revealed_card` keeps its face
+    ///    visible to every viewer while it sits there.
+    ///  * CR 401.2: a library's ORDER is not public ("players can't look at or
+    ///    change the order of cards in a library"), so a move into a library
+    ///    retires the publication. Keeping it would resurface the identity of
+    ///    a card that was shuffled in and later redrawn, which no player may
+    ///    infer from the earlier reveal.
+    ///
+    /// Exile is likewise retired: it may be face down (CR 406.3), and every
+    /// other destination is a public zone whose identity is already visible.
     pub(crate) fn clear_revealed_information_on_zone_exit(
         &mut self,
         occurrence: ObjectIncarnationRef,
+        destination: Zone,
     ) {
         let (controller, owner) = self
             .objects
@@ -32496,30 +32518,42 @@ impl GameState {
             .expect("zone-exit reveal clear must reference a live object");
         // Product knowledge is exact-occurrence scoped too. Unlike the
         // rules-visible reveal sets below, this removes every entitled viewer's
-        // fact, never just the object's current controller.
+        // fact, never just the object's current controller. A fact is keyed on
+        // (zone, incarnation), so it can never match the occurrence that is
+        // about to exist; a hand identity is projected from the public
+        // publication set instead.
         self.product_knowledge_state
             .facts
             .retain(|fact| fact.identity != occurrence);
         self.canonicalize_library_knowledge_epoch(owner);
-        for (audience, lifetime) in [
-            (
+        if self.information_active(
+            ResolvedInformationAudience::Controller(controller),
+            ResolvedInformationLifetime::UntilActionBoundary,
+            occurrence,
+        ) {
+            self.apply_information_edit(
+                &[occurrence],
                 ResolvedInformationAudience::Controller(controller),
                 ResolvedInformationLifetime::UntilActionBoundary,
-            ),
-            (
+                ResolvedInformationEdit::Hide,
+            )
+            .expect("zone-exit reveal clear must match the live object occurrence");
+        }
+        // CR 701.20a + CR 401.2: see the destination rule above.
+        if destination != Zone::Hand
+            && self.information_active(
                 ResolvedInformationAudience::Public,
                 ResolvedInformationLifetime::UntilZoneChange,
-            ),
-        ] {
-            if self.information_active(audience, lifetime, occurrence) {
-                self.apply_information_edit(
-                    &[occurrence],
-                    audience,
-                    lifetime,
-                    ResolvedInformationEdit::Hide,
-                )
-                .expect("zone-exit reveal clear must match the live object occurrence");
-            }
+                occurrence,
+            )
+        {
+            self.apply_information_edit(
+                &[occurrence],
+                ResolvedInformationAudience::Public,
+                ResolvedInformationLifetime::UntilZoneChange,
+                ResolvedInformationEdit::Hide,
+            )
+            .expect("zone-exit reveal clear must match the live object occurrence");
         }
         self.drop_stack_bound_reveals_for_occurrence(occurrence);
     }
