@@ -23,9 +23,9 @@ use crate::types::game_state::{
     PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest, PendingComponentDeliveryParent,
     PendingCounterPostAction, PendingLiminalEntryResume, PendingZoneChangeDelivery,
     PostReplacementDrainOwner, StagedArrangementStatus, StagedBatchDelivery, StagedBatchMember,
-    StagedBatchMemberState, StagedDestroyOperation, StagedLibraryArrangement,
-    StagedMemberOperation, StagedMemberOutcome, WaitingFor, ZoneDeliveryExileTracking,
-    ZoneMoveCompletion,
+    StagedBatchMemberState, StagedDestroyOperation, StagedDestroyOuterApproval,
+    StagedLibraryArrangement, StagedMemberOperation, StagedMemberOutcome, WaitingFor,
+    ZoneDeliveryExileTracking, ZoneMoveCompletion,
 };
 use std::collections::HashSet;
 
@@ -1680,7 +1680,6 @@ fn new_staged_batch(state: &GameState, reqs: &[ZoneMoveRequest]) -> StagedBatchD
                 pending_outcome: None,
                 terminal: None,
                 operation: StagedMemberOperation::ZoneMove,
-                outer_destroy_approved: false,
                 approved_post_replacement: None,
             }
         })
@@ -1960,6 +1959,22 @@ fn consult_next_staged_member(
     }
 }
 
+/// CR 701.8a: retain outer approval on the authoritative staged Destroy payload.
+fn approve_staged_destroy_outer(owner: &mut PendingBatchDeliveries, cursor: usize) {
+    let member = owner
+        .staged
+        .as_mut()
+        .and_then(|staged| staged.members.get_mut(cursor))
+        .expect("outer approval retains its staged member");
+    let StagedMemberOperation::Destroy(operation) = member.operation else {
+        panic!("only a Destroy member can approve its outer event");
+    };
+    member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
+        outer: StagedDestroyOuterApproval::Approved,
+        ..operation
+    });
+}
+
 /// CR 701.8a + CR 616.1: stage one Destroy member's outer event. The four
 /// pre-proposal guards are re-applied here, before the outer `Destroy` reaches
 /// the replacement pipeline.
@@ -1995,13 +2010,7 @@ fn consult_staged_destroy_outer(
         ReplacementResult::Execute(event) => {
             if matches!(event, ProposedEvent::Destroy { .. }) {
                 retain_member_drain(state, owner, cursor, drain_point);
-                if let Some(member) = owner
-                    .staged
-                    .as_mut()
-                    .and_then(|staged| staged.members.get_mut(cursor))
-                {
-                    member.outer_destroy_approved = true;
-                }
+                approve_staged_destroy_outer(owner, cursor);
                 set_staged_member_state(owner, cursor, StagedBatchMemberState::InnerConsulting);
                 let member = owner
                     .staged
@@ -2196,20 +2205,25 @@ fn mark_staged_member_terminal(
     // completion tail's typed fact — the same tail that carries the count
     // policy. Link creation for a later return is a different producer and
     // keeps its links.
-    let consumes_own_exile_links = matches!(
-        owner.completion.as_ref(),
-        Some(crate::types::game_state::BatchCompletion::ChangeZonePopulationSettled { tail, .. })
-            if tail.consumes_own_exile_links
-    );
+    let own_exile_links = match owner.completion.as_ref() {
+        Some(crate::types::game_state::BatchCompletion::ChangeZonePopulationSettled {
+            tail,
+            ..
+        }) => tail.own_exile_links,
+        _ => crate::types::game_state::OwnExileLinkSettlement::Retain,
+    };
     let mut destroyed = None;
     let mut change_zone_bookkeeping = None;
     if let Some(staged) = owner.staged.as_mut() {
         if let Some(member) = staged.members.get_mut(index) {
-            if let StagedMemberOperation::Destroy(operation) = member.operation {
-                if member.outer_destroy_approved {
-                    destroyed = Some((member.identity.object_id, operation.source));
-                }
-            } else {
+            if let StagedMemberOperation::Destroy(StagedDestroyOperation {
+                source,
+                outer: StagedDestroyOuterApproval::Approved,
+                ..
+            }) = member.operation
+            {
+                destroyed = Some((member.identity.object_id, source));
+            } else if matches!(member.operation, StagedMemberOperation::ZoneMove) {
                 change_zone_bookkeeping =
                     Some((member.identity.object_id, member.approved_event.clone()));
             }
@@ -2237,7 +2251,7 @@ fn mark_staged_member_terminal(
             approved_event.as_ref(),
             terminal,
             count_hand_exile,
-            consumes_own_exile_links,
+            own_exile_links,
         );
     }
 }
@@ -2250,7 +2264,7 @@ fn note_change_zone_member_terminal(
     approved_event: Option<&ProposedEvent>,
     terminal: ZoneMoveCompletion,
     count_hand_exile: bool,
-    exiled_by_source: bool,
+    own_exile_links: crate::types::game_state::OwnExileLinkSettlement,
 ) {
     // `approved_event` is the member's own approved move: only a Hand->Exile
     // terminal counts toward the mass hand-exile producer.
@@ -2268,9 +2282,47 @@ fn note_change_zone_member_terminal(
                 state.exiled_from_hand_this_resolution.saturating_add(1);
         }
     }
-    if exiled_by_source {
-        state.exile_links.retain(|link| link.exiled_id != object_id);
+    match own_exile_links {
+        crate::types::game_state::OwnExileLinkSettlement::Retain => {}
+        crate::types::game_state::OwnExileLinkSettlement::Consume => {
+            state.exile_links.retain(|link| link.exiled_id != object_id);
+        }
     }
+}
+
+/// CR 401.4: final approvals sharing an owner and fixed position form one group.
+pub(crate) fn staged_arrangement_groups(
+    staged: &StagedBatchDelivery,
+) -> Vec<((PlayerId, LibraryPosition), Vec<usize>)> {
+    let mut groups: Vec<((PlayerId, LibraryPosition), Vec<usize>)> = Vec::new();
+    for (index, member) in staged.members.iter().enumerate() {
+        if !matches!(
+            member.state,
+            StagedBatchMemberState::Approved | StagedBatchMemberState::Terminal
+        ) {
+            continue;
+        }
+        let Some(ProposedEvent::ZoneChange {
+            to: Zone::Library,
+            library_placement: Some(position),
+            ..
+        }) = member.approved_event.as_ref()
+        else {
+            continue;
+        };
+        match position {
+            LibraryPosition::Top | LibraryPosition::Bottom => {}
+            LibraryPosition::NthFromTop { .. }
+            | LibraryPosition::BeneathTop { .. }
+            | LibraryPosition::RandomWithinTop { .. } => continue,
+        }
+        let key = (member.owner, position.clone());
+        match groups.iter_mut().find(|(existing, _)| *existing == key) {
+            Some((_, indices)) => indices.push(index),
+            None => groups.push((key, vec![index])),
+        }
+    }
+    groups
 }
 
 /// CR 401.4 + CR 101.4: derive the private owner/position groups from final
@@ -2280,25 +2332,7 @@ fn begin_staged_arrangement(state: &GameState, owner: &mut PendingBatchDeliverie
     let Some(staged) = owner.staged.as_mut() else {
         return;
     };
-    let mut groups: Vec<((PlayerId, LibraryPosition), Vec<usize>)> = Vec::new();
-    for (index, member) in staged.members.iter().enumerate() {
-        let Some(ProposedEvent::ZoneChange {
-            to: Zone::Library,
-            library_placement: Some(position),
-            ..
-        }) = member.approved_event.as_ref()
-        else {
-            continue;
-        };
-        if !matches!(position, LibraryPosition::Top | LibraryPosition::Bottom) {
-            continue;
-        }
-        let key = (member.owner, position.clone());
-        match groups.iter_mut().find(|(existing, _)| *existing == key) {
-            Some((_, indices)) => indices.push(index),
-            None => groups.push((key, vec![index])),
-        }
-    }
+    let groups = staged_arrangement_groups(staged);
     let mut arrangements = Vec::new();
     for ((owner_id, position), indices) in groups {
         let announced: Vec<&StagedBatchMember> = indices
@@ -2752,6 +2786,7 @@ pub(crate) fn deliver_staged_destroy_batch(
         member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
             source,
             cant_regenerate,
+            outer: StagedDestroyOuterApproval::Unapproved,
         });
     }
     let mut owner = new_staged_owner(state, &reqs, logical_zone_change_group, staged);
@@ -3064,9 +3099,9 @@ fn finalize_staged_pending_outcome_on(
         ) => {
             // CR 701.8a: outer approval, not delivery. Keep the cursor here and
             // let the driver run the second, inner consult.
-            member.outer_destroy_approved = true;
             member.state = StagedBatchMemberState::InnerConsulting;
             member.pending_outcome = None;
+            approve_staged_destroy_outer(owner, cursor);
             owner.paused_current = None;
             sync_staged_requests(owner);
             true
@@ -3092,9 +3127,11 @@ fn finalize_staged_pending_outcome_on(
             StagedMemberOutcome::Prevented,
         ) => {
             let destroyed = match member.operation {
-                StagedMemberOperation::Destroy(operation) if member.outer_destroy_approved => {
-                    Some((member.identity.object_id, operation.source))
-                }
+                StagedMemberOperation::Destroy(StagedDestroyOperation {
+                    source,
+                    outer: StagedDestroyOuterApproval::Approved,
+                    ..
+                }) => Some((member.identity.object_id, source)),
                 _ => None,
             };
             member.approved_post_replacement = None;
@@ -11601,8 +11638,7 @@ mod staged_batch_tests {
             destination: Zone::Exile,
             count: ChangeZoneCountPolicy::MassAllMembers,
             pending_return_result_producer: None,
-            stamp_this_way: true,
-            consumes_own_exile_links: false,
+            own_exile_links: crate::types::game_state::OwnExileLinkSettlement::Retain,
         };
         let requests = members
             .iter()
@@ -11737,7 +11773,6 @@ mod staged_batch_tests {
             pending_outcome: None,
             terminal: None,
             operation: StagedMemberOperation::ZoneMove,
-            outer_destroy_approved: false,
             approved_post_replacement: None,
         }
     }
@@ -12281,51 +12316,171 @@ mod staged_batch_tests {
 
     #[test]
     fn staged_transport_round_trips_every_stage() {
+        for operation in [
+            StagedMemberOperation::ZoneMove,
+            StagedMemberOperation::Destroy(StagedDestroyOperation {
+                source: ObjectId(999),
+                cant_regenerate: false,
+                outer: StagedDestroyOuterApproval::Unapproved,
+            }),
+        ] {
+            for stage in [
+                BatchDeliveryStage::Approving,
+                BatchDeliveryStage::Arranging,
+                BatchDeliveryStage::Delivering,
+            ] {
+                let mut state = GameState::new_two_player(42);
+                effect_source(&mut state);
+                let a = graveyard_card(&mut state, 1);
+                let member = staged_member(
+                    &state,
+                    a,
+                    Some(approved_library_event(&state, a, LibraryPosition::Bottom)),
+                    StagedBatchMemberState::Approved,
+                    Zone::Graveyard,
+                    None,
+                );
+                let mut member = member;
+                member.operation = match (operation, stage) {
+                    (
+                        StagedMemberOperation::Destroy(operation),
+                        BatchDeliveryStage::Arranging | BatchDeliveryStage::Delivering,
+                    ) => StagedMemberOperation::Destroy(StagedDestroyOperation {
+                        outer: StagedDestroyOuterApproval::Approved,
+                        ..operation
+                    }),
+                    (operation, _) => operation,
+                };
+                match stage {
+                    BatchDeliveryStage::Approving => {
+                        member.state = StagedBatchMemberState::Unconsulted;
+                        member.approved_event = None;
+                    }
+                    // A Delivering payload whose cursor is at the end has already
+                    // delivered every member, so each carries its terminal. An
+                    // `Approved` member behind the delivery cursor is the malformed
+                    // shape the staged validator rejects.
+                    BatchDeliveryStage::Delivering => {
+                        member.state = StagedBatchMemberState::Terminal;
+                        member.terminal = Some(ZoneMoveCompletion::Moved);
+                    }
+                    BatchDeliveryStage::Arranging => {}
+                }
+                let group_id = push_approved_staged(&mut state, vec![member], stage);
+                if stage != BatchDeliveryStage::Approving {
+                    let mut owner = take_owner(&mut state, group_id);
+                    begin_staged_arrangement(&state, &mut owner);
+                    let staged = owner.staged.as_mut().unwrap();
+                    staged.stage = stage;
+                    staged.cursor = staged.members.len();
+                    put_owner(&mut state, owner);
+                }
+                let before = state.active_batch_delivery().unwrap().staged.clone();
+                let wire = serde_json::to_value(&state).expect("state serializes");
+                let restored: GameState = serde_json::from_value(wire).expect("state decodes");
+                let frame = restored
+                    .active_batch_delivery()
+                    .expect("the staged owner survives the round trip");
+                assert_eq!(
+                    frame.staged, before,
+                    "stage, cursor, members and approvals survive {stage:?}"
+                );
+                assert_eq!(frame.logical_zone_change_group.logical_group_id, group_id);
+            }
+        }
+    }
+
+    #[test]
+    fn staged_validator_rejects_duplicate_owner_position_groups() {
+        for position in [LibraryPosition::Top, LibraryPosition::Bottom] {
+            let mut state = GameState::new_two_player(42);
+            effect_source(&mut state);
+            let a = graveyard_card(&mut state, 1);
+            let b = graveyard_card(&mut state, 2);
+            let group_id = replacement_origin_group(&mut state, &[a, b], position);
+            let mut owner = take_owner(&mut state, group_id);
+            begin_staged_arrangement(&state, &mut owner);
+            owner.validate_staged().expect("the derived group is valid");
+            let staged = owner.staged.as_mut().unwrap();
+            staged.arrangements.push(staged.arrangements[0].clone());
+            assert!(
+                owner.validate_staged().is_err(),
+                "duplicate keys are ambiguous"
+            );
+        }
+    }
+
+    #[test]
+    fn staged_validator_requires_group_for_every_positioned_approval() {
         for stage in [
-            BatchDeliveryStage::Approving,
             BatchDeliveryStage::Arranging,
             BatchDeliveryStage::Delivering,
         ] {
             let mut state = GameState::new_two_player(42);
             effect_source(&mut state);
             let a = graveyard_card(&mut state, 1);
-            let member = staged_member(
-                &state,
-                a,
-                Some(approved_library_event(&state, a, LibraryPosition::Bottom)),
-                StagedBatchMemberState::Approved,
-                Zone::Graveyard,
-                None,
+            let b = graveyard_card(&mut state, 2);
+            let members = [(a, LibraryPosition::Top), (b, LibraryPosition::Bottom)]
+                .into_iter()
+                .map(|(id, position)| {
+                    staged_member(
+                        &state,
+                        id,
+                        Some(approved_library_event(&state, id, position)),
+                        StagedBatchMemberState::Approved,
+                        Zone::Graveyard,
+                        None,
+                    )
+                })
+                .collect();
+            let group_id = push_approved_staged(&mut state, members, BatchDeliveryStage::Approving);
+            let mut owner = take_owner(&mut state, group_id);
+            begin_staged_arrangement(&state, &mut owner);
+            owner.staged.as_mut().unwrap().stage = stage;
+            owner
+                .validate_staged()
+                .expect("Top and Bottom are independent valid keys");
+            let missing = owner.staged.as_mut().unwrap().arrangements.remove(0);
+            assert!(owner.validate_staged().is_err(), "every key needs a group");
+            owner
+                .staged
+                .as_mut()
+                .unwrap()
+                .arrangements
+                .insert(0, missing);
+            owner.staged.as_mut().unwrap().arrangements[0]
+                .batch
+                .members
+                .clear();
+            assert!(
+                owner.validate_staged().is_err(),
+                "a group must cover its approval"
             );
-            let mut member = member;
-            match stage {
-                BatchDeliveryStage::Approving => {
-                    member.state = StagedBatchMemberState::Unconsulted;
-                    member.approved_event = None;
-                }
-                // A Delivering payload whose cursor is at the end has already
-                // delivered every member, so each carries its terminal. An
-                // `Approved` member behind the delivery cursor is the malformed
-                // shape the staged validator rejects.
-                BatchDeliveryStage::Delivering => {
-                    member.state = StagedBatchMemberState::Terminal;
-                    member.terminal = Some(ZoneMoveCompletion::Moved);
-                }
-                BatchDeliveryStage::Arranging => {}
-            }
-            let group_id = push_approved_staged(&mut state, vec![member], stage);
-            let before = state.active_batch_delivery().unwrap().staged.clone();
-            let wire = serde_json::to_value(&state).expect("state serializes");
-            let restored: GameState = serde_json::from_value(wire).expect("state decodes");
-            let frame = restored
-                .active_batch_delivery()
-                .expect("the staged owner survives the round trip");
-            assert_eq!(
-                frame.staged, before,
-                "stage, cursor, members and approvals survive {stage:?}"
+            owner.staged.as_mut().unwrap().arrangements.clear();
+            assert!(
+                owner.validate_staged().is_err(),
+                "an empty set omits every key"
             );
-            assert_eq!(frame.logical_zone_change_group.logical_group_id, group_id);
         }
+    }
+
+    #[test]
+    fn staged_validator_only_accepts_submitted_arrangements_during_approval() {
+        let mut state = GameState::new_two_player(42);
+        effect_source(&mut state);
+        let a = graveyard_card(&mut state, 1);
+        let group_id = replacement_origin_group(&mut state, &[a], LibraryPosition::Top);
+        let mut owner = take_owner(&mut state, group_id);
+        begin_staged_arrangement(&state, &mut owner);
+        owner.staged.as_mut().unwrap().stage = BatchDeliveryStage::Approving;
+        assert!(
+            owner.validate_staged().is_err(),
+            "approval cannot retain an unsubmitted arrangement"
+        );
+        owner.staged.as_mut().unwrap().arrangements[0].status = StagedArrangementStatus::Submitted;
+        owner
+            .validate_staged()
+            .expect("a submitted seed can precede consultation of the remaining members");
     }
 
     #[test]
@@ -13554,6 +13709,7 @@ mod staged_batch_tests {
             member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
                 source,
                 cant_regenerate: false,
+                outer: StagedDestroyOuterApproval::Unapproved,
             });
         }
         let mut owner = new_staged_owner(&state, &requests, group, staged);
@@ -13591,7 +13747,7 @@ mod staged_batch_tests {
 
         // Inner Prevented: the outer Destroy was approved, so the singleton
         // rule still emits one `CreatureDestroyed` (F16 preserved).
-        owner.staged.as_mut().unwrap().members[2].outer_destroy_approved = true;
+        approve_staged_destroy_outer(&mut owner, 2);
         mark_staged_member_terminal(
             &mut state,
             &mut owner,
@@ -13602,7 +13758,7 @@ mod staged_batch_tests {
 
         // Inner Execute redirected back to the battlefield: terminal Remained,
         // but the outer approval still emits one `CreatureDestroyed`.
-        owner.staged.as_mut().unwrap().members[3].outer_destroy_approved = true;
+        approve_staged_destroy_outer(&mut owner, 3);
         mark_staged_member_terminal(
             &mut state,
             &mut owner,
@@ -13610,7 +13766,7 @@ mod staged_batch_tests {
             ZoneMoveCompletion::Moved,
             &mut events,
         );
-        owner.staged.as_mut().unwrap().members[4].outer_destroy_approved = true;
+        approve_staged_destroy_outer(&mut owner, 4);
         mark_staged_member_terminal(
             &mut state,
             &mut owner,
@@ -13629,9 +13785,9 @@ mod staged_batch_tests {
         );
 
         // An abandoned member is excluded even when the outer was approved.
+        approve_staged_destroy_outer(&mut owner, 6);
         {
             let member = &mut owner.staged.as_mut().unwrap().members[6];
-            member.outer_destroy_approved = true;
             member.terminal = Some(ZoneMoveCompletion::Moved);
             member.state = StagedBatchMemberState::Abandoned;
         }
@@ -13711,6 +13867,7 @@ mod staged_batch_tests {
         let operation = StagedDestroyOperation {
             source: guard_source,
             cant_regenerate: false,
+            outer: StagedDestroyOuterApproval::Unapproved,
         };
         guard_staged.members[0].operation = StagedMemberOperation::Destroy(operation);
         let mut guard_owner =
@@ -13733,7 +13890,13 @@ mod staged_batch_tests {
             Some(ZoneMoveCompletion::Remained),
             "the guard is a Remained terminal, not a destruction"
         );
-        assert!(!guard_member.outer_destroy_approved);
+        assert!(matches!(
+            guard_member.operation,
+            StagedMemberOperation::Destroy(StagedDestroyOperation {
+                outer: StagedDestroyOuterApproval::Unapproved,
+                ..
+            })
+        ));
         assert!(guard_events.is_empty());
     }
 }

@@ -7249,12 +7249,13 @@ pub(super) fn handle_resolution_choice(
                             source_id,
                             controller: player,
                             destination: dest_zone,
-                            count: crate::types::game_state::ChangeZoneCountPolicy::ChoiceSelected {
-                                chosen: chosen_ids.clone(),
-                            },
+                            count:
+                                crate::types::game_state::ChangeZoneCountPolicy::ChoiceSelected {
+                                    chosen: chosen_ids.clone(),
+                                },
                             pending_return_result_producer,
-                            stamp_this_way: true,
-                            consumes_own_exile_links: false,
+                            own_exile_links:
+                                crate::types::game_state::OwnExileLinkSettlement::Retain,
                         };
                             match crate::game::zone_pipeline::deliver_staged_change_zone_batch(
                                 state,
@@ -11261,17 +11262,15 @@ pub(crate) fn run_batch_completion(
             // resolving continuation is the stack top for the stamp below.
             let _ = state.take_change_zone_batch_marker(tail.group_id);
             state.last_effect_count = Some(settled.policy_count);
-            if tail.stamp_this_way {
-                if let Some(cause) = effects::this_way_cause_for_zone(tail.destination) {
-                    effects::stamp_active_player_action_completion(
-                        state,
-                        tail.source_id,
-                        crate::types::ability::EffectResolutionResult {
-                            cause,
-                            count: settled.arrival_count,
-                        },
-                    );
-                }
+            if let Some(cause) = effects::this_way_cause_for_zone(tail.destination) {
+                effects::stamp_active_player_action_completion(
+                    state,
+                    tail.source_id,
+                    crate::types::ability::EffectResolutionResult {
+                        cause,
+                        count: settled.arrival_count,
+                    },
+                );
             }
             // CR 608.2c + CR 400.7: the moved-object ledger is written from
             // the members that actually moved, never from the selection.

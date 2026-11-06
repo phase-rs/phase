@@ -6925,6 +6925,53 @@ impl PendingBatchDeliveries {
         for arrangement in &staged.arrangements {
             Self::validate_staged_arrangement(staged, arrangement)?;
         }
+        // CR 401.4: one owner/position set has exactly one arrangement authority.
+        let mut keys = Vec::with_capacity(staged.arrangements.len());
+        for arrangement in &staged.arrangements {
+            let key = (arrangement.batch.owner, &arrangement.position);
+            if keys.contains(&key) {
+                return Err("staged arrangements repeat an owner/position group".to_string());
+            }
+            keys.push(key);
+        }
+        match staged.stage {
+            BatchDeliveryStage::Approving => {
+                if staged
+                    .arrangements
+                    .iter()
+                    .any(|arrangement| arrangement.status != StagedArrangementStatus::Submitted)
+                {
+                    return Err(
+                        "an approving staged batch has an unsubmitted arrangement".to_string()
+                    );
+                }
+            }
+            BatchDeliveryStage::Arranging | BatchDeliveryStage::Delivering => {
+                for ((owner, position), indices) in
+                    crate::game::zone_pipeline::staged_arrangement_groups(staged)
+                {
+                    let Some(arrangement) = staged.arrangements.iter().find(|arrangement| {
+                        arrangement.batch.owner == owner && arrangement.position == position
+                    }) else {
+                        return Err(
+                            "a positioned staged approval has no arrangement group".to_string()
+                        );
+                    };
+                    if indices.iter().any(|&index| {
+                        !arrangement
+                            .batch
+                            .members
+                            .iter()
+                            .any(|ordered| ordered.identity == staged.members[index].identity)
+                    }) {
+                        return Err(
+                            "a positioned staged approval is missing from its arrangement"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -6960,22 +7007,23 @@ impl PendingBatchDeliveries {
             }
         }
         let is_destroy = matches!(member.operation, StagedMemberOperation::Destroy(_));
-        if member.outer_destroy_approved && !is_destroy {
-            return Err("a zone-move staged member carries the destroy approval flag".to_string());
-        }
         // CR 701.8a: the outer approval exists only after that outer consult
         // returned Execute(Destroy); a crafted state cannot settle a member as
         // destroyed before the consult ever happened.
-        if member.outer_destroy_approved
-            && !matches!(
-                member.state,
-                StagedBatchMemberState::InnerConsulting
-                    | StagedBatchMemberState::Approved
-                    | StagedBatchMemberState::PreventedWithChild
-                    | StagedBatchMemberState::Terminal
-                    | StagedBatchMemberState::Abandoned
-            )
-        {
+        if matches!(
+            member.operation,
+            StagedMemberOperation::Destroy(StagedDestroyOperation {
+                outer: StagedDestroyOuterApproval::Approved,
+                ..
+            })
+        ) && !matches!(
+            member.state,
+            StagedBatchMemberState::InnerConsulting
+                | StagedBatchMemberState::Approved
+                | StagedBatchMemberState::PreventedWithChild
+                | StagedBatchMemberState::Terminal
+                | StagedBatchMemberState::Abandoned
+        ) {
             return Err(
                 "a staged member carries the destroy approval before its outer consult".to_string(),
             );
@@ -7442,6 +7490,17 @@ pub enum StagedMemberOperation {
 pub struct StagedDestroyOperation {
     pub source: ObjectId,
     pub cant_regenerate: bool,
+    /// CR 701.8a: whether the outer destruction survived its replacement consult.
+    #[serde(default)]
+    pub outer: StagedDestroyOuterApproval,
+}
+
+/// CR 701.8a + CR 614.6: only an approved outer destruction can emit its result.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StagedDestroyOuterApproval {
+    #[default]
+    Unapproved,
+    Approved,
 }
 
 /// One retained member of a staged batch. The exact original request, its
@@ -7467,12 +7526,6 @@ pub struct StagedBatchMember {
     /// every R4b member decode as `ZoneMove`.
     #[serde(default)]
     pub operation: StagedMemberOperation,
-    /// CR 701.8a: set once the outer `Destroy` event was approved (not
-    /// prevented, not redirected). The singleton pushes `CreatureDestroyed` for
-    /// both an inner `Moved` and an inner `Prevented` (`destroy.rs:60-63`), so
-    /// this flag is the exact emission witness.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub outer_destroy_approved: bool,
     /// CR 616.1: approved replacement work retained until member delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_post_replacement: Option<PostReplacementDrainStack>,
@@ -7744,8 +7797,13 @@ pub(crate) fn settle_batch_delivery_outcome(
                 members
                     .iter()
                     .filter(|member| {
-                        member.outer_destroy_approved
-                            && member.state != StagedBatchMemberState::Abandoned
+                        matches!(
+                            member.operation,
+                            StagedMemberOperation::Destroy(StagedDestroyOperation {
+                                outer: StagedDestroyOuterApproval::Approved,
+                                ..
+                            })
+                        ) && member.state != StagedBatchMemberState::Abandoned
                     })
                     .map(|member| member.identity.object_id)
                     .collect(),
@@ -8377,17 +8435,21 @@ pub struct ChangeZoneBatchTail {
     pub count: ChangeZoneCountPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_return_result_producer: Option<(ReturnResultOccurrenceId, ReturnResultId)>,
-    /// The paused path takes the drain's this-way stamp; the synchronous
-    /// targeted/mass paths do not.
-    #[serde(default)]
-    pub stamp_this_way: bool,
     /// CR 400.7 + CR 608.2c: this population selected its members by the
     /// source's own exile links (`TargetFilter::ExiledBySource`), so each moved
     /// member's link is consumed at its terminal. Every other population keeps
     /// its links — including one that CREATES them for a later return
     /// (Worldgorger Dragon's mass exile).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub consumes_own_exile_links: bool,
+    #[serde(default)]
+    pub own_exile_links: OwnExileLinkSettlement,
+}
+
+/// CR 608.2c: whether this population consumes its source's existing exile links.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OwnExileLinkSettlement {
+    #[default]
+    Retain,
+    Consume,
 }
 
 /// CR 608.2c: how a settled ChangeZone population contributes
@@ -53291,8 +53353,8 @@ mod tests {
             operation: StagedMemberOperation::Destroy(StagedDestroyOperation {
                 source: ObjectId(1),
                 cant_regenerate: false,
+                outer: StagedDestroyOuterApproval::Approved,
             }),
-            outer_destroy_approved: true,
             approved_post_replacement: None,
         };
         PendingBatchDeliveries::validate_staged_member(&member)
@@ -53343,8 +53405,33 @@ mod tests {
             pending_outcome: None,
             terminal,
             operation: StagedMemberOperation::ZoneMove,
-            outer_destroy_approved: false,
             approved_post_replacement: None,
+        }
+    }
+
+    #[test]
+    fn staged_destroy_outer_approval_rejects_preconsult_states() {
+        for state in [
+            StagedBatchMemberState::Unconsulted,
+            StagedBatchMemberState::OuterConsulting,
+        ] {
+            let mut member = cursor_member(1, state, None, false);
+            member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
+                source: ObjectId(999),
+                cant_regenerate: false,
+                outer: StagedDestroyOuterApproval::Unapproved,
+            });
+            PendingBatchDeliveries::validate_staged_member(&member)
+                .expect("an unapproved outer destruction can await consultation");
+            member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
+                source: ObjectId(999),
+                cant_regenerate: false,
+                outer: StagedDestroyOuterApproval::Approved,
+            });
+            assert!(
+                PendingBatchDeliveries::validate_staged_member(&member).is_err(),
+                "outer approval cannot precede consultation in {state:?}"
+            );
         }
     }
 
@@ -53391,6 +53478,7 @@ mod tests {
                     member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
                         source: ObjectId(999),
                         cant_regenerate: false,
+                        outer: StagedDestroyOuterApproval::Unapproved,
                     });
                     member.pending_outcome =
                         Some(StagedMemberOutcome::Approved(ProposedEvent::Destroy {

@@ -1516,8 +1516,7 @@ pub fn resolve(
                 selected: selected.clone(),
             },
             pending_return_result_producer: None,
-            stamp_this_way: true,
-            consumes_own_exile_links: false,
+            own_exile_links: crate::types::game_state::OwnExileLinkSettlement::Retain,
         };
         match crate::game::zone_pipeline::deliver_staged_change_zone_batch(
             state,
@@ -3304,8 +3303,11 @@ pub fn resolve_all(
             destination: dest_zone,
             count: crate::types::game_state::ChangeZoneCountPolicy::MassAllMembers,
             pending_return_result_producer: None,
-            stamp_this_way: true,
-            consumes_own_exile_links: matches!(effective_filter, TargetFilter::ExiledBySource),
+            own_exile_links: if matches!(effective_filter, TargetFilter::ExiledBySource) {
+                crate::types::game_state::OwnExileLinkSettlement::Consume
+            } else {
+                crate::types::game_state::OwnExileLinkSettlement::Retain
+            },
         };
         match crate::game::zone_pipeline::deliver_staged_change_zone_batch(
             state,
@@ -14651,8 +14653,7 @@ mod tests {
                 destination: Zone::Battlefield,
                 count: ChangeZoneCountPolicy::MassAllMembers,
                 pending_return_result_producer: None,
-                stamp_this_way: true,
-                consumes_own_exile_links: false,
+                own_exile_links: crate::types::game_state::OwnExileLinkSettlement::Retain,
             }),
             settled: Some(ChangeZoneSettled {
                 policy_count: 3,

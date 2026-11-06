@@ -5632,7 +5632,6 @@ mod r4b_staged_elimination_tests {
             pending_outcome: None,
             terminal: None,
             operation: StagedMemberOperation::ZoneMove,
-            outer_destroy_approved: false,
             approved_post_replacement: None,
         }
     }
