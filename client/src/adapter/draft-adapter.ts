@@ -860,8 +860,9 @@ export function draftSelectionEffectCards(view: DraftPlayerView): DraftCardInsta
 /**
  * How many cards one selection takes on this view, with no draft-effect card
  * or with `effectCardInstanceId`. `null` when the view offers no such
- * selection: a FIFO view that fails the wire check, or an effect card the
- * view does not publish.
+ * selection: a FIFO view that fails the wire check, or an effect card a
+ * FIFO view does not publish. A legacy view answers its reducer's two for
+ * any effect card; the engine checks the card.
  */
 export function draftSelectionPickCount(
   view: DraftPlayerView,

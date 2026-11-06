@@ -745,8 +745,8 @@ function validPickRequest(request: PickRequest): boolean {
         || typeof request.effectCardInstanceId !== "string"
         || request.effectCardInstanceId.length === 0
         || !validPlacementHint(request.placementHint)) return false;
-      // The selection's size is the view's published count for this effect
-      // card; a view that publishes none for it offers no such selection.
+      // The selection's size is the view's count for this effect card; a FIFO
+      // view that publishes none for it offers no such selection.
       const view = useDraftStore.getState().view;
       const count = view === null ? null : draftSelectionPickCount(view, request.effectCardInstanceId);
       return count !== null

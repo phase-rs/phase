@@ -199,7 +199,7 @@ function view(overrides: Partial<DraftPlayerView> = {}): DraftPlayerView {
       workspace_row_classification: { creature_instance_ids: [], noncreature_instance_ids: [] },
     },
     seats: [], current_pack_number: 1, pick_number: 1, pass_direction: "Left",
-    cards_per_pack: 14, pack_count: 3, min_deck_size: 40, addable_cards: [],
+    cards_per_pack: 14, required_pick_count: 1, pack_count: 3, min_deck_size: 40, addable_cards: [],
     timer_remaining_ms: null, standings: [], current_round: 0, tournament_format: "Swiss",
     pod_policy: "Casual", pairings: [], match_config: { match_type: "Bo1" },
     ...overrides,
