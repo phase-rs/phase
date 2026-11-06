@@ -99,7 +99,7 @@ if [ "$MODE" = pinned ]; then
 else
   TMP="$(mktemp)"
 fi
-trap 'rm -f "$TMP" "$TMP.utf8"' EXIT
+trap 'rm -f "$TMP" "${CR_CONVERT_TMP:-}"' EXIT
 # mktemp creates the file 0600; curl -o, mv and cp keep that mode, which would
 # leave the rules text unreadable to any other uid sharing the checkout.
 chmod 644 "$TMP"

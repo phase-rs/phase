@@ -39,7 +39,16 @@ cr_download() {
       echo "ERROR: $dest is UTF-16 and 'iconv' is required to convert it" >&2
       return 1
     fi
-    iconv -f UTF-16 -t UTF-8 "$dest" > "$dest.utf8"
-    mv "$dest.utf8" "$dest"
+    # mktemp creates the file exclusively under an unpredictable name, so a
+    # name planted in a shared temp directory cannot redirect the write.
+    # CR_CONVERT_TMP is global so the caller's EXIT trap can remove it.
+    CR_CONVERT_TMP="$(mktemp "$dest.utf8.XXXXXX")"
+    chmod 644 "$CR_CONVERT_TMP"
+    if ! iconv -f UTF-16 -t UTF-8 "$dest" > "$CR_CONVERT_TMP" \
+      || ! mv "$CR_CONVERT_TMP" "$dest"; then
+      rm -f "$CR_CONVERT_TMP"
+      echo "ERROR: could not convert $dest from UTF-16" >&2
+      return 1
+    fi
   fi
 }
