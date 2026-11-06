@@ -371,7 +371,7 @@ describe("DraftProgress — FIFO progress", () => {
     };
   }
 
-  /** First-round seats, each publishing its own completed steps. */
+  /** Second-round seats, each publishing its own completed steps. */
   function fifoSeats(roundCompletedSteps: readonly number[]): SeatPublicView[] {
     return roundCompletedSteps.map((steps, seat_index): SeatPublicView => ({
       seat_index,
@@ -381,17 +381,16 @@ describe("DraftProgress — FIFO progress", () => {
       has_submitted_deck: false,
       pick_status: "Pending",
       active_pack_count: 1,
-      drafted_card_count: steps,
+      drafted_card_count: 15 + steps,
       face_up_draft_cards: [],
-      fifo_progress: { completed_steps: steps, round_completed_steps: steps },
+      fifo_progress: { completed_steps: 15 + steps, round_completed_steps: steps },
     }));
   }
 
   /**
    * A FIFO view's progress fields over three 15-step boosters, with
    * `pick_number` as the engine publishes it all round unless a case says
-   * otherwise. The player view is in the second round; the spectator view, in
-   * the first.
+   * otherwise. Both views are in the second round.
    */
   function fifoProgressFields(
     shape:
@@ -414,7 +413,7 @@ describe("DraftProgress — FIFO progress", () => {
         // CR 905.1b: the second draft round passes to the right.
         return { ...fields, current_pack_number: 1, pass_direction: "Right", fifo: shape.fifo };
       case "spectator":
-        return { ...fields, current_pack_number: 0, pass_direction: "Left", fifo: shape.fifo, seats: shape.seats };
+        return { ...fields, current_pack_number: 1, pass_direction: "Right", fifo: shape.fifo, seats: shape.seats };
     }
   }
 
@@ -473,7 +472,7 @@ describe("DraftProgress — FIFO progress", () => {
     },
     {
       leg: "a spectator view with one seat missing its progress",
-      currentPack: 1,
+      currentPack: 2,
       view: (damaged: boolean) => {
         const seats = fifoSeats([3, 7, 0]);
         if (damaged) delete seats[1].fifo_progress;
@@ -484,7 +483,7 @@ describe("DraftProgress — FIFO progress", () => {
     },
     {
       leg: "a spectator view whose FIFO state has no session id",
-      currentPack: 1,
+      currentPack: 2,
       view: (damaged: boolean) => {
         const fifo = fifoState();
         if (damaged) Reflect.deleteProperty(fifo, "session_id");

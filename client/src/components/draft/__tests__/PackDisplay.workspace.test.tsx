@@ -2105,9 +2105,11 @@ describe("PackDisplay local workspace controller", () => {
     { queueCount: 1, queueText: "1 pack in your queue" },
     { queueCount: 3, queueText: "3 packs in your queue" },
   ])("labels_a_fifo_pick_with_the_seats_own_step_and_queue ($queueText)", ({ queueCount, queueText }) => {
-    // CR 905.2a: a FIFO seat drafts at its own pace, so the step it is taking
-    // follows its own `round_completed_steps`. `pick_number` stays 0 all round:
-    // a label that read it would say `Pack 2 Pick 1`.
+    // CR 905.2a: during a draft there is no active player or system of
+    // priority. On a FIFO draft a seat takes a step whenever it holds a pack,
+    // so the step it is taking follows its own `round_completed_steps`.
+    // `pick_number` stays 0 all round: a label that read it would say
+    // `Pack 2 Pick 1`.
     render(<PackDisplay controller={controller({
       view: fifoView({
         currentPack: [packCard("pk-a"), packCard("pk-b")],

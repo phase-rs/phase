@@ -86,20 +86,24 @@ describe("DraftSpectatorDashboard FIFO progress", () => {
     ).length;
   }
 
-  /** A first-round seat publishing its own completed steps. */
+  /** A second-round seat publishing its own completed steps. */
   function fifoSeat(seat_index: number, display_name: string, steps: number): SeatPublicView {
     return {
       ...seat(seat_index, display_name, "Pending"),
-      fifo_progress: { completed_steps: steps, round_completed_steps: steps },
+      fifo_progress: { completed_steps: 15 + steps, round_completed_steps: steps },
     };
   }
 
   it("shows_each_seats_own_progress_on_a_fifo_draft", () => {
-    // CR 905.2a: no seat waits on another in a FIFO draft, so each seat
-    // publishes its own completed steps while `pick_number` stays 0 all round.
+    // CR 905.2a: during a draft there is no active player or system of
+    // priority. On a FIFO draft a seat takes a step whenever it holds a pack,
+    // so each seat publishes its own completed steps while `pick_number` stays
+    // 0 all round.
     const fifoView: SpectatorDraftView = {
       ...view([fifoSeat(0, "Alice", 3), fifoSeat(1, "Bob", 7), fifoSeat(2, "Cara", 0)]),
       kind: "Premier",
+      current_pack_number: 1,
+      pass_direction: "Right",
       flow: "FifoAsync",
       fifo: { session_id: "native-fifo-session", revision: 7, paused: null, review_clock: null },
     };

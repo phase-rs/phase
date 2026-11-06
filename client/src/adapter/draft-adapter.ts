@@ -753,7 +753,7 @@ export interface DraftViewPresentation {
 
 /** Where a view stands in the current round, read from what the engine publishes. */
 export type DraftProgressPresentation =
-  /** A legacy view: `pick_number`, the step every seat is taking together. */
+  /** A legacy view: `pick_number`, the steps every seat has completed together. */
   | { kind: "pod"; completedSteps: number }
   /** A FIFO player view: the seat's own steps this round, its queued packs, and whether it holds a pack. */
   | { kind: "seat"; completedSteps: number; queuedPacks: number; holdsHead: boolean }
@@ -948,8 +948,8 @@ function hasFifoProgress(seat: SeatPublicView): seat is SeatPublicView & { fifo_
 
 /**
  * The engine's reading of where the draft stands, for the progress bar and the
- * pack's position label. A legacy view's `pick_number` is the step every seat
- * takes together. CR 905.2a: during a draft there is no active player or
+ * pack's position label. A legacy view's `pick_number` counts the steps every
+ * seat has completed together. CR 905.2a: during a draft there is no active player or
  * system of priority, so on a FIFO view no one step number describes every
  * seat: each seat publishes its own completed steps this round and its queue.
  * A view that claims FIFO and cannot be read publishes no position; it never
