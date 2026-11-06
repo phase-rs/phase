@@ -79537,6 +79537,33 @@ fn bare_choose_compound_child_inherits_non_controller_subject_timing() {
     }
 }
 
+/// SHAPE: a non-controller subject's object-and-player choice keeps stack timing,
+/// because TargetOnly's resolution chooser only prompts the controller.
+/// Synthetic Oracle: no printed card puts a third-party subject on this clause; the
+/// nearest printed card is Risky Move ("... choose a creature you control and an
+/// opponent."), the matched controller control.
+#[test]
+fn compound_choice_non_controller_subject_object_and_player_keeps_stack_timing() {
+    let timing = |text: &str| {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(def.effect.as_ref(), Effect::TargetOnly { .. }),
+            "{text}: the compound object choice must stay reachable: {def:#?}"
+        );
+        def.target_choice_timing
+    };
+    assert_eq!(
+        timing("Choose a creature you control and an opponent."),
+        TargetChoiceTiming::Resolution,
+        "the controller keeps the resolution-time object choice"
+    );
+    assert_eq!(
+        timing("An opponent chooses a creature you control and an opponent."),
+        TargetChoiceTiming::Stack,
+        "the controller must not choose the object for the third-party subject"
+    );
+}
+
 /// SHAPE: Log Flume's printed Visit choice cannot enter the single-object chooser.
 #[test]
 fn bare_choose_stripped_quantifier_does_not_declare_resolution_timing() {
