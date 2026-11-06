@@ -41,9 +41,9 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally, AdditionalCostOrigin,
     AttachCardinality, AttachSelection, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
     CoinFlipResult, Comparator, ControllerRef, CostCategory, CountScope, DamageChannel, DigSource,
-    Duration, Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, ObjectScope, ParsedCondition,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SpentColor,
-    StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    Duration, Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, MultiTargetSpec, ObjectScope,
+    ParsedCondition, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
+    SpentColor, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -4377,11 +4377,9 @@ fn cost_category_binds_cost_paid_object(category: CostCategory) -> bool {
 /// spell), or the instruction's declared target (`ParentTarget`). `None` when
 /// the instruction acts on no single object.
 fn trailing_rider_subject(effect_text: &str, ctx: &ParseContext) -> Option<TargetFilter> {
-    match effect_target_filter(effect_text, ctx)? {
+    match probe_effect_target(effect_text, ctx)?.filter {
         filter if super::subject::is_single_object_ref(&filter) => Some(filter),
-        filter if !filter.is_context_ref() && !matches!(filter, TargetFilter::Any) => {
-            Some(TargetFilter::ParentTarget)
-        }
+        filter if is_declared_target_filter(&filter) => Some(TargetFilter::ParentTarget),
         _ => None,
     }
 }
@@ -4919,15 +4917,32 @@ pub(super) fn strip_routed_suffix_conditional(
 /// filter is a player-chosen target (not a context reference or the untyped
 /// `Any` fallback). Parses on a throwaway context so the caller's is untouched.
 fn effect_has_declared_target(effect_text: &str, ctx: &ParseContext) -> bool {
-    effect_target_filter(effect_text, ctx)
-        .is_some_and(|filter| !filter.is_context_ref() && !matches!(filter, TargetFilter::Any))
+    probe_effect_target(effect_text, ctx)
+        .is_some_and(|probe| is_declared_target_filter(&probe.filter))
 }
 
-/// The typed target filter of the effect `effect_text` lowers to, parsed on a
-/// throwaway context so the caller's is untouched.
-fn effect_target_filter(effect_text: &str, ctx: &ParseContext) -> Option<TargetFilter> {
+/// CR 115.1: a typed target filter names a player-chosen target unless it is
+/// a context reference or the untyped `Any` fallback.
+fn is_declared_target_filter(filter: &TargetFilter) -> bool {
+    !filter.is_context_ref() && !matches!(filter, TargetFilter::Any)
+}
+
+/// The typed target filter of the effect an instruction lowers to, with the
+/// clause's multi-target spec.
+struct EffectTargetProbe {
+    filter: TargetFilter,
+    multi_target: Option<MultiTargetSpec>,
+}
+
+/// Lowers `effect_text` on a throwaway context (the caller's is untouched)
+/// and reads its typed target filter; `None` when the effect has none.
+fn probe_effect_target(effect_text: &str, ctx: &ParseContext) -> Option<EffectTargetProbe> {
     let clause = parse_effect_clause_inner(effect_text, &mut ctx.clone_throwaway());
-    clause.effect.target_filter().cloned()
+    let filter = clause.effect.target_filter()?.clone();
+    Some(EffectTargetProbe {
+        filter,
+        multi_target: clause.multi_target,
+    })
 }
 
 pub(super) fn parse_quantity_comparison(text: &str) -> Option<(Comparator, QuantityExpr)> {
@@ -5194,19 +5209,15 @@ fn declared_single_object_target(
     effect_text: &str,
     ctx: &ParseContext,
 ) -> Option<DeclaredObjectTarget> {
-    let clause = parse_effect_clause_inner(effect_text, &mut ctx.clone_throwaway());
-    if clause.multi_target.is_some() {
-        return None;
-    }
-    let filter = clause.effect.target_filter()?;
-    if filter.is_context_ref()
-        || matches!(filter, TargetFilter::Any)
-        || super::is_player_scoped_filter(filter)
+    let probe = probe_effect_target(effect_text, ctx)?;
+    if probe.multi_target.is_some()
+        || !is_declared_target_filter(&probe.filter)
+        || super::is_player_scoped_filter(&probe.filter)
     {
         return None;
     }
-    let introduced_controller = match filter {
-        TargetFilter::Typed(tf) => tf.controller.clone(),
+    let introduced_controller = match probe.filter {
+        TargetFilter::Typed(tf) => tf.controller,
         _ => None,
     };
     Some(DeclaredObjectTarget {
