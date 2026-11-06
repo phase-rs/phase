@@ -2106,6 +2106,18 @@ Put one of them into your hand and the rest on the bottom of your library in any
 // are synthetic variants of its text.
 // ---------------------------------------------------------------------------
 
+/// The strict unsupported receipt the all-top lowering emits for a remainder
+/// split the Dig resolver cannot honor (`unsupported_rest_split_effect`).
+fn assert_split_receipt(effects: &[&Effect], what: &str) {
+    assert!(
+        effects
+            .iter()
+            .any(|effect| effect.unimplemented_description()
+                == Some("put the rest on top of your library")),
+        "{what} must surface the dig_rest_split_unsupported_shape receipt, got {effects:?}"
+    );
+}
+
 fn parse_sorcery(oracle: &str) -> engine::parser::oracle::ParsedAbilities {
     engine::parser::oracle::parse_oracle_text(
         oracle,
@@ -2139,8 +2151,9 @@ fn chain_effects(parsed: &engine::parser::oracle::ParsedAbilities) -> Vec<&Effec
     effects
 }
 
-/// CR 401.4: a RANDOM all-top remainder is never arranged by its owner, but the
-/// split resolver shuffles the pile and then parks an arrangement choice for it.
+/// CR 401.4 + CR 101.1: a RANDOM all-top remainder is never arranged by its
+/// owner (the card overrides CR 401.4's arrangement), but the split resolver
+/// shuffles the pile and then parks an arrangement choice for it.
 /// The combination must fail closed. Paired with the PlayerChoice control in
 /// `diabolic_vision_parses_an_all_top_remainder`.
 #[test]
@@ -2150,12 +2163,7 @@ fn a_random_order_top_remainder_fails_closed() {
          and the rest on top of your library in a random order.",
     );
     let effects = chain_effects(&parsed);
-    assert!(
-        effects
-            .iter()
-            .any(|effect| effect.unimplemented_description().is_some()),
-        "a random-order top remainder must surface the unsupported receipt, got {effects:?}"
-    );
+    assert_split_receipt(&effects, "a random-order top remainder");
     assert!(
         !effects
             .iter()
@@ -2174,12 +2182,7 @@ fn a_mass_put_all_top_remainder_fails_closed() {
          them into your hand and the rest on top of your library in any order.",
     );
     let effects = chain_effects(&parsed);
-    assert!(
-        effects
-            .iter()
-            .any(|effect| effect.unimplemented_description().is_some()),
-        "a mass put-all top remainder must surface the unsupported receipt, got {effects:?}"
-    );
+    assert_split_receipt(&effects, "a mass put-all top remainder");
 }
 
 /// CONTROL for the mass guard: "any number" lowers to the same unbounded keep
@@ -2223,13 +2226,7 @@ fn an_alternative_random_order_top_remainder_fails_closed() {
          library in a random order.",
     );
     let effects = chain_effects(&parsed);
-    assert!(
-        effects
-            .iter()
-            .any(|effect| effect.unimplemented_description().is_some()),
-        "the alternative's random-order top remainder must surface the unsupported \
-         receipt, got {effects:?}"
-    );
+    assert_split_receipt(&effects, "the alternative's random-order top remainder");
 }
 
 /// CONTROL for the alternative boundary: the same alternative with an
@@ -2272,12 +2269,7 @@ fn an_all_top_remainder_after_an_optional_cost_fails_closed() {
          battlefield and the rest on top of your library in any order.",
     );
     let effects = chain_effects(&parsed);
-    assert!(
-        effects
-            .iter()
-            .any(|effect| effect.unimplemented_description().is_some()),
-        "the \"if you do\" clause must surface the unsupported receipt, got {effects:?}"
-    );
+    assert_split_receipt(&effects, "the \"if you do\" clause");
     assert!(
         !effects.iter().any(|effect| matches!(
             effect,
@@ -2288,4 +2280,71 @@ fn an_all_top_remainder_after_an_optional_cost_fails_closed() {
         )),
         "no PriorLook Dig may be built for an all-top remainder, got {effects:?}"
     );
+}
+
+/// CR 401.4, INHERITANCE: an "instead" alternative that is silent about the
+/// remainder inherits the base branch's all-top split, so a mass put-all
+/// alternative would carry a split its route cannot thread. The guard must read
+/// the alternative's EFFECTIVE remainder, not only its own clause.
+#[test]
+fn a_remainder_silent_mass_alternative_inheriting_an_all_top_split_fails_closed() {
+    let parsed = parse_sorcery(
+        "Look at the top five cards of your library. Put one of them into your hand \
+         and the rest on top of your library in any order.\nSpell mastery \u{2014} If \
+         there are two or more instant and/or sorcery cards in your graveyard, put all \
+         land cards from among them into your hand instead.",
+    );
+    let effects = chain_effects(&parsed);
+    assert_split_receipt(&effects, "a remainder-silent mass alternative");
+}
+
+/// CONTROL for the inheritance boundary: the same cross-line alternative with
+/// "any number" takes the selection route and may inherit the split.
+#[test]
+fn a_remainder_silent_any_number_alternative_keeps_the_inherited_split() {
+    let parsed = parse_sorcery(
+        "Look at the top five cards of your library. Put one of them into your hand \
+         and the rest on top of your library in any order.\nSpell mastery \u{2014} If \
+         there are two or more instant and/or sorcery cards in your graveyard, put any \
+         number of land cards from among them into your hand instead.",
+    );
+    let effects = chain_effects(&parsed);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| effect.unimplemented_description().is_some()),
+        "an any-number alternative is supported, got {effects:?}"
+    );
+}
+
+/// CR 401.4, LATER PATCH: a separate "put the rest …" sentence re-declares the
+/// remainder's order after the all-top split was installed; a random order on
+/// top of that split would let the owner arrange a shuffled pile.
+#[test]
+fn a_later_random_order_rest_sentence_cannot_pair_with_the_all_top_split() {
+    let parsed = parse_sorcery(
+        "Look at the top five cards of your library. Put one of them into your hand \
+         and the rest on top of your library in any order. Put the rest on the bottom \
+         of your library in a random order.",
+    );
+    let effects = chain_effects(&parsed);
+    assert_split_receipt(&effects, "a later random-order remainder sentence");
+}
+
+/// CR 401.4: the kept-to-library reorder form has already named both positions
+/// (the kept card on top, the rest on the bottom), and the resolver deliberately
+/// ignores a split on that branch. Pairing it with an all-top remainder must fail
+/// closed instead of bottoming the pile. No printed card has this sibling; the
+/// nearest printed card is Fertile Thicket ("Look at the top five cards of your
+/// library. You may reveal a basic land card from among them and put that card
+/// on top of your library and the rest on the bottom of your library in any order.").
+#[test]
+fn a_kept_to_library_reorder_with_a_top_remainder_fails_closed() {
+    let parsed = parse_sorcery(
+        "Look at the top five cards of your library. You may reveal a basic land card \
+         from among them, then put that card on top of your library and the rest on \
+         top of your library in any order.",
+    );
+    let effects = chain_effects(&parsed);
+    assert_split_receipt(&effects, "a kept-to-library reorder with a top remainder");
 }

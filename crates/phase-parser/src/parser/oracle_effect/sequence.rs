@@ -5890,7 +5890,7 @@ pub(super) fn apply_clause_continuation(
                             && rest_split_top.is_none()
                         {
                             let mut unsupported =
-                                AbilityDefinition::new(kind, unsupported_top_remainder_effect());
+                                AbilityDefinition::new(kind, unsupported_rest_split_effect());
                             unsupported.condition = Some(AbilityCondition::effect_performed());
                             defs[sac_pos].sub_ability = Some(Box::new(unsupported));
                             return;
@@ -5977,28 +5977,8 @@ pub(super) fn apply_clause_continuation(
             let Some(dig_pos) = dig_pos else {
                 return;
             };
-            // CR 401.4: fail closed on an all-top remainder the Dig resolver
-            // cannot honor (see `unsupported_top_remainder`). "Any number"
-            // lowers to `up_to == true`, which takes the ordinary selection
-            // route and carries the split, so only the deterministic mass
-            // route is rejected here.
-            if matches!(&*defs[dig_pos].effect, Effect::Dig { .. }) {
-                let (mass_keep, _, mass_up_to) = quantity.to_dig_keep();
-                if unsupported_top_remainder(
-                    rest_library_position,
-                    rest_split_top.is_some(),
-                    continuation_rest_order,
-                    is_mass_put_all(mass_keep, mass_up_to, kept_dest),
-                ) {
-                    let previous = &mut defs[dig_pos];
-                    *previous.effect = unsupported_top_remainder_effect();
-                    previous.sub_ability = None;
-                    previous.else_ability = None;
-                    previous.forward_result = false;
-                    return;
-                }
-            }
             let previous = &mut defs[dig_pos];
+            let mut unsupported_split = false;
             if let Effect::Dig {
                 count: dig_count,
                 keep_count,
@@ -6094,6 +6074,18 @@ pub(super) fn apply_clause_continuation(
                 );
                 *dig_enter_tapped = enter_tapped;
                 *dig_enters_attacking = enters_attacking;
+                // CR 401.4: validate the EFFECTIVE remainder this clause
+                // leaves on the Dig (see `unsupported_rest_split`). "Any
+                // number" lowers to `up_to == true`, which takes the ordinary
+                // selection route and carries the split, so only the
+                // deterministic mass route is rejected.
+                unsupported_split = unsupported_rest_split(
+                    rest_split_top_count.is_some(),
+                    *rest_order,
+                    *keep_count,
+                    *up_to,
+                    *destination,
+                );
             } else if let Effect::Mill {
                 destination: mill_destination,
                 ..
@@ -6192,6 +6184,13 @@ pub(super) fn apply_clause_continuation(
                         defs.push(def);
                     }
                 }
+            }
+            if unsupported_split {
+                let previous = &mut defs[dig_pos];
+                *previous.effect = unsupported_rest_split_effect();
+                previous.sub_ability = None;
+                previous.else_ability = None;
+                previous.forward_result = false;
             }
         }
         ContinuationAst::FaceDownProfileSpec { profile } => {
@@ -7129,34 +7128,39 @@ pub(super) fn is_mass_put_all(
     keep_count == Some(u32::MAX) && !up_to && kept_destination.is_some()
 }
 
-/// CR 401.4: whether a remainder routed "on top of your library" names a shape
-/// the Dig resolver cannot honor, so the lowering must fail closed rather than
-/// let it silently reach the library bottom or hand the owner an arrangement
-/// the card does not grant.
+/// CR 401.4: whether a Dig's EFFECTIVE remainder split names a shape the Dig
+/// resolver cannot honor, so the lowering must fail closed rather than let it
+/// silently reach the library bottom or hand the owner an arrangement the card
+/// does not grant. Evaluated on the final fields of the lowered Dig — after
+/// inheritance into an "instead" alternative and after any later "put the rest
+/// …" patch — never on the clause that first spoke about the remainder.
 ///
 /// - The mass put-all route places the remainder through the uniform bottom
 ///   route and threads no split (`resolve_mass_put_all`).
+/// - A kept-to-library reorder ("put that card on top of your library and the
+///   rest on the bottom", Fertile Thicket) has already named both positions;
+///   the resolver deliberately does not consult a split on that branch.
 /// - A "random order" remainder is shuffled and then parked for the owner's
-///   own arrangement (`split_rest_pile_or_park`), which CR 401.4 does not
-///   allow for a random placement.
-///
-/// An explicit Telling Time-class split (`has_explicit_split`) owns its own
-/// positions, so the all-top position never applies to it.
-pub(super) fn unsupported_top_remainder(
-    position: RestLibraryPosition,
-    has_explicit_split: bool,
+///   own arrangement (`split_rest_pile_or_park`). CR 401.4 gives the owner that
+///   arrangement, but the card's "in a random order" overrides it (CR 101.1),
+///   so no arrangement may be offered.
+pub(super) fn unsupported_rest_split(
+    has_split: bool,
     order: DigRestOrder,
-    mass_put_all: bool,
+    keep_count: Option<u32>,
+    up_to: bool,
+    kept_destination: Option<Zone>,
 ) -> bool {
-    position == RestLibraryPosition::Top
-        && !has_explicit_split
-        && (mass_put_all || order == DigRestOrder::Random)
+    has_split
+        && (order == DigRestOrder::Random
+            || kept_destination == Some(Zone::Library)
+            || is_mass_put_all(keep_count, up_to, kept_destination))
 }
 
-/// The strict unsupported receipt for [`unsupported_top_remainder`] shapes.
-pub(super) fn unsupported_top_remainder_effect() -> Effect {
+/// The strict unsupported receipt for [`unsupported_rest_split`] shapes.
+pub(super) fn unsupported_rest_split_effect() -> Effect {
     Effect::unimplemented(
-        "dig_rest_on_top_unsupported_shape",
+        "dig_rest_split_unsupported_shape",
         "put the rest on top of your library",
     )
 }
@@ -7207,11 +7211,15 @@ fn patch_rest_destination_recursively(
     reorder_all: bool,
     rest_order: DigRestOrder,
 ) {
+    let mut unsupported_split = false;
     match &mut *def.effect {
         Effect::Dig {
+            keep_count,
+            up_to,
             destination: kept_destination,
             rest_destination,
             rest_remainder,
+            rest_split_top_count,
             rest_order: dig_rest_order,
             ..
         } => {
@@ -7226,6 +7234,17 @@ fn patch_rest_destination_recursively(
             // declared (Follow the Lumarets patches both of its branches).
             *rest_remainder = DigRestRemainder::Route;
             *dig_rest_order = rest_order;
+            // CR 401.4: a later order patch can pair a remainder split an
+            // earlier clause installed with a random order the split resolver
+            // cannot honor; validate the effective remainder (see
+            // `unsupported_rest_split`).
+            unsupported_split = unsupported_rest_split(
+                rest_split_top_count.is_some(),
+                *dig_rest_order,
+                *keep_count,
+                *up_to,
+                *kept_destination,
+            );
         }
         Effect::RevealUntil {
             rest_destination,
@@ -7236,6 +7255,9 @@ fn patch_rest_destination_recursively(
             *effect_rest_order = rest_order;
         }
         _ => {}
+    }
+    if unsupported_split {
+        *def.effect = unsupported_rest_split_effect();
     }
     if let Some(sub) = def.sub_ability.as_deref_mut() {
         patch_rest_destination_recursively(sub, destination, reorder_all, rest_order);
