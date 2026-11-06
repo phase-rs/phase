@@ -23,21 +23,22 @@ cr_file_effective() {
 
 # Download URL to DEST, converting Wizards' UTF-16 encoding to UTF-8 if needed.
 cr_download() {
-  local url="$1" dest="$2" tool kind
-  for tool in curl file iconv; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-      echo "ERROR: '$tool' is required to download the Comprehensive Rules" >&2
-      return 1
-    fi
-  done
+  local url="$1" dest="$2" bom
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "ERROR: 'curl' is required to download the Comprehensive Rules" >&2
+    return 1
+  fi
   # WotC's published URL may contain unescaped spaces ("MagicCompRules 20260227.txt").
   curl -fsSL "${url// /%20}" -o "$dest"
-  # A failed `file` must not read as "not UTF-16".
-  kind="$(file -b "$dest")" || {
-    echo "ERROR: could not determine the encoding of $dest" >&2
-    return 1
-  }
-  if printf '%s\n' "$kind" | grep -qi 'utf-16'; then
+  # Detect UTF-16 by its byte-order mark rather than `file`, which slim
+  # containers often lack. Text that is neither UTF-8 nor BOM-marked UTF-16
+  # carries no readable effective date, so the caller's edition check rejects it.
+  bom="$(head -c 2 "$dest" | od -An -tx1 | tr -d ' \n')"
+  if [ "$bom" = fffe ] || [ "$bom" = feff ]; then
+    if ! command -v iconv >/dev/null 2>&1; then
+      echo "ERROR: $dest is UTF-16 and 'iconv' is required to convert it" >&2
+      return 1
+    fi
     iconv -f UTF-16 -t UTF-8 "$dest" > "$dest.utf8"
     mv "$dest.utf8" "$dest"
   fi
