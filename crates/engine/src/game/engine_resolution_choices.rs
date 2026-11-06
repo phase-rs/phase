@@ -1253,6 +1253,49 @@ fn dig_continuation_wants_rest_pile_for_count(ability: &ResolvedAbility) -> bool
     wants_rest
 }
 
+/// CR 701.20a + CR 701.20d + CR 401.2: a card revealed by an instruction stays
+/// revealed only as long as that instruction needs it (CR 701.20a), and revealed
+/// cards that are shuffled or otherwise reordered inside a library stop being
+/// revealed and become new objects (CR 701.20d). Once a reveal-dig's keep
+/// decision has committed a reordered pile back into the library, no card in
+/// that pile may keep a reveal marker — the rest pile that went to the bottom
+/// AND the card the player kept on top. Leaving any of them marked is issue
+/// #8059: the caster (and every other player) kept seeing cards that the
+/// instruction had already put away.
+///
+/// Callers pass exactly the cards the instruction reordered. A card that leaves
+/// the library loses its marker with the zone change itself (CR 400.7), never
+/// from here, and a card a private "look at" dig never publicly revealed has no
+/// marker to drop — those occurrences are filtered out so this cleanup only ever
+/// hides a reveal that is actually active.
+///
+/// This is the same cleanup the shared `BatchCompletion::RevealRestPile` tail
+/// runs for the delivery shapes that have a completion to ride; the in-place
+/// library-commit branch answers the `DigChoice` without one, so it calls the
+/// authority directly.
+fn hide_dig_reveal_markers(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    cards: &[ObjectId],
+) {
+    let still_revealed: Vec<ObjectId> = cards
+        .iter()
+        .copied()
+        .filter(|card_id| state.revealed_cards.contains(card_id))
+        .collect();
+    if still_revealed.is_empty() {
+        return;
+    }
+    state
+        .resolve_and_apply_information(
+            &still_revealed,
+            ResolvedInformationAudience::Controller(player),
+            ResolvedInformationLifetime::UntilActionBoundary,
+            ResolvedInformationEdit::Hide,
+        )
+        .expect("reveal cleanup must reference live card occurrences");
+}
+
 /// CR 701.20e / CR 701.23a + CR 401.4: Move the "rest" partition of an
 /// interactive selection (Dig's unkept cards, a search-split's non-primary
 /// cards) to a concrete destination zone. `Library` routes to the bottom of the
@@ -4979,7 +5022,13 @@ pub(super) fn handle_resolution_choice(
                                     rest_remainder: crate::types::ability::DigRestRemainder::Route,
                                     rest_order: DigRestOrder::Preserve,
                                     rest_split_top_count: None,
-                                    clear_markers: Vec::new(),
+                                    // CR 701.20d: the whole looked-at pile was
+                                    // reordered into the library (the kept cards
+                                    // to the top, the rest to the bottom), so
+                                    // none of those cards is still revealed —
+                                    // drop the markers for every card this dig
+                                    // revealed once the pile has landed.
+                                    clear_markers: cards.clone(),
                                     publish_tracked_set: None,
                                     publish_tracked_set_cause: None,
                                     emit_reveal_until_resolved: None,
@@ -4996,6 +5045,14 @@ pub(super) fn handle_resolution_choice(
                         }
                     }
                 }
+                // CR 701.20a + CR 701.20d + CR 401.2: this branch reordered the
+                // whole looked-at pile inside the library — the kept cards to
+                // the top, the rest to the bottom — so the pick no longer needs
+                // ANY of it revealed, not the rest pile and not the kept card
+                // either (a revealed card that is reordered in a library stops
+                // being revealed). Close the window for the whole pile before
+                // the continuation resumes.
+                hide_dig_reveal_markers(state, player, &cards);
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     finish_with_continuation(state, player, events),
                 ));
@@ -5031,16 +5088,18 @@ pub(super) fn handle_resolution_choice(
                 let defer_rest_routing = state.active_ability_continuation().is_some_and(|cont| {
                     dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
                 });
-                // CR 701.20a + CR 701.20e: a silent remainder stays in the
-                // library, so its reveal has to end with the instruction that
-                // caused it. Hand those cards to the completion's marker
+                // CR 701.20a + CR 701.20d + CR 701.20e + CR 401.2: the keep
+                // decision ends the reveal window for the cards it did NOT
+                // keep. They are about to be put away inside the library (or
+                // another rest zone), and a silent remainder stays in the
+                // library — in both shapes the instruction no longer needs
+                // them revealed. Hand those cards to the completion's marker
                 // cleanup, which runs once the kept delivery has settled and
-                // survives any replacement re-park in between.
-                let silent_remainder_markers = if rest_remainder.is_route() {
-                    Vec::new()
-                } else {
-                    unkept.clone()
-                };
+                // survives any replacement re-park in between. The kept cards
+                // leave the looked-at pile for a concrete zone, so their
+                // markers fall with the zone change itself (CR 400.7) — only
+                // the rest pile needs an explicit close here.
+                let rest_marker_cleanup = unkept.clone();
                 let reqs = kept
                     .iter()
                     .map(|&obj_id| {
@@ -5081,7 +5140,11 @@ pub(super) fn handle_resolution_choice(
                         // survives an arbitrary number of replacement re-parks
                         // in between.
                         rest_split_top_count,
-                        clear_markers: silent_remainder_markers,
+                        // CR 701.20a + CR 701.20d + CR 701.20e + CR 401.2: the
+                        // rest pile's reveal markers are dropped once it has
+                        // landed, routed or left silent in the library (see
+                        // `rest_marker_cleanup` above).
+                        clear_markers: rest_marker_cleanup,
                         publish_tracked_set: Some(publish_set),
                         publish_tracked_set_cause: publish_cause,
                         emit_reveal_until_resolved: None,
@@ -5158,7 +5221,11 @@ pub(super) fn handle_resolution_choice(
                     rest_destination,
                     rest_order,
                     rest_split_top_count: None,
-                    clear_markers: Vec::new(),
+                    // CR 701.20a + CR 701.20d + CR 401.2: same rest-pile
+                    // reveal-window close for the reveal-only form whose kept
+                    // cards never move (`kept_destination: None`); the kept
+                    // cards stay revealed for the downstream sub-ability.
+                    clear_markers: unkept.clone(),
                     publish_tracked_set: Some(publish_set),
                     publish_tracked_set_cause: publish_cause,
                     emit_reveal_until_resolved: None,

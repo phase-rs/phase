@@ -217,6 +217,7 @@ mod random_result_source_identity;
 mod replacement_choice_trigger_gating;
 mod resolve_all_consent;
 mod rev_tithe_extractor_facedown_cast;
+mod reveal_pick_visibility;
 mod reveal_until_that_many;
 mod ring_equipped_creature_color_condition;
 mod rules;
