@@ -820,3 +820,51 @@ fn hallowed_burial_owner_concedes_while_seeded_group_is_live() {
     assert_eq!(library(&runner, P2), vec![l2, b]);
     assert_arrangement_finished(&runner);
 }
+
+/// CR 800.4a + CR 903.9b: a surviving chooser can finish consultation after
+/// a different owner's later members have been abandoned.
+#[test]
+fn hallowed_burial_survivor_commander_choice_skips_a_departed_later_member() {
+    let mut scenario =
+        GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, burial_mana());
+    for player in [P0, P1, P2] {
+        scenario.with_library_top(player, &["Sentinel"]);
+    }
+    let commander = scenario
+        .add_creature(P0, "Commander", 2, 2)
+        .commander()
+        .id();
+    let departed = scenario.add_creature(P1, "Departing creature", 2, 2).id();
+    let survivor = scenario.add_creature(P2, "Surviving creature", 2, 2).id();
+    let burial = add_hallowed_burial(&mut scenario);
+    let mut runner = scenario.build();
+    let l0 = library(&runner, P0)[0];
+    let l2 = library(&runner, P2)[0];
+    let cast = runner.cast(burial).resolve();
+    assert_bottom_arrangement_prompt(cast.final_waiting_for(), P0, &[commander]);
+    for (owner, card) in [(P0, commander), (P1, departed), (P2, survivor)] {
+        assert_bottom_arrangement_prompt(&runner.state().waiting_for, owner, &[card]);
+        runner
+            .act(GameAction::SelectCards { cards: vec![card] })
+            .unwrap();
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .unwrap();
+    assert_eq!(library(&runner, P0), vec![l0, commander]);
+    assert_eq!(library(&runner, P2), vec![l2, survivor]);
+    assert_eq!(zone(&runner, departed), Zone::Exile);
+    assert_eq!(zone(&runner, burial), Zone::Graveyard);
+    assert_arrangement_finished(&runner);
+}

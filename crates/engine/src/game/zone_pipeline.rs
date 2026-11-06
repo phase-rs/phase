@@ -1908,6 +1908,12 @@ fn consult_next_staged_member(
         StagedMemberOperation::ZoneMove => None,
     };
     match (destroy_operation, member.state) {
+        (_, StagedBatchMemberState::Terminal | StagedBatchMemberState::Abandoned) => {
+            // CR 800.4a: a later member may have left while an earlier chooser
+            // was answering. Its frozen slot is finished, not a live pause.
+            advance_staged_cursor(owner, member.announcement_index as usize);
+            return StagedConsult::Continue;
+        }
         (Some(operation), StagedBatchMemberState::Unconsulted) => {
             return consult_staged_destroy_outer(state, owner, events, member, operation);
         }
@@ -1915,7 +1921,13 @@ fn consult_next_staged_member(
             return consult_staged_destroy_inner(state, owner, events, member, operation);
         }
         (_, StagedBatchMemberState::Unconsulted) => {}
-        _ => {
+        (
+            _,
+            StagedBatchMemberState::Approved
+            | StagedBatchMemberState::OuterConsulting
+            | StagedBatchMemberState::InnerConsulting
+            | StagedBatchMemberState::PreventedWithChild,
+        ) => {
             // A member still consulting has a live child; the drain finalizes it.
             return StagedConsult::Paused;
         }
@@ -2858,12 +2870,22 @@ fn staged_arrangement_slot(
     member: &StagedBatchMember,
 ) -> Option<usize> {
     let staged = owner.staged.as_ref()?;
+    let Some(ProposedEvent::ZoneChange {
+        to: Zone::Library,
+        library_placement: Some(position),
+        ..
+    }) = member.approved_event.as_ref()
+    else {
+        return None;
+    };
     let arrangement = staged.arrangements.iter().find(|arrangement| {
-        arrangement
-            .batch
-            .members
-            .iter()
-            .any(|ordered| ordered.identity == member.identity)
+        arrangement.batch.owner == member.owner
+            && arrangement.position == *position
+            && arrangement
+                .batch
+                .members
+                .iter()
+                .any(|ordered| ordered.identity == member.identity)
     })?;
     let rank = arrangement
         .batch
@@ -13451,6 +13473,263 @@ mod staged_batch_tests {
                 "an empty set omits every key"
             );
         }
+    }
+
+    #[test]
+    fn staged_validator_rejects_identity_at_another_approved_key() {
+        for stage in [
+            BatchDeliveryStage::Arranging,
+            BatchDeliveryStage::Delivering,
+        ] {
+            for both_top in [false, true] {
+                let mut state = GameState::new_two_player(42);
+                effect_source(&mut state);
+                let a = graveyard_card(&mut state, 1);
+                let b = graveyard_card(&mut state, 2);
+                let members = [
+                    (a, LibraryPosition::Top),
+                    (
+                        b,
+                        if both_top {
+                            LibraryPosition::Top
+                        } else {
+                            LibraryPosition::Bottom
+                        },
+                    ),
+                ]
+                .into_iter()
+                .map(|(id, position)| {
+                    staged_member(
+                        &state,
+                        id,
+                        Some(approved_library_event(&state, id, position)),
+                        StagedBatchMemberState::Approved,
+                        Zone::Graveyard,
+                        None,
+                    )
+                })
+                .collect();
+                let group =
+                    push_approved_staged(&mut state, members, BatchDeliveryStage::Approving);
+                let mut owner = take_owner(&mut state, group);
+                begin_staged_arrangement(&state, &mut owner);
+                let staged = owner.staged.as_mut().unwrap();
+                staged.stage = stage;
+                staged.cursor = 0;
+                for arrangement in &mut staged.arrangements {
+                    arrangement.status = StagedArrangementStatus::Submitted;
+                }
+                owner.validate_staged().expect("valid approved keys");
+                let staged = owner.staged.as_mut().unwrap();
+                if both_top {
+                    let mut wrong = staged.arrangements[0].clone();
+                    wrong.position = LibraryPosition::Bottom;
+                    wrong
+                        .batch
+                        .members
+                        .retain(|entry| entry.identity.object_id == a);
+                    staged.arrangements.insert(0, wrong);
+                } else {
+                    let wrong = staged.arrangements[1].batch.members[0].clone();
+                    staged.arrangements[0].batch.members.push(wrong);
+                }
+                assert!(
+                    owner.validate_staged().is_err(),
+                    "{stage:?}, both_top={both_top}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn staged_validator_rejects_arrangement_outside_numbered_group_domain() {
+        let mut state = GameState::new_two_player(42);
+        effect_source(&mut state);
+        let a = library_card(&mut state, 1);
+        let group =
+            replacement_origin_group(&mut state, &[a], LibraryPosition::NthFromTop { n: 2 });
+        let mut owner = take_owner(&mut state, group);
+        let staged = owner.staged.as_mut().unwrap();
+        staged.stage = BatchDeliveryStage::Delivering;
+        staged.cursor = 0;
+        staged.arrangements.push(StagedLibraryArrangement {
+            position: LibraryPosition::NthFromTop { n: 2 },
+            batch: MassLibraryOrderBatch {
+                owner: PlayerId(0),
+                arranger: None,
+                members: vec![MassLibraryOrderMember::card(
+                    staged.members[0].identity,
+                    Zone::Library,
+                )],
+            },
+            status: StagedArrangementStatus::Submitted,
+        });
+        assert!(
+            owner.validate_staged().is_err(),
+            "library-origin numbered placement is ungrouped"
+        );
+    }
+
+    #[test]
+    fn staged_arrangement_slot_uses_the_approved_key() {
+        let mut state = GameState::new_two_player(42);
+        effect_source(&mut state);
+        let sentinel = library_card(&mut state, 10);
+        let a = graveyard_card(&mut state, 1);
+        let b = graveyard_card(&mut state, 2);
+        let members = [(a, LibraryPosition::Top), (b, LibraryPosition::Bottom)]
+            .into_iter()
+            .map(|(id, position)| {
+                staged_member(
+                    &state,
+                    id,
+                    Some(approved_library_event(&state, id, position)),
+                    StagedBatchMemberState::Approved,
+                    Zone::Graveyard,
+                    None,
+                )
+            })
+            .collect();
+        let group = push_approved_staged(&mut state, members, BatchDeliveryStage::Approving);
+        let mut owner = take_owner(&mut state, group);
+        begin_staged_arrangement(&state, &mut owner);
+        let staged = owner.staged.as_mut().unwrap();
+        // A malformed duplicate must not redirect B from its approved Bottom.
+        let b_entry = staged.arrangements[1].batch.members[0].clone();
+        staged.arrangements[0].batch.members.push(b_entry);
+        for member in &owner.staged.as_ref().unwrap().members {
+            let slot = staged_arrangement_slot(&state, &owner, member).unwrap();
+            zones::move_to_library_at_index(
+                &mut state,
+                member.identity.object_id,
+                Some(slot),
+                &mut Vec::new(),
+            );
+        }
+        assert_eq!(
+            state
+                .library_of(PlayerId(0))
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [a, sentinel, b]
+        );
+    }
+
+    fn parked_population_for_decode(destroy: bool) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        let source = effect_source(&mut state);
+        let a = graveyard_card(&mut state, 1);
+        let mut member = staged_member(
+            &state,
+            a,
+            None,
+            StagedBatchMemberState::Unconsulted,
+            Zone::Graveyard,
+            None,
+        );
+        if destroy {
+            member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
+                source,
+                cant_regenerate: false,
+                outer: StagedDestroyOuterApproval::Unapproved,
+            });
+        }
+        let group = push_approved_staged(&mut state, vec![member], BatchDeliveryStage::Approving);
+        let completion = if destroy {
+            BatchCompletion::DestroyPopulationSettled {
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    source,
+                    PlayerId(0),
+                )),
+                settled_destroyed: None,
+            }
+        } else {
+            BatchCompletion::ChangeZonePopulationSettled {
+                tail: Box::new(ChangeZoneBatchTail {
+                    group_id: group,
+                    effect_kind: EffectKind::ChangeZone,
+                    source_id: source,
+                    controller: PlayerId(0),
+                    destination: Zone::Graveyard,
+                    count: ChangeZoneCountPolicy::MassAllMembers,
+                    pending_return_result_producer: None,
+                    own_exile_links: crate::types::game_state::OwnExileLinkSettlement::Retain,
+                }),
+                settled: None,
+            }
+        };
+        state.active_batch_delivery_mut().unwrap().completion = Some(completion);
+        state
+    }
+
+    #[test]
+    fn staged_population_decode_rejects_premature_settlement() {
+        for destroy in [true, false] {
+            let state = parked_population_for_decode(destroy);
+            let mut wire = serde_json::to_value(&state).unwrap();
+            serde_json::from_value::<GameState>(wire.clone()).expect("valid parked population");
+            // Mutate the valid wire, not the live owner: malformed saves must fail decoding.
+            fn settle_population(value: &mut serde_json::Value) {
+                match value {
+                    serde_json::Value::Object(fields) => {
+                        if let Some(payload) = fields.get_mut("ChangeZonePopulationSettled") {
+                            payload["settled"] = serde_json::json!({
+                                "policy_count": 0, "arrival_count": 0
+                            });
+                        }
+                        if let Some(payload) = fields.get_mut("DestroyPopulationSettled") {
+                            payload["settled_destroyed"] = serde_json::json!([]);
+                        }
+                        for child in fields.values_mut() {
+                            settle_population(child);
+                        }
+                    }
+                    serde_json::Value::Array(values) => {
+                        for child in values {
+                            settle_population(child);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            settle_population(&mut wire);
+            assert!(
+                serde_json::from_value::<GameState>(wire).is_err(),
+                "destroy={destroy}"
+            );
+        }
+    }
+
+    #[test]
+    fn staged_population_decode_rejects_published_return_result() {
+        use crate::types::ability::ReturnResultId;
+        use crate::types::game_state::ReturnResultOccurrenceId;
+        let mut state = parked_population_for_decode(false);
+        let occurrence = ReturnResultOccurrenceId(1);
+        let result = ReturnResultId(1);
+        state.next_return_result_occurrence_id = 2;
+        state.active_return_result_occurrence = Some(occurrence);
+        state
+            .return_result_frames
+            .insert(occurrence, Default::default());
+        let Some(BatchCompletion::ChangeZonePopulationSettled { tail, .. }) =
+            &mut state.active_batch_delivery_mut().unwrap().completion
+        else {
+            unreachable!()
+        };
+        tail.pending_return_result_producer = Some((occurrence, result));
+        let valid = serde_json::to_value(&state).unwrap();
+        serde_json::from_value::<GameState>(valid).expect("valid unpublished population result");
+        state
+            .return_result_frames
+            .get_mut(&occurrence)
+            .unwrap()
+            .insert(result, vec![]);
+        let malformed = serde_json::to_value(&state).unwrap();
+        assert!(serde_json::from_value::<GameState>(malformed).is_err());
     }
 
     #[test]

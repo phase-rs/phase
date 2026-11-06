@@ -6999,12 +6999,18 @@ impl PendingBatchDeliveries {
         }
         // CR 401.4: one owner/position set has exactly one arrangement authority.
         let mut keys = Vec::with_capacity(staged.arrangements.len());
+        let mut identities = HashSet::new();
         for arrangement in &staged.arrangements {
             let key = (arrangement.batch.owner, &arrangement.position);
             if keys.contains(&key) {
                 return Err("staged arrangements repeat an owner/position group".to_string());
             }
             keys.push(key);
+            for entry in &arrangement.batch.members {
+                if !identities.insert(entry.identity) {
+                    return Err("staged arrangements repeat an identity across groups".to_string());
+                }
+            }
         }
         match staged.stage {
             BatchDeliveryStage::Approving => {
@@ -7019,9 +7025,24 @@ impl PendingBatchDeliveries {
                 }
             }
             BatchDeliveryStage::Arranging | BatchDeliveryStage::Delivering => {
-                for ((owner, position), indices) in
-                    crate::game::zone_pipeline::staged_arrangement_groups(staged)
-                {
+                let groups = crate::game::zone_pipeline::staged_arrangement_groups(staged);
+                for arrangement in &staged.arrangements {
+                    let inherited = self
+                        .component_delivery_parent
+                        .as_ref()
+                        .is_some_and(|link| link.inherited_arrangements.contains(arrangement));
+                    if !inherited
+                        && !groups.iter().any(|((owner, position), _)| {
+                            *owner == arrangement.batch.owner && *position == arrangement.position
+                        })
+                    {
+                        return Err(
+                            "a staged arrangement is outside the approved grouping domain"
+                                .to_string(),
+                        );
+                    }
+                }
+                for ((owner, position), indices) in groups {
                     let Some(arrangement) = staged.arrangements.iter().find(|arrangement| {
                         arrangement.batch.owner == owner && arrangement.position == position
                     }) else {
@@ -7354,32 +7375,7 @@ impl PendingBatchDeliveries {
         ordered: &MassLibraryOrderMember,
         stage: BatchDeliveryStage,
     ) -> Result<Option<&'a StagedBatchMember>, String> {
-        if let Some(member) = staged
-            .members
-            .iter()
-            .find(|member| member.identity.object_id == ordered.identity.object_id)
-        {
-            if member.identity != ordered.identity {
-                return Err("a staged arrangement rebinds a stale incarnation".to_string());
-            }
-            if member.owner != arrangement.batch.owner {
-                return Err("a staged arrangement mixes library owners".to_string());
-            }
-            return Ok(Some(member));
-        }
-        let covering = ordered.departing_permanent.and_then(|identity| {
-            staged
-                .members
-                .iter()
-                .find(|member| member.identity == identity)
-        });
-        let Some(member) = covering else {
-            return Ok(None);
-        };
-        if ordered.origin != Zone::Battlefield {
-            return Err("a staged component arrangement has a nonbattlefield origin".to_string());
-        }
-        let at_key = match stage {
+        let at_key = |member: &StagedBatchMember| match stage {
             BatchDeliveryStage::Approving => true,
             BatchDeliveryStage::Arranging | BatchDeliveryStage::Delivering => {
                 matches!(
@@ -7395,7 +7391,32 @@ impl PendingBatchDeliveries {
                 )
             }
         };
-        Ok(at_key.then_some(member))
+        if let Some(member) = staged
+            .members
+            .iter()
+            .find(|member| member.identity.object_id == ordered.identity.object_id)
+        {
+            if member.identity != ordered.identity {
+                return Err("a staged arrangement rebinds a stale incarnation".to_string());
+            }
+            if member.owner != arrangement.batch.owner {
+                return Err("a staged arrangement mixes library owners".to_string());
+            }
+            return Ok(at_key(member).then_some(member));
+        }
+        let covering = ordered.departing_permanent.and_then(|identity| {
+            staged
+                .members
+                .iter()
+                .find(|member| member.identity == identity)
+        });
+        let Some(member) = covering else {
+            return Ok(None);
+        };
+        if ordered.origin != Zone::Battlefield {
+            return Err("a staged component arrangement has a nonbattlefield origin".to_string());
+        }
+        Ok(at_key(member).then_some(member))
     }
 
     fn validate_staged_arrangement(
@@ -7432,14 +7453,19 @@ impl PendingBatchDeliveries {
                 None => return Err("a staged arrangement names a foreign member".to_string()),
             }
         }
-        if staged.stage == BatchDeliveryStage::Arranging {
+        if matches!(
+            staged.stage,
+            BatchDeliveryStage::Arranging | BatchDeliveryStage::Delivering
+        ) {
             if !inherited {
                 let expected: HashSet<ObjectIncarnationRef> = staged
                     .members
                     .iter()
                     .filter(|member| {
-                        member.state == StagedBatchMemberState::Approved
-                            && member.owner == arrangement.batch.owner
+                        matches!(
+                            member.state,
+                            StagedBatchMemberState::Approved | StagedBatchMemberState::Terminal
+                        ) && member.owner == arrangement.batch.owner
                             && matches!(
                                 member.approved_event.as_ref(),
                                 Some(ProposedEvent::ZoneChange {
@@ -15159,6 +15185,11 @@ pub(crate) fn live_return_result_occurrences(
                 {
                     live.insert(*occurrence_id);
                 }
+                if let Some(BatchCompletion::ChangeZonePopulationSettled { tail, .. }) =
+                    &batch.completion
+                {
+                    live.extend(tail.pending_return_result_producer.map(|(id, _)| id));
+                }
             }
             ResolutionFrame::RepeatFor(_)
             | ResolutionFrame::RepeatUntil(_)
@@ -15328,6 +15359,30 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
                             result_id
                         ));
                     }
+                }
+                if let Some(BatchCompletion::ChangeZonePopulationSettled { tail, settled }) =
+                    &batch.completion
+                {
+                    if settled.is_some() {
+                        return Err(
+                            "ChangeZone population is prematurely settled in a parked batch"
+                                .to_string(),
+                        );
+                    }
+                    if let Some(key) = tail.pending_return_result_producer {
+                        validate_parked_publisher(key, "ChangeZone population")?;
+                    }
+                }
+                if matches!(
+                    &batch.completion,
+                    Some(BatchCompletion::DestroyPopulationSettled {
+                        settled_destroyed: Some(_),
+                        ..
+                    })
+                ) {
+                    return Err(
+                        "destroy population is prematurely settled in a parked batch".to_string(),
+                    );
                 }
             }
             ResolutionFrame::RepeatFor(_)
