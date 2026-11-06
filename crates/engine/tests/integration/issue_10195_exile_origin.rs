@@ -204,7 +204,7 @@ fn r1_soulherder_counts_every_creature_exiled_at_once_while_it_survives() {
     assert_eq!(
         p1p1(&runner, soulherder),
         2,
-        "CR 603.6c + CR 603.10a: one trigger per creature exiled from the battlefield"
+        "CR 603.2c: one trigger per creature exiled from the battlefield"
     );
 }
 
@@ -247,6 +247,6 @@ fn r1_captain_marvel_gains_the_exiled_creatures_last_known_power() {
     assert_eq!(
         runner.life(P0) - life_before,
         4,
-        "CR 603.10a: life gained is the Bears' last-known battlefield power (4), not 2"
+        "CR 608.2h: life gained is the Bears' last-known battlefield power (4), not 2"
     );
 }
