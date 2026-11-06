@@ -162,7 +162,7 @@ pub(super) fn collect_object_targets(
     target: &TargetFilter,
 ) -> Vec<ObjectId> {
     if let TargetFilter::Or { filters } = target {
-        // CR 702.26a + CR 702.26h: gather the whole batch before phasing any
+        // CR 702.26g + CR 702.26h: gather the whole batch before phasing any
         // member, so an attachment selected with its host phases indirectly.
         let mut seen = HashSet::new();
         return filters

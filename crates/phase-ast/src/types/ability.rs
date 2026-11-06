@@ -7771,7 +7771,10 @@ impl TypedFilter {
     pub fn lacks_standalone_selection_constraint(&self) -> bool {
         self.type_filters.is_empty()
             && self.controller.is_none()
-            && matches!(self.properties.as_slice(), [] | [FilterProp::Another])
+            && self
+                .properties
+                .iter()
+                .all(|property| *property == FilterProp::Another)
     }
 
     pub fn normalized(mut self) -> Self {
@@ -29592,7 +29595,7 @@ impl TargetFilter {
                 // the source's live-or-LKI incarnation, never chosen while
                 // announcing the ability.
                 | TargetFilter::SourceController
-                // CR 115.1 + CR 400.3: "~'s owner" is read at resolution, never announced.
+                // CR 108.3 + CR 115.10a: "~'s owner" is read at resolution, never announced.
                 | TargetFilter::Owner
                 | TargetFilter::OriginalController
                 // CR 608.2c: the reanimator-Aura's pre-rebind source identity is
@@ -43127,7 +43130,7 @@ mod tests {
             (TypedFilter::creature(), false),
             (
                 TypedFilter::default().properties(vec![FilterProp::Another, FilterProp::Another]),
-                false,
+                true,
             ),
         ] {
             assert_eq!(

@@ -7578,20 +7578,16 @@ pub(super) fn handle_resolution_choice(
                 // CR 401.4 + CR 101.4: for an owner arrangement, `chosen` is the
                 // whole collected multi-owner arrangement, moved here at once.
                 EffectKind::PutAtLibraryPosition => {
-                    // CR 401.4: only grouped positions carry submitted rank
-                    // authority; other placements keep their ordinary delivery.
-                    let owner_arranged_batches = match library_position.as_ref() {
-                        Some(
-                            LibraryPosition::Top
-                            | LibraryPosition::Bottom
-                            | LibraryPosition::NthFromTop { .. },
-                        ) => owner_arranged_batches,
-                        Some(
-                            LibraryPosition::BeneathTop { .. }
-                            | LibraryPosition::RandomWithinTop { .. },
-                        )
-                        | None => None,
-                    };
+                    // CR 730.3a: every owner batch folds physical cards to one
+                    // permanent departure, even outside the seeded position domain.
+                    let departures = owner_arranged_batches.as_ref().map(|batches| {
+                        effects::change_zone::fold_physical_order_to_departures(batches)
+                    });
+                    let seeds = owner_arranged_batches.map_or_else(Vec::new, |batches| {
+                        library_position.as_ref().map_or_else(Vec::new, |position| {
+                            effects::change_zone::submitted_owner_arrangements(batches, position)
+                        })
+                    });
                     let library_position = match library_position {
                         Some(LibraryPosition::Bottom) => LibraryPosition::Bottom,
                         Some(LibraryPosition::NthFromTop { n }) => {
@@ -7609,23 +7605,12 @@ pub(super) fn handle_resolution_choice(
                                 .is_some_and(|object| object.zone == Zone::Library)
                         })
                         .collect();
-                    // CR 730.3a: fold physical cards to permanent departures
-                    // before Top/numbered insertion reverses their order.
-                    let departures = owner_arranged_batches.as_ref().map(|batches| {
-                        effects::change_zone::fold_physical_order_to_departures(batches)
-                    });
                     let non_library_order = effect_zone_non_library_delivery_order(
                         state,
                         departures.as_deref().unwrap_or(&chosen),
                         &library_origin,
                         &library_position,
                     );
-                    let seeds = owner_arranged_batches.map_or_else(Vec::new, |batches| {
-                        effects::change_zone::submitted_owner_arrangements(
-                            batches,
-                            &library_position,
-                        )
-                    });
 
                     if non_library_order.is_empty() {
                         move_library_origin_cards_in_selection_order(

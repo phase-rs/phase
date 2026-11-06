@@ -2674,7 +2674,7 @@ pub(crate) fn reorder_within_library(
     crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
 }
 
-/// CR 401.4 + CR 101.4: the insertion index for one member of a private
+/// CR 401.4 + CR 401.7: the insertion index for one member of a private
 /// owner-arranged fixed-position group, after removing the current member.
 /// Top counts present lower ranks; Bottom subtracts present higher ranks from
 /// the post-removal length. Numbered groups anchor their contiguous block at

@@ -358,7 +358,7 @@ pub(crate) fn install_merge_layer_effect(
 ///
 /// CR 730.3d (replacement propagation): this raw primitive is retained only
 /// for callers that intentionally bypass the zone pipeline. Normal gameplay
-/// instead enters [`move_merged_permanent_on_leave`], which seeds each component
+/// instead enters [`move_merged_permanent_for_parent`], which seeds each component
 /// with the merged event's applied set and lets the shared batch pipeline consult
 /// only still-applicable component replacements. That preserves the rule's
 /// direction that applying a replacement to the merged object applies it to all
@@ -463,25 +463,8 @@ pub fn split_merged_permanent_on_leave(
     // `reset_for_battlefield_exit` during the subsequent `move_to_zone`.
 }
 
-/// CR 730.3d: "If multiple replacement effects could be applied to the event
-/// of a merged permanent leaving the battlefield or being put into the new
-/// zone, applying one of those replacement effects to the object applies it to
-/// all components of the object. If the merged permanent is a commander, it
-/// may be exempt from this rule; see rules 903.9b-c."
-///
-/// This is the normal gameplay route for a merged permanent whose approved
-/// zone-change event is ready to deliver. Every component, including the
-/// survivor, is queued in `move_objects_simultaneously_then`: its inherited
-/// `applied` set prevents a replacement already applied to the merged event
-/// from applying again, while still letting a component-specific replacement
-/// (notably CR 903.9b) consult and pause. The batch owns every pause/restart,
-/// so replacement choices cannot clobber one another or expose partial event
-/// output. The survivor moves through the ordinary mover; absorbed components
-/// retain their `from: None` component-delivery event shape.
-///
-/// CR 903.9c: when an individual commander component accepts the CR 903.9b
-/// Hand/Library replacement, only that component's request changes to Command;
-/// noncommander components remain routed to their appropriate zones.
+/// Test-only standalone entry; production delivery supplies its parent link to
+/// [`move_merged_permanent_for_parent`].
 #[cfg(test)]
 pub(crate) fn move_merged_permanent_on_leave(
     state: &mut GameState,
@@ -502,6 +485,25 @@ pub(crate) fn move_merged_permanent_on_leave(
     )
 }
 
+/// CR 730.3d: "If multiple replacement effects could be applied to the event
+/// of a merged permanent leaving the battlefield or being put into the new
+/// zone, applying one of those replacement effects to the object applies it to
+/// all components of the object. If the merged permanent is a commander, it
+/// may be exempt from this rule; see rules 903.9b-c."
+///
+/// This is the normal gameplay route for a merged permanent whose approved
+/// zone-change event is ready to deliver. Every component, including the
+/// survivor, is queued in `move_objects_simultaneously_then`: its inherited
+/// `applied` set prevents a replacement already applied to the merged event
+/// from applying again, while still letting a component-specific replacement
+/// (notably CR 903.9b) consult and pause. The batch owns every pause/restart,
+/// so replacement choices cannot clobber one another or expose partial event
+/// output. The survivor moves through the ordinary mover; absorbed components
+/// retain their `from: None` component-delivery event shape.
+///
+/// CR 903.9c: when an individual commander component accepts the CR 903.9b
+/// Hand/Library replacement, only that component's request changes to Command;
+/// noncommander components remain routed to their appropriate zones.
 pub(crate) fn move_merged_permanent_for_parent(
     state: &mut GameState,
     merged_id: ObjectId,

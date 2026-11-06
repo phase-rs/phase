@@ -806,7 +806,18 @@ fn hallowed_burial_owner_concedes_while_seeded_group_is_live() {
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { player: P1, .. }
     ));
-    runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+    let departure = runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+    for card in [host, rider, commander] {
+        assert_eq!(zone(&runner, card), Zone::Exile);
+        assert!(
+            !departure.events.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, to: Zone::Library, .. }
+                    if *object_id == card
+            )),
+            "departing owner's card must never be delivered to a library"
+        );
+    }
     runner
         .state()
         .resolution_stack

@@ -198,7 +198,7 @@ pub fn resolve(
             ..
         }
     );
-    // CR 101.4 + CR 701.8a: two or more determined objects are one announced
+    // CR 701.8a: two or more determined objects are one announced
     // simultaneous destruction; stage the whole guarded population so a
     // replacement pause cannot drop the unprocessed suffix or its completion.
     let mut unique_targets: Vec<ObjectId> = Vec::new();
@@ -405,7 +405,7 @@ pub fn resolve_all(
         .copied()
         .collect();
 
-    // CR 101.4 + CR 701.8a: the whole guarded mass population is one announced
+    // CR 701.8a: the whole guarded mass population is one announced
     // simultaneous destruction. A pause must not lose the unprocessed suffix.
     if matching.len() >= 2 {
         let logical_zone_change_group =

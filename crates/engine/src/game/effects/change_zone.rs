@@ -1464,7 +1464,7 @@ pub fn resolve(
     let mut logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &targeted_objects);
     let logical_group_event_start = events.len();
-    // CR 101.4 + CR 608.2c: two or more determined members are one announced
+    // CR 608.2c: two or more determined members are one announced
     // simultaneous ChangeZone population. The producer transfers its exact
     // requests and allocated group to the staged owner; a pause retains the
     // unresolved member context instead of dropping the suffix.
@@ -1528,7 +1528,6 @@ pub fn resolve(
             crate::game::zone_pipeline::StagedChangeZoneOutcome::Paused => return Ok(None),
             crate::game::zone_pipeline::StagedChangeZoneOutcome::Settled { group, members } => {
                 let settled = crate::types::game_state::change_zone_settled_facts(
-                    state,
                     &group,
                     &members,
                     &crate::types::game_state::ChangeZoneCountPolicy::TargetedArrivals { selected },
@@ -2424,6 +2423,12 @@ pub(crate) fn submitted_owner_arrangements(
     batches: Vec<MassLibraryOrderBatch>,
     position: &LibraryPosition,
 ) -> Vec<crate::types::game_state::StagedLibraryArrangement> {
+    match position {
+        LibraryPosition::Top | LibraryPosition::Bottom | LibraryPosition::NthFromTop { .. } => {}
+        LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
+            return Vec::new();
+        }
+    }
     batches
         .into_iter()
         .filter_map(|mut batch| {
@@ -3362,7 +3367,7 @@ pub fn resolve_all(
     let mut logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &matching);
     let logical_group_event_start = events.len();
-    // CR 101.4 + CR 730.3a: multiple objects, or the physical components of
+    // CR 730.3a: multiple objects, or the physical components of
     // one merged permanent, need staged ownership through a component pause.
     // The early owner-arrangement branch above stays unchanged.
     if matching.len() >= 2
@@ -3422,7 +3427,6 @@ pub fn resolve_all(
             crate::game::zone_pipeline::StagedChangeZoneOutcome::Paused => return Ok(()),
             crate::game::zone_pipeline::StagedChangeZoneOutcome::Settled { group, members } => {
                 let settled = crate::types::game_state::change_zone_settled_facts(
-                    state,
                     &group,
                     &members,
                     &crate::types::game_state::ChangeZoneCountPolicy::MassAllMembers,

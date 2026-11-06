@@ -3251,7 +3251,7 @@ fn try_parse_reflexive_this_way_trigger(tp: TextPair) -> Option<ParsedEffectClau
         return None;
     }
 
-    // CR 603.7c: "when an exiled card enters [under …] this way" is the
+    // CR 603.7a: "when an exiled card enters [under …] this way" is the
     // tracked-set delayed trigger owned by `try_parse_inline_delayed_trigger`;
     // the generic reflexive path must not claim it.
     if tag::<_, _, OracleError<'_>>("when an exiled card enters ")
@@ -16254,10 +16254,8 @@ fn parse_into_library_nth_from_top_or_bottom(i: &str) -> OracleResult<'_, Librar
     Ok((i, LibraryPosition::NthFromTop { n }))
 }
 
-/// Shared helper: extract the target filter from "the owner of target [filter] [verb]s it ..."
-/// or "target [filter]'s owner [verb]s it ..." subject patterns.
-///
-/// Returns `Some(target_filter)` if the pattern matches, `None` otherwise.
+/// Extract the declared object or the untargeted possessive object from an owner
+/// subject. Quantified declarations return `None`.
 fn extract_owner_of_target(tp: TextPair, ctx: &mut ParseContext) -> Option<TargetFilter> {
     let predicate_start = subject::find_predicate_start(tp.original)?;
     let mut trial = ctx.clone();

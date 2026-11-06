@@ -807,7 +807,34 @@ fn etrata_three_player_shuffles_into_owner_library() {
     while !runner.state().stack.is_empty() {
         events.extend(runner.act(GameAction::PassPriority).unwrap().events);
     }
-    assert_eq!(runner.state().objects[&victim].zone, Zone::Exile);
+    let exile = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Battlefield),
+                    to: Zone::Exile,
+                    ..
+                } if *object_id == victim
+            )
+        })
+        .expect("the targeted exile, not elimination, moves the victim");
+    let loss = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerLost { player_id } | GameEvent::PlayerEliminated { player_id }
+                    if *player_id == P1
+            )
+        })
+        .expect("FU-4 reaches the subsequent loss clause");
+    assert!(
+        exile < loss,
+        "the printed exile precedes the unrelated FU-4 loss"
+    );
     assert_eq!(runner.state().objects[&etrata].zone, Zone::Library);
     assert!(runner.state().players[2].library.contains(&etrata));
     assert!(!runner.state().players[0].library.contains(&etrata));

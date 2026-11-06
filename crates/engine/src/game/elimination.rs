@@ -710,7 +710,7 @@ pub(crate) fn eliminate_players(
             debug_assert!(false, "team tap payment elimination resume failed: {error}");
         }
 
-        // CR 800.4a + CR 101.4: a staged batch's surviving members, groups and
+        // CR 800.4a: a staged batch's surviving members, groups and
         // prompt are reconciled after every departure sweep and before the
         // generic dead-actor repoint, which would otherwise strand a
         // batch-owned arrangement prompt or drop a surviving delivery. The
@@ -1234,11 +1234,11 @@ fn abandon_pending_zone_change_member_for_player_left(
     identity: ObjectIncarnationRef,
     leaving_player: PlayerId,
 ) {
-    // CR 101.4: capture the exact staged owner (its group and, for a linked
+    // Capture the exact staged owner (its group and, for a linked
     // component batch, the parent boundary it captured) before the retirement
     // transaction mutates anything, so the second visit below names the same
     // frame rather than re-deriving an owner from the nearest staged frame.
-    let staged_owner = state.resolution_stack.staged_owner_identity();
+    let mut staged_owner = state.resolution_stack.staged_owner_identity();
     let mut canceled_pauses = Vec::new();
     if let Some(pending) = state
         .active_change_zone_frame_mut()
@@ -1268,6 +1268,13 @@ fn abandon_pending_zone_change_member_for_player_left(
     state
         .resolution_stack
         .visit_active_component_delivery_pair_mut(|pending| {
+            if staged_owner.as_ref().is_some_and(|owner| {
+                owner.group == pending.logical_zone_change_group.logical_group_id
+                    && owner.component == pending.component_delivery_parent
+            }) {
+                // The pair visitor already reaches this exact staged frame.
+                staged_owner = None;
+            }
             pending
                 .logical_zone_change_group
                 .record_abandoned_by_player_left(identity)
@@ -1289,13 +1296,13 @@ fn abandon_pending_zone_change_member_for_player_left(
                         .expected_event,
                 );
             }
+            pending.prune_inherited_entries(&[identity]);
             crate::game::zone_pipeline::prune_staged_member_for_player_left(pending, identity);
         })
         .expect("elimination visits only an identified component delivery pair");
     if let Some(staged_owner) = staged_owner {
-        // R4b: an approved member's delivery pause buries the staged owner
-        // below a top `PostReplacement` child; the pair visitor above only
-        // reaches the top batch, so visit that exact parent too.
+        // An approved member's delivery pause can bury its staged owner below
+        // a PostReplacement child. Visit it only if the pair visitor missed it.
         state
             .resolution_stack
             .visit_staged_batch_owner_mut(&staged_owner, |pending| {
@@ -1320,6 +1327,7 @@ fn abandon_pending_zone_change_member_for_player_left(
                             .expected_event,
                     );
                 }
+                pending.prune_inherited_entries(&[identity]);
                 crate::game::zone_pipeline::prune_staged_member_for_player_left(pending, identity);
             });
     }
@@ -5635,6 +5643,136 @@ mod r4b_staged_elimination_tests {
             operation: StagedMemberOperation::ZoneMove,
             approved_post_replacement: None,
         }
+    }
+
+    /// CR 800.4a: abandoning an inherited foreign member prunes both the
+    /// parent's submitted order and the child's live/copied order before save.
+    #[test]
+    fn a_departed_inherited_entry_keeps_child_copy_coherent() {
+        use crate::types::game_state::{PendingComponentDeliveryParent, PendingZoneChangeDelivery};
+        let mut state = GameState::new_two_player(42);
+        let host = create_object(
+            &mut state,
+            CardId(41),
+            PlayerId(0),
+            "Host".into(),
+            Zone::Battlefield,
+        );
+        let ordinary = create_object(
+            &mut state,
+            CardId(42),
+            PlayerId(0),
+            "Ordinary".into(),
+            Zone::Battlefield,
+        );
+        let mut members = vec![member(&state, host, 0), member(&state, ordinary, 1)];
+        for member in &mut members {
+            member.request.library_placement = Some(LibraryPosition::Bottom);
+            let mut event = ProposedEvent::zone_change(
+                member.identity.object_id,
+                Zone::Battlefield,
+                Zone::Library,
+                None,
+            );
+            if let ProposedEvent::ZoneChange {
+                library_placement, ..
+            } = &mut event
+            {
+                *library_placement = Some(LibraryPosition::Bottom);
+            }
+            member.approved_event = Some(event);
+        }
+        let arrangements = vec![StagedLibraryArrangement {
+            position: LibraryPosition::Bottom,
+            batch: MassLibraryOrderBatch {
+                owner: PlayerId(0),
+                arranger: None,
+                members: members
+                    .iter()
+                    .map(|member| {
+                        let mut entry =
+                            MassLibraryOrderMember::card(member.identity, Zone::Battlefield);
+                        if member.identity.object_id == host {
+                            entry.departing_permanent = Some(member.identity);
+                        }
+                        entry
+                    })
+                    .collect(),
+            },
+            status: StagedArrangementStatus::Submitted,
+        }];
+        let parent_group = crate::game::triggers::allocate_logical_zone_change_group(
+            &mut state,
+            &[host, ordinary],
+        );
+        let parent_group_id = parent_group.logical_group_id;
+        let event = members[0].approved_event.clone().unwrap();
+        let paused = PendingZoneChangeDelivery::new(members[0].identity, event.clone());
+        let parent = PendingBatchDeliveries {
+            component_delivery_parent: None,
+            logical_zone_change_group: parent_group,
+            paused_current: Some(paused.clone()),
+            remaining: Vec::new(),
+            destination: Zone::Library,
+            source_id: None,
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: vec![host, ordinary],
+            zone_change_record_start: state.zone_changes_this_turn.len(),
+            deferred_events: Vec::new(),
+            staged: Some(StagedBatchDelivery {
+                stage: BatchDeliveryStage::Delivering,
+                cursor: 0,
+                members,
+                arrangements: arrangements.clone(),
+                arrangement_cursor: 1,
+                population_devour_snapshot: None,
+            }),
+        };
+        let mut child = parent.clone();
+        child.logical_zone_change_group =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[host]);
+        child.component_delivery_parent = Some(PendingComponentDeliveryParent {
+            parent_group_id,
+            member: paused.member,
+            expected_event: event.clone(),
+            approved_event: event,
+            inherited_arrangements: arrangements,
+        });
+        child.paused_current = None;
+        child.attempted = vec![host];
+        child.staged.as_mut().unwrap().members.truncate(1);
+        state.push_batch_delivery(parent);
+        state.push_batch_delivery(child);
+        state
+            .resolution_stack
+            .validate_at_rest(&state.waiting_for)
+            .unwrap();
+        let identity = ObjectIncarnationRef::from_object(&state.objects[&ordinary]);
+        abandon_pending_zone_change_member_for_player_left(&mut state, identity, PlayerId(0));
+        let child = state.active_batch_delivery().unwrap();
+        let link = child.component_delivery_parent.as_ref().unwrap();
+        assert_eq!(
+            child.staged.as_ref().unwrap().arrangements,
+            link.inherited_arrangements
+        );
+        assert_eq!(
+            link.inherited_arrangements[0]
+                .batch
+                .members
+                .iter()
+                .map(|member| member.identity.object_id)
+                .collect::<Vec<_>>(),
+            vec![host],
+        );
+        state
+            .resolution_stack
+            .validate_at_rest(&state.waiting_for)
+            .unwrap();
     }
 
     #[test]

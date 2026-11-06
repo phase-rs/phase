@@ -1711,6 +1711,9 @@ fn a_departure_that_settles_a_staged_population_still_reports_the_spell_resolved
     let pausing = {
         let mut builder = scenario.add_creature(P0, "Pausing Bear", 2, 2);
         let id = builder.id();
+        // Infrastructure exception: Drudge Skeletons' regeneration shield is
+        // the nearest printed destroy replacement. This optional NoOp isolates
+        // the concession boundary without claiming a full-card witness.
         builder.with_replacement_definition(
             ReplacementDefinition::new(ReplacementEvent::Destroy)
                 .mode(ReplacementMode::Optional { decline: None })

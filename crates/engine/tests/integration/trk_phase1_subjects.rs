@@ -237,7 +237,7 @@ fn kim_intervening_if_rechecks_after_growth() {
     assert!(runner.state().objects[&source].counters.is_empty());
 }
 
-// CR 121.1: the unchanged activation draws only after its whole cost is paid.
+// CR 602.2b + CR 601.2h: the activation draws only after its whole cost is paid.
 #[test]
 fn kim_activation_pays_counters_from_two_creatures() {
     let mut scenario = GameScenario::new();
@@ -327,10 +327,20 @@ fn scientists_full_multiline_reminder_draws_then_discards() {
     assert_eq!(runner.state().objects[&second].zone, Zone::Hand);
     // The live full-card parse must not leave the reminder as a rules ability.
     let object = &runner.state().objects[&source];
-    assert!(
-        !format!("{:?} {:?}", object.abilities, object.trigger_definitions)
-            .contains("Unimplemented")
-    );
+    let mut implemented = |effect: &engine::types::ability::Effect| {
+        assert!(!matches!(
+            effect,
+            engine::types::ability::Effect::Unimplemented { .. }
+        ));
+        std::ops::ControlFlow::Continue(())
+    };
+    for ability in object.abilities.iter() {
+        let _ = phase_ast::types::ability_visit::visit_ability_def(ability, &mut implemented);
+    }
+    for trigger in object.trigger_definitions.iter_all() {
+        let _ =
+            phase_ast::types::ability_visit::visit_trigger(&trigger.definition, &mut implemented);
+    }
     runner
         .act(GameAction::SelectCards {
             cards: vec![keep, second],

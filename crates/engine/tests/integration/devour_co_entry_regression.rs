@@ -16,6 +16,7 @@ use engine::game::effects::change_zone::resolve;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::effects::sacrifice;
 use engine::game::engine::apply_as_current;
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, QuantityRef,
@@ -24,8 +25,9 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
@@ -399,10 +401,6 @@ fn single_pick_devour_does_not_leak_snapshot_to_later_sacrifice() {
          sacrifice — pool must be the FULL controller creature set; pool={cards:?}"
     );
 }
-
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::game_state::CastPaymentMode;
-use engine::types::phase::Phase;
 
 // Full printed Oracle text from data/mtgjson/AtomicCards.json.
 const TWILIGHTS_CALL: &str = "You may cast this spell as though it had flash if you pay {2} \

@@ -6819,7 +6819,7 @@ pub struct PendingBatchDeliveries {
     /// the full action settles so one co-departure/LKI batch is observable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_events: Vec<GameEvent>,
-    /// CR 101.4 + CR 616.1: staged common-approval lifecycle, if this batch was
+    /// CR 616.1: staged common-approval lifecycle, if this batch was
     /// admitted to it. `None` is every non-staged batch and every legacy save;
     /// the `requests` loop above remains its authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6933,7 +6933,7 @@ impl PendingBatchDeliveries {
             }
             Self::validate_staged_member(member)?;
         }
-        // CR 101.4: one batch is one operation family.
+        // One batch is one operation family.
         let destroy_family = matches!(members[0].operation, StagedMemberOperation::Destroy(_));
         if members.iter().any(|member| {
             matches!(member.operation, StagedMemberOperation::Destroy(_)) != destroy_family
@@ -6948,7 +6948,7 @@ impl PendingBatchDeliveries {
         {
             return Err("a destroy staged batch carries a ChangeZone completion".to_string());
         }
-        // CR 101.4 + CR 608.2c: the ChangeZone family is exactly the typed
+        // CR 608.2c: the ChangeZone family is exactly the typed
         // completion's tail, and that tail names this batch's own logical group.
         // There is no second family flag to disagree with it.
         if let Some(BatchCompletion::ChangeZonePopulationSettled { tail, .. }) =
@@ -7588,7 +7588,7 @@ pub struct PendingBatchZoneMoveRequest {
     pub face_down_in_exile: crate::types::ability::ExileConcealment,
 }
 
-/// CR 101.4 + CR 616.1: staged common-approval lifecycle for one simultaneous
+/// CR 616.1: staged common-approval lifecycle for one simultaneous
 /// request group that retains every member's exact approval through
 /// consultation, arranges positional subsets privately, and delivers the whole
 /// cohort once. Hangs off the existing [`PendingBatchDeliveries`] authority;
@@ -7618,13 +7618,7 @@ pub struct StagedBatchDelivery {
     pub population_devour_snapshot: Option<HashSet<ObjectId>>,
 }
 
-/// CR 400.7 + CR 608.2c: the legacy per-member ChangeZone bookkeeping the
-/// producer loop ran inline after each move. A staged member may pause before
-/// delivery, so the rule runs at the delivery terminal instead — derived from
-/// the member's own typed request tracking and the batch completion's typed
-/// count policy, never from parallel flags.
-///
-/// CR 101.4: the three distinct stages of one admitted batch. Consultation and
+/// The three distinct stages of one admitted batch. Consultation and
 /// arrangement may each pause; delivery never re-enters consultation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchDeliveryStage {
@@ -7633,7 +7627,7 @@ pub enum BatchDeliveryStage {
     Delivering,
 }
 
-/// CR 101.4: the operation family a staged member belongs to. A batch is
+/// The operation family a staged member belongs to. A batch is
 /// homogeneous: every member is one variant or the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum StagedMemberOperation {
@@ -7683,7 +7677,7 @@ pub struct StagedBatchMember {
     pub pending_outcome: Option<StagedMemberOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal: Option<ZoneMoveCompletion>,
-    /// CR 101.4 + CR 701.8a: this member's operation family. Legacy saves and
+    /// CR 701.8a: this member's operation family. Legacy saves and
     /// every R4b member decode as `ZoneMove`.
     #[serde(default)]
     pub operation: StagedMemberOperation,
@@ -7706,7 +7700,7 @@ pub enum StagedBatchMemberState {
     Abandoned,
 }
 
-/// CR 614.5: one consultation's exact result, retained while a post-replacement
+/// CR 616.1: one consultation's exact result, retained while a post-replacement
 /// child remains live so the child's later settlement cannot re-run the
 /// replacement choice.
 ///
@@ -7721,7 +7715,7 @@ pub enum StagedMemberOutcome {
     Prevented,
 }
 
-/// CR 401.4 + CR 101.4: one private owner/position arrangement group derived
+/// CR 401.4: one private owner/position arrangement group derived
 /// from final approvals. `Top`, `Bottom`, and domain-gated `NthFromTop`
 /// positions are grouped. Numbered groups exclude library-origin removals and
 /// competing grouped positions in that library; other positions stay on the
@@ -7974,7 +7968,6 @@ pub(crate) fn settle_batch_delivery_outcome(
         BatchCompletion::ChangeZonePopulationSettled { tail, settled } => {
             assert!(settled.is_none(), "ChangeZone population settled twice");
             *settled = Some(change_zone_settled_facts(
-                state,
                 group,
                 members,
                 &tail.count,
@@ -8034,7 +8027,6 @@ pub(crate) fn settled_logical_zone_change_records(
 /// CR 614.1 + CR 616.1: compute one settled ChangeZone population's exact
 /// facts. Transient per-member inputs only: no member vector is retained.
 pub(crate) fn change_zone_settled_facts(
-    _state: &GameState,
     group: &LogicalZoneChangeGroup,
     members: &[StagedBatchMember],
     policy: &ChangeZoneCountPolicy,
@@ -8559,7 +8551,7 @@ pub enum BatchCompletion {
         /// than a result.
         cards: Vec<ObjectId>,
     },
-    /// CR 701.8a + CR 614.5 + CR 603.10a: one admitted destruction population
+    /// CR 701.8a + CR 614.6 + CR 603.10a: one admitted destruction population
     /// settled. `settled_destroyed` is filled exactly once by settlement with
     /// the members whose outer `Destroy` was approved and whose terminal is not
     /// `Abandoned` (Moved, Remained or inner-Prevented) — the singleton's exact

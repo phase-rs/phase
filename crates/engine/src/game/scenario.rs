@@ -6059,7 +6059,7 @@ mod tests {
         // batch child; the legacy `pending` carrier is gone for this shape. The
         // typed completion is the family authority.
         assert!(
-            !runner.state().active_change_zone_frame().is_some(),
+            runner.state().active_change_zone_frame().is_none(),
             "a multi-member population must not fall back to the legacy carrier"
         );
         assert!(

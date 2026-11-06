@@ -64,6 +64,8 @@ const VENGEFUL_REGROWTH: &str = "Return up to three target land cards from your 
 const VENGEFUL_REGROWTH_RETURN_ONLY: &str =
     "Return up to three target land cards from your graveyard to the battlefield tapped.";
 
+// Infrastructure exception: Drudge Skeletons is the printed analogue. Install
+// the shield its regeneration ability would create, without activating it.
 fn regeneration_shield() -> ReplacementDefinition {
     ReplacementDefinition::new(ReplacementEvent::Destroy)
         .valid_card(TargetFilter::SelfRef)
@@ -394,6 +396,9 @@ fn c5_targeted_change_zone_counts_actual_arrivals() {
 const DAMNATION: &str = "Destroy all creatures. They can't be regenerated.";
 const FUMIGATE: &str =
     "Destroy all creatures. You gain 1 life for each creature destroyed this way.";
+// Infrastructure exception: only Rest in Peace's replacement line is needed;
+// the preinstalled permanent never enters here, so its graveyard-exile trigger
+// is intentionally omitted.
 const REST_IN_PEACE: &str =
     "If a card or token would be put into a graveyard from anywhere, exile it instead.";
 const RISE_OF_THE_DARK_REALMS: &str =
@@ -507,6 +512,9 @@ fn d2_umbra_armor_prevents_destruction_even_with_cant_regenerate() {
         state.priority_player = PlayerId(0);
         let host = battlefield_creature(&mut state, 9_821, PlayerId(0), "Umbra Host");
         let plain = battlefield_creature(&mut state, 9_822, PlayerId(0), "Plain Bear");
+        // Infrastructure exception: Hyena Umbra is the printed analogue. This
+        // constructed Aura isolates umbra armor; its P/T and first strike grant
+        // are irrelevant to the destruction boundary.
         let umbra = create_object(
             &mut state,
             CardId(9_823),
@@ -927,6 +935,9 @@ fn d9_singleton_and_indestructible_negatives() {
     let victim = {
         let mut builder = scenario.add_creature(P0, "Pausing Bear", 2, 2);
         let id = builder.id();
+        // Infrastructure exception: Drudge Skeletons' regeneration shield is
+        // the nearest printed destroy replacement. This optional NoOp only
+        // opens the singleton replacement boundary; it models no printed card.
         builder.with_replacement_definition(
             ReplacementDefinition::new(ReplacementEvent::Destroy)
                 .mode(ReplacementMode::Optional { decline: None })
@@ -1039,6 +1050,9 @@ fn c4_targeted_later_member_pause_keeps_every_return() {
     let first = {
         let mut builder = scenario.add_land_to_graveyard(P0, "Forest");
         let id = builder.id();
+        // Infrastructure exception: Temple Garden is the nearest printed
+        // as-enters choice. An optional tap write on this Forest isolates the
+        // replacement pause without the life-payment branch.
         builder.with_replacement_definition(
             ReplacementDefinition::new(ReplacementEvent::Moved)
                 .mode(ReplacementMode::Optional { decline: None })
@@ -1081,6 +1095,29 @@ fn c4_targeted_later_member_pause_keeps_every_return() {
         Some(3),
         "the admitted targeted population count survives the pause"
     );
+    let tokens: Vec<_> = outcome
+        .state()
+        .battlefield
+        .iter()
+        .map(|id| &outcome.state().objects[id])
+        .filter(|object| object.is_token)
+        .collect();
+    assert_eq!(
+        tokens.len(),
+        3,
+        "the printed that-many tail creates three tokens"
+    );
+    for token in tokens {
+        assert_eq!(token.controller, PlayerId(0));
+        assert_eq!((token.power, token.toughness), (Some(4), Some(2)));
+        assert!(token.keywords.contains(&Keyword::Reach));
+    }
+    assert!(matches!(
+        outcome.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    assert!(outcome.state().resolution_stack.is_empty());
 }
 
 /// D8 (staged Destroy wire/save): a mass destruction paused at the staged
@@ -1297,6 +1334,8 @@ fn c9_empty_mass_population_is_a_no_op() {
         "an empty population produces no battlefield zone change"
     );
     assert_eq!(destroyed_events(&outcome), 0);
+    assert_eq!(effect_resolved_events(&outcome), 1);
+    assert_eq!(zone_of(&outcome, judgment), Zone::Graveyard);
     assert!(matches!(
         outcome.state().waiting_for,
         engine::types::game_state::WaitingFor::Priority { .. }
@@ -1306,6 +1345,9 @@ fn c9_empty_mass_population_is_a_no_op() {
 /// C11 (random-order library, F19/N9): a mass bottom placement with
 /// `random_order` writes the requested placement, produces no arrangement
 /// prompt, and leaves the sentinels above the moved cards.
+/// Infrastructure exception: Junktroller is the nearest printed
+/// graveyard-to-library-bottom move. This constructed mass/random-order
+/// combination isolates placement; it is not Junktroller's full ability.
 #[test]
 fn c11_random_order_bottom_placement_has_no_prompt_and_exact_region() {
     let mut state = GameState::new_two_player(42);
@@ -1465,6 +1507,9 @@ fn c2_structural_mass_entry_applies_counters_and_profile_once() {
 /// whose terminal is `Moved` and whose applied event was Hand→Exile. A mass
 /// member that remains (a token outside the battlefield, CR 111.8) does not
 /// count; a targeted Hand→Exile twin never increments the mass counter.
+/// Infrastructure exception: Memory Jar is the nearest printed mass hand-exile
+/// instruction. These direct resolver fixtures isolate its moved-member ledger,
+/// omitting face-down delivery, drawing and the delayed return.
 #[test]
 fn c13a_mass_hand_exile_counts_only_moved_members() {
     fn hand_card(state: &mut GameState, card: u64, name: &str) -> ObjectId {
@@ -1597,18 +1642,19 @@ fn c13a_mass_hand_exile_counts_only_moved_members() {
 }
 
 /// C10 (targeted paused pins): the paused targeted population settles with the
-/// admitted count, the arrival this-way stamp, and the exact moved ledger in
-/// announcement order (the defect was an empty ledger from the battlefield-only
-/// occurrence projection).
+/// admitted count and the exact moved ledger in announcement order (the defect
+/// was an empty ledger from the battlefield-only occurrence projection).
 /// Infrastructure exception: Vengeful Regrowth is the printed analogue; this
 /// return-only fixture isolates the ledger before its printed token consumer.
 #[test]
-fn c10_paused_targeted_population_pins_count_stamp_and_moved_ledger() {
+fn c10_paused_targeted_population_pins_count_and_moved_ledger() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let first = {
         let mut builder = scenario.add_land_to_graveyard(P0, "Forest");
         let id = builder.id();
+        // Infrastructure exception: Temple Garden is the nearest printed
+        // as-enters choice; this optional tap write isolates the pause.
         builder.with_replacement_definition(
             ReplacementDefinition::new(ReplacementEvent::Moved)
                 .mode(ReplacementMode::Optional { decline: None })
@@ -1646,11 +1692,16 @@ fn c10_paused_targeted_population_pins_count_stamp_and_moved_ledger() {
         "the moved ledger is the actual moved members in announcement order"
     );
     assert_eq!(effect_resolved_events(&outcome), 1);
+    assert!(matches!(
+        outcome.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    assert!(outcome.state().resolution_stack.is_empty());
 }
 
 /// C10 (mass paused pins): a paused mass population uses the non-abandoned
-/// count (not the arrival subset), stamps arrivals, and writes the full moved
-/// ledger.
+/// count (not the arrival subset) and writes the full moved ledger.
 #[test]
 fn c10_paused_mass_population_pins_non_abandoned_count_and_ledger() {
     let mut scenario = GameScenario::new();
@@ -1667,6 +1718,8 @@ fn c10_paused_mass_population_pins_non_abandoned_count_and_ledger() {
     let pauser = {
         let mut builder = scenario.add_creature_to_graveyard(P0, "Grave Pauser", 2, 2);
         let id = builder.id();
+        // Infrastructure exception: Temple Garden is the nearest printed
+        // as-enters choice; this optional tap write isolates the pause.
         builder.with_replacement_definition(
             ReplacementDefinition::new(ReplacementEvent::Moved)
                 .mode(ReplacementMode::Optional { decline: None })
@@ -1705,6 +1758,12 @@ fn c10_paused_mass_population_pins_non_abandoned_count_and_ledger() {
         "the paused mass ledger holds every moved member"
     );
     assert_eq!(effect_resolved_events(&outcome), 1);
+    assert!(matches!(
+        outcome.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    assert!(outcome.state().resolution_stack.is_empty());
 }
 
 /// C12 (F6): a `forward_result` ChangeZone over two members pauses on the first
@@ -1718,7 +1777,7 @@ fn c10_paused_mass_population_pins_non_abandoned_count_and_ledger() {
 /// `ResolvedAbility` and drives `resolve_ability_chain` to isolate the real
 /// `settle_forwarded_zone_result` consumer and marker retirement, not to claim
 /// a public full-card witness. Public ChangeZone completion producers are
-/// covered by C1, C5, C10 and C13a.
+/// covered by C1, C5 and C10.
 #[test]
 fn c12_forwarded_zone_result_binds_staged_arrivals_after_pause() {
     fn graveyard_creature(
@@ -1761,6 +1820,8 @@ fn c12_forwarded_zone_result_binds_staged_arrivals_after_pause() {
             .mode(ReplacementMode::Optional { decline: None })
             .valid_card(TargetFilter::SelfRef)
             .destination_zone(Zone::Battlefield)
+            // Infrastructure exception: Temple Garden is the nearest printed
+            // as-enters choice; this optional tap write isolates the pause.
             .description("enters tapped".to_string())
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
@@ -1923,7 +1984,10 @@ fn deem_inferior_mutated_owner_orders_components_second_from_top() {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         scenario.with_library_top(P1, &["L0", "L1", "L2"]);
-        let host = scenario.add_creature(P1, "Host", 2, 2).id();
+        let host = scenario
+            .add_creature(P1, "Host", 2, 2)
+            .controlled_by(P0)
+            .id();
         let rider = scenario.add_creature_to_hand(P1, "Rider", 3, 3).id();
         let spell = scenario
             .add_spell_to_hand_from_oracle(P0, "Deem Inferior", false, DEEM_INFERIOR)

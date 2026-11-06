@@ -1684,20 +1684,14 @@ fn deliver_batch(
 // R4b: retained common approval and private arrangement
 // ---------------------------------------------------------------------------
 
-/// CR 101.4 + CR 616.1: whether a simultaneous request group enters the staged
-/// common-approval lifecycle.
+/// CR 616.1: whether `move_arranged_batch_then` admits a request group to the
+/// staged common-approval lifecycle.
 ///
-/// Implementation narrowing (documented against the plan): EVERY member must
-/// already be a request-based Graveyard move or a positioned Library move.
-/// Batches with any other destination — in particular a Battlefield entry —
-/// stay on the legacy per-member loop, because that loop runs entry machinery
-/// this staged driver deliberately does not duplicate: intrinsic
-/// loyalty/defense counters, the CR 303.4f/g Aura-host consult and unhosted-Aura
-/// redirect, and the single-faced-transformed / Library→Library guards. No
-/// current producer mixes an admitted Graveyard/positioned-Library member with
-/// a battlefield member; keeping such batches legacy is strictly safer than
-/// silently skipping that machinery. Exempt causes and component children are
-/// likewise excluded (children report to the original parent).
+/// This gate admits only Graveyard moves and positioned Library moves; exempt
+/// causes remain excluded. Component-family children may enter through
+/// `move_arranged_batch_then`; other linked child families retain legacy delivery.
+/// This is not the admission policy of `deliver_staged_change_zone_batch`, which
+/// also admits Battlefield entries such as Twilight's Call and Devour cohorts.
 fn staged_batch_admission(state: &GameState, reqs: &[ZoneMoveRequest]) -> bool {
     !reqs.is_empty()
         && reqs
@@ -1709,7 +1703,7 @@ fn staged_batch_admission(state: &GameState, reqs: &[ZoneMoveRequest]) -> bool {
         && !reqs.iter().any(|req| req.cause.is_exempt())
 }
 
-/// CR 101.4 + CR 400.3: freeze the original membership, pre-consultation
+/// CR 400.3: freeze the original membership, pre-consultation
 /// incarnations and recorded owners before the first consultation.
 fn new_staged_batch(
     state: &GameState,
@@ -1887,7 +1881,7 @@ fn run_staged_batch(
     }
 }
 
-/// CR 101.4 + CR 616.1: consult one member. Approval never delivers: an
+/// CR 616.1: consult one member. Approval never delivers: an
 /// `Execute` result is retained as the exact final event and the cursor moves
 /// on. A `NeedsChoice` parks the exact boundary and the batch frame.
 fn consult_next_staged_member(
@@ -2172,9 +2166,9 @@ fn consult_staged_destroy_inner(
             StagedConsult::Continue
         }
         ReplacementResult::Prevented => {
-            // CR 616.1 + CR 702.89a: a preventer (Umbra armor) can destroy a
-            // dependent permanent as part of its replacing action; that nested
-            // move may itself be waiting on a replacement choice. Keep the
+            // CR 616.1 + CR 614.6: a replacing action can move a dependent
+            // permanent; that nested move may itself be waiting on a replacement
+            // choice. Keep the
             // member parked until the child resolves instead of consulting the
             // next member over a live choice.
             let live_child = state.pending_replacement.is_some()
@@ -2323,8 +2317,11 @@ fn mark_staged_member_terminal(
     }
 }
 
-/// CR 400.7 + CR 608.2c: the legacy late per-member ChangeZone bookkeeping,
-/// run at each member's actual delivery terminal.
+/// CR 400.7 + CR 608.2c: the legacy per-member ChangeZone bookkeeping the
+/// producer loop ran inline after each move. A staged member may pause before
+/// delivery, so the rule runs at the delivery terminal instead — derived from
+/// the member's own typed request tracking and the batch completion's typed
+/// count policy, never from parallel flags.
 fn note_change_zone_member_terminal(
     state: &mut GameState,
     object_id: ObjectId,
@@ -2426,7 +2423,7 @@ pub(crate) fn staged_arrangement_groups(
     groups
 }
 
-/// CR 401.4 + CR 101.4: derive the private owner/position groups from final
+/// CR 401.4: derive the private owner/position groups from final
 /// approvals. Top/Bottom and domain-gated numbered positions are grouped;
 /// request-origin groups replay the legacy insertion order without a prompt.
 fn begin_staged_arrangement(state: &GameState, owner: &mut PendingBatchDeliveries) {
@@ -2641,7 +2638,7 @@ fn publish_next_staged_arrangement(
     Some(StagedStop::Arranging)
 }
 
-/// CR 101.4 + CR 401.4: deliver every approved member in announcement order,
+/// CR 401.4: deliver every approved member in announcement order,
 /// using the tail-insertion slot for grouped fixed library positions.
 fn deliver_staged_members(
     state: &mut GameState,
@@ -2951,7 +2948,7 @@ fn staged_arrangement_slot(
     ))
 }
 
-/// CR 603.10a + CR 101.4: entry for an admitted batch. The owner is driven
+/// CR 603.10a: entry for an admitted batch. The owner is driven
 /// detached and parked only if the batch pauses or needs an arrangement prompt.
 fn deliver_staged_batch_entry(
     state: &mut GameState,
@@ -2989,7 +2986,7 @@ fn deliver_staged_batch_entry(
     }
 }
 
-/// CR 101.4: the outcome of one admitted family entry.
+/// The outcome of one admitted family entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StagedFamilyOutcome {
     Settled,
@@ -3123,7 +3120,7 @@ pub(crate) fn deliver_staged_change_zone_batch(
     }
 }
 
-/// CR 101.4 + CR 616.1: identify the staged member whose replacement prompt is
+/// CR 616.1: identify the staged member whose replacement prompt is
 /// parked. The owner key is the exact parked boundary — not a live-object
 /// lookup — so a modified proposal or a changed incarnation cannot be consumed
 /// as this member's approval. Returns the group and whether the member still
@@ -3135,7 +3132,7 @@ pub(crate) fn staged_approval_owner(
     staged_approval_owner_for(state, parked.member, &parked.expected_event)
 }
 
-/// CR 101.4 + CR 616.1: the exact parked boundary a staged consultation owns,
+/// CR 616.1: the exact parked boundary a staged consultation owns,
 /// for either an outer `Destroy` proposal or a zone change.
 pub(crate) fn staged_approval_owner_for(
     state: &GameState,
@@ -3610,7 +3607,7 @@ pub(crate) fn prune_staged_member_for_player_left(
     sync_staged_requests(pending);
 }
 
-/// CR 800.4a + CR 101.4: reconcile a staged batch after every departure sweep
+/// CR 800.4a: reconcile a staged batch after every departure sweep
 /// and before the generic dead-actor repoint. Surviving groups advance, a
 /// batch-owned prompt whose actor or group is gone is cleared, and a batch with
 /// nothing left to deliver settles and runs its completion once. This seam also
@@ -3621,7 +3618,7 @@ pub(crate) fn reconcile_staged_batch_after_departure(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<crate::game::engine_resolution_choices::DepartureSettlement, String> {
-    // CR 101.4: capture exactly which staged frame owns this action — its
+    // Capture exactly which staged frame owns this action — its
     // logical group and, when it is a linked component batch, the parent
     // boundary it captured. Every mutation below names that same frame; none of
     // them re-derives the owner from a census or from the nearest staged frame.
@@ -3637,7 +3634,7 @@ pub(crate) fn reconcile_staged_batch_after_departure(
             return Ok(crate::game::engine_resolution_choices::DepartureSettlement::NotSettled);
         };
         let boundary = state.resolution_stack.capture_child_boundary();
-        // CR 101.4 + CR 800.4a: reconciliation may deliver surviving batch
+        // CR 800.4a: reconciliation may deliver surviving batch
         // members. If it settles, give settlement only that delivery segment,
         // not the departure sweep; otherwise append the segment and re-park.
         let mut batch_events = Vec::new();
@@ -3805,7 +3802,48 @@ fn settle_batch_owner(
             BatchCompletion::ChangeZonePopulationSettled { .. }
             | BatchCompletion::DestroyPopulationSettled { .. },
         ) => crate::game::triggers::ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
-        _ => crate::game::triggers::ConsumedTriggerEventScope::AllCollectors,
+        None
+        | Some(
+            BatchCompletion::RecordInstructionZoneResult { .. }
+            | BatchCompletion::ReturnAsAuraNoTargetComplete { .. }
+            | BatchCompletion::ExploreLandDeliveryComplete { .. }
+            | BatchCompletion::CloakExileDeliveryComplete { .. }
+            | BatchCompletion::ExileFaceDownPileDeliveryComplete { .. }
+            | BatchCompletion::ExileFaceDownPileReturnComplete { .. }
+            | BatchCompletion::CastFromZoneExileDeliveryComplete { .. }
+            | BatchCompletion::CascadeExileLoopComplete { .. }
+            | BatchCompletion::TopCardContestRoundComplete { .. }
+            | BatchCompletion::CascadeBottomComplete { .. }
+            | BatchCompletion::RippleTerminalComplete { .. }
+            | BatchCompletion::DiscoverBottomComplete { .. }
+            | BatchCompletion::DiscoverPlacementComplete { .. }
+            | BatchCompletion::DiscoverDeclined { .. }
+            | BatchCompletion::ResolutionCastRejectedToHand { .. }
+            | BatchCompletion::DiscoverDeclinedComplete { .. }
+            | BatchCompletion::ResolutionCastRejectionComplete { .. }
+            | BatchCompletion::PutOnTopComplete { .. }
+            | BatchCompletion::TopOrBottomComplete { .. }
+            | BatchCompletion::EffectZonePutAtLibraryPositionComplete { .. }
+            | BatchCompletion::ForEachCategoryExileComplete { .. }
+            | BatchCompletion::DrawnThisTurnTopdeckComplete { .. }
+            | BatchCompletion::SurveilKeepOnTop { .. }
+            | BatchCompletion::ManifestDreadCleanup { .. }
+            | BatchCompletion::RevealRestPile { .. }
+            | BatchCompletion::DigMassPutAllRestComplete { .. }
+            | BatchCompletion::DigMassPutAllComplete { .. }
+            | BatchCompletion::DigPriorLookRestComplete { .. }
+            | BatchCompletion::RemoveExileLinks { .. }
+            | BatchCompletion::NinjutsuPlacement { .. }
+            | BatchCompletion::AttractionOpenRemainder { .. }
+            | BatchCompletion::ContraptionAssembleRemainder { .. }
+            | BatchCompletion::LibrarySearchDeliverySettled { .. }
+            | BatchCompletion::SearchPartitionPrimaryDelivered { .. }
+            | BatchCompletion::SearchFoundZoneDelivery { .. }
+            | BatchCompletion::MeldExile { .. }
+            | BatchCompletion::MeldEntry { .. }
+            | BatchCompletion::MeldRedirect { .. }
+            | BatchCompletion::MilledDeliveryComplete { .. },
+        ) => crate::game::triggers::ConsumedTriggerEventScope::AllCollectors,
     };
     crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
         state,
@@ -4157,7 +4195,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
     }
 }
 
-/// CR 101.4 + CR 616.1: drain one staged batch by its current stage. The
+/// CR 616.1: drain one staged batch by its current stage. The
 /// owner is taken off the stack for the run and re-parked only if the batch
 /// pauses; delivering while its frame were installed would let a delivery
 /// child bury it.
@@ -12084,7 +12122,7 @@ mod staged_batch_tests {
         group_id
     }
 
-    /// CR 800.4a + CR 101.4: surviving batch deliveries settle from their own
+    /// CR 800.4a: surviving batch deliveries settle from their own
     /// event slice, never the unrelated departure events already in the caller.
     #[test]
     fn staged_departure_reconciliation_settles_survivor_events_without_departure_prefix() {
@@ -14057,9 +14095,10 @@ mod staged_batch_tests {
     /// ordering choice; only that answer may resume the shared epilogue.
     #[test]
     fn staged_settle_with_live_completion_prompt_returns_parked() {
-        // Abundance's printed remainder: "put all other cards revealed this
-        // way on the bottom of your library in any order." This isolates its
-        // existing RevealRestPile completion after the kept card's consultation.
+        // Infrastructure exception: Abundance is the printed analogue for the
+        // RevealRestPile completion. Its kept Library→Hand move is never
+        // admitted by production staging; this synthetic owner isolates the
+        // live completion prompt's handback.
         let mut state = GameState::new_two_player(0x326);
         let source = effect_source(&mut state);
         let kept = library_card(&mut state, 1);
