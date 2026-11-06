@@ -1366,6 +1366,8 @@ impl PeriodicDelta {
     /// The charge of [`Self::declared_seat_life_charges`] at one iteration index: repetition
     /// `index + 1`'s. A function of the index alone, so a caller may read any repetition's charge
     /// without walking to it.
+    // Each parameter is a separate authority the caller states, for the reason
+    // `PeriodicDelta::seat_crossing` gives.
     #[allow(clippy::too_many_arguments)]
     fn declared_seat_life_charge_at<'a>(
         &'a self,
@@ -1540,6 +1542,8 @@ impl PeriodicDelta {
     /// engine did not write: a hand-written `DeclareShortcut`, a remote client's included (the
     /// server's payload guard bounds the schedule's length and passes it through), or a restored
     /// save, whose offer declaration and proposal template deserialize their pins verbatim.
+    // Each parameter is a separate authority the caller states, for the reason
+    // `PeriodicDelta::seat_crossing` gives.
     #[allow(clippy::too_many_arguments)]
     fn declared_seat_life_crossing(
         &self,
@@ -1711,11 +1715,13 @@ impl PeriodicDelta {
     /// `declared_seat_life_crossing` reads one charge per stretch between two of them, carries the
     /// life netted so far across each switch point exactly as the stepping walk does, and rounds
     /// only inside the stretch that crosses: one division there, never a second rounding step on a
-    /// remainder. The horizon is the seat's own remaining headroom for the reason D4 gives: `net`
-    /// and `dip` are non-negative, so a repetition that does not advance the accumulation never
-    /// brings the crossing nearer. That premise survives both [`ChargeBound`]s because the
-    /// attributable direction clamps its net term rather than letting an over-estimated magnitude
-    /// carry a negative into this walk.
+    /// remainder. The horizon is the walk's, [`cascade_horizon`]'s sum of the living seats'
+    /// headrooms, not each seat's own: a declaration may defer a seat's charge to a later segment,
+    /// so a seat's own headroom is not an upper bound on the repetition its crossing lands on.
+    /// Both `net` and `dip` are non-negative, so a repetition that does not advance the
+    /// accumulation never brings the crossing nearer. That premise survives both [`ChargeBound`]s
+    /// because the attributable direction clamps its net term rather than letting an
+    /// over-estimated magnitude carry a negative into this walk.
     ///
     /// # The magnitude-constancy premise, stated rather than claimed
     ///
@@ -18110,11 +18116,15 @@ mod tests {
     /// draining P1 by 2. The declarations keep that aim, move it to P0, switch between the two
     /// seats at one and at two pre-declared points, and alternate them in a round robin, which
     /// has no finite list of change points and is stepped. Each is read with no leading
-    /// repetition and with the slot's first repetition latched onto either seat (CR 603.3d).
+    /// repetition and with the slot's first repetition latched onto either seat (CR 603.3d), and
+    /// under two observations: the observed aim on P1, and one that switches from P1 to P0 at
+    /// index 3, which on a declaration that changes nowhere is the only pre-declared switch point.
     ///
     /// REVERT-PROBES: drop the change points a leading slot adds (the latched first repetition,
     /// and each switch point read one index behind) ⇒ a latched row answers differently from the
-    /// stepping walk ⇒ FAILS. Read a round robin as changing nowhere ⇒ its rows FAIL.
+    /// stepping walk ⇒ FAILS. Read a round robin as changing nowhere ⇒ its rows FAIL. Gather the
+    /// change points from the declaration alone ⇒ a row under the switching observation on a
+    /// declaration that changes nowhere answers differently from the stepping walk ⇒ FAILS.
     #[test]
     fn a_declared_life_crossing_is_the_stepping_walks_across_switch_points_and_a_lead() {
         use crate::analysis::decision_template::{
@@ -18166,8 +18176,15 @@ mod tests {
                 DecisionKind::LoopChoice,
             ),
         };
+        let observations = [
+            ("observed on P1", observed.clone()),
+            (
+                "observed on P1, then on P0 from index 3",
+                piecewise(&[(0, 1), (3, 0)]),
+            ),
+        ];
         let declarations = [
-            ("the observed aim", observed.clone()),
+            ("aimed at P1", observed),
             ("aimed at P0", seat_schedule_declaration(&[(&slot, &[0])])),
             ("P1, then P0 from index 3", piecewise(&[(0, 1), (3, 0)])),
             ("P0, then P1 from index 4", piecewise(&[(0, 0), (4, 1)])),
@@ -18199,43 +18216,58 @@ mod tests {
             ),
         ];
         let (mut crossed_past_a_switch, mut moved_by_the_lead) = (0, 0);
+        let mut moved_by_the_observed_switch = 0;
         for (name, declaration) in &declarations {
             let switches = declaration.resolution_change_points();
+            let changes_nowhere = switches
+                .as_ref()
+                .is_some_and(|switches| switches.is_empty());
             for seat in [p0, p1] {
                 for bound in [ChargeBound::Ceiling, ChargeBound::Attributable] {
                     for remaining_life in 0..=24i64 {
                         for horizon in 0..=30u32 {
                             let mut unled = None;
                             for (lead_name, lead) in leads {
-                                let stepped = PeriodicDelta::first_life_crossing(
-                                    period.declared_seat_life_charges(
-                                        seat,
-                                        Some(declaration),
-                                        Some(&observed),
-                                        &points,
-                                        &board,
-                                        bound,
-                                        lead,
-                                    ),
-                                    remaining_life,
-                                    horizon,
-                                );
-                                assert_eq!(
-                                    period.declared_seat_life_crossing(
-                                        seat,
-                                        Some(declaration),
-                                        Some(&observed),
-                                        &points,
-                                        &board,
-                                        bound,
-                                        lead,
-                                        remaining_life,
-                                        horizon,
-                                    ),
-                                    stepped,
-                                    "{name}, {lead_name}, {seat:?}, {bound:?}, life \
-                                     {remaining_life}, horizon {horizon}"
-                                );
+                                // The stepping walk's answer under each observation, held equal
+                                // to the stretch reading's under the same one.
+                                let [stepped, switched] =
+                                    observations.each_ref().map(|(seen_name, seen)| {
+                                        let stepped = PeriodicDelta::first_life_crossing(
+                                            period.declared_seat_life_charges(
+                                                seat,
+                                                Some(declaration),
+                                                Some(seen),
+                                                &points,
+                                                &board,
+                                                bound,
+                                                lead,
+                                            ),
+                                            remaining_life,
+                                            horizon,
+                                        );
+                                        assert_eq!(
+                                            period.declared_seat_life_crossing(
+                                                seat,
+                                                Some(declaration),
+                                                Some(seen),
+                                                &points,
+                                                &board,
+                                                bound,
+                                                lead,
+                                                remaining_life,
+                                                horizon,
+                                            ),
+                                            stepped,
+                                            "{name}, {seen_name}, {lead_name}, {seat:?}, \
+                                             {bound:?}, life {remaining_life}, horizon {horizon}"
+                                        );
+                                        stepped
+                                    });
+                                // The two observations resolve alike before index 3, so an answer
+                                // they disagree on is one the observation's switch moved.
+                                if changes_nowhere && switched != stepped {
+                                    moved_by_the_observed_switch += 1;
+                                }
                                 if matches!(lead, AnnouncedLead::None) {
                                     unled = stepped;
                                 } else if stepped != unled {
@@ -18263,6 +18295,11 @@ mod tests {
             crossed_past_a_switch > 100 && moved_by_the_lead > 100,
             "REACH-GUARD: crossings past a switch point ({crossed_past_a_switch}) and answers \
              the latched repetition moves ({moved_by_the_lead})"
+        );
+        assert!(
+            moved_by_the_observed_switch > 100,
+            "REACH-GUARD: answers on a declaration that changes nowhere that the observation's \
+             switch at index 3 moves ({moved_by_the_observed_switch})"
         );
     }
 

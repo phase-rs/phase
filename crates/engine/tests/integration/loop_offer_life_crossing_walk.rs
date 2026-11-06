@@ -135,8 +135,9 @@ impl AltarBoard {
 /// sequence must be a place where a player has priority"), P0's priority on an empty stack, with
 /// P0 up 4 and P1 down 4 (the cycle that offers the shortcut and the three taken).
 ///
-/// The loop is [`AltarBoard`]'s Zulaport Cutthroat cycle. No target is chosen, so the offer's
-/// certified period charges no target slot and the walk reads every repetition alike.
+/// The loop is [`AltarBoard`]'s Zulaport Cutthroat cycle. Its offer comes by the recorded road
+/// (`replay_bounded_offer`), whose certified period charges no target slot whatever the payoff
+/// targets, so the walk reads every repetition alike.
 ///
 /// REVERT-PROBE: step through the repetitions one at a time up to the sum of the life totals
 /// (`PeriodicDelta::first_life_crossing` in `PeriodicDelta::seat_crossing`) ⇒ the reads with P0
@@ -152,7 +153,7 @@ fn a_drain_shortcut_reads_the_same_life_charges_at_any_life_total() {
         board.cycle_to_the_offer();
         assert!(
             offered_period(board.runner.state()).victim_slot.is_empty(),
-            "REACH-GUARD, lives {lives:?}: Zulaport Cutthroat chooses no target, so the certified \
+            "REACH-GUARD, lives {lives:?}: the offer comes by the recorded road, whose certified \
              period charges no slot"
         );
         board.take(3);
@@ -197,9 +198,10 @@ fn a_drain_shortcut_reads_the_same_life_charges_at_any_life_total() {
 /// Tenacity ("Whenever you gain life, target opponent loses that much life." / "When Enduring
 /// Tenacity dies, if it was a creature, return it to the battlefield under its owner's control.
 /// It's an enchantment. (It's not a creature.)"). Enduring Tenacity's trigger chooses its target
-/// as it is put on the stack (CR 603.3d + CR 601.2c) among three opponents, so the offer's
-/// certified period charges that target slot, and the walk gathers the declarations' change
-/// points and splits off the leading repetition. Each repetition moves "that much life", the 4
+/// as it is put on the stack (CR 603.3d + CR 601.2c) among three opponents. The offer comes by
+/// the ring road, whose certified period charges the target slot an announcement in its window
+/// names, so the walk gathers the declarations' change points and splits off the leading
+/// repetition. Each repetition moves "that much life", the 4
 /// the chain carries, from the targeted P1 to P0. Each take ends where the shortcut ends
 /// (CR 733.2a), at P0's priority with Enduring Tenacity's next trigger on the stack, P0 up 12 and
 /// P1 down 12.
