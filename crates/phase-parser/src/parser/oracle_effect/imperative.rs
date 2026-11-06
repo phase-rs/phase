@@ -4971,8 +4971,10 @@ fn try_parse_choose_object_and_player(
     if min != 1 || max != Some(1) {
         return None;
     }
-    // CR 608.2d: a non-controller subject's choice stays at stack time, the same
-    // gate the bare-choose producer applies.
+    // CR 608.2d + CR 115.10a: the choice is made while the effect is applied, but
+    // TargetOnly's resolution chooser prompts only the controller, so a
+    // non-controller subject's choice keeps stack timing (the same gate the
+    // bare-choose producer applies).
     if choice_ctx.clause_subject_chooser.is_none() {
         choice_ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Resolution);
     }

@@ -23129,8 +23129,10 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // the continuation itself may be attached to the chained sub-ability.
     continuation_ctx.target_chooser = None;
     // CR 608.2d + CR 115.10a: the continuation is part of the same predicate, so a
-    // non-controller subject owns its bare choices too (the anaphoric arm above
-    // builds a blank context that would otherwise drop it).
+    // non-controller subject owns its bare choices too. The non-anaphoric arm
+    // already inherits it through the cloned context; this keeps the anaphoric
+    // arm's blank context from dropping it. No anaphoric bare-choose phrase
+    // parses today, so only the non-anaphoric arm is exercised by a test.
     continuation_ctx.clause_subject_chooser = ctx.clause_subject_chooser.clone();
     // CR 608.2c + CR 608.2k: a bare object pronoun in an anaphoric continuation
     // names the object the primary instruction acted on. When that object is the
