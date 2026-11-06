@@ -146,8 +146,8 @@ struct Board {
     wood_elves: Option<usize>,
     /// Impact Tremors on P0's battlefield.
     tremors: bool,
-    /// Angel of Salvation on P0's battlefield, built from its printed Oracle text.
-    angel: bool,
+    /// Synthetic prevention-shield creature on P0's battlefield; not a printed-card witness.
+    synthetic_shield: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -288,13 +288,17 @@ fn build(board: Board, mode: LoopDetectionMode) -> Option<Built> {
     if board.tremors {
         scenario.add_real_card(P0, "Impact Tremors", Zone::Battlefield, db);
     }
-    if board.angel {
-        // The curated fixture does not carry Angel of Salvation, so build it from its printed
-        // Oracle text — the same pattern this file uses for its `Test Counter Sink`. Flash,
-        // convoke and flying are cast-time keywords: the board starts with the Angel already on
-        // the battlefield and the loop only needs its mandatory, target-slot-free ETB.
+    if board.synthetic_shield {
+        // Explicitly synthetic, like `Test Counter Sink`: this target-free mandatory ETB
+        // exercises shield multiplicity without claiming to model a printed card's choices.
         scenario
-            .add_creature_from_oracle(P0, "Angel of Salvation", 5, 5, ANGEL_OF_SALVATION)
+            .add_creature_from_oracle(
+                P0,
+                "Test Prevention Shield Creature",
+                5,
+                5,
+                SYNTHETIC_SHIELD_CREATURE,
+            )
             .id();
     }
     if let Some(bears) = board.banisher {
@@ -679,7 +683,7 @@ const PLAIN: Board = Board {
     first: None,
     wood_elves: None,
     tremors: false,
-    angel: false,
+    synthetic_shield: false,
 };
 
 const ANCHOR: Board = Board {
@@ -688,17 +692,20 @@ const ANCHOR: Board = Board {
     ..PLAIN
 };
 
-/// Scryfall/MTGJSON verbatim Oracle text for Angel of Salvation (2026-11 export). Built with
-/// `add_creature_from_oracle` because the curated fixture does not carry the card — the same
-/// pattern this file uses for its `Test Counter Sink`.
-const ANGEL_OF_SALVATION: &str = "Flash; convoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's color.)\nFlying\nWhen this creature enters, prevent the next 5 damage that would be dealt this turn to any number of targets, divided as you choose.";
+/// Synthetic mechanism fixture for the comparator's multiplicity rule, not a printed card.
+/// Its nearest printed card is Angel of Salvation, whose ETB targets and divides prevention
+/// (CR 603.3d + CR 601.2c-d: triggers announce targets and division). The parser does not yet
+/// model those printed semantics; parser bring-up is separate scope. The real Angel is NOT
+/// exercised here.
+const SYNTHETIC_SHIELD_CREATURE: &str =
+    "When this creature enters, prevent the next 5 damage that would be dealt this turn.";
 
-const ANGEL: Board = Board {
-    angel: true,
+const SYNTHETIC_SHIELD: Board = Board {
+    synthetic_shield: true,
     // CR 603.3b: this is the board default too — with Animate Dead's trigger first in
-    // the order it resolves LAST, so the Angel's trigger is listed last and resolves
-    // first. The install itself does not depend on the order (CR 113.7a).
-    first: Some("Angel of Salvation"),
+    // the order it resolves LAST, so the synthetic creature's trigger is listed last and
+    // resolves first. The install itself does not depend on the order (CR 113.7a).
+    first: Some("Test Prevention Shield Creature"),
     ..PLAIN
 };
 
@@ -719,14 +726,14 @@ fn worldgorger_animate_dead_is_a_draw_on_every_drive() {
     }
 }
 
-/// CR 104.4b + CR 615.5: Angel of Salvation's mandatory ETB appends one identical "prevent the
-/// next 5 damage this turn" shield to `pending_damage_replacements` every cycle of the
-/// Worldgorger Dragon / Animate Dead loop. Every action is mandatory, so the game is still a
-/// draw; the growing registry must not turn the draw into a stall.
+/// CR 104.4b + CR 615.7: the synthetic creature's mandatory, target-free ETB appends one
+/// identical amount shield to `pending_damage_replacements` every Worldgorger Dragon /
+/// Animate Dead cycle. This mechanism test checks that the comparator's multiplicity rule
+/// lets the mandatory loop draw despite the growing registry; it does not exercise real Angel.
 #[test]
-fn worldgorger_with_angel_of_salvation_is_still_a_draw() {
+fn worldgorger_with_a_synthetic_prevention_shield_is_still_a_draw() {
     for drive in EVERY_DRIVE {
-        let Some(run) = run(ANGEL, LoopDetectionMode::Interactive, drive, 300) else {
+        let Some(run) = run(SYNTHETIC_SHIELD, LoopDetectionMode::Interactive, drive, 300) else {
             return;
         };
         assert_eq!(run.terminal, Terminal::GameOver(None), "{drive:?}");
@@ -737,19 +744,19 @@ fn worldgorger_with_angel_of_salvation_is_still_a_draw() {
         );
         assert!(
             run.max_shields >= 1,
-            "{drive:?}: reach: the Angel's ETB resolved and its shield was live at a \
+            "{drive:?}: reach: the synthetic ETB resolved and its shield was live at a \
              sampled beat, got {}",
             run.max_shields
         );
     }
 }
 
-/// CR 615.5: the class the comparator's multiplicity rule exists for — the registry grows by one
-/// by-value identical, unconsumed, rider-less shield per cycle. With the detector off the board
-/// does not end by itself, so this row is also the draw row's negative control.
+/// CR 615.7: the synthetic multiplicity mechanism — the registry grows by one by-value
+/// identical, unconsumed, rider-less amount shield per cycle. With the detector off the board
+/// does not end by itself, so this row is also the synthetic draw row's negative control.
 #[test]
-fn worldgorger_with_angel_of_salvation_accumulates_identical_shields() {
-    let Some(run) = run(ANGEL, LoopDetectionMode::Off, Drive::Pass, 120) else {
+fn worldgorger_with_a_synthetic_prevention_shield_accumulates_identical_shields() {
+    let Some(run) = run(SYNTHETIC_SHIELD, LoopDetectionMode::Off, Drive::Pass, 120) else {
         return;
     };
     assert_eq!(run.terminal, Terminal::BeatsExhausted);
@@ -767,7 +774,7 @@ fn worldgorger_with_angel_of_salvation_accumulates_identical_shields() {
     );
     assert!(
         shields.iter().all(|def| def.runtime_execute.is_none()),
-        "the Angel's shield has no rider, so the arena is not in play"
+        "the synthetic shield has no rider, so the arena is not in play"
     );
 }
 

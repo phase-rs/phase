@@ -10969,10 +10969,11 @@ mod tests {
     // ===================================================================
 
     use crate::types::ability::{
-        AbilityCondition, Comparator, ControllerRef, CountScope, Effect, FilterProp, PlayerScope,
-        PtStat, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-        ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter,
-        TargetRef, TriggerCondition, TriggerDefinition, TypedFilter,
+        AbilityCondition, Comparator, ControllerRef, CopyRecipient, CountScope, Effect, FilterProp,
+        PlayerScope, PreventionAmount, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+        ReplacementCondition, ReplacementDefinition, ResolvedAbility, RestrictionExpiry,
+        StaticCondition, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
+        TriggerDefinition, TypedFilter,
     };
     use crate::types::counter::CounterMatch;
     use crate::types::player::PlayerCounterKind;
@@ -29485,10 +29486,9 @@ mod tests {
         state
     }
 
-    /// CR 615.5 + CR 614.1a: the shield class Angel of Salvation installs — a floating
-    /// `Next(n)` prevention for the rest of the turn, unconsumed, with no rider.
+    /// CR 615.7: the class printed amount-shield cards install — a floating `Next(n)`
+    /// prevention for the rest of the turn, unconsumed, with no rider.
     fn prevention_shield(amount: u32) -> ReplacementDefinition {
-        use crate::types::ability::{PreventionAmount, RestrictionExpiry};
         ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone)
             .prevention_shield(PreventionAmount::Next(amount))
             .expiry(RestrictionExpiry::EndOfTurn)
@@ -29539,7 +29539,6 @@ mod tests {
     /// entries SPENT (`is_consumed`): a copy effect already used up inside its period cannot
     /// apply again.
     fn copy_effect_naming(id: ObjectId) -> ReplacementDefinition {
-        use crate::types::ability::{CopyRecipient, Effect, TargetFilter};
         ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone)
             .execute(AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
@@ -29560,7 +29559,7 @@ mod tests {
         def
     }
 
-    /// CR 615.5 + CR 609.7b: a shield's AMOUNT is content — "the next 5 damage" and "the next
+    /// CR 615.7 + CR 609.7b: a shield's AMOUNT is content — "the next 5 damage" and "the next
     /// 3 damage" are different loop positions.
     #[test]
     fn loop_comparators_refuse_a_differing_floating_shield_amount() {
@@ -29617,7 +29616,7 @@ mod tests {
         assert_shield_frames_differ(&a, &b);
     }
 
-    /// CR 615.5: the fail-closed lone-install rule reads the LIVE sequence, so one live shield
+    /// CR 615.7: the fail-closed lone-install rule reads the LIVE sequence, so one live shield
     /// against a registry whose entries are all spent still refuses (the live registry is
     /// empty on one side), while two identical live instalments accept.
     #[test]
@@ -29704,7 +29703,7 @@ mod tests {
         assert_shield_frames_match(&a, &b);
     }
 
-    /// CR 615.5: within a turn the registry is append-only, so one identical shield growing
+    /// CR 615.7: within a turn the registry is append-only, so one identical shield growing
     /// into two is the same loop position. Both comparators must accept it, and `PartialEq`
     /// (blind to the whole registry) already does.
     #[test]
@@ -29718,7 +29717,7 @@ mod tests {
         assert_shield_frames_match(&a, &b);
     }
 
-    /// CR 615.5: an appended LIVE shield of a DIFFERENT class breaks the recurrence — the
+    /// CR 615.7: an appended LIVE shield of a DIFFERENT class breaks the recurrence — the
     /// tail rule only tolerates repeats of the class the shorter live registry ended on.
     #[test]
     fn loop_comparators_refuse_an_appended_differing_floating_shield() {
@@ -29727,7 +29726,7 @@ mod tests {
         assert_shield_frames_differ(&a, &b);
     }
 
-    /// CR 615.5: with no live shield observed yet the comparator cannot infer a class, so a
+    /// CR 615.7: with no live shield observed yet the comparator cannot infer a class, so a
     /// single install is refused (fail-closed, delays a draw by at most one cycle) while two
     /// identical installs are accepted. Empty versus empty is the regression row for the
     /// short-circuit: without it every shield-free loop in the engine would stop drawing.
@@ -29741,7 +29740,7 @@ mod tests {
         assert_shield_frames_match(&empty, &shield_frames(&[]));
     }
 
-    /// CR 615.5: the registry is an append log, so order is content. Growth that repeats the
+    /// CR 615.7: the registry is an append log, so order is content. Growth that repeats the
     /// last class is still accepted.
     #[test]
     fn loop_comparators_refuse_reordered_floating_shields() {
