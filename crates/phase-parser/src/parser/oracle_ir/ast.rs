@@ -2114,12 +2114,15 @@ pub(crate) enum CostResourceImperativeAst {
     /// in the CostResource AST (DamageSource, DamageEachPlayer, etc.).
     /// The Effect is already fully constructed by try_parse_damage.
     DamageEffect(Box<Effect>),
-    /// CR 118.1: "pay {cost}" as an effect verb (mana, life, energy, …).
-    /// Carries the unified `AbilityCost` taxonomy directly (lowered to
-    /// `Effect::PayCost { cost, scale: None, .. }`); this IR path never emits a
-    /// per-object scaled mana cost.
+    /// CR 118.1: `pay {cost}` as an effect verb (mana, life, energy, …) carrying
+    /// the unified `AbilityCost`, plus the resolution-time multiplier when the
+    /// clause scales the cost by a player-chosen amount (`pay any amount of {R}`,
+    /// CR 107.1c + CR 107.3f): lowered to `Effect::PayCost { cost, scale, .. }`;
+    /// `scale` is `Some(Ref(Variable "X"))` only for that clause and `None` for
+    /// every other payment.
     Pay {
         cost: AbilityCost,
+        scale: Option<QuantityExpr>,
     },
 }
 

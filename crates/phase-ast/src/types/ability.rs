@@ -24282,6 +24282,12 @@ pub enum Effect {
         /// `PaymentCost::ScaledMana`). When `Some(times)` the mana `cost` base
         /// is multiplied by `times` at payment ("pay {N} for each object chosen
         /// this way"); `times == 0` yields `{0}`, a trivial no-op success.
+        /// That first producer is the per-object `TrackedSetSize` payment
+        /// (Thelon's Curse; CR 118.1). The second producer is a `times` that
+        /// still carries the unannounced X (`times.contains_x()`): the
+        /// multiplier is then the player-chosen amount of a resolution-time
+        /// prompt (`pay::resolve` → `PayableResource::Mana { composition:
+        /// PerUnit }`, CR 107.1c; "pay any amount of {R}", Leyline Tyrant).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scale: Option<QuantityExpr>,
         /// CR 608.2c: Player who pays the resolution-time cost. Defaults to
