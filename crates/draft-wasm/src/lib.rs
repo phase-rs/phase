@@ -161,6 +161,9 @@ fn enforce_procedure_minimum_deck_size(mut config: DraftConfig) -> DraftConfig {
     config
 }
 
+/// The local FIFO Quick configuration of a cube draft: the cube's settings
+/// under the untimed Quick clock and the default selection policy, with the
+/// procedure's minimum-deck floor applied.
 fn build_quick_cube_config(
     cube_name: &str,
     settings: &CubeDraftSettings,
@@ -168,9 +171,9 @@ fn build_quick_cube_config(
     seed: u64,
 ) -> DraftConfig {
     enforce_procedure_minimum_deck_size(DraftConfig {
-        flow: draft_core::types::DraftFlow::LegacyBarrier,
+        flow: DraftFlow::FifoAsync,
         selection_policy: draft_core::types::DraftSelectionPolicy::default(),
-        clock_policy: draft_core::types::DraftClockPolicy::default(),
+        clock_policy: DraftClockPolicy::quick_default(),
         source: DraftSource::Cube {
             id: "custom-cube".to_string(),
             name: cube_name.to_string(),
@@ -407,34 +410,51 @@ pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
     Ok(count)
 }
 
-/// Start a Quick Draft session: 1 human + 7 bots.
+/// Start a Quick Draft on the local FIFO runtime: one human and seven bots.
 ///
 /// - `selection_json`: serialized [`SetPackSequence`] — the distinct set pools
 ///   from draft-pools.json plus the set filling each booster, in pack order.
 ///   The sequence length is the draft's pack count, and a set may repeat.
 /// - `difficulty`: 0=VeryEasy, 1=Easy, 2=Medium, 3=Hard, 4=VeryHard
 /// - `seed`: RNG seed for deterministic pack generation
+/// - `drafting_json`: `"EngineBots"` or `"LlmSeats"`, parsed before anything
+///   else, so a refused call installs nothing.
+/// - `now_ms`: the caller's time; the draft starts at it.
 ///
-/// Returns the initial DraftPlayerView as a JS object.
+/// Returns `{ owner, view }`: the owner the caller presents on every later
+/// local call, and seat 0's view.
 #[wasm_bindgen]
 pub fn start_quick_draft(
     selection_json: &str,
     difficulty: u8,
     seed: u32,
+    drafting_json: &str,
+    now_ms: u64,
 ) -> Result<JsValue, JsValue> {
+    start_quick_draft_inner(selection_json, difficulty, seed, drafting_json, now_ms)
+        .map(|local| to_js(&local))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Pure-Rust core for [`start_quick_draft`].
+fn start_quick_draft_inner(
+    selection_json: &str,
+    difficulty: u8,
+    seed: u32,
+    drafting_json: &str,
+    now_ms: u64,
+) -> Result<LocalFifoSession, String> {
+    let drafting = parse_local_llm_drafting(drafting_json)?;
     // The procedure table is the single authority for how many boosters this
     // kind opens; the selection only decides which set fills each of them.
     let quick_procedure = DraftKind::Quick.procedure();
     let selection =
-        ResolvedSetSelection::parse(selection_json, Some(quick_procedure.packs_per_player))
-            .map_err(|e| JsValue::from_str(&e))?;
-
-    let ai_difficulty = map_difficulty(difficulty);
+        ResolvedSetSelection::parse(selection_json, Some(quick_procedure.packs_per_player))?;
 
     let config = enforce_procedure_minimum_deck_size(DraftConfig {
-        flow: draft_core::types::DraftFlow::LegacyBarrier,
+        flow: DraftFlow::FifoAsync,
         selection_policy: draft_core::types::DraftSelectionPolicy::default(),
-        clock_policy: draft_core::types::DraftClockPolicy::default(),
+        clock_policy: DraftClockPolicy::quick_default(),
         set_code: selection.source.set_code(),
         source: selection.source,
         kind: DraftKind::Quick,
@@ -449,32 +469,15 @@ pub fn start_quick_draft(
         spectator_visibility: SpectatorVisibility::default(),
     });
 
-    let mut seats = vec![DraftSeat::Human {
-        player_id: engine::types::player::PlayerId(0),
-        display_name: "Player".to_string(),
-    }];
-    for i in 1..8u8 {
-        seats.push(DraftSeat::Bot {
-            name: format!("Bot {i}"),
-        });
-    }
-
-    let mut draft_session = DraftSession::new(config, seats, "quick-draft".to_string());
-    let pack_gen = selection.generator;
-
-    // Apply StartDraft to generate packs and transition to Drafting
-    session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
-        .map_err(|e| JsValue::from_str(&format!("Failed to start draft: {}", e)))?;
-
-    let view = filter_for_player(&draft_session, 0);
-
-    // Store state in thread-locals
-    session_cell::install(draft_session);
-    PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
-    DIFFICULTY.with(|cell| cell.set(ai_difficulty));
-    RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
-
-    Ok(to_js(&view))
+    start_local_fifo_draft(
+        config,
+        local_quick_seats(quick_procedure.pod_size),
+        "quick-draft".to_string(),
+        &selection.generator,
+        map_difficulty(difficulty),
+        drafting,
+        now_ms,
+    )
 }
 
 /// Start a local Sealed event: one human and seven bots each open six packs,
@@ -534,7 +537,15 @@ pub fn start_sealed_draft(
     Ok(to_js(&view))
 }
 
-/// Start a Quick Cube Draft session from a counted cube list.
+/// Start a Quick Cube Draft on the local FIFO runtime from a counted cube
+/// list: one human and a bot at every other seat of the settings' pod.
+///
+/// - `drafting_json`: `"EngineBots"` or `"LlmSeats"`, parsed before anything
+///   else, so a refused call installs nothing.
+/// - `now_ms`: the caller's time; the draft starts at it.
+///
+/// Returns `{ owner, view }`: the owner the caller presents on every later
+/// local call, and seat 0's view.
 #[wasm_bindgen]
 pub fn start_quick_cube_draft(
     cube_list_text: &str,
@@ -542,7 +553,33 @@ pub fn start_quick_cube_draft(
     settings_json: &str,
     difficulty: u8,
     seed: u32,
+    drafting_json: &str,
+    now_ms: u64,
 ) -> Result<JsValue, JsValue> {
+    start_quick_cube_draft_inner(
+        cube_list_text,
+        cube_name,
+        settings_json,
+        difficulty,
+        seed,
+        drafting_json,
+        now_ms,
+    )
+    .map(|local| to_js(&local))
+    .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Pure-Rust core for [`start_quick_cube_draft`].
+fn start_quick_cube_draft_inner(
+    cube_list_text: &str,
+    cube_name: &str,
+    settings_json: &str,
+    difficulty: u8,
+    seed: u32,
+    drafting_json: &str,
+    now_ms: u64,
+) -> Result<LocalFifoSession, String> {
+    let drafting = parse_local_llm_drafting(drafting_json)?;
     let settings: CubeDraftSettings = if settings_json.trim().is_empty() {
         CubeDraftSettings {
             pod_size: default_cube_pod_size(),
@@ -553,70 +590,51 @@ pub fn start_quick_cube_draft(
         }
     } else {
         serde_json::from_str(settings_json)
-            .map_err(|e| JsValue::from_str(&format!("Failed to parse cube settings: {e}")))?
+            .map_err(|e| format!("Failed to parse cube settings: {e}"))?
     };
     if settings.pod_size == 0 {
-        return Err(JsValue::from_str("Cube draft pod size must be at least 1"));
+        return Err("Cube draft pod size must be at least 1".to_string());
     }
 
     let entries = parse_cube_list(cube_list_text).map_err(|errors| {
-        JsValue::from_str(&format!(
+        format!(
             "Failed to parse cube list: {}",
             serde_json::to_string(&errors).unwrap_or_else(|_| "invalid lines".to_string())
-        ))
+        )
     })?;
     let (cards, addable_cards) = CARD_DB.with(|cell| {
         let db_borrow = cell.borrow();
         let db = db_borrow
             .as_ref()
-            .ok_or_else(|| JsValue::from_str("Card database must be loaded before cube draft"))?;
+            .ok_or_else(|| "Card database must be loaded before cube draft".to_string())?;
         let cards = cube_cards_from_entries(&entries, db).map_err(|errors| {
-            JsValue::from_str(&format!(
+            format!(
                 "Failed to resolve cube cards: {}",
                 serde_json::to_string(&errors).unwrap_or_else(|_| "unknown cards".to_string())
-            ))
+            )
         })?;
         let addable_cards =
             resolve_addable_cards(&settings.addable_cards, db).map_err(|errors| {
-                JsValue::from_str(&format!(
+                format!(
                     "Failed to resolve addable cards: {}",
                     serde_json::to_string(&errors).unwrap_or_else(|_| "unknown cards".to_string())
-                ))
+                )
             })?;
-        Ok::<_, JsValue>((cards, addable_cards))
+        Ok::<_, String>((cards, addable_cards))
     })?;
 
-    let ai_difficulty = map_difficulty(difficulty);
     let pod_size = settings.pod_size;
     let config = build_quick_cube_config(cube_name, &settings, addable_cards, seed as u64);
 
-    let mut seats = vec![DraftSeat::Human {
-        player_id: engine::types::player::PlayerId(0),
-        display_name: "Player".to_string(),
-    }];
-    for i in 1..pod_size {
-        seats.push(DraftSeat::Bot {
-            name: format!("Bot {i}"),
-        });
-    }
-
-    let mut draft_session = DraftSession::new(config, seats, "quick-cube-draft".to_string());
-    let pack_source = CubePackSource::new(cards);
-    session::apply(
-        &mut draft_session,
-        DraftAction::StartDraft,
-        Some(&pack_source),
+    start_local_fifo_draft(
+        config,
+        local_quick_seats(pod_size),
+        "quick-cube-draft".to_string(),
+        &CubePackSource::new(cards),
+        map_difficulty(difficulty),
+        drafting,
+        now_ms,
     )
-    .map_err(|e| JsValue::from_str(&format!("Failed to start cube draft: {e}")))?;
-
-    let view = filter_for_player(&draft_session, 0);
-
-    session_cell::install(draft_session);
-    PACK_GEN.with(|cell| cell.set(None));
-    DIFFICULTY.with(|cell| cell.set(ai_difficulty));
-    RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
-
-    Ok(to_js(&view))
 }
 
 /// Apply the human player's pick at seat 0, then resolve every bot pick.
@@ -2461,6 +2479,20 @@ fn admit_local_fifo_runtime(session: &DraftSession) -> Result<(), String> {
     }
 }
 
+/// The seats of a local Quick pod of `pod_size`: the human at seat 0
+/// ([`LOCAL_HUMAN_SEAT`]), then a bot at every other seat, the one shape
+/// [`admit_local_fifo_runtime`] admits.
+fn local_quick_seats(pod_size: u8) -> Vec<DraftSeat> {
+    std::iter::once(DraftSeat::Human {
+        player_id: engine::types::player::PlayerId(0),
+        display_name: "Player".to_string(),
+    })
+    .chain((1..pod_size).map(|index| DraftSeat::Bot {
+        name: format!("Bot {index}"),
+    }))
+    .collect()
+}
+
 /// The local read gate: the live owner, then [`admit_local_fifo_runtime`], both
 /// before `f` sees the session. A parallel of [`with_draft_inner`], not a
 /// widening of it.
@@ -2522,6 +2554,8 @@ fn install_local_fifo(
 }
 
 /// Create, start and install a local FIFO Quick draft, and issue its owner.
+/// The Quick constructors, [`start_quick_draft`] and
+/// [`start_quick_cube_draft`], are its callers.
 ///
 /// Everything fallible runs before any thread-local is written. The session is
 /// constructed under a session id the runtime issues itself, never one a caller
@@ -2534,13 +2568,6 @@ fn install_local_fifo(
 /// so a bot seat drafts as soon as it holds a pack, and the start batch makes
 /// every such pick before the human's first view; under
 /// [`LocalLlmDrafting::LlmSeats`] a seat's choice waits for its own drafter.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Quick constructors call this when they create FIFO sessions"
-    )
-)]
 fn start_local_fifo_draft(
     config: DraftConfig,
     seats: Vec<DraftSeat>,
@@ -3241,8 +3268,8 @@ const NO_LLM_REPLY: &str = "the LLM drafter returned no reply";
 /// view.
 ///
 /// `drafting_json`: `"EngineBots"` or `"LlmSeats"`, parsed before the session
-/// is touched. Only the live owner declares it, and every local install resets
-/// it to `"EngineBots"`.
+/// is touched. Only the live owner declares it. An import installs
+/// `"EngineBots"`; a Quick constructor installs the drafting it is given.
 #[wasm_bindgen]
 pub fn local_fifo_set_llm_drafting(
     owner: u32,
@@ -3254,14 +3281,19 @@ pub fn local_fifo_set_llm_drafting(
         .map_err(|error| JsValue::from_str(&error))
 }
 
+/// Parse a client's LLM drafting declaration: `"EngineBots"` or `"LlmSeats"`.
+/// The one parser of every export that takes a drafting.
+fn parse_local_llm_drafting(drafting_json: &str) -> Result<LocalLlmDrafting, String> {
+    serde_json::from_str(drafting_json).map_err(|e| format!("Invalid LLM drafting: {e}"))
+}
+
 /// Pure-Rust core for [`local_fifo_set_llm_drafting`].
 fn local_fifo_set_llm_drafting_inner(
     owner: LocalOwner,
     drafting_json: &str,
     now_ms: u64,
 ) -> Result<DraftPlayerView, String> {
-    let drafting: LocalLlmDrafting =
-        serde_json::from_str(drafting_json).map_err(|e| format!("Invalid LLM drafting: {e}"))?;
+    let drafting = parse_local_llm_drafting(drafting_json)?;
     with_local_fifo_mut_inner(owner, |session| {
         LOCAL_LLM_DRAFTING.with(|cell| cell.set(drafting));
         run_local_fifo_bot_batch(session, now_ms)?;
@@ -4389,7 +4421,7 @@ mod set_selection_tests {
         )
     }
 
-    fn selection_json(pools: &[(&str, u8)], sequence: &[&str]) -> String {
+    pub(super) fn selection_json(pools: &[(&str, u8)], sequence: &[&str]) -> String {
         let pools: Vec<String> = pools
             .iter()
             .map(|(code, size)| pool_json(code, *size))
@@ -7127,6 +7159,8 @@ mod create_multiplayer_draft_tests {
 
         assert_eq!(config(0).min_deck_size, 1);
         assert_eq!(config(4).min_deck_size, 4);
+        assert_eq!(config(4).flow, DraftFlow::FifoAsync);
+        assert_eq!(config(4).clock_policy, DraftClockPolicy::quick_default());
         install_fixture_db();
         let cards = CARD_DB.with(|cell| {
             let db = cell.borrow();
@@ -7136,19 +7170,28 @@ mod create_multiplayer_draft_tests {
             )
             .unwrap()
         });
-        let source = CubePackSource::new(cards);
-        let seats = (0..8)
-            .map(|i| DraftSeat::Bot {
-                name: format!("Bot {i}"),
-            })
-            .collect();
-        let mut session = DraftSession::new(config(4), seats, "quick-cube".into());
-        session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
-        assert_eq!(session.current_pack[0].as_ref().unwrap().0.len(), 15);
-        let restored =
-            restorable_draft_session_from_json(&serde_json::to_string(&session).unwrap()).unwrap();
-        session_cell::install(restored);
-        let pool = booster_pack_pool_for_game_inner().unwrap().unwrap();
+        let local = start_local_fifo_draft(
+            config(4),
+            local_quick_seats(8),
+            "quick-cube-draft".to_string(),
+            &CubePackSource::new(cards),
+            AiDifficulty::Medium,
+            LocalLlmDrafting::EngineBots,
+            1_000,
+        )
+        .expect("the cube configuration starts on the local FIFO runtime");
+        assert_eq!(
+            local
+                .view
+                .fifo
+                .as_ref()
+                .and_then(|fifo| fifo.head.as_ref())
+                .map(|head| head.original_size),
+            Some(15)
+        );
+        let pool = local_fifo_booster_pack_pool_for_game_inner(local.owner)
+            .unwrap()
+            .unwrap();
         assert_eq!(pool.len(), 401);
         assert_eq!(pool.last().unwrap(), "Delta");
         clear_state();
@@ -7653,18 +7696,6 @@ mod local_fifo_runtime_tests {
             pod_policy: PodPolicy::Competitive,
             spectator_visibility: SpectatorVisibility::default(),
         }
-    }
-
-    /// The human at seat 0, then a bot at every other seat.
-    fn local_quick_seats(pod_size: u8) -> Vec<DraftSeat> {
-        std::iter::once(DraftSeat::Human {
-            player_id: PlayerId(0),
-            display_name: "Player".to_string(),
-        })
-        .chain((1..pod_size).map(|index| DraftSeat::Bot {
-            name: format!("Bot {index}"),
-        }))
-        .collect()
     }
 
     fn set_source() -> DraftSource {
@@ -9672,6 +9703,257 @@ mod local_fifo_runtime_tests {
             })
             .expect("seat 1's head is requested");
         assert!(body.contains("Pack 1 of 3, pick 2"), "{body}");
+        reset();
+    }
+
+    // ── The Quick constructors ───────────────────────────────────────────────
+
+    /// A time no other fixture starts at, so the threaded time is visible.
+    const QUICK_START_MS: u64 = 1_700_000_000_000;
+
+    /// The cube list the Quick cube constructor resolves against
+    /// [`install_fixture_db`]: 400 Alpha and one Delta.
+    const QUICK_CUBE_LIST: &str = "400 Alpha\n1 Delta";
+
+    /// The Quick set constructor's selection: one 15-card textless `AAA` set
+    /// filling every booster.
+    fn quick_set_selection() -> String {
+        super::set_selection_tests::selection_json(&[("AAA", 15)], &["AAA"])
+    }
+
+    /// Cube settings unlike the defaults: a 4-seat pod of two 10-card
+    /// boosters, asking for no minimum deck, so the procedure floor raising it
+    /// to 1 is visible.
+    fn quick_cube_settings() -> String {
+        serde_json::json!({
+            "pod_size": 4,
+            "pack_count": 2,
+            "cards_per_pack": 10,
+            "min_deck_size": 0,
+        })
+        .to_string()
+    }
+
+    /// The human at seat 0 and a bot at every other seat of `pod_size`.
+    fn assert_local_quick_seats(session: &DraftSession, pod_size: usize) {
+        assert_eq!(session.seats.len(), pod_size);
+        assert!(matches!(session.seats[0], DraftSeat::Human { .. }));
+        assert!(session.seats[1..]
+            .iter()
+            .all(|seat| matches!(seat, DraftSeat::Bot { .. })));
+    }
+
+    /// The Quick set constructor starts a local FIFO draft: the Quick kind,
+    /// one human and seven bots, the untimed Quick clock, the default
+    /// selection policy, an issued canonical id, the caller's time and
+    /// difficulty, and the bots quiescent. The legacy runtime refuses it, and
+    /// the start retires the earlier draft's owner.
+    #[test]
+    fn the_quick_set_constructor_starts_a_local_fifo_draft() {
+        reset();
+        let a = start_fixture(AiDifficulty::Medium).owner;
+        assert!(local_fifo_view_inner(a).is_ok(), "reach: owner A reads");
+
+        let local = start_quick_draft_inner(
+            &quick_set_selection(),
+            3,
+            7,
+            "\"EngineBots\"",
+            QUICK_START_MS,
+        )
+        .expect("the Quick set constructor starts");
+        assert!(
+            local_fifo_view_inner(local.owner).is_ok(),
+            "reach: the started owner reads"
+        );
+        let session = installed();
+        assert_eq!(session.config.flow, DraftFlow::FifoAsync);
+        assert_eq!(session.config.kind, DraftKind::Quick);
+        assert_eq!(
+            session.config.clock_policy,
+            DraftClockPolicy::quick_default()
+        );
+        assert!(session.config.selection_policy.is_default());
+        assert_local_quick_seats(&session, 8);
+        let fifo = session.fifo.as_ref().expect("a FIFO session");
+        assert!(
+            is_canonical_local_session_id(&fifo.session_id),
+            "{:?}",
+            fifo.session_id
+        );
+        assert_eq!(fifo.last_now_ms, QUICK_START_MS);
+        assert_eq!(DIFFICULTY.with(Cell::get), AiDifficulty::Hard);
+        assert!(bots_quiescent(&session));
+        assert_eq!(
+            with_draft_inner(|_| Ok(())),
+            Err(FIFO_UNSUPPORTED_BY_RUNTIME.to_string())
+        );
+        assert_eq!(local_fifo_view_inner(a).unwrap_err(), STALE_LOCAL_OWNER);
+        reset();
+    }
+
+    /// Not card-derived: the Quick cube constructor starts a local FIFO draft
+    /// with the cube's own pod size, raises a zero minimum deck to the
+    /// procedure floor, and keeps the cube's original multiset for the game.
+    #[test]
+    fn the_quick_cube_constructor_starts_a_local_fifo_draft() {
+        reset();
+        install_fixture_db();
+        let local = start_quick_cube_draft_inner(
+            QUICK_CUBE_LIST,
+            "Cube",
+            &quick_cube_settings(),
+            2,
+            11,
+            "\"EngineBots\"",
+            QUICK_START_MS,
+        )
+        .expect("the Quick cube constructor starts");
+        assert!(
+            local_fifo_view_inner(local.owner).is_ok(),
+            "reach: the started owner reads"
+        );
+        let session = installed();
+        assert_eq!(session.config.flow, DraftFlow::FifoAsync);
+        assert_local_quick_seats(&session, 4);
+        assert_eq!(local.view.min_deck_size, 1);
+        let pool = local_fifo_booster_pack_pool_for_game_inner(local.owner)
+            .expect("the owner reads the pool")
+            .expect("a cube draft keeps its original multiset");
+        assert_eq!(pool.len(), 401);
+        assert_eq!(pool.last().map(String::as_str), Some("Delta"));
+        reset();
+    }
+
+    /// Under LLM seats every bot seat holds its head for its own drafter and a
+    /// request is built for each; under engine bots the start batch drafts
+    /// them and none is requested.
+    fn assert_takes_the_drafting(
+        label: &str,
+        pod_size: u8,
+        start: impl Fn(&str) -> LocalFifoSession,
+    ) {
+        let llm = start("\"LlmSeats\"");
+        assert_eq!(bot_steps(&llm.view), 0, "{label}");
+        assert_eq!(
+            LOCAL_LLM_DRAFTING.with(Cell::get),
+            LocalLlmDrafting::LlmSeats,
+            "{label}"
+        );
+        let requested: Vec<u8> = local_fifo_build_llm_requests_inner(llm.owner, ENDPOINT, "{}")
+            .expect("the owner builds the requests")
+            .iter()
+            .map(|entry| match entry {
+                LocalLlmPickRequest::Request { seat, .. } => *seat,
+                LocalLlmPickRequest::Unbuildable { seat, error, .. } => {
+                    panic!("{label}: seat {seat} is unbuildable: {error}")
+                }
+            })
+            .collect();
+        assert_eq!(requested, (1..pod_size).collect::<Vec<u8>>(), "{label}");
+
+        let engine = start("\"EngineBots\"");
+        assert!(bot_steps(&engine.view) > 0, "{label}");
+        assert_eq!(
+            LOCAL_LLM_DRAFTING.with(Cell::get),
+            LocalLlmDrafting::EngineBots,
+            "{label}"
+        );
+        assert!(
+            local_fifo_build_llm_requests_inner(engine.owner, ENDPOINT, "{}")
+                .expect("the owner builds the requests")
+                .is_empty(),
+            "{label}"
+        );
+    }
+
+    /// Each Quick constructor installs the LLM drafting it is given.
+    #[test]
+    fn the_quick_constructors_take_the_llm_drafting_they_are_given() {
+        reset();
+        assert_takes_the_drafting("set", 8, |drafting| {
+            start_quick_draft_inner(&quick_set_selection(), 2, 7, drafting, QUICK_START_MS)
+                .expect("the Quick set constructor starts")
+        });
+        reset();
+        install_fixture_db();
+        assert_takes_the_drafting("cube", 4, |drafting| {
+            start_quick_cube_draft_inner(
+                QUICK_CUBE_LIST,
+                "Cube",
+                &quick_cube_settings(),
+                2,
+                11,
+                drafting,
+                QUICK_START_MS,
+            )
+            .expect("the Quick cube constructor starts")
+        });
+        reset();
+    }
+
+    /// `start` is refused with an error naming `expected`, no runtime cell
+    /// changes, and `owner` still reads its session.
+    fn assert_refused_before_install(
+        label: &str,
+        expected: &str,
+        owner: LocalOwner,
+        start: impl FnOnce() -> Result<LocalFifoSession, String>,
+    ) {
+        let before = guard_cells_snapshot();
+        let Err(error) = start() else {
+            panic!("{label}: the constructor started");
+        };
+        assert!(error.contains(expected), "{label}: {error}");
+        assert_eq!(guard_cells_snapshot(), before, "{label}");
+        assert!(local_fifo_view_inner(owner).is_ok(), "{label}");
+    }
+
+    /// A Quick constructor refuses before it installs: on each refusal no
+    /// runtime cell changes and the earlier owner keeps its session.
+    #[test]
+    fn a_quick_constructor_refuses_before_it_installs() {
+        reset();
+        let a = start_fixture(AiDifficulty::Medium).owner;
+        let selection = quick_set_selection();
+        assert_refused_before_install("an unparsable drafting", "Invalid LLM drafting", a, || {
+            start_quick_draft_inner(&selection, 2, 7, "\"Sometimes\"", QUICK_START_MS)
+        });
+        let missing_set = super::set_selection_tests::selection_json(&[("AAA", 15)], &["ZZZ"]);
+        assert_refused_before_install(
+            "a set with no pool",
+            "No pool data was supplied for set 'ZZZ'",
+            a,
+            || start_quick_draft_inner(&missing_set, 2, 7, "\"EngineBots\"", QUICK_START_MS),
+        );
+        assert_refused_before_install(
+            "a time beyond the engine's bound",
+            "Failed to start local draft",
+            a,
+            || start_quick_draft_inner(&selection, 2, 7, "\"EngineBots\"", u64::MAX),
+        );
+        assert_refused_before_install(
+            "a cube with no card database",
+            "Card database must be loaded before cube draft",
+            a,
+            || {
+                start_quick_cube_draft_inner(
+                    QUICK_CUBE_LIST,
+                    "Cube",
+                    &quick_cube_settings(),
+                    2,
+                    11,
+                    "\"EngineBots\"",
+                    QUICK_START_MS,
+                )
+            },
+        );
+
+        assert!(
+            start_quick_draft_inner(&selection, 2, 7, "\"EngineBots\"", QUICK_START_MS).is_ok(),
+            "a valid start succeeds"
+        );
+        assert_eq!(local_fifo_view_inner(a).unwrap_err(), STALE_LOCAL_OWNER);
         reset();
     }
 }

@@ -22,6 +22,7 @@ import {
   type LocalFifoLlmDrafting,
   type LocalFifoLlmPickRequest,
   type LocalFifoOwner,
+  type LocalFifoSession,
   type SetPackSequence,
   type SuggestedDeck,
 } from "../adapter/draft-adapter";
@@ -161,7 +162,10 @@ interface DraftStoreState {
   adapter: DraftAdapter | null;
   /** The engine runtime holding this draft's session; set together with `adapter`. */
   runtime: LocalDraftRuntime | null;
-  /** The saved record's declared local FIFO session id, mirrored from its meta. */
+  /**
+   * The local FIFO session id the engine issued this draft, declared in its
+   * saved record; `null` for a legacy session.
+   */
   localFifoSessionId: string | null;
   view: DraftPlayerView | null;
   selectedCard: string | null;
@@ -623,12 +627,23 @@ async function prepareCardDatabase(): Promise<string> {
   return response.text();
 }
 
+/**
+ * How a local start constructs its session: Sealed's legacy constructor, or
+ * the Quick set and cube constructors on the local FIFO runtime.
+ */
+type LocalDraftConstruction =
+  | { readonly runtime: "legacy"; construct(lease: DraftEngineOperationLease): DraftPlayerView }
+  | {
+      readonly runtime: "local-fifo";
+      construct(lease: DraftEngineOperationLease, drafting: LocalFifoLlmDrafting, nowMs: number): LocalFifoSession;
+    };
+
 async function startLocalDraft(input: {
   setCode: string;
   setName: string;
   difficulty: number;
   kind: LocalDraftKind;
-  initialize: Parameters<typeof withDraftEngineOperation<DraftPlayerView>>[0];
+  construction: LocalDraftConstruction;
 }): Promise<void> {
   const lifecycle = beginLifecycle();
   try {
@@ -638,14 +653,41 @@ async function startLocalDraft(input: {
     if (lifecycle !== lifecycleGeneration) return;
     const database = await prepareCardDatabase();
     const adapter = new DraftAdapter();
-    const view = await withDraftEngineOperation((lease) => {
+    // A FIFO start tells its constructor the drafting the player's LLM
+    // settings ask for, read before the lease as a resume reads it.
+    const { construction } = input;
+    const start = construction.runtime === "local-fifo"
+      ? { runtime: construction.runtime, construction, desire: await localFifoLlmDrafting() }
+      : { runtime: construction.runtime, construction };
+    if (lifecycle !== lifecycleGeneration) return;
+    const started = await withDraftEngineOperation((lease): {
+      runtime: LocalDraftRuntime;
+      view: DraftPlayerView;
+      localFifoSessionId: string | null;
+    } => {
       if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft start");
       lease.loadCardDatabase(database);
       lease.setPickEnhancements(usePreferencesStore.getState().draftPickEnhancements);
       if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft start");
-      return input.initialize(lease);
+      switch (start.runtime) {
+        case "legacy":
+          return { runtime: { kind: "legacy" }, view: start.construction.construct(lease), localFifoSessionId: null };
+        case "local-fifo": {
+          const local = start.construction.construct(lease, start.desire.drafting, Date.now());
+          // The engine issues the session id; a view that carries none cannot
+          // be saved under the identity its resume is routed by.
+          const localFifoSessionId = draftViewSessionId(local.view);
+          if (localFifoSessionId === null) throw new Error(i18n.t("draft:run.startUnavailable"));
+          return { runtime: { kind: "local-fifo", owner: local.owner }, view: local.view, localFifoSessionId };
+        }
+      }
     });
     if (lifecycle !== lifecycleGeneration) return;
+    const { runtime, view, localFifoSessionId } = started;
+    // Before the install, so the subscription's sync finds it, as on resume.
+    if (runtime.kind === "local-fifo" && start.runtime === "local-fifo") {
+      fifoLlm = createLocalFifoLlm(lifecycle, runtime.owner, start.desire.drafting);
+    }
     installWorkspace({
       kind: "state",
       authoritativeView: view,
@@ -653,8 +695,8 @@ async function startLocalDraft(input: {
       patch: {
         draftId: crypto.randomUUID(),
         adapter,
-        runtime: { kind: "legacy" },
-        localFifoSessionId: null,
+        runtime,
+        localFifoSessionId,
         phase: input.kind === "Sealed" ? "opening" : "drafting",
         difficulty: input.difficulty,
         selectedSet: input.setCode,
@@ -944,6 +986,29 @@ interface LocalFifoLlm {
 
 /** LLM drafting on the local FIFO runtime for one lifecycle: what the engine was told, and each seat's call in flight with the prompt it answers. */
 let fifoLlm: LocalFifoLlm | null = null;
+
+/**
+ * The `fifoLlm` a start or a resume installs for `lifecycle`: the local
+ * session's owner and the drafting the engine was told, with no call in flight.
+ */
+function createLocalFifoLlm(
+  lifecycle: number,
+  owner: LocalFifoOwner,
+  drafting: LocalFifoLlmDrafting,
+): LocalFifoLlm {
+  return {
+    lifecycle,
+    owner,
+    drafting,
+    availability: "available",
+    controller: new AbortController(),
+    inFlight: new Map(),
+    statuses: new Map(),
+    viewOwed: false,
+    syncing: false,
+    syncAgain: false,
+  };
+}
 
 /** Whether the bot seats should be LLM drafters, and through which profile. */
 type LocalFifoLlmDesire =
@@ -1685,7 +1750,12 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     setName,
     difficulty,
     kind: "Quick",
-    initialize: (lease) => lease.initialize(setPoolJson, difficulty, Math.floor(Math.random() * 0xffffffff)),
+    construction: {
+      runtime: "local-fifo",
+      construct: (lease, drafting, nowMs) => lease.initialize(
+        setPoolJson, difficulty, Math.floor(Math.random() * 0xffffffff), drafting, nowMs,
+      ),
+    },
     });
   },
 
@@ -1705,7 +1775,10 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     setName,
     difficulty,
     kind: "Sealed",
-    initialize: (lease) => lease.initializeSealed(setPoolJson, difficulty, Math.floor(Math.random() * 0xffffffff)),
+    construction: {
+      runtime: "legacy",
+      construct: (lease) => lease.initializeSealed(setPoolJson, difficulty, Math.floor(Math.random() * 0xffffffff)),
+    },
     });
   },
 
@@ -1714,9 +1787,12 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     setName: cubeName,
     difficulty,
     kind: "Quick",
-    initialize: (lease) => lease.initializeCube(
-      cubeListText, cubeName, settings, difficulty, Math.floor(Math.random() * 0xffffffff),
-    ),
+    construction: {
+      runtime: "local-fifo",
+      construct: (lease, drafting, nowMs) => lease.initializeCube(
+        cubeListText, cubeName, settings, difficulty, Math.floor(Math.random() * 0xffffffff), drafting, nowMs,
+      ),
+    },
   }),
 
   completeSealedOpening: () => {
@@ -1825,18 +1901,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       // limits decide; the meta's phase only matters before a run exists.
       const resumedPhase: DraftPhase = run ? draftRunPhase(run) : meta.phase;
       if (runtime.kind === "local-fifo" && fifoResume !== null) {
-        fifoLlm = {
-          lifecycle,
-          owner: runtime.owner,
-          drafting: fifoResume.llm.drafting,
-          availability: "available",
-          controller: new AbortController(),
-          inFlight: new Map(),
-          statuses: new Map(),
-          viewOwed: false,
-          syncing: false,
-          syncAgain: false,
-        };
+        fifoLlm = createLocalFifoLlm(lifecycle, runtime.owner, fifoResume.llm.drafting);
       }
       installWorkspace({
         kind: "state",

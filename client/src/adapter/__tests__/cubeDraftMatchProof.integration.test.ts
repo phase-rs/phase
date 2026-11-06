@@ -26,7 +26,14 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => ({
 }));
 
 import fixture from "../../test/fixtures/draftMatchProof.json";
-import { DraftAdapter, type CubeDraftSettings, type DraftPlayerView } from "../draft-adapter";
+import {
+  DraftAdapter,
+  draftViewPrompt,
+  withDraftEngineOperation,
+  type CubeDraftSettings,
+  type DraftPlayerView,
+  type LocalFifoSession,
+} from "../draft-adapter";
 import { P2PDraftHost } from "../p2p-draft-host";
 import { formatMetadata } from "../../data/formatRegistry";
 import type { PersistedDraftHostSession } from "../../services/draftPersistence";
@@ -34,6 +41,8 @@ import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 
 const wasmDir = resolve(__dirname, "../../wasm");
 const cubeList = fixture.spells.map((name) => `15 ${name}`).join("\n");
+/** The local runtime's explicit time for every call this file makes on it. */
+const PROOF_NOW_MS = 1_700_000_000_000;
 
 function cardData(): string {
   return JSON.stringify(Object.fromEntries([...fixture.spells, ...fixture.basics].map((name) => [
@@ -73,17 +82,55 @@ function settings(minDeckSize: number): CubeDraftSettings {
   };
 }
 
-async function draftTwenty(adapter: DraftAdapter, minimum: number): Promise<DraftPlayerView> {
-  let view = await adapter.initializeCube(cubeList, "Twenty-card proof", settings(minimum), 0, 291);
-  expect(view.status).toBe("Drafting");
+/**
+ * A public cube start on the local FIFO runtime, drafted to deckbuilding by
+ * one selection on each live prompt: the owner and the last view.
+ */
+async function draftTwenty(adapter: DraftAdapter, minimum: number): Promise<LocalFifoSession> {
+  const started = await adapter.initializeCube(
+    cubeList, "Twenty-card proof", settings(minimum), 0, 291, "EngineBots", PROOF_NOW_MS,
+  );
+  expect(typeof started.owner).toBe("number");
+  expect(started.view.status).toBe("Drafting");
+  expect(started.view.flow).toBe("FifoAsync");
+  let view = started.view;
   for (let step = 0; step < 25 && view.status === "Drafting"; step += 1) {
+    const prompt = draftViewPrompt(view);
     const card = view.current_pack?.[0];
-    if (!card) throw new Error(`Cube draft stalled at pick ${step}: ${view.status}`);
-    view = await adapter.submitPick(card.instance_id);
+    if (!prompt || !card) throw new Error(`Cube draft stalled at selection ${step}: ${view.status}`);
+    view = await withDraftEngineOperation((lease) => lease.localFifoSelect(started.owner, {
+      prompt_id: prompt,
+      picked_card_instance_ids: [card.instance_id],
+      burned_card_instance_ids: [],
+      effect_card_instance_ids: [],
+    }, PROOF_NOW_MS));
   }
   expect(view.status).toBe("Deckbuilding");
   expect(view.pool).toHaveLength(20);
-  return view;
+  return { owner: started.owner, view };
+}
+
+/**
+ * A two-seat legacy cube pod made by the P2P constructor, the one route that
+ * still makes a legacy cube session now that a public cube start is local FIFO.
+ */
+function createLegacyCubePod(adapter: DraftAdapter, cubeName: string, seed: number): Promise<DraftPlayerView> {
+  return adapter.createMultiplayerDraft(
+    {
+      type: "Cube",
+      data: { cube_list_text: cubeList, cube_name: cubeName, cube_draft_settings: settings(20) },
+    },
+    [
+      { type: "Human", player_id: 0, display_name: "Host" },
+      { type: "Bot", name: "Bot 1" },
+    ],
+    "Premier",
+    seed,
+    "cube-proof",
+    "Swiss",
+    "Casual",
+    0,
+  );
 }
 
 function installedDecks(): string[][] {
@@ -114,13 +161,14 @@ describe("custom Cube submission to real Limited game", () => {
 
   it("installs the exact exported 20-card submission as an engine game", async () => {
     const adapter = new DraftAdapter();
-    const view = await draftTwenty(adapter, 20);
+    const { owner, view } = await draftTwenty(adapter, 20);
     expect(view.min_deck_size).toBe(20);
     const submitted = view.pool.map((card) => card.name);
     expect(submitted).toHaveLength(20);
-    const accepted = await adapter.submitDeck(submitted, []);
+    const accepted = await withDraftEngineOperation((lease) =>
+      lease.localFifoSubmitDeck(owner, submitted, [], PROOF_NOW_MS));
     expect(accepted.seats[0].has_submitted_deck).toBe(true);
-    const session = JSON.parse(await adapter.exportSession()) as {
+    const session = JSON.parse(await withDraftEngineOperation((lease) => lease.exportLocalFifoSession(owner))) as {
       submitted_decks: Record<string, { seat: number; main_deck: string[] }>;
     };
     const exported = Object.values(session.submitted_decks).find((deck) => deck.seat === 0);
@@ -154,16 +202,28 @@ describe("custom Cube submission to real Limited game", () => {
 
   it("rejects the adjacent 21-card Cube minimum after reaching Deckbuilding", async () => {
     const adapter = new DraftAdapter();
-    const view = await draftTwenty(adapter, 21);
+    const { owner, view } = await draftTwenty(adapter, 21);
     expect(view.min_deck_size).toBe(21);
-    await expect(adapter.submitDeck(view.pool.map((card) => card.name), []))
+    await expect(withDraftEngineOperation((lease) =>
+      lease.localFifoSubmitDeck(owner, view.pool.map((card) => card.name), [], PROOF_NOW_MS)))
       .rejects.toThrow("deck has 20 cards, minimum is 21");
   }, 300_000);
 
   it("checks an exported session with the legacy admission without installing it", async () => {
     const adapter = new DraftAdapter();
-    const view = await draftTwenty(adapter, 20);
-    await adapter.submitDeck(view.pool.map((card) => card.name), []);
+    // Each leg exports and re-exports before the other installs a session:
+    // a public cube start retires the legacy session, and the legacy export
+    // refuses a local FIFO one.
+    const started = await adapter.initializeCube(
+      cubeList, "Admission proof", settings(20), 0, 291, "EngineBots", PROOF_NOW_MS,
+    );
+    const localExport = () => withDraftEngineOperation((lease) => lease.exportLocalFifoSession(started.owner));
+    const local = await localExport();
+    expect(await adapter.checkRestorableSession(local)).toEqual({ type: "Incompatible" });
+    expect(await localExport()).toBe(local);
+
+    // Reach: the P2P constructor made a legacy session.
+    expect((await createLegacyCubePod(adapter, "Admission proof", 291)).status).toBe("Drafting");
     const exported = await adapter.exportSession();
     const session = JSON.parse(exported) as { config: Record<string, unknown> };
 
@@ -183,9 +243,9 @@ describe("custom Cube submission to real Limited game", () => {
 
   it("keeps a recovering host's saved session out of an installed host's draft engine session", async () => {
     const engine = new DraftAdapter();
-    await engine.initializeCube(cubeList, "Recovered pod", settings(20), 0, 401);
+    await createLegacyCubePod(engine, "Recovered pod", 401);
     const recoveredSession = await engine.exportSession();
-    await engine.initializeCube(cubeList, "Installed pod", settings(20), 0, 402);
+    await createLegacyCubePod(engine, "Installed pod", 402);
     const installedSession = await engine.exportSession();
     const ownSession: Record<string, string> = {
       "installed-owner": installedSession,
@@ -306,7 +366,7 @@ describe("custom Cube submission to real Limited game", () => {
     ],
   ] as const)("refuses a recovering host before any import when the draft engine refuses its exported session %s", async (_label, edit) => {
     const engine = new DraftAdapter();
-    await engine.initializeCube(cubeList, "Installed pod", settings(20), 0, 403);
+    await createLegacyCubePod(engine, "Installed pod", 403);
     const installedSession = await engine.exportSession();
     const refusedSession = JSON.stringify(edit(JSON.parse(installedSession) as Record<string, unknown>));
     // Reach: the edit changed the session the engine exported, and the engine holds the export.
@@ -379,5 +439,31 @@ describe("custom Cube submission to real Limited game", () => {
       await useMultiplayerDraftStore.getState().leave(true);
       vi.restoreAllMocks();
     }
+  }, 300_000);
+
+  it("lets_a_started_drafts_llm_seat_answer_its_own_head", async () => {
+    const started = await new DraftAdapter().initializeCube(
+      cubeList, "LLM seat proof", settings(20), 0, 291, "LlmSeats", PROOF_NOW_MS,
+    );
+    expect(started.view.seats[1].fifo_progress?.completed_steps).toBe(0);
+    const endpoint = JSON.stringify({ provider: "OpenAiCompatible", baseUrl: "https://provider.test/v1", model: "test" });
+    const entries = await withDraftEngineOperation((lease) =>
+      lease.localFifoBuildLlmRequests(started.owner, endpoint, {}));
+    // Exactly one: the bot seat holds its head for its own drafter.
+    expect(entries.map((entry) => [entry.kind, entry.seat])).toEqual([["request", 1]]);
+    const [request] = entries;
+    if (request?.kind !== "request") throw new Error("Seat 1's head was not requested");
+
+    // The choice is a 0-based index into the seat's projected head.
+    const body = JSON.stringify({
+      choices: [{ message: { role: "assistant", content: "{\"choice\": 0, \"reason\": \"proof\"}" } }],
+    });
+    const resolved = await withDraftEngineOperation((lease) => lease.localFifoResolveLlmPick(started.owner, {
+      promptId: request.promptId,
+      reply: { fingerprint: request.fingerprint, provider: "OpenAiCompatible", status: 200, body },
+    }, PROOF_NOW_MS));
+    expect(resolved.llmOutcome.seat).toBe(1);
+    expect(resolved.llmOutcome.used, resolved.llmOutcome.error).toBe(true);
+    expect(resolved.view.seats[1].fifo_progress?.completed_steps).toBe(1);
   }, 300_000);
 });

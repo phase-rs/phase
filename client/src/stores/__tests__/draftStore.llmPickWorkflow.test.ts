@@ -15,7 +15,7 @@ import {
 import { createDraftWorkspaceState } from "../../components/draft/workspace/workspacePlacement";
 import type { LlmDrafterStatus } from "../../services/llm/draftLlm";
 import { llmUsageTotals, resetLlmUsage } from "../../services/llm/usage";
-import type { DraftRunState } from "../../services/quickDraftPersistence";
+import type { ActiveQuickDraftMeta, DraftRunState } from "../../services/quickDraftPersistence";
 import type { LlmProviderCatalogEntry } from "../../services/llm/types";
 
 const catalogMock = vi.hoisted(() => ({ loadProviderCatalog: vi.fn() }));
@@ -159,9 +159,44 @@ const PICK_REQUEST = {
   request: { url: "https://provider.test/v1/chat/completions", method: "POST", headers: [], body: "{}" },
 };
 
-async function startDraft(): Promise<void> {
-  wasm.start_quick_draft.mockReturnValue(view([]));
-  await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+/**
+ * Arranges a drafting Quick store on the legacy runtime, whose barrier LLM
+ * round the first two blocks exercise, the one way it is still reached: by
+ * resuming a saved Quick record that declares no local FIFO session. The saved
+ * workspace is the empty one a start installs. It answers the resume's own run
+ * read with `null`, so a run another test left on the persistence mock cannot
+ * reach it, and afterwards clears the call history of every mock the resume
+ * drove, so the test's own counts see none of it.
+ */
+async function restoreLegacyQuick(options: { view?: DraftPlayerView } = {}): Promise<void> {
+  const restored = options.view ?? view([]);
+  const meta: ActiveQuickDraftMeta = {
+    id: "legacy-draft", setCode: "TST", setName: "Test", difficulty: 2, kind: "Quick",
+    phase: "drafting", pickCount: restored.pool.length, updatedAt: 0,
+  };
+  persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(meta);
+  persistence.loadDraftRun.mockResolvedValueOnce(null);
+  persistence.loadQuickDraftSession.mockResolvedValue({
+    sessionJson: "legacy-saved", mainDeck: [], landCounts: {},
+    poolSortMode: "color", poolPanelOpen: true, workspace: createDraftWorkspaceState(),
+  });
+  wasm.import_draft_session.mockReturnValue(restored);
+  const imports = wasm.import_draft_session.mock.calls.length;
+
+  expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: meta.id });
+  expect(wasm.import_draft_session.mock.calls.length).toBe(imports + 1);
+  expect(useDraftStore.getState().runtime).toEqual({ kind: "legacy" });
+
+  for (const driven of [
+    persistence.inspectActiveQuickDraftLifecycle,
+    persistence.loadDraftRun,
+    persistence.loadQuickDraftSession,
+    wasm.import_draft_session,
+    wasm.load_card_database,
+    wasm.set_draft_pick_enhancements,
+    wasm.booster_pack_pool_for_game,
+  ]) driven.mockClear();
+  persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(null);
 }
 
 beforeEach(async () => {
@@ -182,7 +217,7 @@ beforeEach(async () => {
   useLlmStore.setState({ draftEnabled: true, draftProfileId: PROFILE_ID });
 
   wasm.buildLlmDraftPickRequests.mockReturnValue([PICK_REQUEST]);
-  await startDraft();
+  await restoreLegacyQuick();
 });
 
 afterEach(() => {
@@ -379,8 +414,7 @@ describe("LLM picks start when the pack opens", () => {
   }
 
   async function openPack(): Promise<void> {
-    wasm.start_quick_draft.mockReturnValue(packView([], [card("a"), card("b")]));
-    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    await restoreLegacyQuick({ view: packView([], [card("a"), card("b")]) });
   }
 
   it("asks the providers as soon as a pack is open, and the pick reuses those replies", async () => {
@@ -609,6 +643,15 @@ describe("LLM seats on a local FIFO draft", () => {
     wasm.local_fifo_set_llm_drafting.mockReturnValueOnce(declared);
     expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: "fifo-draft" });
     return { imported, declared };
+  }
+
+  /**
+   * Starts a Quick set draft on the local FIFO runtime: the constructor answers
+   * `owner` and a FIFO view, and takes the drafting the player's settings ask for.
+   */
+  async function startFifo(owner = 7): Promise<void> {
+    wasm.start_quick_draft.mockReturnValue({ owner, view: fifoView({ revision: 1 }) });
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
   }
 
   let nextRevision = 100;
@@ -930,5 +973,79 @@ describe("LLM seats on a local FIFO draft", () => {
     expect(declarations()).toEqual([
       JSON.stringify("LlmSeats"), JSON.stringify("EngineBots"), JSON.stringify("LlmSeats"),
     ]);
+  });
+
+  it("a_started_draft_declares_llm_seats_and_asks_each_held_head", async () => {
+    const provider = hangProvider();
+    answerHeadsUntilResolved([seatRequest(1, 3)]);
+
+    await startFifo();
+
+    expect(wasm.start_quick_draft).toHaveBeenCalledExactlyOnceWith(
+      "pool", 2, expect.any(Number), JSON.stringify("LlmSeats"), 1_700_000_000_000n,
+    );
+    await vi.waitFor(() => expect(transport.executeLlmRequest).toHaveBeenCalledOnce());
+    expect(wasm.local_fifo_build_llm_requests.mock.calls[0]![0]).toBe(7);
+
+    provider.release();
+    await vi.waitFor(() => expect(wasm.local_fifo_resolve_llm_pick).toHaveBeenCalledOnce());
+    expect(wasm.local_fifo_resolve_llm_pick.mock.calls[0]![0]).toBe(7);
+    expect(resolution(0).promptId).toEqual(seatPrompt(1, 3));
+    // The constructor took the drafting; nothing re-declares it.
+    expect(wasm.local_fifo_set_llm_drafting).not.toHaveBeenCalled();
+  });
+
+  it("a_started_draft_keeps_engine_bots_when_llm_drafting_is_off", async () => {
+    useLlmStore.setState({ draftEnabled: false });
+    catalogMock.loadProviderCatalog.mockClear();
+
+    await startFifo();
+
+    expect(wasm.start_quick_draft).toHaveBeenCalledExactlyOnceWith(
+      "pool", 2, expect.any(Number), JSON.stringify("EngineBots"), 1_700_000_000_000n,
+    );
+    await settle();
+    expect(catalogMock.loadProviderCatalog).not.toHaveBeenCalled();
+    expect(wasm.local_fifo_build_llm_requests).not.toHaveBeenCalled();
+  });
+
+  it("a_start_superseded_while_the_catalog_loads_constructs_nothing", async () => {
+    let releaseCatalog!: (rows: LlmProviderCatalogEntry[]) => void;
+    catalogMock.loadProviderCatalog.mockClear();
+    catalogMock.loadProviderCatalog.mockReturnValueOnce(new Promise<LlmProviderCatalogEntry[]>((resolve) => {
+      releaseCatalog = resolve;
+    }));
+    wasm.start_quick_draft.mockReturnValue({ owner: 7, view: fifoView({ revision: 1 }) });
+
+    const starting = useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    await vi.waitFor(() => expect(catalogMock.loadProviderCatalog).toHaveBeenCalledOnce());
+    useDraftStore.getState().reset();
+    releaseCatalog(CATALOG);
+    await starting;
+
+    expect(wasm.start_quick_draft).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runtime).toBeNull();
+  });
+
+  it("a_second_start_cuts_the_first_starts_drafters_loose", async () => {
+    const provider = hangProvider();
+    answerHeadsUntilResolved([seatRequest(1, 3)]);
+    await startFifo(7);
+    await vi.waitFor(() => expect(provider.signals).toHaveLength(1));
+    const firstCall = provider.signals[0]!;
+    expect(firstCall.aborted).toBe(false);
+    const firstBuilds = wasm.local_fifo_build_llm_requests.mock.calls.length;
+
+    await startFifo(8);
+
+    expect(firstCall.aborted).toBe(true);
+    await vi.waitFor(() => expect(provider.signals).toHaveLength(2));
+    const laterBuilds = wasm.local_fifo_build_llm_requests.mock.calls.slice(firstBuilds);
+    expect(laterBuilds.length).toBeGreaterThan(0);
+    expect(laterBuilds.every(([owner]) => owner === 8)).toBe(true);
+    provider.release();
+    await vi.waitFor(() => expect(wasm.local_fifo_resolve_llm_pick).toHaveBeenCalled());
+    await settle();
+    expect(wasm.local_fifo_resolve_llm_pick.mock.calls.map(([owner]) => owner)).toEqual([8]);
   });
 });

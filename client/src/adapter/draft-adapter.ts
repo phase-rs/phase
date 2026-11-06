@@ -657,12 +657,16 @@ export interface FifoSpectatorDraftViewArm {
 }
 
 /**
- * The owner draft-wasm issues to the local FIFO runtime's session on import.
- * Only an engine answer mints one; every local FIFO export refuses any other.
+ * The owner draft-wasm issues to the local FIFO runtime's session on a local
+ * start or import. Only an engine answer mints one; every local FIFO export
+ * refuses any other.
  */
 export type LocalFifoOwner = number & { readonly __brand: "LocalFifoOwner" };
 
-/** What `import_local_fifo_session` returns: the issued owner and seat 0's view. */
+/**
+ * What a local start (`start_quick_draft`, `start_quick_cube_draft`) or
+ * `import_local_fifo_session` returns: the issued owner and seat 0's view.
+ */
 export interface LocalFifoSession {
   owner: LocalFifoOwner;
   view: DraftPlayerView;
@@ -1309,8 +1313,21 @@ export class DraftEngineOperationLease {
     this.wasm.set_draft_pick_enhancements(enabled);
   }
 
-  initialize(setPoolJson: string, difficulty: number, seed: number): DraftPlayerView {
-    return this.wasm.start_quick_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
+  /** Start a Quick set draft on the local FIFO runtime with `drafting`, at `nowMs`. */
+  initialize(
+    setPoolJson: string,
+    difficulty: number,
+    seed: number,
+    drafting: LocalFifoLlmDrafting,
+    nowMs: number,
+  ): LocalFifoSession {
+    return this.wasm.start_quick_draft(
+      setPoolJson,
+      difficulty,
+      seed,
+      JSON.stringify(drafting),
+      BigInt(nowMs),
+    ) as LocalFifoSession;
   }
 
   filterPoolListing(listing: DraftCardInstance[], filter: PoolFilter): string[] {
@@ -1332,20 +1349,25 @@ export class DraftEngineOperationLease {
     return this.wasm.start_sealed_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
   }
 
+  /** Start a Quick cube draft on the local FIFO runtime with `drafting`, at `nowMs`. */
   initializeCube(
     cubeListText: string,
     cubeName: string,
     settings: CubeDraftSettings,
     difficulty: number,
     seed: number,
-  ): DraftPlayerView {
+    drafting: LocalFifoLlmDrafting,
+    nowMs: number,
+  ): LocalFifoSession {
     return this.wasm.start_quick_cube_draft(
       cubeListText,
       cubeName,
       JSON.stringify(settings),
       difficulty,
       seed,
-    ) as DraftPlayerView;
+      JSON.stringify(drafting),
+      BigInt(nowMs),
+    ) as LocalFifoSession;
   }
 
   submitPick(cardInstanceId: string): DraftPlayerView {
@@ -1754,9 +1776,11 @@ export class DraftAdapter {
     selection: SetPackSequence,
     difficulty: number,
     seed: number,
-  ): Promise<DraftPlayerView> {
+    drafting: LocalFifoLlmDrafting,
+    nowMs: number,
+  ): Promise<LocalFifoSession> {
     return withDraftEngineOperation((lease) =>
-      lease.initialize(JSON.stringify(selection), difficulty, seed),
+      lease.initialize(JSON.stringify(selection), difficulty, seed, drafting, nowMs),
     );
   }
 
@@ -1808,9 +1832,11 @@ export class DraftAdapter {
     settings: CubeDraftSettings,
     difficulty: number,
     seed: number,
-  ): Promise<DraftPlayerView> {
+    drafting: LocalFifoLlmDrafting,
+    nowMs: number,
+  ): Promise<LocalFifoSession> {
     return withDraftEngineOperation((lease) =>
-      lease.initializeCube(cubeListText, cubeName, settings, difficulty, seed),
+      lease.initializeCube(cubeListText, cubeName, settings, difficulty, seed, drafting, nowMs),
     );
   }
 

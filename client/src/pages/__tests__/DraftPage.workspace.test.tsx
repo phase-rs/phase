@@ -7,7 +7,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
+import { draftViewPrompt, type DraftCardInstance, type DraftPlayerView } from "../../adapter/draft-adapter";
 import { DRAFT_WORKSPACE_PREFERENCES_KEY } from "../../constants/storage";
 import { createDefaultDraftWorkspacePreferences } from "../../components/draft/workspace/workspacePreferences";
 import type { LocalDeckBuilderController } from "../../components/draft/LimitedDeckBuilder";
@@ -49,6 +49,11 @@ const wasm = vi.hoisted(() => ({
   booster_pack_pool_for_game: vi.fn(() => []),
   export_draft_session: vi.fn(() => "session"),
   import_draft_session: vi.fn(),
+  local_fifo_submit_deck: vi.fn(),
+  local_fifo_auto_select: vi.fn(),
+  export_local_fifo_session: vi.fn(() => "fifo-export"),
+  local_fifo_bot_deck: vi.fn(() => ({ main_deck: ["Opponent"], lands: {} })),
+  local_fifo_booster_pack_pool_for_game: vi.fn(() => []),
 }));
 
 const persistence = vi.hoisted(() => ({
@@ -206,6 +211,32 @@ function view(overrides: Partial<DraftPlayerView> = {}): DraftPlayerView {
   } as DraftPlayerView;
 }
 
+/** The engine-issued id of the session a started Quick draft carries. */
+const STARTED_SESSION_ID = "local-0123456789abcdef";
+
+/** Seat 0's view of a started local FIFO draft: a literal that passes the client's FIFO wire check. */
+function fifoView(overrides: Partial<DraftPlayerView> = {}): DraftPlayerView {
+  return {
+    ...view({ current_pack_number: 0, pick_number: 0, ...overrides }),
+    flow: "FifoAsync",
+    fifo: {
+      state: { session_id: STARTED_SESSION_ID, revision: 1, paused: null, review_clock: null },
+      progress: { completed_steps: 0, round_completed_steps: 0 },
+      queue_count: 1,
+      head: { pack_id: 0, opening_seat: 0, round: 0, original_size: 14 },
+      prompt_id: { session_id: STARTED_SESSION_ID, seat: 0, generation: 3 },
+      requirements: { picks: 1, burns: 0 },
+      effects: null,
+      clock: null,
+    },
+  } as DraftPlayerView;
+}
+
+/** What a Quick constructor answers for a started draft: owner 7 and seat 0's FIFO view. */
+function started(overrides: Partial<DraftPlayerView> = {}): { owner: number; view: DraftPlayerView } {
+  return { owner: 7, view: fifoView(overrides) };
+}
+
 describe("DraftPage local deckbuilding wiring", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -253,7 +284,7 @@ describe("DraftPage local deckbuilding wiring", () => {
   });
 
   it("hands the deckbuilder a workspace-wired local controller after drafting", async () => {
-    wasm.start_quick_draft.mockReturnValue(view({ pool: [card("c1", "Grizzly Bears")] }));
+    wasm.start_quick_draft.mockReturnValue(started({ pool: [card("c1", "Grizzly Bears")] }));
     await act(async () => {
       await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
     });
@@ -274,13 +305,15 @@ describe("DraftPage local deckbuilding wiring", () => {
 
     // Submission projects the deck (drafted card plus the added basic) through
     // the real store submit path.
-    wasm.submit_deck.mockReturnValue(view({ status: "Pairing" }));
+    wasm.local_fifo_submit_deck.mockReturnValue(fifoView({ status: "Pairing" }));
     await act(async () => { await controller!.onSubmitDeck(); });
-    expect(wasm.submit_deck).toHaveBeenCalledWith(JSON.stringify(["Grizzly Bears", "Plains"]), JSON.stringify([]));
+    expect(wasm.local_fifo_submit_deck).toHaveBeenCalledWith(
+      7, JSON.stringify(["Grizzly Bears", "Plains"]), "[]", expect.any(BigInt),
+    );
   });
 
   it("shows a strict Bo3 launch reason, keeps the choice, and allows a later legal retry", async () => {
-    wasm.start_quick_draft.mockReturnValue(view({
+    wasm.start_quick_draft.mockReturnValue(started({
       pool: [card("forest", "Forest")],
       match_config: { match_type: "Bo3" },
     }));
@@ -308,7 +341,7 @@ describe("DraftPage local deckbuilding wiring", () => {
   });
 
   it("disables the start action and format picker while a strict launch gate is pending", async () => {
-    wasm.start_quick_draft.mockReturnValue(view({
+    wasm.start_quick_draft.mockReturnValue(started({
       pool: [card("forest", "Forest")],
       match_config: { match_type: "Bo3" },
     }));
@@ -331,7 +364,7 @@ describe("DraftPage local deckbuilding wiring", () => {
 
   it("forwards global draft visual preferences while drafting", async () => {
     usePreferencesStore.setState({ draftCardPreviewMode: "side", draftDoubleClickConfirmPick: true });
-    wasm.start_quick_draft.mockReturnValue(view());
+    wasm.start_quick_draft.mockReturnValue(started());
     await act(async () => {
       await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
     });
@@ -346,8 +379,22 @@ describe("DraftPage local deckbuilding wiring", () => {
     expect(captured.pack).toMatchObject({ kind: "local-workspace", doubleClickPick: true });
   });
 
+  it("renders_a_started_quick_draft_as_a_local_fifo_draft", async () => {
+    wasm.start_quick_draft.mockReturnValue(started({ current_pack: [card("c1")] }));
+    await act(async () => useDraftStore.getState().startDraft("pool", "TST", "Test", 2));
+
+    render(<MemoryRouter><DraftPage /></MemoryRouter>);
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(screen.getByTestId("pack-display")).toBeInTheDocument();
+    const shown = captured.pack?.view;
+    if (!shown) throw new Error("the pack display was handed no view");
+    expect(draftViewPrompt(shown)).toEqual({ session_id: STARTED_SESSION_ID, seat: 0, generation: 3 });
+    expect(useDraftStore.getState().runtime?.kind).toBe("local-fifo");
+  });
+
   it("forwards the engine-published procedure to the draft intro", async () => {
-    wasm.start_quick_draft.mockReturnValue(view({
+    wasm.start_quick_draft.mockReturnValue(started({
       pack_count: 4,
       cards_per_pack: 12,
       pack_sizes: [12, 12, 12, 12],
@@ -372,7 +419,7 @@ describe("DraftPage local deckbuilding wiring", () => {
   it("hides_draft_progress_on_phone_viewports", async () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 430 });
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 932 });
-    wasm.start_quick_draft.mockReturnValue(view({ current_pack: [card("c1")] }));
+    wasm.start_quick_draft.mockReturnValue(started({ current_pack: [card("c1")] }));
     await act(async () => useDraftStore.getState().startDraft("pool", "TST", "Test", 2));
 
     const { container } = render(<MemoryRouter><DraftPage /></MemoryRouter>);
@@ -401,7 +448,7 @@ describe("DraftPage local deckbuilding wiring", () => {
   ])("hides_draft_progress_on_%s", async (responsiveLayout, width, height) => {
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: width });
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: height });
-    wasm.start_quick_draft.mockReturnValue(view({ current_pack: [card("c1")] }));
+    wasm.start_quick_draft.mockReturnValue(started({ current_pack: [card("c1")] }));
     await act(async () => useDraftStore.getState().startDraft("pool", "TST", "Test", 2));
 
     const { container } = render(<MemoryRouter><DraftPage /></MemoryRouter>);
@@ -415,7 +462,7 @@ describe("DraftPage local deckbuilding wiring", () => {
   it("uses_phone_chrome_and_compact_arrow_steps_while_deckbuilding", async () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 924 });
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 412 });
-    wasm.start_quick_draft.mockReturnValue(view({ pool: [card("c1")] }));
+    wasm.start_quick_draft.mockReturnValue(started({ pool: [card("c1")] }));
     await act(async () => useDraftStore.getState().startDraft("pool", "TST", "Test", 2));
     act(() => useDraftStore.setState({ phase: "deckbuilding" }));
 
@@ -432,7 +479,7 @@ describe("DraftPage local deckbuilding wiring", () => {
   it("forwards embedded fill only for responsive workspace phases", async () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 768 });
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 1024 });
-    wasm.start_quick_draft.mockReturnValue(view({ current_pack: [card("c1")] }));
+    wasm.start_quick_draft.mockReturnValue(started({ current_pack: [card("c1")] }));
     await act(async () => useDraftStore.getState().startDraft("pool", "TST", "Test", 2));
 
     const { rerender } = render(
@@ -458,7 +505,7 @@ describe("DraftPage local deckbuilding wiring", () => {
   ] as const)("uses_compact_shell_steps_while_deckbuilding_on_%s", async (_layout, width, height) => {
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: width });
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: height });
-    wasm.start_quick_draft.mockReturnValue(view({ pool: [card("c1")] }));
+    wasm.start_quick_draft.mockReturnValue(started({ pool: [card("c1")] }));
     await act(async () => useDraftStore.getState().startDraft("pool", "TST", "Test", 2));
     act(() => useDraftStore.setState({ phase: "deckbuilding" }));
 
@@ -473,14 +520,14 @@ describe("DraftPage local deckbuilding wiring", () => {
 
   it("places_a_local_auto_pick_with_the_active_sort_resolver", async () => {
     const candidate = { ...card("three-drop"), cmc: 3, type_line: "Creature" };
-    wasm.start_quick_draft.mockReturnValue(view({ current_pack: [candidate] }));
+    wasm.start_quick_draft.mockReturnValue(started({ current_pack: [candidate] }));
     await act(async () => {
       await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
     });
     render(<MemoryRouter><DraftPage /></MemoryRouter>);
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     if (captured.pack?.kind !== "local-workspace") throw new Error("workspace controller not installed");
-    wasm.auto_pick.mockReturnValue(view({ pool: [candidate], current_pack: [] }));
+    wasm.local_fifo_auto_select.mockReturnValue(fifoView({ pool: [candidate], current_pack: [] }));
 
     await act(async () => { await captured.pack!.autoPickCard(); });
 
@@ -516,7 +563,7 @@ describe("DraftPage local deckbuilding wiring", () => {
       ...createDefaultDraftWorkspacePreferences(),
       deck: { sort: "rarity", columnCount: 4, rows: "one", showHeaders: true },
     }));
-    wasm.start_quick_draft.mockReturnValue(view({ current_pack: [card("c1")] }));
+    wasm.start_quick_draft.mockReturnValue(started({ current_pack: [card("c1")] }));
     await act(async () => useDraftStore.getState().startDraft("pool", "TST", "Test", 2));
     render(<MemoryRouter><DraftPage /></MemoryRouter>);
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
@@ -551,7 +598,7 @@ describe("DraftPage local deckbuilding wiring", () => {
   });
 
   it("repairs_and_persists_scale_through_the_quick_page_setter", async () => {
-    wasm.start_quick_draft.mockReturnValue(view({ current_pack: [card("c1")] }));
+    wasm.start_quick_draft.mockReturnValue(started({ current_pack: [card("c1")] }));
     await act(async () => useDraftStore.getState().startDraft("pool", "TST", "Test", 2));
     render(<MemoryRouter><DraftPage /></MemoryRouter>);
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));

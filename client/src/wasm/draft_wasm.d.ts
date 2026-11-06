@@ -293,8 +293,8 @@ export function local_fifo_select(owner: number, selection_json: string, now_ms:
  * view.
  *
  * `drafting_json`: `"EngineBots"` or `"LlmSeats"`, parsed before the session
- * is touched. Only the live owner declares it, and every local install resets
- * it to `"EngineBots"`.
+ * is touched. Only the live owner declares it. An import installs
+ * `"EngineBots"`; a Quick constructor installs the drafting it is given.
  */
 export function local_fifo_set_llm_drafting(owner: number, drafting_json: string, now_ms: bigint): any;
 
@@ -392,22 +392,34 @@ export function set_seat_connected(seat: number, connected: boolean): any;
 export function shared_stack_forced_decision(seat_index: number): any;
 
 /**
- * Start a Quick Cube Draft session from a counted cube list.
+ * Start a Quick Cube Draft on the local FIFO runtime from a counted cube
+ * list: one human and a bot at every other seat of the settings' pod.
+ *
+ * - `drafting_json`: `"EngineBots"` or `"LlmSeats"`, parsed before anything
+ *   else, so a refused call installs nothing.
+ * - `now_ms`: the caller's time; the draft starts at it.
+ *
+ * Returns `{ owner, view }`: the owner the caller presents on every later
+ * local call, and seat 0's view.
  */
-export function start_quick_cube_draft(cube_list_text: string, cube_name: string, settings_json: string, difficulty: number, seed: number): any;
+export function start_quick_cube_draft(cube_list_text: string, cube_name: string, settings_json: string, difficulty: number, seed: number, drafting_json: string, now_ms: bigint): any;
 
 /**
- * Start a Quick Draft session: 1 human + 7 bots.
+ * Start a Quick Draft on the local FIFO runtime: one human and seven bots.
  *
  * - `selection_json`: serialized [`SetPackSequence`] — the distinct set pools
  *   from draft-pools.json plus the set filling each booster, in pack order.
  *   The sequence length is the draft's pack count, and a set may repeat.
  * - `difficulty`: 0=VeryEasy, 1=Easy, 2=Medium, 3=Hard, 4=VeryHard
  * - `seed`: RNG seed for deterministic pack generation
+ * - `drafting_json`: `"EngineBots"` or `"LlmSeats"`, parsed before anything
+ *   else, so a refused call installs nothing.
+ * - `now_ms`: the caller's time; the draft starts at it.
  *
- * Returns the initial DraftPlayerView as a JS object.
+ * Returns `{ owner, view }`: the owner the caller presents on every later
+ * local call, and seat 0's view.
  */
-export function start_quick_draft(selection_json: string, difficulty: number, seed: number): any;
+export function start_quick_draft(selection_json: string, difficulty: number, seed: number, drafting_json: string, now_ms: bigint): any;
 
 /**
  * Start a local Sealed event: one human and seven bots each open six packs,
@@ -549,8 +561,8 @@ export interface InitOutput {
     readonly set_draft_pick_enhancements: (a: number) => void;
     readonly set_seat_connected: (a: number, b: number) => [number, number, number];
     readonly shared_stack_forced_decision: (a: number) => [number, number, number];
-    readonly start_quick_cube_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
-    readonly start_quick_draft: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly start_quick_cube_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: bigint) => [number, number, number];
+    readonly start_quick_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: bigint) => [number, number, number];
     readonly start_sealed_draft: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly submitPickWithLlmBotPicks: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly submit_deck: (a: number, b: number, c: number, d: number) => [number, number, number];
