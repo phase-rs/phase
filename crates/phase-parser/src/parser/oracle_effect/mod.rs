@@ -11522,7 +11522,7 @@ fn parse_effect_clause_inner_with_damage_context(
         });
     }
 
-    // CR 115.1c + CR 115.6: "Choose two target players." is a pure
+    // CR 115.1a + CR 601.2c: "Choose two target players." is a pure
     // exact-count target declaration (Scheming Symmetry); carry the count on
     // the clause so the engine opens that many distinct target slots.
     let lower = text.to_ascii_lowercase();

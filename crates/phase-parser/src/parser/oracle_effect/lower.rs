@@ -9131,7 +9131,7 @@ fn parse_required_target_count_verb(input: &str) -> OracleResult<'_, ()> {
 pub(crate) const BOUNDED_TARGET_CARDINALITIES: &[(&str, usize, usize)] =
     &[("one or two", 1, 2), ("one, two, or three", 1, 3)];
 
-/// CR 115.1c: true when `input` (already lowercase) opens with the article a
+/// CR 115.1: true when `input` (already lowercase) opens with the article a
 /// declared-target phrase needs — bare, or qualified by "other"/"another",
 /// which belong to the qualifier's own filter rather than to the count. The
 /// single authority for that article axis: the exact-count, "any number of"
@@ -9235,7 +9235,8 @@ fn strip_distribute_among_target_quantifier<'a>(
     strip_optional_target_prefix(text)
 }
 
-/// Strip optional target-count prefixes before a targeted phrase.
+/// Strip target-count prefixes ("up to N", "any number of", an exact count) before
+/// a targeted phrase.
 /// For spells, CR 115.1a + CR 115.6 + CR 601.2c: the caster announces
 /// zero through the stated maximum legal targets as the spell is cast.
 /// CR 115.1d + CR 603.3d: triggered abilities choose the same optional
@@ -9255,7 +9256,7 @@ pub(crate) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTar
         return (text, None);
     }
 
-    // CR 115.1c + CR 115.6: an exact count before the target article
+    // CR 115.1 + CR 601.2c: an exact count before the target article
     // ("choose two target players") declares a fixed number of slots. The
     // count and the article are read through the SHARED exact-prefix
     // authority (`strip_exact_target_prefix`) and carried as

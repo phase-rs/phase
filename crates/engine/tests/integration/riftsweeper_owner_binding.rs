@@ -1059,10 +1059,8 @@ fn forge_of_heroes_choose_target_commander_offers_exactly_the_entered_commanders
 // is untouched and P0's library is not shuffled on its account; and the
 // untargeted "You gain 2 life" tail still happens.
 //
-// Boundary case that also holds without the owner-iteration fix for the tail
-// and the untouched illegal target; the owner assertion (`vec![P1]`, the
-// legal target's owner, never the caster P0 who owns the illegal card) is the
-// part tied to the owner-population binding.
+// The owner assertion (`vec![P1]`: the legal target's owner, never the caster P0
+// who owns the illegal card) is the part tied to the owner-population binding.
 #[test]
 fn turn_the_earth_with_one_illegal_target_shuffles_only_the_legal_one_and_keeps_the_tail() {
     let mut scenario = GameScenario::new();
@@ -1123,10 +1121,8 @@ fn turn_the_earth_with_one_illegal_target_shuffles_only_the_legal_one_and_keeps_
 // and each trigger shuffles ITS Dragon into ITS OWNER's library, shuffling
 // that owner's library.
 //
-// Witness, not a revert-failing row: like
-// `alabaster_dragon_death_shuffles_it_into_its_owners_library` it also passes at
-// base 80170c06d (CR 400.3 already routes each Dragon to its owner's library);
-// it guards the simultaneous-death case against regression.
+// Guards the simultaneous-death case: one trigger per Dragon, each Dragon in its
+// own owner's library. This row was not run against reverted production code.
 #[test]
 fn alabaster_dragons_dying_together_each_shuffle_into_their_owners_library() {
     let mut scenario = GameScenario::new();
@@ -1430,7 +1426,9 @@ fn alabaster_dragon_exiled_in_response_stays_exiled_but_its_owner_still_shuffles
 
 // CR 111.7 + CR 603.10a + CR 701.24c: an Alabaster Dragon TOKEN dies; its death
 // trigger still triggers before the token ceases to exist, resolves, finds no
-// object to move, and still shuffles the owner's (its creator's) library.
+// object to move, and still shuffles the owner's library. The token is the
+// printed Dragon marked `is_token` after the scenario is built, not created by
+// an effect, so token creation and its owner (CR 111.2) are not exercised here.
 #[test]
 fn alabaster_dragon_token_death_trigger_resolves_and_still_shuffles_its_owner() {
     let mut scenario = GameScenario::new();
