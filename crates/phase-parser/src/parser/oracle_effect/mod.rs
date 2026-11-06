@@ -8732,6 +8732,13 @@ fn parse_event_context_ref_with_ctx<'a>(
         (TargetFilter::TriggeringPlayer, Some(ControllerRef::ParentTargetController)) => {
             TargetFilter::ParentTargetController
         }
+        // CR 608.2c: "that player" after "choose an opponent (at random)"
+        // names the player the `Choose` selected, not the trigger event's
+        // player (Indoraptor, the Perfect Hybrid).
+        (TargetFilter::TriggeringPlayer, Some(scope @ ControllerRef::ChosenPlayer { .. })) => {
+            subject::chosen_player_anaphor_filter(Some(scope))
+                .unwrap_or(TargetFilter::TriggeringPlayer)
+        }
         // CR 608.2c + CR 109.4 + CR 115.1: "that player" after a targeted
         // `Choose` ("target opponent chooses self or others") or a
         // player-typed `TargetOnly` names the ANNOUNCED target — the most
@@ -9570,6 +9577,12 @@ fn parse_effect_clause_with_damage_context(
             );
             let (stripped, unless_pay) =
                 extract_resolution_unless_pay_modifier(&clause_text, player_scope.as_ref());
+            let mut unless_pay = unless_pay;
+            rebind_chosen_player_unless_payer(
+                unless_pay.as_mut(),
+                ctx.relative_player_scope.as_ref(),
+                &stripped,
+            );
             if unless_pay.is_some() {
                 unless_pay_deferred = unless_pay;
                 (None, stripped)
@@ -15749,6 +15762,7 @@ fn quantity_ref_reads_chain_local_result(reference: &QuantityRef) -> bool {
         | QuantityRef::EnteredThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -21101,9 +21115,31 @@ fn placement_tail_orders_in_any_order(rest: &str) -> bool {
     .is_some()
 }
 
+/// CR 608.2c: does a placement's noun phrase (the text before its positional
+/// terminator, with any cardinality already peeled) name a PLURAL set anaphor —
+/// "those cards" / "these cards" / "them" — with nothing after it? Such a phrase
+/// moves every card of the set it refers to (Stomping Slabs: "reveal the top
+/// seven cards …, then put those cards on the bottom"), not the lowering
+/// default of one card.
+fn placement_names_plural_set_anaphor(noun_phrase: &str) -> bool {
+    all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("those cards"),
+        tag("these cards"),
+        tag("them"),
+    )))
+    .parse(noun_phrase.trim_end())
+    .is_ok()
+}
+
 /// A placement's noun-phrase filter (`None` when it names nothing more specific
-/// than `Any`), its cardinality, and whether its tail closes with "in any order".
-type PlacementNounPhrase = (Option<TargetFilter>, LibraryPlacementCardinality, bool);
+/// than `Any`), its cardinality, whether its tail closes with "in any order", and
+/// whether the noun phrase is a plural set anaphor.
+type PlacementNounPhrase = (
+    Option<TargetFilter>,
+    LibraryPlacementCardinality,
+    bool,
+    bool,
+);
 
 /// `follower` is the player who follows this clause's instruction when the
 /// clause names one structurally (the controller of an imperative, CR 608.2c);
@@ -21203,21 +21239,33 @@ fn refine_put_at_library_position(
                 new_target,
                 cardinality,
                 placement_tail_orders_in_any_order(placement_tail),
+                placement_names_plural_set_anaphor(after_count),
             ))
         })();
-        if let Some((maybe_filter, cardinality, orders_in_any_order)) = extracted {
+        if let Some((maybe_filter, cardinality, orders_in_any_order, names_plural_set)) = extracted
+        {
             if *target == TargetFilter::Any {
                 if let Some(filter) = maybe_filter {
                     *target = filter;
                 }
             }
             match cardinality {
-                // CR 401.4 + CR 608.2c: "those cards" (a tracked set the chain
-                // already named) placed "in any order" is ordered by the player
-                // following the instruction, not each card's owner. A bare
-                // pronoun partition ("any number of them") is not a named set
-                // and keeps its owner-arranged base shape.
+                // CR 608.2c: "put those cards on the bottom" after a look/reveal
+                // names the WHOLE tracked set the earlier instruction published
+                // (Stomping Slabs), so every member is placed — the `Fixed(1)`
+                // lowering default would move one card and leave the rest of the
+                // set where it was.
                 LibraryPlacementCardinality::Unstated => {
+                    if names_plural_set && matches!(*target, TargetFilter::TrackedSet { .. }) {
+                        *count = QuantityExpr::Ref {
+                            qty: QuantityRef::TrackedSetSize,
+                        };
+                    }
+                    // CR 401.4 + CR 608.2c: "those cards" (a tracked set the
+                    // chain already named) placed "in any order" is ordered by
+                    // the player following the instruction, not each card's
+                    // owner. A bare pronoun partition ("any number of them") is
+                    // not a named set and keeps its owner-arranged base shape.
                     if orders_in_any_order
                         && matches!(
                             *target,
@@ -24275,6 +24323,7 @@ fn parent_population_amount_is_plain(amount: &QuantityExpr) -> bool {
             | QuantityRef::EnteredThisTurn { .. }
             | QuantityRef::SacrificedThisTurn { .. }
             | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::EnergyPaidOrLostThisTurn
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::LifeGainedThisTurn { .. }
             | QuantityRef::CardsDrawnThisTurn { .. }
@@ -48121,6 +48170,11 @@ fn parse_effect_chain_ir_body(
 
         let (text, mut unless_pay) =
             extract_resolution_unless_pay_modifier(&text, player_scope.as_ref());
+        rebind_chosen_player_unless_payer(
+            unless_pay.as_mut(),
+            chain_chosen_player_scope.as_ref(),
+            &text,
+        );
 
         // CR 701.17a + CR 608.2k: Derive the actor performing this chunk's effect
         // from any actor prefix that was just stripped ("you (may) ", "an
@@ -49307,9 +49361,12 @@ fn parse_effect_chain_ir_body(
             // from, so "put those cards …" reads them out of the library. A bare
             // reveal is still a reveal `Dig` with no kept-card destination here;
             // assembly demotes it to `RevealTop` later.
+            // CR 701.20e: looking at a card follows the same rules as revealing
+            // it, so a bare look-only `Dig` also leaves its cards in the library.
+            // Without this a following "put those cards into your graveyard"
+            // falls back to the impulse exile origin and moves nothing.
             Effect::RevealTop { .. }
             | Effect::Dig {
-                reveal: true,
                 destination: None,
                 keep_count: None,
                 ..
@@ -52272,6 +52329,65 @@ fn parse_unless_have_you_draw_cost(after_unless: &str) -> Option<AbilityCost> {
             target: TargetFilter::OriginalController,
         }),
     })
+}
+
+/// CR 608.2c + CR 118.12a: after "choose an opponent at random." the anaphoric
+/// unless-payer "they" names the player that `Choose` selected, not a declared
+/// target slot (which resolves to nobody when none exists). Rebinds through the
+/// single chosen-player anaphor authority.
+///
+/// CR 608.2c: this is a FALLBACK, not an override. A clause that declares its
+/// own player subject ("Target player loses 3 life unless they discard a card")
+/// supplies the NEARER antecedent for the "they", which `TargetFilter::Player`
+/// already binds, so an earlier choice must never capture that payer.
+fn rebind_chosen_player_unless_payer(
+    modifier: Option<&mut UnlessPayModifier>,
+    scope: Option<&ControllerRef>,
+    clause_text: &str,
+) {
+    let Some(modifier) = modifier else {
+        return;
+    };
+    if modifier.payer != TargetFilter::Player {
+        return;
+    }
+    // Only a chain that actually chose a player can supply a competing
+    // antecedent, so the clause scan below runs only for that shape.
+    let Some(chosen) = subject::chosen_player_anaphor_filter(scope) else {
+        return;
+    };
+    if clause_declares_player_target(clause_text) {
+        return;
+    }
+    modifier.payer = chosen;
+}
+
+/// CR 115.1 + CR 608.2c: True when an effect clause declares its own player
+/// target ("target player", "target opponent") — as the subject ("Target player
+/// loses 3 life …") or as a recipient after a verb ("deals 3 damage to target
+/// player"). Either position is the nearer antecedent of a following "they"/
+/// "that player", so anaphor rebinding must not reach past it to a player an
+/// earlier instruction chose.
+///
+/// Scans at word boundaries because a declared recipient sits mid-clause. The
+/// probe requires the target KEYWORD, so a descriptor or anaphoric phrase
+/// ("a player", "that player") never blocks rebinding.
+fn clause_declares_player_target(clause_text: &str) -> bool {
+    let lower = clause_text.to_ascii_lowercase();
+    nom_primitives::scan_at_word_boundaries(&lower, parse_declared_player_target_probe).is_some()
+}
+
+/// CR 115.1: scan probe for [`clause_declares_player_target`]. Delegates the
+/// phrase grammar to the single target parser and the player-containing shape
+/// check to the existing explicit-player-target predicate.
+fn parse_declared_player_target_probe(input: &str) -> OracleResult<'_, ()> {
+    let (filter, rest, syntax) =
+        super::oracle_target::parse_target_with_syntax(input, &mut ParseContext::default());
+    if syntax == TargetSyntax::TargetKeyword && target_filter_is_explicit_player_target(&filter) {
+        Ok((rest, ()))
+    } else {
+        Err(oracle_err(input))
+    }
 }
 
 fn extract_resolution_unless_pay_modifier(

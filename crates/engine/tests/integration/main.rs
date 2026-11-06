@@ -103,6 +103,7 @@ mod grim_repriser_restriction;
 mod hellkite_tyrant_steal_artifacts_2906;
 mod heroic_sacrifice_redirect;
 mod hunters_insight_combat_draw;
+mod indoraptor_enrage_chosen_opponent;
 mod innocent_bystander_whole_event_damage;
 mod interaction_contract;
 mod invasion_of_alara_8750;
@@ -216,6 +217,7 @@ mod random_result_source_identity;
 mod replacement_choice_trigger_gating;
 mod resolve_all_consent;
 mod rev_tithe_extractor_facedown_cast;
+mod reveal_pick_visibility;
 mod reveal_until_that_many;
 mod ring_equipped_creature_color_condition;
 mod rules;
@@ -302,6 +304,7 @@ mod zenos_yae_galvus_chosen_object;
 
 mod base_pt_designation_filter;
 mod controller_anaphor_binds_through_context;
+mod through_the_forest_gate;
 
 mod resolution_progress_contract;
 

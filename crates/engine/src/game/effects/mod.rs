@@ -13788,12 +13788,14 @@ fn node_or_branch_references_tracked_set(
             .as_ref()
             .is_some_and(player_filter_references_tracked_set)
         // CR 608.2c: a gate that measures the set ("If all cards revealed this
-        // way are creature cards, …") reads it as surely as the effect does.
+        // way are creature cards, …") reads it as surely as the effect does —
+        // and so does one that tests a filter over it, on any filter axis.
         || ability
             .condition
             .as_ref()
             .is_some_and(|condition| {
                 condition.any_quantity_expr(&quantity_expr_references_tracked_set)
+                    || condition.any_filter_grammar(&filter_grammar_node_consumes_tracked_set)
             });
 
     // CR 700.2 + CR 608.2c: both descents stop at a mode boundary. Guarding only
@@ -14031,33 +14033,77 @@ fn card_type_set_source_references_tracked_set(source: &CardTypeSetSource) -> bo
     found || !complete
 }
 
+/// CR 608.2c: Does this quantity reference read the chain's tracked object set?
+/// Used by `PlayerFilter::PlayerAttribute` which carries a `Box<QuantityRef>`.
+///
+/// The size refs are answered directly. Every other reference defers to the
+/// shared filter-grammar walk, so a tracked set nested anywhere in the
+/// reference's filters — a `TrackedSet` filter, an `InTrackedSet` property, or a
+/// property threshold that counts the set — is found without an allowlist that
+/// a future variant could join silently.
+fn quantity_ref_references_tracked_set(qty: &QuantityRef) -> bool {
+    match qty {
+        QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. } => true,
+        // Characteristic-set quantities can nest a tracked set in their source.
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            card_type_set_source_references_tracked_set(source)
+        }
+        QuantityRef::PropertyAggregate(aggregate) => {
+            card_type_set_source_references_tracked_set(aggregate.source())
+        }
+        // PlayerCount nests a PlayerFilter that can reference the tracked set.
+        QuantityRef::PlayerCount { filter } => player_filter_references_tracked_set(filter),
+        other => crate::types::ability::quantity_ref_grammar_any(
+            other,
+            &filter_grammar_node_consumes_tracked_set,
+        ),
+    }
+}
+
+/// CR 608.2c: Does one node reached by a filter-grammar walk consume the chain's
+/// tracked set — a `TrackedSet`/`TrackedSetFiltered` filter, an `InTrackedSet`
+/// membership property, a property threshold that counts the set, or a player
+/// filter that reads it (`TrackedSetPossessor`, whose inner filter can be plain)?
+/// The per-node test every grammar walk over a condition, quantity or filter
+/// shares.
+fn filter_grammar_node_consumes_tracked_set(
+    node: crate::types::ability::FilterGrammarNode<'_>,
+) -> bool {
+    match node {
+        crate::types::ability::FilterGrammarNode::Filter(filter) => {
+            filter_references_tracked_set(filter)
+        }
+        crate::types::ability::FilterGrammarNode::Prop(prop) => {
+            filter_prop_references_tracked_membership(prop)
+                || filter_prop_references_tracked_quantity(prop)
+        }
+        crate::types::ability::FilterGrammarNode::Player(filter) => {
+            player_filter_references_tracked_set(filter)
+        }
+    }
+}
+
+/// CR 608.2c: Every axis on which a [`TargetFilter`] consumes the chain's
+/// tracked set — a tracked-set filter, an `InTrackedSet` membership property, or
+/// a property threshold that counts the set. Nested player filters carry their
+/// filters through this same union, so asking it once covers each axis instead
+/// of one of them per call site.
+fn filter_consumes_tracked_set(filter: &TargetFilter) -> bool {
+    filter_references_tracked_set(filter)
+        || filter_properties_reference_tracked_quantity(filter)
+        || filter_properties_reference_tracked_membership(filter)
+}
+
 fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
     match qty {
         QuantityExpr::Fixed { .. } => false,
-        QuantityExpr::Ref { qty } => match qty {
-            QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. } => true,
-            // CR 608.2c: the three characteristic-set quantities share the
-            // population axis, so a tracked set nested inside an `AnyOf` union
-            // must be detected too — a direct-only `TrackedSet` match would let
-            // the producer skip publication and the chained count resolve to 0.
-            QuantityRef::DistinctCardTypes { source }
-            | QuantityRef::SharedCardTypes { source }
-            | QuantityRef::DistinctSubtypes { source, .. }
-            | QuantityRef::DistinctColorsAmong { source } => {
-                card_type_set_source_references_tracked_set(source)
-            }
-            QuantityRef::PropertyAggregate(aggregate) => {
-                card_type_set_source_references_tracked_set(aggregate.source())
-            }
-            // CR 608.2c: a player-count whose filter is keyed on the chain's
-            // tracked object set is a CONSUMER of that set — the preceding
-            // producer must publish it, or the count resolves to 0. This is the
-            // Seasoned Pyromancer (#740) shape one layer up: the tracked-set
-            // reference is nested inside the PLAYER filter, not the quantity.
-            // Not every `PlayerCount` qualifies, so it must be asked per filter.
-            QuantityRef::PlayerCount { filter } => player_filter_references_tracked_set(filter),
-            _ => false,
-        },
+        // CR 608.2c: one authority answers every reference, so a tracked set
+        // nested in any reference's filters (an `ObjectCount` over the set, a
+        // player count keyed on it) forces the producer to publish.
+        QuantityExpr::Ref { qty } => quantity_ref_references_tracked_set(qty),
         QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
@@ -14095,8 +14141,7 @@ fn player_filter_references_tracked_set(filter: &PlayerFilter) -> bool {
         // Reads the CR 701.x `player_actions_this_way` ledger.
         | PlayerFilter::PerformedActionThisWay { .. }
         // Plain relations, turn/combat ledgers, event-context anchors, vote
-        // ballots, linked-exile piles and per-candidate board/scalar
-        // comparisons — none consults `tracked_object_sets`.
+        // ballots, linked-exile piles — none consults `tracked_object_sets`.
         | PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer
@@ -14118,9 +14163,21 @@ fn player_filter_references_tracked_set(filter: &PlayerFilter) -> bool {
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::GrantingObjectCaster
         | PlayerFilter::TargetPlayer
-        | PlayerFilter::ChosenPlayer { .. }
-        | PlayerFilter::ControlsCount { .. }
-        | PlayerFilter::PlayerAttribute { .. } => false,
+        | PlayerFilter::ChosenPlayer { .. } => false,
+        // CR 608.2c: ControlsCount carries a TargetFilter and a QuantityExpr
+        // (count) that can reference the chain's tracked set. Recurse into both,
+        // on every axis the filter can consume it (a tracked-set filter, an
+        // `InTrackedSet` property, or a property that counts the set).
+        PlayerFilter::ControlsCount { filter, count, .. } => {
+            filter_consumes_tracked_set(filter) || quantity_expr_references_tracked_set(count)
+        }
+        // CR 608.2c: PlayerAttribute carries a QuantityRef (attr) and a
+        // QuantityExpr (value) that can reference the chain's tracked set.
+        // Recurse into both.
+        PlayerFilter::PlayerAttribute { attr, value, .. } => {
+            quantity_ref_references_tracked_set(attr)
+                || quantity_expr_references_tracked_set(value)
+        }
         // The negation wrapper inherits its inner filter's consumption: an
         // "all except <tracked-set possessor>" scope still needs the set.
         PlayerFilter::AllExcept { exclude, .. } => {
@@ -28582,6 +28639,12 @@ fn resolve_unless_payer(
             }
             resolved
         }
+        // CR 608.2c + CR 118.12a: "choose an opponent at random. …
+        // unless they …" — the payer is the player the earlier `Choose`
+        // selected, read from the resolution-scoped `chosen_players` list.
+        TargetFilter::Typed(_) if payer.chosen_player_index().is_some() => {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
+        }
         // CR 115.1 + CR 118.12a: a payer DECLARED as a target inside the unless
         // clause ("unless target opponent/target player pays") resolves to the
         // player chosen at stack placement, read from `ability.targets` (same as
@@ -37509,6 +37572,170 @@ mod tests {
             !ability_or_branch_references_tracked_set(&ability),
             "a plain PlayerCount{{Opponent}} reads no tracked set and must NOT force publication"
         );
+    }
+
+    /// CR 608.2c: a reader that consumes the chain's tracked set through a
+    /// FILTER — a condition's own filter, an `InTrackedSet` membership property,
+    /// or a player scope whose nested filter/quantity names the set — must make
+    /// its producer publish, or the reader sees an empty/stale set.
+    ///
+    /// Each positive is paired with the same shape over a plain filter, so a
+    /// blanket `=> true` arm (which would force spurious publication for every
+    /// filtered gate) also fails.
+    #[test]
+    fn filter_borne_tracked_set_readers_mark_ability_as_referencing_tracked_set() {
+        let tracked = TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        };
+        let in_tracked_set = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            properties: vec![crate::types::ability::FilterProp::InTrackedSet {
+                id: TrackedSetId(0),
+            }],
+            ..Default::default()
+        });
+        let plain = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            ..Default::default()
+        });
+        let base = || {
+            let mut ability = optional_gain_life(ObjectId(1), PlayerId(0), 1);
+            ability.optional = false;
+            ability
+        };
+        assert!(!ability_or_branch_references_tracked_set(&base()));
+
+        let possessor = || PlayerFilter::TrackedSetPossessor {
+            relation: crate::types::ability::PlayerRelation::Opponent,
+            possession: crate::types::ability::PossessionAxis::Controller,
+            filter: plain.clone(),
+            caused_by: None,
+        };
+
+        // Condition axis: a filter test over the set, directly and wrapped.
+        let gate = |filter: TargetFilter| AbilityCondition::TargetMatchesFilter {
+            filter,
+            use_lki: false,
+            subject_slot: None,
+        };
+        for (label, condition, consumes) in [
+            ("direct tracked-set filter", gate(tracked.clone()), true),
+            ("InTrackedSet property", gate(in_tracked_set.clone()), true),
+            (
+                "negated membership gate",
+                AbilityCondition::Not {
+                    condition: Box::new(gate(in_tracked_set.clone())),
+                },
+                true,
+            ),
+            ("plain filter", gate(plain.clone()), false),
+            // A condition-carried player filter that reads the set itself
+            // (`TrackedSetPossessor`) over a PLAIN inner filter: only the player
+            // node names the set, so the walk must visit player filters.
+            (
+                "scoped tracked-set possessor",
+                AbilityCondition::ScopedPlayerMatches {
+                    filter: possessor(),
+                },
+                true,
+            ),
+            (
+                "negated scoped tracked-set possessor",
+                AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::ScopedPlayerMatches {
+                        filter: possessor(),
+                    }),
+                },
+                true,
+            ),
+            (
+                "scoped plain player relation",
+                AbilityCondition::ScopedPlayerMatches {
+                    filter: PlayerFilter::Opponent,
+                },
+                false,
+            ),
+        ] {
+            let mut ability = base();
+            ability.condition = Some(condition);
+            assert_eq!(
+                ability_or_branch_references_tracked_set(&ability),
+                consumes,
+                "condition: {label}"
+            );
+        }
+
+        // Player-scope axis: ControlsCount's filter and PlayerAttribute's
+        // quantity each carry a nested reader.
+        let controls = |filter: TargetFilter| PlayerFilter::ControlsCount {
+            relation: crate::types::ability::PlayerRelation::Opponent,
+            filter,
+            comparator: Comparator::GE,
+            count: Box::new(QuantityExpr::Fixed { value: 1 }),
+        };
+        for (label, scope, consumes) in [
+            (
+                "ControlsCount over the set",
+                controls(tracked.clone()),
+                true,
+            ),
+            (
+                "ControlsCount over an InTrackedSet property",
+                controls(in_tracked_set),
+                true,
+            ),
+            (
+                "ControlsCount over a plain filter",
+                controls(plain.clone()),
+                false,
+            ),
+            (
+                "ControlsCount whose count is an ObjectCount over the set",
+                PlayerFilter::ControlsCount {
+                    relation: crate::types::ability::PlayerRelation::Opponent,
+                    filter: plain.clone(),
+                    comparator: Comparator::GE,
+                    count: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: tracked.clone(),
+                        },
+                    }),
+                },
+                true,
+            ),
+            (
+                "ControlsCount whose count is an ObjectCount over a plain filter",
+                PlayerFilter::ControlsCount {
+                    relation: crate::types::ability::PlayerRelation::Opponent,
+                    filter: plain.clone(),
+                    comparator: Comparator::GE,
+                    count: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: plain.clone(),
+                        },
+                    }),
+                },
+                false,
+            ),
+            (
+                "PlayerAttribute over the set size",
+                PlayerFilter::PlayerAttribute {
+                    relation: crate::types::ability::PlayerRelation::Opponent,
+                    attr: Box::new(QuantityRef::TrackedSetSize),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 1 }),
+                },
+                true,
+            ),
+        ] {
+            let mut ability = base();
+            ability.player_scope = Some(scope);
+            assert_eq!(
+                ability_or_branch_references_tracked_set(&ability),
+                consumes,
+                "player scope: {label}"
+            );
+        }
     }
 
     #[test]
@@ -51130,6 +51357,7 @@ mod tests {
                     up_to: false,
                     filter,
                     rest_destination: Some(Zone::Graveyard),
+                    rest_remainder: crate::types::ability::DigRestRemainder::Route,
                     rest_split_top_count: None,
                     rest_order: DigRestOrder::Preserve,
                     reveal: false,
@@ -52090,6 +52318,7 @@ mod tests {
                     up_to: false,
                     filter: TargetFilter::Any,
                     rest_destination: Some(Zone::Library),
+                    rest_remainder: crate::types::ability::DigRestRemainder::Route,
                     rest_split_top_count: Some(count_of(filter)),
                     rest_order: crate::types::ability::DigRestOrder::Preserve,
                     reveal: false,
@@ -60038,6 +60267,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
@@ -61322,6 +61552,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
@@ -66099,6 +66330,7 @@ mod parser_oracle_effect_tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
