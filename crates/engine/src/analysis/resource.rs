@@ -932,6 +932,10 @@ pub struct PeriodicDelta {
     /// play rather than commit a relocation it cannot attribute.
     #[serde(default)]
     pub declarable_victims: Vec<PlayerId>,
+    /// CR 601.2c + CR 603.3d: each charged slot whose announcement can name one seat, with that
+    /// seat. Its target choice has one result, so no template moves its loss.
+    #[serde(default)]
+    pub forced_aims: Vec<(DecisionSlot, PlayerId)>,
     /// CR 119.3 + CR 704.5a: per seat, the life magnitude
     /// [`PeriodicDelta::elimination_cascade`] reserved that seat's elimination headroom
     /// against, produced by
@@ -1569,8 +1573,15 @@ impl PeriodicDelta {
                     Some(_) if one_template => seen.as_deref(),
                     Some(_) => own.as_deref(),
                 };
-                let (reaches, now, before) = match published {
-                    Some(legal) => (
+                let forced = self.forced_aims.iter().find(|(forced, _)| forced == slot);
+                let (reaches, now, before) = match (forced, published) {
+                    // CR 601.2c + CR 603.3d: a slot with one legal seat names it under every
+                    // template, so the floor carries its loss once (CR 119.3).
+                    (Some(&(_, aim)), _) => {
+                        let names = aim == seat;
+                        (names, Some(names), Some(names))
+                    }
+                    (None, Some(legal)) => (
                         legal,
                         names_seat(declared, slot),
                         names_seat(seen.as_deref(), slot),
@@ -1578,7 +1589,7 @@ impl PeriodicDelta {
                     // CR 732.2a: a withheld slot's chooser is not the declarer, so neither
                     // template speaks for it. Charged against every seat in the domain, a
                     // known over-charge (see the doc).
-                    None => (in_domain, None, None),
+                    (None, None) => (in_domain, None, None),
                 };
                 if reaches && now != Some(false) && before != Some(true) {
                     landing += magnitude;
@@ -1769,9 +1780,19 @@ impl PeriodicDelta {
             .find(|&&(seat, _)| seat == proposer)
             .map(|&(_, repetition)| repetition);
 
+        let living = state.players.iter().filter(|p| !p.is_eliminated).count();
         let mut entries: Vec<PredictedDeparture> = Vec::new();
-        for (seat, repetition) in crossings {
+        for (departed, (seat, repetition)) in crossings.into_iter().enumerate() {
             if proposer_crossing.is_some_and(|bound| repetition > bound) {
+                break;
+            }
+            // CR 704.3 + CR 104.2a: seats crossing at one repetition leave together, and once at
+            // most one seat is left the game is over, so no later repetition exists.
+            if entries
+                .last()
+                .is_some_and(|last| last.repetition < repetition)
+                && living - departed <= 1
+            {
                 break;
             }
             match entries.last_mut() {
@@ -14329,14 +14350,8 @@ mod tests {
              derivations read the published list; got {:?}",
             per_cycle.victim_slot
         );
-        // CR 704.5a: RE-DERIVED THROUGH THE PUBLISHED CHARGE AUTHORITY, not pinned. The bound is
-        // the victim's own crossing under the declaration this offer publishes — which on a board
-        // whose one announcement is FORCED is no declaration at all, so the charge authority reads
-        // the charged slot as WITHHELD and charges it fail-closed: the period's own net term plus
-        // the slot's full magnitude as reach, since with no published point neither template
-        // speaks for the aim. That is that authority's own documented over-charge, and it is why
-        // this bound is BELOW the divisor-derived one the same board's aim subtraction would give
-        // — a narrower offer, never a wider one.
+        // CR 601.2c + CR 603.3d: the forced slot names P1 under every template, so the charge
+        // authority carries its loss once, as the divisor does.
         let victim = PlayerId(1);
         let remaining = i64::from(
             state
@@ -14377,20 +14392,16 @@ mod tests {
                 )
                 .next()
         );
-        // The CONTROL that the re-derivation above discriminates: the DIVISOR authority, on the
-        // same board and the same published bytes, answers a DIFFERENT count. Without this the
-        // equality could be satisfied by two spellings of one arithmetic.
         let divisor = per_cycle
             .delta
             .elimination_bounds(&state, &per_cycle.seat_life_charge)
-            .expect("CONTROL: the divisor still consumes a living seat on this board")
+            .expect("the divisor consumes a living seat on this board")
             .count;
-        assert_ne!(
-            Some(divisor),
-            crossing,
-            "CONTROL: the published divisor — which subtracts the window's observed aim — \
-             authorises a different count on this very board, so the equality above states WHICH \
-             derivation the producer runs rather than restating one"
+        assert_eq!(
+            (crossing, Some(divisor)),
+            (Some(11), Some(11)),
+            "CR 119.3 + CR 704.5a: P1 at 21 losing 2 per repetition through its one forced slot \
+             crosses at the 11th under both authorities"
         );
     }
 
@@ -19141,6 +19152,7 @@ mod tests {
             delta,
             victim_slot: vec![(slot.clone(), 2)],
             declarable_victims: SlotCharge::declarable_victims(&charges),
+            forced_aims: Vec::new(),
             seat_life_charge: published,
             cleanup: None,
             instructed_mills: None,
@@ -19223,6 +19235,7 @@ mod tests {
             delta: life_loss_delta(&[(0, 1), (1, 4)]),
             victim_slot: vec![(slot.clone(), 4)],
             declarable_victims: SlotCharge::declarable_victims(&dipping_charges),
+            forced_aims: Vec::new(),
             seat_life_charge: life_loss_delta(&[(0, 4), (1, 4)])
                 .seat_life_charges(&dipping_charges),
             cleanup: None,
@@ -19283,6 +19296,7 @@ mod tests {
                 delta: life_loss_delta(losses),
                 victim_slot: vec![(slot.clone(), 2)],
                 declarable_victims: vec![p0, p1],
+                forced_aims: Vec::new(),
                 seat_life_charge: reserved
                     .iter()
                     .map(|&(seat, magnitude)| (PlayerId(seat), magnitude))
@@ -19388,6 +19402,7 @@ mod tests {
             delta: swap_delta,
             victim_slot: vec![(s1.clone(), 3), (s2.clone(), 3)],
             declarable_victims: SlotCharge::declarable_victims(&swap_charges),
+            forced_aims: Vec::new(),
             seat_life_charge: swap_published,
             cleanup: None,
             instructed_mills: None,
@@ -19452,6 +19467,7 @@ mod tests {
             delta: life_loss_delta(&[(1, 2)]),
             victim_slot: vec![(g.clone(), 2)],
             declarable_victims: SlotCharge::declarable_victims(&gain_charges),
+            forced_aims: Vec::new(),
             seat_life_charge: life_loss_delta(&[(0, 2), (1, 2)]).seat_life_charges(&gain_charges),
             cleanup: None,
             instructed_mills: None,
@@ -19497,6 +19513,7 @@ mod tests {
             delta: ResourceVector::default(),
             victim_slot: Vec::new(),
             declarable_victims: Vec::new(),
+            forced_aims: Vec::new(),
             seat_life_charge: vec![(p0, 1)],
             cleanup: None,
             instructed_mills: None,
@@ -19557,6 +19574,7 @@ mod tests {
             delta: life_loss_delta(&[(1, 2)]),
             victim_slot: vec![(s1.clone(), 2), (s2.clone(), 2)],
             declarable_victims: SlotCharge::declarable_victims(&two_slots),
+            forced_aims: Vec::new(),
             seat_life_charge: frame_wise.seat_life_charges(&two_slots),
             cleanup: None,
             instructed_mills: None,
@@ -19607,6 +19625,7 @@ mod tests {
             delta: life_loss_delta(&[(1, 2)]),
             victim_slot: vec![(s.clone(), 2)],
             declarable_victims: SlotCharge::declarable_victims(&one_slot),
+            forced_aims: Vec::new(),
             seat_life_charge: frame_wise.seat_life_charges(&one_slot),
             cleanup: None,
             instructed_mills: None,
@@ -19632,6 +19651,52 @@ mod tests {
             ),
             DeclaredLifeCharge { net: 0, dip: 1 },
             "CR 704.5a: no slot reaches P0, so none can have left it"
+        );
+    }
+
+    /// CR 601.2c + CR 603.3d: a withheld slot with one legal seat names it under every template,
+    /// so the seat pays its floor once; with two legal seats it still lands fail-closed.
+    #[test]
+    fn a_forced_slot_charges_its_one_seat_once_under_no_template() {
+        let (p1, p2) = (PlayerId(1), PlayerId(2));
+        let mut board = bound_board(&[20, 18, 20]);
+        let s = announced_target_slot(&mut board, 500);
+        let frame_wise = life_loss_delta(&[(1, 2)]);
+        let period = |reaches: Vec<PlayerId>, forced_aims: Vec<(DecisionSlot, PlayerId)>| {
+            let charges = vec![SlotCharge {
+                slot: s.clone(),
+                magnitude: 2,
+                reaches,
+                aimed_at: Some(p1),
+            }];
+            PeriodicDelta {
+                frames_per_period: 2,
+                delta: life_loss_delta(&[(1, 2)]),
+                victim_slot: vec![(s.clone(), 2)],
+                declarable_victims: SlotCharge::declarable_victims(&charges),
+                forced_aims,
+                seat_life_charge: frame_wise.seat_life_charges(&charges),
+                cleanup: None,
+                instructed_mills: None,
+                growth: Default::default(),
+                seat_life_charge_growth: Vec::new(),
+            }
+        };
+        let charge = |period: &PeriodicDelta| {
+            nth_charge(period, p1, None, None, &[], 0, &board, ChargeBound::Ceiling)
+        };
+
+        let forced = period(vec![p1], vec![(s.clone(), p1)]);
+        assert_eq!(
+            charge(&forced),
+            DeclaredLifeCharge { net: 2, dip: 2 },
+            "CR 119.3: the forced slot's loss is the floor, charged once"
+        );
+        let open = period(vec![p1, p2], Vec::new());
+        assert_eq!(
+            charge(&open),
+            DeclaredLifeCharge { net: 4, dip: 4 },
+            "CR 732.2a: a withheld slot that could name another seat lands on P1 as well"
         );
     }
 
@@ -22157,6 +22222,7 @@ mod tests {
             delta,
             victim_slot: vec![(slot.clone(), 1)],
             declarable_victims: vec![PlayerId(1)],
+            forced_aims: Vec::new(),
             seat_life_charge: vec![(PlayerId(1), 3)],
             cleanup: None,
             instructed_mills: None,
@@ -22375,6 +22441,7 @@ mod tests {
                 delta,
                 victim_slot: vec![],
                 declarable_victims: vec![],
+                forced_aims: Vec::new(),
                 seat_life_charge: vec![],
                 cleanup: None,
                 instructed_mills: None,
@@ -30009,6 +30076,7 @@ mod tests {
             delta,
             victim_slot: victim_slot.to_vec(),
             declarable_victims: domain.iter().copied().map(PlayerId).collect(),
+            forced_aims: Vec::new(),
             seat_life_charge: Vec::new(),
             cleanup: None,
             instructed_mills: None,

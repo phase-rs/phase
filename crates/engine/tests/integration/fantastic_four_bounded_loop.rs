@@ -5715,6 +5715,17 @@ fn an_allocation_of_the_published_suggestion_commits_its_whole_count() {
     let mut state = load_f4();
     let offer = f4_allocation_offer(&mut state);
     let count = offer.drivable_count;
+    let (_, _, schema) = offer_parts(&state);
+    assert!(
+        state.players.iter().any(|p| p.id == P3 && !p.is_eliminated),
+        "reach-guard: P3 is in the game at the offer"
+    );
+    assert_eq!(
+        (schema.measured_repetition_bound, &schema.iteration_count),
+        (Some(89), &IterationCount::Fixed(88)),
+        "CR 121.4: P3 is still in the game at P0's library crossing at 89, so that crossing \
+         ends the walk, not P2's departure at 77"
+    );
 
     assert!(
         offer.rate > 0,
@@ -8216,8 +8227,8 @@ fn f4_re_aiming_segments(state: &GameState, offer: &F4Allocation) -> [(PlayerId,
 /// # Admitted member
 ///
 /// The same respond window saved without the published declaration, as a save written before
-/// that field existed is: the crossing cycle drops, every cycle before it commits, and priority
-/// is handed back to a living seat.
+/// that field existed is: its count exceeds the ceiling's, so the take is refused whole and
+/// priority returns to the proposer.
 #[test]
 fn an_admitted_re_aiming_accept_delivers_its_whole_count_and_the_crossing_it_declares() {
     let mut state = load_f4();
@@ -8282,27 +8293,16 @@ fn an_admitted_re_aiming_accept_delivers_its_whole_count_and_the_crossing_it_dec
         "reach-guard: the save decodes to a pinned proposal with no published declaration"
     );
     let legacy_losses = f4_accept_window(&mut legacy);
-    // No announcement is in flight at the offer, so the first segment's seat crosses at its
-    // headroom.
-    let crossing = first_headroom;
     assert_eq!(
-        (
-            legacy_losses.iter().sum::<i64>() / offer.rate,
-            f4_loss(&legacy, &legacy_losses, offer.preannounced),
-            f4_loss(&legacy, &legacy_losses, first),
-        ),
-        (
-            i64::from(crossing - 1),
-            0,
-            i64::from(crossing - 1) * offer.rate,
-        ),
-        "CR 732.2a: with no published declaration the crossing cycle drops and every cycle \
-         before it commits"
+        legacy_losses,
+        vec![0; legacy_losses.len()],
+        "CR 732.2a: with no published declaration the ceiling charges the slot to every opponent, \
+         so the declared count exceeds it and the take is refused whole"
     );
     assert!(
         legacy.players.iter().all(|player| !player.is_eliminated)
-            && matches!(legacy.waiting_for, WaitingFor::Priority { player } if !f4_eliminated(&legacy, player)),
-        "CR 800.4a: priority is handed back to a living seat; got {:?}",
+            && matches!(legacy.waiting_for, WaitingFor::Priority { player } if player == offer.proposer),
+        "CR 732.2a: priority returns to the proposer; got {:?}",
         legacy.waiting_for
     );
 }
@@ -9167,6 +9167,11 @@ fn a_period_whose_target_set_shrinks_to_one_performs_past_the_shrink() {
         "reach-guard: the offer frame"
     );
     assert_eq!(schema.iteration_count, IterationCount::Fixed(77));
+    assert_eq!(
+        schema.measured_repetition_bound,
+        Some(77),
+        "CR 104.2a: P2 leaving at 77 leaves P0 alone, so P0's library crossing at 89 never comes"
+    );
 
     f4_accept_suggested(&mut state);
     assert!(

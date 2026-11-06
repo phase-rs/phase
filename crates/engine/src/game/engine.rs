@@ -3682,6 +3682,7 @@ fn certified_bounded_cycle_offer<'a>(
                 delta,
                 victim_slot: Vec::new(),
                 declarable_victims: Vec::new(),
+                forced_aims: Vec::new(),
                 seat_life_charge: Vec::new(),
                 cleanup: None,
                 instructed_mills: None,
@@ -3766,6 +3767,7 @@ fn certified_bounded_cycle_offer<'a>(
                     delta,
                     victim_slot: Vec::new(),
                     declarable_victims: Vec::new(),
+                    forced_aims: Vec::new(),
                     seat_life_charge: Vec::new(),
                     cleanup: None,
                     instructed_mills: None,
@@ -3990,6 +3992,16 @@ fn bounded_offer_tail(
     // lift to what the bound actually reserved and the two cannot be derived apart.
     periodic.declarable_victims =
         crate::analysis::resource::SlotCharge::declarable_victims(&charged);
+    // CR 601.2c + CR 603.3d: a slot whose announcement can reach one seat names that seat.
+    periodic.forced_aims = charged
+        .iter()
+        .filter_map(
+            |charge| match (charge.reaches.as_slice(), charge.aimed_at) {
+                ([only], Some(aim)) if *only == aim => Some((charge.slot.clone(), aim)),
+                _ => None,
+            },
+        )
+        .collect();
     // CR 119.3 + CR 704.5a: the per-seat divisor, published and then HANDED to the reduction,
     // so the bound cannot be divided by anything other than what the certificate states.
     periodic.seat_life_charge = frame_wise.seat_life_charges(&charged);
@@ -8707,6 +8719,7 @@ pub(crate) fn replay_bounded_offer(
         delta: crate::analysis::resource::ResourceVector::period(prior, current),
         victim_slot: Vec::new(),
         declarable_victims: Vec::new(),
+        forced_aims: Vec::new(),
         seat_life_charge: Vec::new(),
         cleanup,
         instructed_mills: crate::analysis::resource::period_instructed_mills(state, prior, current),
@@ -8861,6 +8874,7 @@ pub(crate) fn counted_offer(
                 delta: crate::analysis::resource::ResourceVector::period(prior, current),
                 victim_slot: Vec::new(),
                 declarable_victims: Vec::new(),
+                forced_aims: Vec::new(),
                 seat_life_charge: Vec::new(),
                 cleanup: None,
                 instructed_mills: None,

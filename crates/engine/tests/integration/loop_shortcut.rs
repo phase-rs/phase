@@ -6515,6 +6515,7 @@ fn a_wire_zero_frames_per_period_fails_the_load_and_a_wire_two_does_not() {
             delta: Default::default(),
             victim_slot: vec![],
             declarable_victims: vec![],
+            forced_aims: Vec::new(),
             seat_life_charge: vec![],
             cleanup: None,
             instructed_mills: None,
@@ -6578,6 +6579,7 @@ fn a_wire_zero_frames_per_period_fails_the_load_and_a_wire_two_does_not() {
                             delta: Default::default(),
                             victim_slot: vec![],
                             declarable_victims: vec![],
+                            forced_aims: Vec::new(),
                             seat_life_charge: vec![],
                             cleanup: None,
                             instructed_mills: None,
@@ -11879,6 +11881,12 @@ fn bloodloop_mandatory_draw_cascade_offers_at_2p_3p_and_4p() {
             schema.is_bounded(),
             "{players}p: an unbounded schema would take a different declare arm"
         );
+        assert_eq!(
+            schema.measured_repetition_bound,
+            Some(17),
+            "{players}p: CR 704.3 + CR 104.2a: every opponent leaves together at 17, so P0's \
+             library crossing never comes"
+        );
         let per_cycle = certificate
             .per_cycle
             .as_ref()
@@ -11913,6 +11921,66 @@ fn bloodloop_mandatory_draw_cascade_offers_at_2p_3p_and_4p() {
             "{players}p: the cascade's controller loses no life"
         );
     }
+}
+
+/// Verbatim Oracle text of Leyline of Sanctity.
+const LEYLINE_OF_SANCTITY: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nYou have hexproof. (You can't be the target of spells or abilities your opponents control.)";
+
+/// CR 601.2c + CR 603.3d + CR 119.3: with P2 hexproof, Sanguine Bond's "target opponent" has the
+/// one legal target P1, so each repetition charges P1 its loss once. P1 at 3 leaves at the third
+/// (CR 704.5a), and the next trigger has no legal target, so P2 stays in the game.
+#[test]
+fn a_drain_whose_only_target_is_forced_counts_each_loss_once() {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 4);
+    scenario.with_life(P2, 5);
+    scenario.add_enchantment_from_oracle(P0, "Sanguine Bond", SANGUINE_BOND);
+    scenario.add_creature_from_oracle(P0, "Bloodthirsty Conqueror", 3, 4, BLOODTHIRSTY_CONQUEROR);
+    scenario.add_enchantment_from_oracle(P2, "Leyline of Sanctity", LEYLINE_OF_SANCTITY);
+    scenario.add_basic_land(P1, ManaColor::Red);
+    scenario.add_bolt_to_hand(P1);
+    let kickoff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let _ = runner.cast(kickoff).commit();
+    let mut state = runner.state().clone();
+
+    drive_to_bounded_offer(&mut state, 50).expect("reach-guard: the drain is offered");
+    let (proposer, _, schema) = bounded_offer_parts(&state);
+    assert_eq!(
+        seat_lives(&state)[1..],
+        [(P1, 3), (P2, 5)],
+        "reach-guard: the offer frame"
+    );
+    assert_eq!(
+        schema.iteration_count,
+        IterationCount::Fixed(3),
+        "CR 704.5a: P1 at 3 losing 1 per repetition leaves at the third"
+    );
+
+    r6a_declare_and_accept_all(&mut state, proposer, 3);
+    assert_eq!(
+        (
+            state
+                .players
+                .iter()
+                .map(|p| p.is_eliminated)
+                .collect::<Vec<_>>(),
+            state.players[2].life
+        ),
+        (vec![false, true, false], 5),
+        "CR 704.5a + CR 800.4: P1 leaves and the game goes on with P2; got {:?}",
+        state.waiting_for
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "no winner: P2 is still in the game; got {:?}",
+        state.waiting_for
+    );
 }
 
 // ═══════════════ FIX ROUND 1 — the declared count is CONSUMABLE ═══════════════
@@ -15352,7 +15420,7 @@ fn ai_bounded_declare_candidate_is_generated_legal_and_drives() {
     );
 
     // The cascade's first crossing, re-derived from the published period and the offer-beat
-    // board: the accepted count spans past it, so it is where the drive ends.
+    // board, where the accepted count ends.
     let lives_before: Vec<(PlayerId, i64)> = state
         .players
         .iter()
@@ -15374,11 +15442,11 @@ fn ai_bounded_declare_candidate_is_generated_legal_and_drives() {
         .map(|(_, c)| *c)
         .min()
         .expect("REACH-GUARD: the published period must consume a seat on the life axis");
-    assert!(
-        first < i64::from(suggestion),
-        "REACH-GUARD: the published suggestion must reach PAST the first crossing — that is the \
-         cascade span this phase publishes, and it is what makes the outcome below the drive's \
-         own stopping rule rather than the count running out; crossings {crossings:?} under \
+    assert_eq!(
+        first,
+        i64::from(suggestion),
+        "REACH-GUARD: CR 104.2a + CR 704.3: the crossing that takes both opponents ends the game, \
+         so the published suggestion is that crossing; crossings {crossings:?} under \
          {suggestion}"
     );
     let first_victims: Vec<PlayerId> = crossings
@@ -17534,6 +17602,7 @@ fn answer_beat_frames_carry_the_synced_window_and_the_offer_certificate_is_exact
         delta,
         victim_slot,
         declarable_victims,
+        forced_aims: _,
         seat_life_charge,
         cleanup: _,
         instructed_mills: _,
