@@ -4135,10 +4135,8 @@ fn redact_hidden_zone_change_event(
             object_id,
             player_id: _,
             source_id: _,
-        } => {
-            if concealed_discard_ids.contains(object_id) {
-                *object_id = ObjectId(0);
-            }
+        } if concealed_discard_ids.contains(object_id) => {
+            *object_id = ObjectId(0);
         }
         _ => {}
     }
@@ -15091,7 +15089,7 @@ mod tests {
         GameEvent::Discarded {
             player_id: PlayerId(0),
             object_id,
-            source_id: ObjectId(900),
+            source_id: Some(ObjectId(900)),
         }
     }
 
@@ -15162,7 +15160,7 @@ mod tests {
                     event,
                     GameEvent::Discarded {
                         player_id: PlayerId(0),
-                        source_id: ObjectId(900),
+                        source_id: Some(ObjectId(900)),
                         ..
                     }
                 ));

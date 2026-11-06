@@ -1126,7 +1126,7 @@ fn r17_stored_discard_trigger_event_is_redacted_for_unauthorized_viewers() {
         let stack = serde_json::to_value(&projected.stack).expect("serialize stack");
         assert!(
             !identifying_object_ids(&stack).contains(&bears.0),
-            "{label}: the projected stack still carries the card's id"
+            "{label}: the card's id is still present under trigger_event / event-shaped keys of the projected stack"
         );
     }
 

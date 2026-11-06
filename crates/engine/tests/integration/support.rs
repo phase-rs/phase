@@ -212,9 +212,8 @@ fn collect_numbers(value: &Value, out: &mut BTreeSet<u64>) {
 /// Every number found anywhere under an `IDENTIFYING_ID_KEYS` key of `value`, at any
 /// depth (so the tuple-vector keys `assignments`, `attacks` and `source_amounts`,
 /// which hold arrays of arrays, are covered). `ObjectId` is `#[serde(transparent)]`
-/// over `u64`. A small non-id number inside a subtree can collide with a probed id;
-/// that can only false-fail a negative check, never hide a leak (probed ids here are
-/// above the small values such subtrees carry).
+/// over `u64`. A collision between a probed card id and a small non-id number under a
+/// walked key can only make a negative check fail, never hide a leak.
 pub fn identifying_object_ids(value: &Value) -> BTreeSet<u64> {
     let mut ids = BTreeSet::new();
     walk_identifying(value, &mut ids);
