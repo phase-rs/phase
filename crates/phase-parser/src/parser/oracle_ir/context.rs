@@ -693,8 +693,12 @@ pub struct ParseContext {
     /// engine's `TargetOnly` exemption in `defers_conditional_target_selection`
     /// keeps later announced targets.
     /// Partial and quantified choices leave this unset.
-    /// Peeled opponent-may choices explicitly declare `Stack` so the
-    /// accepting-player timing fallback cannot reintroduce `Resolution`.
+    /// A peeled opponent-may chunk's own bare choice declares `Stack` so the
+    /// accepting-player timing fallback cannot reintroduce `Resolution` on it;
+    /// a compound continuation's sub-link in such a chunk is still re-timed by
+    /// `target_choice_timing_for_clause_sub`. A non-controller printed subject
+    /// withdraws the declaration from the head and from every `TargetOnly` link
+    /// of the sub-ability chain it owns.
     ///
     /// Set and consumed within a single chunk parse; never serialized. A
     /// speculative sub-parse that discards its cloned context discards this too.
