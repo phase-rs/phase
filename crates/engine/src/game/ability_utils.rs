@@ -8055,8 +8055,10 @@ fn defers_conditional_target_selection(sub: &ResolvedAbility) -> bool {
             &sub.condition,
             Some(AbilityCondition::AdditionalCostPaidInstead) if !sub.context.additional_cost_paid
         )
-        // CR 601.2c: sticker and bare-object choices defer only their own picks,
-        // not the targets of independent following instructions.
+        // CR 601.2c + CR 700.2: sticker and bare-object choices defer only their
+        // own picks, not the targets of independent following instructions. A
+        // bare-choose mode of a modal spell (whose chosen modes' targets are
+        // announced as it is cast) likewise defers only its own pick.
         || (sub.target_choice_timing == TargetChoiceTiming::Resolution
             && !matches!(
                 sub.effect,

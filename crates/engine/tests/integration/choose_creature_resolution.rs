@@ -177,17 +177,20 @@ fn explicit_target_spell_prompts_at_cast_and_excludes_shroud() {
 
 /// Synthetic Oracle: no printed card pairs a bare choose in a later chunk with a
 /// distinct later printed target through this path; there is no printed analogue.
-/// Pins two facts: a bare choose in a LATER chunk keeps its legacy Stack timing
-/// (it is announced as a cast-time target slot), and the later printed target is
-/// still announced after it. The engine exemption for a Resolution `TargetOnly`
-/// sub-ability is covered by the modal row
-/// `modal_bare_choose_mode_does_not_hide_later_mode_target`, not by this row.
+/// Pins two facts (CR 115.10a + CR 608.2d): a bare choose in a LATER chunk
+/// resolves at resolution time, with no cast-time prompt of its own, and the later
+/// printed target (CR 601.2c) is still the only cast-time prompt. At resolution
+/// the controller picks among their own creatures only, and the damage uses the
+/// picked creature's power.
 #[test]
-fn later_chunk_bare_choose_keeps_stack_timing_and_later_printed_target_is_announced() {
+fn later_chunk_bare_choose_resolves_at_resolution_and_later_printed_target_is_announced() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    // The spell's Draw must not empty the library and lose the game.
+    scenario.with_library_top(P0, &["Library card"]);
+    // Different powers, so the damage tells which creature was bound.
     let own = scenario.add_creature(P0, "Own creature", 2, 2).id();
-    let other_own = scenario.add_creature(P0, "Other own creature", 2, 2).id();
+    let other_own = scenario.add_creature(P0, "Other own creature", 4, 4).id();
     let opposing = scenario.add_creature(P1, "Opposing creature", 3, 3).id();
     let other_opposing = scenario
         .add_creature(P1, "Other opposing creature", 3, 3)
@@ -212,37 +215,14 @@ fn later_chunk_bare_choose_keeps_stack_timing_and_later_printed_target_is_announ
             payment_mode: CastPaymentMode::Auto,
         })
         .unwrap();
-    // A bare choose in a later chunk retains its legacy Stack timing, so the
-    // first cast-time prompt is its slot: the controller's creatures only.
-    let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
-        panic!(
-            "expected the legacy Stack-timed bare-choose slot while casting: {:?}",
-            runner.state().waiting_for
-        );
-    };
-    assert!(selection
-        .current_legal_targets
-        .contains(&TargetRef::Object(own)));
-    assert!(selection
-        .current_legal_targets
-        .contains(&TargetRef::Object(other_own)));
-    assert!(!selection
-        .current_legal_targets
-        .contains(&TargetRef::Object(opposing)));
-    assert!(!selection
-        .current_legal_targets
-        .contains(&TargetRef::Object(other_opposing)));
-    runner
-        .act(GameAction::ChooseTarget {
-            target: Some(TargetRef::Object(own)),
-        })
-        .unwrap();
+    // CR 601.2c: the first and only cast-time prompt is the printed target slot;
+    // the bare choose in the later chunk has no slot of its own.
     let WaitingFor::TargetSelection {
         player, selection, ..
     } = &runner.state().waiting_for
     else {
         panic!(
-            "expected the later printed target while casting: {:?}",
+            "expected the printed target while casting: {:?}",
             runner.state().waiting_for
         );
     };
@@ -270,24 +250,84 @@ fn later_chunk_bare_choose_keeps_stack_timing_and_later_printed_target_is_announ
             target: Some(TargetRef::Object(opposing)),
         })
         .unwrap();
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::Priority { .. }
-    ));
+    // No further cast-time prompt: the spell is on the stack.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "{:?}",
+        runner.state().waiting_for
+    );
     assert_eq!(runner.state().stack.len(), 1);
     let entry = &runner.state().stack[0];
     assert_eq!(entry.source_id, spell);
     let root = entry
         .ability()
         .expect("the cast spell must carry its ability");
+    let choice = std::iter::successors(Some(root), |node| node.sub_ability.as_deref())
+        .find(|node| matches!(node.effect, Effect::TargetOnly { .. }))
+        .expect("the cast spell must retain its bare-choice instruction");
+    assert_eq!(choice.target_choice_timing, TargetChoiceTiming::Resolution);
+    assert!(choice.targets.is_empty());
     let damage = std::iter::successors(Some(root), |node| node.sub_ability.as_deref())
         .find(|node| matches!(node.effect, Effect::DealDamage { .. }))
         .expect("the cast spell must retain its printed damage instruction");
+    assert_eq!(damage.target_choice_timing, TargetChoiceTiming::Stack);
     assert!(
         damage.targets.contains(&TargetRef::Object(opposing)),
         "the damage target must already be announced on the stack: {damage:#?}"
     );
     assert!(!damage.targets.contains(&TargetRef::Object(other_opposing)));
+
+    for _ in 0..8 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        assert!(
+            !runner.state().stack.is_empty(),
+            "must reach the creature choice"
+        );
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    // CR 608.2d: only now does the controller choose, among their own creatures.
+    let WaitingFor::ChooseFromZoneChoice {
+        player,
+        cards,
+        count,
+        up_to,
+        source_id,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected the untargeted creature choice during resolution: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*source_id, spell);
+    assert_eq!(*count, 1);
+    assert!(!*up_to);
+    assert!(cards.contains(&own));
+    assert!(cards.contains(&other_own));
+    assert!(!cards.contains(&opposing));
+    assert!(!cards.contains(&other_opposing));
+    assert_eq!(runner.state().objects[&opposing].damage_marked, 0);
+    runner
+        .act(GameAction::SelectCards { cards: vec![own] })
+        .unwrap();
+    assert_eq!(
+        runner.state().objects[&opposing].damage_marked,
+        2,
+        "the damage must use the picked 2-power creature, not the 4-power one"
+    );
+    assert_eq!(runner.state().objects[&other_opposing].damage_marked, 0);
+    assert_eq!(runner.state().objects[&own].damage_marked, 0);
+    assert_eq!(runner.state().objects[&other_own].damage_marked, 0);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 
 #[test]
@@ -394,10 +434,9 @@ fn sakashima_avatar_announces_copy_source_then_prompts_recipient_at_resolution()
             cards: vec![shroud],
         })
         .unwrap();
-    // The chosen recipient does not yet become the copy: BecomeCopy reads an
-    // Untargeted(ParentTarget) recipient from the child's own target list (the
-    // copy source); the same happens on main with a Stack-timed recipient.
-    // Tracked separately; this test covers choice timing only.
+    // This test covers choice timing only, not the BecomeCopy result. The
+    // recipient does not yet become the copy; whether the same holds on main with
+    // a Stack-timed recipient has not been run.
     assert!(runner.state().stack.is_empty());
     assert!(matches!(
         runner.state().waiting_for,

@@ -31,7 +31,6 @@ use super::{
     resolve_it_pronoun, ParseContext, PriorZoneChoicePartition,
 };
 use crate::parser::oracle_ir::ast::*;
-use crate::parser::oracle_ir::context::ClauseChainPosition;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::ChosenReturnSpec;
 use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
@@ -5158,15 +5157,11 @@ pub(super) fn parse_choose_ast(
             let (target, remainder) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
             // CR 115.10a + CR 608.2d: a fully parsed, untargeted singular
-            // "a/an <object> you control" declares Resolution here, at a chain head.
-            // Stripped optional quantifiers and exact counts fail the a/an gate.
-            // Peeled actor scopes and random selections are not controller choices.
-            // The head restriction is a deliberate scope limit, not a rules
-            // contract: the choice is not a target at any chain position. Later
-            // chain chunks keep Stack as before this producer existed, a known gap
-            // that is not certified as correct behavior. A compound continuation's
-            // or a modal mode's bare choice may still be Resolution mid-chain; the
-            // engine's TargetOnly exemption keeps later announced targets.
+            // "a/an <object> you control" declares Resolution here, at any chain
+            // position. Stripped optional quantifiers and exact counts fail the
+            // a/an gate. Peeled actor scopes and random selections are not
+            // controller choices. The engine's TargetOnly exemption in
+            // `defers_conditional_target_selection` keeps later announced targets.
             if ctx.clause_opponent_may_scope.is_some() {
                 // The accepting-player timing fallback also retimes described
                 // objects. TargetOnly cannot prompt that chooser, so override
@@ -5178,7 +5173,6 @@ pub(super) fn parse_choose_ast(
                     .is_ok()
                 && ctx.target_selection_mode == TargetSelectionMode::Chosen
                 && ctx.clause_player_scope.is_none()
-                && ctx.clause_chain_position == ClauseChainPosition::Head
                 && !nom_primitives::scan_contains(rest_lower, "target ")
                 && is_you_controlled_target(&target)
                 && !target.is_context_ref()

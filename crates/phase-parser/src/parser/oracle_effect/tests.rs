@@ -78859,26 +78859,151 @@ fn bare_choose_printed_cards_use_resolution_timing() {
     assert_eq!(copy.target_choice_timing, TargetChoiceTiming::Stack);
 }
 
-/// SHAPE: the bare-choice producer's chain-head restriction is a deliberate scope
-/// limit, not a rules contract (CR 115.10a + CR 608.2d: the choice is not a target
-/// at any chain position). A later bare choose keeps `Stack` exactly as before
-/// this producer existed; that is a known gap and is not certified as correct
-/// behavior. The head row proves the printed target on a later clause stays
-/// stack-time either way.
+/// SHAPE: printed cards whose controller-choice "choose a <object> you control"
+/// follows an earlier instruction declare `Resolution` timing (CR 115.10a: the
+/// choice is not a target; CR 608.2d: it is announced as the effect is applied).
+/// Tunnel of Love's opponent choice ("They choose a creature they control")
+/// is not the controller's and stays stack-time.
 #[test]
-fn bare_choose_chain_head_scope_limit_keeps_later_choice_and_printed_target_at_stack() {
-    for (text, choice_index, timing) in [
+fn bare_choose_later_chunk_printed_cards_use_resolution_timing() {
+    fn assert_you_choice(name: &str, node: &AbilityDefinition) {
+        let Effect::TargetOnly {
+            target: TargetFilter::Typed(tf),
+        } = node.effect.as_ref()
+        else {
+            panic!("{name}: expected the bare-choice TargetOnly node: {node:#?}");
+        };
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "{name}: the choice must be a creature-class you control: {node:#?}"
+        );
+        assert_eq!(
+            node.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "{name}: a later-chunk bare choice must declare Resolution: {node:#?}"
+        );
+    }
+
+    let armed = parse_card(
+        "Vehicles you control become artifact creatures until end of turn. Choose a Dwarf you control. Attach any number of Equipment you control to it.",
+        "Armed and Armored",
+        &[],
+        &["Instant"],
+    );
+    assert_you_choice(
+        "Armed and Armored",
+        armed.abilities[0]
+            .sub_ability
+            .as_deref()
+            .expect("Armed and Armored: the choice must follow the Vehicle animation"),
+    );
+
+    let escape = parse_card(
+        "Destroy all non-Vehicle creatures. Then choose a Vehicle you control. It perpetually becomes an artifact creature.",
+        "Turbocharged Escape",
+        &[],
+        &["Sorcery"],
+    );
+    assert_you_choice(
+        "Turbocharged Escape",
+        escape.abilities[0]
+            .sub_ability
+            .as_deref()
+            .expect("Turbocharged Escape: the choice must follow the destruction"),
+    );
+
+    let elderspell = parse_card(
+        "Destroy any number of target planeswalkers. Choose a planeswalker you control. Put two loyalty counters on it for each planeswalker destroyed this way.",
+        "The Elderspell",
+        &[],
+        &["Sorcery"],
+    );
+    assert_you_choice(
+        "The Elderspell",
+        elderspell.abilities[0]
+            .sub_ability
+            .as_deref()
+            .expect("The Elderspell: the choice must follow the destruction"),
+    );
+
+    let wraith = parse_card(
+        "Wraith Form — This creature can't be blocked.\nTransdimensional Scout — When this creature deals combat damage to a player, you may pay {3} and sacrifice it. If you do, choose a land you control. Then search your library for up to two basic land cards which have the same name as the chosen land, put them onto the battlefield tapped, then shuffle.",
+        "Canoptek Wraith",
+        &[],
+        &["Creature"],
+    );
+    assert_you_choice(
+        "Canoptek Wraith",
+        wraith.triggers[0]
+            .execute
+            .as_deref()
+            .and_then(|execute| execute.sub_ability.as_deref())
+            .and_then(|pay| pay.sub_ability.as_deref())
+            .expect("Canoptek Wraith: the choice must follow the pay-and-sacrifice instructions"),
+    );
+
+    // The Visit-trigger gate requires the Attraction subtype.
+    let tunnel = parse_oracle_text(
+        "Visit — Choose an opponent. They choose a creature they control, then you choose a creature you control. You may exile the chosen creatures. If you do, return them to the battlefield under their owners' control at the beginning of the next end step. Otherwise, the chosen creatures fight each other.",
+        "Tunnel of Love",
+        &[],
+        &["Artifact".to_string()],
+        &["Attraction".to_string()],
+    );
+    let opponent_choice = tunnel.triggers[0]
+        .execute
+        .as_deref()
+        .and_then(|execute| execute.sub_ability.as_deref())
+        .expect("Tunnel of Love: the opponent's choice must follow 'Choose an opponent'");
+    assert!(
+        matches!(opponent_choice.effect.as_ref(), Effect::TargetOnly { .. }),
+        "Tunnel of Love: the opponent's choice must be a TargetOnly node: {opponent_choice:#?}"
+    );
+    assert_eq!(
+        opponent_choice.target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "Tunnel of Love: the opponent's own choice must stay stack-time: {opponent_choice:#?}"
+    );
+    assert_you_choice(
+        "Tunnel of Love",
+        opponent_choice
+            .sub_ability
+            .as_deref()
+            .expect("Tunnel of Love: the controller's choice must follow the opponent's"),
+    );
+
+    let brudiclad = parse_card(
+        "Creature tokens you control have haste.\nAt the beginning of combat on your turn, create a 2/1 blue Phyrexian Myr artifact creature token. Then you may choose a token you control. If you do, each other token you control becomes a copy of that token.",
+        "Brudiclad, Telchor Engineer",
+        &[],
+        &["Creature"],
+    );
+    assert_you_choice(
+        "Brudiclad, Telchor Engineer",
+        brudiclad.triggers[0]
+            .execute
+            .as_deref()
+            .and_then(|execute| execute.sub_ability.as_deref())
+            .expect("Brudiclad, Telchor Engineer: the choice must follow the token creation"),
+    );
+}
+
+/// SHAPE: the bare-choice producer declares `Resolution` at any chain position,
+/// the head and a later chunk alike (CR 115.10a: the choice is not a target;
+/// CR 608.2d: it is announced as the effect is applied). The later printed
+/// "target creature you don't control" damage recipient stays stack-time
+/// (CR 601.2c) in both rows.
+#[test]
+fn bare_choose_resolves_at_any_chain_position_and_keeps_later_printed_target_at_stack() {
+    for (text, choice_index) in [
         (
             "Choose a creature you control. It deals damage equal to its power to target creature you don't control.",
             0,
-            TargetChoiceTiming::Resolution,
         ),
-        // Known gap: a later bare choose keeps `Stack` as on main; this pins the
-        // current scope limit, not a rules-correct timing.
         (
             "Draw a card. Choose a creature you control. It deals damage equal to its power to target creature you don't control.",
             1,
-            TargetChoiceTiming::Stack,
         ),
     ] {
         let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
@@ -78889,7 +79014,7 @@ fn bare_choose_chain_head_scope_limit_keeps_later_choice_and_printed_target_at_s
         );
         assert_eq!(
             choice.declared_target_choice_timing,
-            (timing == TargetChoiceTiming::Resolution).then_some(timing),
+            Some(TargetChoiceTiming::Resolution),
             "{text}"
         );
 
@@ -78901,7 +79026,11 @@ fn bare_choose_chain_head_scope_limit_keeps_later_choice_and_printed_target_at_s
             matches!(choice.effect.as_ref(), Effect::TargetOnly { .. }),
             "{text}: {choice:#?}"
         );
-        assert_eq!(choice.target_choice_timing, timing, "{text}");
+        assert_eq!(
+            choice.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "{text}"
+        );
         let damage = choice
             .sub_ability
             .as_deref()
@@ -79145,7 +79274,8 @@ fn bare_choose_stripped_quantifier_does_not_declare_resolution_timing() {
     );
     assert_eq!(ir.clauses[0].declared_target_choice_timing, None);
 
-    // A later singular choice remains mid-chain even after a quantified head.
+    // A later singular, unquantified choice declares Resolution at any chain
+    // position, even after a quantified head that stays undeclared.
     let chain = format!("{log_flume} {final_showdown}");
     let ir = parse_effect_chain_ir(&chain, AbilityKind::Spell, &mut ParseContext::default());
     assert_eq!(ir.clauses.len(), 2);
@@ -79156,7 +79286,10 @@ fn bare_choose_stripped_quantifier_does_not_declare_resolution_timing() {
     );
     assert_eq!(ir.clauses[0].declared_target_choice_timing, None);
     assert_eq!(ir.clauses[1].parsed.effect, Effect::TargetOnly { target });
-    assert_eq!(ir.clauses[1].declared_target_choice_timing, None);
+    assert_eq!(
+        ir.clauses[1].declared_target_choice_timing,
+        Some(TargetChoiceTiming::Resolution)
+    );
 }
 
 /// SHAPE: an exact-count choice cannot enter the single-object chooser.
