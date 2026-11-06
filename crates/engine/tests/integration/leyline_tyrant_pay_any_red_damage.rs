@@ -465,7 +465,7 @@ const VIRTUE_OF_STRENGTH: &str =
 /// except "Mountain" (scenario basic) and "Virtue of Strength" (absent from the
 /// fixture, built from its verbatim Oracle text). Caged Sun's chosen colour is
 /// `sun_color`; Fertile Ground is attached to P0's first Mountain before
-/// Vendetta is cast (CR 704.5p: an Aura never sits unattached). Returns the
+/// Vendetta is cast (CR 704.5m: an unattached Aura would go to the graveyard). Returns the
 /// runner and the ids parallel to `cards`, or `None` without a card database.
 fn real_board(
     pool: &[ManaType],
@@ -578,6 +578,17 @@ fn tapped(runner: &GameRunner, id: ObjectId) -> bool {
     runner.state().objects[&id].tapped
 }
 
+/// After paying the offered maximum, every red unit produced or floating was
+/// consumed by the payment (the maximum is the whole payable red), so none is
+/// left in P0's pool.
+fn assert_all_red_spent(runner: &GameRunner) {
+    assert_eq!(
+        pool_color(runner, P0, ManaType::Red),
+        0,
+        "the payment consumed all red mana"
+    );
+}
+
 /// Row N0: a lone Mountain offers 1 (sibling of N1; passes without the
 /// simulated ceiling).
 #[test]
@@ -608,6 +619,8 @@ fn ceiling_n1_nyxbloom_triples_the_mountain() {
     assert!(!tapped(&runner, ids[1]), "reach: the Mountain is untapped");
     assert_eq!(max, 3, "Mountain taps for RRR under Nyxbloom");
     assert_offer_is_payable(&mut runner, max);
+    assert!(tapped(&runner, ids[1]), "the Mountain was tapped to pay");
+    assert_all_red_spent(&runner);
 }
 
 /// Row N2: paying 2 of the 3 offered leaves the third red floating.
@@ -632,13 +645,19 @@ fn ceiling_n2_partial_payment_leaves_the_rest_floating() {
 /// Row N3: two Mountains under Nyxbloom offer at least 3 + 3.
 #[test]
 fn ceiling_n3_two_mountains_under_nyxbloom() {
-    let Some((mut runner, _)) = board_runner(&mine(&["Nyxbloom Ancient", "Mountain", "Mountain"]))
+    let Some((mut runner, ids)) =
+        board_runner(&mine(&["Nyxbloom Ancient", "Mountain", "Mountain"]))
     else {
         return;
     };
     let max = prompt_max(&mut runner);
     assert!(max >= 6, "two tripled Mountains: {max}");
     assert_offer_is_payable(&mut runner, max);
+    assert!(
+        tapped(&runner, ids[1]) && tapped(&runner, ids[2]),
+        "both Mountains were tapped to pay"
+    );
+    assert_all_red_spent(&runner);
 }
 
 /// Row N7: "If you tap a permanent for mana" refers to its controller, so an
@@ -661,12 +680,14 @@ fn ceiling_n7_opponents_nyxbloom_does_not_multiply() {
 /// Row V1: Virtue of Strength triples a basic land's mana.
 #[test]
 fn ceiling_v1_virtue_of_strength_triples_a_basic() {
-    let Some((mut runner, _)) = board_runner(&mine(&["Virtue of Strength", "Mountain"])) else {
+    let Some((mut runner, ids)) = board_runner(&mine(&["Virtue of Strength", "Mountain"])) else {
         return;
     };
     let max = prompt_max(&mut runner);
     assert_eq!(max, 3);
     assert_offer_is_payable(&mut runner, max);
+    assert!(tapped(&runner, ids[1]), "the Mountain was tapped to pay");
+    assert_all_red_spent(&runner);
 }
 
 /// Row V2: Great Furnace is an Artifact Land without the Basic supertype, so
@@ -692,12 +713,14 @@ fn ceiling_v2_virtue_of_strength_ignores_a_nonbasic_land() {
 /// Row M1: Mana Flare adds one more mana of the type the land produced.
 #[test]
 fn ceiling_m1_mana_flare_doubles_a_land() {
-    let Some((mut runner, _)) = board_runner(&mine(&["Mana Flare", "Mountain"])) else {
+    let Some((mut runner, ids)) = board_runner(&mine(&["Mana Flare", "Mountain"])) else {
         return;
     };
     let max = prompt_max(&mut runner);
     assert_eq!(max, 2);
     assert_offer_is_payable(&mut runner, max);
+    assert!(tapped(&runner, ids[1]), "the Mountain was tapped to pay");
+    assert_all_red_spent(&runner);
 }
 
 /// Row S1: Caged Sun (chosen red) adds one more {R} when a land adds red.
@@ -715,6 +738,8 @@ fn ceiling_s1_caged_sun_of_the_chosen_colour_adds_one() {
     );
     assert_eq!(max, 2);
     assert_offer_is_payable(&mut runner, max);
+    assert!(tapped(&runner, ids[1]), "the Mountain was tapped to pay");
+    assert_all_red_spent(&runner);
 }
 
 /// Row S1b: a Caged Sun that chose blue adds nothing for a red land (pair: S1).
@@ -772,6 +797,8 @@ fn ceiling_r5_nyxbloom_with_fertile_ground() {
     );
     assert!(max >= 4, "3 from the Mountain plus the Aura's mana: {max}");
     assert_offer_is_payable(&mut runner, max);
+    assert!(tapped(&runner, ids[1]), "the enchanted Mountain was tapped");
+    assert_all_red_spent(&runner);
 }
 
 /// Row F1: Rugged Prairie ("{R/W}, {T}: Add {R}{R}...") plus a Mountain offers
@@ -834,7 +861,7 @@ fn ceiling_i0_no_red_source_offers_zero() {
 #[test]
 fn ceiling_big_floating_pool_is_not_capped() {
     let mut pool = vec![ManaType::Black];
-    pool.extend(std::iter::repeat(ManaType::Red).take(2000));
+    pool.extend(std::iter::repeat_n(ManaType::Red, 2000));
     let cards = mine(&["Nyxbloom Ancient", "Mountain"]);
     let Some((mut runner, ids)) = real_board(&pool, Some(1_000_000), &cards, ManaColor::Red) else {
         return;
@@ -845,4 +872,6 @@ fn ceiling_big_floating_pool_is_not_capped() {
     assert_eq!(runner.state().objects[&ids[0]].zone, Zone::Battlefield);
     assert!(max >= 2003, "2000 floating + a tripled Mountain: {max}");
     assert_offer_is_payable(&mut runner, max);
+    assert!(tapped(&runner, ids[1]), "the Mountain was tapped to pay");
+    assert_all_red_spent(&runner);
 }

@@ -24126,9 +24126,12 @@ pub(crate) enum PausedManaPayment {
 }
 
 /// Cap on the source-derived width of the simulated-ceiling probe (see
-/// [`effect_payment_simulated_ceiling`]). It bounds the planner's residual
-/// only — `plan_auto_tap_rows` re-scans every need per assigned shard — and
-/// never the floating mana pool, which is counted in full.
+/// [`effect_payment_simulated_ceiling`]). It bounds the source-derived part of
+/// the probe only (`plan_auto_tap_rows` re-scans every need per assigned shard)
+/// and never the floating mana pool, which is counted in full. Pool mana the
+/// cost cannot spend (floating {U} for an {R} unit) is not removed by
+/// `reduce_cost_by_pool`, so it still reaches the planner's residual; that
+/// pool-dominated case is the pre-existing descent cost named in the PR notes.
 const PROBE_UNIT_CAP: u32 = 512;
 
 /// CR 118.1 + CR 605.3a: Each battlefield permanent's
@@ -24172,8 +24175,8 @@ pub(super) fn effect_payment_mana_ceiling(state: &GameState, payer: PlayerId) ->
 ///
 /// `payable` must be monotone (once false, false for every larger `n`) and
 /// `payable(0)` is taken as true. Dropping a unit from a payable cost keeps it
-/// payable (CR 601.2h: the payment is atomic, so a cost with fewer identical
-/// shards or less generic mana is never harder to pay), which makes the
+/// payable (any payment of the larger cost, restricted to the smaller cost's
+/// shards and generic mana, pays the smaller one), which makes the
 /// affordability predicate monotone.
 pub(super) fn max_payable_units(upper: u32, payable: impl Fn(u32) -> bool) -> u32 {
     let (mut lo, mut hi) = (0, upper);
