@@ -156,28 +156,28 @@ impl DecisionTemplate {
     /// schedule changes at its declared starts (before its first start it has no entry, which is
     /// a change too), and a round robin of two or more changes at every index.
     ///
-    /// WILDCARD-FREE over [`PinnedDecision`] and [`TargetSchedule`], so a decision kind or a
-    /// schedule that reads the index some other way fails to build here.
+    /// WILDCARD-FREE over [`PinnedDecision`], [`TargetPin`] and [`TargetSchedule`], so a decision
+    /// kind, a pin kind or a schedule that reads the index some other way fails to build here.
     pub(crate) fn resolution_change_points(&self) -> Option<BTreeSet<IterationIndex>> {
         let mut points = BTreeSet::new();
         for decision in &self.decisions {
             match decision {
                 PinnedDecision::Targets { targets, .. } => {
                     for target in targets {
-                        // `resolve_target` hands the index to a scheduled pin only.
-                        let TargetPin::Scheduled(schedule) = target else {
-                            continue;
-                        };
-                        match schedule {
-                            TargetSchedule::Constant(_) => {}
-                            TargetSchedule::RoundRobin(schedule) => {
-                                if schedule.len() > 1 {
-                                    return None;
+                        match target {
+                            // `resolve_target` hands neither of these the iteration index.
+                            TargetPin::ByIdentity(_) | TargetPin::Player(_) => {}
+                            TargetPin::Scheduled(schedule) => match schedule {
+                                TargetSchedule::Constant(_) => {}
+                                TargetSchedule::RoundRobin(schedule) => {
+                                    if schedule.len() > 1 {
+                                        return None;
+                                    }
                                 }
-                            }
-                            TargetSchedule::Piecewise(schedule) => {
-                                points.extend(schedule.iter().map(|(start, _)| *start));
-                            }
+                                TargetSchedule::Piecewise(schedule) => {
+                                    points.extend(schedule.iter().map(|(start, _)| *start));
+                                }
+                            },
                         }
                     }
                 }
@@ -1949,6 +1949,7 @@ mod tests {
                 "no scheduled pin",
                 template(vec![
                     targets(10, TargetPin::ByIdentity(this_obj(10, None))),
+                    targets(11, TargetPin::Player(PlayerId(1))),
                     PinnedDecision::Order {
                         slot: DecisionSlot::first(this_obj(11, None), ChoicePoint::TriggerOrder),
                         pos: 0,
