@@ -97,9 +97,13 @@ if [ "$MODE" = pinned ]; then
   mkdir -p "$(dirname "$DEST")"
   TMP="$(mktemp "$DEST.tmp.XXXXXX")"
 else
-  TMP="$(mktemp)"
+  # A private (0700) directory, so no other user can replace the download or
+  # its UTF-16 conversion file, even in a shared temp directory that lacks
+  # the sticky bit.
+  TMP_DIR="$(mktemp -d)"
+  TMP="$(mktemp "$TMP_DIR/MagicCompRules.XXXXXX")"
 fi
-trap 'rm -f "$TMP" "${CR_CONVERT_TMP:-}"' EXIT
+trap 'rm -f "$TMP" "${CR_CONVERT_TMP:-}"; [ -z "${TMP_DIR:-}" ] || rm -rf "$TMP_DIR"' EXIT
 # mktemp creates the file 0600; curl -o, mv and cp keep that mode, which would
 # leave the rules text unreadable to any other uid sharing the checkout.
 chmod 644 "$TMP"
