@@ -344,7 +344,8 @@ pub fn strip_reminder_text(text: &str) -> String {
     result.trim().to_string()
 }
 
-/// CR 207.2a: reminder text has no rules meaning. Mask only balanced spans
+/// CR 207.2 + CR 207.2a: reminder text (italic text in parentheses) has no game
+/// function. Mask only balanced spans
 /// crossing lines; preserve byte offsets and physical lines for source anchors.
 /// Single-line reminders remain available to specialized semantic readers.
 pub(crate) fn mask_multiline_reminder_text(text: &str) -> String {

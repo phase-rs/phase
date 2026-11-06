@@ -1391,7 +1391,7 @@ pub fn parse_target_with_syntax<'a>(
         // separator compositionally, then delegate the complete object tail to
         // the shared type-phrase grammar so controller/type qualifiers retain
         // their ordinary semantics.
-        // CR 115.1a + CR 601.2c: the player noun is number-agnostic in this
+        // CR 115.1: the player noun is number-agnostic in this
         // grammar — "target players" / "target opponents" name the same slot
         // axis as their singular forms, with the clause's `MultiTargetSpec`
         // carrying the printed count. The plural legs
