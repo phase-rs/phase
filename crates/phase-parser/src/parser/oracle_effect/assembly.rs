@@ -27,9 +27,9 @@ use crate::parser::oracle_nom::target::chain_text_mentions_chosen_object;
 use crate::types::ability::{
     effect_variant_name, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
     AggregateFunction, CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId,
-    Comparator, ControllerRef, DamageChannel, DigRestOrder, DigSource, Duration, Effect,
-    EffectOutcomeSignal, EffectScope, FilterProp, LibraryPosition, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId, SharedQuality,
+    Comparator, ControllerRef, DamageChannel, DigRestOrder, DigRestRemainder, DigSource, Duration,
+    Effect, EffectOutcomeSignal, EffectScope, FilterProp, LibraryPosition, PlayerFilter,
+    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId, SharedQuality,
     SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink, TapStateChange,
     TargetFilter, TypedFilter,
 };
@@ -2248,6 +2248,7 @@ fn bind_those_cards_bottom_to_prior_look(
         filter: TargetFilter::Any,
         destination: None,
         rest_destination: Some(Zone::Library),
+        rest_remainder: DigRestRemainder::Route,
         rest_split_top_count: None,
         rest_order,
         reveal: false,
