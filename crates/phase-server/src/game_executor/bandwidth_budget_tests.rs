@@ -646,6 +646,7 @@ impl ScriptedGame {
             | WaitingFor::RippleRevealChoice { .. }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::DigBottomOrder { .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
@@ -732,6 +733,7 @@ impl ScriptedGame {
             | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
             | WaitingFor::SeparatePilesChoice { .. }
+            | WaitingFor::SecretAgendaChoice { .. }
             | WaitingFor::CompanionReveal { .. }
             | WaitingFor::ChooseLegend { .. }
             | WaitingFor::CommanderZoneChoice { .. }
@@ -1652,11 +1654,7 @@ fn resource_pass(
         }
     }
     let bytes = std::array::from_fn(|index| totals[index].bytes.iter().sum());
-    owners.clear();
-    assert!(
-        owners.is_empty(),
-        "all measured server owners and prepared tokens dropped"
-    );
+    drop(owners);
     let mut fresh = ResourceLane::Codec(Traffic::Continuous).owner();
     assert!(fresh.memory().is_none());
     let envelope = resource_envelope(terminal[0].message.clone());
@@ -1678,7 +1676,7 @@ fn resource_pass(
     ));
     drop(fresh);
     runtime.block_on(tokio::task::yield_now());
-    println!("P5 TEARDOWN run={run} pass={pass:?} lane={lane:?} encoding={encoding:?} remaining_accounted_server_owners=0; fresh owner absent then independent Full");
+    println!("P5 TEARDOWN run={run} pass={pass:?} lane={lane:?} encoding={encoding:?} fresh owner absent then independent Full");
     bytes
 }
 

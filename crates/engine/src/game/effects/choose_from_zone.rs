@@ -16,7 +16,7 @@ use crate::types::game_state::{
     GameState, PendingPerPlayerZoneChoice, ResolvingTriggerContext, WaitingFor,
     ZoneOpponentChooserPurpose,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -91,16 +91,15 @@ pub fn resolve(
     // CR 102.3: `Each(OtherPlayers)` is the same iteration with the controller
     // excluded ("for each OTHER player" — Kaya, Spirits' Justice).
     if let ZoneOwner::Each(scope) = zone_owner {
-        // CR 608.2c: each pick rebinds the chain's tracked set, so a `Tracked`
-        // pool read per player would read the previous player's picks. No
-        // producer emits this; refuse it rather than offer the wrong cards.
-        // (The random pick reads every pool before it publishes.)
-        if candidate_source == ZoneChoiceCandidateSource::Tracked {
-            return Err(EffectError::MissingParam(
-                "ChooseFromZone Each with a Tracked pool is not modelled for chosen picks"
-                    .to_string(),
-            ));
-        }
+        // CR 608.2c + CR 608.2d: each pick rebinds the chain's tracked set, so
+        // a `Tracked` pool ("For each opponent, choose a land card that player
+        // owns exiled this way" — Ensign Pavel Chekov) is pinned to the set the
+        // instruction names when the iteration begins. Every later player's
+        // pool reads that pinned set, never the previous player's picks. (The
+        // random pick reads every pool before it publishes.)
+        let tracked_pool = (candidate_source == ZoneChoiceCandidateSource::Tracked)
+            .then_some(state.chain_tracked_set_id)
+            .flatten();
         let players = per_player_iteration_population(state, ability, scope);
         // No pick has accumulated yet — the first one must start a fresh set.
         return advance_per_player_iteration(
@@ -111,6 +110,7 @@ pub fn resolve(
                 current: None,
                 nominee: None,
                 accumulated: false,
+                tracked_pool,
             },
             events,
         );
@@ -820,7 +820,7 @@ pub(crate) fn resolve_random_in_chain(
         // same outcome as this branch's all-pools-empty case.
         if let Ok(spec) = PerPlayerSpec::of(ability) {
             for player in per_player_iteration_population(state, ability, scope) {
-                let pool = spec.pool(state, ability, player);
+                let pool = spec.pool(state, ability, player, None);
                 let clamped = count.min(pool.len());
                 picked.extend(
                     pool.choose_multiple(state.rng.draw(RandomDraw::Outcome), clamped)
@@ -929,7 +929,16 @@ impl PerPlayerSpec {
         }
     }
 
-    fn pool(&self, state: &GameState, ability: &ResolvedAbility, owner: PlayerId) -> Vec<ObjectId> {
+    /// `tracked_pool` is the iteration's pinned `Tracked` set
+    /// ([`PendingPerPlayerZoneChoice::tracked_pool`]); `None` reads the pool's
+    /// provenance live.
+    fn pool(
+        &self,
+        state: &GameState,
+        ability: &ResolvedAbility,
+        owner: PlayerId,
+        tracked_pool: Option<TrackedSetId>,
+    ) -> Vec<ObjectId> {
         if self.count == 0 {
             return Vec::new();
         }
@@ -944,14 +953,26 @@ impl PerPlayerSpec {
         // CR 608.2c + CR 608.2d: a source-bound pool names a set of objects;
         // each player's pick is the part of that set in their own zone(s).
         // `Direct` and `Legacy` read each player's zone(s) (CR 101.4).
-        match source_bound_candidates(
-            state,
-            ability,
-            self.zone,
-            &self.additional_zones,
-            self.filter.as_ref(),
-            self.candidate_source,
-        ) {
+        // CR 608.2c: a pinned `Tracked` pool reads the set the instruction
+        // named, not the chain set this iteration's own picks have rebound.
+        let bound = match (self.candidate_source, tracked_pool) {
+            (ZoneChoiceCandidateSource::Tracked, Some(set_id)) => Some(
+                state
+                    .tracked_object_sets
+                    .get(&set_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
+            _ => source_bound_candidates(
+                state,
+                ability,
+                self.zone,
+                &self.additional_zones,
+                self.filter.as_ref(),
+                self.candidate_source,
+            ),
+        };
+        match bound {
             Some(bound) => cards.into_iter().filter(|id| bound.contains(id)).collect(),
             None => cards,
         }
@@ -1021,6 +1042,8 @@ struct PerPlayerCursor {
     /// CR 800.4g: the player elected to make the pending pool choice only.
     nominee: Option<PlayerId>,
     accumulated: bool,
+    /// CR 608.2c: the pinned `Tracked` pool set, if any.
+    tracked_pool: Option<TrackedSetId>,
 }
 
 impl PerPlayerCursor {
@@ -1031,6 +1054,7 @@ impl PerPlayerCursor {
             accumulated,
             current,
             nominee,
+            tracked_pool,
         } = frame;
         (
             ability,
@@ -1039,6 +1063,7 @@ impl PerPlayerCursor {
                 current,
                 nominee,
                 accumulated,
+                tracked_pool,
             },
         )
     }
@@ -1050,6 +1075,7 @@ impl PerPlayerCursor {
             accumulated: self.accumulated,
             current: self.current,
             nominee: self.nominee,
+            tracked_pool: self.tracked_pool,
         }
     }
 }
@@ -1088,11 +1114,14 @@ fn advance_per_player_iteration(
         mut current,
         mut nominee,
         accumulated,
+        tracked_pool,
     } = cursor;
     // CR 800.4a: a player who has left the game is no longer iterated.
     remaining.retain(|&player| players::is_alive(state, player));
     if let Some(owner) = current {
-        if !players::is_alive(state, owner) || spec.pool(state, ability, owner).is_empty() {
+        if !players::is_alive(state, owner)
+            || spec.pool(state, ability, owner, tracked_pool).is_empty()
+        {
             current = None;
         }
     }
@@ -1104,7 +1133,7 @@ fn advance_per_player_iteration(
             let eligible: Vec<PlayerId> = remaining
                 .iter()
                 .copied()
-                .filter(|&player| !spec.pool(state, ability, player).is_empty())
+                .filter(|&player| !spec.pool(state, ability, player, tracked_pool).is_empty())
                 .collect();
             let Some(&first) = eligible.first() else {
                 finish_per_player_iteration(state, ability, accumulated, events);
@@ -1133,6 +1162,7 @@ fn advance_per_player_iteration(
                             current: None,
                             nominee: None,
                             accumulated,
+                            tracked_pool,
                         }
                         .park(ability),
                     );
@@ -1176,11 +1206,12 @@ fn advance_per_player_iteration(
         current: Some(owner),
         nominee: maker.and(nominee),
         accumulated,
+        tracked_pool,
     };
     capture_per_player_trigger_context(state);
     match maker {
         Some(maker) => {
-            let cards = spec.pool(state, ability, owner);
+            let cards = spec.pool(state, ability, owner, tracked_pool);
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: maker,
                 count: spec.count.min(cards.len()),
@@ -1554,7 +1585,7 @@ pub(crate) fn migrate_legacy_per_player_frame_on_restore(
         return Err(UNESTABLISHED.to_string());
     }
     let spec = PerPlayerSpec::of(&frame.ability).map_err(|e| e.to_string())?;
-    let pool = spec.pool(state, &frame.ability, owner);
+    let pool = spec.pool(state, &frame.ability, owner, frame.tracked_pool);
     let consistent = prompt_cards
         .iter()
         .filter(|id| {
@@ -4949,22 +4980,17 @@ mod tests {
         }
     }
 
-    /// A chosen per-player pick with a `Tracked` pool is refused (each pick
-    /// rebinds the tracked set); the same pick from `Direct` opens a prompt.
+    /// CR 608.2c + CR 608.2d: a chosen per-player pick with a `Tracked` pool
+    /// offers only the tracked cards in that player's zone; the same pick from
+    /// `Direct` offers the whole zone.
     #[test]
-    fn chosen_per_player_pick_refuses_a_tracked_pool() {
-        for (source, refused) in [
-            (
-                crate::types::ability::ZoneChoiceCandidateSource::Tracked,
-                true,
-            ),
-            (
-                crate::types::ability::ZoneChoiceCandidateSource::Direct,
-                false,
-            ),
+    fn chosen_per_player_pick_reads_the_pinned_tracked_pool() {
+        for source in [
+            crate::types::ability::ZoneChoiceCandidateSource::Tracked,
+            crate::types::ability::ZoneChoiceCandidateSource::Direct,
         ] {
             let mut state = GameState::new_two_player(42);
-            let (named, _unrelated) = named_and_unrelated_graveyard_cards(&mut state);
+            let (named, unrelated) = named_and_unrelated_graveyard_cards(&mut state);
             state
                 .tracked_object_sets
                 .insert(TrackedSetId(1), vec![named]);
@@ -4991,14 +5017,25 @@ mod tests {
             );
             install_test_carrier(&mut state, ObjectId(100), PlayerId(0));
             let mut events = Vec::new();
-            let result = resolve(&mut state, &ability, &mut events);
-            assert_eq!(result.is_err(), refused, "{source:?}: {result:?}");
-            if !refused {
-                assert!(matches!(
-                    state.waiting_for,
-                    WaitingFor::ChooseFromZoneChoice { .. }
-                ));
-            }
+            resolve(&mut state, &ability, &mut events).expect("per-player pick opens");
+            let WaitingFor::ChooseFromZoneChoice { cards, player, .. } = &state.waiting_for else {
+                panic!(
+                    "{source:?}: expected a pool prompt, got {:?}",
+                    state.waiting_for
+                );
+            };
+            assert_eq!(*player, PlayerId(0));
+            let expected = match source {
+                crate::types::ability::ZoneChoiceCandidateSource::Tracked => vec![named],
+                _ => vec![named, unrelated],
+            };
+            assert_eq!(cards, &expected, "{source:?}");
+            let frame = state
+                .active_per_player_zone_choice()
+                .expect("the iteration is parked");
+            let pinned = (source == crate::types::ability::ZoneChoiceCandidateSource::Tracked)
+                .then_some(TrackedSetId(1));
+            assert_eq!(frame.tracked_pool, pinned, "{source:?}");
         }
     }
 
@@ -5932,6 +5969,7 @@ mod tests {
             accumulated: false,
             current: Some(PlayerId(1)),
             nominee: None,
+            tracked_pool: None,
         });
 
         let mut events = Vec::new();

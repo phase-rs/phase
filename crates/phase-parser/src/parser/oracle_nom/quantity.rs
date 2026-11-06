@@ -6,9 +6,11 @@
 
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until, take_while1};
-use nom::character::complete::satisfy;
-use nom::combinator::{all_consuming, eof, map, map_opt, map_res, not, opt, peek, value, verify};
+use nom::bytes::complete::{tag, tag_no_case, take_until, take_while1};
+use nom::character::complete::{multispace1, satisfy};
+use nom::combinator::{
+    all_consuming, consumed, eof, map, map_opt, map_res, not, opt, peek, value, verify,
+};
 use nom::multi::{many0, many1, separated_list1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -18,7 +20,7 @@ use super::duration::parse_cast_snapshot_suffix;
 use super::error::{oracle_err, OracleResult};
 use super::primitives::{
     parse_article, parse_color, parse_core_type, parse_counter_type_typed, parse_keyword_name,
-    parse_number, scan_preceded,
+    parse_number, scan_at_word_boundaries, scan_preceded,
 };
 use super::target::{
     parse_controller_phrase, parse_type_filter_word, ControllerForm, ControllerSubject,
@@ -1659,6 +1661,52 @@ fn parse_commander_zone_disjunction(input: &str) -> OracleResult<'_, TargetFilte
     ))
 }
 
+/// CR 903.3e: A characteristic read of "your commander" finds that player's
+/// commander in every zone, including their library and hand, so an aggregate
+/// over your commanders names every zone.
+///
+/// The read does the widening, not the phrase: the shared type-phrase grammar
+/// leaves "your commanders" unzoned because it also names a trigger subject
+/// ("your commander enters or attacks"). Only the population that "your
+/// commanders" and "commanders you own" parse to is widened: a typed filter with
+/// no controller, no type filters, and exactly the properties
+/// `FilterProp::Owned { controller: ControllerRef::You }` and
+/// `FilterProp::IsCommander`, in either order. That is the population of
+/// Tangleweave Armor and Cactus Preserve ("where X is the greatest mana value
+/// among your commanders"). Every other filter stays as written, among them a
+/// controller clause (CR 903.3d: controlling a commander means a permanent on the
+/// battlefield), a named zone (CR 903.3d: a commander in a specific zone), a
+/// tapped or untapped requirement (CR 110.5d: cards not on the battlefield are
+/// neither tapped nor untapped) and any type filter.
+fn your_commanders_in_every_zone(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed)
+            if typed.controller.is_none()
+                && typed.type_filters.is_empty()
+                && matches!(
+                    typed.properties.as_slice(),
+                    [
+                        FilterProp::Owned {
+                            controller: ControllerRef::You
+                        },
+                        FilterProp::IsCommander
+                    ] | [
+                        FilterProp::IsCommander,
+                        FilterProp::Owned {
+                            controller: ControllerRef::You
+                        }
+                    ]
+                ) =>
+        {
+            typed.properties.push(FilterProp::InAnyZone {
+                zones: Zone::ALL.to_vec(),
+            });
+            TargetFilter::Typed(typed)
+        }
+        other => other,
+    }
+}
+
 /// Parse "the greatest mana value of a commander you own on the battlefield or in the command zone".
 ///
 /// CR 202.3: Superlative "greatest" requires aggregate-max.
@@ -1667,7 +1715,7 @@ fn parse_commander_zone_disjunction(input: &str) -> OracleResult<'_, TargetFilte
 /// Used for flashback costs with "where X is the greatest mana value of a commander you own
 /// on the battlefield or in the command zone".
 ///
-/// Maps to `QuantityRef::Aggregate` with Max function to handle partner commanders.
+/// Maps to `QuantityRef::PropertyAggregate` with Max function to handle partner commanders.
 fn parse_greatest_commander_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("the greatest ").parse(input)?;
     let (rest, property) = parse_mana_value_phrase(rest)?;
@@ -2211,8 +2259,14 @@ fn parse_object_property_aggregate_ref(input: &str) -> OracleResult<'_, Quantity
     Ok((
         final_remainder,
         QuantityRef::PropertyAggregate(
-            PropertyAggregate::new(function, property, CardTypeSetSource::Objects { filter })
-                .expect("object populations support every aggregate property"),
+            PropertyAggregate::new(
+                function,
+                property,
+                CardTypeSetSource::Objects {
+                    filter: your_commanders_in_every_zone(filter),
+                },
+            )
+            .expect("object populations support every aggregate property"),
         ),
     ))
 }
@@ -4700,7 +4754,7 @@ fn parse_cost_paid_object_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
             scope: ObjectScope::CostPaidObject,
         },
-        // ManaSymbolCount is produced only via `QuantityRef::Aggregate`, never
+        // ManaSymbolCount is produced only via `QuantityRef::PropertyAggregate`, never
         // as a single cost-paid-object reference.
         ObjectProperty::ManaSymbolCount(_) => return Err(oracle_err(input)),
     };
@@ -5588,6 +5642,21 @@ pub(crate) fn parse_event_context_opponent_dealt_damage(
     ))
 }
 
+/// CR 107.14 + CR 122.1: "{E} you've paid or lost this turn" counts the energy
+/// counters the controller removed from themselves this turn (Blaster Hulk).
+/// `multispace1` absorbs the double space left where the "(energy counter)"
+/// reminder text was stripped; `tag_no_case` accepts the symbol in either the
+/// printed (`{E}`) or lowered (`{e}`) form, since callers pass both.
+fn parse_for_each_energy_paid_or_lost_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = (
+        tag_no_case("{e}"),
+        multispace1,
+        tag("you've paid or lost this turn"),
+    )
+        .parse(input)?;
+    Ok((rest, QuantityRef::EnergyPaidOrLostThisTurn))
+}
+
 /// CR 106.4: "unspent [color] mana you have" counts floating mana in the
 /// controller's mana pool.
 fn parse_for_each_unspent_mana(input: &str) -> OracleResult<'_, QuantityRef> {
@@ -5808,6 +5877,65 @@ fn parse_card_with_relative_clause(input: &str) -> OracleResult<'_, TargetFilter
     ))
 }
 
+/// CR 608.2c: whether `text` names a player through an anaphor ("they",
+/// "that player", "its controller", "its owner") in any position the shared
+/// population grammar binds to a fixed player regardless of the supplied
+/// antecedents. Lets a reader whose population grammar cannot bind an anaphor
+/// to its antecedent decline the phrase instead of accepting a context-free
+/// default. Direct players ("you control", "you own", "your graveyard") do not
+/// count.
+fn names_player_anaphor(text: &str) -> bool {
+    scan_at_word_boundaries(text, parse_population_player_anaphor).is_some()
+}
+
+/// CR 608.2c: one anaphoric player reference inside a population phrase.
+///
+/// * control — "they control", "that player controls", "its controller
+///   controls": the anaphoric subjects of the shared `parse_controller_phrase`;
+/// * CR 108.3 ownership — "they own", "that player owns", "owned by that
+///   player";
+/// * CR 404.1 zone owner — "their graveyard", "that player's graveyard", "its
+///   owner's graveyard", "its controller's graveyard".
+fn parse_population_player_anaphor(input: &str) -> OracleResult<'_, ()> {
+    let anaphoric_subject = || {
+        alt((
+            tag("that player"),
+            tag("they"),
+            preceded(alt((tag("its "), tag("their "))), tag("controller")),
+        ))
+    };
+    alt((
+        value(
+            (),
+            verify(parse_controller_phrase, |phrase| {
+                matches!(phrase.subject, ControllerSubject::Anaphoric(_))
+            }),
+        ),
+        value(
+            (),
+            (
+                anaphoric_subject(),
+                tag(" "),
+                alt((tag("owns"), tag("own"))),
+                not(satisfy(char::is_alphanumeric)),
+            ),
+        ),
+        value((), (tag("owned by "), anaphoric_subject())),
+        value(
+            (),
+            alt((
+                tag("their "),
+                tag("that player's "),
+                preceded(
+                    alt((tag("its "), tag("their "))),
+                    alt((tag("owner's "), tag("controller's "))),
+                ),
+            )),
+        ),
+    ))
+    .parse(input)
+}
+
 fn parse_for_each_clause_ref_with_they_controller<'a>(
     input: &'a str,
     antecedents: &PlayerAntecedents,
@@ -5851,9 +5979,41 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
             // CR 205.2a: "for each card type among <population>" and "card type
             // they share with <population>" share the population grammar; nested
             // to keep the outer `alt` within nom's tuple arity (21 items).
+            //
+            // CR 205.3m: "for every five creature types among non-Borg creatures
+            // you control" (Sarek) — the category-restricted distinct-subtype
+            // count shares the same population grammar, so the grouped
+            // "for each/every N …" reader can divide it. Its "<category> type"
+            // head must precede the generic controlled-type arms, whose leading
+            // "creature" token would otherwise commit.
             alt((
                 parse_distinct_card_types_among,
                 parse_shared_card_types_with,
+                // This for-each extension is creature-only; other categories
+                // retain their existing number-of quantity-reader support.
+                //
+                // CR 608.2c + CR 109.5: the shared population grammar reads its
+                // controller, owner and zone owner without this reader's player
+                // antecedents, so an anaphoric "they control" / "they own" /
+                // "their graveyard" would bind to a fixed player instead of the
+                // iterating or scoped one. No printed card uses that framing
+                // here (Sarek names "you control"), so the arm declines it
+                // rather than bind the wrong player.
+                map(
+                    verify(
+                        consumed(parse_distinct_category_subtypes_among),
+                        |(population, qty): &(&str, QuantityRef)| {
+                            matches!(
+                                qty,
+                                QuantityRef::DistinctSubtypes {
+                                    restrict: Some(SubtypeSet::Creature),
+                                    ..
+                                }
+                            ) && !names_player_anaphor(population)
+                        },
+                    ),
+                    |(_, qty)| qty,
+                ),
             )),
             // CR 108.3: owned-card populations; nested to keep the outer `alt`
             // within nom's tuple arity (21 items).
@@ -5908,7 +6068,10 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
         parse_for_each_battlefield_type,
         parse_for_each_commander_cast_count,
         parse_mana_spent_to_cast_ref,
-        parse_for_each_unspent_mana,
+        alt((
+            parse_for_each_unspent_mana,
+            parse_for_each_energy_paid_or_lost_this_turn,
+        )),
         parse_for_each_distinct_colors_among_permanents,
         // CR 122.1: "kind of counter on/among <filter>" (Bribe Taker). Placed
         // before the generic `<type> you control` arm so the leading "kind"
@@ -6272,6 +6435,21 @@ pub(crate) fn parse_mana_from_source_spent_to_cast(input: &str) -> OracleResult<
     // SelfObject literal retained: this ref form never accepts "that" subjects.
     let (rest, _scope) = parse_mana_spent_self_subject(rest)?;
     Ok((rest, source_filter))
+}
+
+/// CR 106.3 + CR 601.2h: the name-independent head of "using mana produced by
+/// <source>", the clause that says which source's mana paid for a spell.
+pub(crate) fn parse_using_mana_produced_by_head(input: &str) -> OracleResult<'_, &str> {
+    tag("using mana produced by ").parse(input)
+}
+
+/// CR 106.3 + CR 201.5: "using mana produced by ~", naming the trigger's own source.
+pub(crate) fn parse_using_mana_produced_by_self(input: &str) -> OracleResult<'_, ()> {
+    preceded(
+        parse_using_mana_produced_by_head,
+        super::duration::parse_self_reference_subject,
+    )
+    .parse(input)
 }
 
 pub(crate) fn parse_mana_source_filter(input: &str) -> OracleResult<'_, TargetFilter> {
@@ -10578,6 +10756,27 @@ mod tests {
         }
     }
 
+    /// CR 106.3 + CR 201.5: the clause reads the trigger's own source, whichever
+    /// self-reference token the text uses; the head alone is name-independent.
+    #[test]
+    fn parse_using_mana_produced_by_reads_only_a_self_reference_tail() {
+        for source in ["~", "this permanent", "this land"] {
+            let clause = format!("using mana produced by {source}");
+            assert_eq!(
+                parse_using_mana_produced_by_self(&clause),
+                Ok(("", ())),
+                "{clause:?}"
+            );
+        }
+        assert!(parse_using_mana_produced_by_self("using teamwork").is_err());
+        assert!(parse_using_mana_produced_by_self("using mana produced by a treasure").is_err());
+        assert_eq!(
+            parse_using_mana_produced_by_head("using mana produced by a treasure"),
+            Ok(("a treasure", "using mana produced by "))
+        );
+        assert!(parse_using_mana_produced_by_head("using teamwork").is_err());
+    }
+
     #[test]
     fn parse_for_each_unspent_mana_rejects_invalid_color_and_spent_to_cast() {
         assert!(parse_for_each_clause_ref("unspent purple mana you have").is_err());
@@ -11151,6 +11350,26 @@ mod tests {
                 .unwrap();
         assert_eq!(rest, "");
         assert!(matches!(q, QuantityRef::DistinctCounterKindsAmong { .. }));
+    }
+
+    #[test]
+    fn for_each_category_subtypes_accepts_creatures_without_extending_planeswalkers() {
+        // SHAPE: the for-each extension is limited to the creature-type class.
+        let (_, qty) = parse_for_each_clause_ref_complete(
+            "creature types among non-borg creatures you control",
+        )
+        .expect("the complete creature-type for-each clause parses");
+        assert!(matches!(
+            qty,
+            QuantityRef::DistinctSubtypes {
+                restrict: Some(SubtypeSet::Creature),
+                ..
+            }
+        ));
+        assert!(parse_for_each_clause_ref_complete(
+            "planeswalker types among planeswalkers you control"
+        )
+        .is_err());
     }
 
     #[test]
@@ -13569,6 +13788,78 @@ mod tests {
         ));
     }
 
+    /// CR 608.2c + CR 109.5: the creature-type for-each arm keeps a literal
+    /// "you control" / "you own" / "your graveyard" population under a supplied
+    /// player antecedent, and declines the anaphoric control, ownership and
+    /// zone-owner framings its population grammar cannot bind to that
+    /// antecedent.
+    #[test]
+    fn for_each_creature_types_among_discriminates_controller_from_antecedent() {
+        let ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..Default::default()
+        };
+        let (rest, q) = parse_for_each_clause_ref_with_context(
+            "creature types among non-borg creatures you control",
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::DistinctSubtypes {
+                source: CardTypeSetSource::Objects {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        controller: Some(ControllerRef::You),
+                        ..
+                    })
+                },
+                restrict: Some(SubtypeSet::Creature),
+                ..
+            }
+        ));
+        for direct in [
+            "creature types among creatures you own",
+            "creature types among creature cards in your graveyard",
+        ] {
+            let parsed = parse_for_each_clause_ref_with_context(direct, &ctx);
+            assert!(
+                matches!(
+                    parsed,
+                    Ok((
+                        "",
+                        QuantityRef::DistinctSubtypes {
+                            restrict: Some(SubtypeSet::Creature),
+                            ..
+                        }
+                    ))
+                ),
+                "{direct}: a direct player stays accepted, got {parsed:?}"
+            );
+        }
+        for anaphoric in [
+            "creature types among non-borg creatures they control",
+            "creature types among creatures that player controls",
+            "creature types among creatures they own",
+            "creature types among creatures owned by that player",
+            "creature types among creature cards in their graveyard",
+            "creature types among creature cards in that player's graveyard",
+        ] {
+            let parsed = parse_for_each_clause_ref_with_context(anaphoric, &ctx);
+            assert!(
+                !matches!(parsed, Ok((_, QuantityRef::DistinctSubtypes { .. }))),
+                "{anaphoric}: must not bind a subtype count, got {parsed:?}"
+            );
+            assert!(
+                !matches!(
+                    parse_for_each_clause_ref(anaphoric),
+                    Ok((_, QuantityRef::DistinctSubtypes { .. }))
+                ),
+                "{anaphoric}: unscoped reader must decline too"
+            );
+        }
+    }
+
     #[test]
     fn test_parse_for_each_attacking_creature_you_control_ignores_they_context() {
         let ctx = ParseContext {
@@ -14576,6 +14867,224 @@ mod tests {
         };
 
         assert_eq!(owner, ControllerRef::You);
+    }
+
+    /// Reads a fully consumed object aggregate as its function, property and
+    /// population.
+    fn object_aggregate(phrase: &str) -> (AggregateFunction, ObjectProperty, TargetFilter) {
+        let (rest, qty) = parse_quantity_ref_complete(phrase).unwrap();
+        assert_eq!(rest, "", "{phrase}");
+        let QuantityRef::PropertyAggregate(aggregate) = qty else {
+            panic!("{phrase}: expected a property aggregate, got {qty:?}");
+        };
+        let CardTypeSetSource::Objects { filter } = aggregate.source() else {
+            panic!(
+                "{phrase}: expected an object population, got {:?}",
+                aggregate.source()
+            );
+        };
+        (aggregate.function(), aggregate.property(), filter.clone())
+    }
+
+    fn typed_population(
+        controller: Option<ControllerRef>,
+        properties: Vec<FilterProp>,
+    ) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            controller,
+            properties,
+            ..Default::default()
+        })
+    }
+
+    /// CR 903.3e: an aggregate over your commanders reads every zone. The first
+    /// row is the printed text of Tangleweave Armor ("Equipped creature gets
+    /// +X/+X, where X is the greatest mana value among your commanders.") and
+    /// Cactus Preserve. No printed card exhibits the shape of the other rows,
+    /// which vary the aggregate head and the ownership wording; the nearest
+    /// printed card is Tangleweave Armor.
+    #[test]
+    fn your_commanders_aggregate_reads_every_zone() {
+        let every_zone = || FilterProp::InAnyZone {
+            zones: Zone::ALL.to_vec(),
+        };
+        let owned = || FilterProp::Owned {
+            controller: ControllerRef::You,
+        };
+        for (phrase, function, property) in [
+            (
+                "the greatest mana value among your commanders",
+                AggregateFunction::Max,
+                ObjectProperty::ManaValue,
+            ),
+            (
+                "the highest mana value among your commanders",
+                AggregateFunction::Max,
+                ObjectProperty::ManaValue,
+            ),
+            (
+                "the greatest power among your commanders",
+                AggregateFunction::Max,
+                ObjectProperty::Power,
+            ),
+            (
+                "the greatest toughness among your commanders",
+                AggregateFunction::Max,
+                ObjectProperty::Toughness,
+            ),
+            (
+                "the total mana value of your commanders",
+                AggregateFunction::Sum,
+                ObjectProperty::ManaValue,
+            ),
+        ] {
+            let (parsed_function, parsed_property, filter) = object_aggregate(phrase);
+            assert_eq!(
+                (parsed_function, parsed_property),
+                (function, property),
+                "{phrase}"
+            );
+            assert_eq!(
+                filter,
+                typed_population(None, vec![owned(), FilterProp::IsCommander, every_zone()]),
+                "{phrase}"
+            );
+        }
+        let (_, _, filter) = object_aggregate("the greatest mana value among commanders you own");
+        assert_eq!(
+            filter,
+            typed_population(None, vec![FilterProp::IsCommander, owned(), every_zone()])
+        );
+    }
+
+    /// CR 903.3d + CR 109.2 + CR 110.5d: every other commander population stays as
+    /// written, and CR 903.3e's "your commander" does not reach another player's
+    /// commander.
+    #[test]
+    fn other_commander_readings_keep_their_population() {
+        let owned_by = |controller| FilterProp::Owned { controller };
+        for (phrase, expected) in [
+            // CR 903.3d, "controlling a commander". Command Chair: "{T}: Add X mana
+            // of any one color, where X is the greatest mana value among commanders
+            // you control."
+            (
+                "the greatest mana value among commanders you control",
+                typed_population(Some(ControllerRef::You), vec![FilterProp::IsCommander]),
+            ),
+            // No printed card exhibits this shape; the nearest printed card is
+            // Command Chair.
+            (
+                "the greatest mana value among commanders you own and control",
+                typed_population(
+                    Some(ControllerRef::You),
+                    vec![FilterProp::IsCommander, owned_by(ControllerRef::You)],
+                ),
+            ),
+            // CR 903.3d, "a commander in a specific zone". No printed card exhibits
+            // this shape; the nearest printed card is Command Beacon ("Put your
+            // commander into your hand from the command zone.").
+            (
+                "the greatest mana value among your commanders in the command zone",
+                typed_population(
+                    None,
+                    vec![
+                        owned_by(ControllerRef::You),
+                        FilterProp::IsCommander,
+                        FilterProp::InZone {
+                            zone: Zone::Command,
+                        },
+                    ],
+                ),
+            ),
+            // CR 903.3d, named zones. Cloudkill: "All creatures get -X/-X until end
+            // of turn, where X is the greatest mana value of a commander you own on
+            // the battlefield or in the command zone."
+            (
+                "the greatest mana value of a commander you own on the battlefield or in the command zone",
+                typed_population(
+                    None,
+                    vec![
+                        FilterProp::IsCommander,
+                        FilterProp::InAnyZone {
+                            zones: vec![Zone::Battlefield, Zone::Command],
+                        },
+                        owned_by(ControllerRef::You),
+                    ],
+                ),
+            ),
+            // Kept only to pin the population as written; this reading is not derived
+            // from a printed card. No printed card exhibits this shape; the nearest
+            // printed card is Command Chair.
+            (
+                "the greatest mana value among commanders",
+                typed_population(None, vec![FilterProp::IsCommander]),
+            ),
+            // CR 109.2: a card type makes it a permanent on the battlefield. No printed
+            // card exhibits this shape; the nearest printed card is Raised by Giants
+            // ("Commander creatures you own have base power and toughness 10/10 and are
+            // Giants in addition to their other types.").
+            (
+                "the greatest power among commander creatures you own",
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![FilterProp::IsCommander, owned_by(ControllerRef::You)],
+                }),
+            ),
+            // CR 110.5d: only permanents have status; cards not on the battlefield are
+            // neither tapped nor untapped. The population stays as written, and with
+            // no zone it reads the battlefield. No printed card exhibits this shape;
+            // the nearest printed card is Tangleweave Armor.
+            (
+                "the greatest mana value among untapped commanders you own",
+                typed_population(
+                    None,
+                    vec![
+                        FilterProp::Untapped,
+                        FilterProp::IsCommander,
+                        owned_by(ControllerRef::You),
+                    ],
+                ),
+            ),
+            // Not "your commander" (CR 903.3e). No printed card exhibits this shape; the
+            // nearest printed card is Imposing Grandeur ("Each player may discard their
+            // hand and draw cards equal to the greatest mana value of a commander they
+            // own on the battlefield or in the command zone.").
+            (
+                "the greatest mana value among commanders an opponent owns",
+                typed_population(
+                    None,
+                    vec![FilterProp::IsCommander, owned_by(ControllerRef::Opponent)],
+                ),
+            ),
+            // Not "your commander" (CR 903.3e). No printed card exhibits this shape; the
+            // nearest printed card is Imposing Grandeur.
+            (
+                "the greatest mana value among commanders they own",
+                typed_population(
+                    None,
+                    vec![
+                        FilterProp::IsCommander,
+                        owned_by(ControllerRef::ScopedPlayer),
+                    ],
+                ),
+            ),
+        ] {
+            assert_eq!(object_aggregate(phrase).2, expected, "{phrase}");
+        }
+
+        // Tome of Legends: "Whenever your commander enters or attacks, put a page
+        // counter on this artifact." The shared type-phrase grammar is not widened,
+        // so the trigger subject names no zone.
+        let (filter, rest) = parse_type_phrase_folding("your commander enters or attacks");
+        assert_eq!(
+            filter,
+            typed_population(
+                None,
+                vec![owned_by(ControllerRef::You), FilterProp::IsCommander]
+            )
+        );
+        assert_eq!(rest, "enters or attacks");
     }
 
     /// CR 701.17a + CR 701.17c: "the milled card's mana value" routes through
