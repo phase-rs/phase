@@ -1531,6 +1531,33 @@ describe("WebSocketAdapter", () => {
       expect(nativeSocket.close).toHaveBeenCalledTimes(1);
     });
 
+    it("rejects a GameCreated without a Full session key before it can replace native reconnect credentials", async () => {
+      const nativeAdapter = nativeReconnectAdapter();
+      const listener = vi.fn();
+      nativeAdapter.onEvent(listener);
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      listener.mockClear();
+
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameCreated",
+          data: { game_code: "NATIVE", player_token: "guest-token" },
+        }),
+      );
+
+      await expect(attached).rejects.toThrow("Server omitted a valid Full session identity");
+      expect(nativeAdapter.nativeSession).toEqual({
+        gameCode: "NATIVE",
+        playerId: 1,
+        playerToken: "guest-token",
+        fullKey: { game_code: "NATIVE", generation: 1 },
+      });
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+    });
+
     it("rejects a hostile SessionAttached before it can settle native reconnect", async () => {
       const nativeAdapter = nativeReconnectAdapter();
       const listener = vi.fn();
@@ -1643,6 +1670,29 @@ describe("WebSocketAdapter", () => {
       await expect(nativeAdapter.getSnapshot()).rejects.toThrow("No game state available");
       expect(listener).toHaveBeenCalledTimes(1);
       expect(listener).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+    });
+
+    it("reports the Full key before the seat or token when a native reconnect GameStarted is wrong on all three (the shared comparator's order)", async () => {
+      const nativeAdapter = nativeReconnectAdapter();
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameStarted",
+          data: {
+            state_revision: 7,
+            state: createMockState(),
+            your_player: 0,
+            player_token: "attacker-token",
+            full_key: { game_code: "NATIVE", generation: 2 },
+          },
+        }),
+      );
+
+      await expect(attached).rejects.toThrow("Server changed the Full session identity");
+      await expect(nativeAdapter.getSnapshot()).rejects.toThrow("No game state available");
     });
 
     it("rejects a native reconnect GameStarted without a Full session key before caching it", async () => {
@@ -6209,6 +6259,43 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
     return socket;
   }
 
+  const GAME_ENDED_MESSAGE = "The game ended before the join could finish after state delivery failed.";
+  const TERMINAL_DELIVERY: FullTerminalDelivery = {
+    key: REPLY_OWNERSHIP_FULL_KEY,
+    terminalRevision: 9,
+    deliveryId: "episode-delivery",
+    credential: "episode-credential",
+    display: { winner: 0, reason: "Finished" },
+    finalView: { players: [], objects: {}, waiting_for: { type: "GameOver", data: { winner: 0 } } } as unknown as GameState,
+  };
+  /**
+   * The inbound messages the episode router fails the join on beyond a refusal, with the single
+   * failure each yields, and the event the same message publishes through its ordinary handler.
+   */
+  const ROUTED_TERMINALS = [
+    [
+      "RequestRejected",
+      { type: "RequestRejected", data: { reason: "Too many requests" } },
+      { code: "REQUEST_FAILED", message: "Too many requests", recoverable: true },
+      "requestRejected",
+    ],
+    [
+      "TerminalResult",
+      { type: "TerminalResult", data: { delivery: TERMINAL_DELIVERY } },
+      { code: "WS_CLOSED", message: GAME_ENDED_MESSAGE, recoverable: false },
+      "terminalDelivery",
+    ],
+    [
+      "GameOver",
+      { type: "GameOver", data: { winner: 0, reason: "Finished" } },
+      { code: "WS_CLOSED", message: GAME_ENDED_MESSAGE, recoverable: false },
+      "gameOver",
+    ],
+  ] as const;
+  /** A native AI driver fault: the router lists it as neutral, a fault of the game's driver and not of the join. */
+  const AI_DRIVER_FAULT = { type: "AiDriverFault", data: { fault: { id: 1, after_state_revision: 2, cause: null } } };
+  const AI_DRIVER_FAULT_MESSAGE = "Native AI driver stopped; this game can no longer advance.";
+
   describe("admission and plain completion", () => {
     it.each<FirstFullFailure>(["decodeFailure", "bootstrapRejection"])("finishes the same join on one snapshot-only Reconnect carrying the failed Full's credentials (%s)", async (kind) => {
       const join = await startJoin();
@@ -6350,6 +6437,19 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
         expect(latchesOf(adapter)).toEqual(CLEAN_LATCHES);
       } finally {
         adapter.dispose();
+      }
+    });
+
+    it("reports the Full key before the seat or token when a reply is wrong on all three (the shared comparator's order)", async () => {
+      const { join } = await fallbackWithReply(() => plainStarted(2, {
+        full_key: { game_code: "GAME01", generation: 8 }, your_player: 1, player_token: "other-token",
+      }));
+      try {
+        await expect(settledAs(join)).resolves.toMatchObject({
+          code: "WS_ERROR", message: "Server changed the Full session identity", recoverable: false,
+        });
+      } finally {
+        join.adapter.dispose();
       }
     });
 
@@ -6711,6 +6811,80 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
         fallback.dispatchSynthetic("message", plainStarted(4));
         await vi.waitFor(() => expect(join.outcome.value).toEqual({ resolvedWith: undefined }));
         expect(episodeEventsOf(join.events)).toEqual([]);
+      } finally {
+        join.adapter.dispose();
+      }
+    });
+  });
+
+  describe("the episode router (salvaged source)", () => {
+    beforeEach(() => { terminalStore.commit.mockClear(); });
+
+    it.each(ROUTED_TERMINALS)("fails the join once on %s, publishes nothing and lets a later explicit reconnect start fresh", async (_name, frame, failure) => {
+      const join = await startJoin();
+      const { adapter, events } = join;
+      try {
+        await failFirstFull(join, "decodeFailure");
+        const fallback = await snapshotOnlyHandshake("Reconnect", join.raw);
+        // Reach guards: the episode is active on its replacement socket with provisional credentials.
+        expect(fallbackOf(adapter)).toBe("reconnecting");
+        expect(join.outcome.value).toBe("never settled");
+        expect(adapter.nativeSession).not.toBeNull();
+
+        fallback.dispatchSynthetic("message", JSON.stringify(frame));
+        await expect(settledAs(join)).resolves.toMatchObject(failure);
+        // Let any asynchronous terminal handling that must not have started run.
+        await vi.advanceTimersByTimeAsync(0);
+        expect(typesOf(events)).toEqual(["serverHello", "serverHello"]);
+        expect(fallbackOf(adapter)).toBe("finished");
+        expect(latchesOf(adapter)).toEqual(CLEAN_LATCHES);
+        expect(adapter.nativeSession).toBeNull();
+        expect(adapter.gameCode).toBeNull();
+        expect(terminalStore.commit).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+
+        expect(adapter.tryReconnect(RECONNECT_SESSION as never)).toBe(true);
+        const fresh = await snapshotOnlyHandshake("Reconnect", fallback);
+        expect(sentFrames(fresh, "Reconnect")).toHaveLength(1);
+        expect(offeredCodec(fresh)).toBe(false);
+      } finally {
+        adapter.dispose();
+      }
+    });
+
+    it.each(ROUTED_TERMINALS)("still delivers %s through its ordinary handler on a healthy join (positive control)", async (_name, frame, _failure, ordinaryEvent) => {
+      const join = await startJoin();
+      try {
+        deliverCodec(join.raw, "Full", codecGameStarted(1, 1));
+        await expect(settledAs(join)).resolves.toEqual({ resolvedWith: undefined });
+        expect(fallbackOf(join.adapter)).toBe("unused");
+        join.raw.dispatchSynthetic("message", JSON.stringify(frame));
+        await vi.waitFor(() => expect(typesOf(join.events)).toContain(ordinaryEvent));
+      } finally {
+        join.adapter.dispose();
+      }
+    });
+
+    it("leaves the episode pending on an AiDriverFault, a fault of the game's driver, and still completes on the real GameStarted", async () => {
+      const join = await startJoin();
+      try {
+        await failFirstFull(join, "decodeFailure");
+        const fallback = await snapshotOnlyHandshake("Reconnect", join.raw);
+        expect(fallbackOf(join.adapter)).toBe("reconnecting");
+
+        fallback.dispatchSynthetic("message", JSON.stringify(AI_DRIVER_FAULT));
+        // Reach guard: the ordinary handler ran, so only the episode's fate is under test.
+        expect(typesOf(join.events)).toContain("aiDriverFault");
+        expect(join.events.filter((event) => event.type === "error")).toEqual([
+          { type: "error", message: AI_DRIVER_FAULT_MESSAGE },
+        ]);
+        expect(fallbackOf(join.adapter)).toBe("reconnecting");
+        expect(join.outcome.value).toBe("never settled");
+
+        fallback.dispatchSynthetic("message", plainStarted(3));
+        await expect(settledAs(join)).resolves.toEqual({ resolvedWith: undefined });
+        expect((await join.adapter.getSnapshot()).state.turn_number).toBe(3);
+        expect(fallbackOf(join.adapter)).toBe("finished");
       } finally {
         join.adapter.dispose();
       }
@@ -7697,6 +7871,84 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
           fallback.dispatchSynthetic("message", plainStarted(4));
           await expect(settledAs(join)).resolves.toEqual({ resolvedWith: undefined });
           expect(episodeEventsOf(join.events)).toEqual([]);
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+    });
+
+    describe("the episode router (held source)", () => {
+      beforeEach(() => { terminalStore.commit.mockClear(); });
+
+      it.each(ROUTED_TERMINALS)("fails the join once on %s, keeps the published session and lets a later explicit reconnect start fresh", async (_name, frame, failure) => {
+        const { join, fallback } = await heldFallback({ waitingSnapshot: true });
+        const { adapter, events } = join;
+        try {
+          // Reach guards: the episode is active on its replacement socket and the join is pending.
+          expect(fallbackOf(adapter)).toBe("reconnecting");
+          expect(join.outcome.value).toBe("never settled");
+
+          fallback.dispatchSynthetic("message", JSON.stringify(frame));
+          await expect(settledAs(join)).resolves.toMatchObject(failure);
+          await vi.advanceTimersByTimeAsync(0);
+          // One prefix, one replacement hello, then nothing from the failure itself.
+          expect(typesOf(events)).toEqual([...prefixOf(true), "serverHello"]);
+          expect(fallbackOf(adapter)).toBe("finished");
+          expect(latchesOf(adapter)).toEqual(CLEAN_LATCHES);
+          expect(adapter.nativeSession).toEqual(HELD_SESSION);
+          expect(terminalStore.commit).not.toHaveBeenCalled();
+          expect(vi.getTimerCount()).toBe(0);
+
+          expect(adapter.tryReconnect(RECONNECT_SESSION as never)).toBe(true);
+          const fresh = await snapshotOnlyHandshake("Reconnect", fallback);
+          expect(sentFrames(fresh, "Reconnect")).toHaveLength(1);
+          expect(offeredCodec(fresh)).toBe(false);
+        } finally {
+          adapter.dispose();
+        }
+      });
+
+      it("leaves the episode pending on an AiDriverFault, a fault of the game's driver, and still completes on the real GameStarted", async () => {
+        const { join, fallback } = await heldFallback();
+        try {
+          expect(fallbackOf(join.adapter)).toBe("reconnecting");
+          fallback.dispatchSynthetic("message", JSON.stringify(AI_DRIVER_FAULT));
+          // Reach guard: the ordinary handler ran, so only the episode's fate is under test.
+          expect(typesOf(join.events)).toContain("aiDriverFault");
+          expect(fallbackOf(join.adapter)).toBe("reconnecting");
+          expect(join.outcome.value).toBe("never settled");
+
+          fallback.dispatchSynthetic("message", plainStarted(3));
+          await expect(settledAs(join)).resolves.toEqual({ resolvedWith: undefined });
+          expect((await join.adapter.getSnapshot()).state.turn_number).toBe(3);
+          expect(fallbackOf(join.adapter)).toBe("finished");
+        } finally {
+          join.adapter.dispose();
+        }
+      });
+
+      // After the pregame return the episode is parked in awaitingGameStarted: its deadline is over and
+      // the join waits for the game to start as a joiner that never failed does, so the router is not
+      // active and a game that ends meanwhile takes its ordinary handlers (base behavior).
+      it("keeps base behavior for a TerminalResult and a GameOver that arrive while waiting for the game to start", async () => {
+        terminalStore.commit.mockClear();
+        const { join, fallback } = await heldFallback();
+        try {
+          fallback.dispatchSynthetic("message", gameCreated());
+          fallback.dispatchSynthetic("message", sessionAttached());
+          await vi.waitFor(() => expect(fallbackOf(join.adapter)).toBe("awaitingGameStarted"));
+
+          fallback.dispatchSynthetic("message", JSON.stringify(ROUTED_TERMINALS[1][1]));
+          await vi.waitFor(() => expect(typesOf(join.events)).toContain("terminalDelivery"));
+          expect(terminalStore.commit).toHaveBeenCalledOnce();
+          expect(join.events.filter((event) => event.type === "sessionChanged").slice(-1)[0])
+            .toMatchObject({ session: { terminalOnly: true } });
+
+          fallback.dispatchSynthetic("message", JSON.stringify(ROUTED_TERMINALS[2][1]));
+          expect(typesOf(join.events)).toContain("gameOver");
+          // Not a join outcome there: the original initialization is untouched.
+          expect(fallbackOf(join.adapter)).toBe("awaitingGameStarted");
+          expect(join.outcome.value).toBe("never settled");
         } finally {
           join.adapter.dispose();
         }

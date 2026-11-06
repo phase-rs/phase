@@ -1658,6 +1658,110 @@ function initialFallbackFailure(): AdapterError {
   );
 }
 
+/** The initialization failure a server `Error` carries (also the reply to an ordinary pending join). */
+function serverErrorInitializationError(data: { message: string; code?: string }): AdapterError {
+  return data.code === "deck_rejected"
+    ? new AdapterError(AdapterErrorCode.DECK_REJECTED, data.message, false)
+    : actionRejectionError(data.message);
+}
+
+/**
+ * What an inbound server message does to an ACTIVE initial fallback episode
+ * (`reconnecting`). `terminal` ends the episode as the original initialization's
+ * single failure; `neutral` leaves the episode running and lets the message's
+ * ordinary handler (or the episode-owned reply handlers) process it.
+ */
+type EpisodeRouting =
+  | { readonly kind: "terminal"; readonly error: AdapterError }
+  | { readonly kind: "neutral" };
+
+const EPISODE_NEUTRAL: EpisodeRouting = { kind: "neutral" };
+
+/**
+ * The single place that decides how every inbound message type bears on an
+ * active initial fallback episode. Handlers never consult the episode to decide
+ * whether a message ends the join; adding a message type that can end or
+ * contradict the join means adding its row here.
+ *
+ * Terminal (the join cannot finish, or the game is no longer the one the
+ * original join was waiting for):
+ *  - `Error`: the server refused the join; the ordinary initialization error.
+ *  - `PasswordRequired`: the room demands a password the join cannot supply.
+ *  - `StateWithheld` of a `GameStarted`: the bootstrap cannot be delivered. A
+ *    withheld `StateUpdate` is neutral: the join stays pending until a real
+ *    `GameStarted` or the deadline.
+ *  - `RequestRejected`: the server refused a request while the join was pending.
+ *  - `TerminalResult`, `GameOver`: the game ended before the join recovered.
+ *    The result is for a game this join never started playing, so nothing is
+ *    published (no session, no terminal delivery, no game-over event) and the
+ *    original codec failure stays in the episode's diagnostics only.
+ *
+ * Neutral, listed because the reason is not obvious:
+ *  - `AiDriverFault`: a native AI driver fault is a fault of the game's driver,
+ *    not an outcome of this join; its ordinary handler reports it and the
+ *    episode stays pending.
+ *  - `GameCreated`, `SessionAttached`, `GameStarted`: the episode's own replies,
+ *    validated against the retained identity by their handlers.
+ *  - `StateUpdate`, `PlayerSlotsUpdate`, `ActionRejected`, `ActionFailed`, and
+ *    every other message: ordinary traffic that answers no part of the join.
+ *
+ * A join parked in `awaitingGameStarted` (a held seat returned to its waiting
+ * room) is not routed here: the episode's deadline is over and it waits for the
+ * game to start exactly as a joiner that never failed does, so `TerminalResult`
+ * and `GameOver` take their ordinary handlers there.
+ */
+function episodeRouting(msg: { type: string; data?: unknown }): EpisodeRouting {
+  switch (msg.type) {
+    case "Error":
+      return {
+        kind: "terminal",
+        error: serverErrorInitializationError(msg.data as { message: string; code?: string }),
+      };
+    case "PasswordRequired":
+      return {
+        kind: "terminal",
+        error: new AdapterError("PASSWORD_REQUIRED", "Room requires a password", true),
+      };
+    case "StateWithheld": {
+      const data = msg.data as { withheld: WithheldFrame; reason: string };
+      return data.withheld.type === "GameStarted"
+        ? { kind: "terminal", error: new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.reason, true) }
+        : EPISODE_NEUTRAL;
+    }
+    case "RequestRejected": {
+      const data = (msg.data ?? {}) as { reason?: unknown };
+      return {
+        kind: "terminal",
+        error: new AdapterError(
+          AdapterErrorCode.REQUEST_FAILED,
+          typeof data.reason === "string" ? data.reason : "Server rejected the request.",
+          true,
+        ),
+      };
+    }
+    case "TerminalResult":
+    case "GameOver":
+      return {
+        kind: "terminal",
+        error: new AdapterError(
+          "WS_CLOSED",
+          "The game ended before the join could finish after state delivery failed.",
+          false,
+        ),
+      };
+    case "AiDriverFault":
+    case "GameCreated":
+    case "SessionAttached":
+    case "GameStarted":
+    case "StateUpdate":
+    case "PlayerSlotsUpdate":
+    case "ActionRejected":
+    case "ActionFailed":
+    default:
+      return EPISODE_NEUTRAL;
+  }
+}
+
 /** The pregame frames a server may answer an initial fallback's `Reconnect` with. */
 interface FallbackPregameFrame {
   readonly type: "GameCreated" | "SessionAttached";
@@ -1667,13 +1771,118 @@ interface FallbackPregameFrame {
   readonly full_key?: FullSessionKey;
 }
 
+/** The identity a server reply is checked against. */
+interface ExpectedSessionIdentity {
+  readonly gameCode: string;
+  readonly playerId: PlayerId;
+  readonly playerToken: string;
+  readonly fullKey: FullSessionKey;
+}
+
+/** The identity fields a server reply carries; each is absent when the frame has no such field. */
+interface SessionIdentityFrame {
+  readonly gameCode?: string;
+  readonly playerId?: PlayerId;
+  readonly playerToken?: string;
+  readonly fullKey?: FullSessionKey;
+}
+
+/**
+ * How one reply is held to the expected identity. The game code, when the frame
+ * names one, and the Full key are always compared. The remaining axes vary with
+ * the frame's protocol shape:
+ *  - `seat`: `"required"` when the frame names a seat (a missing seat is a
+ *    mismatch, never a pass); `"ifPresent"` when the frame may omit it and is
+ *    only compared when present; `"absent"` for a frame whose protocol shape has
+ *    no seat, which is never compared.
+ *  - `token`: `"optional"` when the frame may omit the token (omitted, or exactly
+ *    the expected one); `"required"` when it must carry exactly the expected one.
+ *  - `label`: the prefix of the game, seat and token messages.
+ */
+interface SessionIdentityRules {
+  readonly label: string;
+  readonly seat: "required" | "ifPresent" | "absent";
+  readonly token: "optional" | "required";
+}
+
+/** Whether two Full keys name the same generation of the same game. */
+function sameFullSessionKey(a: FullSessionKey, b: FullSessionKey): boolean {
+  return a.game_code === b.game_code && a.generation === b.generation;
+}
+
+/**
+ * The single authority for comparing a reply's identity with the expected one:
+ * the first mismatch's message, or null when the reply matches. Checked in a
+ * fixed order: game, Full key, seat, token. Every reply-identity guard (the
+ * native reconnect's frames, the initial fallback's replies, and the equality
+ * of two credential tuples) goes through here, so a future identity field is
+ * added once.
+ */
+function sessionIdentityMismatch(
+  expected: ExpectedSessionIdentity,
+  frame: SessionIdentityFrame,
+  rules: SessionIdentityRules,
+): string | null {
+  if (frame.gameCode !== undefined && frame.gameCode !== expected.gameCode) {
+    return `${rules.label} attached game ${frame.gameCode}, expected ${expected.gameCode}`;
+  }
+  if (!frame.fullKey) return "Server omitted a valid Full session identity";
+  if (!sameFullSessionKey(frame.fullKey, expected.fullKey)) {
+    return "Server changed the Full session identity";
+  }
+  const seatCompared = rules.seat === "required"
+    || (rules.seat === "ifPresent" && frame.playerId !== undefined);
+  if (seatCompared && frame.playerId !== expected.playerId) {
+    return `${rules.label} attached player ${frame.playerId}, expected ${expected.playerId}`;
+  }
+  if (
+    (frame.playerToken !== undefined || rules.token === "required")
+    && frame.playerToken !== expected.playerToken
+  ) {
+    return `${rules.label} changed the player token`;
+  }
+  return null;
+}
+
+/** The expected identity a credential tuple states. */
+function identityOfCredentials(credentials: StateCodecJoinCredentials): ExpectedSessionIdentity {
+  return {
+    gameCode: credentials.fullKey.game_code,
+    playerId: credentials.yourPlayer,
+    playerToken: credentials.playerToken,
+    fullKey: credentials.fullKey,
+  };
+}
+
 /** Whether two credential tuples name the same seat of the same Full session. */
 function sameJoinCredentials(a: StateCodecJoinCredentials, b: StateCodecJoinCredentials): boolean {
-  return a.playerToken === b.playerToken
-    && a.yourPlayer === b.yourPlayer
-    && a.fullKey.game_code === b.fullKey.game_code
-    && a.fullKey.generation === b.fullKey.generation;
+  return sessionIdentityMismatch(identityOfCredentials(a), {
+    playerId: b.yourPlayer,
+    playerToken: b.playerToken,
+    fullKey: b.fullKey,
+  }, { label: "Credentials", seat: "required", token: "required" }) === null;
 }
+
+/**
+ * The rules an initial fallback's replies are held to. A reconnect's GameStarted
+ * names the seat but omits the token (omitted or exactly the retained one); the
+ * pregame frames always carry the token, and only SessionAttached names a seat
+ * (GameCreated's protocol shape has none to compare).
+ */
+const FALLBACK_GAME_STARTED_RULES: SessionIdentityRules = { label: "Reconnect", seat: "required", token: "optional" };
+const FALLBACK_SESSION_ATTACHED_RULES: SessionIdentityRules = { label: "Reconnect", seat: "required", token: "required" };
+const FALLBACK_GAME_CREATED_RULES: SessionIdentityRules = { label: "Reconnect", seat: "absent", token: "required" };
+
+/**
+ * The rules a native reconnect's frames are held to. Each frame type carries a
+ * different subset of the identity (GameCreated has no seat, GameStarted
+ * usually no token), so seat and token are compared only when present.
+ */
+const NATIVE_RECONNECT_RULES: SessionIdentityRules = {
+  label: "Native reconnect",
+  seat: "ifPresent",
+  token: "optional",
+};
 
 /**
  * WebSocket-backed implementation of EngineAdapter.
@@ -3001,49 +3210,6 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   /**
-   * Why a fallback reply's identity does not match the retained credentials, or
-   * null when it does. Checked in a fixed order: game, Full key, seat, token. A
-   * reconnect's GameStarted omits the token (`"optional"`: omitted or exactly the
-   * retained one); the pregame frames always carry it (`"required"`). The seat is
-   * `"required"` for every reply that names one (GameStarted's `your_player`,
-   * SessionAttached's `player_id`): a missing seat is a mismatch, never a pass.
-   * `"absent"` is only for the seatless GameCreated, whose protocol shape has no
-   * seat to compare.
-   */
-  private fallbackIdentityMismatch(
-    expected: StateCodecJoinCredentials,
-    frame: {
-      gameCode?: string;
-      playerId?: PlayerId;
-      playerToken?: string;
-      fullKey?: FullSessionKey;
-    },
-    token: "optional" | "required",
-    seat: "required" | "absent",
-  ): string | null {
-    if (frame.gameCode !== undefined && frame.gameCode !== expected.fullKey.game_code) {
-      return `Reconnect attached game ${frame.gameCode}, expected ${expected.fullKey.game_code}`;
-    }
-    if (!frame.fullKey) return "Server omitted a valid Full session identity";
-    if (
-      frame.fullKey.game_code !== expected.fullKey.game_code
-      || frame.fullKey.generation !== expected.fullKey.generation
-    ) {
-      return "Server changed the Full session identity";
-    }
-    if (seat === "required" && frame.playerId !== expected.yourPlayer) {
-      return `Reconnect attached player ${frame.playerId}, expected ${expected.yourPlayer}`;
-    }
-    if (
-      (frame.playerToken !== undefined || token === "required")
-      && frame.playerToken !== expected.playerToken
-    ) {
-      return "Reconnect changed the player token";
-    }
-    return null;
-  }
-
-  /**
    * Identity preflight of the fallback's GameStarted, before any bootstrap,
    * cache or episode completion: same game, Full key and seat, and the token
    * omitted (a reconnect reply carries none) or exactly the retained one.
@@ -3052,11 +3218,11 @@ export class WebSocketAdapter implements EngineAdapter {
     expected: StateCodecJoinCredentials,
     frame: { your_player: PlayerId; player_token?: string; full_key?: FullSessionKey },
   ): boolean {
-    const message = this.fallbackIdentityMismatch(expected, {
+    const message = sessionIdentityMismatch(identityOfCredentials(expected), {
       playerId: frame.your_player,
       playerToken: frame.player_token,
       fullKey: frame.full_key,
-    }, "optional", "required");
+    }, FALLBACK_GAME_STARTED_RULES);
     return message === null
       ? true
       : this.rejectSessionIdentity(new AdapterError("WS_ERROR", message, false));
@@ -3104,12 +3270,12 @@ export class WebSocketAdapter implements EngineAdapter {
   ): void {
     const message = frame.type === "SessionAttached" && episode.pregameReturn !== "gameCreated"
       ? "Server answered the join's reconnect with an unexpected pregame session reply"
-      : this.fallbackIdentityMismatch(episode.credentials, {
+      : sessionIdentityMismatch(identityOfCredentials(episode.credentials), {
         gameCode: frame.game_code,
         playerId: frame.player_id,
         playerToken: frame.player_token,
         fullKey: frame.full_key,
-      }, "required", frame.type === "GameCreated" ? "absent" : "required");
+      }, frame.type === "GameCreated" ? FALLBACK_GAME_CREATED_RULES : FALLBACK_SESSION_ATTACHED_RULES);
     if (message !== null) {
       this.rejectSessionIdentity(new AdapterError("WS_ERROR", message, false));
       return;
@@ -3378,8 +3544,26 @@ export class WebSocketAdapter implements EngineAdapter {
     return this._serverInfo;
   }
 
+  /**
+   * The one place an inbound message can end an active initial fallback episode
+   * (see `episodeRouting` for each message type's class). True when the message
+   * ended the episode and the original initialization, so no handler runs.
+   */
+  private routeFallbackEpisode(msg: { type: string; data?: unknown }): boolean {
+    if (!this.initialFallbackActive()) return false;
+    const routing = episodeRouting(msg);
+    switch (routing.kind) {
+      case "terminal":
+        this.failInitialFallback(routing.error);
+        return true;
+      case "neutral":
+        return false;
+    }
+  }
+
   private handleMessage(msg: { type: string; data?: unknown; command_id?: unknown }): void {
     if (this.sessionIdentityRejected) return;
+    if (this.routeFallbackEpisode(msg)) return;
 
     switch (msg.type) {
       // ServerHello is no longer observed here — the shared
@@ -3506,10 +3690,6 @@ export class WebSocketAdapter implements EngineAdapter {
         // Otherwise the adapter would stay stuck waiting for a
         // `GameStarted` that will never come.
         const data = msg.data as { game_code: string };
-        if (this.initialFallbackActive()) {
-          this.failInitialFallback(new AdapterError("PASSWORD_REQUIRED", "Room requires a password", true));
-          break;
-        }
         this.emit({ type: "passwordRequired", gameCode: data.game_code });
         if (this.reconnectInFlight) this.failReconnect("failed");
         if (this.initReject) {
@@ -3765,11 +3945,6 @@ export class WebSocketAdapter implements EngineAdapter {
           withheld: WithheldFrame;
           reason: string;
         };
-        // A withheld bootstrap cannot finish the initial fallback: the join fails once.
-        if (data.withheld.type === "GameStarted" && this.initialFallbackActive()) {
-          this.failInitialFallback(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.reason, true));
-          break;
-        }
         // Without a delivered board the seat cannot reach the menu: fail the join recoverably.
         if (data.withheld.type === "GameStarted" && this.snapshot === null) {
           // The notice is this client's only seat assignment; GamePage resets the reconnect state on it, so it precedes the failure.
@@ -4111,14 +4286,7 @@ export class WebSocketAdapter implements EngineAdapter {
         const data = msg.data as { message: string; code?: string };
         const terminal = this.reconnectInFlight || this.initReject !== null
           || this.pregameReject !== null || this.gameStartedReject !== null;
-        const initializationError = data.code === "deck_rejected"
-          ? new AdapterError(AdapterErrorCode.DECK_REJECTED, data.message, false)
-          : actionRejectionError(data.message);
-        if (this.initialFallbackActive()) {
-          this.failInitialFallback(initializationError);
-          break;
-        }
-        this.rejectInitialization(initializationError);
+        this.rejectInitialization(serverErrorInitializationError(data));
         this.rejectPregameMutation(actionRejectionError(data.message));
         this.rejectAbandon(actionRejectionError(data.message));
         if (this.reconnectInFlight) this.failReconnect();
@@ -4187,11 +4355,7 @@ export class WebSocketAdapter implements EngineAdapter {
     if (!key || key.game_code !== gameCode || key.generation < 1) {
       return new AdapterError("WS_ERROR", "Server omitted a valid Full session identity", false);
     }
-    if (
-      this.fullSessionKey
-      && (this.fullSessionKey.game_code !== key.game_code
-        || this.fullSessionKey.generation !== key.generation)
-    ) {
+    if (this.fullSessionKey && !sameFullSessionKey(this.fullSessionKey, key)) {
       return new AdapterError("WS_ERROR", "Server changed the Full session identity", false);
     }
     return null;
@@ -4205,29 +4369,13 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   /** Reject identity-bearing reconnect frames before they can update session state. */
-  private acceptNativeReconnectIdentity(frame: {
-    gameCode?: string;
-    playerId?: PlayerId;
-    playerToken?: string;
-    fullKey?: FullSessionKey;
-  }): boolean {
+  private acceptNativeReconnectIdentity(frame: SessionIdentityFrame): boolean {
     const expected = this.options.nativePregame?.kind === "reconnect"
       ? this.options.nativePregame
       : null;
     if (!expected) return true;
 
-    const errorMessage = frame.gameCode !== undefined && frame.gameCode !== expected.gameCode
-      ? `Native reconnect attached game ${frame.gameCode}, expected ${expected.gameCode}`
-      : frame.playerId !== undefined && frame.playerId !== expected.playerId
-        ? `Native reconnect attached player ${frame.playerId}, expected ${expected.playerId}`
-        : frame.playerToken !== undefined && frame.playerToken !== expected.playerToken
-          ? "Native reconnect changed the player token"
-          : !frame.fullKey
-            ? "Server omitted a valid Full session identity"
-            : frame.fullKey.game_code !== expected.fullKey.game_code
-                || frame.fullKey.generation !== expected.fullKey.generation
-              ? "Server changed the Full session identity"
-              : null;
+    const errorMessage = sessionIdentityMismatch(expected, frame, NATIVE_RECONNECT_RULES);
     if (!errorMessage) return true;
 
     return this.rejectSessionIdentity(new AdapterError("WS_ERROR", errorMessage, false));
