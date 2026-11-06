@@ -1793,3 +1793,175 @@ fn c12_forwarded_zone_result_binds_staged_arrivals_after_pause() {
         "the chained counter node resolves after the population's single event"
     );
 }
+
+/// CR 730.3a + CR 401.4 + CR 401.7: the owner chooses both the numbered
+/// position and the private order of the departing merged permanent's cards.
+#[test]
+fn deem_inferior_mutated_owner_orders_components_second_from_top() {
+    const DEEM_INFERIOR: &str = "This spell costs {1} less to cast for each card you've drawn this turn.\nThe owner of target nonland permanent puts it into their library second from the top or on the bottom.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["L0", "L1", "L2"]);
+    let host = scenario.add_creature(P1, "Host", 2, 2).id();
+    let rider = scenario.add_creature_to_hand(P1, "Rider", 3, 3).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Deem Inferior", false, DEEM_INFERIOR)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    engine::game::merge::merge_object_onto(
+        runner.state_mut(),
+        rider,
+        host,
+        engine::game::merge::MergeSide::Bottom,
+        &mut Vec::new(),
+    );
+    let sentinels: Vec<_> = runner.state().library_of(P1).iter().copied().collect();
+    runner.cast(spell).target_objects(&[host]).commit();
+    for _ in 0..16 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::TopOrBottomChoice { .. }
+        ) {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner
+            .act(GameAction::PassPriority)
+            .expect("resolve Deem Inferior");
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TopOrBottomChoice {
+            player: P1,
+            object_id,
+            top_position: engine::types::ability::LibraryPosition::NthFromTop { n: 2 },
+        } if object_id == host
+    ));
+    runner
+        .act(GameAction::ChooseTopOrBottom { top: true })
+        .expect("P1 chooses second from top");
+    match &runner.state().waiting_for {
+        WaitingFor::DigRestSplitChoice {
+            player,
+            library_owner,
+            cards,
+            top_count,
+            scope,
+            ..
+        } => {
+            assert_eq!(
+                (*player, *library_owner),
+                (P1, P1),
+                "P0 never arranges P1's cards"
+            );
+            assert_eq!(*scope, engine::types::ability::DigRestSplitScope::OrderOnly);
+            assert_eq!(*top_count, 2, "the UI presents the numbered block top-down");
+            let mut offered = cards.clone();
+            offered.sort_unstable();
+            let mut expected = vec![host, rider];
+            expected.sort_unstable();
+            assert_eq!(offered, expected);
+        }
+        other => panic!("expected P1's component order, got {other:?}"),
+    }
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![rider, host],
+        })
+        .expect("P1 submits the component permutation");
+    assert_eq!(
+        runner
+            .state()
+            .library_of(P1)
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        [sentinels[0], rider, host, sentinels[1], sentinels[2]]
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+}
+
+/// CR 401.7: a nonmerged tuck has no ordering prompt and uses the exact
+/// numbered slot, including the short-library clamp.
+#[test]
+fn tricksters_stratagem_nonmerged_exact_nth_slot() {
+    const TRICKSTERS_STRATAGEM: &str = "The owner of target creature an opponent controls puts it into their library second from the top or on the bottom. Then up to one target creature you control connives. (Draw a card, then discard a card. If you discarded a nonland card, put a +1/+1 counter on that creature.)";
+    for fillers in [&["L0", "L1"][..], &["L0"][..]] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P1, fillers);
+        scenario.with_library_top(P0, &["Caster Filler"]);
+        let victim = scenario.add_creature(P1, "Opposing Creature", 2, 2).id();
+        let conniver = scenario.add_creature(P0, "Own Creature", 2, 2).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Trickster's Stratagem", false, TRICKSTERS_STRATAGEM)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        let sentinels: Vec<_> = runner.state().library_of(P1).iter().copied().collect();
+        // FU-3: declining this optional slot has a separate existing defect.
+        // Selecting P0's legal creature keeps its connive out of P1's library.
+        runner
+            .cast(spell)
+            .target_objects(&[victim, conniver])
+            .commit();
+        for _ in 0..16 {
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::TopOrBottomChoice { .. }
+            ) {
+                break;
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            runner
+                .act(GameAction::PassPriority)
+                .expect("resolve Trickster's Stratagem");
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::TopOrBottomChoice { player: P1, .. }
+        ));
+        let result = runner
+            .act(GameAction::ChooseTopOrBottom { top: true })
+            .expect("P1 chooses second from top");
+        let mut expected = sentinels.clone();
+        expected.insert(1, victim);
+        assert_eq!(
+            runner
+                .state()
+                .library_of(P1)
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            expected,
+            "L0 is never drawn by P0's connive"
+        );
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved { kind: EffectKind::Connive, source_id, .. }
+                    if *source_id == conniver
+            )),
+            "the printed continuation connived P0's creature"
+        );
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "no arrangement or connive choice remains: {:?}",
+            runner.state().waiting_for
+        );
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+    }
+}

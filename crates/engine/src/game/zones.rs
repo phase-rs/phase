@@ -2675,13 +2675,11 @@ pub(crate) fn reorder_within_library(
 }
 
 /// CR 401.4 + CR 101.4: the insertion index for one member of a private
-/// owner-arranged Library Top/Bottom group. The tail-insertion form never uses
-/// a fixed base: `move_to_library_at_index` first removes a library-origin
-/// member, so `library_len_after_current_removal` is exactly the length the
-/// index applies to. A `Top` member goes after every already-delivered
-/// lower-rank member; a `Bottom` member goes at the tail minus every
-/// already-delivered higher-rank member. By induction the delivered members
-/// stay sorted at their anchored end after every insertion.
+/// owner-arranged fixed-position group, after removing the current member.
+/// Top counts present lower ranks; Bottom subtracts present higher ranks from
+/// the post-removal length. Numbered groups anchor their contiguous block at
+/// the numbered slot, clamped against the length without any present members
+/// (CR 401.7), then offset by the present lower ranks.
 ///
 /// `delivered_ranks` are the final-order ranks of this group's members that
 /// have already been delivered; `rank` is this member's final-order rank.
@@ -2691,23 +2689,24 @@ pub(crate) fn arranged_library_slot(
     rank: usize,
     position: &crate::types::ability::LibraryPosition,
 ) -> usize {
-    let delivered_ranks: Vec<usize> = delivered_ranks.collect();
     match position {
-        crate::types::ability::LibraryPosition::Top => delivered_ranks
-            .iter()
-            .filter(|other| **other < rank)
-            .count(),
+        crate::types::ability::LibraryPosition::Top => {
+            delivered_ranks.filter(|other| *other < rank).count()
+        }
         crate::types::ability::LibraryPosition::Bottom => library_len_after_current_removal
-            .saturating_sub(
-                delivered_ranks
-                    .iter()
-                    .filter(|other| **other > rank)
-                    .count(),
-            ),
-        // Only Top/Bottom members are grouped; anything else keeps the ordinary
-        // placement arm and never calls this helper.
-        _ => {
-            debug_assert!(false, "arranged_library_slot is only for Top/Bottom groups");
+            .saturating_sub(delivered_ranks.filter(|other| *other > rank).count()),
+        crate::types::ability::LibraryPosition::NthFromTop { n } => {
+            let (present, before) = delivered_ranks
+                .fold((0usize, 0usize), |(present, before), other| {
+                    (present + 1, before + usize::from(other < rank))
+                });
+            (n.saturating_sub(1) as usize)
+                .min(library_len_after_current_removal.saturating_sub(present))
+                + before
+        }
+        crate::types::ability::LibraryPosition::BeneathTop { .. }
+        | crate::types::ability::LibraryPosition::RandomWithinTop { .. } => {
+            debug_assert!(false, "unsupported arranged library position");
             0
         }
     }
@@ -5316,6 +5315,112 @@ mod tests {
                 arranged_library_slot(len_after_removal, delivered.iter().copied(), rank, position);
             move_to_library_at_index(state, *id, Some(slot), events);
             delivered.push(rank);
+        }
+    }
+
+    /// CR 401.4 + CR 401.7: numbered groups keep the submitted block together,
+    /// clamping its base to the bottom of a short library.
+    #[test]
+    fn arranged_library_slot_numbered_block_clamps_without_splitting() {
+        for count in [3, 1, 0] {
+            let mut state = setup();
+            let sentinels: Vec<_> = (0..count)
+                .map(|index| {
+                    create_object(
+                        &mut state,
+                        CardId(index + 10),
+                        PlayerId(0),
+                        format!("L{index}"),
+                        Zone::Library,
+                    )
+                })
+                .collect();
+            state.players[0].library = sentinels.iter().copied().collect();
+            let a = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "A".into(),
+                Zone::Graveyard,
+            );
+            let b = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "B".into(),
+                Zone::Graveyard,
+            );
+            deliver_grouped(
+                &mut state,
+                &[b, a],
+                &[a, b],
+                &LibraryPosition::NthFromTop { n: 2 },
+                PlayerId(0),
+                &mut Vec::new(),
+            );
+            let mut expected = sentinels;
+            let base = expected.len().min(1);
+            expected.splice(base..base, [b, a]);
+            assert_eq!(
+                state
+                    .library_of(PlayerId(0))
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                expected,
+                "initial library length {count}"
+            );
+        }
+        // Present ranks need not be consecutive: a later rank may arrive first.
+        assert_eq!(
+            arranged_library_slot(
+                5,
+                [0, 2].into_iter(),
+                1,
+                &LibraryPosition::NthFromTop { n: 2 },
+            ),
+            2
+        );
+    }
+
+    /// CR 401.7: a singleton numbered group uses the ordinary clamped slot.
+    #[test]
+    fn arranged_library_slot_numbered_singleton_matches_ordinary_insertion() {
+        for count in [0, 1, 3] {
+            let mut state = setup();
+            let sentinels: Vec<_> = (0..count)
+                .map(|index| {
+                    create_object(
+                        &mut state,
+                        CardId(index + 10),
+                        PlayerId(0),
+                        format!("L{index}"),
+                        Zone::Library,
+                    )
+                })
+                .collect();
+            state.players[0].library = sentinels.into_iter().collect();
+            let card = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Singleton".into(),
+                Zone::Graveyard,
+            );
+            let mut ordinary = state.clone();
+            deliver_grouped(
+                &mut state,
+                &[card],
+                &[card],
+                &LibraryPosition::NthFromTop { n: 2 },
+                PlayerId(0),
+                &mut Vec::new(),
+            );
+            move_to_library_at_index(&mut ordinary, card, Some(1), &mut Vec::new());
+            assert_eq!(
+                state.library_of(PlayerId(0)),
+                ordinary.library_of(PlayerId(0))
+            );
         }
     }
 

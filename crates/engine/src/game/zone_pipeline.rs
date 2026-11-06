@@ -2311,10 +2311,11 @@ pub(crate) fn staged_arrangement_groups(
             continue;
         };
         match position {
-            LibraryPosition::Top | LibraryPosition::Bottom => {}
-            LibraryPosition::NthFromTop { .. }
-            | LibraryPosition::BeneathTop { .. }
-            | LibraryPosition::RandomWithinTop { .. } => continue,
+            LibraryPosition::Top | LibraryPosition::Bottom | LibraryPosition::NthFromTop { .. } => {
+            }
+            LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
+                continue
+            }
         }
         let key = (member.owner, position.clone());
         match groups.iter_mut().find(|(existing, _)| *existing == key) {
@@ -2322,12 +2323,45 @@ pub(crate) fn staged_arrangement_groups(
             None => groups.push((key, vec![index])),
         }
     }
+    // Numbered blocks need a stable base: library-origin removals or a second
+    // position in this library keep the ordinary per-member placement route.
+    groups.retain(|((owner, position), _)| {
+        !matches!(position, LibraryPosition::NthFromTop { .. })
+            || !staged.members.iter().any(|member| {
+                if member.owner != *owner
+                    || !matches!(
+                        member.state,
+                        StagedBatchMemberState::Approved | StagedBatchMemberState::Terminal
+                    )
+                {
+                    return false;
+                }
+                let Some(ProposedEvent::ZoneChange {
+                    from,
+                    to: Zone::Library,
+                    library_placement: Some(other_position),
+                    ..
+                }) = member.approved_event.as_ref()
+                else {
+                    return false;
+                };
+                match other_position {
+                    LibraryPosition::Top
+                    | LibraryPosition::Bottom
+                    | LibraryPosition::NthFromTop { .. } => {
+                        other_position != position || *from == Zone::Library
+                    }
+                    LibraryPosition::BeneathTop { .. }
+                    | LibraryPosition::RandomWithinTop { .. } => false,
+                }
+            })
+    });
     groups
 }
 
 /// CR 401.4 + CR 101.4: derive the private owner/position groups from final
-/// approvals. Only Library Top/Bottom lands are grouped; request-origin groups
-/// replay the legacy insertion order without a prompt.
+/// approvals. Top/Bottom and domain-gated numbered positions are grouped;
+/// request-origin groups replay the legacy insertion order without a prompt.
 fn begin_staged_arrangement(state: &GameState, owner: &mut PendingBatchDeliveries) {
     let Some(staged) = owner.staged.as_mut() else {
         return;
@@ -2355,7 +2389,10 @@ fn begin_staged_arrangement(state: &GameState, owner: &mut PendingBatchDeliverie
                     .any(|member| staged_member_placement_is_replacement(member)));
         let ordered: Vec<&StagedBatchMember> = if needs_prompt {
             announced.clone()
-        } else if matches!(position, LibraryPosition::Top) {
+        } else if matches!(
+            position,
+            LibraryPosition::Top | LibraryPosition::NthFromTop { .. }
+        ) {
             announced.iter().rev().copied().collect()
         } else {
             announced.clone()
@@ -2461,7 +2498,12 @@ fn publish_next_staged_arrangement(
         .iter()
         .map(|member| member.identity.object_id)
         .collect();
-    let top_count = if matches!(arrangement.position, LibraryPosition::Top) {
+    // OrderOnly's shared UI labels the block "top"; both top and numbered
+    // blocks are submitted in their final top-down order.
+    let top_count = if matches!(
+        arrangement.position,
+        LibraryPosition::Top | LibraryPosition::NthFromTop { .. }
+    ) {
         cards.len()
     } else {
         0
@@ -2488,7 +2530,7 @@ fn publish_next_staged_arrangement(
 }
 
 /// CR 101.4 + CR 401.4: deliver every approved member in announcement order,
-/// using the tail-insertion slot for grouped Library Top/Bottom lands.
+/// using the tail-insertion slot for grouped fixed library positions.
 fn deliver_staged_members(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
@@ -2677,8 +2719,8 @@ fn advance_staged_cursor(owner: &mut PendingBatchDeliveries, index: usize) {
     sync_staged_requests(owner);
 }
 
-/// Tail-insertion slot for one grouped member. `None` means the member is not
-/// in a Top/Bottom arrangement and keeps the ordinary placement arm.
+/// Tail-insertion slot for a grouped fixed-position member. `None` keeps the
+/// ordinary placement arm for members outside the grouping domain.
 fn staged_arrangement_slot(
     state: &GameState,
     owner: &PendingBatchDeliveries,
@@ -2697,37 +2739,60 @@ fn staged_arrangement_slot(
         .members
         .iter()
         .position(|ordered| ordered.identity == member.identity)?;
-    let in_library = state
-        .objects
-        .get(&member.identity.object_id)
-        .is_some_and(|object| object.zone == Zone::Library)
-        && state
-            .library_of(member.owner)
-            .contains(&member.identity.object_id);
-    let library_len = state.library_of(member.owner).len();
-    let len_after_removal = library_len.saturating_sub(usize::from(in_library));
-    let delivered_ranks: Vec<usize> = arrangement
+    let library = state.library_of(arrangement.batch.owner);
+    let in_library = library.contains(&member.identity.object_id);
+    let len_after_removal = library.len().saturating_sub(usize::from(in_library));
+    // CR 400.7: cross-zone arrivals have a new incarnation; a library reorder
+    // retains its incarnation and is present only after its own Moved terminal.
+    let present = arrangement
         .batch
         .members
         .iter()
         .enumerate()
-        .filter(|(_, ordered)| {
-            staged.members.iter().any(|candidate| {
-                candidate.identity == ordered.identity
-                    && candidate.state == StagedBatchMemberState::Terminal
-                    && candidate.terminal != Some(ZoneMoveCompletion::Prevented)
-                    // Only members that actually entered this library offset the
-                    // rank; a refused/Remained member was never inserted.
-                    && state
-                        .library_of(arrangement.batch.owner)
-                        .contains(&ordered.identity.object_id)
-            })
-        })
-        .map(|(index, _)| index)
-        .collect();
+        .filter_map(|(rank, ordered)| {
+            let position = library
+                .iter()
+                .position(|id| *id == ordered.identity.object_id)?;
+            let delivered = if ordered.origin == Zone::Library {
+                staged.members.iter().any(|candidate| {
+                    candidate.identity == ordered.identity
+                        && candidate.state == StagedBatchMemberState::Terminal
+                        && candidate.terminal == Some(ZoneMoveCompletion::Moved)
+                })
+            } else {
+                state
+                    .objects
+                    .get(&ordered.identity.object_id)
+                    .is_some_and(|object| object.incarnation != ordered.identity.incarnation)
+            };
+            delivered.then_some((rank, position))
+        });
+    match &arrangement.position {
+        LibraryPosition::NthFromTop { .. } => {
+            // Numbered blocks require a stable contiguous base. Top/Bottom
+            // may legally interleave present arrivals with library-origin
+            // members still awaiting their reorder (CR 401.4).
+            debug_assert!(
+                {
+                    let (count, first, last) = present.clone().fold(
+                        (0usize, usize::MAX, 0usize),
+                        |(count, first, last), (_, position)| {
+                            (count + 1, first.min(position), last.max(position))
+                        },
+                    );
+                    count == 0 || last - first + 1 == count
+                },
+                "present arranged members occupy contiguous library positions"
+            );
+        }
+        LibraryPosition::Top
+        | LibraryPosition::Bottom
+        | LibraryPosition::BeneathTop { .. }
+        | LibraryPosition::RandomWithinTop { .. } => {}
+    }
     Some(zones::arranged_library_slot(
         len_after_removal,
-        delivered_ranks.into_iter(),
+        present.map(|(rank, _)| rank),
         rank,
         &arrangement.position,
     ))
@@ -6349,7 +6414,7 @@ fn deliver_replaced_batch_member(
     track_exiled_by_source: bool,
     drain: PostReplacementDrainOwner,
     _legacy_library_placement: Option<LibraryPosition>,
-    // R4b: exact insertion index for a grouped Library Top/Bottom member.
+    // Exact insertion index for a grouped fixed-position library member.
     explicit_library_index: Option<usize>,
     owner: Option<BatchMemberDeliveryOwner>,
     events: &mut Vec<GameEvent>,
@@ -11964,6 +12029,279 @@ mod staged_batch_tests {
         }
     }
 
+    /// CR 401.7: a request-origin numbered block uses reverse announcement
+    /// order without asking for another permutation.
+    #[test]
+    fn derived_nth_from_top_pair_matches_legacy_reverse_insertion() {
+        for count in [0, 1, 3] {
+            let mut state = GameState::new_two_player(42);
+            effect_source(&mut state);
+            let sentinels: Vec<_> = (0..count)
+                .map(|index| library_card(&mut state, index + 10))
+                .collect();
+            let a = graveyard_card(&mut state, 1);
+            let b = graveyard_card(&mut state, 2);
+            let position = LibraryPosition::NthFromTop { n: 2 };
+            let members = [a, b]
+                .into_iter()
+                .map(|id| {
+                    staged_member(
+                        &state,
+                        id,
+                        Some(approved_library_event(&state, id, position.clone())),
+                        StagedBatchMemberState::Approved,
+                        Zone::Library,
+                        Some(position.clone()),
+                    )
+                })
+                .collect();
+            let group_id = push_approved_staged(&mut state, members, BatchDeliveryStage::Approving);
+            let mut owner = take_owner(&mut state, group_id);
+            begin_staged_arrangement(&state, &mut owner);
+            let staged = owner.staged.as_ref().unwrap();
+            assert_eq!(staged.stage, BatchDeliveryStage::Delivering);
+            assert_eq!(staged.arrangements.len(), 1);
+            assert_eq!(
+                staged.arrangements[0].status,
+                StagedArrangementStatus::Derived
+            );
+            assert_eq!(
+                staged.arrangements[0]
+                    .batch
+                    .members
+                    .iter()
+                    .map(|member| member.identity.object_id)
+                    .collect::<Vec<_>>(),
+                [b, a]
+            );
+            owner.validate_staged().expect("numbered group validates");
+            let mut missing_group = owner.clone();
+            missing_group.staged.as_mut().unwrap().arrangements.clear();
+            assert!(
+                missing_group.validate_staged().is_err(),
+                "a numbered approval must have its arrangement authority"
+            );
+            assert!(publish_next_staged_arrangement(&mut state, &mut owner).is_none());
+            assert_eq!(
+                deliver_staged_members(&mut state, &mut owner, &mut Vec::new()),
+                StagedStop::Delivered
+            );
+            let mut expected = sentinels;
+            let base = expected.len().min(1);
+            expected.splice(base..base, [b, a]);
+            assert_eq!(
+                state
+                    .library_of(PlayerId(0))
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn nth_from_top_group_gated_off_for_library_origin_and_shared_library() {
+        let nth = LibraryPosition::NthFromTop { n: 2 };
+        for (origin, position, sibling_position, sibling_owner, expected_positions) in [
+            (Zone::Library, nth.clone(), nth.clone(), PlayerId(0), vec![]),
+            (
+                Zone::Graveyard,
+                nth.clone(),
+                LibraryPosition::Top,
+                PlayerId(0),
+                vec![LibraryPosition::Top],
+            ),
+            (
+                Zone::Graveyard,
+                nth.clone(),
+                LibraryPosition::Bottom,
+                PlayerId(0),
+                vec![LibraryPosition::Bottom],
+            ),
+            (
+                Zone::Graveyard,
+                nth.clone(),
+                LibraryPosition::NthFromTop { n: 3 },
+                PlayerId(0),
+                vec![],
+            ),
+            (
+                Zone::Graveyard,
+                nth.clone(),
+                LibraryPosition::Top,
+                PlayerId(1),
+                vec![nth, LibraryPosition::Top],
+            ),
+            // Top and Bottom remain independent, even for library origins.
+            (
+                Zone::Library,
+                LibraryPosition::Top,
+                LibraryPosition::Bottom,
+                PlayerId(0),
+                vec![LibraryPosition::Top, LibraryPosition::Bottom],
+            ),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            effect_source(&mut state);
+            let a = if origin == Zone::Library {
+                library_card(&mut state, 1)
+            } else {
+                graveyard_card(&mut state, 1)
+            };
+            let b = create_object(
+                &mut state,
+                CardId(2),
+                sibling_owner,
+                "Sibling".into(),
+                origin,
+            );
+            let members = [(a, position), (b, sibling_position)]
+                .into_iter()
+                .map(|(id, position)| {
+                    staged_member(
+                        &state,
+                        id,
+                        Some(approved_library_event(&state, id, position.clone())),
+                        StagedBatchMemberState::Approved,
+                        Zone::Library,
+                        Some(position),
+                    )
+                })
+                .collect();
+            let group_id = push_approved_staged(&mut state, members, BatchDeliveryStage::Approving);
+            let mut owner = take_owner(&mut state, group_id);
+            begin_staged_arrangement(&state, &mut owner);
+            assert_eq!(
+                owner
+                    .staged
+                    .as_ref()
+                    .unwrap()
+                    .arrangements
+                    .iter()
+                    .map(|group| group.position.clone())
+                    .collect::<Vec<_>>(),
+                expected_positions
+            );
+            owner
+                .validate_staged()
+                .expect("producer and validator share the gate");
+        }
+    }
+
+    /// CR 401.4: a Top group can reorder library-origin members around
+    /// cross-zone arrivals that are already present, as in Doomsday.
+    #[test]
+    fn staged_arrangement_slot_top_group_tolerates_interleaved_library_origin_members() {
+        let mut state = GameState::new_two_player(42);
+        effect_source(&mut state);
+        let library_a = library_card(&mut state, 1);
+        let library_c = library_card(&mut state, 2);
+        let library_e = library_card(&mut state, 3);
+        let graveyard_a = graveyard_card(&mut state, 4);
+        let graveyard_b = graveyard_card(&mut state, 5);
+        // Reverse announcement derives the measured final-order ranks:
+        // [Library C, Graveyard A, Library E, Graveyard B, Library A].
+        let members = [library_a, graveyard_b, library_e, graveyard_a, library_c]
+            .into_iter()
+            .map(|id| {
+                staged_member(
+                    &state,
+                    id,
+                    Some(approved_library_event(&state, id, LibraryPosition::Top)),
+                    StagedBatchMemberState::Approved,
+                    Zone::Library,
+                    Some(LibraryPosition::Top),
+                )
+            })
+            .collect();
+        let group_id = push_approved_staged(&mut state, members, BatchDeliveryStage::Approving);
+        let mut owner = take_owner(&mut state, group_id);
+        begin_staged_arrangement(&state, &mut owner);
+        // The two graveyard cards arrived in an earlier batch. The current
+        // library reordering has not delivered any of its library-origin cards.
+        zones::move_to_library_at_index(&mut state, graveyard_a, Some(0), &mut Vec::new());
+        zones::move_to_library_at_index(&mut state, graveyard_b, Some(2), &mut Vec::new());
+        zones::reorder_within_library(
+            &mut state,
+            PlayerId(0),
+            &[graveyard_a, library_e, graveyard_b, library_a, library_c],
+            Some(0),
+        );
+        assert_eq!(
+            state
+                .library_of(PlayerId(0))
+                .iter()
+                .position(|id| *id == graveyard_a),
+            Some(0)
+        );
+        assert_eq!(
+            state
+                .library_of(PlayerId(0))
+                .iter()
+                .position(|id| *id == graveyard_b),
+            Some(2)
+        );
+        let current = &owner.staged.as_ref().unwrap().members[4];
+        let slot = staged_arrangement_slot(&state, &owner, current).expect("Top reorder slot");
+        assert_eq!(slot, 0, "Library C goes before every present higher rank");
+        zones::move_to_library_at_index(&mut state, library_c, Some(slot), &mut Vec::new());
+        assert_eq!(
+            state
+                .library_of(PlayerId(0))
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [library_c, graveyard_a, library_e, graveyard_b, library_a]
+        );
+    }
+
+    /// CR 400.7 + CR 401.4: present cross-zone arrivals are recognized by
+    /// incarnation, even before their own staged terminal has been recorded.
+    #[test]
+    fn nth_from_top_group_counts_present_positions_not_adjacent_ranks() {
+        let mut state = GameState::new_two_player(42);
+        effect_source(&mut state);
+        let l0 = library_card(&mut state, 10);
+        let l1 = library_card(&mut state, 11);
+        let a = graveyard_card(&mut state, 1);
+        let b = graveyard_card(&mut state, 2);
+        let c = graveyard_card(&mut state, 3);
+        let position = LibraryPosition::NthFromTop { n: 2 };
+        let members = [a, b, c]
+            .into_iter()
+            .map(|id| {
+                staged_member(
+                    &state,
+                    id,
+                    Some(approved_library_event(&state, id, position.clone())),
+                    StagedBatchMemberState::Approved,
+                    Zone::Library,
+                    Some(position.clone()),
+                )
+            })
+            .collect();
+        let group_id = push_approved_staged(&mut state, members, BatchDeliveryStage::Approving);
+        let mut owner = take_owner(&mut state, group_id);
+        begin_staged_arrangement(&state, &mut owner);
+        // Derived final order is [C, B, A]. Present ranks {0, 2} occupy
+        // adjacent library positions, not adjacent final-order ranks.
+        zones::move_to_library_at_index(&mut state, c, Some(1), &mut Vec::new());
+        zones::move_to_library_at_index(&mut state, a, Some(2), &mut Vec::new());
+        let member = &owner.staged.as_ref().unwrap().members[1];
+        let slot = staged_arrangement_slot(&state, &owner, member).expect("numbered group slot");
+        assert_eq!(slot, 2);
+        zones::move_to_library_at_index(&mut state, b, Some(slot), &mut Vec::new());
+        assert_eq!(
+            state
+                .library_of(PlayerId(0))
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [l0, c, b, a, l1]
+        );
+    }
+
     #[test]
     fn staged_arrangement_submits_the_owner_permutation() {
         let mut state = GameState::new_two_player(42);
@@ -12392,7 +12730,11 @@ mod staged_batch_tests {
 
     #[test]
     fn staged_validator_rejects_duplicate_owner_position_groups() {
-        for position in [LibraryPosition::Top, LibraryPosition::Bottom] {
+        for position in [
+            LibraryPosition::Top,
+            LibraryPosition::Bottom,
+            LibraryPosition::NthFromTop { n: 2 },
+        ] {
             let mut state = GameState::new_two_player(42);
             effect_source(&mut state);
             let a = graveyard_card(&mut state, 1);

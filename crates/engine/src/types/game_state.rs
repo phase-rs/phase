@@ -7267,9 +7267,9 @@ impl PendingBatchDeliveries {
     ) -> Result<(), String> {
         if !matches!(
             arrangement.position,
-            LibraryPosition::Top | LibraryPosition::Bottom
+            LibraryPosition::Top | LibraryPosition::Bottom | LibraryPosition::NthFromTop { .. }
         ) {
-            return Err("a staged arrangement groups a non-Top/Bottom position".to_string());
+            return Err("a staged arrangement groups an unsupported library position".to_string());
         }
         if arrangement.batch.arranger.is_some() {
             return Err("a staged arrangement has a named arranger".to_string());
