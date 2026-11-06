@@ -6209,6 +6209,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
     // Before this precedence existed, case 2 kept the base's split and the
     // alternative branch tried to partition a remainder its own text had
     // already sent uniformly to one position.
+    let alt_names_split = alt_rest_split_top_count.is_some();
     let alt_rest_split_top_count = alt_rest_split_top_count.map(|boxed| *boxed).or_else(|| {
         if alt_rest.is_some() {
             // CR 401.4: an alternative that puts its remainder on TOP names
@@ -6229,6 +6230,31 @@ pub(crate) fn try_parse_dig_instead_alternative(
         alt_rest_destination,
         alt_rest_split_top_count.is_some(),
     );
+    // CR 401.4: fail closed on the all-top remainder shapes the Dig resolver
+    // cannot honor, exactly as the base branch's continuation does — never let
+    // them silently bottom or arbitrarily order the pile.
+    if super::sequence::unsupported_top_remainder(
+        alt_rest_library_position,
+        alt_names_split,
+        alt_rest_order,
+        super::sequence::is_mass_put_all(alt_keep_count, alt_up_to, alt_destination),
+    ) {
+        return Some(AbilityIr {
+            source_text: text.to_string(),
+            body: EffectChainIr::single_clause(
+                text,
+                kind,
+                parsed_clause(super::sequence::unsupported_top_remainder_effect()),
+                None,
+                None,
+                false,
+            ),
+            shell: AbilityShellIr::default(),
+            die_results: vec![],
+            root_transforms: vec![AbilityRootTransform::AppendCondition(condition)],
+            modal: None,
+        });
+    }
     let alt_effect = Effect::Dig {
         player: prev_player.clone(),
         count: prev_count.clone(),

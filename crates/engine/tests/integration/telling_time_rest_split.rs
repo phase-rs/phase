@@ -49,6 +49,14 @@ fn telling_time_cost() -> ManaCost {
     }
 }
 
+/// Diabolic Vision's printed cost: {U}{B}.
+fn diabolic_vision_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue, ManaCostShard::Black],
+        generic: 0,
+    }
+}
+
 fn add_mana(runner: &mut GameRunner, ty: ManaType, count: usize) {
     for _ in 0..count {
         let unit = ManaUnit::new(ty, ObjectId(0), false, vec![]);
@@ -1896,7 +1904,7 @@ fn a_same_player_split_still_shows_its_own_looker_the_pile() {
 // ALL-TOP remainder (Diabolic Vision).
 // ---------------------------------------------------------------------------
 
-/// Verbatim Oracle text (Diabolic Vision, {2}{U}{U} sorcery).
+/// Verbatim Oracle text (Diabolic Vision, {U}{B} sorcery).
 const DIABOLIC_VISION_ORACLE: &str = "Look at the top five cards of your library. \
 Put one of them into your hand and the rest on top of your library in any order.";
 
@@ -1964,7 +1972,7 @@ fn diabolic_vision_puts_the_whole_remainder_on_top_in_the_chosen_order() {
         false,
         DIABOLIC_VISION_ORACLE,
     );
-    builder.with_mana_cost(telling_time_cost());
+    builder.with_mana_cost(diabolic_vision_cost());
     let spell_id = builder.id();
     let mut runner = scenario.build();
 
@@ -1976,7 +1984,8 @@ fn diabolic_vision_puts_the_whole_remainder_on_top_in_the_chosen_order() {
         add_library_card(&mut runner, "Suffix0"),
         add_library_card(&mut runner, "Suffix1"),
     ];
-    add_mana(&mut runner, ManaType::Blue, 2);
+    add_mana(&mut runner, ManaType::Blue, 1);
+    add_mana(&mut runner, ManaType::Black, 1);
 
     let outcome = runner.cast(spell_id).resolve();
     let looked_at = match outcome.final_waiting_for() {
@@ -2058,19 +2067,225 @@ Put one of them into your hand and the rest on the bottom of your library in any
             cards: vec![looked_at[0]],
         })
         .expect("keeping one looked-at card must be accepted");
+    // CR 401.4: "in any order" lets the owner arrange the bottom pile, so an
+    // arrangement prompt MAY be parked. The control is the POSITION, not the
+    // absence of a prompt: a bottom remainder has no card to place on top, so
+    // any split prompt it parks must carry `top_count == 0`, and answering it
+    // with the pile as listed must still leave everything below the suffix.
+    if let WaitingFor::DigRestSplitChoice {
+        cards, top_count, ..
+    } = runner.state().waiting_for.clone()
+    {
+        assert_eq!(
+            top_count, 0,
+            "a bottom remainder never places a card on top of the library"
+        );
+        runner
+            .act(GameAction::SelectCards { cards })
+            .expect("a bottom-pile arrangement must be accepted");
+    }
     runner.advance_until_stack_empty();
 
-    assert!(
-        !matches!(
-            runner.state().waiting_for,
-            WaitingFor::DigRestSplitChoice { .. }
-        ),
-        "a bottom remainder is routed immediately, never through the all-top split prompt"
-    );
     let library: Vec<ObjectId> = runner.state().players[0].library.iter().copied().collect();
     assert_eq!(library.len(), 4, "three remainder cards plus the suffix");
     assert_eq!(
         library[0], suffix,
         "the untouched suffix stays on top; the remainder went to the bottom"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fail-closed boundaries of the all-top remainder (CR 401.4).
+//
+// The Dig resolver can honor an all-top remainder only on the ordinary
+// selection route, with the owner arranging the pile. Every other combination
+// the grammar accepts must surface as the strict unsupported receipt instead of
+// silently reaching the library bottom or handing the owner an arrangement
+// choice the card does not grant. No printed card currently combines these
+// shapes; the nearest printed card is Diabolic Vision, so the fixtures below
+// are synthetic variants of its text.
+// ---------------------------------------------------------------------------
+
+fn parse_sorcery(oracle: &str) -> engine::parser::oracle::ParsedAbilities {
+    engine::parser::oracle::parse_oracle_text(
+        oracle,
+        "Synthetic Top Remainder",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    )
+}
+
+/// Every effect reachable from an ability through its `else_ability` and
+/// `sub_ability` links (the alternative branch of a conditional "instead" sits in
+/// front of its base branch; an "if you do" clause hangs off its cost).
+fn chain_effects(parsed: &engine::parser::oracle::ParsedAbilities) -> Vec<&Effect> {
+    fn walk<'a>(
+        node: &'a engine::types::ability::AbilityDefinition,
+        effects: &mut Vec<&'a Effect>,
+    ) {
+        effects.push(node.effect.as_ref());
+        if let Some(sub) = node.sub_ability.as_deref() {
+            walk(sub, effects);
+        }
+        if let Some(other) = node.else_ability.as_deref() {
+            walk(other, effects);
+        }
+    }
+    let mut effects = Vec::new();
+    for ability in &parsed.abilities {
+        walk(ability, &mut effects);
+    }
+    effects
+}
+
+/// CR 401.4: a RANDOM all-top remainder is never arranged by its owner, but the
+/// split resolver shuffles the pile and then parks an arrangement choice for it.
+/// The combination must fail closed. Paired with the PlayerChoice control in
+/// `diabolic_vision_parses_an_all_top_remainder`.
+#[test]
+fn a_random_order_top_remainder_fails_closed() {
+    let parsed = parse_sorcery(
+        "Look at the top five cards of your library. Put one of them into your hand \
+         and the rest on top of your library in a random order.",
+    );
+    let effects = chain_effects(&parsed);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| effect.unimplemented_description().is_some()),
+        "a random-order top remainder must surface the unsupported receipt, got {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Dig { .. })),
+        "no Dig may survive to bottom or arrange the pile, got {effects:?}"
+    );
+}
+
+/// CR 608.2c + CR 701.20e: the deterministic "put ALL <filter> from among them"
+/// route places its remainder through the uniform bottom route and threads no
+/// split, so an all-top remainder on it must fail closed.
+#[test]
+fn a_mass_put_all_top_remainder_fails_closed() {
+    let parsed = parse_sorcery(
+        "Look at the top five cards of your library. Put all land cards from among \
+         them into your hand and the rest on top of your library in any order.",
+    );
+    let effects = chain_effects(&parsed);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| effect.unimplemented_description().is_some()),
+        "a mass put-all top remainder must surface the unsupported receipt, got {effects:?}"
+    );
+}
+
+/// CONTROL for the mass guard: "any number" lowers to the same unbounded keep
+/// sentinel but with `up_to == true`, which takes the ordinary selection route
+/// and carries the split — so it must NOT be rejected.
+#[test]
+fn an_any_number_top_remainder_keeps_its_split() {
+    let parsed = parse_sorcery(
+        "Look at the top five cards of your library. Put any number of land cards \
+         from among them into your hand and the rest on top of your library in any order.",
+    );
+    let effects = chain_effects(&parsed);
+    let Some(Effect::Dig {
+        up_to,
+        rest_split_top_count,
+        rest_order,
+        ..
+    }) = effects
+        .iter()
+        .find(|effect| matches!(effect, Effect::Dig { .. }))
+    else {
+        panic!("an any-number top remainder must stay a Dig, got {effects:?}");
+    };
+    assert!(*up_to, "\"any number\" is an up-to selection");
+    assert_eq!(
+        *rest_split_top_count,
+        Some(QuantityExpr::Fixed { value: 5 }),
+        "the all-top remainder rides the split, clamped to the pile at resolution"
+    );
+    assert_eq!(*rest_order, DigRestOrder::PlayerChoice);
+}
+
+/// CR 401.4, alternative lowering (`try_parse_dig_instead_alternative`): the
+/// "instead" branch applies the same boundary as the ordinary route.
+#[test]
+fn an_alternative_random_order_top_remainder_fails_closed() {
+    let parsed = parse_sorcery(
+        "Look at the top five cards of your library. Put one of them into your hand \
+         and the rest on the bottom of your library in any order. If you control a \
+         creature, instead put two of them into your hand and the rest on top of your \
+         library in a random order.",
+    );
+    let effects = chain_effects(&parsed);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| effect.unimplemented_description().is_some()),
+        "the alternative's random-order top remainder must surface the unsupported \
+         receipt, got {effects:?}"
+    );
+}
+
+/// CONTROL for the alternative boundary: the same alternative with an
+/// arrangement ("in any order") is supported and keeps its all-top split.
+#[test]
+fn an_alternative_player_ordered_top_remainder_keeps_its_split() {
+    let parsed = parse_sorcery(
+        "Look at the top five cards of your library. Put one of them into your hand \
+         and the rest on the bottom of your library in any order. If you control a \
+         creature, instead put two of them into your hand and the rest on top of your \
+         library in any order.",
+    );
+    let digs = collect_dig_chain(&parsed);
+    let alternative = digs
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Dig {
+                keep_count: Some(2),
+                rest_split_top_count,
+                ..
+            } => Some(rest_split_top_count.clone()),
+            _ => None,
+        })
+        .expect("the alternative Dig must be present");
+    assert_eq!(
+        alternative,
+        Some(QuantityExpr::Fixed { value: 5 }),
+        "the alternative's top remainder rides the all-top split"
+    );
+}
+
+/// CR 401.4, intervening-cost shape (Birthing Ritual-class PriorLook Digs): the
+/// rebuilt Digs carry `count: 0`, so there is no count to clamp an all-top
+/// remainder from. The shape must fail closed rather than bottom the pile.
+#[test]
+fn an_all_top_remainder_after_an_optional_cost_fails_closed() {
+    let parsed = parse_sorcery(
+        "Look at the top seven cards of your library. You may sacrifice a creature. \
+         If you do, you may put a creature card from among those cards onto the \
+         battlefield and the rest on top of your library in any order.",
+    );
+    let effects = chain_effects(&parsed);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| effect.unimplemented_description().is_some()),
+        "the \"if you do\" clause must surface the unsupported receipt, got {effects:?}"
+    );
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Dig {
+                source: DigSource::PriorLook,
+                ..
+            }
+        )),
+        "no PriorLook Dig may be built for an all-top remainder, got {effects:?}"
     );
 }

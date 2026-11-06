@@ -5859,21 +5859,6 @@ pub(super) fn apply_clause_continuation(
                             "Dig-source face-down from-among with intervening sacrifice \
                              is not yet supported"
                         );
-                        // CR 401.4: the all-top remainder form ("and the rest on
-                        // top of your library") has no printed card in this
-                        // optional-sacrifice shape, and the PriorLook Digs built
-                        // below carry `count: 0` — they read the looked-at set
-                        // from `private_look_ids`, so there is no count expression
-                        // the top remainder could be clamped from. A release build
-                        // therefore falls back to the library bottom; debug builds
-                        // flag the unsupported shape instead of letting it pass
-                        // silently.
-                        debug_assert!(
-                            rest_library_position == RestLibraryPosition::Bottom,
-                            "all-top remainder with an intervening optional cost is not \
-                             yet supported; see the DigFromAmong patch arm"
-                        );
-
                         // 1. Demote the root Dig to look-only (no choice yet).
                         if let Effect::Dig {
                             keep_count,
@@ -5891,6 +5876,24 @@ pub(super) fn apply_clause_continuation(
                             *rest_destination = None;
                             *reveal = false;
                             *up_to = false;
+                        }
+
+                        // CR 401.4: the all-top remainder form ("and the rest on
+                        // top of your library") has no printed card in this
+                        // optional-sacrifice shape, and the PriorLook Digs built
+                        // below carry `count: 0` — they read the looked-at set
+                        // from `private_look_ids`, so there is no count expression
+                        // the top remainder could be clamped from. Fail closed:
+                        // the "if you do" clause becomes the strict unsupported
+                        // receipt instead of a Dig that would bottom the pile.
+                        if rest_library_position == RestLibraryPosition::Top
+                            && rest_split_top.is_none()
+                        {
+                            let mut unsupported =
+                                AbilityDefinition::new(kind, unsupported_top_remainder_effect());
+                            unsupported.condition = Some(AbilityCondition::effect_performed());
+                            defs[sac_pos].sub_ability = Some(Box::new(unsupported));
+                            return;
                         }
 
                         // 2. Map quantity → keep_count / up_to for the choice Dig.
@@ -5974,6 +5977,27 @@ pub(super) fn apply_clause_continuation(
             let Some(dig_pos) = dig_pos else {
                 return;
             };
+            // CR 401.4: fail closed on an all-top remainder the Dig resolver
+            // cannot honor (see `unsupported_top_remainder`). "Any number"
+            // lowers to `up_to == true`, which takes the ordinary selection
+            // route and carries the split, so only the deterministic mass
+            // route is rejected here.
+            if matches!(&*defs[dig_pos].effect, Effect::Dig { .. }) {
+                let (mass_keep, _, mass_up_to) = quantity.to_dig_keep();
+                if unsupported_top_remainder(
+                    rest_library_position,
+                    rest_split_top.is_some(),
+                    continuation_rest_order,
+                    is_mass_put_all(mass_keep, mass_up_to, kept_dest),
+                ) {
+                    let previous = &mut defs[dig_pos];
+                    *previous.effect = unsupported_top_remainder_effect();
+                    previous.sub_ability = None;
+                    previous.else_ability = None;
+                    previous.forward_result = false;
+                    return;
+                }
+            }
             let previous = &mut defs[dig_pos];
             if let Effect::Dig {
                 count: dig_count,
@@ -6044,17 +6068,6 @@ pub(super) fn apply_clause_continuation(
                 // the last clause to speak about the remainder owns it
                 // (CR 608.2c, written order).
                 //
-                // CR 608.2c: the deterministic "put ALL <filter> from among
-                // them" mass route (`resolve_mass_put_all`) places the
-                // remainder through the uniform bottom route and does not
-                // thread a split. No printed card combines that shape with an
-                // all-top remainder; a release build falls back to the bottom,
-                // and debug builds flag the unsupported combination.
-                debug_assert!(
-                    !(matches!(quantity, PutCount::All | PutCount::AnyNumber)
-                        && rest_library_position == RestLibraryPosition::Top),
-                    "all-top remainder on the mass put-all Dig shape is not yet supported"
-                );
                 // CR 401.4: "… and the rest on top of your library in any
                 // order" (Diabolic Vision) is the degenerate
                 // all-top remainder, which `rest_destination: Some(Library)`
@@ -7101,6 +7114,51 @@ fn dig_needs_last_revealed_rest_sibling(effect: &Effect) -> bool {
         } => !matches!(count, QuantityExpr::Fixed { .. }),
         _ => false,
     }
+}
+
+/// CR 608.2c + CR 701.20a/701.20e: the deterministic "put ALL <filter> from
+/// among them onto [destination]" mass route. Mirrors the dispatch condition in
+/// `resolve_dig` (`raw_keep_num == u32::MAX && !is_up_to`, with a concrete kept
+/// destination): "any number" lowers to the same unbounded sentinel but with
+/// `up_to == true`, so it takes the ordinary selection route instead.
+pub(super) fn is_mass_put_all(
+    keep_count: Option<u32>,
+    up_to: bool,
+    kept_destination: Option<Zone>,
+) -> bool {
+    keep_count == Some(u32::MAX) && !up_to && kept_destination.is_some()
+}
+
+/// CR 401.4: whether a remainder routed "on top of your library" names a shape
+/// the Dig resolver cannot honor, so the lowering must fail closed rather than
+/// let it silently reach the library bottom or hand the owner an arrangement
+/// the card does not grant.
+///
+/// - The mass put-all route places the remainder through the uniform bottom
+///   route and threads no split (`resolve_mass_put_all`).
+/// - A "random order" remainder is shuffled and then parked for the owner's
+///   own arrangement (`split_rest_pile_or_park`), which CR 401.4 does not
+///   allow for a random placement.
+///
+/// An explicit Telling Time-class split (`has_explicit_split`) owns its own
+/// positions, so the all-top position never applies to it.
+pub(super) fn unsupported_top_remainder(
+    position: RestLibraryPosition,
+    has_explicit_split: bool,
+    order: DigRestOrder,
+    mass_put_all: bool,
+) -> bool {
+    position == RestLibraryPosition::Top
+        && !has_explicit_split
+        && (mass_put_all || order == DigRestOrder::Random)
+}
+
+/// The strict unsupported receipt for [`unsupported_top_remainder`] shapes.
+pub(super) fn unsupported_top_remainder_effect() -> Effect {
+    Effect::unimplemented(
+        "dig_rest_on_top_unsupported_shape",
+        "put the rest on top of your library",
+    )
 }
 
 /// CR 701.20e + CR 608.2c: the remainder a selection clause declares for the
