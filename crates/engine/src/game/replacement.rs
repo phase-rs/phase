@@ -9256,7 +9256,7 @@ pub(crate) fn begin_turn_would_be_prevented(
     !find_applicable_replacements(state, &proposed, registry).is_empty()
 }
 
-const MAX_REPLACEMENT_DEPTH: u16 = 16;
+pub(crate) const MAX_REPLACEMENT_DEPTH: u16 = 16;
 
 /// Identifies which ability branch of a `ReplacementDefinition` is being applied.
 /// CR 614.1a + CR 614.1c: `ReplacementMode::Optional` carries both an `execute` ability
@@ -10550,8 +10550,17 @@ fn apply_single_replacement_and_dirty(
     events: &mut Vec<GameEvent>,
 ) -> (Result<ProposedEvent, ApplyResult>, bool) {
     let before = proposed.clone();
-    let owns_pipeline = matches!(proposed, ProposedEvent::TurnFaceUp { .. })
-        && matches!(branch, ReplacementBranch::Execute);
+    let owns_pipeline = matches!(proposed, ProposedEvent::TurnFaceUp { .. });
+    let decline_body = if owns_pipeline && matches!(branch, ReplacementBranch::Decline) {
+        replacement_choice_definition(state, rid).and_then(|definition| {
+            replacement_mode_decline_cloned(&definition.mode).and_then(|body| {
+                (!EventModifiers::has_only_event_modifier_for_event(Some(&body), &proposed))
+                    .then(|| (body, replacement_ability_controller(state, rid, definition)))
+            })
+        })
+    } else {
+        None
+    };
     let caller_wait = owns_pipeline.then(|| {
         state.resolution_stack.push_inner(
             crate::types::resolution::ResolutionFrame::ReplacementPipeline(Box::new(
@@ -10569,6 +10578,16 @@ fn apply_single_replacement_and_dirty(
         )
     });
     let mut result = apply_single_replacement(state, proposed, rid, branch, registry, events);
+    // CR 608.2c + CR 616.1f: complete the selected decline instruction before
+    // offering another replacement for this turn-up. The pipeline owner stays
+    // below the body if that instruction needs a choice.
+    if let (Ok(ProposedEvent::TurnFaceUp { applied, .. }), Some((body, controller))) =
+        (&result, decline_body)
+    {
+        let mut ability = build_resolved_from_def(&body, rid.source, controller);
+        ability.set_replacement_applied_recursive(applied.clone());
+        let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 1);
+    }
     let paused = owns_pipeline && !matches!(state.waiting_for, WaitingFor::Priority { .. });
     if owns_pipeline && !paused {
         state
@@ -12699,10 +12718,11 @@ fn continue_replacement_impl(
             // needed — the modifier has already been applied to the ProposedEvent.
             // If the decline branch has non-modifier work (e.g., a choice side-effect),
             // it is retained as a post-replacement side effect.
-            let post = if EventModifiers::has_only_event_modifier_for_event(
-                decline_effect.as_deref(),
-                &proposed,
-            ) {
+            let post = if matches!(proposed, ProposedEvent::TurnFaceUp { .. })
+                || EventModifiers::has_only_event_modifier_for_event(
+                    decline_effect.as_deref(),
+                    &proposed,
+                ) {
                 None
             } else {
                 decline_effect

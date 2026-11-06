@@ -1689,6 +1689,111 @@ mod tests {
     }
 
     #[test]
+    fn declined_turn_face_up_body_finishes_before_the_next_replacement() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ChooseOneOfKind, Effect, PlayerFilter,
+            ReplacementDefinition, ReplacementMode, TargetFilter,
+        };
+        use crate::types::actions::GameAction;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+        let gain = |amount| Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: amount },
+            player: TargetFilter::Controller,
+        };
+        let decline = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![
+                    AbilityDefinition::new(AbilityKind::Spell, gain(1)),
+                    AbilityDefinition::new(AbilityKind::Spell, gain(2)),
+                ],
+                kind: ChooseOneOfKind::Ordinary,
+            },
+        );
+        let first = ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
+            .valid_card(TargetFilter::SelfRef)
+            .mode(ReplacementMode::Optional {
+                decline: Some(Box::new(decline)),
+            })
+            .execute(AbilityDefinition::new(AbilityKind::Spell, gain(8)));
+        let second = ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
+            .valid_card(TargetFilter::SelfRef)
+            .mode(ReplacementMode::Optional { decline: None })
+            .execute(AbilityDefinition::new(AbilityKind::Spell, gain(4)));
+        {
+            let object = state.objects.get_mut(&id).unwrap();
+            object.replacement_definitions.push(first.clone());
+            object.replacement_definitions.push(second.clone());
+            Arc::make_mut(&mut object.base_replacement_definitions).extend([first, second]);
+        }
+        let mut events = Vec::new();
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+        events.clear();
+        turn_face_up(&mut state, player, id, &mut events).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::TurnedFaceUp { .. })));
+
+        let order = crate::game::engine::apply(
+            &mut state,
+            player,
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("choose the first replacement");
+        assert!(matches!(
+            order.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        let declined = crate::game::engine::apply(
+            &mut state,
+            player,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("decline the first replacement");
+        assert!(matches!(
+            declined.waiting_for,
+            WaitingFor::ChooseOneOfBranch { .. }
+        ));
+        assert!(!declined
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::TurnedFaceUp { .. })));
+        assert_eq!(state.players[0].life, 20);
+
+        let saved = serde_json::to_string(&state).expect("serialize suspended decline");
+        state = serde_json::from_str(&saved).expect("restore suspended decline");
+        let branch =
+            crate::game::engine::apply(&mut state, player, GameAction::ChooseBranch { index: 0 })
+                .expect("complete the decline body");
+        assert_eq!(state.players[0].life, 21);
+        assert!(matches!(
+            branch.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert!(!branch
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::TurnedFaceUp { .. })));
+        let completed = crate::game::engine::apply(
+            &mut state,
+            player,
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("accept the second replacement");
+        assert_eq!(state.players[0].life, 25);
+        assert_eq!(completed.events.iter().filter(|event| matches!(event, GameEvent::TurnedFaceUp { object_id } if *object_id == id)).count(), 1);
+    }
+
+    #[test]
     fn turn_face_up_gaps_attach_to_external_target() {
         // CR 708.11: Gift of Doom's "As ~ is turned face up, you may attach it to
         // a creature" needs an external host *choice* made during the turn-up,

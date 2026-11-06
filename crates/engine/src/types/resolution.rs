@@ -3665,6 +3665,42 @@ impl ResolutionStack {
         let mut direct_choice_count = 0;
         let mut buried_direct_choice = None;
         for (index, frame) in self.frames.iter().enumerate() {
+            if let ResolutionFrame::ReplacementPipeline(pending) = frame {
+                // CR 616.1f: only a turn-face-up event is currently parked by
+                // this owner. Its depth was captured inside the bounded loop,
+                // before applying the replacement, and must be safe to advance.
+                match &pending.event {
+                    ProposedEvent::TurnFaceUp { applied, .. } if !applied.is_empty() => {}
+                    ProposedEvent::TurnFaceUp { .. } => {
+                        return Err(ResolutionStackError::InvalidPayload {
+                            frame: FrameKind::ReplacementPipeline,
+                            message: "a suspended replacement pipeline must retain its applied replacement".to_string(),
+                        });
+                    }
+                    _ => {
+                        return Err(ResolutionStackError::InvalidPayload {
+                            frame: FrameKind::ReplacementPipeline,
+                            message:
+                                "only turn-face-up events may own a suspended replacement pipeline"
+                                    .to_string(),
+                        });
+                    }
+                }
+                if pending.depth >= crate::game::replacement::MAX_REPLACEMENT_DEPTH {
+                    return Err(ResolutionStackError::InvalidPayload {
+                        frame: FrameKind::ReplacementPipeline,
+                        message: "suspended replacement pipeline depth exceeds its live bound"
+                            .to_string(),
+                    });
+                }
+                if matches!(waiting_for, WaitingFor::Priority { .. }) {
+                    return Err(ResolutionStackError::InvalidPayload {
+                        frame: FrameKind::ReplacementPipeline,
+                        message: "a suspended replacement pipeline requires a live choice"
+                            .to_string(),
+                    });
+                }
+            }
             if matches!(frame.gate(), FrameGate::DirectChoice(_)) {
                 direct_choice_count += 1;
                 if index + 1 != self.frames.len() {
@@ -3827,8 +3863,12 @@ impl ResolutionStack {
 /// Version 3 distinguishes the current exploited-trigger source/victim roles
 /// from the legacy actor fallback stored in `valid_card`. Version 4 requires
 /// every draw frame to carry its result owner explicitly, including `null`.
-/// Version 5 adds the simultaneous-draw dealer to the draw frame.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 5;
+/// Version 5 adds the simultaneous-draw dealer to the draw frame. Version 6
+/// adds the suspended replacement-pipeline frame.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 6;
+
+/// First wire version that can carry a suspended replacement pipeline.
+const REPLACEMENT_PIPELINE_WIRE_VERSION: u64 = 6;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -3846,6 +3886,9 @@ const LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION: u64 = 3;
 /// Last wire version written before a draw frame could carry a simultaneous-draw
 /// dealer. It is also the first version that requires `delivery_owner`.
 const LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION: u64 = 4;
+
+/// Last wire version written before suspended replacement pipelines existed.
+const LEGACY_PRE_REPLACEMENT_PIPELINE_WIRE_VERSION: u64 = 5;
 
 /// The `GameState` fields whose serialized form is UNCONDITIONAL: each carries
 /// `#[serde(default …)]` but NO `skip_serializing_if`, so the derived
@@ -4380,9 +4423,9 @@ impl ResolutionStateWire {
     /// Decodes persisted full-game state at the resolution compatibility boundary.
     ///
     /// Version 1 is read only through the legacy migration path below. Versions
-    /// 2 and 3 share the typed-frame reader; versions 4 and 5 use the same frame
-    /// layout with an explicit draw-result-owner presence check, and a version-4
-    /// draw frame simply has no dealer.
+    /// 2 and 3 share the typed-frame reader; versions 4 through 6 use the same
+    /// reader with explicit draw-result ownership. Version 4 has no draw dealer,
+    /// and versions before 6 cannot carry a replacement-pipeline frame.
     fn from_value(mut value: Value) -> Result<Self, String> {
         let version = {
             let object = value
@@ -4405,12 +4448,12 @@ impl ResolutionStateWire {
             LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION => {
                 GameStateDecodeMode::ResolutionWireV3
             }
-            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION | RESOLUTION_STATE_WIRE_VERSION => {
-                GameStateDecodeMode::ResolutionWireV4
-            }
+            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_PRE_REPLACEMENT_PIPELINE_WIRE_VERSION
+            | RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_PRE_REPLACEMENT_PIPELINE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
@@ -4655,6 +4698,15 @@ impl ResolutionStateWire {
                 }
                 let mut frames: ResolutionStack = serde_json::from_value(frames_value.clone())
                     .map_err(|error| error.to_string())?;
+                if version < REPLACEMENT_PIPELINE_WIRE_VERSION
+                    && frames
+                        .iter()
+                        .any(|frame| matches!(frame, ResolutionFrame::ReplacementPipeline(_)))
+                {
+                    return Err(format!(
+                        "replacement pipeline frame requires resolution_state_version {REPLACEMENT_PIPELINE_WIRE_VERSION}; found {version}"
+                    ));
+                }
                 frames.recover_draw_sequence_allocator();
                 frames.recover_discard_allocator();
                 frames.recover_post_replacement_frame_id_allocator();
@@ -7035,18 +7087,110 @@ mod tests {
     }
 
     #[test]
-    fn resolution_wire_contract_pins_v5_and_the_legacy_readers() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 5);
+    fn resolution_wire_contract_pins_v6_and_the_legacy_readers() {
+        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 6);
         assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
         assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
         assert_eq!(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION, 3);
         assert_eq!(LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION, 4);
+        assert_eq!(LEGACY_PRE_REPLACEMENT_PIPELINE_WIRE_VERSION, 5);
 
         let mut v1 =
             serde_json::to_value(GameState::new_two_player(57)).expect("legacy state serializes");
         v1["resolution_state_version"] = Value::from(1_u64);
         serde_json::from_value::<ResolutionStateWire>(v1)
             .expect("the v1 reader remains available for historical saves");
+    }
+
+    #[test]
+    fn replacement_pipeline_restore_rejects_invalid_owner_and_preserves_v5_compatibility() {
+        use crate::types::game_state::{PersistedGameState, PersistedRestoreFinalization};
+        use crate::types::proposed_event::{AppliedReplacementKey, DrawEventStage};
+
+        let mut state = GameState::new_two_player(58);
+        state.waiting_for = WaitingFor::ScryChoice {
+            player: PlayerId(0),
+            cards: Vec::new(),
+        };
+        let empty = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("empty current wire serializes");
+        let mut legacy = empty.clone();
+        legacy["resolution_state_version"] =
+            Value::from(LEGACY_PRE_REPLACEMENT_PIPELINE_WIRE_VERSION);
+        let legacy = serde_json::from_value::<PersistedGameState>(legacy)
+            .expect("v5 snapshots without the new frame remain readable");
+        legacy
+            .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+            .expect("the production restore path accepts the old snapshot");
+
+        let applied = HashSet::from([AppliedReplacementKey::object(ObjectId(10), 0)]);
+        let valid = PendingReplacementPipeline {
+            event: ProposedEvent::TurnFaceUp {
+                object_id: ObjectId(10),
+                applied: applied.clone(),
+            },
+            depth: 0,
+        };
+        let fixture = |pending: PendingReplacementPipeline| {
+            let mut value = empty.clone();
+            value["resolution_frames"]["frames"] =
+                serde_json::to_value(vec![ResolutionFrame::ReplacementPipeline(Box::new(
+                    pending,
+                ))])
+                .expect("the frame serializes");
+            value
+        };
+        let saved = fixture(valid.clone());
+        let restored = serde_json::from_value::<PersistedGameState>(saved.clone())
+            .expect("v6 accepts a valid suspended event");
+        restored
+            .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+            .expect("the valid event crosses the production restore path");
+
+        let mut mislabeled_v5 = saved.clone();
+        mislabeled_v5["resolution_state_version"] =
+            Value::from(LEGACY_PRE_REPLACEMENT_PIPELINE_WIRE_VERSION);
+        assert!(serde_json::from_value::<PersistedGameState>(mislabeled_v5).is_err());
+        let bad_event = PendingReplacementPipeline {
+            event: ProposedEvent::Draw {
+                player_id: PlayerId(0),
+                count: 1,
+                stage: DrawEventStage::Individual,
+                applied: HashSet::new(),
+            },
+            depth: 0,
+        };
+        let bad_depth = PendingReplacementPipeline {
+            event: valid.event.clone(),
+            depth: u16::MAX,
+        };
+        let unmarked = PendingReplacementPipeline {
+            event: ProposedEvent::TurnFaceUp {
+                object_id: ObjectId(10),
+                applied: HashSet::new(),
+            },
+            depth: 0,
+        };
+        for pending in [bad_event, bad_depth, unmarked] {
+            for envelope in [false, true] {
+                let value = fixture(pending.clone());
+                let value = if envelope {
+                    serde_json::json!({ "state": value })
+                } else {
+                    value
+                };
+                let error = serde_json::from_value::<PersistedGameState>(value)
+                    .expect_err("both production persistence ingresses reject an unsafe owner")
+                    .to_string();
+                assert!(error.contains("ReplacementPipeline"), "{error}");
+            }
+        }
+        let mut without_choice = saved;
+        without_choice["waiting_for"] = serde_json::to_value(WaitingFor::Priority {
+            player: PlayerId(0),
+        })
+        .unwrap();
+        assert!(serde_json::from_value::<PersistedGameState>(without_choice).is_err());
     }
 
     #[test]
@@ -9079,6 +9223,6 @@ mod tests {
         let error = serde_json::from_value::<ResolutionStateWire>(future)
             .expect_err("an unknown version is refused")
             .to_string();
-        assert!(error.contains("1, 2, 3, 4, or 5"), "{error}");
+        assert!(error.contains("1, 2, 3, 4, 5, or 6"), "{error}");
     }
 }
