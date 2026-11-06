@@ -23,6 +23,29 @@
 //!     graveyard") stays caster-performed.
 //!   * R6 — Yarok's Fenlurker: the `player_scope` fan-out keeps per-seat
 //!     attribution.
+//!   * R8 — Declaration in Stone: a mass sweep scoped to the target's
+//!     controller ("all other creatures its controller controls") names whose
+//!     objects are swept, not who acts — the caster still performs it.
+//!   * R9 — Ashiok, Nightmare Muse: the paired pick ("then that player exiles a
+//!     card from their hand") with the same `ParentTargetController` scope is
+//!     the subject form and records that player.
+//!   * R10 — Mudhole: a public-action subject-form mass exile that parks on a
+//!     `ReplacementChoice` records the subject for the paused member and for the
+//!     member resumed from the pending frame, then settles. No printed card
+//!     replaces a move into exile; the nearest printed cards are Rest in Peace
+//!     ("If a card or token would be put into a graveyard from anywhere, exile
+//!     it instead.") and Dauthi Voidwalker ("If a card would be put into an
+//!     opponent's graveyard from anywhere, instead exile it with a void counter
+//!     on it."), which redirect a graveyard-bound move into exile. One
+//!     SYNTHETIC optional replacement on a move into exile raises the prompt;
+//!     every other card in the row is a real printed card.
+//!
+//! Class premise for R8/R9: every printed `ChangeZoneAll` scoped by
+//! `ParentTargetController` is a subjectless sweep (Declaration in Stone,
+//! Deputy of Detention, Eradicate, Counterbore, Legions to Ashes), and every
+//! printed `ChangeZone` scoped by it is a subject-form pick (Ashiok, Nightmare
+//! Muse -3; Isildur's Fateful Strike; Azula, Cunning Usurper; Struggle for
+//! Sanity's "That player exiles a card from it, then you exile a card from it").
 //!
 //! Revert sensitivity is stated per test. The one reader of `exiled_by`
 //! (`casting::exile_permission_pool`) is guarded by
@@ -32,12 +55,16 @@
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{AbilityDefinition, Effect};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ReplacementMode, TargetFilter,
+};
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 const P2: PlayerId = PlayerId(2);
@@ -62,6 +89,16 @@ const TORMODS_CRYPT: &str = "{T}, Sacrifice this artifact: Exile target player's
 
 /// Yarok's Fenlurker `{B}{B}` Creature — Horror 1/1 — verbatim Oracle text.
 const YAROKS_FENLURKER: &str = "When this creature enters, each opponent exiles a card from their hand.\n{2}{B}: This creature gets +1/+1 until end of turn.";
+
+/// Declaration in Stone `{1}{W}` Sorcery — verbatim Oracle text.
+const DECLARATION_IN_STONE: &str = "Exile target creature and all other creatures its controller controls with the same name as that creature. That player investigates for each nontoken creature exiled this way.";
+
+/// Ashiok, Nightmare Muse `{3}{U}{B}` Legendary Planeswalker — Ashiok —
+/// verbatim Oracle text (U+2212 minus signs).
+const ASHIOK_NIGHTMARE_MUSE: &str = "[+1]: Create a 2/3 blue and black Nightmare creature token with \"Whenever this token attacks or blocks, each opponent exiles the top two cards of their library.\"\n[\u{2212}3]: Return target nonland permanent to its owner's hand, then that player exiles a card from their hand.\n[\u{2212}7]: You may cast up to three spells from among face-up cards your opponents own from exile without paying their mana costs.";
+
+/// Mudhole `{2}{R}` Instant — verbatim Oracle text.
+const MUDHOLE: &str = "Target player exiles all land cards from their graveyard.";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -537,4 +574,294 @@ fn yaroks_fenlurker_fan_out_keeps_per_seat_attribution() {
             || matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "the fan-out completes without a leftover prompt"
     );
+}
+
+// ---------------------------------------------------------------------------
+// R8 — a mass sweep scoped to the target's controller stays caster-performed.
+// ---------------------------------------------------------------------------
+
+/// Battlefield Clue tokens controlled by `player`.
+fn clues_controlled(runner: &GameRunner, player: PlayerId) -> usize {
+    let state = runner.state();
+    state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|o| o.controller == player && o.card_types.subtypes.iter().any(|s| s == "Clue"))
+        .count()
+}
+
+/// Declaration in Stone: "Exile target creature and all other creatures its
+/// controller controls with the same name as that creature." The second leg is
+/// a subjectless sweep: "its controller" names whose creatures are swept, and
+/// the spell's controller follows the instruction (CR 608.2c), so the caster
+/// exiles both. The announced target is the caster's exile too (CR 601.2c).
+///
+/// Revert sensitivity: without the sweep rule the twin records `Some(P1)`.
+#[test]
+fn declaration_in_stone_sweep_stays_caster_performed() {
+    assert_parses_clean(
+        "Declaration in Stone",
+        &[],
+        &["Sorcery"],
+        DECLARATION_IN_STONE,
+    );
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario.add_creature(P1, "Grizzly Bear", 2, 2).id();
+    let twin = scenario.add_creature(P1, "Grizzly Bear", 2, 2).id();
+    // Hostile owner-vs-caster case: the caster's own same-name creature is not
+    // part of "its controller controls", so it must stay.
+    let decoy = scenario.add_creature(P0, "Grizzly Bear", 2, 2).id();
+    let dis = scenario
+        .add_spell_to_hand_from_oracle(P0, "Declaration in Stone", false, DECLARATION_IN_STONE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![],
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(dis).target_objects(&[victim]).resolve();
+
+    // Reach-guards: the spell resolved fully, both of P1's bears were exiled,
+    // and the controller scope bound to P1 (two Clues to P1, none to P0).
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "Declaration in Stone resolves cleanly; got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_eq!(zone(&runner, victim), Zone::Exile);
+    assert_eq!(zone(&runner, twin), Zone::Exile);
+    assert_eq!(zone(&runner, decoy), Zone::Battlefield);
+    assert_eq!(clues_controlled(&runner, P1), 2, "one Clue per exiled bear");
+    assert_eq!(clues_controlled(&runner, P0), 0);
+
+    assert_eq!(
+        exiled_by(&runner, victim),
+        Some(P0),
+        "the announced target is the caster's exile"
+    );
+    assert_eq!(
+        exiled_by(&runner, twin),
+        Some(P0),
+        "a subjectless sweep scoped to the target's controller is the caster's exile"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R9 — the paired PICK with the same scope records the subject.
+// ---------------------------------------------------------------------------
+
+/// Ashiok, Nightmare Muse -3: "Return target nonland permanent to its owner's
+/// hand, then that player exiles a card from their hand." The pick carries the
+/// same `ParentTargetController` scope as R8's sweep but has a subject
+/// ("that player"), so that player performs the exile.
+///
+/// Revert sensitivity: records `Some(P0)` against the base, and `Some(P0)`
+/// against a sweep rule that does not distinguish a pick from a sweep.
+#[test]
+fn ashiok_minus_three_pick_records_that_player() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P1, "Opp Bear", 2, 2).id();
+    let ashiok = scenario
+        .add_planeswalker_from_oracle(
+            P0,
+            "Ashiok, Nightmare Muse",
+            "Ashiok",
+            5,
+            ASHIOK_NIGHTMARE_MUSE,
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    let index = runner.state().objects[&ashiok]
+        .abilities
+        .iter()
+        .position(|ability| matches!(&*ability.effect, Effect::Bounce { .. }))
+        .expect("Ashiok has the -3 ability (a Bounce chain)");
+    // Reach-guard: the -3 chain parsed cleanly into a bounce followed by the
+    // exile pick (the -7 line is a separate ability).
+    let chain = &runner.state().objects[&ashiok].abilities[index];
+    assert!(
+        !chain_has_unimplemented(chain),
+        "the -3 chain parses with no Unimplemented"
+    );
+    assert!(
+        matches!(
+            chain.sub_ability.as_deref().map(|sub| &*sub.effect),
+            Some(Effect::ChangeZone { .. })
+        ),
+        "the -3 chain's second clause is the ChangeZone pick"
+    );
+    assert!(runner.state().players[P1.0 as usize].hand.is_empty());
+
+    runner
+        .activate(ashiok, index)
+        .target_objects(&[bear])
+        .resolve();
+    drive_to_priority(&mut runner);
+
+    // Reach-guard: single eligible card, no choice prompt, the bounced bear was
+    // the one exiled.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "one eligible card takes the prompt-free shortcut; got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone(&runner, bear), Zone::Exile);
+    assert_eq!(exile_count(&runner), 1);
+    assert!(runner.state().players[P1.0 as usize].hand.is_empty());
+    assert_eq!(
+        exiled_by(&runner, bear),
+        Some(P1),
+        "\"that player exiles a card from their hand\" is that player's exile"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R10 — a paused subject-form mass exile records the subject across resume.
+// ---------------------------------------------------------------------------
+
+/// Mudhole: "Target player exiles all land cards from their graveyard." The
+/// subject is the target player for every member regardless of a pause: the
+/// performer is fixed once at resolver entry (CR 608.2h) and carried by the
+/// pending frame to the members resumed from it.
+///
+/// The prompt is raised by one SYNTHETIC optional replacement ("Synthetic Exile
+/// Redirect", controlled by P0) on a move into exile — see the module doc for
+/// the nearest printed cards. Both prompts are answered through
+/// `GameAction::ChooseReplacement`.
+///
+/// Revert sensitivity: reverting the pending frame's `controller: performer`
+/// makes the second land `Some(P0)`; reverting the member loop's
+/// `Some(performer)` makes the first land `Some(P0)`.
+#[test]
+fn mudhole_replacement_pause_resume_records_the_subject() {
+    assert_parses_clean("Mudhole", &[], &["Instant"], MUDHOLE);
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let land_a = scenario
+        .add_land_to_graveyard(P1, "Graveyard Forest A")
+        .id();
+    let land_b = scenario
+        .add_land_to_graveyard(P1, "Graveyard Forest B")
+        .id();
+    scenario.with_graveyard(P1, &["Graveyard Relic"]);
+    scenario
+        .add_creature(P0, "Synthetic Exile Redirect", 1, 1)
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .mode(ReplacementMode::Optional { decline: None })
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        origin: None,
+                        destination: Zone::Graveyard,
+                        target: TargetFilter::SelfRef,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
+                        face_down_profile: None,
+                        enters_modified_if: None,
+                    },
+                ))
+                .destination_zone(Zone::Exile),
+        );
+    let mudhole = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mudhole", true, MUDHOLE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![],
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    let relic = runner.state().players[P1.0 as usize]
+        .graveyard
+        .iter()
+        .copied()
+        .find(|id| *id != land_a && *id != land_b)
+        .expect("the nonland graveyard card exists");
+
+    let outcome = runner.cast(mudhole).target_player(P1).resolve();
+
+    // First prompt: the first land is parked on the replacement choice and the
+    // second sits in the pending frame, carrying the subject as its performer.
+    match outcome.final_waiting_for() {
+        WaitingFor::ReplacementChoice { player, kind, .. } => {
+            assert_eq!(*player, P1, "the affected card's owner chooses (CR 616.1)");
+            assert_eq!(*kind, ReplacementChoiceKind::OptionalBranch);
+        }
+        other => panic!("expected the first replacement prompt; got {other:?}"),
+    }
+    let frame = runner
+        .state()
+        .active_change_zone_frame()
+        .and_then(|frame| frame.pending.as_ref())
+        .expect("the paused mass move stashed a pending frame");
+    assert_eq!(frame.controller, P1, "the frame carries the subject");
+    assert_eq!(frame.remaining.len(), 1, "one land is still to be moved");
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("decline the first replacement");
+
+    // Second prompt: the resumed member parks again, with nothing left over.
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice { player, kind, .. } => {
+            assert_eq!(*player, P1);
+            assert_eq!(*kind, ReplacementChoiceKind::OptionalBranch);
+        }
+        other => panic!("expected the second replacement prompt; got {other:?}"),
+    }
+    let frame = runner
+        .state()
+        .active_change_zone_frame()
+        .and_then(|frame| frame.pending.as_ref())
+        .expect("the resumed member re-parked with a pending frame");
+    assert_eq!(
+        frame.controller, P1,
+        "the resumed frame still carries the subject"
+    );
+    assert!(
+        frame.remaining.is_empty(),
+        "the last land is the one parked"
+    );
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("decline the second replacement");
+
+    // Settled: nothing pending, both lands exiled by the subject.
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(runner.state().active_change_zone_frame().is_none());
+    for land in [land_a, land_b] {
+        assert_eq!(zone(&runner, land), Zone::Exile);
+        assert_eq!(
+            exiled_by(&runner, land),
+            Some(P1),
+            "\"target player exiles\" is the target player's exile, paused or resumed"
+        );
+    }
+    assert_eq!(
+        zone(&runner, relic),
+        Zone::Graveyard,
+        "the nonland card is not part of \"all land cards\""
+    );
+    assert_eq!(exile_count(&runner), 2);
 }

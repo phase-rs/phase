@@ -484,55 +484,163 @@ fn resolution_zone_candidates(
 ///
 /// `filter_controller` is the move's chooser, which is the performer for a move
 /// that names another player as its subject ("that player exiles a card from
-/// their hand"). Two shapes measured on printed cards are NOT that:
+/// their hand"). Three shapes measured on printed cards are NOT that:
 ///   * a destination other than Exile — `performed_by` also feeds entry
 ///     ownership under `EntryOwnership::ActorOwns` (`zone_pipeline.rs::entry_receiver`,
 ///     Dandan), so a non-Exile move keeps the controller;
-///   * a library-owned subject filter (`Owned { ScopedPlayer }` + `InZone { Library }`),
+///   * a library-owned subject filter (`ScopedPlayer` + `InZone { Library }`),
 ///     where "their library" names whose library it is, not who acts — Rahilda,
 ///     Wanted Cutthroat: "exile a nonland card from their library at random" is
-///     the controller's exile. (The mirror clause "that player exiles all cards
-///     from their library", Thought Lash, needs an actor axis; see the issue.)
+///     the controller's exile;
+///   * a mass sweep scoped to the parent target's controller
+///     (`sweep_names_parent_target_controllers_objects`) — Declaration in Stone,
+///     Eradicate: "its controller" names whose objects are swept, not who acts.
+///
+/// Both filter classifiers read the typed `controller` and the `Owned { .. }`
+/// property alike, so this answer is the same before and after
+/// `owner_scoped_nonbattlefield_mass_filter`.
+///
+/// Known limits, each needing an actor axis on `ChangeZoneAll` (a serialized
+/// change, tracked on the issue): the mirror clause "that player exiles all
+/// cards from their library" (Thought Lash), and a subject-form sweep scoped to
+/// the parent target's controller (Legion's End's second sentence, which the
+/// parser does not produce today) would be credited to the caster.
 fn move_performer(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
     destination: Zone,
     filter_controller: PlayerId,
 ) -> PlayerId {
-    if destination != Zone::Exile || filter_names_library_owner(target_filter) {
+    let names_whose_objects = filter_names_library_owner(target_filter)
+        || sweep_names_parent_target_controllers_objects(ability, target_filter);
+    if destination != Zone::Exile || names_whose_objects {
         ability.controller
     } else {
         filter_controller
     }
 }
 
-/// `Owned { ScopedPlayer }` together with `InZone { Library }` on the same typed
-/// leg: the filter picks a card out of that player's library by ownership.
-fn filter_names_library_owner(filter: &TargetFilter) -> bool {
+/// CR 109.4: only objects on the stack or battlefield have a controller, so a
+/// non-battlefield leg's typed `controller` and the `Owned { .. }` property that
+/// `owner_scoped_nonbattlefield_mass_filter` rewrites it to name the same
+/// player relation. Reading both makes classification identical before and
+/// after that rewrite.
+fn leg_names_player(leg: &TypedFilter, player: &ControllerRef) -> bool {
+    leg.controller.as_ref() == Some(player)
+        || leg
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Owned { controller } if controller == player))
+}
+
+/// Whether any typed leg of `filter` satisfies `pred`. The recursion set is the
+/// one `owner_scoped_nonbattlefield_mass_filter` rewrites (`Typed`, `And`, `Or`,
+/// `Not`, `TrackedSetFiltered`), so a classification built on it cannot differ
+/// across that rewrite. The leaf list mirrors `TargetFilter::controller_scope`.
+fn any_typed_leg<F: Fn(&TypedFilter) -> bool>(filter: &TargetFilter, pred: &F) -> bool {
     match filter {
-        TargetFilter::Typed(tf) => {
-            tf.properties.iter().any(|p| {
+        TargetFilter::Typed(tf) => pred(tf),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(|f| any_typed_leg(f, pred))
+        }
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            any_typed_leg(filter, pred)
+        }
+        // Nested filters these helpers deliberately do not traverse: no card
+        // nests a scoped-player or parent-target controller inside them.
+        TargetFilter::StackAbility { .. } | TargetFilter::ChosenDamageSource { .. } => false,
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+/// `ScopedPlayer` together with `InZone { Library }` on the same typed leg, in
+/// either encoding (typed `controller: ScopedPlayer`, or
+/// `Owned { ScopedPlayer }`): the filter picks a card out of that player's
+/// library by ownership.
+fn filter_names_library_owner(filter: &TargetFilter) -> bool {
+    any_typed_leg(filter, &|leg| {
+        leg_names_player(leg, &ControllerRef::ScopedPlayer)
+            && leg.properties.iter().any(|p| {
                 matches!(
                     p,
-                    crate::types::ability::FilterProp::Owned {
-                        controller: crate::types::ability::ControllerRef::ScopedPlayer
-                    }
-                )
-            }) && tf.properties.iter().any(|p| {
-                matches!(
-                    p,
-                    crate::types::ability::FilterProp::InZone {
+                    FilterProp::InZone {
                         zone: Zone::Library
                     }
                 )
             })
-        }
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(filter_names_library_owner)
-        }
-        TargetFilter::Not { filter } => filter_names_library_owner(filter),
-        _ => false,
-    }
+    })
+}
+
+/// CR 608.2c + CR 701.23a: a mass move announces no subject through
+/// `ParentTargetController` — "all other creatures its controller controls"
+/// (Declaration in Stone, Deputy of Detention) and "search its controller's
+/// graveyard, hand, and library … and exile them" (Eradicate, Counterbore)
+/// name whose objects are swept; the spell's controller follows the
+/// instruction. A pick with the same scope is the subject form ("then that
+/// player exiles a card from their hand", Ashiok, Nightmare Muse) and is not
+/// matched. The shape is read from `ability.effect`, the discriminant both
+/// resolvers already dispatch on.
+fn sweep_names_parent_target_controllers_objects(
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> bool {
+    matches!(ability.effect, Effect::ChangeZoneAll { .. })
+        && any_typed_leg(filter, &|leg| {
+            leg_names_player(leg, &ControllerRef::ParentTargetController)
+        })
 }
 
 /// CR 608.2d + CR 701.13a: report whether this exact optional-for-any-player
@@ -2880,8 +2988,10 @@ pub fn resolve_all(
         crate::game::effects::controller_for_relative_filter(state, ability, &target_filter);
     // CR 608.2c: who performs this mass move, decided once beside the chooser.
     // A mass move announces no targets, so the instruction's own subject (when
-    // it names one) is the performer; the library gate keeps a library-owner
-    // move on the controller (`move_performer`).
+    // it names one) is the performer; the library-owner and parent-target-sweep
+    // gates keep those moves on the controller (`move_performer`). The classifier
+    // reads both filter encodings, so computing it before
+    // `owner_scoped_nonbattlefield_mass_filter` is order-independent.
     let performer = move_performer(ability, &target_filter, dest_zone, filter_controller);
     let target_filter = owner_scoped_nonbattlefield_mass_filter(target_filter, &origin_zones);
 
@@ -12892,6 +13002,428 @@ mod tests {
         assert!(state.objects[&shock_b].tapped);
         assert_eq!(state.players[0].life, life_before);
         assert!(state.active_change_zone_frame().is_none());
+    }
+
+    // ---------------------------------------------------------------------
+    // Performer classification (issue #10414): `move_performer`'s library-owner
+    // and parent-target-sweep gates. Nothing here is card-specific; each
+    // fixture is a filter shape that printed cards produce, named per row.
+    // ---------------------------------------------------------------------
+
+    fn performer_test_mass_exile(
+        origin: Option<Zone>,
+        target: TargetFilter,
+        controller: PlayerId,
+    ) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin,
+                destination: Zone::Exile,
+                target,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                library_shuffle: Default::default(),
+                random_order: false,
+            },
+            vec![],
+            ObjectId(9700),
+            controller,
+        )
+    }
+
+    fn performer_test_pick_exile(
+        origin: Option<Zone>,
+        target: TargetFilter,
+        controller: PlayerId,
+    ) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin,
+                destination: Zone::Exile,
+                target,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(9700),
+            controller,
+        )
+    }
+
+    fn card_leg(controller: Option<ControllerRef>, properties: Vec<FilterProp>) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Card],
+            controller,
+            properties,
+        })
+    }
+
+    /// Encoding A of a library-owner leg: typed `controller: ScopedPlayer` plus
+    /// `InZone { Library }`. Encoding B is `Owned { ScopedPlayer }` plus
+    /// `InZone { Library }` — the form `owner_scoped_nonbattlefield_mass_filter`
+    /// rewrites A to, and the form the parser prints for Rahilda.
+    fn library_leg_encoding_a() -> TargetFilter {
+        card_leg(
+            Some(ControllerRef::ScopedPlayer),
+            vec![FilterProp::InZone {
+                zone: Zone::Library,
+            }],
+        )
+    }
+
+    fn library_leg_encoding_b() -> TargetFilter {
+        card_leg(
+            None,
+            vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::ScopedPlayer,
+                },
+                FilterProp::InZone {
+                    zone: Zone::Library,
+                },
+            ],
+        )
+    }
+
+    /// CR 109.4 + CR 608.2c: the performer classification is a function of the
+    /// filter's relation, not of its encoding. `move_performer` classifies the
+    /// filter before `owner_scoped_nonbattlefield_mass_filter` rewrites a typed
+    /// `controller` into `Owned { .. }`, so every fixture must classify the same
+    /// way before and after that rewrite — and the expected values are literal,
+    /// so equality cannot be satisfied vacuously by both sides being wrong.
+    ///
+    /// Revert sensitivity: the encoding-A fixtures fail against an `Owned`-only
+    /// library classifier; the `ParentTargetController` fixtures fail without
+    /// the sweep classifier.
+    #[test]
+    fn performer_classifier_is_invariant_under_mass_owner_normalisation() {
+        let plain_creature = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![],
+        });
+        let parent_in_any_zone = |wrap: fn(TargetFilter) -> TargetFilter| {
+            wrap(card_leg(
+                Some(ControllerRef::ParentTargetController),
+                vec![
+                    FilterProp::InAnyZone {
+                        zones: vec![Zone::Graveyard, Zone::Hand, Zone::Library],
+                    },
+                    FilterProp::SameNameAsParentTarget,
+                ],
+            ))
+        };
+        let identity = |f: TargetFilter| f;
+        // (name, filter, names a library owner, names ParentTargetController's objects)
+        let fixtures: Vec<(&str, TargetFilter, bool, bool)> = vec![
+            (
+                "A: typed ScopedPlayer + library",
+                library_leg_encoding_a(),
+                true,
+                false,
+            ),
+            (
+                "B: Owned ScopedPlayer + library",
+                library_leg_encoding_b(),
+                true,
+                false,
+            ),
+            (
+                "Or [A, creature]",
+                TargetFilter::Or {
+                    filters: vec![library_leg_encoding_a(), plain_creature.clone()],
+                },
+                true,
+                false,
+            ),
+            (
+                "And [creature, A]",
+                TargetFilter::And {
+                    filters: vec![plain_creature.clone(), library_leg_encoding_a()],
+                },
+                true,
+                false,
+            ),
+            (
+                "Not A",
+                TargetFilter::Not {
+                    filter: Box::new(library_leg_encoding_a()),
+                },
+                true,
+                false,
+            ),
+            (
+                "TrackedSetFiltered A",
+                TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(library_leg_encoding_a()),
+                    caused_by: None,
+                },
+                true,
+                false,
+            ),
+            (
+                "typed ScopedPlayer + graveyard (Mudhole / Strategic Betrayal subject form)",
+                card_leg(
+                    Some(ControllerRef::ScopedPlayer),
+                    vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                ),
+                false,
+                false,
+            ),
+            (
+                "typed Opponent + library (a different relation)",
+                card_leg(
+                    Some(ControllerRef::Opponent),
+                    vec![FilterProp::InZone {
+                        zone: Zone::Library,
+                    }],
+                ),
+                false,
+                false,
+            ),
+            (
+                "typed ScopedPlayer, no zone",
+                card_leg(Some(ControllerRef::ScopedPlayer), vec![]),
+                false,
+                false,
+            ),
+            (
+                "Eradicate shape (parsed): typed ParentTargetController + InAnyZone",
+                parent_in_any_zone(identity),
+                false,
+                true,
+            ),
+            (
+                "Owned ParentTargetController alone (post-normalisation encoding)",
+                card_leg(
+                    None,
+                    vec![
+                        FilterProp::Owned {
+                            controller: ControllerRef::ParentTargetController,
+                        },
+                        FilterProp::InAnyZone {
+                            zones: vec![Zone::Graveyard, Zone::Hand, Zone::Library],
+                        },
+                    ],
+                ),
+                false,
+                true,
+            ),
+            (
+                "And [creature, Eradicate shape]",
+                TargetFilter::And {
+                    filters: vec![plain_creature.clone(), parent_in_any_zone(identity)],
+                },
+                false,
+                true,
+            ),
+            (
+                "Not (Eradicate shape)",
+                parent_in_any_zone(|f| TargetFilter::Not {
+                    filter: Box::new(f),
+                }),
+                false,
+                true,
+            ),
+            ("plain creature", plain_creature.clone(), false, false),
+        ];
+
+        let mass = performer_test_mass_exile(None, TargetFilter::None, PlayerId(0));
+        let pick = performer_test_pick_exile(None, TargetFilter::None, PlayerId(0));
+        for (name, filter, expect_library, expect_parent) in fixtures {
+            let normalised = owner_scoped_nonbattlefield_mass_filter(
+                filter.clone(),
+                &[Zone::Graveyard, Zone::Hand, Zone::Library],
+            );
+            for (label, f) in [("raw", &filter), ("normalised", &normalised)] {
+                assert_eq!(
+                    filter_names_library_owner(f),
+                    expect_library,
+                    "{name} ({label}): library-owner classification"
+                );
+                assert_eq!(
+                    sweep_names_parent_target_controllers_objects(&mass, f),
+                    expect_parent,
+                    "{name} ({label}): parent-target sweep classification (mass move)"
+                );
+                // The pick shape is never a sweep, whatever the filter names.
+                assert!(
+                    !sweep_names_parent_target_controllers_objects(&pick, f),
+                    "{name} ({label}): a pick is never classified as a sweep"
+                );
+            }
+        }
+    }
+
+    /// Runs `ChangeZoneAll { Library -> Exile }` scoped to P1 over two P1 library
+    /// cards and returns each card's zone and `exiled_by`.
+    fn mass_library_exile_outcome(target: TargetFilter) -> Vec<(Zone, Option<PlayerId>)> {
+        let mut state = GameState::new_two_player(42);
+        let cards: Vec<ObjectId> = (0..2)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(9710 + i),
+                    PlayerId(1),
+                    format!("Library Card {i}"),
+                    Zone::Library,
+                )
+            })
+            .collect();
+        let mut ability = performer_test_mass_exile(Some(Zone::Library), target, PlayerId(0));
+        ability.scoped_player = Some(PlayerId(1));
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).expect("mass library exile resolves");
+        assert!(
+            state.players[1].library.is_empty(),
+            "reach-guard: the scoped player's library was swept; got {:?}",
+            state.players[1].library
+        );
+        cards
+            .iter()
+            .map(|id| (state.objects[id].zone, state.objects[id].exiled_by))
+            .collect()
+    }
+
+    /// CR 608.2c + CR 109.4: a library-owner leg ("exile … from their library",
+    /// Rahilda, Wanted Cutthroat) is the caster's exile whichever way the filter
+    /// is encoded — encoding A (typed `controller: ScopedPlayer` + library) and
+    /// encoding B (`Owned { ScopedPlayer }` + library) name the same relation.
+    ///
+    /// Revert sensitivity: HEAD's `Owned`-only classifier records P1 for
+    /// encoding A.
+    #[test]
+    fn library_owner_leg_mass_performer_matches_across_encodings() {
+        let a = mass_library_exile_outcome(library_leg_encoding_a());
+        let b = mass_library_exile_outcome(library_leg_encoding_b());
+        assert!(
+            a.iter()
+                .chain(b.iter())
+                .all(|(zone, _)| *zone == Zone::Exile),
+            "reach-guard: every library card was exiled in both runs; a={a:?} b={b:?}"
+        );
+        assert_eq!(
+            b,
+            vec![(Zone::Exile, Some(PlayerId(0))); 2],
+            "encoding B is the caster's exile"
+        );
+        assert_eq!(a, b, "encoding A must classify exactly as encoding B");
+    }
+
+    /// Runs `ChangeZone { Library -> Exile }` (a pick) scoped to P1 over one P1
+    /// library card (the single-eligible shortcut) and returns its zone,
+    /// `exiled_by` and whether a choice prompt was raised.
+    fn pick_library_exile_outcome(target: TargetFilter) -> (Zone, Option<PlayerId>, bool) {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(9720),
+            PlayerId(1),
+            "Library Card".to_string(),
+            Zone::Library,
+        );
+        let mut ability = performer_test_pick_exile(Some(Zone::Library), target, PlayerId(0));
+        ability.scoped_player = Some(PlayerId(1));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("library pick resolves");
+        (
+            state.objects[&card].zone,
+            state.objects[&card].exiled_by,
+            matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+        )
+    }
+
+    /// CR 608.2c + CR 109.4: the same equivalence on the pick path, which has no
+    /// owner-scope normaliser (`resolve`), so the classifier alone carries it.
+    ///
+    /// Revert sensitivity: HEAD's `Owned`-only classifier records P1 for
+    /// encoding A.
+    #[test]
+    fn library_owner_leg_pick_performer_matches_across_encodings() {
+        let a = pick_library_exile_outcome(library_leg_encoding_a());
+        let b = pick_library_exile_outcome(library_leg_encoding_b());
+        assert_eq!(
+            (a.0, a.2, b.0, b.2),
+            (Zone::Exile, false, Zone::Exile, false),
+            "reach-guard: both runs exiled the card without a prompt; a={a:?} b={b:?}"
+        );
+        assert_eq!(b.1, Some(PlayerId(0)), "encoding B is the caster's exile");
+        assert_eq!(a.1, b.1, "encoding A must classify exactly as encoding B");
+    }
+
+    /// CR 608.2c + CR 701.23a: "Search its controller's graveyard, hand, and
+    /// library for all cards with the same name as that creature and exile them"
+    /// (Eradicate) announces no subject through `ParentTargetController` — it
+    /// names whose cards are swept, and the spell's controller performs the
+    /// exile. The filter is Eradicate's parsed, pre-normalisation encoding
+    /// (typed `controller: ParentTargetController`), which is what
+    /// `move_performer` classifies.
+    ///
+    /// Revert sensitivity: without the sweep rule, the members are recorded as
+    /// exiled by P1 (the swept cards' owner).
+    #[test]
+    fn parent_target_controller_hidden_zone_sweep_is_caster_performed() {
+        let mut state = GameState::new_two_player(42);
+        let mk = |state: &mut GameState, card: u64, owner: u8, zone: Zone| {
+            create_object(
+                state,
+                CardId(card),
+                PlayerId(owner),
+                "Grizzly Bear".to_string(),
+                zone,
+            )
+        };
+        let target = mk(&mut state, 9730, 1, Zone::Battlefield);
+        let gy = mk(&mut state, 9731, 1, Zone::Graveyard);
+        let hand = mk(&mut state, 9732, 1, Zone::Hand);
+        let lib = mk(&mut state, 9733, 1, Zone::Library);
+        let decoy = mk(&mut state, 9734, 0, Zone::Graveyard);
+
+        let sweep = card_leg(
+            Some(ControllerRef::ParentTargetController),
+            vec![
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Graveyard, Zone::Hand, Zone::Library],
+                },
+                FilterProp::SameNameAsParentTarget,
+            ],
+        );
+        let mut ability = performer_test_mass_exile(None, sweep, PlayerId(0));
+        ability.targets = vec![TargetRef::Object(target)];
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).expect("hidden-zone sweep resolves");
+
+        // Reach-guards: the three swept zones moved, the filter bound to P1
+        // (the caster's same-name card and the battlefield target stay).
+        for id in [gy, hand, lib] {
+            assert_eq!(state.objects[&id].zone, Zone::Exile, "{id:?} swept");
+            assert_eq!(
+                state.objects[&id].exiled_by,
+                Some(PlayerId(0)),
+                "the sweep is the caster's exile"
+            );
+        }
+        assert_eq!(
+            state.objects[&decoy].zone,
+            Zone::Graveyard,
+            "the caster's own same-name card is not swept"
+        );
+        assert_eq!(state.objects[&target].zone, Zone::Battlefield);
     }
 
     /// CR 614.12 + CR 701.24a + CR 701.24d: a parser-emitted mass “shuffle
