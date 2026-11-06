@@ -15,7 +15,9 @@ use nom::Parser;
 
 use super::oracle_classifier::has_enters_with_counter_tokens;
 use super::oracle_effect::become_copy_except::parse_except_clause;
-use super::oracle_effect::lower::{apply_where_x_quantity_expression, parse_where_x_quantity_core};
+use super::oracle_effect::lower::{
+    apply_where_x_quantity_expression, parse_where_x_quantity_core, WhereXBinding,
+};
 use super::oracle_effect::{
     excise_selection_qualifier, parse_effect_chain, parse_effect_chain_with_context,
     parse_effect_clause, parse_named_choice_object, try_parse_named_choice,
@@ -5614,7 +5616,7 @@ fn bind_enters_with_where_x(count: QuantityExpr, where_x: &str) -> Option<Quanti
             if definition.contains_x() {
                 return None;
             }
-            apply_where_x_quantity_expression(count, Some(where_x))
+            apply_where_x_quantity_expression(count, WhereXBinding::bare(Some(where_x)))
         }
     }
 }
