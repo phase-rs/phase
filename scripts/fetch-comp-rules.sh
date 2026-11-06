@@ -63,11 +63,12 @@ if [ -n "$OUTPUT" ]; then
   fi
   # The pinned copy must only ever hold the pinned edition. Keep the output
   # path simple enough to compare exactly: not a symlink (cp would follow it,
-  # and a dangling link defeats -ef), in a directory that already exists (so
-  # `cd -P` resolves every `..` and directory symlink physically). Then -ef
-  # catches an existing DEST under any name, hard links included, and the
-  # physical-path comparison catches a not-yet-existing one. It ignores case,
-  # since macOS and Windows filesystems usually do.
+  # and a dangling link defeats -ef), in a directory that already exists.
+  # Then -ef catches an existing DEST under any name, hard links included, and
+  # a not-yet-existing one is caught by directory identity (-ef on the two
+  # directories, which sees through `..`, directory symlinks, mounts and UNC
+  # aliases) plus the file name compared without case, as macOS and Windows
+  # filesystems usually do.
   OUT_DIR="$(dirname "$OUTPUT")"
   if [ -L "$OUTPUT" ]; then
     echo "ERROR: --output must not be a symlink: $OUTPUT" >&2
@@ -77,10 +78,9 @@ if [ -n "$OUTPUT" ]; then
     echo "ERROR: --output directory does not exist: $OUT_DIR" >&2
     exit 2
   fi
-  OUT_PHYS="$(cd -P "$OUT_DIR" && pwd -P)/$(basename "$OUTPUT")"
-  DEST_PHYS="$(cd -P "$(dirname "$DEST")" && pwd -P)/$(basename "$DEST")"
-  if [ "$OUTPUT" -ef "$DEST" ] || [ "$(printf '%s' "$OUT_PHYS" | tr '[:upper:]' '[:lower:]')" \
-    = "$(printf '%s' "$DEST_PHYS" | tr '[:upper:]' '[:lower:]')" ]; then
+  if [ "$OUTPUT" -ef "$DEST" ] || { [ "$OUT_DIR" -ef "$(dirname "$DEST")" ] \
+    && [ "$(basename "$OUTPUT" | tr '[:upper:]' '[:lower:]')" \
+      = "$(basename "$DEST" | tr '[:upper:]' '[:lower:]')" ]; }; then
     echo "ERROR: --output must not be $DEST, which holds the pinned edition" >&2
     exit 2
   fi
