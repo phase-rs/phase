@@ -22572,7 +22572,8 @@ pub enum Effect {
         /// Filter for keepable cards (Any = no filter).
         #[serde(default = "default_target_filter_any")]
         filter: TargetFilter,
-        /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
+        /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom
+        /// unless `rest_split_top_count` names a top position).
         #[serde(default)]
         rest_destination: Option<Zone>,
         /// CR 701.20e: whether the unkept cards are moved at all. A silent
@@ -22592,9 +22593,14 @@ pub enum Effect {
         /// is known only to them).
         ///
         /// `Some(n)` = exactly `n` of the remainder go on top and the rest go
-        /// to the bottom, via a `WaitingFor::DigRestSplitChoice` pause.
-        /// `None` = unchanged behavior: the whole remainder goes uniformly to
-        /// `rest_destination` (defaulting to Graveyard). Note CR 701.20d: the
+        /// to the bottom, via a `WaitingFor::DigRestSplitChoice` pause. `n` is
+        /// clamped to the actual remainder, so a value at or beyond the pile
+        /// size is the DEGENERATE all-top remainder the parser emits for "…
+        /// and the rest on top of your library" (Diabolic Vision) — the whole
+        /// pile goes on top and its CR 401.4 arrangement
+        /// is still the owner's choice. `None` = unchanged behavior: the whole
+        /// remainder goes uniformly to `rest_destination` (defaulting to
+        /// Graveyard). Note CR 701.20d: the
         /// remainder cards are reordered within the library by this split, so
         /// they stop being revealed and become new objects — the shared
         /// `reorder_within_library` primitive that performs the move already
