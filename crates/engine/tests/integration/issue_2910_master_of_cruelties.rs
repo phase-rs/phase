@@ -308,4 +308,13 @@ fn kaalia_cheated_master_of_cruelties_sets_the_defending_players_life_to_one() {
         state.players[P0.0 as usize].life, 20,
         "the attacking player's life total must not be set instead"
     );
+    assert!(
+        state.stack.is_empty(),
+        "the trigger must have finished resolving"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "expected Priority after the trigger resolves, got {:?}",
+        state.waiting_for
+    );
 }

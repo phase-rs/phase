@@ -4768,25 +4768,20 @@ fn declared_player_slot_indexes(ctx: &ParseContext) -> Vec<usize> {
         .collect()
 }
 
-/// CR 608.2c + CR 109.4: The relative player a trigger condition introduced
-/// (`relative_player_scope_for_condition`, oracle_trigger.rs) is the antecedent of
-/// every bare player anaphor in that trigger's effect body — "they", "that
-/// player", "that player's life total". This is the single scope→filter binding
-/// for the pronoun and possessive grammars, so the two sentence forms cannot
-/// name different players.
+/// CR 608.2c + CR 109.4: Share the existing bare-player pronoun grammar's
+/// supported scope bindings with possessive life-total subjects.
 ///
-/// `None` when the condition named no relative player: each caller then keeps the
-/// CR 608.2c reading of its own phrase (a previously named target, or the
-/// trigger's subject). `ScopedPlayer` is the each-player / iterated frame; its
-/// continuous-modification escape (`resolve_they_pronoun`'s object-set rule) is
-/// owned by that caller, which checks the scope before consulting this map.
+/// `None` when no relative-player scope is present or its binding is not
+/// handled here; callers retain their established fallback. `ScopedPlayer` is
+/// the each-player / iterated frame; its continuous-modification escape
+/// (`resolve_they_pronoun`'s object-set rule) remains owned by that caller.
 fn relative_player_scope_anaphor_filter(ctx: &ParseContext) -> Option<TargetFilter> {
     match ctx.relative_player_scope.as_ref()? {
         // CR 506.2 + CR 508.5: an attack trigger's player is the DEFENDING player
         // — the player (or the attacked planeswalker's controller) the source is
         // attacking — not the attacking player carried by the attack event.
         ControllerRef::DefendingPlayer => Some(TargetFilter::DefendingPlayer),
-        // CR 120.3 + CR 603.7c: the damaged / acting player the trigger event
+        // CR 120.3: the damaged / acting player the trigger event
         // carries ("deals [combat] damage to a player", Unstoppable Slasher).
         ControllerRef::TargetPlayer | ControllerRef::TriggeringPlayer => {
             Some(TargetFilter::TriggeringPlayer)
@@ -4799,7 +4794,16 @@ fn relative_player_scope_anaphor_filter(ctx: &ParseContext) -> Option<TargetFilt
         // CR 608.2c + CR 109.4: "that player" after a `Choose(Player)` clause
         // refers to the chosen player — a player-only `Typed` filter carrying the
         // chosen scope (Gluntch's "choose a player. They put two +1/+1 counters …").
-        scope => chosen_player_anaphor_filter(Some(scope)),
+        scope @ ControllerRef::ChosenPlayer { .. } => chosen_player_anaphor_filter(Some(scope)),
+        ControllerRef::You
+        | ControllerRef::Opponent
+        | ControllerRef::TargetOpponent
+        | ControllerRef::EventTargetController
+        | ControllerRef::DeclaredPlayer { .. }
+        | ControllerRef::SourceChosenPlayer
+        | ControllerRef::EnchantedPlayer
+        | ControllerRef::ActivePlayer
+        | ControllerRef::SpecificPlayer { .. } => None,
     }
 }
 
