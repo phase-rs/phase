@@ -24250,8 +24250,11 @@ fn effect_payment_permissions(
 /// source-derived residual: at least one shard per capacity-positive permanent
 /// after the two-shard combination rows (Rugged Prairie, Arena of Glory). The
 /// width is not capped: a cap would undercount multiplier boards wider than the
-/// cap (Nyxbloom Ancient over hundreds of lands), and the caller's first exact
-/// check already drives the planner at the capacity width. Pool mana the cost
+/// cap (Nyxbloom Ancient over hundreds of lands). The probe costs one planner
+/// pass at up to twice the capacity width (each 1-capacity source counts 2),
+/// comparable to the caller's first exact check when a multiplier lifts the
+/// ceiling, and up to about 4x it on wide boards with no multiplier; it runs
+/// once per resolution prompt. Pool mana the cost
 /// cannot spend (floating {U} for an {R} unit) still reaches the planner's
 /// residual; that pool-dominated case makes the caller's downward search start
 /// high (see `resolution_mana_per_unit_max`).
