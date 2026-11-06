@@ -53801,10 +53801,11 @@ fn add_mana_from_source(
 ///
 /// SYNTHETIC, and the repo's real-card rule is applied deliberately. Printed
 /// sorceries with a purely generic mana cost do exist — Aang's Journey (`{2}`),
-/// Gruesome Slaughter (`{6}`) — but each carries a library search, a kicker or a
-/// target (Indicate, `{0}`), and these legs need a cost-only spell that is cast
-/// and discarded without resolving an effect. Substituting one would import an
-/// effect path the payment-provenance legs are not about, so the fixture keeps a
+/// Gruesome Slaughter (`{6}`) — but this consumer needs a specific mana VALUE on
+/// each leg (1 and 2), and the printed generic-only sorceries sit at `{0}`, `{2}`
+/// and `{6}` with a library search, kicker or target clause of their own. The
+/// legs are paid and discarded without resolving anything, so importing one would
+/// drag in an effect path the provenance tests are not about. The fixture keeps a
 /// synthetic Sorcery shell with no ability at all; the nearest printed analogue
 /// for the cost shape is Aang's Journey (`{2}`).
 fn create_paid_sorcery(
@@ -64187,14 +64188,15 @@ fn copy_cast_with_no_spell_ability_records_no_targets() {
         .id();
     // SYNTHETIC COSTS, with the repo's real-card rule applied deliberately. The
     // Boast cost needs fifteen or more black mana symbols among the exiled cards'
-    // costs, and this row needs exactly two exiled cards — one a vanilla,
-    // ability-less creature (the copy whose record must be empty) and one a spell.
-    // The highest printed black pip counts are Doomsday Excruciator (`{B}` x6) and
-    // Zodiark, Umbral God (`{B}` x5); the highest on a vanilla creature is one
-    // (Walking Corpse, `{1}{B}`). A printed pair of that shape therefore tops out
-    // at seven symbols, so the threshold is unreachable with two printed cards
-    // and the shells below carry no printed card's name or text. The nearest
-    // printed analogues for the cost shape are Doomsday Excruciator and Zodiark.
+    // costs, and this row needs exactly two exiled cards — one a zero-ability
+    // creature (the copy whose record must be empty) and one a spell. The highest
+    // printed black pip counts are six (Doomsday Excruciator, `{B}` x6) and five
+    // (Zodiark, Umbral God and Pox Plague, `{B}` x5); the highest on a zero-ability
+    // creature is two (Mass of Ghouls, `{3}{B}{B}`; Minotaur Abomination,
+    // `{4}{B}{B}`). A printed pair of that shape therefore tops out at eight
+    // symbols — below the fifteen the Boast cost requires — so the shells below
+    // carry no printed card's name or text. The nearest printed analogues for the
+    // cost shape are Doomsday Excruciator and Mass of Ghouls.
     let black = ManaCost::Cost {
         shards: vec![ManaCostShard::Black; 15],
         generic: 0,

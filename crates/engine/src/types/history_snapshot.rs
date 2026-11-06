@@ -487,10 +487,6 @@ mod tests {
     #[test]
     fn compact_lki_accepts_the_verbose_spelling() {
         let verbose_lki = fully_populated_lki();
-        let verbose = serde_json::to_string(&CompactWrapper {
-            lki: verbose_lki.clone(),
-        })
-        .expect("serialization succeeds");
         // Re-encode through the verbose `LKISnapshot` shape and decode it with
         // the compact codec: every `alias` must accept the long field name.
         let verbose_payload = format!(
@@ -498,7 +494,6 @@ mod tests {
             serde_json::to_string(&serde_json::to_value(&verbose_lki).expect("to_value"))
                 .expect("to_string")
         );
-        let _ = verbose;
         let decoded: CompactWrapper =
             serde_json::from_str(&verbose_payload).expect("verbose spelling decodes");
         assert_eq!(decoded.lki, verbose_lki);
