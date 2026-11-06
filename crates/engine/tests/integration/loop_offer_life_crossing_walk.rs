@@ -150,7 +150,7 @@ impl AltarBoard {
 /// (`PeriodicDelta::first_life_crossing` in `PeriodicDelta::seat_crossing`) ⇒ the reads with P0
 /// at 4,000,000 are millions more than at 40.
 #[test]
-fn a_drain_shortcut_reads_the_same_life_charges_at_a_large_life_total() {
+fn a_drain_shortcut_reads_as_many_life_charges_at_a_large_life_total() {
     let Some(db) = crate::support::shared_card_db() else {
         return;
     };
@@ -216,7 +216,7 @@ fn a_drain_shortcut_reads_the_same_life_charges_at_a_large_life_total() {
 /// REVERT-PROBE: as above ⇒ the reads with P0 at 4,000,000 are millions more than at the saved
 /// total.
 #[test]
-fn a_targeted_drain_shortcut_reads_the_same_life_charges_at_a_large_life_total() {
+fn a_targeted_drain_shortcut_reads_as_many_life_charges_at_a_large_life_total() {
     /// The life each repetition moves: the amount the saved game's chain carries.
     const HIT: i32 = 4;
     let reads_at = |life: Option<i32>| {
