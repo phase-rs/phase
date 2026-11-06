@@ -427,13 +427,21 @@ fn resolution_mana_x_max(
 ///
 /// Unlike `resolution_mana_x_max` this never fails: `per_unit.scaled(0)` is
 /// `{0}`, which CR 118.5 makes payable by acknowledgment alone, so the search
-/// floors at 0 rather than returning `None`. The upper bound is the effect-payment
-/// mana ceiling (`casting::effect_payment_mana_ceiling`: pool plus each
-/// permanent's capacity, including colour-dependent sources and TapsForMana
-/// aura bonuses); the downward search then gates every candidate through the
-/// effect-context auto-tap check, so colors the unit demands, and sources whose
-/// mana may not be spent at resolution, are enforced exactly as on submit.
-/// Like the X path it clones the probe cost once per candidate.
+/// floors at 0 rather than returning `None`.
+///
+/// The search starts at `casting::effect_payment_ceiling` — the larger of the
+/// simulated production (the real effect-context auto-tap and inline-trigger
+/// pipeline on an over-sized probe, which counts replacement multipliers such as
+/// Nyxbloom Ancient, TapsForMana bonuses and colour rules) and the per-permanent
+/// capacity bound `casting::effect_payment_mana_ceiling` — and descends to the
+/// largest N at or below it that the unchanged single-pass exact check
+/// `casting::can_pay_effect_mana_cost_after_auto_tap` accepts, so colors the
+/// unit demands, and sources whose mana may not be spent at resolution, are
+/// enforced exactly as on submit. That is the largest accepted N overall
+/// whenever no exactly-acceptable N exceeds the starting ceiling; the ceiling
+/// is derived from the same pipeline the exact check runs, but this is not
+/// proved for every printed producer. Like the X path it builds one probe cost
+/// per candidate.
 ///
 /// CR 605.3a + CR 605.3b: the chosen amount is paid through `pay_unless_cost`,
 /// which has no resume root, so the offered range must not count a mana source
@@ -444,22 +452,39 @@ fn resolution_mana_per_unit_max(
     source_id: ObjectId,
     per_unit: &ManaCost,
 ) -> u32 {
-    let mut n = casting::effect_payment_mana_ceiling(state, payer);
+    let legacy = casting::effect_payment_mana_ceiling(state, payer);
+    let mut n = casting::effect_payment_ceiling(state, payer, source_id, legacy, |n| {
+        per_unit_scaled_checked(per_unit, n)
+    });
     loop {
         if n == 0 {
             return 0;
         }
-        if casting::can_pay_effect_mana_cost_after_auto_tap(
-            state,
-            payer,
-            source_id,
-            &per_unit.scaled(n),
-            casting::PausedManaPayment::Unresumable,
-        ) {
+        if per_unit_scaled_checked(per_unit, n).is_some_and(|scaled| {
+            casting::can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                payer,
+                source_id,
+                &scaled,
+                casting::PausedManaPayment::Unresumable,
+            )
+        }) {
             return n;
         }
         n -= 1;
     }
+}
+
+/// `per_unit` repeated `n` times (`ManaCost::scaled`), or `None` when the
+/// scaled shard count or generic amount is not representable in `u32`.
+/// `ManaCost::scaled` multiplies unchecked, so the width is checked here before
+/// any cost is built.
+fn per_unit_scaled_checked(per_unit: &ManaCost, n: u32) -> Option<ManaCost> {
+    if let ManaCost::Cost { shards, generic } = per_unit {
+        let width = u32::try_from(shards.len()).ok()?.checked_add(*generic)?;
+        n.checked_mul(width)?;
+    }
+    Some(per_unit.scaled(n))
 }
 
 fn trigger_event_amount(state: &GameState) -> Option<u32> {
@@ -4611,5 +4636,222 @@ mod tests {
             0,
             "paying 0 life draws 0 cards"
         );
+    }
+}
+
+/// Tests for the resolution-time per-unit payment ceiling
+/// (`casting::effect_payment_ceiling`) against printed mana producers.
+#[cfg(test)]
+mod ceiling_tests {
+    use super::*;
+    use crate::game::game_object::AttachTarget;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+    use crate::types::ability::ChosenAttribute;
+    use crate::types::mana::{ManaColor, ManaCostShard};
+    use crate::types::phase::Phase;
+    use crate::types::zones::Zone;
+
+    const VIRTUE_OF_STRENGTH: &str =
+        "If you tap a basic land for mana, it produces three times as much of that mana instead.";
+
+    fn red_unit() -> ManaCost {
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        }
+    }
+
+    /// Builds a P0 board of `cards` (printed cards from the shared fixture;
+    /// "Mountain" / "Island" are the scenario basics; "Virtue of Strength" is
+    /// absent from the fixture and is built from its verbatim Oracle text).
+    /// Caged Sun's chosen colour is Red and Fertile Ground is attached to the
+    /// first Mountain. Returns the state and a source object for the payment.
+    fn board(cards: &[&str], sun_color: ManaColor) -> (GameState, ObjectId) {
+        let db = crate::test_support::shared_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut first_mountain = None;
+        let mut sun = None;
+        let mut aura = None;
+        for &name in cards {
+            match name {
+                "Mountain" => {
+                    let id = scenario.add_basic_land(P0, ManaColor::Red);
+                    first_mountain.get_or_insert(id);
+                }
+                "Island" => {
+                    scenario.add_basic_land(P0, ManaColor::Blue);
+                }
+                "Virtue of Strength" => {
+                    scenario.add_enchantment_from_oracle(P0, name, VIRTUE_OF_STRENGTH);
+                }
+                _ => {
+                    let id = scenario.add_real_card(P0, name, Zone::Battlefield, db);
+                    match name {
+                        "Caged Sun" => sun = Some(id),
+                        "Fertile Ground" => aura = Some(id),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let source = scenario.add_creature(P0, "Payment Source", 1, 1).id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        if let Some(sun) = sun {
+            // The as-enters choice is abandoned by `add_real_card`; set it.
+            let obj = state.objects.get_mut(&sun).expect("Caged Sun");
+            obj.chosen_attributes
+                .retain(|a| !matches!(a, ChosenAttribute::Color(_)));
+            obj.chosen_attributes
+                .push(ChosenAttribute::Color(sun_color));
+        }
+        if let (Some(aura), Some(land)) = (aura, first_mountain) {
+            state
+                .objects
+                .get_mut(&aura)
+                .expect("Fertile Ground")
+                .attached_to = Some(AttachTarget::Object(land));
+            state
+                .objects
+                .get_mut(&land)
+                .expect("Mountain")
+                .attachments
+                .push(aura);
+        }
+        state.layers_dirty.mark_full();
+        (runner.state().clone(), source)
+    }
+
+    fn exact(state: &GameState, source: ObjectId, n: u32) -> bool {
+        per_unit_scaled_checked(&red_unit(), n).is_some_and(|cost| {
+            casting::can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                P0,
+                source,
+                &cost,
+                casting::PausedManaPayment::Unresumable,
+            )
+        })
+    }
+
+    /// The BASE algorithm: largest N <= the capacity bound the exact check
+    /// accepts.
+    fn base_offer(state: &GameState, source: ObjectId) -> u32 {
+        let mut n = casting::effect_payment_mana_ceiling(state, P0);
+        while n > 0 && !exact(state, source, n) {
+            n -= 1;
+        }
+        n
+    }
+
+    fn offered(state: &GameState, source: ObjectId) -> u32 {
+        resolution_mana_per_unit_max(state, P0, source, &red_unit())
+    }
+
+    fn simulated(state: &GameState, source: ObjectId) -> Option<u32> {
+        casting::effect_payment_simulated_ceiling(state, P0, source, |n| {
+            per_unit_scaled_checked(&red_unit(), n)
+        })
+    }
+
+    const TABLE: &[&[&str]] = &[
+        &["Mountain"],
+        &["Nyxbloom Ancient", "Mountain"],
+        &["Nyxbloom Ancient", "Mountain", "Mountain"],
+        &["Virtue of Strength", "Mountain"],
+        &["Virtue of Strength", "Great Furnace"],
+        &["Mana Flare", "Mountain"],
+        &["Caged Sun", "Mountain"],
+        &["Lotus Petal", "Mountain"],
+        &["Nyxbloom Ancient", "Mountain", "Fertile Ground"],
+        &["Rugged Prairie", "Mountain"],
+        &["Prophetic Prism", "Mountain"],
+        &["Mountain", "Arena of Glory"],
+        &["Nyxbloom Ancient", "Prophetic Prism", "Mountain"],
+        &["Nyxbloom Ancient", "Rugged Prairie", "Mountain"],
+        &["Island"],
+    ];
+
+    /// K1: the offered maximum is never below what the capacity-only (BASE)
+    /// algorithm offered. Asserts the floor property only.
+    #[test]
+    fn offered_max_is_never_below_the_capacity_floor() {
+        for cards in TABLE {
+            let (state, source) = board(cards, ManaColor::Red);
+            let base = base_offer(&state, source);
+            let now = offered(&state, source);
+            assert!(now >= base, "{cards:?}: offered {now} < BASE offer {base}");
+        }
+    }
+
+    /// K2: on the table boards the offered maximum is the largest N the exact
+    /// check accepts (completeness), with reach guards.
+    #[test]
+    fn offered_max_is_the_largest_exactly_payable_amount_on_table_boards() {
+        for cards in TABLE {
+            let (state, source) = board(cards, ManaColor::Red);
+            let legacy = casting::effect_payment_mana_ceiling(&state, P0);
+            let scan_to = simulated(&state, source).unwrap_or(0).max(legacy) + 8;
+            let largest = (0..=scan_to)
+                .rev()
+                .find(|&n| n == 0 || exact(&state, source, n))
+                .expect("zero is always payable");
+            assert!(largest < scan_to, "{cards:?}: the scan was truncated");
+            assert_eq!(offered(&state, source), largest, "{cards:?}");
+            if !matches!(cards, ["Island"]) {
+                assert!(largest >= 1, "{cards:?}: reach guard, a red source exists");
+            }
+            let plain_multiplier_board = matches!(
+                cards,
+                [
+                    "Nyxbloom Ancient",
+                    "Mountain",
+                    "Mountain" | "Fertile Ground"
+                ] | ["Nyxbloom Ancient", "Mountain"]
+            );
+            if plain_multiplier_board {
+                assert!(
+                    largest > legacy,
+                    "{cards:?}: reach guard, the multiplier is beyond the capacity bound \
+                     (largest {largest}, legacy {legacy})"
+                );
+            }
+        }
+    }
+
+    /// K3: the simulation fires and sees the Nyxbloom multiplier.
+    #[test]
+    fn simulated_ceiling_sees_the_nyxbloom_multiplier() {
+        let (state, source) = board(&["Nyxbloom Ancient", "Mountain"], ManaColor::Red);
+        let legacy = casting::effect_payment_mana_ceiling(&state, P0);
+        let v = simulated(&state, source).expect("the probe completes");
+        assert!(v >= 3, "Mountain taps for three red under Nyxbloom: {v}");
+        assert!(
+            v > legacy,
+            "simulated {v} exceeds the capacity bound {legacy}"
+        );
+    }
+
+    /// K4: `max_payable_units` is the threshold of a monotone predicate;
+    /// scaling overflow is `None` rather than a wrapped or huge cost.
+    #[test]
+    fn max_payable_units_finds_the_threshold_and_scaling_is_checked() {
+        for threshold in [0u32, 1, 7, 20] {
+            assert_eq!(
+                casting::max_payable_units(20, |n| n <= threshold),
+                threshold
+            );
+        }
+        assert_eq!(casting::max_payable_units(0, |_| false), 0);
+        assert_eq!(casting::max_payable_units(u32::MAX, |n| n <= 5), 5);
+
+        let wide = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 1,
+        };
+        assert!(per_unit_scaled_checked(&wide, u32::MAX).is_none());
+        assert!(per_unit_scaled_checked(&wide, 3).is_some());
     }
 }

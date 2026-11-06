@@ -24125,28 +24125,204 @@ pub(crate) enum PausedManaPayment {
     Unresumable,
 }
 
-/// CR 118.1 + CR 605.3a: Upper bound of the total mana the payer could produce
-/// for a resolution-time effect payment: the mana pool plus each battlefield
-/// permanent's [`super::mana_sources::effect_payment_mana_capacity`] (mana
-/// abilities, colour-dependent sources, and TapsForMana aura bonuses).
-///
-/// Effect payments are not spell casts, so no spell context, convoke/improvise
-/// or delve applies. The per-permanent sum can over-count (chain-sacrifice
-/// configurations, a single permanent's alternative abilities); that is
-/// acceptable for an upper bound because callers gate every candidate amount
-/// through [`can_pay_effect_mana_cost_after_auto_tap`].
-pub(super) fn effect_payment_mana_ceiling(state: &GameState, payer: PlayerId) -> u32 {
-    let pool = state
-        .players
-        .iter()
-        .find(|p| p.id == payer)
-        .map_or(0, |p| p.mana_pool.total() as u32);
-    let permanents: u32 = state
+/// Cap on the source-derived width of the simulated-ceiling probe (see
+/// [`effect_payment_simulated_ceiling`]). It bounds the planner's residual
+/// only — `plan_auto_tap_rows` re-scans every need per assigned shard — and
+/// never the floating mana pool, which is counted in full.
+const PROBE_UNIT_CAP: u32 = 512;
+
+/// CR 118.1 + CR 605.3a: Each battlefield permanent's
+/// [`super::mana_sources::effect_payment_mana_capacity`] for a resolution-time
+/// effect payment, keeping only permanents that can contribute mana.
+fn effect_payment_permanent_capacities(state: &GameState, payer: PlayerId) -> Vec<u32> {
+    state
         .battlefield
         .iter()
         .map(|&id| super::mana_sources::effect_payment_mana_capacity(state, id, payer))
-        .sum();
-    pool + permanents
+        .filter(|&capacity| capacity > 0)
+        .collect()
+}
+
+/// CR 106.4: Total mana floating in `payer`'s pool, saturated to `u32`.
+fn effect_payment_pool_total(state: &GameState, payer: PlayerId) -> u32 {
+    state.players.iter().find(|p| p.id == payer).map_or(0, |p| {
+        u32::try_from(p.mana_pool.total()).unwrap_or(u32::MAX)
+    })
+}
+
+/// CR 118.1 + CR 605.3a: Per-permanent capacity upper bound of the total mana
+/// the payer could produce for a resolution-time effect payment: the mana pool
+/// plus each battlefield permanent's
+/// [`super::mana_sources::effect_payment_mana_capacity`] (mana abilities,
+/// colour-dependent sources, and TapsForMana aura bonuses).
+///
+/// Effect payments are not spell casts, so no spell context, convoke/improvise
+/// or delve applies. The per-permanent sum can over-count (chain-sacrifice
+/// configurations, a single permanent's alternative abilities) and does not
+/// model replacement multipliers (CR 106.12b), which is why it is only the
+/// floor of [`effect_payment_ceiling`]. Over-estimates are gated by
+/// [`can_pay_effect_mana_cost_after_auto_tap`]. Sums saturate.
+pub(super) fn effect_payment_mana_ceiling(state: &GameState, payer: PlayerId) -> u32 {
+    effect_payment_permanent_capacities(state, payer)
+        .into_iter()
+        .fold(effect_payment_pool_total(state, payer), u32::saturating_add)
+}
+
+/// Largest `n <= upper` for which `payable(n)` holds, by binary search.
+///
+/// `payable` must be monotone (once false, false for every larger `n`) and
+/// `payable(0)` is taken as true. Dropping a unit from a payable cost keeps it
+/// payable (CR 601.2h: the payment is atomic, so a cost with fewer identical
+/// shards or less generic mana is never harder to pay), which makes the
+/// affordability predicate monotone.
+pub(super) fn max_payable_units(upper: u32, payable: impl Fn(u32) -> bool) -> u32 {
+    let (mut lo, mut hi) = (0, upper);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if payable(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
+/// Clones `state` and flushes layers so a payment probe reads the same derived
+/// characteristics the live payment would.
+fn effect_payment_probe_state(state: &GameState) -> GameState {
+    let mut simulated = state.clone();
+    super::layers::flush_layers(&mut simulated);
+    simulated
+}
+
+/// Runs one effect-context auto-tap pass for `cost` on the probe state
+/// `simulated`, then resolves coupled `TapsForMana` triggered mana abilities
+/// inline. Returns `true` when an auto-tapped mana ability paused for a
+/// replacement choice, in which case the inline triggers are not resolved.
+fn run_effect_auto_tap_pass(
+    simulated: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    tap_events: &mut Vec<crate::types::events::GameEvent>,
+) -> bool {
+    let effect_ctx = PaymentContext::Effect;
+    super::casting_costs::auto_tap_mana_sources_with_context(
+        simulated,
+        player,
+        cost,
+        tap_events,
+        Some(source_id),
+        Some(&effect_ctx),
+    );
+    // CR 118.12 + CR 605.3b + CR 616.1: A replacement choice during an
+    // auto-tapped mana ability is an in-progress payment when the live payment
+    // can surface that exact choice before spending, and a dead end when it
+    // cannot suspend. The caller decides which.
+    if mana_ability_cost_payment_is_paused(simulated) {
+        return true;
+    }
+    // CR 605.4a: Resolve coupled `TapsForMana` triggered mana abilities inline
+    // so the bonus mana is in the simulated pool — same authority the real
+    // payment path uses, keeping preview and execution in lockstep.
+    super::triggers::resolve_tap_mana_triggers_inline(simulated, tap_events, 0);
+    false
+}
+
+/// CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Effect-time resolution mana
+/// payments share the same payment-permission bundle as cast/activation.
+fn effect_payment_permissions(
+    simulated: &GameState,
+    player: PlayerId,
+) -> crate::types::mana::CostPermissionContext {
+    let mana_spend_permission =
+        player_mana_spend_permission_for_optional_spell(simulated, player, None);
+    super::static_abilities::build_cost_permission_context(simulated, player, mana_spend_permission)
+}
+
+/// CR 118.1 + CR 605.3a + CR 605.4a + CR 106.12b: The mana a resolution-time
+/// effect payment of `cost_at(n)` could really draw on, measured by running the
+/// same effect-context auto-tap and inline-trigger pipeline as
+/// [`can_pay_effect_mana_cost_after_auto_tap`] on an over-sized probe, so
+/// replacement multipliers (Nyxbloom Ancient), TapsForMana bonuses (Fertile
+/// Ground) and colour rules are counted at the probe's plan. Returns the
+/// largest `n` such that `cost_at(n)` is payable from the resulting pool, plus
+/// one per choice-owing echo firing.
+///
+/// The probe asks for `pool_total + min(PROBE_UNIT_CAP, sum of max(2, capacity))`
+/// units, so the pool the planner subtracts first never leaves it with fewer
+/// than the source-derived residual: at least one shard per capacity-positive
+/// permanent after the two-shard combination rows (Rugged Prairie, Arena of
+/// Glory). Past [`PROBE_UNIT_CAP`] of source width the simulation can undercount
+/// and callers fall back on the capacity floor.
+///
+/// `cost_at` returns `None` when scaling to `n` is not representable; that
+/// makes the probe itself `None` (callers use the capacity floor) and makes
+/// `payable(n)` false. Also `None` when an auto-tapped mana ability pauses for
+/// a choice (CR 605.3b + CR 616.1), because the live payment cannot suspend.
+pub(super) fn effect_payment_simulated_ceiling(
+    state: &GameState,
+    payer: PlayerId,
+    source_id: ObjectId,
+    cost_at: impl Fn(u32) -> Option<crate::types::mana::ManaCost>,
+) -> Option<u32> {
+    let source_width = effect_payment_permanent_capacities(state, payer)
+        .into_iter()
+        .fold(0u32, |acc, capacity| acc.saturating_add(capacity.max(2)))
+        .min(PROBE_UNIT_CAP);
+    let probe_units = effect_payment_pool_total(state, payer).saturating_add(source_width);
+    let probe_cost = cost_at(probe_units)?;
+
+    let mut simulated = effect_payment_probe_state(state);
+    let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
+    if run_effect_auto_tap_pass(
+        &mut simulated,
+        payer,
+        source_id,
+        &probe_cost,
+        &mut tap_events,
+    ) {
+        return None;
+    }
+    let permissions = effect_payment_permissions(&simulated, payer);
+    // CR 605.4a + CR 608.2d: settle choice-free delayed bonuses into the pool
+    // exactly as the exact check's preview does.
+    let settlement = super::triggers::settle_echo_bonuses_for_preview(&mut simulated, &tap_events);
+    let pool = &simulated.players.iter().find(|p| p.id == payer)?.mana_pool;
+    let effect_ctx = PaymentContext::Effect;
+    let upper = u32::try_from(pool.total()).unwrap_or(u32::MAX);
+    let payable_units = max_payable_units(upper, |n| {
+        cost_at(n).is_some_and(|cost| {
+            mana_payment::can_pay_for_spell(pool, &cost, Some(&effect_ctx), permissions)
+        })
+    });
+    // Each choice-owing echo firing adds one mana; counting it can only
+    // over-estimate, which the exact check gates.
+    let choice_owing = u32::try_from(settlement.choice_owing.len()).unwrap_or(u32::MAX);
+    Some(payable_units.saturating_add(choice_owing))
+}
+
+/// CR 118.1 + CR 605.3a: Starting point of a resolution-time effect payment's
+/// downward search: `max(simulated production, legacy)`. `legacy` is the
+/// capacity-based bound the caller already had ([`effect_payment_mana_ceiling`]
+/// for per-unit payments), which keeps the result at least the capacity floor
+/// even where the over-sized probe starves a source's own sub-cost (CR 118.10:
+/// a payment applies to one cost, so sources the probe already used cannot pay
+/// another source's cost) or the probe cannot be built or pauses.
+///
+/// The caller's exact check ([`can_pay_effect_mana_cost_after_auto_tap`]) still
+/// gates every candidate, so an over-estimate here is never offered.
+pub(super) fn effect_payment_ceiling(
+    state: &GameState,
+    payer: PlayerId,
+    source_id: ObjectId,
+    legacy: u32,
+    cost_at: impl Fn(u32) -> Option<crate::types::mana::ManaCost>,
+) -> u32 {
+    effect_payment_simulated_ceiling(state, payer, source_id, cost_at)
+        .unwrap_or(0)
+        .max(legacy)
 }
 
 /// Returns true if the player can pay a resolution-time mana cost after
@@ -24161,43 +24337,18 @@ pub(super) fn can_pay_effect_mana_cost_after_auto_tap(
     cost: &crate::types::mana::ManaCost,
     paused: PausedManaPayment,
 ) -> bool {
-    let mut simulated = state.clone();
-    super::layers::flush_layers(&mut simulated);
-
+    let mut simulated = effect_payment_probe_state(state);
     let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
     let effect_ctx = PaymentContext::Effect;
-    super::casting_costs::auto_tap_mana_sources_with_context(
-        &mut simulated,
-        player,
-        cost,
-        &mut tap_events,
-        Some(source_id),
-        Some(&effect_ctx),
-    );
-    // CR 118.12 + CR 605.3b + CR 616.1: A replacement choice during an
-    // auto-tapped mana ability is an in-progress payment when the live payment
-    // can surface that exact choice before spending, and a dead end when it
-    // cannot suspend.
-    if mana_ability_cost_payment_is_paused(&simulated) {
+    // CR 118.12 + CR 605.3b + CR 616.1: A pause is an in-progress payment when
+    // the live payment can surface the choice and a dead end when it cannot.
+    if run_effect_auto_tap_pass(&mut simulated, player, source_id, cost, &mut tap_events) {
         return match paused {
             PausedManaPayment::Resumable => true,
             PausedManaPayment::Unresumable => false,
         };
     }
-    // CR 605.4a: Resolve coupled `TapsForMana` triggered mana abilities inline
-    // so the bonus mana is in the simulated pool — same authority the real
-    // payment path uses, keeping preview and execution in lockstep.
-    super::triggers::resolve_tap_mana_triggers_inline(&mut simulated, &mut tap_events, 0);
-
-    let mana_spend_permission =
-        player_mana_spend_permission_for_optional_spell(&simulated, player, None);
-    // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Effect-time resolution
-    // mana payments share the same payment-permission bundle as cast/activation.
-    let permissions = super::static_abilities::build_cost_permission_context(
-        &simulated,
-        player,
-        mana_spend_permission,
-    );
+    let permissions = effect_payment_permissions(&simulated, player);
     // CR 605.4a + CR 608.2d: effect-time payments carry a typed resolution
     // root when the live path can suspend for a pre-spend echo choice, so the
     // preview must account for the same bonus the spell/ability preview does.

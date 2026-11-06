@@ -2266,6 +2266,8 @@ fn land_tap_aura_bonus(
 /// [`CapacityUse::Castability`] does not exclude them; they are sized at their
 /// best colour, unlike [`x_ceiling_mana_capacity`]. Mana-multiplying
 /// replacement effects are NOT included, same as the previous X-based bound.
+/// This is the floor of `casting::effect_payment_ceiling` (which raises it with
+/// the simulated production) and the input that sizes its probe.
 /// Over-estimation is safe because the caller gates every offered amount
 /// through the exact auto-tap affordability check.
 ///
