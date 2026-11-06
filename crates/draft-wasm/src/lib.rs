@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -9,12 +9,14 @@ use draft_core::cube::{
     cube_cards_from_entries, parse_cube_list, resolve_addable_cards, CubePackSource,
 };
 use draft_core::pack_generator::PackGenerator;
+use draft_core::pack_source::PackSource;
 use draft_core::session;
 use draft_core::set_pool::LimitedSetPool;
 use draft_core::types::*;
 use draft_core::view::{filter_for_player, DraftPlayerView};
 use engine::database::CardDatabase;
 use phase_ai::config::AiDifficulty;
+use session_cell::LocalOwner;
 
 mod bot_ai;
 mod session_cell;
@@ -1139,10 +1141,7 @@ fn submit_deck_inner(
     main_deck_json: &str,
     commanders_json: &str,
 ) -> Result<draft_core::view::DraftPlayerView, String> {
-    let main_deck: Vec<String> =
-        serde_json::from_str(main_deck_json).map_err(|e| format!("Failed to parse deck: {e}"))?;
-    let commanders: Vec<String> = serde_json::from_str(commanders_json)
-        .map_err(|e| format!("Failed to parse commanders: {e}"))?;
+    let (main_deck, commanders) = parse_deck_payload(main_deck_json, commanders_json)?;
 
     with_draft_mut_inner(|session| {
         session::apply(
@@ -1162,32 +1161,49 @@ fn submit_deck_inner(
     })
 }
 
+/// Parse a deck submission's two payloads, before any session is touched. The
+/// two parse failures carry DISTINCT texts so a caller can tell which payload
+/// was bad.
+fn parse_deck_payload(
+    main_deck_json: &str,
+    commanders_json: &str,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let main_deck: Vec<String> =
+        serde_json::from_str(main_deck_json).map_err(|e| format!("Failed to parse deck: {e}"))?;
+    let commanders: Vec<String> = serde_json::from_str(commanders_json)
+        .map_err(|e| format!("Failed to parse commanders: {e}"))?;
+    Ok((main_deck, commanders))
+}
+
 /// Auto-suggest a playable Limited deck from the human's pool.
 ///
 /// Returns a SuggestedDeck with ~23 spells + ~17 lands, using AI evaluation
 /// at the current difficulty level. Per D-12: "Suggest deck" auto-build.
 #[wasm_bindgen]
 pub fn suggest_deck() -> Result<JsValue, JsValue> {
-    with_draft(|session| {
-        let pool = &session.pools[0];
-        let difficulty = DIFFICULTY.with(|cell| cell.get());
+    with_draft(|session| to_js(&human_deck_suggestion(session)))
+}
 
-        CARD_DB.with(|cell| {
-            let db_borrow = cell.borrow();
-            let card_db = db_borrow.as_ref();
-            // `0`: the HUMAN designates their commander in the deck builder, so
-            // the suggester must not pre-empt that choice. A decision, not a
-            // default.
-            let result = suggest::suggest_deck(
-                pool,
-                difficulty,
-                card_db,
-                session.config.min_deck_size,
-                0,
-                &session.config.addable_cards,
-            );
-            to_js(&result)
-        })
+/// The deck suggestion for the human at seat 0, shared by [`suggest_deck`] and
+/// the local runtime's suggestion.
+fn human_deck_suggestion(session: &DraftSession) -> suggest::SuggestedDeck {
+    let pool = &session.pools[0];
+    let difficulty = DIFFICULTY.with(|cell| cell.get());
+
+    CARD_DB.with(|cell| {
+        let db_borrow = cell.borrow();
+        let card_db = db_borrow.as_ref();
+        // `0`: the HUMAN designates their commander in the deck builder, so
+        // the suggester must not pre-empt that choice. A decision, not a
+        // default.
+        suggest::suggest_deck(
+            pool,
+            difficulty,
+            card_db,
+            session.config.min_deck_size,
+            0,
+            &session.config.addable_cards,
+        )
     })
 }
 
@@ -1201,11 +1217,17 @@ pub fn suggest_lands(spells_json: &str) -> Result<JsValue, JsValue> {
     let spell_names: Vec<String> = serde_json::from_str(spells_json)
         .map_err(|e| JsValue::from_str(&format!("Failed to parse spells: {}", e)))?;
 
-    with_draft(|session| {
-        let pool = &session.pools[0];
-        let lands = suggest::suggest_lands(&spell_names, pool, session.config.min_deck_size);
-        to_js(&lands)
-    })
+    with_draft(|session| to_js(&human_land_suggestion(session, &spell_names)))
+}
+
+/// The land suggestion for `spell_names` against the human's pool at seat 0,
+/// shared by [`suggest_lands`] and the local runtime's land suggestion.
+fn human_land_suggestion(
+    session: &DraftSession,
+    spell_names: &[String],
+) -> std::collections::HashMap<String, u8> {
+    let pool = &session.pools[0];
+    suggest::suggest_lands(spell_names, pool, session.config.min_deck_size)
 }
 
 /// Suggest land counts for spells in a specific multiplayer seat's pool.
@@ -1374,10 +1396,7 @@ fn submit_deck_for_seat_inner(
     main_deck_json: &str,
     commanders_json: &str,
 ) -> Result<draft_core::view::DraftPlayerView, String> {
-    let main_deck: Vec<String> =
-        serde_json::from_str(main_deck_json).map_err(|e| format!("Failed to parse deck: {e}"))?;
-    let commanders: Vec<String> = serde_json::from_str(commanders_json)
-        .map_err(|e| format!("Failed to parse commanders: {e}"))?;
+    let (main_deck, commanders) = parse_deck_payload(main_deck_json, commanders_json)?;
 
     with_draft_mut_inner(|session| {
         session::apply(
@@ -1565,54 +1584,61 @@ pub fn get_bot_deck(bot_seat: u8) -> Result<JsValue, JsValue> {
 /// `create_multiplayer_draft_inner`, `submit_pick_for_seat_inner` and
 /// `draft_procedure_dto` exist.
 fn get_bot_deck_inner(bot_seat: u8) -> Result<suggest::SuggestedDeck, String> {
-    with_draft_inner(|session| {
-        if bot_seat == 0 || bot_seat as usize >= session.seats.len() {
-            return Err("bot_seat is out of range".to_string());
+    with_draft_inner(|session| bot_deck_for_seat(session, bot_seat))
+}
+
+/// A bot seat's auto-built deck from its drafted pool, shared by
+/// [`get_bot_deck_inner`] and the local runtime's bot deck.
+fn bot_deck_for_seat(
+    session: &DraftSession,
+    bot_seat: u8,
+) -> Result<suggest::SuggestedDeck, String> {
+    if bot_seat == 0 || bot_seat as usize >= session.seats.len() {
+        return Err("bot_seat is out of range".to_string());
+    }
+    let pool = &session.pools[bot_seat as usize];
+    let difficulty = DIFFICULTY.with(|cell| cell.get());
+
+    CARD_DB.with(|cell| {
+        let db_borrow = cell.borrow();
+        let card_db = db_borrow.as_ref();
+
+        // CR 407.3 + CR 903.3: Cube addables and Commander designations
+        // require typed faces. Ordinary set-backed pods can propose a
+        // deck without this optional database; game admission still
+        // checks every submitted name and excludes ante cards.
+        let requires_card_db = match &session.config.source {
+            DraftSource::Set { .. } => session.config.kind.commanders_required() > 0,
+            DraftSource::Cube { .. } => true,
+        };
+        if requires_card_db && card_db.is_none() {
+            return Err("Card database must be loaded before a draft bot deck".to_string());
         }
-        let pool = &session.pools[bot_seat as usize];
-        let difficulty = DIFFICULTY.with(|cell| cell.get());
 
-        CARD_DB.with(|cell| {
-            let db_borrow = cell.borrow();
-            let card_db = db_borrow.as_ref();
+        let deck = suggest::suggest_deck(
+            pool,
+            difficulty,
+            card_db,
+            session.config.min_deck_size,
+            session.config.kind.commanders_required(),
+            &session.config.addable_cards,
+        );
 
-            // CR 407.3 + CR 903.3: Cube addables and Commander designations
-            // require typed faces. Ordinary set-backed pods can propose a
-            // deck without this optional database; game admission still
-            // checks every submitted name and excludes ante cards.
-            let requires_card_db = match &session.config.source {
-                DraftSource::Set { .. } => session.config.kind.commanders_required() > 0,
-                DraftSource::Cube { .. } => true,
-            };
-            if requires_card_db && card_db.is_none() {
-                return Err("Card database must be loaded before a draft bot deck".to_string());
-            }
+        // Enforce the session-configured floor for the bot, as
+        // `validate_limited_deck` does for human decks. CR 100.2b sets
+        // ordinary Limited at 40 cards; CR 903.13f(1) sets Commander Draft
+        // at 60. Custom Cube floors are configuration, not CR 100.2b.
+        // Never publish an undersized proposal if the bot runs out of cards.
+        let deck_total: usize =
+            deck.main_deck.len() + deck.lands.values().map(|&n| n as usize).sum::<usize>();
+        if deck_total < session.config.min_deck_size {
+            return Err(format!(
+                "Draft bot deck reached {deck_total} cards, minimum is {}",
+                session.config.min_deck_size
+            ));
+        }
 
-            let deck = suggest::suggest_deck(
-                pool,
-                difficulty,
-                card_db,
-                session.config.min_deck_size,
-                session.config.kind.commanders_required(),
-                &session.config.addable_cards,
-            );
-
-            // Enforce the session-configured floor for the bot, as
-            // `validate_limited_deck` does for human decks. CR 100.2b sets
-            // ordinary Limited at 40 cards; CR 903.13f(1) sets Commander Draft
-            // at 60. Custom Cube floors are configuration, not CR 100.2b.
-            // Never publish an undersized proposal if the bot runs out of cards.
-            let deck_total: usize =
-                deck.main_deck.len() + deck.lands.values().map(|&n| n as usize).sum::<usize>();
-            if deck_total < session.config.min_deck_size {
-                return Err(format!(
-                    "Draft bot deck reached {deck_total} cards, minimum is {}",
-                    session.config.min_deck_size
-                ));
-            }
-
-            Ok(deck)
-        })
+        Ok(deck)
     })
 }
 
@@ -2354,6 +2380,706 @@ pub fn get_draft_view_for_seat(seat_index: u8) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub fn get_draft_status() -> Result<JsValue, JsValue> {
     with_draft(|session| to_js(&session.status))
+}
+
+// ── Local FIFO runtime ───────────────────────────────────────────────────────
+//
+// A FIFO Quick draft this runtime owns locally: one human at seat 0 and an
+// engine-run bot at every other seat. The general gates above refuse every FIFO
+// session, and they still do; the local gates below admit only this shape, and
+// only for the caller holding the installed session's live local owner
+// (`session_cell::LocalOwner`). Each operation is one export over a
+// native-testable `_inner` core, and every mutating one takes the host's
+// explicit time.
+
+/// The seat the local human occupies, and the only seat the local runtime
+/// projects.
+const LOCAL_HUMAN_SEAT: u8 = 0;
+
+/// The prefix of every session id the local runtime issues.
+const LOCAL_SESSION_ID_PREFIX: &str = "local-";
+
+/// The local gates' refusal for a session they do not admit.
+const NOT_A_LOCAL_FIFO_SESSION: &str = "This draft is not a local FIFO Quick draft";
+
+/// Whether `id` has the one shape the local runtime issues:
+/// [`LOCAL_SESSION_ID_PREFIX`] followed by exactly 16 lowercase hex digits.
+fn is_canonical_local_session_id(id: &DraftSessionId) -> bool {
+    id.0.strip_prefix(LOCAL_SESSION_ID_PREFIX)
+        .is_some_and(|hex| {
+            hex.len() == 16
+                && hex
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
+
+/// Admit only a session the local runtime can own: the FIFO flow, the Quick
+/// kind, a human at seat 0 and a bot at every other seat, under a canonical
+/// local session id. Every refusal is [`NOT_A_LOCAL_FIFO_SESSION`].
+///
+/// CR 905.1c: during the draft a player can look only at the booster pack they
+/// are drafting from, the cards they have drafted, and cards revealed or
+/// drafted face up. The runtime projects one seat, so exactly one seat may be a
+/// person, and it is seat 0. The admission indexes no seat: a session with no
+/// seats has no human at seat 0 and is refused.
+fn admit_local_fifo_runtime(session: &DraftSession) -> Result<(), String> {
+    let refuse = || Err(NOT_A_LOCAL_FIFO_SESSION.to_string());
+    if session.config.flow != DraftFlow::FifoAsync {
+        return refuse();
+    }
+    match session.config.kind {
+        DraftKind::Quick => {}
+        DraftKind::Premier
+        | DraftKind::Traditional
+        | DraftKind::Sealed
+        | DraftKind::CommanderDraft
+        | DraftKind::Winston => return refuse(),
+    }
+    let human_at_local_seat = matches!(
+        session.seats.get(usize::from(LOCAL_HUMAN_SEAT)),
+        Some(DraftSeat::Human { .. })
+    );
+    let every_other_seat_is_a_bot = session
+        .seats
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != usize::from(LOCAL_HUMAN_SEAT))
+        .all(|(_, seat)| matches!(seat, DraftSeat::Bot { .. }));
+    let canonical_id = session
+        .fifo
+        .as_ref()
+        .is_some_and(|fifo| is_canonical_local_session_id(&fifo.session_id));
+    if human_at_local_seat && every_other_seat_is_a_bot && canonical_id {
+        Ok(())
+    } else {
+        refuse()
+    }
+}
+
+/// The local read gate: the live owner, then [`admit_local_fifo_runtime`], both
+/// before `f` sees the session. A parallel of [`with_draft_inner`], not a
+/// widening of it.
+fn with_local_fifo_inner<R>(
+    owner: LocalOwner,
+    f: impl FnOnce(&DraftSession) -> Result<R, String>,
+) -> Result<R, String> {
+    session_cell::with_local_draft_inner(owner, |session| {
+        admit_local_fifo_runtime(session).and_then(|()| f(session))
+    })
+}
+
+/// The local mutable gate: the live owner, then [`admit_local_fifo_runtime`],
+/// both before `f` sees the session. A parallel of [`with_draft_mut_inner`],
+/// not a widening of it.
+fn with_local_fifo_mut_inner<R>(
+    owner: LocalOwner,
+    f: impl FnOnce(&mut DraftSession) -> Result<R, String>,
+) -> Result<R, String> {
+    session_cell::with_local_draft_mut_inner(owner, |session| {
+        admit_local_fifo_runtime(session).and_then(|()| f(session))
+    })
+}
+
+/// What a local install returns: the owner the caller presents on every later
+/// call, and seat 0's view.
+#[derive(Serialize)]
+struct LocalFifoSession {
+    owner: LocalOwner,
+    view: DraftPlayerView,
+}
+
+/// Create, start and install a local FIFO Quick draft, and issue its owner.
+///
+/// Everything fallible runs before any thread-local is written. The session is
+/// constructed under a session id the runtime issues itself, never one a caller
+/// supplies; it is admitted by [`admit_local_fifo_runtime`] BEFORE `StartDraft`
+/// deals a single pack; it starts at `now_ms`; and its bots run to quiescence.
+/// Only then is it installed, with its difficulty and the bots' random state.
+/// No pack generator is kept: every FIFO pack is dealt at `StartDraft`.
+///
+/// CR 905.2a: during a draft there is no active player or system of priority,
+/// so a bot seat drafts as soon as it holds a pack, and the start batch makes
+/// every such pick before the human's first view.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the Quick constructors call this when they create FIFO sessions"
+    )
+)]
+fn start_local_fifo_draft(
+    config: DraftConfig,
+    seats: Vec<DraftSeat>,
+    draft_code: String,
+    pack_source: &dyn PackSource,
+    difficulty: AiDifficulty,
+    now_ms: u64,
+) -> Result<LocalFifoSession, String> {
+    let session_id = DraftSessionId(format!(
+        "{LOCAL_SESSION_ID_PREFIX}{:016x}",
+        rand::rng().random::<u64>()
+    ));
+    let mut session = DraftSession::new_fifo(config, seats, draft_code, session_id)
+        .map_err(|e| format!("Failed to create local draft: {e}"))?;
+    admit_local_fifo_runtime(&session)?;
+    session::apply_at(
+        &mut session,
+        DraftAction::StartDraft,
+        Some(pack_source),
+        now_ms,
+    )
+    .map_err(|e| format!("Failed to start local draft: {e}"))?;
+
+    let mut rng = ChaCha20Rng::seed_from_u64(session.config.rng_seed);
+    let enhancement = PICK_ENHANCEMENT.with(|cell| cell.get());
+    let bound = local_fifo_bot_batch_bound(&session);
+    CARD_DB.with(|cell| {
+        let db_borrow = cell.borrow();
+        drive_local_fifo_bot_batch(
+            &mut session,
+            difficulty,
+            db_borrow.as_ref(),
+            enhancement,
+            &mut rng,
+            now_ms,
+            bound,
+        )
+    })?;
+    let view = filter_for_player(&session, LOCAL_HUMAN_SEAT);
+
+    let owner = session_cell::install_local(session);
+    DIFFICULTY.with(|cell| cell.set(difficulty));
+    RNG.with(|cell| cell.set(Some(rng)));
+    PACK_GEN.with(|cell| cell.set(None));
+    Ok(LocalFifoSession { owner, view })
+}
+
+/// The local draft's view: seat 0's projection, which publishes every seat's
+/// FIFO progress.
+///
+/// `owner`: the owner the local start or import returned. Any other owner is
+/// refused before the session is read.
+#[wasm_bindgen]
+pub fn local_fifo_view(owner: u32) -> Result<JsValue, JsValue> {
+    local_fifo_view_inner(LocalOwner::from_raw(owner))
+        .map(|view| to_js(&view))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Pure-Rust core for [`local_fifo_view`].
+fn local_fifo_view_inner(owner: LocalOwner) -> Result<DraftPlayerView, String> {
+    with_local_fifo_inner(owner, |session| {
+        Ok(filter_for_player(session, LOCAL_HUMAN_SEAT))
+    })
+}
+
+/// The local human's composed selection, bound to the prompt it answers.
+///
+/// It names no seat: the seat is always the owner's, seat 0, and a payload
+/// that names one is refused as an unknown field before the session is read.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalFifoSelection {
+    prompt_id: DraftPromptId,
+    picked_card_instance_ids: Vec<String>,
+    burned_card_instance_ids: Vec<String>,
+    /// The draft-effect cards this selection uses, empty for none, in the
+    /// order they go back into the pack.
+    effect_card_instance_ids: Vec<String>,
+}
+
+/// The selection the engine makes for `seat` on the prompt `prompt_id`: the
+/// bot's picks, the burns the policy requires, and no draft-effect card.
+/// `None` when the seat holds no head pack or owes no pick.
+///
+/// CR 905.1c: a player can look only at the pack they are drafting from, the
+/// cards they have drafted, and cards revealed or drafted face up, so `view`
+/// (that seat's own projection) is all this reads. The counts are the engine's
+/// published `requirements`, never
+/// literals: a kind or policy that takes more than one card, or burns, per
+/// step is honoured as published. The pick indices are mapped to instance ids
+/// before anything moves, and the burns are the head's remaining cards in the
+/// projection's order.
+fn fifo_ai_selection(
+    view: &DraftPlayerView,
+    seat: u8,
+    prompt_id: DraftPromptId,
+    difficulty: AiDifficulty,
+    card_db: Option<&CardDatabase>,
+    enhancement: bot_ai::PickEnhancement,
+    rng: &mut ChaCha20Rng,
+) -> Option<DraftAction> {
+    let fifo = view.fifo.as_ref()?;
+    let head = fifo.head.as_ref()?;
+    let pack = view.current_pack.as_deref()?;
+    let requirements = fifo.requirements;
+    if requirements.picks == 0 {
+        return None;
+    }
+    let picked_card_instance_ids: Vec<String> = bot_ai::bot_picks(
+        pack,
+        requirements.picks,
+        difficulty,
+        &view.pool,
+        card_db,
+        enhancement,
+        bot_ai::PackShape {
+            pack_number: head.round,
+            cards_in_pack: head.original_size,
+        },
+        rng,
+    )
+    .into_iter()
+    .map(|index| pack[index].instance_id.clone())
+    .collect();
+    let burned_card_instance_ids = pack
+        .iter()
+        .map(|card| &card.instance_id)
+        .filter(|id| !picked_card_instance_ids.contains(*id))
+        .take(requirements.burns)
+        .cloned()
+        .collect();
+    Some(DraftAction::Select {
+        seat,
+        prompt_id,
+        picked_card_instance_ids,
+        burned_card_instance_ids,
+        effect_card_instance_ids: Vec::new(),
+    })
+}
+
+/// The termination bound for one local bot batch, DERIVED from the state: the
+/// undrafted cards (every queued pack plus every unopened pack), plus one.
+///
+/// Every bot application removes at least one card from that total: the
+/// engine's requirements take at least one pick from a non-empty head, and a
+/// bot returns no draft-effect card to the pack. Opening a round moves cards
+/// from unopened packs into queues without changing the total. So a batch makes
+/// at most as many applications as there are undrafted cards, and the bound
+/// cannot trip from a legal state.
+fn local_fifo_bot_batch_bound(session: &DraftSession) -> usize {
+    let queued: usize = session.fifo.as_ref().map_or(0, |fifo| {
+        fifo.seats
+            .iter()
+            .flat_map(|seat| &seat.queue)
+            .map(|queued| queued.pack.0.len())
+            .sum()
+    });
+    let unopened: usize = session
+        .packs_by_seat
+        .iter()
+        .flatten()
+        .map(|pack| pack.0.len())
+        .sum();
+    queued.saturating_add(unopened).saturating_add(1)
+}
+
+/// Run the local bot seats to quiescence: while the session is drafting, the
+/// lowest-indexed bot seat holding a head pack makes the selection
+/// [`fifo_ai_selection`] chooses from its own projection, at `now_ms`, until no
+/// bot seat holds a head.
+///
+/// CR 905.2a: during a draft there is no active player or system of priority;
+/// when several players would act at once and cannot agree on an order, the
+/// order is random. The engine runs every bot seat, and they act in seat order,
+/// an order they agree on, which makes the batch deterministic for a given
+/// random state. Which packs each seat ends up holding does not depend on that
+/// order: a seat receives packs only from its one neighbour, in the order that
+/// neighbour passes them, so only the order of the random draws does.
+///
+/// Atomic per application: each selection commits whole through
+/// `session::apply_at` or not at all, and `rng` advances only when it commits.
+///
+/// `bound` is a parameter so `the_bot_batch_fails_loudly_rather_than_spinning`
+/// can drive the failure branch; production passes
+/// [`local_fifo_bot_batch_bound`]. Loud on violation, never silent: the bound
+/// tripping, a bot seat with no selection, and a refused selection are each an
+/// `Err`. The legitimate exits are the session leaving `Drafting` and no bot
+/// seat holding a head.
+fn drive_local_fifo_bot_batch(
+    session: &mut DraftSession,
+    difficulty: AiDifficulty,
+    card_db: Option<&CardDatabase>,
+    enhancement: bot_ai::PickEnhancement,
+    rng: &mut ChaCha20Rng,
+    now_ms: u64,
+    bound: usize,
+) -> Result<(), String> {
+    let mut applied = 0usize;
+    while session.status == DraftStatus::Drafting {
+        let Some(seat) = session
+            .seats
+            .iter()
+            .enumerate()
+            .filter(|(index, seat)| {
+                *index != usize::from(LOCAL_HUMAN_SEAT) && matches!(seat, DraftSeat::Bot { .. })
+            })
+            .filter_map(|(index, _)| u8::try_from(index).ok())
+            .find(|&seat| session.head_pack(seat).is_some())
+        else {
+            break;
+        };
+
+        applied += 1;
+        if applied > bound {
+            return Err(format!(
+                "local FIFO bot batch exceeded its termination bound of {bound} selections \
+                 (seat {seat}); the undrafted card count is not decreasing"
+            ));
+        }
+
+        // THE ONLY INPUT the bot gets: the projection a person in that seat
+        // would see.
+        let view = filter_for_player(session, seat);
+        let mut trial = rng.clone();
+        let action = view
+            .fifo
+            .as_ref()
+            .and_then(|fifo| fifo.prompt_id.clone())
+            .and_then(|prompt_id| {
+                fifo_ai_selection(
+                    &view,
+                    seat,
+                    prompt_id,
+                    difficulty,
+                    card_db,
+                    enhancement,
+                    &mut trial,
+                )
+            })
+            .ok_or_else(|| format!("no FIFO selection for bot seat {seat}"))?;
+        session::apply_at(session, action, None, now_ms)
+            .map_err(|e| format!("bot seat {seat} selection refused: {e}"))?;
+        *rng = trial;
+    }
+    Ok(())
+}
+
+/// [`drive_local_fifo_bot_batch`] over the runtime's difficulty, pick
+/// enhancement, random state and card database, with the derived bound. The
+/// random state goes back on every exit, an error included: it then holds the
+/// state after the last committed application.
+fn run_local_fifo_bot_batch(session: &mut DraftSession, now_ms: u64) -> Result<(), String> {
+    let difficulty = DIFFICULTY.with(|cell| cell.get());
+    let enhancement = PICK_ENHANCEMENT.with(|cell| cell.get());
+    let mut rng = RNG
+        .with(|cell| cell.take())
+        .ok_or_else(|| "RNG not initialized".to_string())?;
+    let bound = local_fifo_bot_batch_bound(session);
+    let result = CARD_DB.with(|cell| {
+        let db_borrow = cell.borrow();
+        drive_local_fifo_bot_batch(
+            session,
+            difficulty,
+            db_borrow.as_ref(),
+            enhancement,
+            &mut rng,
+            now_ms,
+            bound,
+        )
+    });
+    RNG.with(|cell| cell.set(Some(rng)));
+    result
+}
+
+/// Apply the local human's composed selection at `now_ms`, then run the bots to
+/// quiescence.
+///
+/// `selection_json`: `{ prompt_id, picked_card_instance_ids,
+/// burned_card_instance_ids, effect_card_instance_ids }`, with the prompt id
+/// copied from the view. It names no seat; the seat is the owner's. The payload
+/// is parsed before the session is touched, and a stale prompt changes nothing.
+/// Returns seat 0's view.
+#[wasm_bindgen]
+pub fn local_fifo_select(
+    owner: u32,
+    selection_json: &str,
+    now_ms: u64,
+) -> Result<JsValue, JsValue> {
+    local_fifo_select_inner(LocalOwner::from_raw(owner), selection_json, now_ms)
+        .map(|view| to_js(&view))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Pure-Rust core for [`local_fifo_select`].
+fn local_fifo_select_inner(
+    owner: LocalOwner,
+    selection_json: &str,
+    now_ms: u64,
+) -> Result<DraftPlayerView, String> {
+    let selection: LocalFifoSelection = serde_json::from_str(selection_json)
+        .map_err(|e| format!("Failed to parse selection: {e}"))?;
+    with_local_fifo_mut_inner(owner, |session| {
+        session::apply_at(
+            session,
+            DraftAction::Select {
+                seat: LOCAL_HUMAN_SEAT,
+                prompt_id: selection.prompt_id,
+                picked_card_instance_ids: selection.picked_card_instance_ids,
+                burned_card_instance_ids: selection.burned_card_instance_ids,
+                effect_card_instance_ids: selection.effect_card_instance_ids,
+            },
+            None,
+            now_ms,
+        )
+        .map_err(|e| format!("Selection failed: {e}"))?;
+        run_local_fifo_bot_batch(session, now_ms)?;
+        Ok(filter_for_player(session, LOCAL_HUMAN_SEAT))
+    })
+}
+
+/// Let the engine make the local human's selection on the prompt
+/// `prompt_id_json` at `now_ms`, with the bots' own choice at the active
+/// difficulty, then run the bots to quiescence.
+///
+/// The auto-pick is bound to the caller's prompt, so a stale prompt is refused
+/// and changes nothing, the random state included. It spends no draft-effect
+/// card. Returns seat 0's view.
+#[wasm_bindgen]
+pub fn local_fifo_auto_select(
+    owner: u32,
+    prompt_id_json: &str,
+    now_ms: u64,
+) -> Result<JsValue, JsValue> {
+    local_fifo_auto_select_inner(LocalOwner::from_raw(owner), prompt_id_json, now_ms)
+        .map(|view| to_js(&view))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Pure-Rust core for [`local_fifo_auto_select`]. The selection is drawn from a
+/// copy of the random state, which replaces the stored one only when the
+/// selection commits; on every refusal the stored state is put back untouched.
+fn local_fifo_auto_select_inner(
+    owner: LocalOwner,
+    prompt_id_json: &str,
+    now_ms: u64,
+) -> Result<DraftPlayerView, String> {
+    let prompt_id: DraftPromptId = serde_json::from_str(prompt_id_json)
+        .map_err(|e| format!("Failed to parse prompt id: {e}"))?;
+    with_local_fifo_mut_inner(owner, |session| {
+        let view = filter_for_player(session, LOCAL_HUMAN_SEAT);
+        let difficulty = DIFFICULTY.with(|cell| cell.get());
+        let enhancement = PICK_ENHANCEMENT.with(|cell| cell.get());
+        let stored = RNG
+            .with(|cell| cell.take())
+            .ok_or_else(|| "RNG not initialized".to_string())?;
+        let mut trial = stored.clone();
+        let applied = CARD_DB
+            .with(|cell| {
+                let db_borrow = cell.borrow();
+                fifo_ai_selection(
+                    &view,
+                    LOCAL_HUMAN_SEAT,
+                    prompt_id,
+                    difficulty,
+                    db_borrow.as_ref(),
+                    enhancement,
+                    &mut trial,
+                )
+            })
+            .ok_or_else(|| "No pack to pick from".to_string())
+            .and_then(|action| {
+                session::apply_at(session, action, None, now_ms)
+                    .map_err(|e| format!("Auto-pick failed: {e}"))
+            });
+        let kept = if applied.is_ok() { trial } else { stored };
+        RNG.with(|cell| cell.set(Some(kept)));
+        applied?;
+        run_local_fifo_bot_batch(session, now_ms)?;
+        Ok(filter_for_player(session, LOCAL_HUMAN_SEAT))
+    })
+}
+
+/// Submit the local human's deck at `now_ms`.
+///
+/// `main_deck_json`: JSON array of card name strings. `commanders_json`: JSON
+/// array of the card names designated as commander(s), `[]` for a Quick
+/// draft. Both are parsed before the session is touched. Returns seat 0's
+/// view.
+#[wasm_bindgen]
+pub fn local_fifo_submit_deck(
+    owner: u32,
+    main_deck_json: &str,
+    commanders_json: &str,
+    now_ms: u64,
+) -> Result<JsValue, JsValue> {
+    local_fifo_submit_deck_inner(
+        LocalOwner::from_raw(owner),
+        main_deck_json,
+        commanders_json,
+        now_ms,
+    )
+    .map(|view| to_js(&view))
+    .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Pure-Rust core for [`local_fifo_submit_deck`].
+fn local_fifo_submit_deck_inner(
+    owner: LocalOwner,
+    main_deck_json: &str,
+    commanders_json: &str,
+    now_ms: u64,
+) -> Result<DraftPlayerView, String> {
+    let (main_deck, commanders) = parse_deck_payload(main_deck_json, commanders_json)?;
+    with_local_fifo_mut_inner(owner, |session| {
+        // CR 100.2b: a limited deck has a minimum deck size of 40 cards, built
+        // from the product plus basic lands. The engine's deck validation
+        // enforces the session's floor inside the FIFO transaction, so a
+        // refused deck leaves the session unchanged.
+        session::apply_at(
+            session,
+            DraftAction::SubmitDeck {
+                seat: LOCAL_HUMAN_SEAT,
+                main_deck,
+                commanders,
+                printings: Vec::new(),
+            },
+            None,
+            now_ms,
+        )
+        .map_err(deck_submission_message)?;
+        Ok(filter_for_player(session, LOCAL_HUMAN_SEAT))
+    })
+}
+
+/// Auto-suggest a playable Limited deck from the local human's pool, as
+/// [`suggest_deck`] does for the legacy runtime.
+#[wasm_bindgen]
+pub fn local_fifo_suggest_deck(owner: u32) -> Result<JsValue, JsValue> {
+    local_fifo_suggest_deck_inner(LocalOwner::from_raw(owner))
+        .map(|deck| to_js(&deck))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Pure-Rust core for [`local_fifo_suggest_deck`].
+fn local_fifo_suggest_deck_inner(owner: LocalOwner) -> Result<suggest::SuggestedDeck, String> {
+    with_local_fifo_inner(owner, |session| Ok(human_deck_suggestion(session)))
+}
+
+/// Suggest land counts for `spells_json` (a JSON array of card name strings)
+/// against the local human's pool, as [`suggest_lands`] does for the legacy
+/// runtime. The payload is parsed before the session is touched.
+#[wasm_bindgen]
+pub fn local_fifo_suggest_lands(owner: u32, spells_json: &str) -> Result<JsValue, JsValue> {
+    local_fifo_suggest_lands_inner(LocalOwner::from_raw(owner), spells_json)
+        .map(|lands| to_js(&lands))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Pure-Rust core for [`local_fifo_suggest_lands`].
+fn local_fifo_suggest_lands_inner(
+    owner: LocalOwner,
+    spells_json: &str,
+) -> Result<std::collections::HashMap<String, u8>, String> {
+    let spell_names: Vec<String> =
+        serde_json::from_str(spells_json).map_err(|e| format!("Failed to parse spells: {e}"))?;
+    with_local_fifo_inner(owner, |session| {
+        Ok(human_land_suggestion(session, &spell_names))
+    })
+}
+
+/// A local bot seat's auto-built deck for match play, as [`get_bot_deck`]
+/// builds one for the legacy runtime.
+///
+/// `bot_seat`: a bot seat's index, 1 or more.
+#[wasm_bindgen]
+pub fn local_fifo_bot_deck(owner: u32, bot_seat: u8) -> Result<JsValue, JsValue> {
+    local_fifo_bot_deck_inner(LocalOwner::from_raw(owner), bot_seat)
+        .map(|deck| to_js(&deck))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Pure-Rust core for [`local_fifo_bot_deck`].
+fn local_fifo_bot_deck_inner(
+    owner: LocalOwner,
+    bot_seat: u8,
+) -> Result<suggest::SuggestedDeck, String> {
+    with_local_fifo_inner(owner, |session| bot_deck_for_seat(session, bot_seat))
+}
+
+/// The local draft's original cube multiset for the game launched after it,
+/// as [`booster_pack_pool_for_game`] returns for the legacy runtime: `null`
+/// for a set draft.
+#[wasm_bindgen]
+pub fn local_fifo_booster_pack_pool_for_game(owner: u32) -> Result<JsValue, JsValue> {
+    local_fifo_booster_pack_pool_for_game_inner(LocalOwner::from_raw(owner))
+        .map(|pool| to_js(&pool))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Pure-Rust core for [`local_fifo_booster_pack_pool_for_game`].
+fn local_fifo_booster_pack_pool_for_game_inner(
+    owner: LocalOwner,
+) -> Result<Option<Vec<String>>, String> {
+    with_local_fifo_inner(owner, |session| {
+        Ok(session.booster_pack_pool_for_game().map(<[String]>::to_vec))
+    })
+}
+
+/// Serialize the local draft's full session to JSON for local persistence.
+///
+/// The trusted local export, like [`export_draft_session`]: it is the whole
+/// session, every seat's pool and every unopened pack included, so it is for
+/// persistence and never for display. It carries no owner;
+/// [`import_local_fifo_session`] issues a new one.
+#[wasm_bindgen]
+pub fn export_local_fifo_session(owner: u32) -> Result<String, JsValue> {
+    export_local_fifo_session_inner(LocalOwner::from_raw(owner))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Pure-Rust core for [`export_local_fifo_session`].
+fn export_local_fifo_session_inner(owner: LocalOwner) -> Result<String, String> {
+    with_local_fifo_inner(owner, |session| {
+        serde_json::to_string(session)
+            .map_err(|e| format!("Failed to serialize draft session: {e}"))
+    })
+}
+
+/// Restore a local draft from [`export_local_fifo_session`]'s JSON, and issue
+/// it a new owner.
+///
+/// The text is deserialized, admitted by the local admission, and validated as
+/// a snapshot, all before anything is written; on any failure nothing is
+/// installed and the current draft keeps its owner. The session id and its
+/// prompts are kept. The owner is re-issued on every import, so every earlier
+/// owner is refused afterwards. The bots' random state resumes from the
+/// session's seed offset by its revision, so each save point resumes its own
+/// stream.
+///
+/// `difficulty`: 0=VeryEasy, 1=Easy, 2=Medium, 3=Hard, 4=VeryHard.
+/// Returns `{ owner, view }`.
+#[wasm_bindgen]
+pub fn import_local_fifo_session(json: &str, difficulty: u8) -> Result<JsValue, JsValue> {
+    import_local_fifo_session_inner(json, difficulty)
+        .map(|local| to_js(&local))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Pure-Rust core for [`import_local_fifo_session`].
+fn import_local_fifo_session_inner(json: &str, difficulty: u8) -> Result<LocalFifoSession, String> {
+    let session: DraftSession = serde_json::from_str(json)
+        .map_err(|e| format!("Failed to deserialize draft session: {e}"))?;
+    admit_local_fifo_runtime(&session)?;
+    session
+        .validate_persisted_snapshot()
+        .map_err(|e| format!("Invalid draft snapshot: {e}"))?;
+    // The revision moves on every committed application, so the seed offset
+    // differs between save points of one draft.
+    let revision = session
+        .fifo
+        .as_ref()
+        .ok_or_else(|| NOT_A_LOCAL_FIFO_SESSION.to_string())?
+        .revision;
+    let rng = ChaCha20Rng::seed_from_u64(session.config.rng_seed.wrapping_add(revision));
+    let view = filter_for_player(&session, LOCAL_HUMAN_SEAT);
+
+    let owner = session_cell::install_local(session);
+    DIFFICULTY.with(|cell| cell.set(map_difficulty(difficulty)));
+    RNG.with(|cell| cell.set(Some(rng)));
+    PACK_GEN.with(|cell| cell.set(None));
+    Ok(LocalFifoSession { owner, view })
 }
 
 #[cfg(test)]
@@ -3416,12 +4142,12 @@ mod create_multiplayer_draft_tests {
         }"#
     }
 
-    fn install_fixture_db() {
+    pub(super) fn install_fixture_db() {
         let db = CardDatabase::from_json_str(fixture_card_db_json()).unwrap();
         CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
     }
 
-    fn clear_state() {
+    pub(super) fn clear_state() {
         session_cell::clear();
         PACK_GEN.with(|cell| cell.set(None));
         RNG.with(|cell| cell.set(None));
@@ -3798,7 +4524,7 @@ mod create_multiplayer_draft_tests {
         session
     }
 
-    fn dormant_fixture(flow: DraftFlow, status: DraftStatus) -> DraftSession {
+    pub(super) fn dormant_fixture(flow: DraftFlow, status: DraftStatus) -> DraftSession {
         use draft_core::pack_source::FixturePackSource;
         let template = persisted_premier_session(SetLayout::UniformByRound {
             codes: vec!["TST".into()],
@@ -3877,7 +4603,7 @@ mod create_multiplayer_draft_tests {
         PACK_GEN.with(|cell| cell.set(Some(PackGenerator::new(pool))));
     }
 
-    fn guard_cells_snapshot() -> serde_json::Value {
+    pub(super) fn guard_cells_snapshot() -> serde_json::Value {
         use draft_core::pack_source::PackSource;
         use rand::RngCore;
         let session = if session_cell::is_installed() {
@@ -3903,7 +4629,7 @@ mod create_multiplayer_draft_tests {
             cards
         });
         let database = CARD_DB.with(|cell| { let value=cell.borrow();value.as_ref().map(|db| serde_json::json!({"count":db.card_count(),"alpha":db.get_face_by_name("Alpha")})) });
-        serde_json::json!({"session":session,"difficulty":DIFFICULTY.with(|cell|format!("{:?}",cell.get())),"rng":rng,"generator":generated,"database":database})
+        serde_json::json!({"session":session,"difficulty":DIFFICULTY.with(|cell|format!("{:?}",cell.get())),"rng":rng,"generator":generated,"database":database,"local_owner":session_cell::local_owner()})
     }
 
     #[test]
@@ -6428,5 +7154,1298 @@ mod llm_seat_authority_tests {
     #[test]
     fn the_roster_is_the_only_source_of_eligibility() {
         assert_eq!(llm_eligible_bot_seats(&pod(&[0, 1, 2], 3)), vec![0, 1, 2]);
+    }
+}
+
+#[cfg(test)]
+mod local_fifo_runtime_tests {
+    use super::create_multiplayer_draft_tests::{
+        clear_state, dormant_fixture, guard_cells_snapshot, install_fixture_db,
+    };
+    use super::*;
+    use crate::session_cell::STALE_LOCAL_OWNER;
+    use draft_core::pack_source::FixturePackSource;
+    use engine::types::card::DraftEffect;
+    use engine::types::player::PlayerId;
+    use rand::RngCore;
+
+    /// The instance id [`LibrarianSource`] deals Cogwork Librarian under.
+    const LIBRARIAN: &str = "cogwork-librarian";
+
+    /// A canonical local session id, for sessions built by draft-core directly.
+    const CANONICAL_ID: &str = "local-0123456789abcdef";
+
+    /// An endpoint that parses, so the session gate, not a parse error, is what
+    /// refuses the LLM request builder.
+    const ENDPOINT: &str =
+        r#"{"provider":"OpenAiCompatible","baseUrl":"https://provider.test/v1","model":"test"}"#;
+
+    /// A local Quick FIFO configuration: three boosters, the 40-card floor, the
+    /// untimed Quick clock, no discard threshold, and `burns_per_pick` burns.
+    /// The seed only makes the bots' random draws repeatable.
+    fn local_quick_config(
+        source: DraftSource,
+        pod_size: u8,
+        cards_per_pack: u8,
+        burns_per_pick: u8,
+    ) -> DraftConfig {
+        DraftConfig {
+            flow: DraftFlow::FifoAsync,
+            selection_policy: DraftSelectionPolicy {
+                burns_per_pick,
+                discard_threshold: 0,
+            },
+            clock_policy: DraftClockPolicy::quick_default(),
+            set_code: source.set_code(),
+            source,
+            kind: DraftKind::Quick,
+            pod_size,
+            cards_per_pack,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 20_261_106,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        }
+    }
+
+    /// The human at seat 0, then a bot at every other seat.
+    fn local_quick_seats(pod_size: u8) -> Vec<DraftSeat> {
+        std::iter::once(DraftSeat::Human {
+            player_id: PlayerId(0),
+            display_name: "Player".to_string(),
+        })
+        .chain((1..pod_size).map(|index| DraftSeat::Bot {
+            name: format!("Bot {index}"),
+        }))
+        .collect()
+    }
+
+    fn set_source() -> DraftSource {
+        DraftSource::single_set("TST")
+    }
+
+    /// Three textless 3-card `TST` boosters per seat. With 8 seats a booster
+    /// reaches three seats before it empties (CR 905.1a), so every seat drafts
+    /// 3 cards a round and 9 in all. After the start batch the human's queue
+    /// holds its own booster (3 cards), seat 7's (2) and seat 6's (1), in that
+    /// order, because the first round passes left (CR 905.1b).
+    fn fixture_source() -> FixturePackSource {
+        FixturePackSource {
+            set_code: "TST".to_string(),
+            cards_per_pack: 3,
+        }
+    }
+
+    /// [`fixture_source`]'s boosters, except that the first card of seat 0's
+    /// first booster is Cogwork Librarian, so it is in the local human's first
+    /// head. Its Oracle text, verbatim: "Draft this card face up. / As you draft
+    /// a card, you may draft an additional card from that booster pack. If you
+    /// do, put this card into that booster pack." The parser reads it as
+    /// `DraftEffect::AdditionalPick`, a card drafted face up (CR 905.2c).
+    struct LibrarianSource;
+
+    impl PackSource for LibrarianSource {
+        fn generate_pack(
+            &self,
+            rng: &mut dyn rand::RngCore,
+            seat: u8,
+            pack_number: u8,
+        ) -> DraftPack {
+            let mut pack = fixture_source().generate_pack(rng, seat, pack_number);
+            if seat == 0 && pack_number == 0 {
+                pack.0[0] = DraftCardInstance {
+                    instance_id: LIBRARIAN.to_string(),
+                    name: "Cogwork Librarian".to_string(),
+                    set_code: "CNS".to_string(),
+                    collector_number: "58".to_string(),
+                    rarity: "common".to_string(),
+                    colors: Vec::new(),
+                    cmc: 4,
+                    type_line: "Artifact Creature — Construct".to_string(),
+                    draft_effect: Some(DraftEffect::AdditionalPick),
+                };
+            }
+            pack
+        }
+    }
+
+    /// [`fixture_source`], counting every booster it is asked to generate.
+    struct CountingSource {
+        calls: Cell<usize>,
+    }
+
+    impl PackSource for CountingSource {
+        fn generate_pack(
+            &self,
+            rng: &mut dyn rand::RngCore,
+            seat: u8,
+            pack_number: u8,
+        ) -> DraftPack {
+            self.calls.set(self.calls.get() + 1);
+            fixture_source().generate_pack(rng, seat, pack_number)
+        }
+    }
+
+    fn start(
+        config: DraftConfig,
+        seats: Vec<DraftSeat>,
+        source: &dyn PackSource,
+        difficulty: AiDifficulty,
+    ) -> Result<LocalFifoSession, String> {
+        start_local_fifo_draft(
+            config,
+            seats,
+            "quick-draft".to_string(),
+            source,
+            difficulty,
+            1_000,
+        )
+    }
+
+    /// The standard local session: 8 seats over [`fixture_source`].
+    fn start_fixture(difficulty: AiDifficulty) -> LocalFifoSession {
+        start(
+            local_quick_config(set_source(), 8, 3, 0),
+            local_quick_seats(8),
+            &fixture_source(),
+            difficulty,
+        )
+        .expect("the local Quick shape starts")
+    }
+
+    /// The standard local session over [`LibrarianSource`].
+    fn start_librarian() -> LocalFifoSession {
+        start(
+            local_quick_config(set_source(), 8, 3, 0),
+            local_quick_seats(8),
+            &LibrarianSource,
+            AiDifficulty::Medium,
+        )
+        .expect("the local Quick shape starts")
+    }
+
+    /// A Cogwork Librarian session after the human drafts the Librarian with
+    /// their first pick: the owner, and the view that selection returned.
+    fn librarian_drafted() -> (LocalOwner, DraftPlayerView) {
+        let local = start_librarian();
+        let payload = selection_json(
+            &live_prompt(&local.view),
+            &[LIBRARIAN.to_string()],
+            &[],
+            &[],
+        );
+        let view = local_fifo_select_inner(local.owner, &payload, 2_000)
+            .expect("drafting the Librarian is a legal selection");
+        (local.owner, view)
+    }
+
+    /// A session in the local shape built by draft-core's own constructors under
+    /// `id`, started at 1000 ms with no bot batch run.
+    fn core_session(config: DraftConfig, seats: Vec<DraftSeat>, id: &str) -> DraftSession {
+        let mut session = DraftSession::new_fifo(
+            config,
+            seats,
+            "quick-draft".to_string(),
+            DraftSessionId(id.to_string()),
+        )
+        .expect("draft-core admits the configuration");
+        session::apply_at(
+            &mut session,
+            DraftAction::StartDraft,
+            Some(&fixture_source()),
+            1_000,
+        )
+        .expect("the session starts");
+        session
+    }
+
+    fn installed() -> DraftSession {
+        session_cell::with_installed(DraftSession::clone)
+    }
+
+    /// Not drafting, or no bot seat holds a head pack while the human does.
+    fn bots_quiescent(session: &DraftSession) -> bool {
+        let seat_holds_a_head =
+            |index: usize| session.head_pack(u8::try_from(index).unwrap()).is_some();
+        session.status != DraftStatus::Drafting
+            || (session.seats.iter().enumerate().all(|(index, seat)| {
+                !matches!(seat, DraftSeat::Bot { .. }) || !seat_holds_a_head(index)
+            }) && seat_holds_a_head(usize::from(LOCAL_HUMAN_SEAT)))
+    }
+
+    /// Every bot seat's completed steps, as the view publishes them.
+    fn bot_steps(view: &DraftPlayerView) -> u64 {
+        view.seats
+            .iter()
+            .filter(|seat| seat.is_bot)
+            .map(|seat| {
+                seat.fifo_progress
+                    .as_ref()
+                    .expect("a FIFO view publishes every seat's progress")
+                    .completed_steps
+            })
+            .sum()
+    }
+
+    fn live_prompt(view: &DraftPlayerView) -> DraftPromptId {
+        view.fifo
+            .as_ref()
+            .and_then(|fifo| fifo.prompt_id.clone())
+            .expect("the human holds a live prompt")
+    }
+
+    fn ids(cards: &[DraftCardInstance]) -> Vec<String> {
+        cards.iter().map(|card| card.instance_id.clone()).collect()
+    }
+
+    fn names(cards: &[DraftCardInstance]) -> Vec<String> {
+        cards.iter().map(|card| card.name.clone()).collect()
+    }
+
+    fn head_ids(view: &DraftPlayerView) -> Vec<String> {
+        ids(view
+            .current_pack
+            .as_deref()
+            .expect("the human holds a head pack"))
+    }
+
+    fn selection_json(
+        prompt_id: &DraftPromptId,
+        picked: &[String],
+        burned: &[String],
+        effects: &[String],
+    ) -> String {
+        serde_json::json!({
+            "prompt_id": prompt_id,
+            "picked_card_instance_ids": picked,
+            "burned_card_instance_ids": burned,
+            "effect_card_instance_ids": effects,
+        })
+        .to_string()
+    }
+
+    fn prompt_json(prompt_id: &DraftPromptId) -> String {
+        serde_json::to_string(prompt_id).unwrap()
+    }
+
+    fn value(view: &DraftPlayerView) -> serde_json::Value {
+        serde_json::to_value(view).unwrap()
+    }
+
+    /// The runtime never issues owner 0, so it is never the live owner.
+    fn retired_owner() -> LocalOwner {
+        LocalOwner::from_raw(0)
+    }
+
+    fn deck_total(deck: &suggest::SuggestedDeck) -> usize {
+        deck.main_deck.len() + deck.lands.values().map(|&n| usize::from(n)).sum::<usize>()
+    }
+
+    /// Auto-select on the live prompt until the draft leaves `Drafting`,
+    /// handing every returned view to `after_each`. The human drafts 9 cards, so
+    /// 27 calls is a safety cap, not an expectation.
+    fn draft_every_pick(
+        owner: LocalOwner,
+        mut view: DraftPlayerView,
+        mut after_each: impl FnMut(&DraftPlayerView),
+    ) -> DraftPlayerView {
+        let mut calls: u64 = 0;
+        while view.status == DraftStatus::Drafting {
+            assert!(calls < 27, "the draft did not finish within 27 selections");
+            calls += 1;
+            view = local_fifo_auto_select_inner(
+                owner,
+                &prompt_json(&live_prompt(&view)),
+                1_000 + calls,
+            )
+            .expect("an auto-pick on the live prompt is accepted");
+            after_each(&view);
+        }
+        view
+    }
+
+    fn reset() {
+        clear_state();
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+    }
+
+    /// Once a second local session is installed, the first one's owner neither
+    /// reads nor acts, and a legacy install retires the second one's owner.
+    #[test]
+    fn a_stale_local_owner_neither_reads_nor_acts() {
+        reset();
+        let a = start_fixture(AiDifficulty::Medium).owner;
+        assert!(
+            local_fifo_view_inner(a).is_ok(),
+            "reach: the live owner reads"
+        );
+
+        let b = start_fixture(AiDifficulty::Medium);
+        assert_ne!(a, b.owner);
+        // B's live prompt and a card of B's live head: only the owner check can
+        // refuse this payload, so a stale prompt cannot mask the gate.
+        let payload = selection_json(&live_prompt(&b.view), &head_ids(&b.view)[..1], &[], &[]);
+        let before = guard_cells_snapshot();
+        assert_eq!(local_fifo_view_inner(a).unwrap_err(), STALE_LOCAL_OWNER);
+        assert_eq!(guard_cells_snapshot(), before);
+        assert_eq!(
+            local_fifo_select_inner(a, &payload, 2_000).unwrap_err(),
+            STALE_LOCAL_OWNER
+        );
+        assert_eq!(guard_cells_snapshot(), before);
+        assert_eq!(
+            export_local_fifo_session_inner(a).unwrap_err(),
+            STALE_LOCAL_OWNER
+        );
+        assert_eq!(guard_cells_snapshot(), before);
+
+        assert!(local_fifo_view_inner(b.owner).is_ok());
+        assert!(
+            local_fifo_select_inner(b.owner, &payload, 2_000).is_ok(),
+            "the same payload is accepted under the live owner"
+        );
+
+        let legacy = dormant_fixture(DraftFlow::LegacyBarrier, DraftStatus::Drafting);
+        import_draft_session_inner(&serde_json::to_string(&legacy).unwrap(), 2)
+            .expect("a legacy save imports");
+        assert_eq!(
+            local_fifo_view_inner(b.owner).unwrap_err(),
+            STALE_LOCAL_OWNER
+        );
+        reset();
+    }
+
+    #[test]
+    fn local_sessions_carry_distinct_canonical_ids() {
+        reset();
+        let installed_id = || {
+            session_cell::with_installed(|session| {
+                session
+                    .fifo
+                    .as_ref()
+                    .expect("a FIFO session")
+                    .session_id
+                    .clone()
+            })
+        };
+        start_fixture(AiDifficulty::Medium);
+        let first = installed_id();
+        start_fixture(AiDifficulty::Medium);
+        let second = installed_id();
+        for id in [&first, &second] {
+            let hex =
+                id.0.strip_prefix("local-")
+                    .unwrap_or_else(|| panic!("{id:?} does not carry the local prefix"));
+            assert_eq!(id.0.len(), 22, "{id:?}");
+            assert!(
+                hex.bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                "{id:?}"
+            );
+        }
+        assert_ne!(first, second);
+        reset();
+    }
+
+    /// Each refused id differs from the accepted one in exactly one property.
+    #[test]
+    fn canonical_local_session_ids_have_one_shape() {
+        reset();
+        let id = |text: &str| DraftSessionId(text.to_string());
+        assert!(is_canonical_local_session_id(&id(CANONICAL_ID)));
+        assert!(
+            !is_canonical_local_session_id(&id("local-0123456789ABCDEF")),
+            "uppercase digits"
+        );
+        assert!(
+            !is_canonical_local_session_id(&id("local-0123")),
+            "too few digits"
+        );
+        assert!(
+            !is_canonical_local_session_id(&id("lokal-0123456789abcdef")),
+            "another prefix"
+        );
+        assert!(
+            !is_canonical_local_session_id(&id("local-0123456789abcdeg")),
+            "one non-hex digit"
+        );
+        reset();
+    }
+
+    /// Every general-runtime gate refuses an installed local session while its
+    /// owner is live, before any closure runs and with no effect.
+    #[test]
+    fn the_general_runtime_refuses_an_owned_local_session() {
+        reset();
+        let owner = start_fixture(AiDifficulty::Medium).owner;
+        install_fixture_db();
+        let before = guard_cells_snapshot();
+        let refused = Err(FIFO_UNSUPPORTED_BY_RUNTIME.to_string());
+
+        let entered = Cell::new(0);
+        let read = with_draft_inner(|_| {
+            entered.set(entered.get() + 1);
+            Ok(())
+        });
+        let write = with_draft_mut_inner(|_| {
+            entered.set(entered.get() + 1);
+            Ok(())
+        });
+        assert_eq!(read, refused);
+        assert_eq!(write, refused);
+        assert_eq!(entered.get(), 0);
+        assert_eq!(guard_cells_snapshot(), before);
+
+        let pick = serde_json::to_string(&DraftAction::Pick {
+            seat: 0,
+            card_instance_ids: vec!["TST-0-0-0".to_string()],
+        })
+        .unwrap();
+        let assert_refused = |label: &str, result: Result<(), String>| {
+            assert_eq!(result, refused, "{label}");
+            assert_eq!(guard_cells_snapshot(), before, "{label}");
+        };
+        assert_refused(
+            "submit_pick_for_seat",
+            submit_pick_for_seat_inner(0, "[\"TST-0-0-0\"]").map(|_| ()),
+        );
+        assert_refused("submit_deck", submit_deck_inner("[]", "[]").map(|_| ()));
+        assert_refused(
+            "submit_deck_for_seat",
+            submit_deck_for_seat_inner(0, "[]", "[]").map(|_| ()),
+        );
+        assert_refused(
+            "suggest_lands_for_seat",
+            suggest_lands_for_seat_inner(0, "[]").map(|_| ()),
+        );
+        assert_refused("get_bot_deck", get_bot_deck_inner(1).map(|_| ()));
+        assert_refused(
+            "booster_pack_pool_for_game",
+            booster_pack_pool_for_game_inner().map(|_| ()),
+        );
+        assert_refused(
+            "build_llm_draft_pick_requests",
+            build_llm_draft_pick_requests_inner(ENDPOINT, "{}").map(|_| ()),
+        );
+        assert_refused(
+            "submit_pick_with_llm_bot_picks",
+            submit_pick_with_llm_bot_picks_inner("TST-0-0-0", "[]").map(|_| ()),
+        );
+        assert_refused(
+            "resolve_shared_stack_bot_turns",
+            resolve_shared_stack_bot_turns_inner().map(|_| ()),
+        );
+        assert_refused(
+            "apply_draft_action",
+            apply_draft_action_inner(&pick).map(|_| ()),
+        );
+
+        assert!(
+            local_fifo_view_inner(owner).is_ok(),
+            "the same install is reachable through the local gate"
+        );
+        reset();
+    }
+
+    /// The local gates admit before their closures: the live owner alone does
+    /// not reach a session the local admission refuses.
+    #[test]
+    fn the_local_gate_admits_before_its_closure() {
+        reset();
+        let owner = start_fixture(AiDifficulty::Medium).owner;
+        let entered = Cell::new(0);
+        let count = |_: &DraftSession| {
+            entered.set(entered.get() + 1);
+            Ok(())
+        };
+
+        session_cell::with_installed_mut(|session| session.config.kind = DraftKind::Premier);
+        let refused = Err(NOT_A_LOCAL_FIFO_SESSION.to_string());
+        assert_eq!(with_local_fifo_inner(owner, count), refused);
+        assert_eq!(
+            with_local_fifo_mut_inner(owner, |session| count(&*session)),
+            refused
+        );
+        assert_eq!(entered.get(), 0);
+
+        session_cell::with_installed_mut(|session| session.config.kind = DraftKind::Quick);
+        assert_eq!(with_local_fifo_inner(owner, count), Ok(()));
+        assert_eq!(
+            with_local_fifo_mut_inner(owner, |session| count(&*session)),
+            Ok(())
+        );
+        assert_eq!(entered.get(), 2);
+        reset();
+    }
+
+    /// Construction admits before it deals and installs nothing on a refusal.
+    #[test]
+    fn local_construction_refuses_before_dealing_packs() {
+        reset();
+        let previous = start_fixture(AiDifficulty::Medium).owner;
+        let before = guard_cells_snapshot();
+
+        let premier = DraftConfig {
+            kind: DraftKind::Premier,
+            ..local_quick_config(set_source(), 8, 3, 0)
+        };
+        let mut second_human = local_quick_seats(8);
+        second_human[3] = DraftSeat::Human {
+            player_id: PlayerId(3),
+            display_name: "Player 3".to_string(),
+        };
+        let legacy = DraftConfig {
+            flow: DraftFlow::LegacyBarrier,
+            ..local_quick_config(set_source(), 8, 3, 0)
+        };
+        // A zero-length pick clock is draft-core's own configuration refusal.
+        let zero_clock = DraftConfig {
+            clock_policy: DraftClockPolicy {
+                pick: PickClockPolicy::Fixed { duration_ms: 0 },
+                review_duration_ms: 0,
+            },
+            ..local_quick_config(set_source(), 8, 3, 0)
+        };
+        let refusals = [
+            ("Premier kind", premier, local_quick_seats(8)),
+            (
+                "a second human seat",
+                local_quick_config(set_source(), 8, 3, 0),
+                second_human,
+            ),
+            ("legacy flow", legacy, local_quick_seats(8)),
+            ("zero pick clock", zero_clock, local_quick_seats(8)),
+        ];
+        for (label, config, seats) in refusals {
+            let source = CountingSource {
+                calls: Cell::new(0),
+            };
+            assert!(
+                start(config, seats, &source, AiDifficulty::VeryHard).is_err(),
+                "{label}"
+            );
+            assert_eq!(source.calls.get(), 0, "{label}: no booster is dealt");
+            assert_eq!(guard_cells_snapshot(), before, "{label}");
+            assert!(local_fifo_view_inner(previous).is_ok(), "{label}");
+        }
+
+        let source = CountingSource {
+            calls: Cell::new(0),
+        };
+        assert!(start(
+            local_quick_config(set_source(), 8, 3, 0),
+            local_quick_seats(8),
+            &source,
+            AiDifficulty::Medium,
+        )
+        .is_ok());
+        // 8 seats x 3 boosters, one generation each.
+        assert_eq!(source.calls.get(), 24);
+        reset();
+    }
+
+    /// The local view is seat 0's projection and publishes every seat's FIFO
+    /// progress.
+    #[test]
+    fn the_local_view_is_seat_zero_and_publishes_every_seats_progress() {
+        reset();
+        let local = start_fixture(AiDifficulty::Medium);
+        let session = installed();
+        let view = local_fifo_view_inner(local.owner).expect("the live owner reads");
+
+        assert_eq!(value(&view), value(&filter_for_player(&session, 0)));
+        assert_ne!(value(&view), value(&filter_for_player(&session, 1)));
+        assert!(bot_steps(&view) > 0, "reach: the bots have drafted");
+        // CR 905.1a: a Quick seat drafts one card per step, and the bots spend
+        // no effect card, so a seat's completed steps are its pool size.
+        for (index, seat) in view.seats.iter().enumerate() {
+            let progress = seat
+                .fifo_progress
+                .as_ref()
+                .expect("every seat's progress is published");
+            assert_eq!(
+                progress.completed_steps,
+                u64::try_from(session.pools[index].len()).unwrap(),
+                "seat {index}"
+            );
+        }
+        assert_eq!(
+            view.fifo
+                .as_ref()
+                .expect("a FIFO view")
+                .progress
+                .completed_steps,
+            0
+        );
+        reset();
+    }
+
+    #[test]
+    fn construction_runs_the_bots_to_quiescence() {
+        reset();
+        let local = start_fixture(AiDifficulty::Medium);
+        let session = installed();
+        assert!(bots_quiescent(&session));
+        let steps = bot_steps(&local.view);
+        assert!(steps > 0);
+        // One commit for `StartDraft`, then one per bot application.
+        assert_eq!(
+            session.fifo.as_ref().expect("a FIFO session").revision,
+            1 + steps
+        );
+        reset();
+    }
+
+    #[test]
+    fn a_composed_selection_applies_then_the_bots_reach_quiescence() {
+        reset();
+        let local = start_librarian();
+        let fifo = local.view.fifo.as_ref().expect("a FIFO view");
+        // Reach: under the default policy a Quick step takes one card and burns
+        // none.
+        assert_eq!(
+            fifo.requirements,
+            DraftSelectionRequirements { picks: 1, burns: 0 }
+        );
+        assert!(head_ids(&local.view).contains(&LIBRARIAN.to_string()));
+        let steps_before = bot_steps(&local.view);
+
+        let payload = selection_json(
+            &live_prompt(&local.view),
+            &[LIBRARIAN.to_string()],
+            &[],
+            &[],
+        );
+        let view = local_fifo_select_inner(local.owner, &payload, 2_000)
+            .expect("drafting the Librarian is a legal selection");
+        assert_eq!(ids(&view.pool), vec![LIBRARIAN.to_string()]);
+        assert!(bots_quiescent(&installed()));
+        assert!(bot_steps(&view) > steps_before);
+        reset();
+    }
+
+    /// Cogwork Librarian: "As you draft a card, you may draft an additional card
+    /// from that booster pack. If you do, put this card into that booster pack."
+    #[test]
+    fn a_composed_selection_carries_its_effect_list() {
+        reset();
+        let (owner, view) = librarian_drafted();
+        let fifo = view.fifo.as_ref().expect("a FIFO view");
+        let effects = fifo
+            .effects
+            .as_ref()
+            .expect("reach: the Librarian can be used on this head");
+        assert_eq!(effects.card_instance_ids, vec![LIBRARIAN.to_string()]);
+        assert_eq!(
+            effects.requirements,
+            vec![DraftSelectionRequirements { picks: 2, burns: 0 }]
+        );
+        let picks = effects.requirements[0].picks;
+        let head = head_ids(&view);
+        assert_eq!(
+            head.len(),
+            picks,
+            "the head is the 2-card booster seat 7 passed"
+        );
+        let picked: Vec<String> = head.into_iter().take(picks).collect();
+
+        let payload = selection_json(&live_prompt(&view), &picked, &[], &[LIBRARIAN.to_string()]);
+        let after = local_fifo_select_inner(owner, &payload, 3_000)
+            .expect("two picks with the Librarian's effect are legal");
+        let pool = ids(&after.pool);
+        assert!(!pool.contains(&LIBRARIAN.to_string()));
+        assert!(picked.iter().all(|id| pool.contains(id)));
+
+        let session = installed();
+        let in_a_bot_pool = session
+            .seats
+            .iter()
+            .zip(&session.pools)
+            .filter(|(seat, _)| matches!(seat, DraftSeat::Bot { .. }))
+            .flat_map(|(_, pool)| pool)
+            .any(|card| card.instance_id == LIBRARIAN);
+        let in_a_queue = session
+            .fifo
+            .as_ref()
+            .expect("a FIFO session")
+            .seats
+            .iter()
+            .flat_map(|seat| &seat.queue)
+            .flat_map(|queued| &queued.pack.0)
+            .any(|card| card.instance_id == LIBRARIAN);
+        assert!(
+            in_a_bot_pool || in_a_queue,
+            "the Librarian went back into the booster"
+        );
+        reset();
+    }
+
+    #[test]
+    fn auto_select_is_prompt_bound_and_spends_no_effect_card() {
+        reset();
+        let (owner, view) = librarian_drafted();
+        assert!(
+            view.fifo.as_ref().expect("a FIFO view").effects.is_some(),
+            "reach: the Librarian could be spent on this head"
+        );
+        let after = local_fifo_auto_select_inner(owner, &prompt_json(&live_prompt(&view)), 3_000)
+            .expect("an auto-pick on the live prompt is accepted");
+        assert_eq!(after.pool.len(), 2);
+        assert!(ids(&after.pool).contains(&LIBRARIAN.to_string()));
+        reset();
+    }
+
+    /// `VeryEasy` is the one difficulty whose bot draws from the random state,
+    /// so it is the one under which a draw before the refusal would show.
+    #[test]
+    fn a_stale_prompt_changes_nothing() {
+        reset();
+        let local = start_fixture(AiDifficulty::VeryEasy);
+        let stale = live_prompt(&local.view);
+
+        let before = guard_cells_snapshot();
+        let view = local_fifo_auto_select_inner(local.owner, &prompt_json(&stale), 2_000)
+            .expect("an auto-pick on the live prompt is accepted");
+        let after = guard_cells_snapshot();
+        assert_ne!(
+            after["rng"], before["rng"],
+            "reach: the snapshot sees the random state move"
+        );
+        let head = head_ids(&view);
+        assert_eq!(head.len(), 2, "reach: a refused auto-pick would have drawn");
+
+        let assert_stale = |label: &str, result: Result<DraftPlayerView, String>| {
+            let error = result.expect_err(label);
+            assert!(error.contains("stale draft prompt"), "{label}: {error}");
+            assert_eq!(guard_cells_snapshot(), after, "{label}");
+        };
+        assert_stale(
+            "consumed prompt",
+            local_fifo_select_inner(
+                local.owner,
+                &selection_json(&stale, &head[..1], &[], &[]),
+                3_000,
+            ),
+        );
+        let other_seat = DraftPromptId {
+            seat: 1,
+            ..live_prompt(&view)
+        };
+        assert_stale(
+            "another seat's prompt",
+            local_fifo_select_inner(
+                local.owner,
+                &selection_json(&other_seat, &head[..1], &[], &[]),
+                3_000,
+            ),
+        );
+        assert_stale(
+            "consumed prompt, auto-pick",
+            local_fifo_auto_select_inner(local.owner, &prompt_json(&stale), 3_000),
+        );
+        reset();
+    }
+
+    #[test]
+    fn a_selection_payload_naming_a_seat_is_refused_before_the_session() {
+        reset();
+        let local = start_librarian();
+        let mut payload: serde_json::Value = serde_json::from_str(&selection_json(
+            &live_prompt(&local.view),
+            &[LIBRARIAN.to_string()],
+            &[],
+            &[],
+        ))
+        .unwrap();
+        payload["seat"] = serde_json::json!(3);
+        let before = guard_cells_snapshot();
+        let error = local_fifo_select_inner(local.owner, &payload.to_string(), 2_000)
+            .expect_err("a payload naming a seat is refused");
+        assert!(error.contains("unknown field `seat`"), "{error}");
+        assert_eq!(guard_cells_snapshot(), before);
+
+        payload.as_object_mut().unwrap().remove("seat");
+        assert!(local_fifo_select_inner(local.owner, &payload.to_string(), 2_000).is_ok());
+        reset();
+    }
+
+    #[test]
+    fn bots_select_by_the_engine_requirements() {
+        reset();
+        // A policy burn: every bot step on a 3- or 2-card head must burn one.
+        start(
+            local_quick_config(set_source(), 8, 3, 1),
+            local_quick_seats(8),
+            &fixture_source(),
+            AiDifficulty::Medium,
+        )
+        .expect("the bots burn what the policy requires");
+        let session = installed();
+        let removed = &session.fifo.as_ref().expect("a FIFO session").removed;
+        assert!(!removed.is_empty());
+        assert!(removed
+            .iter()
+            .all(|card| card.reason == DraftRemovalReason::Burn));
+        reset();
+
+        // CR 903.13b: a Commander Draft step takes two cards, a count no Quick
+        // head can publish. This session is only a projection input; the local
+        // gates never admit it.
+        let config = DraftConfig {
+            flow: DraftFlow::FifoAsync,
+            selection_policy: DraftSelectionPolicy::default(),
+            clock_policy: DraftClockPolicy::default(),
+            source: set_source(),
+            set_code: "TST".to_string(),
+            kind: DraftKind::CommanderDraft,
+            pod_size: 4,
+            cards_per_pack: 6,
+            pack_count: 2,
+            min_deck_size: DraftKind::CommanderDraft.procedure().min_deck_size,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats = (0..4)
+            .map(|seat| DraftSeat::Human {
+                player_id: PlayerId(seat),
+                display_name: format!("Player {seat}"),
+            })
+            .collect();
+        let mut commander = DraftSession::new_fifo(
+            config,
+            seats,
+            "commander-draft".to_string(),
+            DraftSessionId("commander-draft".to_string()),
+        )
+        .expect("a Commander Draft FIFO pod is admitted");
+        session::apply_at(
+            &mut commander,
+            DraftAction::StartDraft,
+            Some(&FixturePackSource {
+                set_code: "TST".to_string(),
+                cards_per_pack: 6,
+            }),
+            1_000,
+        )
+        .expect("the pod starts");
+        let view = filter_for_player(&commander, 1);
+        let fifo = view.fifo.as_ref().expect("a FIFO view");
+        assert_eq!(fifo.requirements.picks, 2);
+        let action = fifo_ai_selection(
+            &view,
+            1,
+            live_prompt(&view),
+            AiDifficulty::Medium,
+            None,
+            bot_ai::PickEnhancement::Off,
+            &mut ChaCha20Rng::seed_from_u64(7),
+        )
+        .expect("seat 1 holds a head");
+        let DraftAction::Select {
+            picked_card_instance_ids,
+            ..
+        } = &action
+        else {
+            panic!("the engine's selection is a Select, got {action:?}");
+        };
+        assert_eq!(picked_card_instance_ids.len(), 2);
+        session::apply_at(&mut commander, action, None, 1_100)
+            .expect("the engine accepts its own selection");
+        reset();
+    }
+
+    #[test]
+    fn the_bot_batch_fails_loudly_rather_than_spinning() {
+        reset();
+        let session = core_session(
+            local_quick_config(set_source(), 8, 3, 0),
+            local_quick_seats(8),
+            CANONICAL_ID,
+        );
+        assert!(!bots_quiescent(&session), "reach: the bots hold heads");
+        // 8 seats x 3 boosters x 3 cards undrafted, plus one.
+        assert_eq!(local_fifo_bot_batch_bound(&session), 73);
+
+        let mut starved = session.clone();
+        let error = drive_local_fifo_bot_batch(
+            &mut starved,
+            AiDifficulty::Medium,
+            None,
+            bot_ai::PickEnhancement::Off,
+            &mut ChaCha20Rng::seed_from_u64(1),
+            1_000,
+            1,
+        )
+        .expect_err("a bound of 1 trips on a multi-selection batch");
+        assert!(error.contains("termination bound"), "{error}");
+
+        // Paired positive: the same state runs clean under the derived bound.
+        let mut healthy = session;
+        let bound = local_fifo_bot_batch_bound(&healthy);
+        drive_local_fifo_bot_batch(
+            &mut healthy,
+            AiDifficulty::Medium,
+            None,
+            bot_ai::PickEnhancement::Off,
+            &mut ChaCha20Rng::seed_from_u64(1),
+            1_000,
+            bound,
+        )
+        .expect("the derived bound is not reachable from a legal state");
+        assert!(bots_quiescent(&healthy));
+        reset();
+    }
+
+    /// 14-card boosters give the start batch enough random draws on large heads
+    /// that two equal outcomes from an unseeded state would be a coincidence.
+    #[test]
+    fn the_bot_batch_is_deterministic() {
+        reset();
+        let source = FixturePackSource {
+            set_code: "TST".to_string(),
+            cards_per_pack: 14,
+        };
+        let construct = || {
+            start(
+                local_quick_config(set_source(), 8, 14, 0),
+                local_quick_seats(8),
+                &source,
+                AiDifficulty::VeryEasy,
+            )
+            .expect("the local Quick shape starts");
+            installed()
+        };
+        let first = construct();
+        let second = construct();
+        let pools = |session: &DraftSession| -> Vec<Vec<String>> {
+            session.pools.iter().map(|pool| ids(pool)).collect()
+        };
+        let progress = |session: &DraftSession| -> Vec<u64> {
+            session
+                .fifo
+                .as_ref()
+                .expect("a FIFO session")
+                .seats
+                .iter()
+                .map(|seat| seat.completed_steps)
+                .collect()
+        };
+        assert!(
+            progress(&first).iter().sum::<u64>() > 0,
+            "reach: the bots drafted"
+        );
+        assert_eq!(pools(&first), pools(&second));
+        assert_eq!(progress(&first), progress(&second));
+        reset();
+    }
+
+    /// CR 905.1a + CR 905.1b: the human drafts every round while the bots keep
+    /// up after every selection.
+    #[test]
+    fn the_human_drafts_every_round_while_bots_stay_quiescent() {
+        reset();
+        let local = start_fixture(AiDifficulty::Medium);
+        let mut rounds = std::collections::BTreeSet::new();
+        let end = draft_every_pick(local.owner, local.view, |view| {
+            assert!(bots_quiescent(&installed()));
+            if view.status == DraftStatus::Drafting {
+                rounds.insert(view.current_pack_number);
+            }
+        });
+        assert_eq!(rounds, std::collections::BTreeSet::from([0, 1, 2]));
+        assert_eq!(end.status, DraftStatus::Deckbuilding);
+        assert!(installed().pools.iter().all(|pool| pool.len() == 9));
+        reset();
+    }
+
+    /// CR 100.2b: a limited deck has a minimum deck size of 40 cards, built
+    /// from the product plus basic lands.
+    #[test]
+    fn deck_submission_runs_at_explicit_time() {
+        reset();
+        let local = start_fixture(AiDifficulty::Medium);
+        let owner = local.owner;
+        let end = draft_every_pick(owner, local.view, |_| {});
+        assert_eq!(end.status, DraftStatus::Deckbuilding);
+        let pool = names(&end.pool);
+        assert_eq!(pool.len(), 9);
+        let with_plains = |count: usize| {
+            let mut deck = pool.clone();
+            deck.extend(std::iter::repeat_n("Plains".to_string(), count));
+            serde_json::to_string(&deck).unwrap()
+        };
+
+        let before = guard_cells_snapshot();
+        let short = local_fifo_submit_deck_inner(owner, &with_plains(30), "[]", 9_000_000)
+            .expect_err("a 39-card deck is refused");
+        assert!(short.contains("minimum is 40"), "{short}");
+        assert_eq!(guard_cells_snapshot(), before);
+        let unreadable =
+            local_fifo_submit_deck_inner(owner, &with_plains(31), "not json", 9_000_000)
+                .expect_err("an unreadable designation is refused");
+        assert!(
+            unreadable.contains("Failed to parse commanders"),
+            "{unreadable}"
+        );
+        assert_eq!(guard_cells_snapshot(), before);
+        assert_eq!(
+            local_fifo_submit_deck_inner(retired_owner(), &with_plains(31), "[]", 9_000_000)
+                .unwrap_err(),
+            STALE_LOCAL_OWNER
+        );
+        assert_eq!(guard_cells_snapshot(), before);
+
+        // 9_000_000 exceeds every earlier time in this draft, so only the
+        // caller's time can put it in the session.
+        let view = local_fifo_submit_deck_inner(owner, &with_plains(31), "[]", 9_000_000)
+            .expect("40 cards from the pool and basic lands are accepted");
+        assert_eq!(view.status, DraftStatus::Complete);
+        let session = installed();
+        assert_eq!(
+            session.fifo.as_ref().expect("a FIFO session").last_now_ms,
+            9_000_000
+        );
+        session
+            .validate_persisted_snapshot()
+            .expect("the completed session is a valid snapshot");
+        reset();
+    }
+
+    /// Suggestions are not card-derived: a suggested deck is exactly the 40-card
+    /// floor (CR 100.2b) from the pool plus basics, and a land suggestion is
+    /// clamped to 16-18 lands.
+    #[test]
+    fn suggestions_and_bot_decks_reach_the_local_owner() {
+        reset();
+        let local = start_fixture(AiDifficulty::Medium);
+        let owner = local.owner;
+        let end = draft_every_pick(owner, local.view, |_| {});
+        let pool = names(&end.pool);
+
+        let suggested = local_fifo_suggest_deck_inner(owner).expect("the owner's suggestion");
+        assert!(suggested.main_deck.iter().all(|name| pool.contains(name)));
+        assert_eq!(deck_total(&suggested), 40);
+        assert!(suggested.commander.is_empty());
+
+        let lands = local_fifo_suggest_lands_inner(owner, &serde_json::to_string(&pool).unwrap())
+            .expect("the owner's land suggestion");
+        // clamp(40 - 9, 16, 18)
+        assert_eq!(lands.values().map(|&n| usize::from(n)).sum::<usize>(), 18);
+
+        let bot = local_fifo_bot_deck_inner(owner, 1).expect("seat 1's deck");
+        let bot_pool = names(&installed().pools[1]);
+        assert_eq!(deck_total(&bot), 40);
+        assert!(bot.commander.is_empty());
+        assert!(bot.main_deck.iter().all(|name| bot_pool.contains(name)));
+        for seat in [0, 8] {
+            let error = local_fifo_bot_deck_inner(owner, seat).unwrap_err();
+            assert!(error.contains("out of range"), "seat {seat}: {error}");
+        }
+
+        let stale = retired_owner();
+        assert_eq!(
+            local_fifo_suggest_deck_inner(stale).unwrap_err(),
+            STALE_LOCAL_OWNER
+        );
+        assert_eq!(
+            local_fifo_suggest_lands_inner(stale, "[]").unwrap_err(),
+            STALE_LOCAL_OWNER
+        );
+        assert_eq!(
+            local_fifo_bot_deck_inner(stale, 1).unwrap_err(),
+            STALE_LOCAL_OWNER
+        );
+        reset();
+    }
+
+    /// Not card-derived: a cube draft's game uses the cube's original multiset,
+    /// and a set draft has none.
+    #[test]
+    fn the_booster_pack_pool_reaches_the_local_owner() {
+        reset();
+        let set = start_fixture(AiDifficulty::Medium);
+        assert_eq!(
+            local_fifo_booster_pack_pool_for_game_inner(set.owner).unwrap(),
+            None
+        );
+
+        // 2 seats x 3 boosters x 2 cards: the cube's whole multiset is dealt.
+        let cube_cards: Vec<DraftCardInstance> = (0..12)
+            .map(|index| DraftCardInstance {
+                instance_id: format!("cube-source-{index}"),
+                name: format!("Cube Card {index}"),
+                set_code: "CUBE".to_string(),
+                collector_number: format!("{index}"),
+                rarity: "cube".to_string(),
+                colors: Vec::new(),
+                cmc: 0,
+                type_line: String::new(),
+                draft_effect: None,
+            })
+            .collect();
+        let cube_names = names(&cube_cards);
+        let cube = start(
+            local_quick_config(
+                DraftSource::Cube {
+                    id: "custom-cube".to_string(),
+                    name: "Fixture Cube".to_string(),
+                },
+                2,
+                2,
+                0,
+            ),
+            local_quick_seats(2),
+            &CubePackSource::new(cube_cards),
+            AiDifficulty::Medium,
+        )
+        .expect("a two-seat Quick cube draft starts");
+        assert_eq!(
+            local_fifo_booster_pack_pool_for_game_inner(cube.owner).unwrap(),
+            Some(cube_names)
+        );
+        assert_eq!(
+            local_fifo_booster_pack_pool_for_game_inner(retired_owner()).unwrap_err(),
+            STALE_LOCAL_OWNER
+        );
+        reset();
+    }
+
+    #[test]
+    fn a_local_export_imports_and_is_re_owned() {
+        reset();
+        let local = start_fixture(AiDifficulty::Medium);
+        let a = local.owner;
+        let mut view = local.view;
+        for now_ms in [2_000, 3_000] {
+            view = local_fifo_auto_select_inner(a, &prompt_json(&live_prompt(&view)), now_ms)
+                .expect("an auto-pick on the live prompt is accepted");
+        }
+
+        let json = export_local_fifo_session_inner(a).expect("the owner exports");
+        assert_eq!(
+            restorable_draft_session_verdict(&json),
+            RestorableDraftSessionVerdict::Incompatible
+        );
+        let exported: DraftSession = serde_json::from_str(&json).unwrap();
+
+        let imported = import_local_fifo_session_inner(&json, 0).expect("the export imports");
+        let c = imported.owner;
+        assert_ne!(c, a);
+        assert_eq!(installed(), exported);
+        assert_eq!(
+            value(&imported.view),
+            value(&filter_for_player(&exported, 0))
+        );
+        let revision = exported.fifo.as_ref().expect("a FIFO session").revision;
+        let mut resumed =
+            ChaCha20Rng::seed_from_u64(exported.config.rng_seed.wrapping_add(revision));
+        let words: Vec<u64> = (0..4).map(|_| resumed.next_u64()).collect();
+        assert_eq!(guard_cells_snapshot()["rng"], serde_json::json!(words));
+        assert_eq!(DIFFICULTY.with(|cell| cell.get()), AiDifficulty::VeryEasy);
+
+        assert_eq!(local_fifo_view_inner(a).unwrap_err(), STALE_LOCAL_OWNER);
+        let payload = selection_json(
+            &live_prompt(&imported.view),
+            &head_ids(&imported.view)[..1],
+            &[],
+            &[],
+        );
+        assert!(local_fifo_select_inner(c, &payload, 4_000).is_ok());
+        reset();
+    }
+
+    #[test]
+    fn a_local_import_refuses_before_installing() {
+        reset();
+        let a = start_fixture(AiDifficulty::Medium).owner;
+        let quick = || local_quick_config(set_source(), 8, 3, 0);
+        let positive = core_session(quick(), local_quick_seats(8), CANONICAL_ID);
+        let as_json = |session: &DraftSession| serde_json::to_string(session).unwrap();
+        let mut second_human = local_quick_seats(8);
+        second_human[3] = DraftSeat::Human {
+            player_id: PlayerId(3),
+            display_name: "Player 3".to_string(),
+        };
+        let all_bots = (0..8)
+            .map(|index| DraftSeat::Bot {
+                name: format!("Bot {index}"),
+            })
+            .collect();
+        let mut no_seats = serde_json::to_value(&positive).unwrap();
+        no_seats["seats"] = serde_json::json!([]);
+        let mut overflow: serde_json::Value =
+            serde_json::from_str(&export_local_fifo_session_inner(a).unwrap()).unwrap();
+        overflow["fifo"]["revision"] = serde_json::json!(MAX_DRAFT_JSON_INTEGER + 1);
+
+        let hostiles = [
+            ("unreadable text", "{".to_string()),
+            (
+                "a legacy save",
+                as_json(&dormant_fixture(
+                    DraftFlow::LegacyBarrier,
+                    DraftStatus::Drafting,
+                )),
+            ),
+            (
+                "the Premier kind",
+                as_json(&core_session(
+                    DraftConfig {
+                        kind: DraftKind::Premier,
+                        ..quick()
+                    },
+                    local_quick_seats(8),
+                    CANONICAL_ID,
+                )),
+            ),
+            (
+                "a short session id",
+                as_json(&core_session(quick(), local_quick_seats(8), "local-0123")),
+            ),
+            (
+                "a second human seat",
+                as_json(&core_session(quick(), second_human, CANONICAL_ID)),
+            ),
+            ("no seats", no_seats.to_string()),
+            (
+                "no human seat",
+                as_json(&core_session(quick(), all_bots, CANONICAL_ID)),
+            ),
+            (
+                "a revision past the JSON integer range",
+                overflow.to_string(),
+            ),
+        ];
+        let before = guard_cells_snapshot();
+        for (label, json) in hostiles {
+            assert!(
+                import_local_fifo_session_inner(&json, 4).is_err(),
+                "{label}"
+            );
+            assert_eq!(guard_cells_snapshot(), before, "{label}");
+            assert!(local_fifo_view_inner(a).is_ok(), "{label}");
+        }
+        assert!(import_local_fifo_session_inner(&as_json(&positive), 4).is_ok());
+        reset();
+    }
+
+    #[test]
+    fn legacy_import_still_refuses_a_local_export() {
+        reset();
+        let a = start_fixture(AiDifficulty::Medium).owner;
+        let json = export_local_fifo_session_inner(a).expect("the owner exports");
+        let before = guard_cells_snapshot();
+        assert_eq!(
+            import_draft_session_inner(&json, 4).unwrap_err(),
+            FIFO_UNSUPPORTED_BY_RUNTIME
+        );
+        assert_eq!(guard_cells_snapshot(), before);
+        assert!(local_fifo_view_inner(a).is_ok());
+        reset();
     }
 }

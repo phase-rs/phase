@@ -119,6 +119,16 @@ export function draft_procedure(kind: number, tournament_format: string): any;
 export function export_draft_session(): string;
 
 /**
+ * Serialize the local draft's full session to JSON for local persistence.
+ *
+ * The trusted local export, like [`export_draft_session`]: it is the whole
+ * session, every seat's pool and every unopened pack included, so it is for
+ * persistence and never for display. It carries no owner;
+ * [`import_local_fifo_session`] issues a new one.
+ */
+export function export_local_fifo_session(owner: number): string;
+
+/**
  * Narrow a limited-pool listing through the ENGINE's filtering authority
  * (#7546 review): the display sends the listing and a typed `PoolFilter`;
  * it renders exactly the returned instance ids. Each instance is classified
@@ -172,6 +182,23 @@ export function get_view_for_seat(seat: number): any;
 export function import_draft_session(json: string, difficulty: number): any;
 
 /**
+ * Restore a local draft from [`export_local_fifo_session`]'s JSON, and issue
+ * it a new owner.
+ *
+ * The text is deserialized, admitted by the local admission, and validated as
+ * a snapshot, all before anything is written; on any failure nothing is
+ * installed and the current draft keeps its owner. The session id and its
+ * prompts are kept. The owner is re-issued on every import, so every earlier
+ * owner is refused afterwards. The bots' random state resumes from the
+ * session's seed offset by its revision, so each save point resumes its own
+ * stream.
+ *
+ * `difficulty`: 0=VeryEasy, 1=Easy, 2=Medium, 3=Hard, 4=VeryHard.
+ * Returns `{ owner, view }`.
+ */
+export function import_local_fifo_session(json: string, difficulty: number): any;
+
+/**
  * Initialize panic hook for better error messages in WASM.
  */
 export function init_panic_hook(): void;
@@ -188,6 +215,76 @@ export function llmProviderCatalog(): any;
  * Returns the number of cards loaded.
  */
 export function load_card_database(json_str: string): number;
+
+/**
+ * Let the engine make the local human's selection on the prompt
+ * `prompt_id_json` at `now_ms`, with the bots' own choice at the active
+ * difficulty, then run the bots to quiescence.
+ *
+ * The auto-pick is bound to the caller's prompt, so a stale prompt is refused
+ * and changes nothing, the random state included. It spends no draft-effect
+ * card. Returns seat 0's view.
+ */
+export function local_fifo_auto_select(owner: number, prompt_id_json: string, now_ms: bigint): any;
+
+/**
+ * The local draft's original cube multiset for the game launched after it,
+ * as [`booster_pack_pool_for_game`] returns for the legacy runtime: `null`
+ * for a set draft.
+ */
+export function local_fifo_booster_pack_pool_for_game(owner: number): any;
+
+/**
+ * A local bot seat's auto-built deck for match play, as [`get_bot_deck`]
+ * builds one for the legacy runtime.
+ *
+ * `bot_seat`: a bot seat's index, 1 or more.
+ */
+export function local_fifo_bot_deck(owner: number, bot_seat: number): any;
+
+/**
+ * Apply the local human's composed selection at `now_ms`, then run the bots to
+ * quiescence.
+ *
+ * `selection_json`: `{ prompt_id, picked_card_instance_ids,
+ * burned_card_instance_ids, effect_card_instance_ids }`, with the prompt id
+ * copied from the view. It names no seat; the seat is the owner's. The payload
+ * is parsed before the session is touched, and a stale prompt changes nothing.
+ * Returns seat 0's view.
+ */
+export function local_fifo_select(owner: number, selection_json: string, now_ms: bigint): any;
+
+/**
+ * Submit the local human's deck at `now_ms`.
+ *
+ * `main_deck_json`: JSON array of card name strings. `commanders_json`: JSON
+ * array of the card names designated as commander(s), `[]` for a Quick
+ * draft. Both are parsed before the session is touched. Returns seat 0's
+ * view.
+ */
+export function local_fifo_submit_deck(owner: number, main_deck_json: string, commanders_json: string, now_ms: bigint): any;
+
+/**
+ * Auto-suggest a playable Limited deck from the local human's pool, as
+ * [`suggest_deck`] does for the legacy runtime.
+ */
+export function local_fifo_suggest_deck(owner: number): any;
+
+/**
+ * Suggest land counts for `spells_json` (a JSON array of card name strings)
+ * against the local human's pool, as [`suggest_lands`] does for the legacy
+ * runtime. The payload is parsed before the session is touched.
+ */
+export function local_fifo_suggest_lands(owner: number, spells_json: string): any;
+
+/**
+ * The local draft's view: seat 0's projection, which publishes every seat's
+ * FIFO progress.
+ *
+ * `owner`: the owner the local start or import returned. Any other owner is
+ * refused before the session is read.
+ */
+export function local_fifo_view(owner: number): any;
 
 /**
  * The complete engine-owned filter option lists for a pool, computed from
@@ -378,9 +475,11 @@ export interface InitOutput {
     readonly auto_pick: () => [number, number, number];
     readonly booster_pack_pool_for_game: () => [number, number, number];
     readonly buildLlmDraftPickRequests: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly check_restorable_draft_session: (a: number, b: number) => any;
     readonly create_multiplayer_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number];
     readonly draft_procedure: (a: number, b: number, c: number) => [number, number, number];
     readonly export_draft_session: () => [number, number, number, number];
+    readonly export_local_fifo_session: (a: number) => [number, number, number, number];
     readonly filter_pool_listing: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly get_bot_deck: (a: number) => [number, number, number];
     readonly get_draft_status: () => [number, number, number];
@@ -388,7 +487,16 @@ export interface InitOutput {
     readonly get_view: () => [number, number, number];
     readonly get_view_for_seat: (a: number) => [number, number, number];
     readonly import_draft_session: (a: number, b: number, c: number) => [number, number, number];
+    readonly import_local_fifo_session: (a: number, b: number, c: number) => [number, number, number];
     readonly load_card_database: (a: number, b: number) => [number, number, number];
+    readonly local_fifo_auto_select: (a: number, b: number, c: number, d: bigint) => [number, number, number];
+    readonly local_fifo_booster_pack_pool_for_game: (a: number) => [number, number, number];
+    readonly local_fifo_bot_deck: (a: number, b: number) => [number, number, number];
+    readonly local_fifo_select: (a: number, b: number, c: number, d: bigint) => [number, number, number];
+    readonly local_fifo_submit_deck: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
+    readonly local_fifo_suggest_deck: (a: number) => [number, number, number];
+    readonly local_fifo_suggest_lands: (a: number, b: number, c: number) => [number, number, number];
+    readonly local_fifo_view: (a: number) => [number, number, number];
     readonly pool_filter_options: (a: number, b: number) => [number, number, number];
     readonly resolve_shared_stack_bot_turns: () => [number, number, number];
     readonly set_draft_pick_enhancements: (a: number) => void;
@@ -407,7 +515,6 @@ export interface InitOutput {
     readonly suggest_deck: () => [number, number, number];
     readonly suggest_lands: (a: number, b: number) => [number, number, number];
     readonly suggest_lands_for_seat: (a: number, b: number, c: number) => [number, number, number];
-    readonly check_restorable_draft_session: (a: number, b: number) => any;
     readonly init_panic_hook: () => void;
     readonly llmProviderCatalog: () => any;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
