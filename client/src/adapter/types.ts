@@ -1239,6 +1239,22 @@ export type PhrasePace =
   | { type: "Said" }
   | { type: "Quickly"; max_gap_ms: number };
 
+/// Mirrors `engine::types::un_actions::SayPhrasePayment`: the engine-owned
+/// instance of a timed spoken payment (Toy Boat's "Say \"Toy Boat\" quickly").
+/// `owed` is the total the printed cost requires, `said` how many the engine has
+/// accepted, and `deadline_ms` the host instant by which the next saying must
+/// arrive. The client renders this progress and reports clicks with host stamps;
+/// it never decides whether a pause was in time.
+export interface SayPhrasePayment {
+  id: number;
+  owed: number;
+  said: number;
+  clock_ms: number;
+  last_seq?: number;
+  last_said_ms?: number;
+  deadline_ms?: number;
+}
+
 export type UnlessCost =
   | {
       type: "SayPhrase";
@@ -3461,6 +3477,11 @@ export type GameAction =
   | { type: "ChooseResolutionOptionalPaymentBranch"; data: { choice: ResolutionOptionalPaymentChoice } }
   | { type: "DecideOptionalEffectAndRemember"; data: { choice: AutoMayChoice; scope?: MayTriggerAutoChoiceScope } }
   | { type: "PayUnlessCost"; data: { pay: boolean } }
+  /// Un-card (no CR entry): one host-stamped saying of a timed spoken
+  /// unless-cost. The host stamps the human's monotonic instant; the engine
+  /// validates it against the stored window. `payment: 0` means "the instance
+  /// this prompt advertises".
+  | { type: "SayPhrase"; data: { payment: number; seq: number; at_ms: number } }
   // CR 118.12a: Choose a branch of a disjunctive unless-cost. The
   // discriminant is `Decline` (effect happens) or `Pay { index }` (the
   // selected sub-cost re-enters the standard unless-payment flow).
@@ -4667,6 +4688,9 @@ export interface GameState {
   /** CR 603.5: the viewer's stored "don't ask again" auto-choices for optional ("may") triggers. */
   may_trigger_auto_choices?: MayTriggerAutoChoiceRecord[];
   un_actions?: UnActionState;
+  /** Un-card (no CR entry): the engine-owned instance of a timed spoken
+   *  unless-payment (Toy Boat). `undefined`/`null` when none is pending. */
+  say_payment?: SayPhrasePayment | null;
   replacement_auto_choices?: ReplacementAutoChoiceRecord[];
   lands_tapped_for_mana?: Record<number, number[]>;
   scheduled_turn_controls?: Array<{

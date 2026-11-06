@@ -21,6 +21,7 @@ import type {
   MatchConfig,
   ObjectId,
   PhrasePace,
+  SayPhrasePayment,
   SerializedAbilityCost,
   AiDecisionDiagnosticReceipt,
   TakebackEvent,
@@ -3908,6 +3909,7 @@ function SayPhrasePanel({
   phrase,
   repetitions,
   quickWindowMs,
+  sayPayment,
   effect,
 }: {
   phrase: string;
@@ -3915,66 +3917,97 @@ function SayPhrasePanel({
   repetitions: number;
   /** Present for a "quickly" payment: each click must land inside the window. */
   quickWindowMs?: number;
+  /** The engine-owned instance of this payment, when it is a timed one. */
+  sayPayment?: SayPhrasePayment | null;
   effect?: string;
 }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const owed = Math.max(1, repetitions);
-  // The engine owns the payment count: every `PayUnlessCost` reports exactly one
-  // saying and comes back with the sayings still owed. So this panel keeps no
-  // completion flag — a later prompt that reuses this component starts from the
-  // engine's own count instead of inheriting a finished payment.
-  const [said, setSaid] = useState(0);
-  const previousOwed = useRef(owed);
-  const inFlight = useRef(0);
-  // Sayings reported to the engine whose acknowledgement has not arrived yet.
-  // The ref stays the synchronous over-report guard; this mirror is what holds
-  // the pace window, because a round trip can outlast the window and a lapsed
-  // timer must never decline a payment the player already made in time.
-  const [awaitingAck, setAwaitingAck] = useState(0);
+  // The ENGINE owns this payment. `sayPayment` is the instance it minted for
+  // this prompt: how many sayings it has actually accepted and the host instant
+  // by which the next one must arrive. Each click is a host-stamped observation
+  // (`SayPhrase`) that the engine validates against that deadline, so a pause is
+  // judged by the engine and this panel only renders the result.
+  const said = sayPayment?.said ?? 0;
+  const total = Math.max(1, sayPayment?.owed ?? repetitions);
+  const paymentId = sayPayment?.id ?? 0;
+  // Continue the host sequence the engine already accepted. A client that
+  // reconnects mid-payment must not replay a sequence number: the engine rejects
+  // it as a duplicate (`SayPhrasePayment::observe`).
+  const seq = useRef(sayPayment?.last_seq ?? 0);
+  // The host instant of this payment's most recent click. It is what the
+  // engine validates, so the window is armed from it rather than from an
+  // acknowledgement (a slow round trip must not shorten the player's window).
+  const lastSaidAt = useRef<number | null>(null);
+  // Clicks reported to the engine in this payment, including those still
+  // awaiting an acknowledgement.
+  const [reported, setReported] = useState(said);
+  const awaitingAck = Math.max(0, reported - said);
 
-  // A smaller owed count is the engine acknowledging sayings already reported;
-  // anything else is a fresh prompt, where the local progress starts over.
+  // A fresh engine instance is a fresh payment; local progress restarts from
+  // it. A payment already in progress keeps its click stamps.
   useEffect(() => {
-    const previous = previousOwed.current;
-    previousOwed.current = owed;
-    if (owed < previous) {
-      const acknowledged = previous - owed;
-      inFlight.current = Math.max(0, inFlight.current - acknowledged);
-      setAwaitingAck(inFlight.current);
-      setSaid((current) => current + acknowledged);
-      return;
-    }
-    inFlight.current = 0;
-    setAwaitingAck(0);
-    setSaid(0);
-  }, [owed]);
+    if (said > 0) return;
+    seq.current = 0;
+    lastSaidAt.current = null;
+    setReported(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paymentId]);
 
   // CR 118.12a: the pace is part of the payment. The window times the pause
   // *between* sayings, so it only starts once a saying has been made: a single
   // required saying has no pause to measure and must never expire before it is
-  // made. A saying still awaiting its acknowledgement holds the window (the
-  // pause it measures is one the player has already not taken), and each
-  // acknowledgement re-arms it. A window that lapses unanswered is a refusal to
-  // pay, which the engine turns into the sacrifice.
+  // made. It is armed from the host instant of the player's own click, so only
+  // an actual pause can lapse it, and a saying still awaiting an
+  // acknowledgement holds it (the engine already has that answer). A lapsed
+  // window is reported to the engine as a stamped observation; the engine's
+  // stored deadline decides that it is a pause and produces the sacrifice.
   useEffect(() => {
     if (quickWindowMs === undefined || said === 0 || awaitingAck > 0) return;
+    if (lastSaidAt.current === null) return;
+    const remaining = Math.max(
+      0,
+      lastSaidAt.current + quickWindowMs - performance.now(),
+    );
     const timer = setTimeout(() => {
-      void dispatch({ type: "PayUnlessCost", data: { pay: false } });
-    }, quickWindowMs);
+      // The host observes the lapse and reports it as an observation stamped
+      // past the engine's deadline; the engine then applies the unpaid branch
+      // (CR 118.12a). The client never decides the outcome itself.
+      seq.current += 1;
+      void dispatch({
+        type: "SayPhrase",
+        data: {
+          payment: paymentId,
+          seq: seq.current,
+          at_ms: performance.now(),
+        },
+      });
+    }, remaining);
     return () => clearTimeout(timer);
   }, [awaitingAck, dispatch, quickWindowMs, said]);
 
   const say = () => {
-    // One click is one saying, and the engine accepts no more than the sayings
-    // still owed (a rapid double click must not over-report).
-    if (inFlight.current >= owed) return;
-    inFlight.current += 1;
-    setAwaitingAck(inFlight.current);
-    void dispatch({ type: "PayUnlessCost", data: { pay: true } });
+    // One click is one saying, and the engine accepts no more than the payment
+    // requires (a rapid double click must not over-report).
+    if (reported >= total) return;
+    if (quickWindowMs === undefined) {
+      setReported((current) => current + 1);
+      void dispatch({ type: "PayUnlessCost", data: { pay: true } });
+      return;
+    }
+    const at = performance.now();
+    lastSaidAt.current = at;
+    seq.current += 1;
+    setReported((current) => current + 1);
+    // `payment: 0` names "the instance this prompt advertises"; after the first
+    // acknowledgement the engine's own id is rendered from `sayPayment`.
+    void dispatch({
+      type: "SayPhrase",
+      data: { payment: paymentId, seq: seq.current, at_ms: at },
+    });
   };
 
-  const required = said + owed;
+  const required = total;
 
   return (
     <AnimatePresence>
@@ -4032,6 +4065,7 @@ function UnlessPaymentPanel() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const waitingFor = useGameStore((s) => s.waitingFor);
+  const sayPayment = useGameStore((s) => s.gameState?.say_payment ?? null);
 
   if (waitingFor?.type !== "UnlessPayment") return null;
 
@@ -4049,6 +4083,7 @@ function UnlessPaymentPanel() {
         quickWindowMs={
           sayCost.pace?.type === "Quickly" ? sayCost.pace.max_gap_ms : undefined
         }
+        sayPayment={sayPayment}
         effect={effect}
       />
     );

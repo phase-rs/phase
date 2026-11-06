@@ -367,6 +367,20 @@ function queuedLocalActionStillApplies(next: PendingLocalAction): boolean {
   const { gameState, legalActions, waitingFor } = useGameStore.getState();
   if (Object.is(next.waitingFor, waitingFor)) return true;
   if (!waitingForActorMatches(waitingFor, gameState, next.actor)) return false;
+  // A spoken-payment observation is a host-stamped decision the engine
+  // validates itself: payment identity, monotonic sequence and the pace
+  // deadline. A first click's reply can advance the prompt (fewer sayings
+  // owed) while a second rapid click is still queued; that advance does not
+  // make the second observation stale. `SayPhrase` is never a legal action the
+  // engine mints (it carries host stamps the engine cannot produce), so it
+  // cannot rely on the legal-action match below.
+  if (
+    next.action.type === "SayPhrase" &&
+    waitingFor?.type === "UnlessPayment" &&
+    waitingFor.data.cost.type === "SayPhrase"
+  ) {
+    return true;
+  }
   if (legalActions.some((action) => actionsEqual(action, next.action))) return true;
   // Resolve All begins from Priority but is deliberately absent from normal
   // legal actions: it opens its own engine-authored consent protocol.

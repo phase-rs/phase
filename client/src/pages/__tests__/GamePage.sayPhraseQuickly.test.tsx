@@ -2,7 +2,11 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
 
-import type { PhrasePace, WaitingFor } from "../../adapter/types.ts";
+import type {
+  PhrasePace,
+  SayPhrasePayment,
+  WaitingFor,
+} from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -86,6 +90,7 @@ vi.mock("../../adapter/draft-adapter.ts", async (importOriginal) => ({
 }));
 
 const PHRASE = "Toy Boat";
+const PAYMENT_ID = 7;
 /** Deliberately far below the engine's printed second: the panel only reads the
  *  window the engine publishes, so a short one exercises the same code path
  *  without a multi-second test. */
@@ -102,7 +107,7 @@ function gamePageTree() {
 }
 
 /** Toy Boat's cumulative-upkeep say-it payment: `repetitions` sayings of the
- *  phrase still owed, each reported one click at a time inside the engine's
+ *  phrase still owed, each a host-stamped observation inside the engine's
  *  `pace` window. */
 function toyBoatUnlessPayment(repetitions: number): WaitingFor {
   return {
@@ -121,58 +126,96 @@ function toyBoatUnlessPayment(repetitions: number): WaitingFor {
   };
 }
 
+/** The engine-owned instance a freshly surfaced timed payment carries. */
+function paymentFor(owed: number, said = 0): SayPhrasePayment {
+  return { id: PAYMENT_ID, owed, said, clock_ms: 0 };
+}
+
 function phraseBox() {
   return screen.getByRole("button", { name: new RegExp(PHRASE) });
 }
 
+type SayPhraseAttempt = {
+  type: string;
+  data?: {
+    pay?: boolean;
+    payment?: number;
+    seq?: number;
+    at_ms?: number;
+  };
+};
+
+function sayPhraseCalls() {
+  return dispatchMock.mock.calls
+    .map(([action]) => action as SayPhraseAttempt)
+    .filter((action) => action.type === "SayPhrase")
+    .map((action) => action.data ?? {});
+}
+
 function payUnlessCostCalls() {
   return dispatchMock.mock.calls
-    .map(([action]) => action as { type: string; data?: { pay?: boolean } })
+    .map(([action]) => action as SayPhraseAttempt)
     .filter((action) => action.type === "PayUnlessCost")
     .map((action) => action.data?.pay);
 }
 
-/** Stands in for the engine's spoken-payment bookkeeping: each accepted saying
- *  is one `PayUnlessCost`, the sayings still owed shrink by one, and the last
- *  one closes the prompt. */
+function setPrompt(next: WaitingFor | null, said: number, owed: number) {
+  const state = useGameStore.getState().gameState;
+  act(() => {
+    useGameStore.setState({
+      waitingFor: next,
+      gameState: state
+        ? {
+            ...state,
+            say_payment: next ? paymentFor(owed, said) : null,
+          }
+        : state,
+    });
+  });
+}
+
+/** Stands in for the engine's spoken-payment bookkeeping: each `SayPhrase` is
+ *  one accepted saying, the engine's `said` grows, the sayings still owed
+ *  shrink, and the last one closes the prompt. `PayUnlessCost { pay: false }`
+ *  declines and retires the instance. */
 function acknowledgeSayings() {
-  dispatchMock.mockImplementation((action: { type: string; data?: { pay?: boolean } }) => {
+  dispatchMock.mockImplementation((action: SayPhraseAttempt) => {
     const current = useGameStore.getState().waitingFor;
     if (
-      action.type !== "PayUnlessCost" ||
-      action.data?.pay !== true ||
       current?.type !== "UnlessPayment" ||
       current.data.cost.type !== "SayPhrase"
     ) {
       return Promise.resolve();
     }
-    const owed = Math.max(1, current.data.cost.repetitions ?? 1);
+    if (action.type === "PayUnlessCost") {
+      if (action.data?.pay === false) setPrompt(null, 0, 1);
+      return Promise.resolve();
+    }
+    if (action.type !== "SayPhrase") return Promise.resolve();
+    const payment = useGameStore.getState().gameState?.say_payment;
+    const owed = payment?.owed ?? 1;
+    const said = (payment?.said ?? 0) + 1;
     const next: WaitingFor | null =
-      owed <= 1
+      said >= owed
         ? null
         : {
             ...current,
             data: {
               ...current.data,
-              cost: { ...current.data.cost, repetitions: owed - 1 },
+              cost: { ...current.data.cost, repetitions: owed - said },
             },
           };
-    act(() => {
-      useGameStore.setState({ waitingFor: next });
-    });
+    setPrompt(next, said, owed);
     return Promise.resolve();
   });
 }
 
 /** Acknowledge each accepted saying only when the test flushes it: models a
- *  multiplayer round trip whose reply lands after the pace window was armed, so
- *  the player's next saying is reported before the engine answers the last one. */
+ *  multiplayer round trip whose reply lands after the pace window was armed. */
 function deferAcknowledgements() {
   const pending: Array<() => void> = [];
-  dispatchMock.mockImplementation((action: { type: string; data?: { pay?: boolean } }) => {
-    if (action.type !== "PayUnlessCost" || action.data?.pay !== true) {
-      return Promise.resolve();
-    }
+  dispatchMock.mockImplementation((action: SayPhraseAttempt) => {
+    if (action.type !== "SayPhrase") return Promise.resolve();
     pending.push(() => {
       const current = useGameStore.getState().waitingFor;
       if (
@@ -181,20 +224,20 @@ function deferAcknowledgements() {
       ) {
         return;
       }
-      const owed = Math.max(1, current.data.cost.repetitions ?? 1);
+      const payment = useGameStore.getState().gameState?.say_payment;
+      const owed = payment?.owed ?? 1;
+      const said = (payment?.said ?? 0) + 1;
       const next: WaitingFor | null =
-        owed <= 1
+        said >= owed
           ? null
           : {
               ...current,
               data: {
                 ...current.data,
-                cost: { ...current.data.cost, repetitions: owed - 1 },
+                cost: { ...current.data.cost, repetitions: owed - said },
               },
             };
-      act(() => {
-        useGameStore.setState({ waitingFor: next });
-      });
+      setPrompt(next, said, owed);
     });
     return Promise.resolve();
   });
@@ -216,6 +259,7 @@ function setup(repetitions: number) {
     .withPlayers(0, 1)
     .waitingFor(toyBoatUnlessPayment(repetitions))
     .build();
+  state.say_payment = paymentFor(repetitions);
   act(() => {
     useGameStore.setState({
       gameId: "say-phrase",
@@ -259,7 +303,8 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     expect(payUnlessCostCalls()).toEqual([]);
 
     fireEvent.click(phraseBox());
-    expect(payUnlessCostCalls()).toEqual([true]);
+    expect(sayPhraseCalls()).toHaveLength(1);
+    expect(payUnlessCostCalls()).toEqual([]);
   });
 
   it("does not start the window until the first saying, even when more are owed", async () => {
@@ -274,22 +319,44 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     expect(payUnlessCostCalls()).toEqual([]);
 
     fireEvent.click(phraseBox());
-    expect(payUnlessCostCalls()).toEqual([true]);
+    expect(sayPhraseCalls()).toHaveLength(1);
   });
 
-  it("reports one saying per click and lets the engine ask for the rest", async () => {
+  it("reports one host-stamped observation per click", async () => {
     setup(2);
     render(gamePageTree());
 
     await screen.findByText(PHRASE);
     fireEvent.click(phraseBox());
-    expect(payUnlessCostCalls()).toEqual([true]);
-    // The engine still owes a saying, so the prompt is still up for it.
-    expect(phraseBox()).toBeInTheDocument();
-
     fireEvent.click(phraseBox());
-    expect(payUnlessCostCalls()).toEqual([true, true]);
+
+    const calls = sayPhraseCalls();
+    expect(calls).toHaveLength(2);
+    expect(calls.map((call) => call.seq)).toEqual([1, 2]);
+    expect(calls[0].payment).toBe(PAYMENT_ID);
+    expect(calls[1].payment).toBe(PAYMENT_ID);
+    // Each observation carries the host's own monotonic instant.
+    expect(calls[0].at_ms).toBeTypeOf("number");
+    expect(calls[1].at_ms).toBeGreaterThanOrEqual(calls[0].at_ms as number);
     expect(screen.queryByText(PHRASE)).toBeNull();
+  });
+
+  it("submits both rapid clicks as distinct saying occurrences", async () => {
+    // The real dispatch boundary drops a repeated same-action/same-prompt
+    // submission while the first is in flight. Two sayings must therefore be
+    // two DIFFERENT observations, or the second saying is silently lost and the
+    // payment strands with one saying owed and one in flight.
+    setup(2);
+    render(gamePageTree());
+
+    await screen.findByText(PHRASE);
+    fireEvent.click(phraseBox());
+    fireEvent.click(phraseBox());
+
+    const calls = sayPhraseCalls();
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).not.toEqual(calls[1]);
+    expect(new Set(calls.map((call) => call.seq)).size).toBe(2);
   });
 
   it("declines when the next saying does not follow inside the window", async () => {
@@ -299,13 +366,13 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     await screen.findByText(PHRASE);
     vi.useFakeTimers();
     fireEvent.click(phraseBox());
-    expect(payUnlessCostCalls()).toEqual([true]);
+    expect(sayPhraseCalls()).toHaveLength(1);
 
     advance(GAP_MS * 4);
-    expect(payUnlessCostCalls()).toEqual([true, false]);
+    expect(payUnlessCostCalls()).toEqual([false]);
   });
 
-  it("does not expire a saying answered inside the window but acknowledged late", async () => {
+  it("arms the window from the click, not from the acknowledgement", async () => {
     const acknowledgeNextSaying = deferAcknowledgements();
     setup(3);
     render(gamePageTree());
@@ -318,32 +385,27 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
 
     advance(GAP_MS / 2);
     fireEvent.click(phraseBox());
-    expect(payUnlessCostCalls()).toEqual([true, true]);
+    expect(sayPhraseCalls()).toHaveLength(2);
 
     // Its acknowledgement is slower than the window. The player already said
-    // the phrase in time, so the window must wait for the engine rather than
-    // decline a payment that was made.
+    // the phrase, so an in-flight observation must not be declined.
     advance(GAP_MS * 4);
-    expect(payUnlessCostCalls()).toEqual([true, true]);
+    expect(payUnlessCostCalls()).toEqual([]);
 
-    // Once the engine answers, one saying is still owed and the window is live
-    // again: not saying it now is the pause the card punishes.
+    // Once the engine answers, the window is measured from the second click's
+    // own host stamp; not saying anything more is the pause the card punishes.
     acknowledgeNextSaying();
     advance(GAP_MS * 4);
-    expect(payUnlessCostCalls()).toEqual([true, true, false]);
+    expect(payUnlessCostCalls()).toEqual([false]);
   });
 
-  it("pays after one saying per repetition inside the window", async () => {
+  it("renders the engine's own saying progress", async () => {
     setup(2);
     render(gamePageTree());
 
-    await screen.findByText(PHRASE);
-    vi.useFakeTimers();
+    expect(await screen.findByText("0 of 2 said")).toBeInTheDocument();
     fireEvent.click(phraseBox());
-    advance(GAP_MS / 4);
-    fireEvent.click(phraseBox());
-
-    expect(payUnlessCostCalls()).toEqual([true, true]);
+    expect(await screen.findByText("1 of 2 said")).toBeInTheDocument();
   });
 
   it("lets a following prompt start a fresh payment", async () => {
@@ -352,14 +414,22 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
 
     await screen.findByText(PHRASE);
     fireEvent.click(phraseBox());
-    expect(payUnlessCostCalls()).toEqual([true]);
+    expect(sayPhraseCalls()).toHaveLength(1);
 
     // Successive Toy Boat upkeeps replace the prompt at the same position, so
     // the retained panel must not inherit the finished payment.
+    const state = useGameStore.getState().gameState!;
     act(() => {
-      useGameStore.setState({ waitingFor: toyBoatUnlessPayment(1) });
+      useGameStore.setState({
+        waitingFor: toyBoatUnlessPayment(1),
+        gameState: { ...state, say_payment: { ...paymentFor(1), id: PAYMENT_ID + 1 } },
+      });
     });
     fireEvent.click(phraseBox());
-    expect(payUnlessCostCalls()).toEqual([true, true]);
+
+    const calls = sayPhraseCalls();
+    expect(calls).toHaveLength(2);
+    expect(calls[1].payment).toBe(PAYMENT_ID + 1);
+    expect(calls[1].seq).toBe(1);
   });
 });
