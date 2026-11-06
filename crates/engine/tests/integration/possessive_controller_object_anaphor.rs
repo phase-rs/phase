@@ -669,8 +669,8 @@ fn beacon_of_destruction_shuffles_into_its_owners_library() {
         })
         .collect();
     // FU-2: the existing automatic zone-move shuffle duplicates the explicit
-    // instruction. This count records that defect, not a desired rules contract.
-    assert_eq!(shuffles, vec![P0, P0]);
+    // instruction. This row deliberately does not depend on that duplicate.
+    assert!(!shuffles.is_empty() && shuffles.iter().all(|player| *player == P0));
     assert_eq!(events.iter().filter(|event| matches!(event,
         GameEvent::EffectResolved { kind: EffectKind::Shuffle, source_id, .. } if *source_id == beacon
     )).count(), 1);

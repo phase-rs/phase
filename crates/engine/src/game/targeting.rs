@@ -4608,8 +4608,8 @@ mod tests {
     use crate::game::game_object::AttachTarget;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        Comparator, ContinuousModification, Duration, ParentTargetMissingReason, QuantityExpr,
-        TargetReadOrigin,
+        Comparator, ContinuousModification, Duration, Effect, ParentTargetMissingReason,
+        QuantityExpr, TargetReadOrigin,
     };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
@@ -9090,7 +9090,6 @@ mod tests {
     /// requiring an incarnation pin or substituting the ability's controller.
     #[test]
     fn resolve_effect_player_ref_owner_reads_spell_and_replacement_sources() {
-        use crate::types::ability::Effect;
         let mut state = GameState::new_two_player(42);
         let source = create_object(
             &mut state,

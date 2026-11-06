@@ -41,7 +41,8 @@ use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    GameState, PersistedGameState, PersistedRestoreFinalization, WaitingFor,
+    GameState, PersistedGameState, PersistedRestoreFinalization, StagedBatchMemberState,
+    StagedDestroyOperation, StagedDestroyOuterApproval, StagedMemberOperation, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
@@ -1233,6 +1234,23 @@ fn emergence_destroy_replacement_inner_choice_round_trips() {
         commit.state().waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
+    let staged = commit
+        .state()
+        .active_batch_delivery()
+        .and_then(|batch| batch.staged.as_ref())
+        .expect("the inner replacement choice retains its staged batch");
+    let member = &staged.members[staged.cursor];
+    assert_eq!(member.identity.object_id, land);
+    assert_eq!(member.state, StagedBatchMemberState::InnerConsulting);
+    assert!(matches!(
+        member.operation,
+        StagedMemberOperation::Destroy(StagedDestroyOperation {
+            outer: StagedDestroyOuterApproval::Approved,
+            ..
+        })
+    ));
+    assert!(member.pending_outcome.is_none());
+    assert!(member.approved_post_replacement.is_some());
     commit
         .state()
         .resolution_stack

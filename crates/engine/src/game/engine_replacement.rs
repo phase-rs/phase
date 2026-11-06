@@ -4818,6 +4818,7 @@ mod tests {
     use super::*;
     use crate::game::engine::apply_as_current;
     use crate::game::replacement::{self as replacement_mod, ReplacementResult};
+    use crate::game::scenario::{GameScenario, P0, P1};
     use crate::game::zone_pipeline::{move_object, ZoneMoveRequest, ZoneMoveResult};
     use crate::game::zones::create_object;
     use crate::types::ability::LibraryPosition;
@@ -4872,8 +4873,6 @@ mod tests {
     /// before re-parking the remaining, noncommuting entry replacements.
     #[test]
     fn may_cost_discard_answer_reparks_ordering_and_publishes_it() {
-        use crate::game::scenario::{GameScenario, P0, P1};
-
         let mut scenario = GameScenario::new();
         let mox = scenario
             .add_creature_to_graveyard(P0, "Mox Diamond", 0, 0)

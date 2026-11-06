@@ -24,8 +24,8 @@ use engine::game::scenario::{CastCommit, GameScenario, P0, P1};
 use engine::game::stack::stack_object_controller;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    DamageRedirectTarget, Effect, PreventionAmount, RedirectionLifetime, ResolvedAbility,
-    TargetFilter, TargetRef, TypedFilter,
+    DamageRedirectTarget, Effect, PreventionAmount, QuantityExpr, RedirectionLifetime,
+    ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -790,7 +790,6 @@ fn chimera_retarget_subject_binds_to_the_triggering_spell() {
 /// CR 115.1 + CR 400.3: source-owner recipients are resolved, never announced.
 #[test]
 fn owner_anchor_claims_no_target_slot() {
-    use engine::types::ability::QuantityExpr;
     let state = GameState::new_two_player(42);
     for effect in [
         Effect::Shuffle {

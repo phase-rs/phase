@@ -5477,10 +5477,13 @@ mod entering_aura_attachment_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ChosenAttribute, ReplacementDefinition,
+        AbilityDefinition, AbilityKind, ChosenAttribute, ControllerRef,
+        PostReplacementContinuation, QuantityExpr, ReplacementDefinition, TypeFilter, TypedFilter,
     };
-    use crate::types::ability::{ControllerRef, TypeFilter, TypedFilter};
     use crate::types::card_type::CoreType;
+    use crate::types::game_state::{
+        PostReplacementDrain, PostReplacementDrainStack, ResidentDrainPolicy,
+    };
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
     use crate::types::keywords::ProtectionTarget;
@@ -5691,10 +5694,6 @@ mod entering_aura_attachment_tests {
     // replacement work. Deliver and the pending-host choice must both keep it.
     #[test]
     fn aura_host_remained_drops_retained_drain_and_population_snapshot() {
-        use crate::types::ability::{PostReplacementContinuation, QuantityExpr};
-        use crate::types::game_state::{
-            PostReplacementDrain, PostReplacementDrainStack, ResidentDrainPolicy,
-        };
         for (origin, host_count) in [
             (Zone::Graveyard, 0),
             (Zone::Stack, 0),
@@ -11784,31 +11783,26 @@ mod staged_batch_tests {
         submit_owner_library_order, submitted_owner_arrangements, OwnerArrangementInstruction,
         OwnerLibraryOrderProgress,
     };
+    use crate::game::triggers::{
+        collect_delayed_triggers_into_deferred, collect_triggers_into_deferred,
+        filter_consumed_trigger_events, TriggerCollectionRequester,
+    };
     use crate::game::zones::create_object;
-    use crate::types::ability::{DigRestOrder, LibraryPosition};
-    use crate::types::ability::{Effect, ResolvedAbility};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, DelayedTriggerCondition, DigRestOrder, Effect, EffectKind,
+        LibraryPosition, QuantityExpr, ResolvedAbility, TargetFilter, TriggerDefinition,
+    };
     use crate::types::game_state::{
-        BatchCompletion, DigDeliveryStage, StagedBatchMemberState, StagedDestroyOperation,
-        StagedMemberOperation, ZoneMoveCompletion,
+        BatchCompletion, ChangeZoneBatchTail, ChangeZoneCountPolicy, DelayedTrigger,
+        DigDeliveryStage, StagedBatchMemberState, StagedDestroyOperation, StagedMemberOperation,
+        ZoneMoveCompletion,
     };
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
+    use crate::types::triggers::TriggerMode;
 
     #[test]
     fn staged_change_zone_keeps_delayed_leaves_trigger() {
-        use crate::game::triggers::{
-            collect_delayed_triggers_into_deferred, collect_triggers_into_deferred,
-            filter_consumed_trigger_events, TriggerCollectionRequester,
-        };
-        use crate::types::ability::{
-            AbilityDefinition, AbilityKind, DelayedTriggerCondition, EffectKind, QuantityExpr,
-            TargetFilter, TriggerDefinition,
-        };
-        use crate::types::game_state::{
-            ChangeZoneBatchTail, ChangeZoneCountPolicy, DelayedTrigger,
-        };
-        use crate::types::triggers::TriggerMode;
-
         let mut state = GameState::new_two_player(42);
         let controller = PlayerId(0);
         let source = effect_source(&mut state);
