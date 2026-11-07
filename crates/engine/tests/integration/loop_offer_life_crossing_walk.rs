@@ -1,4 +1,4 @@
-//! CR 704.5a + CR 733.2a: offering a loop shortcut, and taking it as suggested, reads a number of
+//! CR 704.5a + CR 732.2a: offering a loop shortcut, and taking it as suggested, reads a number of
 //! life charges bounded by the declarations' switch points, not by any life total, so its work
 //! does not grow with the players' life totals (a declaration whose target rotates in a round
 //! robin of two or more is still read one repetition at a time; see
@@ -136,9 +136,9 @@ impl AltarBoard {
     }
 }
 
-/// CR 704.5a + CR 733.2a: an untargeted drain loop's offer and a `Fixed(3)` take of it read the
+/// CR 704.5a + CR 732.2a: an untargeted drain loop's offer and a `Fixed(3)` take of it read the
 /// same number of life charges with P0 at 40, at 4,000,000 and ten short of `i32::MAX`, and with
-/// P1 at 4,000,000. Each take ends where the shortcut ends (CR 733.2a: "The ending point of this
+/// P1 at 4,000,000. Each take ends where the shortcut ends (CR 732.2a: "The ending point of this
 /// sequence must be a place where a player has priority"), P0's priority on an empty stack, with
 /// P0 up 4 and P1 down 4 (the cycle that offers the shortcut and the three taken).
 ///
@@ -195,7 +195,7 @@ fn a_drain_shortcut_reads_as_many_life_charges_at_a_large_life_total() {
     }
 }
 
-/// CR 704.5a + CR 733.2a: a targeted drain loop's offer and a `Fixed(3)` take of it read the same
+/// CR 704.5a + CR 732.2a: a targeted drain loop's offer and a `Fixed(3)` take of it read the same
 /// number of life charges with the loop's controller at the saved game's own life total, at
 /// 4,000,000 and at 1,000,000,000.
 ///
@@ -210,7 +210,7 @@ fn a_drain_shortcut_reads_as_many_life_charges_at_a_large_life_total() {
 /// names, so the walk gathers the declarations' change points and splits off the leading
 /// repetition. Each repetition moves "that much life", the 4
 /// the chain carries, from the targeted P1 to P0. Each take ends where the shortcut ends
-/// (CR 733.2a), at P0's priority with Enduring Tenacity's next trigger on the stack, P0 up 12 and
+/// (CR 732.2a), at P0's priority with Enduring Tenacity's next trigger on the stack, P0 up 12 and
 /// P1 down 12.
 ///
 /// REVERT-PROBE: as above ⇒ the reads with P0 at 4,000,000 are millions more than at the saved

@@ -150,7 +150,7 @@ impl DecisionTemplate {
         }
     }
 
-    /// CR 733.2a: the iteration indices at which [`resolve`] may answer differently than at the
+    /// CR 732.2a: the iteration indices at which [`resolve`] may answer differently than at the
     /// index before, on one unchanged board, or `None` where no finite list holds them. A pin
     /// reads the index only through a [`TargetSchedule`]: a constant never changes, a piecewise
     /// schedule changes at its declared starts (before its first start it has no entry, which is
@@ -1919,7 +1919,7 @@ mod tests {
         Ranking::one(AnnouncementSubject::Seat(player))
     }
 
-    /// CR 733.2a: on one board a template's resolution changes with the iteration index only
+    /// CR 732.2a: on one board a template's resolution changes with the iteration index only
     /// where [`DecisionTemplate::resolution_change_points`] says it may. Each row resolves its
     /// template at twelve successive indices through [`resolve`] itself: between two listed
     /// points every index answers as the one before it, a piecewise schedule answers differently

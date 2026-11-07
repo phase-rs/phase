@@ -1630,7 +1630,9 @@ impl PeriodicDelta {
             }
             let charge = charge_at(start);
             let run = i64::from(last - start);
-            let short = remaining_life - netted - charge.dip;
+            let short = remaining_life
+                .saturating_sub(netted)
+                .saturating_sub(charge.dip);
             let steps = if short <= 0 {
                 Some(0)
             } else if charge.net > 0 {
@@ -9172,8 +9174,8 @@ mod tests {
     /// CR 704.3 + CR 704.5a: reading a charge stream one stretch at a time gives the answer of
     /// stepping through it one repetition at a time
     /// (`PeriodicDelta::first_life_crossing_by_stretch` against
-    /// `PeriodicDelta::first_life_crossing`), for every stream below, every life total from -2 to
-    /// 45 and every horizon up to 60, with the stream's own change points and with spare points
+    /// `PeriodicDelta::first_life_crossing`), for every stream below, `i64::MIN` and life totals
+    /// from -2 to 45, and every horizon up to 60, with the stream's own change points and with spare points
     /// at which nothing changes. The streams: a seat never charged, a constant charge, a dip
     /// above its net, a dip that nets nothing, a charge that starts late, one that stops, and
     /// two that change three times. The stretch reading reads at most one charge per stretch.
@@ -9212,7 +9214,7 @@ mod tests {
             let own: BTreeSet<IterationIndex> =
                 stretches.iter().map(|(first, ..)| *first).collect();
             let spare: BTreeSet<IterationIndex> = own.iter().copied().chain([1, 6, 40]).collect();
-            for remaining_life in -2..=45i64 {
+            for remaining_life in (-2..=45).chain([i64::MIN]) {
                 for horizon in 0..=60u32 {
                     let stepped = PeriodicDelta::first_life_crossing(
                         (0..).map(|index| charge_of(stretches, index)),
