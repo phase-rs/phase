@@ -2659,10 +2659,12 @@ fn a_continuing_loop_past_the_proof_budget_is_not_a_draw() {
     );
 }
 
-/// CR 603.3b + CR 704.5c: Ichor Rats returns beside Animate Dead each cycle and its trigger,
-/// resolving first, gives each player a poison counter, so both players reach ten poison counters
-/// and lose together, as Off plays it. Poison is a loss axis the holder may shortcut (CR 732.2a):
-/// the offer is the repetitions P0 survives, short of the one that ends the game.
+/// CR 603.3b + CR 704.5c: Ichor Rats ("When this creature enters, each player gets a poison
+/// counter.") returns beside Animate Dead each cycle and its trigger, resolving first, gives each
+/// player a poison counter, so both players reach ten poison counters and lose together, as Off
+/// plays it. Poison is a loss axis the holder may shortcut (CR 732.2a): from one poison counter
+/// each, the offer is the 8 repetitions P0 survives and the bound is the 9th, whose counter is the
+/// tenth (CR 104.3d).
 fn mandatory_poison_loop_is_offered_short_of_ten_poison(drive: Drive) {
     let board = Board {
         ichor_rats: true,
@@ -2685,11 +2687,11 @@ fn mandatory_poison_loop_is_offered_short_of_ten_poison(drive: Drive) {
     let Some(offered) = run(board, LoopDetectionMode::Interactive, drive, 250) else {
         return;
     };
-    let poison = offered.poison(P0);
     assert_eq!(
         (
             &offered.terminal,
             offer_schema(offered.state()),
+            offered.poison(P0),
             offered.poison(P1)
         ),
         (
@@ -2698,9 +2700,10 @@ fn mandatory_poison_loop_is_offered_short_of_ten_poison(drive: Drive) {
                 mandatory: false
             },
             (IterationCount::Fixed(8), 8, Some(9)),
-            poison
+            1,
+            1
         ),
-        "{drive:?}: from {poison} poison"
+        "{drive:?}"
     );
 }
 

@@ -2298,11 +2298,10 @@ fn an_altar_zulaport_period_is_offered_a_bounded_shortcut_and_taken() {
     }
 }
 
-/// CR 800.4a + CR 104.2a: on four seats, P0 sacrifices Gravecrawler to Phyrexian Altar beside
+/// CR 800.4a + CR 732.2a: on four seats, P0 sacrifices Gravecrawler to Phyrexian Altar beside
 /// Blood Artist ("Whenever this creature or another creature dies, target player loses 1 life and
-/// you gain 1 life."), aiming each trigger at P1, and recasts it. The repetition P1 leaves in is
-/// performed and ends the count: the offer is P1's life, with two opponents left and nobody
-/// crowned.
+/// you gain 1 life."), aiming each trigger at P1, and recasts it. The row checks that the
+/// repetition P1 leaves in is counted: the measured bound reaches P1's whole life.
 #[test]
 fn a_targeted_drain_on_four_seats_counts_the_repetition_its_seat_leaves_in() {
     let Some(db) = shared_card_db() else { return };

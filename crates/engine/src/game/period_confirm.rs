@@ -1846,8 +1846,8 @@ fn announced_declared(
         }) else {
             return Ok(());
         };
-        // CR 603.3d + CR 601.2c: after a departure a trigger with one legal target has it chosen
-        // for it, so a pin naming a seat that left is no choice the declaration makes.
+        // CR 603.3d + CR 601.2c: once any seat has left, a trigger's announced targets are not
+        // compared with its pin, whichever seat the pin names.
         if !end.departed(replay)
             && crate::game::ability_utils::declared_targets_in_chain(ability)
                 != pinned_targets(decision)?
@@ -2589,10 +2589,11 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
             let pair = Box::new([prior.clone(), current.clone()]);
             let mut count = Count::default();
             count.note(seats(&s_n), &s_n1, &CycleEnd::CameRound);
-            let mut repeats = count.note(seats(&s_n1), &replay, &second);
+            let mut last = second;
+            let mut repeats = count.note(seats(&s_n1), &replay, &last);
             while repeats && count.repetitions < COUNT_CAP {
                 let before = seats(&replay);
-                let ended = end.repeat(
+                last = end.repeat(
                     &mut replay,
                     &items,
                     &mut Vec::new(),
@@ -2600,14 +2601,14 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
                     &mut Vec::new(),
                     None,
                 );
-                repeats = count.note(before, &replay, &ended);
+                repeats = count.note(before, &replay, &last);
             }
             let parts = counted_offer(
                 &frames,
                 points,
                 count.survived(holder),
                 count.repetitions,
-                counted_ending(holder, &s_n, &replay).map(|kind| (kind, holder)),
+                counted_ending(holder, &s_n, &replay, &last).map(|kind| (kind, holder)),
             );
             let departures = count.departures;
             return Ok(Confirmation {
@@ -3314,22 +3315,23 @@ impl Count {
 }
 
 /// CR 104.2a + CR 732.2a: how the counted repetitions from `start` to `end` end the game, when
-/// they end it with `holder` the winner.
-fn counted_ending(holder: PlayerId, start: &GameState, end: &GameState) -> Option<WinKind> {
-    let won = end
-        .game_end
-        .as_ref()
-        .is_some_and(|game_end| game_end.winner == Some(holder));
-    won.then(
-        || match classify_win_kind(holder, &ResourceVector::period(start, end), Some(end)) {
+/// the last of them `ended` with `holder` the winner.
+fn counted_ending(
+    holder: PlayerId,
+    start: &GameState,
+    end: &GameState,
+    ended: &CycleEnd,
+) -> Option<WinKind> {
+    matches!(ended, CycleEnd::HolderWon(_)).then(|| {
+        match classify_win_kind(holder, &ResourceVector::period(start, end), Some(end)) {
             kind @ (WinKind::LethalDamage
             | WinKind::PoisonLoss
             | WinKind::Decking
             | WinKind::ImmediateWin) => kind,
             // CR 104.2b / CR 104.3e: no opponent's life, poison or library moved, so an effect won it.
             WinKind::ExtraTurns | WinKind::Advantage => WinKind::ImmediateWin,
-        },
-    )
+        }
+    })
 }
 
 /// CR 732.2c: performs one cycle of `period` from `state`, a frame where `run`'s holder has
