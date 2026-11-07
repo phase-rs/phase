@@ -667,8 +667,9 @@ pub fn protection_prevents_from(target: &GameObject, source: &GameObject) -> boo
 pub fn preventing_protection_quality(
     target: &GameObject,
     source: &GameObject,
+    source_name: Option<&str>,
 ) -> Option<MatchedProtectionQuality> {
-    all_preventing_protection_qualities(target, source)
+    all_preventing_protection_qualities(target, source, source_name)
         .into_iter()
         .next()
 }
@@ -683,11 +684,12 @@ pub fn preventing_protection_quality(
 pub fn all_preventing_protection_qualities(
     target: &GameObject,
     source: &GameObject,
+    source_name: Option<&str>,
 ) -> Vec<MatchedProtectionQuality> {
     let mut out = Vec::new();
     for kw in &target.keywords {
         if let Keyword::Protection(ref pt) = kw {
-            if let Some(quality) = matching_protection_quality(pt, target, source) {
+            if let Some(quality) = matching_protection_quality(pt, target, source, source_name) {
                 if !out.contains(&quality) {
                     out.push(quality);
                 }
@@ -730,12 +732,15 @@ pub fn protection_prevents_from_with_source_name(
     false
 }
 
+/// Bool matcher over [`matching_protection_quality`] for live-object call
+/// sites (targeting, blocking, attaching): no LKI override, so the live
+/// source name decides chosen-name matches.
 pub fn source_matches_protection_target(
     protection: &ProtectionTarget,
     protected: &GameObject,
     source: &GameObject,
 ) -> bool {
-    matching_protection_quality(protection, protected, source).is_some()
+    matching_protection_quality(protection, protected, source, None).is_some()
 }
 
 /// CR 702.16g + CR 615.13 (Matt R8-F1): the resolved quality when
@@ -748,6 +753,7 @@ pub fn matching_protection_quality(
     protection: &ProtectionTarget,
     protected: &GameObject,
     source: &GameObject,
+    source_name: Option<&str>,
 ) -> Option<MatchedProtectionQuality> {
     // CR 709.4b: A split source off the stack has the combined colors of both
     // halves; on the stack (the usual protection-source case) it is the chosen
@@ -780,7 +786,7 @@ pub fn matching_protection_quality(
         ProtectionTarget::ChosenCardName => protected
             .chosen_card_name()
             .filter(|name| {
-                crate::game::filter::source_has_chosen_name(Some(source), None, name)
+                crate::game::filter::source_has_chosen_name(Some(source), source_name, name)
             })
             .map(|name| MatchedProtectionQuality::ChosenName(fnv1a_64(name.as_bytes()))),
         // CR 702.16k: Resolve "the chosen player" from the protected
@@ -997,7 +1003,7 @@ fn fnv1a_feed(hash: u64, byte: u8) -> u64 {
     (hash ^ u64::from(byte)).wrapping_mul(FNV1A64_PRIME)
 }
 
-fn fnv1a_64(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a_64(bytes: &[u8]) -> u64 {
     bytes
         .iter()
         .fold(FNV1A64_OFFSET, |hash, byte| fnv1a_feed(hash, *byte))

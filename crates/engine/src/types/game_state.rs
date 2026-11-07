@@ -44579,6 +44579,7 @@ mod tests {
                 target: TargetRef::Player(PlayerId(1)),
                 amount: 3,
                 is_combat: true,
+                source_name: None,
                 applied: HashSet::new(),
             })],
             paused_entry: 1,

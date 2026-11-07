@@ -806,6 +806,11 @@ pub enum MatchedProtectionQuality {
     Everything,
     Filter(u64),
     FromPlayer(ProtectionPlayerScope),
+    /// CR 702.16a + CR 201.2: "protection from the chosen card name" (Runed
+    /// Halo) — FNV-1a fingerprint of the chosen name, mirroring the
+    /// `CardSubtype`/`Filter` fingerprint precedent. The discriminant keeps
+    /// the name domain disjoint from every other fingerprint domain.
+    ChosenName(u64),
 }
 
 impl MatchedProtectionQuality {
@@ -842,6 +847,8 @@ impl MatchedProtectionQuality {
                     CoreType::Phenomenon => 12,
                     CoreType::Scheme => 13,
                     CoreType::Conspiracy => 14,
+                    CoreType::Boss => 15,
+                    CoreType::Event => 16,
                 },
                 1,
             ),
@@ -865,11 +872,12 @@ impl MatchedProtectionQuality {
                 },
                 8,
             ),
+            MatchedProtectionQuality::ChosenName(fingerprint) => (fingerprint, 9),
         }
     }
 
     /// CR 616.1 (Matt R10-F1): the virtual-candidate rid parts for this
-    /// quality — the variant discriminant (selects one of the nine
+    /// quality — the variant discriminant (selects one of the ten
     /// `PROTECTION_REPLACEMENT_SOURCE_*` sentinels) plus the minor word
     /// (rides whole in the rid index). Shares the ordinal table with
     /// [`sort_words`](Self::sort_words) so the two can never disagree.
@@ -911,6 +919,8 @@ impl MatchedProtectionQuality {
                 12 => Some(MatchedProtectionQuality::CardType(CoreType::Phenomenon)),
                 13 => Some(MatchedProtectionQuality::CardType(CoreType::Scheme)),
                 14 => Some(MatchedProtectionQuality::CardType(CoreType::Conspiracy)),
+                15 => Some(MatchedProtectionQuality::CardType(CoreType::Boss)),
+                16 => Some(MatchedProtectionQuality::CardType(CoreType::Event)),
                 _ => None,
             },
             2 => Some(MatchedProtectionQuality::CardSubtype(minor)),
@@ -941,6 +951,7 @@ impl MatchedProtectionQuality {
                 )),
                 _ => None,
             },
+            9 => Some(MatchedProtectionQuality::ChosenName(minor)),
             _ => None,
         }
     }
@@ -5439,6 +5450,8 @@ mod tests {
             MatchedProtectionQuality::Filter(u64::MAX),
             MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::Opponent),
             MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::You),
+            MatchedProtectionQuality::ChosenName(0),
+            MatchedProtectionQuality::ChosenName(u64::MAX),
         ] {
             let (discriminant, minor) = quality.replacement_rid_parts();
             assert_eq!(
@@ -5447,10 +5460,13 @@ mod tests {
                 "rid codec must round-trip {quality:?}"
             );
         }
-        assert_eq!(MatchedProtectionQuality::from_replacement_parts(9, 0), None);
+        assert_eq!(
+            MatchedProtectionQuality::from_replacement_parts(10, 0),
+            None
+        );
         assert_eq!(MatchedProtectionQuality::from_replacement_parts(0, 5), None);
         assert_eq!(
-            MatchedProtectionQuality::from_replacement_parts(1, 15),
+            MatchedProtectionQuality::from_replacement_parts(1, 17),
             None
         );
         assert_eq!(MatchedProtectionQuality::from_replacement_parts(4, 1), None);

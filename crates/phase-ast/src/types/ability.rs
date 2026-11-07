@@ -37846,7 +37846,8 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
-            | AbilityCondition::ScopedPlayerMatches { .. } => false,
+            | AbilityCondition::ScopedPlayerMatches { .. }
+            | AbilityCondition::PlayerAttackedPlayer { .. } => false,
         }
     }
 
@@ -37947,7 +37948,8 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIsNeither
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
-            | AbilityCondition::SourceLacksKeyword { .. } => false,
+            | AbilityCondition::SourceLacksKeyword { .. }
+            | AbilityCondition::PlayerAttackedPlayer { .. } => false,
         }
     }
 

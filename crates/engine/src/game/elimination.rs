@@ -2473,6 +2473,7 @@ mod tests {
                 target,
                 amount: 3,
                 is_combat: true,
+                source_name: None,
                 applied: std::collections::HashSet::new(),
             })
         }
@@ -2526,6 +2527,7 @@ mod tests {
                     target: TargetRef::Object(survivor),
                     amount: 3,
                     is_combat: true,
+                    source_name: None,
                     applied: std::collections::HashSet::new(),
                 }],
                 phase_a_tally: Vec::new(),
@@ -2762,6 +2764,7 @@ mod tests {
                 target,
                 amount: 3,
                 is_combat: true,
+                source_name: None,
                 applied: std::collections::HashSet::new(),
             }
         }

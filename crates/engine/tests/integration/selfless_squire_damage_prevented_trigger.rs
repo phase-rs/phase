@@ -4385,7 +4385,8 @@ fn disjoint_protections_publish_separate_applications() {
         engine::game::static_abilities::preventing_player_protection_quality(
             runner.state(),
             P0,
-            Some(gingerbrute)
+            Some(gingerbrute),
+            None,
         ),
         Some(MatchedProtectionQuality::CardType(CoreType::Artifact)),
         "reach guard: the artifact attacker must resolve to the artifact quality"
@@ -4394,7 +4395,8 @@ fn disjoint_protections_publish_separate_applications() {
         engine::game::static_abilities::preventing_player_protection_quality(
             runner.state(),
             P0,
-            Some(rollicker)
+            Some(rollicker),
+            None,
         ),
         Some(MatchedProtectionQuality::CardType(CoreType::Enchantment)),
         "reach guard: the enchantment attacker must resolve to the enchantment quality"

@@ -1714,6 +1714,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
             is_combat: true,
+            source_name: None,
             applied: std::collections::HashSet::new(),
         };
         let crate::game::replacement::CombatDamageReplacementOutcome::Complete { survivors, tally } =

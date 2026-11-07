@@ -567,6 +567,7 @@ fn candletrap_prevents_enchanted_creatures_combat_damage() {
         target: TargetRef::Player(P0),
         amount: 3,
         is_combat: true,
+        source_name: None,
         applied: Default::default(),
     };
     let result =
@@ -814,6 +815,7 @@ fn fog_bank_both_directions_correct_after_unifying_self_ref() {
         target: TargetRef::Player(P1),
         amount: 5,
         is_combat: true,
+        source_name: None,
         applied: Default::default(),
     };
     let result =
@@ -980,6 +982,7 @@ fn gaseous_form_prevents_both_combat_directions_but_not_noncombat_damage() {
         target: TargetRef::Object(host),
         amount: 4,
         is_combat: true,
+        source_name: None,
         applied: Default::default(),
     };
     assert!(
@@ -1001,6 +1004,7 @@ fn gaseous_form_prevents_both_combat_directions_but_not_noncombat_damage() {
         target: TargetRef::Player(P0),
         amount: 3,
         is_combat: true,
+        source_name: None,
         applied: Default::default(),
     };
     assert!(
@@ -1023,6 +1027,7 @@ fn gaseous_form_prevents_both_combat_directions_but_not_noncombat_damage() {
         target: TargetRef::Player(P0),
         amount: 3,
         is_combat: false,
+        source_name: None,
         applied: Default::default(),
     };
     match engine::game::replacement::replace_event(
@@ -1279,6 +1284,7 @@ fn heart_of_light_real_cast_prevents_combat_and_noncombat_damage() {
         target: TargetRef::Object(host),
         amount: 5,
         is_combat: false,
+        source_name: None,
         applied: Default::default(),
     };
     let result =

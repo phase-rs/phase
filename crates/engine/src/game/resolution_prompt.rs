@@ -1594,6 +1594,7 @@ mod tests {
                     target: TargetRef::Player(PlayerId(1)),
                     amount: count,
                     is_combat: false,
+                    source_name: None,
                     applied: Default::default(),
                 }),
                 accounted,

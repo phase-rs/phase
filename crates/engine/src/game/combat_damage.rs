@@ -2507,7 +2507,6 @@ fn run_apnap_scheduled_batch<T>(
 ///
 /// Used by both the automatic assignment path and the interactive
 /// `AssignCombatDamage` handler.
-
 pub(crate) fn apply_combat_damage(
     state: &mut GameState,
     assignments: &[(ObjectId, DamageAssignment)],

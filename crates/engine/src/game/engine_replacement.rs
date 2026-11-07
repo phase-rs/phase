@@ -2213,6 +2213,7 @@ fn handle_replacement_choice_inner(
                 if state.has_post_replacement_drain() {
                     let _ = apply_pending_post_replacement_effect(state, None, None, None, events);
                 }
+            }
             // CR 614.6: a prevented move never happened, so the paused discard
             // owned by this answer is never recorded. A carrier installed by a
             // substitute during this answer is a different value and survives.
@@ -6251,6 +6252,7 @@ mod tests {
             target: crate::types::ability::TargetRef::Object(target),
             amount: 0,
             is_combat: false,
+            source_name: None,
             applied: std::collections::HashSet::new(),
         };
         let mut events = Vec::new();

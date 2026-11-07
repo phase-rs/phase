@@ -2667,6 +2667,7 @@ fn redirect_damage_event(
     damage_amount: u32,
     is_combat: bool,
     applied: HashSet<AppliedReplacementKey>,
+    source_name: Option<String>,
     lifetime: RedirectionLifetime,
     events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -2681,6 +2682,7 @@ fn redirect_damage_event(
             target,
             amount: damage_amount,
             is_combat,
+            source_name,
             applied,
         });
     }
@@ -2696,6 +2698,7 @@ fn redirect_damage_event(
             target,
             amount: damage_amount,
             is_combat,
+            source_name,
             applied,
         });
     }
@@ -2716,6 +2719,7 @@ fn redirect_damage_event(
                 target: new_recipient.unwrap_or(target),
                 amount: damage_amount,
                 is_combat,
+                source_name: source_name.clone(),
                 applied,
             };
             // CR 614.5: The one-shot opportunity is spent on this event whether
@@ -2784,6 +2788,7 @@ fn redirect_damage_event(
                     target: new_target,
                     amount: redirected_amount,
                     is_combat,
+                    source_name: source_name.clone(),
                     applied: applied.clone(),
                 };
                 match replace_event(state, redirected_event, events) {
@@ -2816,6 +2821,7 @@ fn redirect_damage_event(
                     target,
                     amount: damage_amount,
                     is_combat,
+                    source_name,
                     applied,
                 });
             }
@@ -2828,6 +2834,7 @@ fn redirect_damage_event(
                 target,
                 amount: remaining_amount,
                 is_combat,
+                source_name,
                 applied,
             })
         }
@@ -2851,6 +2858,7 @@ fn damage_done_applier(
             target,
             amount,
             is_combat,
+            source_name,
             applied,
         } = event
         {
@@ -2919,6 +2927,7 @@ fn damage_done_applier(
                                 target,
                                 amount,
                                 is_combat,
+                                source_name,
                                 applied,
                             })
                         }
@@ -3032,6 +3041,7 @@ fn damage_done_applier(
                 target,
                 amount: new_amount,
                 is_combat,
+                source_name,
                 applied,
             });
         }
@@ -3054,6 +3064,7 @@ fn damage_done_applier(
             target,
             amount: damage_amount,
             is_combat,
+            source_name,
             applied,
         } = event
         {
@@ -3073,6 +3084,7 @@ fn damage_done_applier(
                 damage_amount,
                 is_combat,
                 applied,
+                source_name,
                 lifetime,
                 events,
             );
@@ -3113,6 +3125,7 @@ fn damage_done_applier(
             target,
             amount: dmg,
             is_combat,
+            source_name,
             applied,
         } = event
         {
@@ -3148,6 +3161,7 @@ fn damage_done_applier(
                         dmg,
                         is_combat,
                         applied,
+                        source_name,
                         RedirectionLifetime::Continuous,
                         events,
                     );
@@ -3165,6 +3179,7 @@ fn damage_done_applier(
                         target,
                         amount: dmg,
                         is_combat,
+                        source_name,
                         applied,
                     });
                 }
@@ -3230,6 +3245,7 @@ fn damage_done_applier(
                             target: target.clone(),
                             amount: dmg,
                             is_combat,
+                            source_name,
                             applied,
                         });
                     } else {
@@ -3238,6 +3254,7 @@ fn damage_done_applier(
                             target: target.clone(),
                             amount: remaining_damage,
                             is_combat,
+                            source_name,
                             applied,
                         });
                     }
@@ -3276,6 +3293,7 @@ fn damage_done_applier(
                             target: target.clone(),
                             amount: remaining_damage,
                             is_combat,
+                            source_name,
                             applied,
                         });
                     }
@@ -3376,6 +3394,7 @@ fn damage_done_applier(
             target,
             amount: dmg,
             is_combat,
+            source_name,
             applied,
         } = event
         {
@@ -3385,6 +3404,7 @@ fn damage_done_applier(
                     target,
                     amount: dmg,
                     is_combat,
+                    source_name,
                     applied,
                 });
             }
@@ -3680,6 +3700,7 @@ fn apply_shield_counter_replacement(
                 target,
                 amount,
                 is_combat,
+                source_name,
                 applied,
             },
         ) if matches!(target, TargetRef::Object(object_id) if object_id == rid.source) => {
@@ -3688,6 +3709,7 @@ fn apply_shield_counter_replacement(
                 target: target.clone(),
                 amount,
                 is_combat,
+                source_name,
                 applied,
             };
 
@@ -3758,6 +3780,7 @@ fn apply_protection_replacement(
             target,
             amount,
             is_combat,
+            source_name,
             applied,
         } => {
             // CR 120.8: a 0-damage event is not damage at all — no
@@ -3768,6 +3791,7 @@ fn apply_protection_replacement(
                     target,
                     amount,
                     is_combat,
+                    source_name,
                     applied,
                 });
             }
@@ -8985,7 +9009,7 @@ fn protection_quality_from_rid(rid: ReplacementId) -> Option<MatchedProtectionQu
 
 /// CR 616.1 (Matt R10-F1): English tail for a protection candidate label,
 /// rendered from the rid alone (no state, no event). Exact for the seven
-/// denotable variants; the two fingerprint variants name their class plus
+/// denotable variants; the three fingerprint variants name their class plus
 /// the low 32 hash bits so overlapping members still read distinctly.
 fn protection_quality_label_tail(quality: MatchedProtectionQuality) -> String {
     match quality {
@@ -9034,6 +9058,12 @@ fn protection_quality_label_tail(quality: MatchedProtectionQuality) -> String {
             ProtectionPlayerScope::Opponent => "protection from opponents".to_string(),
             ProtectionPlayerScope::You => "protection from your own objects".to_string(),
         },
+        MatchedProtectionQuality::ChosenName(fingerprint) => {
+            format!(
+                "protection from a chosen card name #{:08x}",
+                fingerprint as u32
+            )
+        }
     }
 }
 
@@ -9118,6 +9148,7 @@ pub fn find_applicable_replacements(
         target,
         amount,
         source_id,
+        source_name,
         ..
     } = event
     {
@@ -9127,7 +9158,9 @@ pub fn find_applicable_replacements(
                     match (state.objects.get(object_id), state.objects.get(source_id)) {
                         (Some(target_obj), Some(source_obj)) => {
                             crate::game::keywords::all_preventing_protection_qualities(
-                                target_obj, source_obj,
+                                target_obj,
+                                source_obj,
+                                source_name.as_deref(),
                             )
                         }
                         _ => Vec::new(),
@@ -9138,6 +9171,7 @@ pub fn find_applicable_replacements(
                         state,
                         *player_id,
                         Some(*source_id),
+                        source_name.as_deref(),
                     )
                 }
             };
@@ -14611,6 +14645,7 @@ mod tests {
                     target: TargetRef::Object(object_id),
                     amount: 2,
                     is_combat: false,
+                    source_name: None,
                     applied: HashSet::new(),
                 }
             };
@@ -14910,6 +14945,7 @@ mod tests {
                 target: TargetRef::Player(PlayerId(0)),
                 amount: 3,
                 is_combat: false,
+                source_name: None,
                 applied: HashSet::new(),
             },
             &mut events,
@@ -15896,6 +15932,7 @@ mod tests {
                     target: TargetRef::Player(PlayerId(0)),
                     amount: 1,
                     is_combat: false,
+                    source_name: None,
                     applied: HashSet::new(),
                 },
                 vec![ReplacementEvent::DamageDone, ReplacementEvent::DealtDamage],
@@ -16761,6 +16798,7 @@ mod tests {
             target: crate::types::ability::TargetRef::Object(ObjectId(30)),
             amount: 2,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         let dmg_candidates = vec![
@@ -17083,6 +17121,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -17128,6 +17167,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -17178,6 +17218,7 @@ mod tests {
             target: TargetRef::Object(ObjectId(30)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -17259,6 +17300,7 @@ mod tests {
             target: TargetRef::Object(ObjectId(30)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -18561,6 +18603,7 @@ mod tests {
                 target: TargetRef::Player(PlayerId(1)),
                 amount,
                 is_combat: false,
+                source_name: None,
                 applied: HashSet::new(),
             };
             // CR 120.4b + CR 616.1f: only the current proposed damage amount
@@ -20353,6 +20396,9 @@ mod tests {
             MatchedProtectionQuality::Filter(1),
             MatchedProtectionQuality::Filter(0x0000_0001_0000_0000),
             MatchedProtectionQuality::Filter(u64::MAX),
+            MatchedProtectionQuality::ChosenName(0),
+            MatchedProtectionQuality::ChosenName(0xFFFF_FFFF_0000_0001),
+            MatchedProtectionQuality::ChosenName(u64::MAX),
             MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::Opponent),
             MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::You),
         ] {
@@ -20408,6 +20454,7 @@ mod tests {
                 target: TargetRef::Player(PlayerId(0)),
                 amount: 2,
                 is_combat: false,
+                source_name: None,
                 applied: HashSet::new(),
             },
             sacrifice_provenance: None,
@@ -20543,6 +20590,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             amount: 5,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
 
@@ -20606,6 +20654,7 @@ mod tests {
             target: TargetRef::Object(ObjectId(10)),
             amount: 5,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
 
@@ -20633,6 +20682,7 @@ mod tests {
             target: TargetRef::Object(ObjectId(20)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
 
@@ -20718,6 +20768,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
 
@@ -20754,6 +20805,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
 
@@ -20810,6 +20862,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
 
@@ -20862,6 +20915,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         let rid = ReplacementId {
@@ -22262,6 +22316,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             amount,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         }
     }
@@ -22401,6 +22456,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
 
@@ -22428,6 +22484,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
             is_combat: true,
+            source_name: None,
             applied: HashSet::new(),
         };
         match replace_event(&mut state, combat, &mut events) {
@@ -22454,6 +22511,7 @@ mod tests {
             target: TargetRef::Object(ObjectId(60)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         match replace_event(&mut state, to_own, &mut events) {
@@ -22853,6 +22911,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         let registry = build_replacement_registry();
@@ -22878,6 +22937,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         let registry = build_replacement_registry();
@@ -22915,6 +22975,7 @@ mod tests {
             target: TargetRef::Object(ObjectId(60)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         let registry = build_replacement_registry();
@@ -22948,6 +23009,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -22960,6 +23022,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -23011,6 +23074,7 @@ mod tests {
             target: TargetRef::Object(ObjectId(60)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -23023,6 +23087,7 @@ mod tests {
             target: TargetRef::Object(ObjectId(61)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -24008,6 +24073,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         let registry = build_replacement_registry();
@@ -24022,6 +24088,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -24047,6 +24114,7 @@ mod tests {
             target: TargetRef::Object(ObjectId(60)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -24071,6 +24139,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -24083,6 +24152,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -27502,6 +27572,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         assert!(!empty_mana_pool_matcher(&damage, ObjectId(0), &state));
@@ -27528,6 +27599,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             amount: 1,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         assert!(!(entry.matcher)(&damage, ObjectId(0), &state));
@@ -27817,6 +27889,7 @@ mod tests {
             target: TargetRef::Object(ObjectId(51)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         assert_eq!(
@@ -27834,6 +27907,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -27885,6 +27959,7 @@ mod tests {
             target: TargetRef::Object(ObjectId(30)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -27898,6 +27973,7 @@ mod tests {
             target: TargetRef::Object(ObjectId(31)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         assert_eq!(
@@ -27927,6 +28003,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -27944,6 +28021,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         assert_eq!(
@@ -28103,6 +28181,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
             is_combat: true,
+            source_name: None,
             applied: HashSet::new(),
         };
         let is_our_damage = |event: &ProposedEvent| {
@@ -28195,6 +28274,7 @@ mod tests {
                 target: TargetRef::Object(target),
                 amount: 3,
                 is_combat: true,
+                source_name: None,
                 applied: HashSet::new(),
             }
         }

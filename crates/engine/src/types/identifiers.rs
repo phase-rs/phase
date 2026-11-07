@@ -16,7 +16,7 @@ use crate::game::game_object::GameObject;
 /// allocator starts at 1), and disjoint from `ObjectId(0)` (registry-hosted
 /// replacements) so dispatch can discriminate by source alone.
 pub(crate) const PROTECTION_REPLACEMENT_SOURCE_BASE: u64 = u64::MAX - 16;
-pub(crate) const PROTECTION_REPLACEMENT_SOURCE_COUNT: u64 = 9;
+pub(crate) const PROTECTION_REPLACEMENT_SOURCE_COUNT: u64 = 10;
 
 /// The protection virtual-candidate decoding of an [`ObjectId`], defined here
 /// beside the engine-owned source range it reads.

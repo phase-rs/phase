@@ -714,6 +714,7 @@ fn proposed_events(
         target,
         amount: 1,
         is_combat: false,
+        source_name: None,
         applied: Default::default(),
     };
     let moves = |destinations: &[Zone]| -> Vec<ProposedEvent> {

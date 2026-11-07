@@ -24,7 +24,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CombatPreventionTally, DamageRecord, DistributionScope, EachSourceBatchFrame, GameState,
-    PreventedDamageEntry, TriggerSourceRead, WaitingFor,
+    PreventedDamageEntry, TriggerSourceContext, TriggerSourceRead, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, KeywordKind, MatchedProtectionQuality};
@@ -586,6 +586,7 @@ pub(crate) fn pre_replacement_damage_gate(
         target: target.clone(),
         amount,
         is_combat,
+        source_name: ctx.source_name.clone(),
         applied: HashSet::new(),
     })
 }
@@ -1277,13 +1278,18 @@ pub(crate) fn drain_pending_damage_post_loss(
 /// to the original damage-source id so `DamageContext::from_source` reproduces the
 /// original source's keywords at resume time; `amount` is captured as `Fixed` so
 /// it does not re-resolve against mutated state.
+/// CR 113.7a + CR 608.2h: every remaining-damage resume node keeps the paused
+/// batch's latched trigger source, so a departed source is still evaluated by
+/// its last known information on resume. Stamped here (not at call sites) so
+/// every pause helper propagates it by construction.
 fn build_remaining_damage_node(
     damage_source_id: ObjectId,
     controller: PlayerId,
     target: TargetRef,
     amount: u32,
+    trigger_source: Option<TriggerSourceContext>,
 ) -> ResolvedAbility {
-    ResolvedAbility::new(
+    let mut node = ResolvedAbility::new(
         Effect::DealDamage {
             amount: QuantityExpr::Fixed {
                 value: amount as i32,
@@ -1300,7 +1306,9 @@ fn build_remaining_damage_node(
         vec![target],
         damage_source_id,
         controller,
-    )
+    );
+    node.trigger_source = trigger_source;
+    node
 }
 
 /// CR 120.4b: Build a one-shot continuation that applies an already-replaced
@@ -1413,10 +1421,13 @@ fn remaining_damage_chain(
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
 ) -> Option<ResolvedAbility> {
     let node = |target, amount| {
-        let mut node =
-            build_remaining_damage_node(damage_source_id, ability.controller, target, amount);
-        node.trigger_source = ability.trigger_source.clone();
-        node
+        build_remaining_damage_node(
+            damage_source_id,
+            ability.controller,
+            target,
+            amount,
+            ability.trigger_source.clone(),
+        )
     };
     let mut iter = remaining.into_iter();
     let (first_target, first_amount) = iter.next()?;
@@ -1486,7 +1497,13 @@ fn stash_each_source_combined_continuation(
     }
 
     for (source_id, target, amount) in raw_remaining {
-        let node = build_remaining_damage_node(source_id, controller, target, amount);
+        let node = build_remaining_damage_node(
+            source_id,
+            controller,
+            target,
+            amount,
+            ability.trigger_source.clone(),
+        );
         match head_opt.as_mut() {
             None => head_opt = Some(node),
             Some(h) => append_to_sub_chain(h, node),
@@ -1555,10 +1572,21 @@ fn stash_remaining_each_source_damage(
         return;
     };
 
-    let mut head =
-        build_remaining_damage_node(first_source, controller, first_target, first_amount);
+    let mut head = build_remaining_damage_node(
+        first_source,
+        controller,
+        first_target,
+        first_amount,
+        ability.trigger_source.clone(),
+    );
     for (source_id, target, amount) in iter {
-        let node = build_remaining_damage_node(source_id, controller, target, amount);
+        let node = build_remaining_damage_node(
+            source_id,
+            controller,
+            target,
+            amount,
+            ability.trigger_source.clone(),
+        );
         append_to_sub_chain(&mut head, node);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
@@ -1879,6 +1907,10 @@ pub fn resolve_post_replacement(
         target,
         amount,
         is_combat,
+        // Post-replacement continuations never re-derive candidates
+        // (`apply_damage_after_replacement` applies directly), so the
+        // snapshot-restored context — which carries no name — is exact here.
+        source_name: ctx.source_name.clone(),
         applied: HashSet::new(),
     };
 
@@ -1926,12 +1958,12 @@ fn damage_context_from_ability(state: &GameState, ability: &ResolvedAbility) -> 
             // CR 608.2h + CR 400.7: the captured observation, not the object now
             // occupying the id, supplies the source's characteristics. Prefer
             // the exact-incarnation exit snapshot over the trigger-time snapshot.
-            let lki = crate::game::filter::exit_lki_for_incarnation(
+            let exit = crate::game::filter::exit_lki_for_incarnation(
                 state,
                 latched.identity.reference.object_id,
                 latched.identity.reference.incarnation,
-            )
-            .unwrap_or(&latched.lki);
+            );
+            let lki = exit.unwrap_or(&latched.lki);
             // allow-raw-authority: reading characteristic snapshot from departed-source LKI
             let has_keyword = |kind: KeywordKind| lki.keywords.iter().any(|k| k.kind() == kind);
             let mut ctx = DamageContext::fallback(ability.source_id, lki.controller);
@@ -2613,7 +2645,7 @@ pub fn resolve_all(
                     resolve_quantity_with_targets(state, amount, ability).max(0) as u32
                 }
             };
-            (dmg > 0).then_some((ctx.source_id, ctx, target, dmg))
+            (dmg > 0).then_some((ctx.source_id, ctx.clone(), target, dmg))
         })
         .collect();
 
@@ -4015,6 +4047,7 @@ fn stash_remaining_each_deals_chain(
             ability.controller,
             TargetRef::Object(recipient_id),
             power as u32,
+            ability.trigger_source.clone(),
         );
         match head.as_mut() {
             Some(h) => append_to_sub_chain(h, node),
@@ -5458,6 +5491,7 @@ mod tests {
                 target: TargetRef::Object(victim),
                 amount: 1,
                 is_combat: true,
+                source_name: None,
                 applied: HashSet::new(),
             };
             let mut events = Vec::new();
@@ -5529,6 +5563,7 @@ mod tests {
                 target: TargetRef::Player(P0),
                 amount: 1,
                 is_combat: false,
+                source_name: None,
                 applied: HashSet::new(),
             };
             let mut events = Vec::new();
@@ -5599,6 +5634,7 @@ mod tests {
             target: TargetRef::Object(target),
             amount: 2,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();
@@ -5645,6 +5681,7 @@ mod tests {
             target: TargetRef::Object(target),
             amount: 1,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();
@@ -5683,6 +5720,7 @@ mod tests {
             target: TargetRef::Object(target),
             amount: 2,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();
@@ -5712,6 +5750,7 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             amount: 2,
             is_combat: false,
+            source_name: None,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();

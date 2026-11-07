@@ -1992,8 +1992,9 @@ pub fn preventing_player_protection_quality(
     state: &GameState,
     player_id: PlayerId,
     source: Option<ObjectId>,
+    source_name: Option<&str>,
 ) -> Option<crate::types::keywords::MatchedProtectionQuality> {
-    all_preventing_player_protection_qualities(state, player_id, source)
+    all_preventing_player_protection_qualities(state, player_id, source, source_name)
         .into_iter()
         .next()
 }
@@ -2006,26 +2007,14 @@ pub fn all_preventing_player_protection_qualities(
     state: &GameState,
     player_id: PlayerId,
     source: Option<ObjectId>,
+    source_name: Option<&str>,
 ) -> Vec<crate::types::keywords::MatchedProtectionQuality> {
     all_matching_player_protections(
         state,
         player_id,
         source.and_then(|id| state.objects.get(&id)),
+        source_name,
     )
-}
-
-/// Single match authority behind [`player_protection_from_object`] and
-/// [`preventing_player_protection_quality`]: the resolved quality when a
-/// player-scope protection ability matches, or `None`. The bool matcher
-/// delegates, so a match and its resolution can never disagree.
-fn matching_player_protection(
-    state: &GameState,
-    player_id: PlayerId,
-    source: Option<&crate::game::game_object::GameObject>,
-) -> Option<crate::types::keywords::MatchedProtectionQuality> {
-    all_matching_player_protections(state, player_id, source)
-        .into_iter()
-        .next()
 }
 
 /// Collecting authority behind the single-match fns: every resolved
@@ -2035,6 +2024,7 @@ fn all_matching_player_protections(
     state: &GameState,
     player_id: PlayerId,
     source: Option<&crate::game::game_object::GameObject>,
+    source_name: Option<&str>,
 ) -> Vec<crate::types::keywords::MatchedProtectionQuality> {
     use crate::game::keywords::matching_card_type_quality;
     use crate::types::ability::ControllerRef;
@@ -2095,14 +2085,14 @@ fn all_matching_player_protections(
                     .filter(|chosen| {
                         crate::game::filter::source_has_chosen_name(
                             Some(source_obj),
-                            None,
+                            source_name,
                             chosen,
                         )
                     })
                     .map(|chosen| {
-                        MatchedProtectionQuality::ChosenName(
-                            crate::game::keywords::fnv1a_64(chosen.as_bytes()),
-                        )
+                        MatchedProtectionQuality::ChosenName(crate::game::keywords::fnv1a_64(
+                            chosen.as_bytes(),
+                        ))
                     }),
                 // CR 702.16k: "Protection from [a player]" at the player level — the
                 // protected player has protection from each object the specified

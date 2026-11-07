@@ -573,6 +573,17 @@ pub enum ProposedEvent {
         target: TargetRef,
         amount: u32,
         is_combat: bool,
+        /// CR 608.2h + CR 702.16e: the source's name as observed when the
+        /// damage event was created — the live name for live sources, the
+        /// last-known-information projection for departed sources (a Clone
+        /// copying Volatile Rig now in the graveyard reads "Volatile Rig",
+        /// not "Clone"). Protection matching reads this override before the
+        /// live object so chosen-name protection (Runed Halo) survives its
+        /// source across pauses, resumes, and save/load. `None` (including
+        /// payloads written before the field existed) falls back to the live
+        /// object, exactly the pre-override behavior.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_name: Option<String>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },

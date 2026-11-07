@@ -532,6 +532,7 @@ fn replacement_applies(
             target,
             amount,
             is_combat: true,
+            source_name: None,
             applied: Default::default(),
         },
         replacement_registry(),

@@ -9,9 +9,9 @@ use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
     CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageKindFilter,
     Designation, Duration, Effect, FilterProp, ObjectProperty, ObjectScope, Parity, ParitySource,
-    PlayerFilter,
-    PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
-    SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    SharedQuality, SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
