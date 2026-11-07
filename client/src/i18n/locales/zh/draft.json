@@ -289,6 +289,10 @@
     "pickToDeck": "将 {{card}} 选入套牌",
     "pickToSideboard": "将 {{card}} 选入备牌",
     "picking": "选牌中…",
+    "queuedPacks_few": "队列中有 {{count}} 个补充包",
+    "queuedPacks_many": "队列中有 {{count}} 个补充包",
+    "queuedPacks_one": "队列中有 {{count}} 个补充包",
+    "queuedPacks_other": "队列中有 {{count}} 个补充包",
     "scale": "补充包显示比例",
     "scaleDecrease": "缩小补充包显示",
     "scaleIncrease": "放大补充包显示",
@@ -330,7 +334,8 @@
     "hostLeft": "主持人已离开轮抽",
     "incompatible": "此轮抽与你的协议版本不兼容。",
     "kicked": "你已被移出轮抽桌",
-    "retry": "尝试重新连接"
+    "retry": "尝试重新连接",
+    "unreadable": "无法读取此已保存的轮抽，因此无法继续。"
   },
   "podPhase": {
     "complete": "已完成",

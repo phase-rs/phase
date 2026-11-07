@@ -157,13 +157,28 @@ fn set_name(code: &str, set_names: &SetNames) -> String {
 
 /// The seat's current position in the draft: which pack, which pick, and which
 /// way packs are moving.
+///
+/// A FIFO seat's position is its own: the round of the pack it holds and the
+/// steps it has completed this round, both from its own projection; a barrier
+/// pod's is the pod's step.
 pub fn progress_context(view: &DraftPlayerView) -> String {
+    let (pack_number, pick_number) = match view
+        .fifo
+        .as_ref()
+        .and_then(|fifo| fifo.head.as_ref().map(|head| (head, &fifo.progress)))
+    {
+        Some((head, progress)) => (
+            u64::from(head.round) + 1,
+            progress.round_completed_steps + 1,
+        ),
+        None => (
+            u64::from(view.current_pack_number) + 1,
+            u64::from(view.pick_number) + 1,
+        ),
+    };
     format!(
-        "Pack {} of {}, pick {} — packs are passing {:?}.",
-        view.current_pack_number + 1,
-        view.pack_count,
-        view.pick_number + 1,
-        view.pass_direction,
+        "Pack {pack_number} of {}, pick {pick_number} — packs are passing {:?}.",
+        view.pack_count, view.pass_direction,
     )
 }
 
@@ -366,6 +381,137 @@ mod tests {
         assert_eq!(rendered, pool_context(&pool));
         assert!(rendered.contains("U: A (2), C (2)"), "{rendered}");
         assert!(rendered.contains("Colorless/Land: B (2)"), "{rendered}");
+    }
+
+    /// An eight-seat Quick pod of five-card boosters over three rounds, in
+    /// `flow`, started at 1000 ms.
+    fn started_quick_pod(flow: draft_core::types::DraftFlow) -> draft_core::types::DraftSession {
+        use draft_core::pack_source::FixturePackSource;
+        use draft_core::session;
+        use draft_core::types::{
+            DeckAddableCards, DraftAction, DraftClockPolicy, DraftConfig, DraftFlow, DraftSeat,
+            DraftSelectionPolicy, DraftSession, DraftSessionId, DraftSource,
+        };
+
+        let config = DraftConfig {
+            flow,
+            selection_policy: DraftSelectionPolicy::default(),
+            clock_policy: DraftClockPolicy::quick_default(),
+            source: DraftSource::single_set("TST"),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Quick,
+            pod_size: 8,
+            cards_per_pack: 5,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 7,
+            tournament_format: Default::default(),
+            pod_policy: Default::default(),
+            spectator_visibility: Default::default(),
+        };
+        let seats = (0..8)
+            .map(|seat| DraftSeat::Bot {
+                name: format!("Bot {seat}"),
+            })
+            .collect();
+        let fixture = FixturePackSource {
+            set_code: "TST".to_string(),
+            cards_per_pack: 5,
+        };
+        let mut session = match flow {
+            DraftFlow::FifoAsync => DraftSession::new_fifo(
+                config,
+                seats,
+                "TEST".to_string(),
+                DraftSessionId("local-0123456789abcdef".to_string()),
+            )
+            .expect("a FIFO Quick pod is admitted"),
+            DraftFlow::LegacyBarrier => DraftSession::new(config, seats, "TEST".to_string()),
+        };
+        session::apply_at(&mut session, DraftAction::StartDraft, Some(&fixture), 1_000)
+            .expect("the pod starts");
+        session
+    }
+
+    /// CR 905.2a: a draft has no priority, so FIFO seats draft at their own
+    /// pace and a seat's pick in the round is the steps it has taken itself.
+    /// Seat 1 here has taken its own first pick and holds seat 0's remainder,
+    /// while the pod-wide step counter has not moved.
+    #[test]
+    fn a_fifo_seat_states_its_own_pack_and_pick() {
+        use draft_core::session;
+        use draft_core::types::{DraftAction, DraftFlow, DraftSession};
+        use draft_core::view::filter_for_player;
+
+        let mut session = started_quick_pod(DraftFlow::FifoAsync);
+        let select_first = |session: &mut DraftSession, seat: u8| {
+            let view = filter_for_player(session, seat);
+            let prompt_id = view
+                .fifo
+                .as_ref()
+                .and_then(|fifo| fifo.prompt_id.clone())
+                .expect("the seat holds a live prompt");
+            let first = view.current_pack.as_ref().expect("the seat holds a head")[0]
+                .instance_id
+                .clone();
+            session::apply_at(
+                session,
+                DraftAction::Select {
+                    seat,
+                    prompt_id,
+                    picked_card_instance_ids: vec![first],
+                    burned_card_instance_ids: Vec::new(),
+                    effect_card_instance_ids: Vec::new(),
+                },
+                None,
+                2_000,
+            )
+            .expect("a first-card selection is legal");
+        };
+        select_first(&mut session, 0);
+        select_first(&mut session, 1);
+
+        let view = filter_for_player(&session, 1);
+        let fifo = view.fifo.as_ref().expect("a FIFO projection");
+        assert_eq!(
+            view.pick_number, 0,
+            "reach: the pod-wide counter is still 0"
+        );
+        assert_eq!(fifo.progress.round_completed_steps, 1);
+        assert_eq!(view.current_pack.as_ref().map(Vec::len), Some(4));
+        assert_eq!(
+            progress_context(&view),
+            "Pack 1 of 3, pick 2 — packs are passing Left."
+        );
+
+        // The barrier pod's position is the pod's step: after one whole-pod
+        // step every seat is on its second pick.
+        let mut legacy = started_quick_pod(DraftFlow::LegacyBarrier);
+        for seat in 0..8 {
+            let first = legacy.current_pack[usize::from(seat)]
+                .as_ref()
+                .expect("every seat holds a pack")
+                .0[0]
+                .instance_id
+                .clone();
+            session::apply(
+                &mut legacy,
+                DraftAction::Pick {
+                    seat,
+                    card_instance_ids: vec![first],
+                },
+                None,
+            )
+            .expect("a whole-pod pick step succeeds");
+        }
+        let legacy_view = filter_for_player(&legacy, 1);
+        assert!(legacy_view.fifo.is_none());
+        assert_eq!(legacy_view.pick_number, 1);
+        assert_eq!(
+            progress_context(&legacy_view),
+            "Pack 1 of 3, pick 2 — packs are passing Left."
+        );
     }
 
     #[test]

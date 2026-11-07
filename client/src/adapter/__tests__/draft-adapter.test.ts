@@ -9,6 +9,8 @@ const wasm = vi.hoisted(() => ({
   submit_deck_for_seat: vi.fn(),
   suggest_lands_for_seat: vi.fn(),
   draft_procedure: vi.fn(),
+  start_quick_draft: vi.fn(),
+  start_quick_cube_draft: vi.fn(),
 }));
 
 vi.mock("@wasm/draft", () => wasm);
@@ -135,5 +137,41 @@ describe("DraftAdapter engine coordinator", () => {
     await new DraftAdapter().submitDeck(["Island"], []);
 
     expect(wasm.submit_deck).toHaveBeenCalledWith('["Island"]', "[]");
+  });
+
+  it("passes_the_quick_constructors_their_drafting_and_time_last", async () => {
+    const view = { status: "Drafting" };
+    wasm.start_quick_draft.mockReturnValue({ owner: 9, view });
+    wasm.start_quick_cube_draft.mockReturnValue({ owner: 9, view });
+    const settings = {
+      pod_size: 4,
+      pack_count: 2,
+      cards_per_pack: 10,
+      min_deck_size: 20,
+      addable_cards: { policy: "StandardBasics" as const, custom: [] },
+    };
+
+    // The drafting is not the `EngineBots` a hard-coded value would send, and
+    // the time is nonzero, so the `bigint` it crosses the boundary as is visible.
+    const set = await withDraftEngineOperation((lease) =>
+      lease.initialize("pool", 3, 11, "LlmSeats", 1_700_000_000_000));
+    const cube = await withDraftEngineOperation((lease) =>
+      lease.initializeCube("1 Alpha", "Cube", settings, 3, 11, "LlmSeats", 1_700_000_000_000));
+
+    // LAST and exact-args: the engine reads this boundary positionally.
+    expect(wasm.start_quick_draft).toHaveBeenCalledOnce();
+    expect(wasm.start_quick_draft).toHaveBeenCalledWith("pool", 3, 11, "\"LlmSeats\"", 1_700_000_000_000n);
+    expect(wasm.start_quick_cube_draft).toHaveBeenCalledOnce();
+    expect(wasm.start_quick_cube_draft).toHaveBeenCalledWith(
+      "1 Alpha",
+      "Cube",
+      JSON.stringify(settings),
+      3,
+      11,
+      "\"LlmSeats\"",
+      1_700_000_000_000n,
+    );
+    expect(set).toEqual({ owner: 9, view });
+    expect(cube).toEqual({ owner: 9, view });
   });
 });

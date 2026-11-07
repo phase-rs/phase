@@ -13,15 +13,6 @@ export type Draft27ViewAdmission =
   | { ok: true }
   | { ok: false; error: Draft27CompatibilityError };
 
-/**
- * The host must retain the exact value it admitted.  Keeping the generic
- * value in this result makes it impossible for a caller to classify one view
- * and accidentally publish a later reread instead.
- */
-export type Draft27ValueAdmission<T> =
-  | { ok: true; value: T }
-  | { ok: false; error: Draft27CompatibilityError };
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -71,29 +62,14 @@ export function classifyDraft27Compatibility(rawView: unknown): Draft27ViewAdmis
 }
 
 /**
- * Host and import callers use the generic entry below so their admitted raw
- * value remains bound to the side effects that follow it.
+ * Returns the value it is given once the classifier admits it, or throws the
+ * typed incompatibility error.  It classifies only that value: a saved draft
+ * session is the draft engine's to check.
  */
-export function admitDraft27GuestView(rawView: unknown): Draft27ViewAdmission {
-  return classifyDraft27Compatibility(rawView);
-}
-
-/**
- * Side-effect-free host admission for a raw view.  It classifies only the
- * value it is given: a saved draft session is the draft engine's to check.
- */
-export function admitDraft27HostValue<T>(value: T): Draft27ValueAdmission<T> {
-  const direct = classifyDraft27Compatibility(value);
-  if (!direct.ok) return direct;
-
-  return { ok: true, value };
-}
-
-/** Returns the admitted value, or throws the typed incompatibility error. */
 export function requireDraft27HostValue<T>(value: T): T {
-  const admission = admitDraft27HostValue(value);
+  const admission = classifyDraft27Compatibility(value);
   if (!admission.ok) throw new Draft27IncompatibilityError(admission.error);
-  return admission.value;
+  return value;
 }
 
 export class Draft27IncompatibilityError extends Error {

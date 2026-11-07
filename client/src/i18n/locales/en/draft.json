@@ -175,6 +175,10 @@
     "cardsInPack_few": "{{count}} cards in pack",
     "cardsInPack_many": "{{count}} cards in pack",
     "cardsInPack_other": "{{count}} cards in pack",
+    "queuedPacks_one": "{{count}} pack in your queue",
+    "queuedPacks_few": "{{count}} packs in your queue",
+    "queuedPacks_many": "{{count}} packs in your queue",
+    "queuedPacks_other": "{{count}} packs in your queue",
     "currentPick": "Pack {{pack}} Pick {{pick}}",
     "picking": "Picking…",
     "autoPick": "Auto-pick",
@@ -663,6 +667,7 @@
     "hostLeft": "Host left the draft",
     "connection": "Connection Error",
     "incompatible": "This draft is incompatible with your protocol version.",
+    "unreadable": "This saved draft cannot be read, so it cannot be resumed.",
     "retry": "Try Reconnecting"
   },
   "spectator": {

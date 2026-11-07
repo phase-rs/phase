@@ -96,7 +96,12 @@ vi.mock("../../components/draft/SetSelector", () => ({ SetSelector: () => null }
 
 import { DraftPodPage } from "../DraftPodPage";
 import { isHostedPodRecoveryInFlight, useDraftPodStore } from "../../stores/draftPodStore";
-import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
+import {
+  DRAFT_RECOVERY_CONNECTION_ERROR,
+  DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
+  DRAFT_RECOVERY_UNREADABLE_ERROR,
+  useMultiplayerDraftStore,
+} from "../../stores/multiplayerDraftStore";
 import { useConnectivityStore } from "../../stores/connectivityStore";
 import {
   getDraftStore,
@@ -173,6 +178,14 @@ function savedSession(name: string): { text: string; verdict: RestorableDraftSes
   if (!saved) throw new Error(`The fixture has no saved session named ${name}`);
   return { text: JSON.stringify(saved.session), verdict: saved.verdict };
 }
+
+/** What the current recovery failure records, by name. */
+function recordedFailureKeys(): string[] {
+  return Object.keys(useDraftPodStore.getState().hostRecoveryFailure ?? {}).sort();
+}
+
+/** A recovery failure records its kind and the attempt that showed it, and nothing of the saved pod. */
+const failureKeys = ["capture", "kind", "orchestrationGeneration", "routeToken"];
 
 describe("DraftPodPage host recovery on the saved pod storage", () => {
   beforeEach(async () => {
@@ -384,14 +397,15 @@ describe("DraftPodPage host recovery on the saved pod storage", () => {
       await waitFor(() => expect(useDraftPodStore.getState().hostRecoveryFailure).not.toBeNull());
       expect(useDraftPodStore.getState().hostRecoveryFailure?.capture).toMatchObject({ id: savedPod.persistenceId });
       expect(useDraftPodStore.getState().hostRecoveryFailure?.kind).toBe("incompatible");
-      expect(useDraftPodStore.getState().configError).toBe("podError.incompatible");
+      expect(recordedFailureKeys()).toEqual(failureKeys);
+      expect(useDraftPodStore.getState().configError).toBe(DRAFT_RECOVERY_INCOMPATIBLE_ERROR);
       expect(await screen.findByText("This draft is incompatible with your protocol version.")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Try Reconnecting" })).toBeEnabled();
       expect(mocks.hostRoom).not.toHaveBeenCalled();
       expect(mocks.hosts).toHaveLength(0);
       expect(mocks.checkRestorableSession).toHaveBeenCalledWith(saved.draftSessionJson);
       expect(inspectActiveDraftPod()).toMatchObject({ type: "present", capture: { id: savedPod.persistenceId } });
-      await expect(loadDraftHostSession(savedPod.persistenceId)).resolves.toMatchObject({ type: "admitted", raw: saved });
+      await expect(loadDraftHostSession(savedPod.persistenceId)).resolves.toMatchObject({ type: "admitted", session: saved });
     });
 
     it("ends the recovery as a connection failure before any peer when the engine cannot answer", async () => {
@@ -403,11 +417,12 @@ describe("DraftPodPage host recovery on the saved pod storage", () => {
       await waitFor(() => expect(useDraftPodStore.getState().hostRecoveryFailure).not.toBeNull());
       expect(useDraftPodStore.getState().hostRecoveryFailure?.capture).toMatchObject({ id: savedPod.persistenceId });
       expect(useDraftPodStore.getState().hostRecoveryFailure?.kind).toBe("initializationFailure");
-      expect(useDraftPodStore.getState().configError).toBe("podError.connection");
+      expect(recordedFailureKeys()).toEqual(failureKeys);
+      expect(useDraftPodStore.getState().configError).toBe(DRAFT_RECOVERY_CONNECTION_ERROR);
       expect(mocks.hostRoom).not.toHaveBeenCalled();
       expect(mocks.hosts).toHaveLength(0);
       expect(inspectActiveDraftPod()).toMatchObject({ type: "present", capture: { id: savedPod.persistenceId } });
-      await expect(loadDraftHostSession(savedPod.persistenceId)).resolves.toMatchObject({ type: "admitted", raw: saved });
+      await expect(loadDraftHostSession(savedPod.persistenceId)).resolves.toMatchObject({ type: "admitted", session: saved });
     });
   });
 
@@ -431,13 +446,79 @@ describe("DraftPodPage host recovery on the saved pod storage", () => {
       expect(mocks.checkRestorableSession).toHaveBeenCalledOnce();
       expect(mocks.checkRestorableSession).toHaveBeenCalledWith(text);
       expect(useDraftPodStore.getState().hostRecoveryFailure?.kind).toBe("incompatible");
-      expect(useDraftPodStore.getState().configError).toBe("podError.incompatible");
+      expect(recordedFailureKeys()).toEqual(failureKeys);
+      expect(useDraftPodStore.getState().configError).toBe(DRAFT_RECOVERY_INCOMPATIBLE_ERROR);
       expect(await screen.findByText("This draft is incompatible with your protocol version.")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Try Reconnecting" })).toBeEnabled();
       expect(mocks.hostRoom).not.toHaveBeenCalled();
       expect(mocks.hosts).toHaveLength(0);
       expect(inspectActiveDraftPod()).toMatchObject({ type: "present", capture: { id: savedPod.persistenceId } });
-      await expect(loadDraftHostSession(savedPod.persistenceId)).resolves.toMatchObject({ type: "admitted", raw: saved });
+      await expect(loadDraftHostSession(savedPod.persistenceId)).resolves.toMatchObject({ type: "admitted", session: saved });
+    });
+  });
+
+  describe("with a started saved pod whose session the draft engine cannot read", () => {
+    const { text, verdict } = savedSession("legacy_review_unknown_flow");
+    const saved = { ...savedPod, draftStarted: true, draftSessionJson: text };
+    const unreadableMessage = "This saved draft cannot be read, so it cannot be resumed.";
+
+    beforeEach(async () => {
+      await saveDraftHostSession(savedPod.persistenceId, saved);
+      saveActiveDraftPod(savedRecord({ phase: "drafting" }));
+      mocks.checkRestorableSession.mockResolvedValue(verdict);
+      // draft-wasm's import throws its refusal text as a string; its
+      // restore's refusal for this session begins with this text.
+      mocks.restoreRefusal = "Failed to deserialize draft session: unknown variant `FutureFlow`";
+    });
+
+    it("reports the pod with its own message and no retry, before any peer", async () => {
+      // Reach: the draft engine's recorded answer for this saved session is that
+      // it cannot read it.
+      expect(verdict).toEqual({ type: "Unreadable" });
+
+      renderAt("/draft-pod?entry=host");
+
+      expect(await screen.findByText(unreadableMessage)).toBeInTheDocument();
+      // Reach: the recovery settled with a recorded failure for the saved pod.
+      expect(useDraftPodStore.getState().hostRecoveryFailure).not.toBeNull();
+      expect(useDraftPodStore.getState().hostRecoveryFailure?.capture).toMatchObject({ id: savedPod.persistenceId });
+      expect(useDraftPodStore.getState().hostRecoveryFailure?.kind).toBe("unreadable");
+      expect(recordedFailureKeys()).toEqual(failureKeys);
+      expect(useDraftPodStore.getState().configError).toBe(DRAFT_RECOVERY_UNREADABLE_ERROR);
+      expect(screen.getByRole("button", { name: "Return to Menu" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Try Reconnecting" })).toBeNull();
+      expect(mocks.hostRoom).not.toHaveBeenCalled();
+      expect(mocks.hosts).toHaveLength(0);
+      expect(mocks.checkRestorableSession).toHaveBeenCalledOnce();
+      expect(mocks.checkRestorableSession).toHaveBeenCalledWith(text);
+      expect(inspectActiveDraftPod()).toMatchObject({ type: "present", capture: { id: savedPod.persistenceId } });
+      await expect(loadDraftHostSession(savedPod.persistenceId)).resolves.toMatchObject({ type: "admitted", session: saved });
+    });
+
+    it("keeps a held guest seat running through the failure and its Return to Menu", async () => {
+      const user = userEvent.setup();
+      await expect(
+        useMultiplayerDraftStore.getState().joinDraft({ kind: "new", roomCode: "ABCDE", displayName: "Alice" }),
+      ).resolves.toEqual({ status: "opened" });
+      // Reach: this tab holds a guest seat in another pod.
+      expect(useMultiplayerDraftStore.getState().role).toBe("guest");
+
+      renderAt("/draft-pod?entry=host");
+
+      expect(await screen.findByText(unreadableMessage)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Try Reconnecting" })).toBeNull();
+      expect(useDraftPodStore.getState().hostRecoveryFailure?.kind).toBe("unreadable");
+      expect(recordedFailureKeys()).toEqual(failureKeys);
+      expect(useDraftPodStore.getState().configError).toBe(DRAFT_RECOVERY_UNREADABLE_ERROR);
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "guest", phase: "lobby" });
+
+      await user.click(screen.getByRole("button", { name: "Return to Menu" }));
+
+      await waitFor(() => expect(useDraftPodStore.getState().hostRecoveryFailure).toBeNull());
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "guest", phase: "lobby" });
+      expect(mocks.hostRoom).not.toHaveBeenCalled();
+      expect(inspectActiveDraftPod()).toMatchObject({ type: "present", capture: { id: savedPod.persistenceId } });
+      await expect(loadDraftHostSession(savedPod.persistenceId)).resolves.toMatchObject({ type: "admitted", session: saved });
     });
   });
 });

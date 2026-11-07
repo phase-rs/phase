@@ -1710,4 +1710,72 @@ describe("useDraftWorkspaceDrag", () => {
     expect(disconnect).toHaveBeenCalledOnce();
     globalThis.ResizeObserver = OriginalResizeObserver;
   });
+
+  describe("an owned drop whose interaction generation moves", () => {
+    const ownedIntent = {
+      kind: "pick", instanceIds: ["card-1"], destination: "sideboard", placementHint: { column: 2 },
+    } as const;
+
+    /** Drops `card-1` on the collapsed sideboard; the dispatch takes the lock with its own intent. */
+    function dropOwned(
+      interaction: ReturnType<typeof createInteraction>,
+      outcome: Promise<{ status: "acknowledged" }>,
+      onSettled: (result: PackDropSettlement) => void,
+    ) {
+      const onDrop = vi.fn((request: DraftDropRequest): DraftDropDispatch => {
+        interaction.publish({ interactionGeneration: 1, pickInteractionLocked: true, pendingPickIntent: ownedIntent });
+        return { requestToken: request.requestToken, interactionGeneration: 1, outcome };
+      });
+      render(<Harness interaction={interaction} onDrop={onDrop as never} onSettled={onSettled} />);
+      const source = screen.getByTestId("source");
+      const target = screen.getByTestId("target");
+      source.setPointerCapture = vi.fn();
+      source.releasePointerCapture = vi.fn();
+      target.getBoundingClientRect = () => rect(0, 0, 200, 200);
+      fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 4, pointerType: "mouse" });
+      fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 4, pointerType: "mouse" });
+      fireEvent.pointerUp(source, { clientX: 30, clientY: 30, pointerId: 4, pointerType: "mouse" });
+      expect(onDrop).toHaveBeenCalledOnce();
+    }
+
+    it("settles_an_owned_drop_on_its_outcome_when_its_unlock_moves_the_generation", async () => {
+      // An accepted selection installs a new prompt in the same update that
+      // releases the drop's lock; both orders of that update and the outcome.
+      for (const order of ["unlock-first", "outcome-first"] as const) {
+        const interaction = createInteraction();
+        let resolveOutcome!: (value: { status: "acknowledged" }) => void;
+        const outcome = new Promise<{ status: "acknowledged" }>((resolve) => { resolveOutcome = resolve; });
+        const onSettled = vi.fn();
+        dropOwned(interaction, outcome, onSettled);
+        expect(onSettled).not.toHaveBeenCalled();
+
+        const unlock = () => interaction.publish({ interactionGeneration: 2, pickInteractionLocked: false, pendingPickIntent: null });
+        if (order === "unlock-first") {
+          act(unlock);
+          expect(onSettled).not.toHaveBeenCalled();
+          await act(async () => resolveOutcome({ status: "acknowledged" }));
+        } else {
+          await act(async () => resolveOutcome({ status: "acknowledged" }));
+          expect(onSettled).not.toHaveBeenCalled();
+          act(unlock);
+        }
+
+        expect(onSettled).toHaveBeenCalledExactlyOnceWith({ kind: "outcome", outcome: { status: "acknowledged" } });
+        expect(screen.getByTestId("announcement")).toHaveTextContent("Picked Card One.");
+        cleanup();
+      }
+    });
+
+    it("conflicts_an_owned_drop_when_the_generation_moves_before_its_unlock", () => {
+      const interaction = createInteraction();
+      const onSettled = vi.fn();
+      dropOwned(interaction, new Promise(() => undefined), onSettled);
+      // Admitted: a refused admission settles as soon as the pointer is released.
+      expect(onSettled).not.toHaveBeenCalled();
+
+      act(() => interaction.publish({ interactionGeneration: 2, pickInteractionLocked: true, pendingPickIntent: ownedIntent }));
+
+      expect(onSettled).toHaveBeenCalledExactlyOnceWith({ kind: "conflict" });
+    });
+  });
 });

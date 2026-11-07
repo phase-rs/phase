@@ -175,6 +175,10 @@
     "cardsInPack_few": "{{count}} cartas en el sobre",
     "cardsInPack_many": "{{count}} cartas en el sobre",
     "cardsInPack_other": "{{count}} cartas en el sobre",
+    "queuedPacks_one": "{{count}} sobre en tu cola",
+    "queuedPacks_few": "{{count}} sobres en tu cola",
+    "queuedPacks_many": "{{count}} sobres en tu cola",
+    "queuedPacks_other": "{{count}} sobres en tu cola",
     "currentPick": "Sobre {{pack}} Elección {{pick}}",
     "picking": "Eligiendo…",
     "autoPick": "Elección automática",
@@ -655,6 +659,7 @@
     "hostLeft": "El anfitrión abandonó el draft",
     "connection": "Error de conexión",
     "incompatible": "Este draft no es compatible con tu versión de protocolo.",
+    "unreadable": "Este draft guardado no se puede leer, así que no se puede reanudar.",
     "retry": "Intentar reconectar"
   },
   "winston": {

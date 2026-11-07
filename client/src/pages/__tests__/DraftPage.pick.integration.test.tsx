@@ -5,7 +5,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
+import type {
+  DraftCardInstance,
+  DraftPlayerView,
+  FifoEffectOptions,
+  FifoPlayerView,
+} from "../../adapter/draft-adapter";
 import type * as WasmAdapterModule from "../../adapter/wasm-adapter";
 import { DRAFT_WORKSPACE_PREFERENCES_KEY } from "../../constants/storage";
 import { createDefaultDraftWorkspacePreferences } from "../../components/draft/workspace/workspacePreferences";
@@ -28,6 +33,9 @@ const wasm = vi.hoisted(() => ({
   auto_pick: vi.fn(),
   suggest_deck: vi.fn(),
   export_draft_session: vi.fn(() => "session"),
+  local_fifo_select: vi.fn(),
+  local_fifo_auto_select: vi.fn(),
+  local_fifo_submit_deck: vi.fn(),
 }));
 
 const persistence = vi.hoisted(() => ({
@@ -64,7 +72,6 @@ vi.mock("../../hooks/useCardImage", () => ({ useCardImage: () => ({ src: null, i
 vi.mock("../../components/chrome/ScreenChrome", () => ({ ScreenChrome: () => null }));
 vi.mock("../../components/menu/MenuShell", () => ({ MenuShell: ({ children }: { children: ReactNode }) => <>{children}</> }));
 vi.mock("../../components/draft/DraftSteps", () => ({ DraftSteps: () => null }));
-vi.mock("../../components/draft/DraftProgress", () => ({ DraftProgress: () => null }));
 vi.mock("../../components/card/HoverCardPreview", () => ({ HoverCardPreview: () => null }));
 vi.mock("../../components/draft/BotDifficultySelector", () => ({ BotDifficultySelector: () => null }));
 vi.mock("../../components/draft/CubeSetupPanel", () => ({ CubeSetupPanel: () => null }));
@@ -85,9 +92,48 @@ function card(instanceId: string): DraftCardInstance {
   };
 }
 
-function view({ pool = [], pack = [card("picked")], effects = [] }: { pool?: DraftCardInstance[]; pack?: DraftCardInstance[]; effects?: DraftCardInstance[] } = {}): DraftPlayerView {
+/**
+ * Cogwork Librarian (CNS #58), whose Oracle text the engine reads as its one
+ * additional-pick draft effect:
+ *   Draft this card face up.
+ *   As you draft a card, you may draft an additional card from that booster
+ *   pack. If you do, put this card into that booster pack.
+ */
+function cogworkLibrarian(): DraftCardInstance {
   return {
-    status: "Drafting", kind: "Quick", launch_capability: "None", distribution: "PickAndPass", commanders_required: 0, pool, current_pack: pack, draft_effects: effects,
+    instance_id: "cogwork", name: "Cogwork Librarian", set_code: "CNS", collector_number: "58",
+    rarity: "common", colors: [], cmc: 4, type_line: "Artifact Creature — Construct",
+    draft_effect: "additional_pick",
+  };
+}
+
+/** The engine-issued id of the session a started Quick draft carries. */
+const SESSION_ID = "local-0123456789abcdef";
+/** The live prompt of the started draft's head. */
+const STARTED_PROMPT = { session_id: SESSION_ID, seat: 0, generation: 3 };
+
+/** Seat 0's FIFO record: a held head under the started prompt, taking one card a step. */
+function fifoRecord(effects: FifoEffectOptions | null = null): FifoPlayerView {
+  return {
+    state: { session_id: SESSION_ID, revision: 1, paused: null, review_clock: null },
+    progress: { completed_steps: 0, round_completed_steps: 0 },
+    queue_count: 1,
+    head: { pack_id: 0, opening_seat: 0, round: 0, original_size: 14 },
+    prompt_id: STARTED_PROMPT,
+    requirements: { picks: 1, burns: 0 },
+    effects,
+    clock: null,
+  };
+}
+
+/**
+ * Seat 0's view of a started local FIFO draft: a literal that passes the
+ * client's FIFO wire check. Every answer keeps the started prompt, so the
+ * page's interaction generation stays where the start put it.
+ */
+function view({ pool = [], pack = [card("picked")], effects = null }: { pool?: DraftCardInstance[]; pack?: DraftCardInstance[]; effects?: FifoEffectOptions | null } = {}): DraftPlayerView {
+  return {
+    status: "Drafting", kind: "Quick", launch_capability: "None", distribution: "PickAndPass", commanders_required: 0, pool, current_pack: pack, draft_effects: [],
     pool_groups: {
       color_groups: [], type_groups: [], cmc_groups: [], rarity_groups: [],
       type_filter_options: [], color_filter_options: [],
@@ -99,7 +145,14 @@ function view({ pool = [], pack = [card("picked")], effects = [] }: { pool?: Dra
     cards_per_pack: 14, required_pick_count: 1, pick_selection_mode: "Direct", pick_steps_per_pack: 14, pack_count: 3, min_deck_size: 40, addable_cards: [],
     timer_remaining_ms: null, standings: [], current_round: 0, next_pairing_round: 1, tournament_format: "Swiss",
     pod_policy: "Casual", pairings: [], match_config: { match_type: "Bo1" },
+    flow: "FifoAsync",
+    fifo: fifoRecord(effects),
   } as DraftPlayerView;
+}
+
+/** The selection the store sent the local FIFO runtime on its `call`th select. */
+function selection(call = 0): unknown {
+  return JSON.parse(wasm.local_fifo_select.mock.calls[call]![1] as string);
 }
 
 function deferred<T>() {
@@ -109,7 +162,7 @@ function deferred<T>() {
 }
 
 async function renderDraft(initialView = view()) {
-  wasm.start_quick_draft.mockReturnValue(initialView);
+  wasm.start_quick_draft.mockReturnValue({ owner: 7, view: initialView });
   await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
   expect(fetch).toHaveBeenCalledWith(__CARD_DATA_URL__);
   expect(wasm.load_card_database).toHaveBeenLastCalledWith("{}");
@@ -169,12 +222,19 @@ describe("DraftPage production pick integration", () => {
 
   it("drags_a_rendered_pack_card_through_the_real_store_to_the_collapsed_sideboard_column", async () => {
     const result = deferred<DraftPlayerView>();
-    wasm.submit_pick.mockReturnValue(result.promise);
+    wasm.local_fifo_select.mockReturnValue(result.promise);
     await renderDraft();
     const { source, target, release } = prepareDrag();
 
     dragToTarget(source, target);
-    await waitFor(() => expect(wasm.submit_pick).toHaveBeenCalledWith("picked"));
+    await waitFor(() => expect(wasm.local_fifo_select).toHaveBeenCalledOnce());
+    expect(wasm.local_fifo_select.mock.calls[0]![0]).toBe(7);
+    expect(selection()).toEqual({
+      prompt_id: STARTED_PROMPT,
+      picked_card_instance_ids: ["picked"],
+      burned_card_instance_ids: [],
+      effect_card_instance_ids: [],
+    });
     expect(release).toHaveBeenCalledTimes(1);
     expect(useDraftStore.getState()).toMatchObject({ pickInteractionLocked: true });
     expect(useDraftStore.getState().workspaceState?.placements.picked).toBeUndefined();
@@ -186,7 +246,7 @@ describe("DraftPage production pick integration", () => {
 
   it("joins_owned_unlock_with_explicit_rejection_without_inserting_or_leaving", async () => {
     const result = deferred<DraftPlayerView>();
-    wasm.submit_pick.mockReturnValue(result.promise);
+    wasm.local_fifo_select.mockReturnValue(result.promise);
     await renderDraft();
     const { source, target, release } = prepareDrag();
     dragToTarget(source, target);
@@ -203,7 +263,7 @@ describe("DraftPage production pick integration", () => {
     // Simulate format admission at its adapter boundary to isolate pick sequencing.
     formatGate.evaluate.mockResolvedValueOnce({ compatible: true, reasons: [] });
     const submission = deferred<DraftPlayerView>();
-    wasm.submit_deck.mockReturnValue(submission.promise);
+    wasm.local_fifo_submit_deck.mockReturnValue(submission.promise);
     await renderDraft();
     const privateOperation = useDraftStore.getState().submitDeck();
     expect(formatGate.evaluate).toHaveBeenCalledOnce();
@@ -212,14 +272,14 @@ describe("DraftPage production pick integration", () => {
       scheme_deck: [], signature_spell: [], draft_set_codes: [],
       selected_format: "Limited", selected_match_type: "Bo1", player_count: 2,
     });
-    await waitFor(() => expect(wasm.submit_deck).toHaveBeenCalledOnce());
+    await waitFor(() => expect(wasm.local_fifo_submit_deck).toHaveBeenCalledOnce());
     expect(formatGate.evaluate.mock.invocationCallOrder[0])
-      .toBeLessThan(wasm.submit_deck.mock.invocationCallOrder[0]!);
+      .toBeLessThan(wasm.local_fifo_submit_deck.mock.invocationCallOrder[0]!);
     const { source, target, release } = prepareDrag();
     dragToTarget(source, target);
 
     await waitFor(() => expect(document.querySelector('[data-instance-id="picked"]')?.getAttribute("data-visual-state")).toBe("selected"));
-    expect(wasm.submit_pick).not.toHaveBeenCalled();
+    expect(wasm.local_fifo_select).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalledTimes(1);
     expect(useDraftStore.getState()).toMatchObject({ pickInteractionLocked: false, pendingPickIntent: null });
     expect(useDraftStore.getState().workspaceState?.placements.picked).toBeUndefined();
@@ -241,19 +301,20 @@ describe("DraftPage production pick integration", () => {
       scheme_deck: [], signature_spell: [], draft_set_codes: [],
       selected_format: "Limited", selected_match_type: "Bo1", player_count: 2,
     });
-    expect(wasm.submit_deck).not.toHaveBeenCalled();
+    expect(wasm.local_fifo_submit_deck).not.toHaveBeenCalled();
     expect(useDraftStore.getState().workspaceState).toBe(workspaceBefore);
     expect(useDraftStore.getState().view).toBe(viewBefore);
     expect(useDraftStore.getState()).toMatchObject({ phase: "drafting", pickInteractionLocked: false, pendingPickIntent: null });
 
-    wasm.submit_pick.mockReturnValue(view({ pool: [card("picked")], pack: [] }));
+    wasm.local_fifo_select.mockReturnValue(view({ pool: [card("picked")], pack: [] }));
     const { source, target, release } = prepareDrag();
     dragToTarget(source, target);
-    await waitFor(() => expect(wasm.submit_pick).toHaveBeenCalledWith("picked"));
+    await waitFor(() => expect(wasm.local_fifo_select).toHaveBeenCalledOnce());
+    expect(selection()).toMatchObject({ prompt_id: STARTED_PROMPT, picked_card_instance_ids: ["picked"] });
     await waitFor(() => expect(useDraftStore.getState().workspaceState?.placements.picked).toMatchObject({ zone: "sideboard", column: 0 }));
     expect(release).toHaveBeenCalledTimes(1);
     expect(useDraftStore.getState()).toMatchObject({ pickInteractionLocked: false, pendingPickIntent: null });
-    expect(wasm.submit_deck).not.toHaveBeenCalled();
+    expect(wasm.local_fifo_submit_deck).not.toHaveBeenCalled();
   });
 
   const preExistingPicked = { ...card("picked"), cmc: 0 };
@@ -265,7 +326,7 @@ describe("DraftPage production pick integration", () => {
     ["unchanged", [card("existing")], [card("existing")], undefined],
   ] as const)("rejects_%s_adapter_acknowledgment_through_the_real_page", async (label, beforePool, afterPool, existingZone) => {
     const pack = [label === "pre-existing" ? preExistingPicked : card("picked")];
-    wasm.submit_pick.mockReturnValue(view({ pool: [...afterPool], pack }));
+    wasm.local_fifo_select.mockReturnValue(view({ pool: [...afterPool], pack }));
     await renderDraft(view({ pool: [...beforePool], pack }));
     if (label === "pre-existing") {
       expect(useDraftStore.getState().workspaceState?.placements.picked).toMatchObject({ zone: "deck", column: 0 });
@@ -278,7 +339,8 @@ describe("DraftPage production pick integration", () => {
     const { source, target, release } = prepareDrag();
 
     dragToTarget(source, target);
-    await waitFor(() => expect(wasm.submit_pick).toHaveBeenCalledWith("picked"));
+    await waitFor(() => expect(wasm.local_fifo_select).toHaveBeenCalledOnce());
+    expect(selection()).toMatchObject({ picked_card_instance_ids: ["picked"] });
     await waitFor(() => expect(document.querySelector('[data-instance-id="picked"]')?.getAttribute("data-visual-state")).toBe("failure-restored"));
     unsubscribe();
 
@@ -291,20 +353,34 @@ describe("DraftPage production pick integration", () => {
   });
 
   it("rejects_partial_two_card_effect_atomically_through_the_real_page", async () => {
-    const effect = card("effect");
+    const librarian = cogworkLibrarian();
     const first = card("first");
     const second = card("second");
-    const initialView = view({ pool: [effect], pack: [first, second], effects: [effect] });
-    wasm.submit_pick_with_draft_effect.mockReturnValue(view({ pool: [effect, first], pack: [first, second], effects: [effect] }));
+    // CR 905.2c: the Librarian is drafted face up; using it takes one card
+    // plus its additional card, the two picks the engine publishes.
+    const effects = { card_instance_ids: ["cogwork"], requirements: [{ picks: 2, burns: 0 }] };
+    const initialView = view({ pool: [librarian], pack: [first, second], effects });
+    wasm.local_fifo_select.mockReturnValue(view({ pool: [librarian, first], pack: [first, second], effects }));
     await renderDraft(initialView);
     const workspaceBefore = useDraftStore.getState().workspaceState;
-    fireEvent.click(screen.getByRole("checkbox", { name: "effect" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Cogwork Librarian" }));
     fireEvent.click(screen.getByRole("button", { name: "first" }));
+    // A partial selection, one card where the engine publishes two, is refused
+    // before it reaches the engine.
+    fireEvent.click(screen.getByRole("button", { name: "Pick first to Deck" }));
+    expect(wasm.local_fifo_select).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().workspaceState).toBe(workspaceBefore);
     fireEvent.click(screen.getByRole("button", { name: "second" }));
     const { source, target, release } = prepareDrag("first");
 
     dragToTarget(source, target);
-    await waitFor(() => expect(wasm.submit_pick_with_draft_effect).toHaveBeenCalledWith("effect", JSON.stringify(["first", "second"])));
+    await waitFor(() => expect(wasm.local_fifo_select).toHaveBeenCalledOnce());
+    expect(selection()).toEqual({
+      prompt_id: STARTED_PROMPT,
+      picked_card_instance_ids: ["first", "second"],
+      burned_card_instance_ids: [],
+      effect_card_instance_ids: ["cogwork"],
+    });
     await waitFor(() => expect(document.querySelector('[data-instance-id="first"]')?.getAttribute("data-visual-state")).toBe("failure-restored"));
 
     expect(document.querySelector('[data-instance-id="second"]')).toHaveAttribute("data-visual-state", "failure-restored");
@@ -318,14 +394,15 @@ describe("DraftPage production pick integration", () => {
 
   it("ignores_a_stale_adapter_result_after_synchronous_lifecycle_replacement", async () => {
     await renderDraft();
-    wasm.submit_pick.mockImplementation(() => {
+    wasm.local_fifo_select.mockImplementation(() => {
       useDraftStore.getState().reset();
       return view({ pool: [card("picked")], pack: [] });
     });
     const { source, target, release } = prepareDrag();
 
     dragToTarget(source, target);
-    await waitFor(() => expect(wasm.submit_pick).toHaveBeenCalledWith("picked"));
+    await waitFor(() => expect(wasm.local_fifo_select).toHaveBeenCalledOnce());
+    expect(selection()).toMatchObject({ picked_card_instance_ids: ["picked"] });
     await waitFor(() => expect(useDraftStore.getState().phase).toBe("setup"));
 
     expect(release).toHaveBeenCalledTimes(1);
@@ -336,7 +413,7 @@ describe("DraftPage production pick integration", () => {
 
   it("keeps_a_new_generation_authoritative_when_the_old_adapter_result_arrives", async () => {
     const oldResult = deferred<DraftPlayerView>();
-    wasm.submit_pick.mockReturnValue(oldResult.promise);
+    wasm.local_fifo_select.mockReturnValue(oldResult.promise);
     await renderDraft();
     const { source, target, release } = prepareDrag();
     dragToTarget(source, target);
@@ -353,7 +430,7 @@ describe("DraftPage production pick integration", () => {
     expect(useDraftStore.getState()).toMatchObject({ interactionGeneration: replacementGeneration, pickInteractionLocked: false, pendingPickIntent: null });
     expect(useDraftStore.getState().workspaceState).toBeNull();
 
-    wasm.start_quick_draft.mockReturnValue(view({ pack: [card("replacement")] }));
+    wasm.start_quick_draft.mockReturnValue({ owner: 7, view: view({ pack: [card("replacement")] }) });
     await act(async () => useDraftStore.getState().startDraft("pool", "TST", "Replacement", 2));
     expect(document.querySelector('[data-instance-id="replacement"]')).not.toBeNull();
     expect(useDraftStore.getState().view?.current_pack?.map((entry) => entry.instance_id)).toEqual(["replacement"]);
@@ -361,5 +438,41 @@ describe("DraftPage production pick integration", () => {
     expect(useDraftStore.getState().workspaceState?.placements.picked).toBeUndefined();
     expect(document.querySelector('[data-instance-id="replacement"]')).not.toHaveAttribute("data-visual-state", "failure-restored");
     expect(document.querySelector('[data-visual-state="leaving"]')).toBeNull();
+  });
+
+  it("renders_a_started_quick_drafts_own_progress_and_queue", async () => {
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1440 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 900 });
+    try {
+      // The seat's own position: 16 steps in all, 2 of them this round. A
+      // reader of the wrong field fills 14 pips and counts 17; a reader of the
+      // legacy `pick_number` shows Pick 1, no pips and no queue.
+      await renderDraft({
+        ...view(),
+        current_pack_number: 1,
+        pick_number: 0,
+        pack_pick_steps: [14, 14, 14],
+        fifo: { ...fifoRecord(), progress: { completed_steps: 16, round_completed_steps: 2 }, queue_count: 3 },
+      } as DraftPlayerView);
+
+      expect(document.querySelector("[data-draft-progress]")).not.toBeNull();
+      expect(useDraftStore.getState().runtime).toEqual({ kind: "local-fifo", owner: 7 });
+      expect(screen.getByText("Pack 2 Pick 3")).toBeInTheDocument();
+      expect(screen.getByText("3 packs in your queue")).toBeInTheDocument();
+      // The two classes a filled pip carries; no pip carries a bare `bg-amber-400`.
+      const pips = [...document.querySelectorAll('[data-pack-number="2"][data-pick-number]')];
+      const filled = pips.filter((pip) => (
+        pip.classList.contains("bg-amber-400/50") || pip.classList.contains("bg-amber-400/90")
+      ));
+      expect(filled).toHaveLength(2);
+      const counter = document.querySelector("[data-draft-progress-counter]");
+      expect(counter?.children[0]?.textContent).toBe("3");
+      expect(counter?.children[1]?.textContent).toBe("/14");
+    } finally {
+      Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: width });
+      Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: height });
+    }
   });
 });
