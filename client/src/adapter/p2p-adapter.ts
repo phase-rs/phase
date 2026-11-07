@@ -4942,7 +4942,7 @@ export class P2PHostAdapter implements EngineAdapter {
   private sendSayingFailure(
     session: PeerSession,
     action: GameAction,
-    message: string,
+    error: unknown,
   ): void {
     if (action.type === "SayPhrase") {
       void this.send(session, {
@@ -4950,11 +4950,16 @@ export class P2PHostAdapter implements EngineAdapter {
         payment: action.data.payment,
         seq: action.data.seq,
         accepted: false,
-        message,
+        message: error instanceof Error ? error.message : String(error),
       });
       return;
     }
-    void this.send(session, { type: "action_failed", message });
+    void this.send(
+      session,
+      typeof error === "string"
+        ? { type: "action_failed", message: error }
+        : actionFailureFrame(error),
+    );
   }
 
   private async handleGuestMessage(
@@ -5054,7 +5059,7 @@ export class P2PHostAdapter implements EngineAdapter {
             this.sendSayingFailure(
               session,
               msg.action,
-              err instanceof Error ? err.message : String(err),
+              err,
             );
           }
           break;

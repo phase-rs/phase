@@ -538,6 +538,8 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
   });
 
   it("lets a following prompt start a fresh payment", async () => {
+    // Keep the real-time window from lapsing during prompt transition
+    acknowledgeSayings({ lapseOnExpiry: false });
     // 2 sayings owed: saying 1 leaves the panel mounted with said > 0
     setup(2);
     render(gamePageTree());

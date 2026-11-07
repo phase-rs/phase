@@ -4014,6 +4014,19 @@ function SayPhrasePanel({
   // restarted on every local saying.
   const deadlineRef = useRef<number | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = undefined;
+      }
+      deadlineRef.current = null;
+    };
+  }, []);
 
   // Compute the current deadline based on latest click or retained deadline.
   const computeDeadline = (): number | null => {
@@ -4029,6 +4042,8 @@ function SayPhrasePanel({
   const startTimer = () => {
     if (timerRef.current) clearTimeout(timerRef.current);
     const check = () => {
+      if (!mountedRef.current) return;
+      if (paymentIdRef.current !== paymentId) return;
       const deadline = deadlineRef.current;
       if (deadline === null) return;
       const now = sayPhraseHostClockMs();
@@ -4040,6 +4055,7 @@ function SayPhrasePanel({
         type: "SayPhrase",
         data: { payment: paymentId, seq: 0, at_ms: now, report: "Expiry" },
       }).catch(() => {});
+      if (!mountedRef.current || paymentIdRef.current !== paymentId) return;
       timerRef.current = setTimeout(check, SAY_PHRASE_EXPIRY_RETRY_MS);
     };
     const deadline = deadlineRef.current;
@@ -4051,7 +4067,22 @@ function SayPhrasePanel({
   // Effect: compute deadline and start timer when engine acknowledges a saying
   // (said changes) or payment/retained deadline changes. The deadline ref is
   // also updated in `say()` on each local click.
+  //
+  // The timer only arms AFTER the first saying (said > 0 or a local click).
+  // A fresh prompt with said = 0 has no pause to measure; the window starts
+  // on the first click. A restored payment (said > 0) arms from the engine's
+  // retained deadline_ms.
   useEffect(() => {
+    // No saying made yet and no local click: no pause to time, don't run.
+    if (said === 0 && lastSaidAt.current === null) {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = undefined;
+      }
+      deadlineRef.current = null;
+      return;
+    }
+
     const deadline = computeDeadline();
     if (deadline === null) {
       if (timerRef.current) {
@@ -4066,6 +4097,7 @@ function SayPhrasePanel({
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dispatch, paymentId, quickWindowMs, retainedDeadline, said]);
 
   const submitSaying = (at: number, retriesLeft: number) => {
