@@ -10038,9 +10038,12 @@ mod inferred_source_anaphor_tests {
     }
 
     /// CR 400.7 + CR 608.2c: the source referent is unbound only when the
-    /// departed source was the inference's sole referent. A spell targeting
-    /// Loki, God of Lies (the trigger's source) and a second creature still
-    /// names the second creature after Loki is blinked.
+    /// departed source was the inference's sole referent. No printed card puts
+    /// the source and a second object in the spell-cast tier; the nearest,
+    /// Loki, God of Lies, triggers only on a spell that "targets only a single
+    /// creature" (the second half of this test). The first half pins the
+    /// predicate's contract for a two-referent inference after the source is
+    /// blinked.
     #[test]
     fn the_source_referent_is_unbound_only_when_admission_empties_the_inference() {
         let mut state = GameState::new_two_player(7);
