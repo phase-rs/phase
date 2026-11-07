@@ -2003,6 +2003,8 @@ fn deem_inferior_mutated_owner_orders_components_second_from_top() {
             .with_mana_cost(ManaCost::zero())
             .id();
         let mut runner = scenario.build();
+        // Infrastructure exception: this direct merge stands in for Gemrazer's
+        // public Mutate cast; this row isolates the departing components' order.
         engine::game::merge::merge_object_onto(
             runner.state_mut(),
             rider,

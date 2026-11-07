@@ -4987,6 +4987,22 @@ pub(super) fn is_standalone_object_choice_clause(fragment: &str) -> bool {
     parse_battlefield_object_choice_core(rest, rest_lower, &mut throwaway).is_some()
 }
 
+// Preserve the legacy fallback's one-word rejection boundary. Longer tails may
+// contain restrictions or continuations handled elsewhere in the parser.
+fn target_tail_is_unparsed_word(tail: &str) -> bool {
+    verify(
+        all_consuming(preceded(
+            not(all_consuming(take_while1::<_, _, OracleError<'_>>(
+                |c: char| c.is_ascii_punctuation(),
+            ))),
+            take_while1(|c: char| !c.is_whitespace()),
+        )),
+        |word: &&str| !super::sequence::starts_clause_text_or_conjugated(word),
+    )
+    .parse(tail)
+    .is_ok()
+}
+
 pub(super) fn parse_choose_ast(
     text: &str,
     lower: &str,
@@ -5147,9 +5163,7 @@ pub(super) fn parse_choose_ast(
             let (target, remainder) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
             let tail = remainder.trim();
-            if (tail.split_whitespace().count() == 1
-                && !tail.chars().all(|c| c.is_ascii_punctuation())
-                && !super::sequence::starts_clause_text_or_conjugated(tail))
+            if target_tail_is_unparsed_word(tail)
                 || matches!(&target, TargetFilter::Typed(filter)
                     if filter.lacks_standalone_selection_constraint())
             {

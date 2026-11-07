@@ -108,7 +108,7 @@ fn rhythm_of_the_wild_grants_riot_on_library_to_battlefield_put() {
         matches!(
             frame,
             engine::types::resolution::ResolutionFrame::BatchDelivery(batch)
-                if batch.is_change_zone_population()
+                if batch.staged.is_some()
         )
     }));
     assert!(

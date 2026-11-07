@@ -384,6 +384,8 @@ fn add_component_pair(
     (host, rider)
 }
 
+// Infrastructure exception: this direct merge stands in for Gemrazer's public
+// Mutate cast so these rows isolate owner arrangement and component delivery.
 fn merge_pair(runner: &mut GameRunner, host: ObjectId, rider: ObjectId) {
     engine::game::merge::merge_object_onto(
         runner.state_mut(),

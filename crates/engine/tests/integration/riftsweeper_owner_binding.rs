@@ -148,7 +148,8 @@ fn riftsweeper_face_up_target_owner_and_stale_incarnation() {
     }
 }
 
-// CR 608.2b: the mandatory trigger cannot acquire the source when exile is empty.
+// CR 603.3d + CR 601.2c: with no legal target in exile, the trigger is removed
+// from the stack while its targets are being chosen, before it can resolve.
 #[test]
 fn riftsweeper_without_face_up_exile_has_no_owner_action() {
     let mut scenario = GameScenario::new();
