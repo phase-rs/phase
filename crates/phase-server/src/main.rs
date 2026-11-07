@@ -5157,6 +5157,23 @@ async fn handle_socket(
     // before that queued greeting is encoded.
     let (hello_tx, hello_rx) = tokio::sync::oneshot::channel();
     let (application, mut incoming) = mpsc::channel(socket_ingress::MAX_COMMANDS);
+    let drain_app = application.clone();
+    tx.set_ingress_drain(move || {
+        let app = drain_app.clone();
+        async move {
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let envelope = crate::socket_mailbox::ClientEnvelope::drain(done_tx);
+            let received = socket_io::Received {
+                message: envelope,
+                received_at: Instant::now(),
+                admission: crate::socket_ingress::Admission::synthetic(),
+                heartbeat: socket_io::HeartbeatInspection::Complete,
+            };
+            if app.send(received).await.is_ok() {
+                let _ = done_rx.await;
+            }
+        }
+    });
     transport.set_decoder(tokio::spawn(socket_decode::run(
         frames,
         socket.clone(),
@@ -5190,6 +5207,11 @@ async fn handle_socket(
                     None => break,
                 },
             };
+            if let Some(drain) = client_msg.drain {
+                let _ = drain.send(());
+                drop(admission);
+                continue;
+            }
             socket.set_command_id(client_msg.command_id());
             let resync = client_msg.resync;
             let client_msg = client_msg.message;
@@ -10080,7 +10102,9 @@ fn epoch_ms_at_ingress(received_at: Instant) -> u64 {
 /// The client may report the lapse too, but it cannot be the only timer: a
 /// reloaded or skewed payer would otherwise hold the payment open forever.
 /// `(payer, payer token, payment id, deadline)` is read under the session lock.
-fn say_phrase_expiry_target(session: &GameSession) -> Option<(PlayerId, String, u64, u64)> {
+pub(crate) fn say_phrase_expiry_target(
+    session: &GameSession,
+) -> Option<(PlayerId, String, u64, u64)> {
     let payment = session.state.say_payment.as_deref()?;
     let deadline_ms = payment.deadline_ms?;
     let engine::types::game_state::WaitingFor::UnlessPayment { player, .. } =
@@ -10103,7 +10127,7 @@ fn say_phrase_expiry_target(session: &GameSession) -> Option<(PlayerId, String, 
 /// before submitting: a saying accepted while the task slept advances the
 /// deadline, and an expiry frame from the old deadline must not be sent.
 #[allow(clippy::too_many_arguments)]
-fn schedule_say_phrase_expiry(
+pub(crate) fn schedule_say_phrase_expiry(
     target: Option<(PlayerId, String, u64, u64)>,
     executor: &game_executor::GameExecutor,
     state: &SharedState,
@@ -10131,6 +10155,16 @@ fn schedule_say_phrase_expiry(
         );
         loop {
             tokio::time::sleep(sleep_for).await;
+            let payer_tx = {
+                let routes = connections.lock().await;
+                routes
+                    .get(&game_code)
+                    .and_then(|seats| seats.get(&payer))
+                    .cloned()
+            };
+            if let Some(ref payer_tx) = payer_tx {
+                payer_tx.drain_ingress().await;
+            }
             let live = match lock_session(&state, &game_code).await {
                 Ok(session) => say_phrase_expiry_target(&session),
                 Err(_) => return,
@@ -10150,39 +10184,168 @@ fn schedule_say_phrase_expiry(
                 _ => return,
             }
         }
-        let payer_tx = {
-            let routes = connections.lock().await;
-            routes
-                .get(&game_code)
-                .and_then(|seats| seats.get(&payer))
-                .cloned()
-        };
-        let Some(payer_tx) = payer_tx else {
-            return;
-        };
-        let mut identity = SocketIdentity::default();
-        identity.set_session(game_code.clone(), payer, token);
-        crate::handle_full_game_submission(
-            None,
-            GameSubmission::Action(GameAction::SayPhrase {
-                payment: payment_id,
-                seq: 0,
-                at_ms: 0,
-                report: engine::types::un_actions::SayPhraseReport::Expiry,
-            }),
+        apply_say_phrase_expiry(
+            &game_code,
+            payer,
+            &token,
+            payment_id,
             &executor,
             &state,
             &db,
             &draft_state,
             &connections,
-            &payer_tx,
             &game_db,
             &game_spectators,
-            &identity,
             Instant::now(),
         )
         .await;
     });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_say_phrase_expiry(
+    game_code: &str,
+    payer: PlayerId,
+    player_token: &str,
+    payment_id: u64,
+    executor: &game_executor::GameExecutor,
+    state: &SharedState,
+    db: &SharedDb,
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    game_db: &SharedGameDb,
+    game_spectators: &SharedGameSpectators,
+    received_at: Instant,
+) {
+    let host_received_at_ms = epoch_ms_at_ingress(received_at);
+    let lock_start = Instant::now();
+    let Ok(session) = lock_session(state, game_code).await else {
+        return;
+    };
+    let live = say_phrase_expiry_target(&session);
+    let Some((live_payer, _, live_payment, live_deadline)) = live else {
+        return;
+    };
+    if live_payer != payer || live_payment != payment_id || live_deadline > host_received_at_ms {
+        return;
+    }
+    let key = session
+        .full_runtime
+        .as_ref()
+        .expect("an authenticated Full action retains its runtime")
+        .key
+        .clone();
+    let publisher = game_executor::StateUpdatePublisher::capture(
+        connections,
+        Some(game_spectators),
+        key,
+        session.player_count,
+        Vec::new(),
+        Vec::new(),
+    )
+    .await;
+    let card_db = db.clone();
+    let persistence = game_db.clone();
+    let persistence_executor = executor.clone();
+    let code = game_code.to_string();
+    let action = GameAction::SayPhrase {
+        payment: payment_id,
+        seq: 0,
+        at_ms: 0,
+        report: engine::types::un_actions::SayPhraseReport::Expiry,
+    };
+    let player_token = player_token.to_string();
+    let (session, applied) = executor
+        .with_session(session, move |session| {
+            let HandledAction { result, takeback } = session
+                .handle_action_with_card_db_outcome_at(
+                    &player_token,
+                    action,
+                    Some(card_db.as_ref()),
+                    host_received_at_ms,
+                )?;
+            let revision = session.advance_state_revision();
+            let ai = session.begin_ai_run();
+            let mut publisher = publisher;
+            let (takeback_before, takeback_after) = concession_takeback_notices(takeback, payer);
+            if let Some(notice) = takeback_before {
+                publisher.notify_players(notice);
+            }
+            let terminal = matches!(
+                &session.state.waiting_for,
+                engine::types::game_state::WaitingFor::GameOver { .. }
+            );
+            let (unpublished, takeback_after) = if ai.is_break() && !terminal {
+                persist_full_session_async(&persistence_executor, &persistence, session);
+                let source = game_executor::StateUpdateSource::from_result(&result, revision)
+                    .guarded(&code)
+                    .map_err(|reason| {
+                        warn!(
+                            game = %code,
+                            revision,
+                            %reason,
+                            "action snapshot exceeds broadcast bounds"
+                        );
+                        SessionActionError::Operational(reason)
+                    })?;
+                publisher.set_batch_metadata(
+                    session.state.eliminated_players.clone(),
+                    session.rewind_options(),
+                );
+                publisher.publish(&source);
+                if let Some(notice) = takeback_after {
+                    publisher.notify_players(notice);
+                }
+                (None, None)
+            } else {
+                (Some(result), takeback_after)
+            };
+            Ok::<_, SessionActionError>(Some(AppliedHumanSubmission {
+                revision,
+                unpublished,
+                takeback_after,
+                publisher,
+                ai,
+            }))
+        })
+        .await;
+    let Ok(Some(applied)) = applied else {
+        return;
+    };
+    let AppliedHumanSubmission {
+        revision,
+        unpublished,
+        takeback_after,
+        publisher,
+        ai,
+    } = applied;
+    let (dummy_tx, _) = socket_mailbox::channel();
+    let reply = dummy_tx.for_completion(None);
+    let Some(human_result) = unpublished else {
+        publisher.finish(executor).await;
+        if let std::ops::ControlFlow::Break(ai) = ai {
+            broadcast_ai_failure(connections, game_code, ai.fault).await;
+        }
+        return;
+    };
+    finish_full_ai_continuation(
+        session,
+        ai,
+        human_result,
+        revision,
+        publisher,
+        takeback_after.into_iter().collect(),
+        &reply,
+        executor,
+        state,
+        draft_state,
+        connections,
+        game_db,
+        game_code.to_string(),
+        "say_phrase_expiry",
+        lock_start,
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -88,6 +88,12 @@ impl Admission {
         self.pool
     }
 
+    pub(crate) fn synthetic() -> Self {
+        IngressBudget::default()
+            .admit_for_refusal()
+            .expect("default budget admits")
+    }
+
     /// Charge the uncompressed JSON retained by a decoded command, not just
     /// its smaller gzip envelope. The command keeps its original count slot.
     pub(crate) fn resize(&mut self, payload_bytes: usize) -> Result<(), Limit> {
