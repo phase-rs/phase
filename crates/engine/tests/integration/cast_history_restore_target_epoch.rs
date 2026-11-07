@@ -733,7 +733,8 @@ struct MidPaymentBoard {
     mountain: ObjectId,
 }
 
-/// CR 700.5: does `object` have the creature card type right now?
+/// CR 613.1d: layer 4 is what decides an object's card types, so "is this a
+/// creature right now" is a live layer reading and not a printed property.
 fn is_creature(state: &GameState, object: ObjectId) -> bool {
     state.objects[&object]
         .card_types
