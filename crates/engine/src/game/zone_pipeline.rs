@@ -3611,6 +3611,8 @@ pub(crate) fn prune_staged_member_for_player_left(
 /// reaches a staged owner buried below a top `PostReplacement` child; that case
 /// mutates the owner in place (the child's own resume drains it) rather than
 /// popping a frame it does not own.
+/// A retired replacement consultation skips its member, preserving main's
+/// departure behavior; FU-7/#341 tracks reconsulting the surviving controller.
 pub(crate) fn reconcile_staged_batch_after_departure(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -3635,6 +3637,49 @@ pub(crate) fn reconcile_staged_batch_after_departure(
         // members. If it settles, give settlement only that delivery segment,
         // not the departure sweep; otherwise append the segment and re-park.
         let mut batch_events = Vec::new();
+        // CR 800.4a + CR 616.1: departure can retire the chooser's pending
+        // replacement without retiring this surviving member's consultation.
+        // Only the active owner with no live child may skip that member.
+        let retired_prompt = match state.waiting_for {
+            WaitingFor::Priority { .. } => true,
+            WaitingFor::ReplacementChoice { player, .. } => {
+                !crate::game::players::is_alive(state, player)
+            }
+            _ => false,
+        };
+        if state.pending_replacement.is_none() && retired_prompt {
+            let retired_cursor = owner.staged.as_mut().and_then(|staged| {
+                if staged.stage != BatchDeliveryStage::Approving {
+                    return None;
+                }
+                let member = staged.members.get_mut(staged.cursor)?;
+                if member.pending_outcome.is_some()
+                    || !matches!(
+                        member.state,
+                        StagedBatchMemberState::OuterConsulting
+                            | StagedBatchMemberState::InnerConsulting
+                    )
+                {
+                    return None;
+                }
+                if let StagedMemberOperation::Destroy(operation) = &mut member.operation {
+                    operation.outer = StagedDestroyOuterApproval::Unapproved;
+                }
+                Some(staged.cursor)
+            });
+            if let Some(cursor) = retired_cursor {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                mark_staged_member_terminal(
+                    state,
+                    &mut owner,
+                    cursor,
+                    ZoneMoveCompletion::Remained,
+                    &mut batch_events,
+                );
+            }
+        }
         if reconcile_staged_owner(state, &mut owner, identity.group, &mut batch_events) {
             let deferred_events = std::mem::take(&mut owner.deferred_events);
             settle_batch_owner(state, owner, deferred_events, &mut batch_events);

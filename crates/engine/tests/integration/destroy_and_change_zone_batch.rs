@@ -26,7 +26,7 @@ use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::change_zone::resolve_all;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::engine::apply_as_current;
-use engine::game::scenario::{GameScenario, Outcome, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, Outcome, P0, P1};
 use engine::game::zones::create_object;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
@@ -2166,4 +2166,120 @@ fn tricksters_stratagem_nonmerged_exact_nth_slot() {
         assert!(runner.state().stack.is_empty());
         assert!(runner.state().resolution_stack.is_empty());
     }
+}
+
+fn destroy_with_surviving_owner_and_opposing_chooser() -> (GameRunner, ObjectId, ObjectId, ObjectId)
+{
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(p2, "Protected creature", 2, 2).id();
+    scenario.with_counter(host, CounterType::Shield, 1);
+    let sibling = scenario.add_creature(P0, "Ordinary creature", 2, 2).id();
+    let control = scenario
+        .add_enchantment_from_oracle(
+            P1,
+            "Mind Control",
+            "Enchant creature\nYou control enchanted creature.",
+        )
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let umbra = scenario
+        .add_enchantment_from_oracle(
+            p2,
+            "Hyena Umbra",
+            "Enchant creature\nEnchanted creature gets +1/+1 and has first strike.\nUmbra armor (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)",
+        )
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let wrath = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
+    let mut runner = scenario.build();
+    engine::game::effects::attach::attach_to(runner.state_mut(), control, host);
+    engine::game::effects::attach::attach_to(runner.state_mut(), umbra, host);
+    engine::game::layers::flush_layers(runner.state_mut());
+    assert_eq!(runner.state().objects[&host].controller, P1);
+    (runner, host, sibling, wrath)
+}
+
+/// CR 800.4a + CR 616.1: a departed chooser's retired consultation must not
+/// strand the other members. Skipping the protected member preserves main's
+/// behavior; reconsulting its surviving owner is FU-7/#341, not this repair.
+#[test]
+fn staged_destroy_skips_the_member_whose_chooser_conceded_and_resolves_the_rest() {
+    let p2 = PlayerId(2);
+    let (mut runner, host, sibling, wrath) = destroy_with_surviving_owner_and_opposing_chooser();
+    let pending = runner.cast(wrath).commit().try_resolve().unwrap();
+    assert!(matches!(
+        pending.final_waiting_for(),
+        WaitingFor::ReplacementChoice { player: P1, .. }
+    ));
+    assert!(runner.state().active_batch_delivery().is_some());
+    let result = runner.act(GameAction::Concede { player_id: P1 }).unwrap();
+    let wire = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the boundary immediately after concession serializes");
+    let restored = serde_json::from_value::<PersistedGameState>(wire)
+        .expect("the post-concession boundary decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+        .expect("the post-concession boundary prepares")
+        .finalize_immediately()
+        .expect("the post-concession boundary finalizes");
+    for state in [runner.state(), &restored] {
+        assert_eq!(state.objects[&host].controller, p2);
+        assert_eq!(state.objects[&host].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&sibling].zone,
+            Zone::Graveyard,
+            "retiring the chooser's consultation must not strand later members"
+        );
+        assert_eq!(state.objects[&wrath].zone, Zone::Graveyard);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.pending_replacement.is_none());
+        assert!(state.stack.is_empty());
+        assert!(state.resolution_stack.is_empty());
+        state
+            .resolution_stack
+            .validate_at_rest(&state.waiting_for)
+            .expect("the departed chooser leaves a valid public boundary");
+    }
+    assert!(!result.events.iter().any(|event| matches!(
+        event,
+        GameEvent::CreatureDestroyed { object_id, .. } if *object_id == host
+    )));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        GameEvent::CreatureDestroyed { object_id, .. } if *object_id == sibling
+    )));
+}
+
+/// CR 616.1: the same population must retain its live controller's choice,
+/// not skip the protected member before the chooser answers.
+#[test]
+fn staged_destroy_keeps_the_choice_when_its_chooser_does_not_concede() {
+    let (mut runner, host, sibling, wrath) = destroy_with_surviving_owner_and_opposing_chooser();
+    let pending = runner.cast(wrath).commit().try_resolve().unwrap();
+    assert!(matches!(
+        pending.final_waiting_for(),
+        WaitingFor::ReplacementChoice { player: P1, .. }
+    ));
+    assert!(runner.state().pending_replacement.is_some());
+    assert_eq!(runner.state().objects[&host].controller, P1);
+    assert_eq!(runner.state().objects[&host].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&sibling].zone, Zone::Battlefield);
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the living controller answers its retained choice");
+    assert_eq!(runner.state().objects[&host].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&sibling].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&wrath].zone, Zone::Graveyard);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    runner
+        .state()
+        .resolution_stack
+        .validate_at_rest(&runner.state().waiting_for)
+        .expect("the living chooser completes at a valid public boundary");
 }
