@@ -282,6 +282,7 @@ class NativeP2PBridge {
   private readonly latestViews = new Map<PlayerId, NativeViewerUpdate>();
   private readonly terminalDeliveries = new Map<PlayerId, FullTerminalDelivery>();
   private readonly pendingViews = new Map<number, Map<PlayerId, NativeSeatReport>>();
+  private readonly sayingRevisions = new Set<number>();
   /** Each seat's latest withheld notice; `latestViews` cannot reach its revision. */
   private readonly withheldNotices = new Map<PlayerId, StateWithheldNotice>();
   private readonly startWaiters: Array<(update: NativeViewerUpdate) => void> = [];
@@ -319,7 +320,11 @@ class NativeP2PBridge {
     private readonly formatConfig: FormatConfig | undefined,
     private readonly matchConfig: MatchConfig | undefined,
     private readonly options: NativeP2PHostOptions,
-    private readonly onRevision: (revision: number, reports: Map<PlayerId, NativeSeatReport>) => Promise<void>,
+    private readonly onRevision: (
+      revision: number,
+      reports: Map<PlayerId, NativeSeatReport>,
+      saying?: boolean,
+    ) => Promise<void>,
     private readonly onFault: (fault: { id: number; revision: number; message: string }) => Promise<void>,
     private readonly onHostTerminalDelivery: (revision: number) => Promise<void>,
     private readonly onSeatNotice: (playerId: PlayerId, event: TakebackEvent) => Promise<void>,
@@ -669,6 +674,7 @@ class NativeP2PBridge {
     this.latestViews.clear();
     this.withheldNotices.clear();
     this.pendingViews.clear();
+    this.sayingRevisions.clear();
     this.resumeWaiters.clear();
     this.pendingSeatNotices = [];
   }
@@ -739,6 +745,9 @@ class NativeP2PBridge {
       const revision = event.serverRevision;
       const playerId = client.playerId;
       if (playerId === null) return;
+      if (event.saying) {
+        this.sayingRevisions.add(revision);
+      }
       const update: NativeViewerUpdate = {
         snapshot: event.snapshot,
         events: event.events,
@@ -782,9 +791,10 @@ class NativeP2PBridge {
       .sort(([a], [b]) => a - b);
     for (const [revision, reports] of complete) {
       this.pendingViews.delete(revision);
+      const isSaying = this.sayingRevisions.has(revision);
       this.revisionQueue = this.revisionQueue
         .then(async () => {
-          await this.onRevision(revision, reports);
+          await this.onRevision(revision, reports, isSaying);
           this.deliveredRevision = Math.max(this.deliveredRevision, revision);
           await this.releaseFaultsThroughDeliveredRevision();
           await this.releaseSeatNoticesThroughDeliveredRevision();
@@ -1667,6 +1677,7 @@ export class P2PHostAdapter implements EngineAdapter {
    * substitute for the setup handshake.
    */
   private guestAckedRevisions = new Map<PlayerId, number>();
+  private readonly sayingRevisions = new Set<number>();
   /** Exact recipient statements issued so a receipt can be checked even if it
    * arrives while the host's send promise is still settling. */
   private issuedTerminalResults = new Map<PlayerId, P2PTerminalResult>();
@@ -1851,8 +1862,8 @@ export class P2PHostAdapter implements EngineAdapter {
         formatConfig,
         matchConfig,
         native,
-        (revision, reports) => this.enqueueDelivery(
-          () => this.handleNativeRevision(revision, reports),
+        (revision, reports, isSaying) => this.enqueueDelivery(
+          () => this.handleNativeRevision(revision, reports, isSaying),
         ),
         (fault) => this.enqueueDelivery(() => this.handleNativeAiDriverFault(fault)),
         (revision) => this.enqueueDelivery(() => this.commitWithheldHostTerminal(revision)),
@@ -3455,6 +3466,7 @@ export class P2PHostAdapter implements EngineAdapter {
   private async handleNativeRevision(
     revision: number,
     reports: Map<PlayerId, NativeSeatReport>,
+    sayingOrReason?: boolean | string,
     terminalReason?: string,
   ): Promise<void> {
     if (!this.ownsAuthority()) return;
@@ -3462,6 +3474,11 @@ export class P2PHostAdapter implements EngineAdapter {
     if (!hostReport) return;
     if (revision < this.authoritativeRevision) return;
     this.authoritativeRevision = revision;
+    const isSaying = typeof sayingOrReason === "boolean" ? sayingOrReason : false;
+    if (isSaying) {
+      this.sayingRevisions.add(revision);
+    }
+    const saying = isSaying || this.sayingRevisions.has(revision);
     const allNames = this.playerNamesForSeats();
     const sends: Array<Promise<boolean>> = [];
     for (const [pid, session] of this.guestSessions) {
@@ -3470,7 +3487,11 @@ export class P2PHostAdapter implements EngineAdapter {
       if (report.kind === "withheld") {
         // A seat client without a snapshot fails a withheld GameStarted instead of reporting it.
         if (this.nativeInitialSetupPending) continue;
-        sends.push(this.send(session, { type: "state_withheld", revision }));
+        sends.push(this.send(session, {
+          type: "state_withheld",
+          revision,
+          ...(saying ? { saying: true } : {}),
+        }));
         continue;
       }
       const { update } = report;
@@ -3498,6 +3519,7 @@ export class P2PHostAdapter implements EngineAdapter {
           state: update.snapshot.state,
           events: update.events,
           logEntries: update.logEntries,
+          ...(saying ? { saying: true } : {}),
           ...legalActionsToWire(update.snapshot.legalResult),
         }));
       }
@@ -3920,6 +3942,9 @@ export class P2PHostAdapter implements EngineAdapter {
     if (!this.ownsAuthority()) return;
     if (this.nativeBridge) return;
     const revision = ++this.authoritativeRevision;
+    if (saying) {
+      this.sayingRevisions.add(revision);
+    }
     const sends: Array<Promise<boolean>> = [];
     for (const [pid, session] of this.guestSessions) {
       if (this.disconnectedSeats.has(pid)) continue;
@@ -4207,15 +4232,22 @@ export class P2PHostAdapter implements EngineAdapter {
       const withheld = this.nativeWithheldSeats.get(pid);
       if (withheld) {
         // A lost notice heals into the notice, never into the seat's older board.
-        await this.send(session, { type: "state_withheld", revision: withheld.revision });
+        const isSaying = this.sayingRevisions.has(withheld.revision);
+        await this.send(session, {
+          type: "state_withheld",
+          revision: withheld.revision,
+          ...(isSaying ? { saying: true } : {}),
+        });
         return;
       }
       const handoff = await this.reconnectHandoff(pid);
+      const isSaying = this.sayingRevisions.has(handoff.revision);
       const accepted = await this.send(session, {
         type: "state_update",
         revision: handoff.revision,
         state: handoff.snapshot.state,
         events: [],
+        ...(isSaying ? { saying: true } : {}),
         ...legalActionsToWire(handoff.snapshot.legalResult),
       });
       if (!accepted) return;
@@ -6046,6 +6078,7 @@ export class P2PGuestAdapter implements EngineAdapter {
   /** Armed with the slot in `parkPendingSubmission`, cleared only by
    *  `settlePendingSubmission` — see `SUBMISSION_TIMEOUT_MS`. */
   private pendingSubmissionTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingSubmissionSent = false;
   /**
    * Spoken observations whose host reply is still in flight, keyed by payment
    * and sequence. They settle through `saying_result` only, never through an
@@ -6215,7 +6248,9 @@ export class P2PGuestAdapter implements EngineAdapter {
       },
     });
     this.rejectPendingSubmission(
-      new AdapterError("P2P_ERROR", "Host disconnected while submitting an action", true),
+      this.pendingSubmissionSent
+        ? new AdapterError("P2P_ERROR", "Host disconnected while submitting an action", true)
+        : new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true),
     );
     this.rejectAllPendingSayings(
       new AdapterError("P2P_ERROR", "Host disconnected while submitting a saying", true),
@@ -6258,10 +6293,20 @@ export class P2PGuestAdapter implements EngineAdapter {
     }
     return new Promise<SubmitResult>((resolve, reject) => {
       this.parkPendingSubmission(resolve, reject);
-      this.send({
+      void this.send({
         type: "action",
         senderPlayerId: this.assignedPlayerId!,
         action,
+      }).then((sent) => {
+        if (this.pendingResolve === resolve) {
+          this.pendingSubmissionSent = sent;
+          if (!sent) {
+            this.settlePendingSubmission({
+              kind: "reject",
+              error: new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true),
+            });
+          }
+        }
       });
     });
   }
@@ -6363,10 +6408,20 @@ export class P2PGuestAdapter implements EngineAdapter {
     this.requireAuthenticatedSession();
     return new Promise<SubmitResult>((resolve, reject) => {
       this.parkPendingSubmission(resolve, reject);
-      this.send({
+      void this.send({
         type: "interaction",
         senderPlayerId: this.assignedPlayerId!,
         submission,
+      }).then((sent) => {
+        if (this.pendingResolve === resolve) {
+          this.pendingSubmissionSent = sent;
+          if (!sent) {
+            this.settlePendingSubmission({
+              kind: "reject",
+              error: new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true),
+            });
+          }
+        }
       });
     });
   }
@@ -7020,6 +7075,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     const reject = this.pendingReject;
     this.pendingResolve = null;
     this.pendingReject = null;
+    this.pendingSubmissionSent = false;
     if (outcome.kind === "resolve") {
       if (!resolve) return false;
       resolve(outcome.result);
@@ -7065,6 +7121,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     });
     this.pendingResolve = resolve;
     this.pendingReject = reject;
+    this.pendingSubmissionSent = false;
     this.pendingSubmissionTimer = setTimeout(() => {
       this.pendingSubmissionTimer = null;
       this.settlePendingSubmission({
@@ -7134,9 +7191,10 @@ export class P2PGuestAdapter implements EngineAdapter {
 
   private handleHostDisconnect(session: PeerSession): void {
     if (session !== this.session) return;
-    this.rejectPendingSubmission(
-      new AdapterError("P2P_ERROR", "Host disconnected while submitting an action", true),
-    );
+    const error = this.pendingSubmissionSent
+      ? new AdapterError("P2P_ERROR", "Host disconnected while submitting an action", true)
+      : new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true);
+    this.rejectPendingSubmission(error);
     this.rejectAllPendingSayings(
       new AdapterError("P2P_ERROR", "Host disconnected while submitting a saying", true),
     );

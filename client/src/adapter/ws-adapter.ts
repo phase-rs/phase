@@ -1522,7 +1522,8 @@ export type WsAdapterEvent =
   | { type: "stateChanged"; snapshot: EngineSnapshot; events: GameEvent[]; logEntries?: GameLogEntry[]; serverRevision?: number;
       /** Server-published turn boundaries. Always an array on this transport —
        *  `[]` means "the server published none", never "unknown". */
-      rewindTargets?: RewindOption[] }
+      rewindTargets?: RewindOption[];
+      saying?: boolean }
   /** The server applied a state it could not send; `null` once a state arrives again. */
   | { type: "stateDelivery"; withheld: StateWithheldNotice | null }
   | { type: "sessionAttached"; attachment: NativeSessionAttachment }
@@ -3035,6 +3036,13 @@ export class WebSocketAdapter implements EngineAdapter {
           // own correlated completion it still answers the pending command;
           // dropping it would leave the submission slot occupied. Legacy
           // (uncorrelated) frames keep the old drop-only behaviour.
+          if (typeof msg.command_id === "number") {
+            const sayingPending = this.pendingSayingCommands.get(msg.command_id);
+            if (sayingPending) {
+              this.pendingSayingCommands.delete(msg.command_id);
+              sayingPending.resolve({ events: data.events, log_entries: data.log_entries });
+            }
+          }
           if (msg.command_id !== undefined) {
             const stalePending = this.submission.take(msg.command_id);
             if (stalePending) {
@@ -3063,11 +3071,13 @@ export class WebSocketAdapter implements EngineAdapter {
         );
         this.cachedStateRevision = data.state_revision ?? this.cachedStateRevision;
         this.settleWithheld();
+        let isSaying = false;
         if (typeof msg.command_id === "number") {
           const sayingPending = this.pendingSayingCommands.get(msg.command_id);
           if (sayingPending) {
             this.pendingSayingCommands.delete(msg.command_id);
             sayingPending.resolve({ events: data.events, log_entries: data.log_entries });
+            isSaying = true;
           }
         }
         const pending = this.submission.take(msg.command_id);
@@ -3084,6 +3094,7 @@ export class WebSocketAdapter implements EngineAdapter {
             logEntries: data.log_entries,
             serverRevision: data.state_revision,
             rewindTargets: data.rewind_targets ?? [],
+            ...(isSaying ? { saying: true } : {}),
           });
         }
         break;
@@ -3167,6 +3178,13 @@ export class WebSocketAdapter implements EngineAdapter {
           this.emit({ type: "bootstrapDelivered" });
           if (this.reconnectInFlight) this.completeReconnect(true);
         } else {
+          if (typeof msg.command_id === "number") {
+            const sayingPending = this.pendingSayingCommands.get(msg.command_id);
+            if (sayingPending) {
+              this.pendingSayingCommands.delete(msg.command_id);
+              sayingPending.resolve({ events: [], log_entries: [] });
+            }
+          }
           const pending = this.submission.take(msg.command_id);
           if (pending) {
             pending.resolve({ events: [], log_entries: [] });

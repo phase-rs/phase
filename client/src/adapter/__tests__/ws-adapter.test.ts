@@ -2923,6 +2923,42 @@ describe("WebSocketAdapter", () => {
       expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
     });
 
+    it("settles a saying action from its own correlated stale StateUpdate without applying the stale snapshot", async () => {
+      const events = vi.fn();
+      subject.onEvent(events);
+      deliverOwnershipStateUpdate(socket, "newer-peer-update", 5);
+      const sayingAction: GameAction = {
+        type: "SayPhrase",
+        data: { payment: 7, seq: 1, at_ms: 100, report: "Saying" },
+      };
+      const outcome = trackRejection(subject.submitAction(sayingAction, 0));
+      const commandId = lastSubmissionCommandId(socket);
+      events.mockClear();
+      deliverOwnershipStateUpdate(socket, "own-stale-saying-completion", 4, commandId);
+      await expect(outcome()).resolves.toEqual({
+        resolvedWith: { events: [{ marker: "own-stale-saying-completion" }], log_entries: [] },
+      });
+      // The stale snapshot itself is never applied.
+      expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
+    });
+
+    it("settles a saying action from a correlated StateWithheld notice", async () => {
+      deliverOwnershipStateUpdate(socket, "cached", 5);
+      const events = vi.fn();
+      subject.onEvent(events);
+      const sayingAction: GameAction = {
+        type: "SayPhrase",
+        data: { payment: 7, seq: 1, at_ms: 100, report: "Saying" },
+      };
+      const outcome = trackRejection(subject.submitAction(sayingAction, 0));
+      const commandId = lastSubmissionCommandId(socket);
+      deliverWithheld(6, commandId);
+      await expect(outcome()).resolves.toEqual({
+        resolvedWith: { events: [], log_entries: [] },
+      });
+      expect(latestDelivery(events)).toEqual({ revision: 6, reason: WITHHELD_REASON });
+    });
+
     it.each(["ActionRejected", "ActionFailed"] as const)(
       "owns a matching %s but ignores its late echo during the next interaction",
       async (type) => {

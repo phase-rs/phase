@@ -912,6 +912,7 @@ const VALID_TYPES = new Set([
   "action_rejected",
   "action_failed",
   "action_noop",
+  "saying_result",
   "mana_payment_preview",
   "mana_payment_preview_rejected",
   "mana_payment_preview_failed",

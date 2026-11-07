@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection.ts";
+import type { PeerSession } from "../../network/peer.ts";
+import { WIRE_PROTOCOL_VERSION, type P2PMessage } from "../../network/protocol.ts";
+import type { TransportConnection, TransportPeer } from "../../network/transport.ts";
 import { P2PGuestAdapter, P2PHostAdapter } from "../p2p-adapter.ts";
 import {
   AdapterError,
   AdapterErrorCode,
   type GameAction,
+  type GameEvent,
+  type GameState,
   type SubmitResult,
 } from "../types.ts";
 
@@ -69,6 +75,26 @@ type HostInternals = {
   expireSayPhrase: (paymentId: number) => Promise<void>;
 };
 
+type HostGuestMessageInternals = {
+  handlePendingTerminalReconnectFrame: (session: unknown, msg: unknown) => boolean;
+  authenticatedGuestPlayerId: (session: unknown, msg: unknown) => number | null;
+  concedingSeats: Set<number>;
+  eliminatedSeats: Set<number>;
+  gameRunState: string;
+  guestSessions: Map<number, unknown>;
+  applyBrowserMutation: <T>(run: () => Promise<T>) => Promise<T>;
+  nativeBridge: {
+    submitAction: (action: GameAction, player: number) => Promise<{ result: SubmitResult }>;
+  };
+  send: (session: unknown, msg: unknown) => Promise<boolean>;
+  sendSayingFailure: (session: unknown, action: GameAction, error: unknown) => void;
+  handleGuestMessage: (
+    session: unknown,
+    msg: P2PMessage,
+    receivedAtMs: number,
+  ) => Promise<void>;
+};
+
 function makeHost(submitAction: HostInternals["nativeBridge"]["submitAction"]) {
   const host = Object.create(P2PHostAdapter.prototype) as unknown as HostInternals;
   host.disposed = false;
@@ -108,6 +134,61 @@ function saying(seq = 1): SayingAction {
     type: "SayPhrase",
     data: { payment: 7, seq, at_ms: 1, report: "Saying" },
   };
+}
+
+function remoteState(label: string): GameState {
+  return {
+    label,
+    turn_number: 1,
+    active_player: 0,
+    priority_player: 1,
+    phase: "PreCombatMain",
+    players: [],
+    objects: {},
+    waiting_for: { type: "UnlessPayment", data: { player: 1 } },
+  } as unknown as GameState;
+}
+
+function createFakePeer(): {
+  peer: {
+    on: () => void;
+    off: () => void;
+    connect: () => never;
+    destroy: () => void;
+  };
+} {
+  return {
+    peer: {
+      on() {},
+      off() {},
+      connect() {
+        throw new Error("not used in tests");
+      },
+      destroy() {},
+    },
+  };
+}
+
+async function authenticatedGuest(conn: FakeDataConnection): Promise<P2PGuestAdapter> {
+  const { peer } = createFakePeer();
+  const adapter = new P2PGuestAdapter(
+    { player: { main_deck: [], sideboard: [] } },
+    peer as unknown as TransportPeer,
+    "host-peer",
+    conn as unknown as TransportConnection,
+  );
+  await adapter.initialize();
+  await conn.simulateData({
+    type: "game_setup",
+    wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+    assignedPlayerId: 1,
+    playerToken: "seat-token",
+    revision: 1,
+    state: remoteState("initial"),
+    events: [],
+    legalActions: [],
+  });
+  return adapter;
 }
 
 describe("P2P saying reply lane", () => {
@@ -167,46 +248,107 @@ describe("P2P saying reply lane", () => {
     expect(ordinaryResolve).toHaveBeenCalledWith(EMPTY);
   });
 
-  it("does not settle a parked Stay Quiet submission when a saying's state_update broadcast arrives", () => {
-    const guest = makeGuest(true);
-    const ordinaryResolve = vi.fn();
-    const ordinaryReject = vi.fn();
-    guest.parkPendingSubmission(ordinaryResolve, ordinaryReject);
+  it("does not settle a parked Stay Quiet submission when a saying's state_update or state_withheld arrives, and only settles it on its own result", async () => {
+    const conn = new FakeDataConnection();
+    const guest = await authenticatedGuest(conn);
 
-    // In guest adapter's handleMessage for "state_update", msg.saying bypasses settlePendingSubmission.
-    const msg = {
-      type: "state_update" as const,
-      saying: true,
-      events: [],
-      logEntries: [],
+    const stayQuietAction: GameAction = {
+      type: "ChooseUnlessCostBranch",
+      data: { choice: { type: "Decline" } },
     };
-    const settled = msg.saying
-      ? false
-      : guest.settlePendingSubmission({
-          kind: "resolve",
-          result: { events: msg.events, log_entries: msg.logEntries },
-        });
+    const ordinary = guest.submitAction(stayQuietAction, 1);
+    let ordinarySettled = false;
+    void ordinary.then(
+      () => {
+        ordinarySettled = true;
+      },
+      () => {
+        ordinarySettled = true;
+      },
+    );
 
-    expect(settled).toBe(false);
-    expect(ordinaryResolve).not.toHaveBeenCalled();
-    expect(guest.pendingResolve).toBe(ordinaryResolve);
+    // A saying's state_update broadcast arrives:
+    await conn.simulateData({
+      type: "state_update",
+      saying: true,
+      revision: 2,
+      state: remoteState("saying-state"),
+      events: [{ marker: "saying-applied" } as unknown as GameEvent],
+      logEntries: [],
+    });
+    expect(ordinarySettled).toBe(false);
+
+    // A saying's state_withheld broadcast arrives:
+    await conn.simulateData({
+      type: "state_withheld",
+      saying: true,
+      revision: 3,
+    });
+    expect(ordinarySettled).toBe(false);
+
+    // A saying_result arrives:
+    await conn.simulateData({
+      type: "saying_result",
+      payment: 7,
+      seq: 1,
+      accepted: true,
+    });
+    expect(ordinarySettled).toBe(false);
+
+    // Now its own state_update arrives (without saying):
+    await conn.simulateData({
+      type: "state_update",
+      revision: 4,
+      state: remoteState("quiet-state"),
+      events: [{ marker: "quiet-applied" } as unknown as GameEvent],
+      logEntries: [],
+    });
+
+    await expect(ordinary).resolves.toEqual({
+      events: [{ marker: "quiet-applied" }],
+      log_entries: [],
+    });
+    expect(ordinarySettled).toBe(true);
+    guest.dispose();
   });
 
-  it("forwards a native rejection through host to guest as a failed saying_result", () => {
-    const host = Object.create(P2PHostAdapter.prototype) as any;
+  it("forwards a native rejection through host to guest as a failed saying_result", async () => {
     const sentMessages: unknown[] = [];
-    host.send = vi.fn((_session: unknown, msg: unknown) => {
-      sentMessages.push(msg);
-      return Promise.resolve(true);
-    });
-    const session = {};
+    const session = {} as unknown as PeerSession;
     const rejection = new AdapterError(
       AdapterErrorCode.ACTION_REJECTED,
       "Payment already expired",
       false,
     );
+    const submitAction = vi.fn(async () => {
+      throw rejection;
+    });
 
-    host.sendSayingFailure(session, saying(1), rejection);
+    const host = Object.create(
+      P2PHostAdapter.prototype,
+    ) as unknown as HostGuestMessageInternals;
+    host.handlePendingTerminalReconnectFrame = () => false;
+    host.authenticatedGuestPlayerId = () => 1;
+    host.concedingSeats = new Set();
+    host.eliminatedSeats = new Set();
+    host.gameRunState = "running";
+    host.guestSessions = new Map([[1, session]]);
+    host.applyBrowserMutation = (run) => run();
+    host.nativeBridge = { submitAction };
+    host.send = vi.fn((_session: unknown, msg: unknown) => {
+      sentMessages.push(msg);
+      return Promise.resolve(true);
+    });
+
+    await host.handleGuestMessage(
+      session,
+      {
+        type: "action",
+        senderPlayerId: 1,
+        action: saying(1),
+      },
+      Date.now(),
+    );
 
     expect(sentMessages).toEqual([
       {
@@ -217,5 +359,99 @@ describe("P2P saying reply lane", () => {
         message: "Payment already expired",
       },
     ]);
+  });
+
+  it("propagates definite no-send for untimed P2P payments and preserves retry", async () => {
+    const currentConn = new FakeDataConnection();
+    const { peer } = createFakePeer();
+    const guest = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as TransportPeer,
+      "host-peer",
+      currentConn as unknown as TransportConnection,
+    );
+    await guest.initialize();
+    await currentConn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      revision: 1,
+      state: remoteState("initial"),
+      events: [],
+      legalActions: [],
+    });
+
+    const guestInternals = guest as unknown as {
+      pendingSubmissionSent: boolean;
+      parkPendingSubmission: (
+        resolve: (result: SubmitResult) => void,
+        reject: (error: Error) => void,
+      ) => void;
+      attachSession: (conn: TransportConnection) => void;
+      attemptReconnect: () => Promise<void>;
+      handleHostDisconnect: (session: unknown) => void;
+      session: unknown;
+    };
+    guestInternals.attemptReconnect = vi.fn().mockResolvedValue(undefined);
+
+    const untimedPayment: GameAction = {
+      type: "ChooseUnlessCostBranch",
+      data: { choice: { type: "Pay", data: { index: 0 } } },
+    };
+
+    // 1. Failed transport send rejects with ACTION_NOT_SENT:
+    vi.spyOn(currentConn, "send").mockImplementation(() => {
+      throw new Error("transport send failed");
+    });
+
+    await expect(guest.submitAction(untimedPayment, 1)).rejects.toMatchObject({
+      code: AdapterErrorCode.ACTION_NOT_SENT,
+    });
+    vi.restoreAllMocks();
+
+    // 2. Disconnect while parked and unsent also rejects with ACTION_NOT_SENT:
+    guestInternals.attemptReconnect = vi.fn().mockResolvedValue(undefined);
+    const unsentPromise = new Promise<SubmitResult>((resolve, reject) => {
+      guestInternals.parkPendingSubmission(resolve, reject);
+    });
+    guestInternals.handleHostDisconnect(guestInternals.session);
+    await expect(unsentPromise).rejects.toMatchObject({
+      code: AdapterErrorCode.ACTION_NOT_SENT,
+    });
+
+    // 3. Reattach session with an open connection and acknowledge reconnect.
+    const reconnectedConn = new FakeDataConnection();
+    guestInternals.attachSession(reconnectedConn as unknown as TransportConnection);
+
+    await reconnectedConn.simulateData({
+      type: "reconnect_ack",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      revision: 2,
+      state: remoteState("reconnected"),
+      events: [],
+      playerNames: { 0: "Host", 1: "Guest" },
+      legalActions: [],
+    });
+
+    // Retry untimed payment through the restored session:
+    const retried = guest.submitAction(untimedPayment, 1);
+
+    // Host receives the action and broadcasts state update:
+    await reconnectedConn.simulateData({
+      type: "state_update",
+      revision: 3,
+      state: remoteState("paid"),
+      events: [{ marker: "paid" } as unknown as GameEvent],
+      logEntries: [],
+    });
+
+    await expect(retried).resolves.toEqual({
+      events: [{ marker: "paid" }],
+      log_entries: [],
+    });
+
+    guest.dispose();
   });
 });
