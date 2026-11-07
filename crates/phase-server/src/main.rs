@@ -5157,19 +5157,18 @@ async fn handle_socket(
     // before that queued greeting is encoded.
     let (hello_tx, hello_rx) = tokio::sync::oneshot::channel();
     let (application, mut incoming) = mpsc::channel(socket_ingress::MAX_COMMANDS);
-    let drain_app = application.clone();
+    let drain_ingress = socket.ingress_sender();
     tx.set_ingress_drain(move || {
-        let app = drain_app.clone();
+        let ingress = drain_ingress.clone();
         async move {
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-            let envelope = crate::socket_mailbox::ClientEnvelope::drain(done_tx);
             let received = socket_io::Received {
-                message: envelope,
+                message: socket_io::IngressFrame::Drain(done_tx),
                 received_at: Instant::now(),
                 admission: crate::socket_ingress::Admission::synthetic(),
                 heartbeat: socket_io::HeartbeatInspection::Complete,
             };
-            if app.send(received).await.is_ok() {
+            if ingress.send(received).await.is_ok() {
                 let _ = done_rx.await;
             }
         }
@@ -8997,6 +8996,53 @@ async fn handle_full_game_submission(
         return;
     }
     let session = session.expect("the authority gate proved the session exists");
+    let seat = identity
+        .player_id
+        .expect("the authority gate proved this seat");
+    apply_and_publish_full_submission(
+        session,
+        submission,
+        &player_token,
+        seat,
+        command_id,
+        host_received_at_ms,
+        &reply,
+        executor,
+        state,
+        db,
+        draft_state,
+        connections,
+        game_db,
+        game_spectators,
+        game_code,
+        kind,
+        lock_start,
+        is_zero_count_debug_create,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_and_publish_full_submission(
+    session: tokio::sync::OwnedMutexGuard<server_core::session::GameSession>,
+    submission: GameSubmission,
+    player_token: &str,
+    seat: PlayerId,
+    command_id: Option<server_core::protocol::CommandId>,
+    host_received_at_ms: u64,
+    reply: &crate::socket_mailbox::Completion<'_>,
+    executor: &game_executor::GameExecutor,
+    state: &SharedState,
+    db: &SharedDb,
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    game_db: &SharedGameDb,
+    game_spectators: &SharedGameSpectators,
+    game_code: String,
+    kind: &'static str,
+    lock_start: Instant,
+    is_zero_count_debug_create: bool,
+) {
     let publisher = if is_zero_count_debug_create {
         None
     } else {
@@ -9016,21 +9062,14 @@ async fn handle_full_game_submission(
                 Vec::new(),
             )
             .await
-            .with_completion(
-                identity
-                    .player_id
-                    .expect("the authority gate proved this seat"),
-                command_id,
-            ),
+            .with_completion(seat, command_id),
         )
     };
     let card_db = db.clone();
     let persistence = game_db.clone();
     let persistence_executor = executor.clone();
     let code = game_code.clone();
-    let seat = identity
-        .player_id
-        .expect("the authority gate proved this seat");
+    let player_token = player_token.to_string();
     // The owned game guard spans admission waits, AI continuations and all
     // publication. Other games can use the CPU between these work units.
     let (session, applied) = executor
@@ -9151,7 +9190,7 @@ async fn handle_full_game_submission(
         revision,
         publisher,
         takeback_after.into_iter().collect(),
-        &reply,
+        reply,
         executor,
         state,
         draft_state,
@@ -10105,6 +10144,9 @@ fn epoch_ms_at_ingress(received_at: Instant) -> u64 {
 pub(crate) fn say_phrase_expiry_target(
     session: &GameSession,
 ) -> Option<(PlayerId, String, u64, u64)> {
+    if session.hosting() == server_core::session::HostingMode::SingleUser {
+        return None;
+    }
     let payment = session.state.say_payment.as_deref()?;
     let deadline_ms = payment.deadline_ms?;
     let engine::types::game_state::WaitingFor::UnlessPayment { player, .. } =
@@ -10229,121 +10271,33 @@ async fn apply_say_phrase_expiry(
     if live_payer != payer || live_payment != payment_id || live_deadline > host_received_at_ms {
         return;
     }
-    let key = session
-        .full_runtime
-        .as_ref()
-        .expect("an authenticated Full action retains its runtime")
-        .key
-        .clone();
-    let publisher = game_executor::StateUpdatePublisher::capture(
-        connections,
-        Some(game_spectators),
-        key,
-        session.player_count,
-        Vec::new(),
-        Vec::new(),
-    )
-    .await;
-    let card_db = db.clone();
-    let persistence = game_db.clone();
-    let persistence_executor = executor.clone();
-    let code = game_code.to_string();
+    let (dummy_tx, _) = socket_mailbox::channel();
+    let reply = dummy_tx.for_completion(None);
     let action = GameAction::SayPhrase {
         payment: payment_id,
         seq: 0,
         at_ms: 0,
         report: engine::types::un_actions::SayPhraseReport::Expiry,
     };
-    let player_token = player_token.to_string();
-    let (session, applied) = executor
-        .with_session(session, move |session| {
-            let HandledAction { result, takeback } = session
-                .handle_action_with_card_db_outcome_at(
-                    &player_token,
-                    action,
-                    Some(card_db.as_ref()),
-                    host_received_at_ms,
-                )?;
-            let revision = session.advance_state_revision();
-            let ai = session.begin_ai_run();
-            let mut publisher = publisher;
-            let (takeback_before, takeback_after) = concession_takeback_notices(takeback, payer);
-            if let Some(notice) = takeback_before {
-                publisher.notify_players(notice);
-            }
-            let terminal = matches!(
-                &session.state.waiting_for,
-                engine::types::game_state::WaitingFor::GameOver { .. }
-            );
-            let (unpublished, takeback_after) = if ai.is_break() && !terminal {
-                persist_full_session_async(&persistence_executor, &persistence, session);
-                let source = game_executor::StateUpdateSource::from_result(&result, revision)
-                    .guarded(&code)
-                    .map_err(|reason| {
-                        warn!(
-                            game = %code,
-                            revision,
-                            %reason,
-                            "action snapshot exceeds broadcast bounds"
-                        );
-                        SessionActionError::Operational(reason)
-                    })?;
-                publisher.set_batch_metadata(
-                    session.state.eliminated_players.clone(),
-                    session.rewind_options(),
-                );
-                publisher.publish(&source);
-                if let Some(notice) = takeback_after {
-                    publisher.notify_players(notice);
-                }
-                (None, None)
-            } else {
-                (Some(result), takeback_after)
-            };
-            Ok::<_, SessionActionError>(Some(AppliedHumanSubmission {
-                revision,
-                unpublished,
-                takeback_after,
-                publisher,
-                ai,
-            }))
-        })
-        .await;
-    let Ok(Some(applied)) = applied else {
-        return;
-    };
-    let AppliedHumanSubmission {
-        revision,
-        unpublished,
-        takeback_after,
-        publisher,
-        ai,
-    } = applied;
-    let (dummy_tx, _) = socket_mailbox::channel();
-    let reply = dummy_tx.for_completion(None);
-    let Some(human_result) = unpublished else {
-        publisher.finish(executor).await;
-        if let std::ops::ControlFlow::Break(ai) = ai {
-            broadcast_ai_failure(connections, game_code, ai.fault).await;
-        }
-        return;
-    };
-    finish_full_ai_continuation(
+    apply_and_publish_full_submission(
         session,
-        ai,
-        human_result,
-        revision,
-        publisher,
-        takeback_after.into_iter().collect(),
+        GameSubmission::Action(action),
+        player_token,
+        payer,
+        None,
+        host_received_at_ms,
         &reply,
         executor,
         state,
+        db,
         draft_state,
         connections,
         game_db,
+        game_spectators,
         game_code.to_string(),
         "say_phrase_expiry",
         lock_start,
+        false,
     )
     .await;
 }

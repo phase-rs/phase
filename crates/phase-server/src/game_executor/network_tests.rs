@@ -7428,5 +7428,61 @@ mod oversized_publication {
                 outcome.expect("timely saying was not completed");
             });
         }
+
+        #[test]
+        fn say_phrase_parks_timely_frame_before_decode_while_deadline_elapses() {
+            run_async_test(|| async {
+                let table = NativeTable::duel().await;
+                let now = crate::epoch_ms_at_ingress(std::time::Instant::now());
+                let (state, payment_id) = toy_boat_state(Some(now + 200));
+                install(&table, state, &[]).await;
+                let mut p0 = table.connect(P0).await;
+                let target = {
+                    let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                        .await
+                        .unwrap();
+                    crate::say_phrase_expiry_target(&session)
+                };
+                let saying_action = GameAction::SayPhrase {
+                    payment: payment_id,
+                    seq: 1,
+                    at_ms: 0,
+                    report: engine::types::un_actions::SayPhraseReport::Saying,
+                };
+                let decode_gate = table
+                    .app
+                    .context
+                    .socket_hooks
+                    .arm_resync(crate::socket_test_hooks::ResyncPoint::Decode);
+                send_command_frame(&mut p0, &saying_action, 42).await;
+                decode_gate.entered.notified().await;
+
+                crate::schedule_say_phrase_expiry(
+                    target,
+                    &table.app.context.game_executor,
+                    &table.app.sessions,
+                    &table.app.db,
+                    &table.app.draft_sessions,
+                    &table.app.connections,
+                    &table.app.game_db,
+                    &table.app.game_spectators,
+                    &table.key.game_code,
+                );
+
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                decode_gate.release.notify_one();
+
+                let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                    let comp = completion(&mut p0, 42).await;
+                    assert_eq!(comp["command_id"], 42);
+                    let state = session_read(&table, |s| s.state.clone()).await;
+                    let say_payment = state.say_payment.as_ref().expect("payment still active");
+                    assert_eq!(say_payment.said, 1);
+                })
+                .await;
+                table.server.abort();
+                outcome.expect("timely saying held before decode was processed before expiry");
+            });
+        }
     }
 }
