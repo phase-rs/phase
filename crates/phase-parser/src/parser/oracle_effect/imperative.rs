@@ -27909,12 +27909,12 @@ mod tests {
         );
 
         for text in [
-            // No name clause: the multi-zone player exile's class.
+            // No name clause: the multi-zone player exile's class. No printed card exhibits this possessive; nearest printed card: Identity Crisis.
             "cards from their hand and graveyard",
-            // A trailing fragment must not be silently dropped.
+            // A trailing fragment must not be silently dropped. No printed card exhibits these two fragments; nearest printed card: Legion's End.
             "cards with that name from their hand and graveyard and shuffle",
             "cards with that name from their hand, then draw a card",
-            // Not a bare "cards" head.
+            // Not a bare "cards" head. No printed card exhibits this fragment; nearest printed card: Legion's End.
             "creature cards with that name from their hand",
         ] {
             assert_eq!(

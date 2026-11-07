@@ -97675,9 +97675,9 @@ fn rag_man_reveal_conjunct_is_a_real_random_discard() {
             Effect::Discard {
                 selection: CardSelectionMode::Random,
                 target: TargetFilter::DeclaredPlayer { .. },
-                filter: Some(TargetFilter::Typed(_)),
+                filter: Some(TargetFilter::Typed(tf)),
                 ..
-            }
+            } if tf.type_filters == vec![TypeFilter::Creature]
         ),
         "{:?}",
         spine[1].effect
