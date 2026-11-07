@@ -504,6 +504,15 @@ class NativeP2PBridge {
   }
 
   async getState(): Promise<GameState> {
+    if (this.withheldNotices.has(0)) {
+      try {
+        const raw = await this.clientFor(0).exportPersistenceState();
+        const parsed = JSON.parse(raw);
+        return (parsed && typeof parsed === "object" && "state" in parsed ? parsed.state : parsed) as GameState;
+      } catch (err) {
+        console.warn("[NativeP2PBridge] failed to export authoritative state for withheld host:", err);
+      }
+    }
     return this.clients.get(0)?.getState()
       ?? this.latestViews.get(0)?.snapshot.state
       ?? Promise.reject(new AdapterError("P2P_ERROR", "Native host state is unavailable", true));
@@ -1614,6 +1623,8 @@ export class P2PHostAdapter implements EngineAdapter {
   private sayExpiryDeadline: number | null = null;
   /** Generation fences a stale async state read from re-arming an old payment. */
   private sayExpiryGeneration = 0;
+  /** Generation guards the active timer against an older callback resuming after rekey. */
+  private sayExpiryTimerGeneration = 0;
   private sessionLatencies = new WeakMap<PeerSession, number | null>();
   /**
    * A reconnecting transport has proved its token but is not a game session
@@ -3447,7 +3458,8 @@ export class P2PHostAdapter implements EngineAdapter {
       ? this.nativeBridge.submitAction(action, actor)
       : this.wasm.submitAction(action, actor));
     if (isZeroCountDebugCreate(action)) return transition.result;
-    await this.broadcastStateUpdate(transition);
+    this.scheduleSayPhraseExpiry();
+    await this.broadcastStateUpdate(transition, undefined, action.type === "SayPhrase");
     await this.runAiLoop();
     void this.persistAuthoritativeState();
     return transition.result;
@@ -4421,12 +4433,13 @@ export class P2PHostAdapter implements EngineAdapter {
       return;
     }
     this.clearSayExpiryTimer();
+    const timerGen = ++this.sayExpiryTimerGeneration;
     this.sayExpiryPayment = payment.id;
     this.sayExpiryDeadline = payment.deadline_ms;
     const delay = Math.max(0, payment.deadline_ms - sayPhraseHostClockMs() + 1);
     this.sayExpiryTimer = setTimeout(() => {
       this.sayExpiryTimer = null;
-      void this.expireSayPhrase(payment.id);
+      void this.expireSayPhrase(payment.id, timerGen);
     }, delay);
   }
 
@@ -4435,8 +4448,10 @@ export class P2PHostAdapter implements EngineAdapter {
     this.sayExpiryTimer = null;
   }
 
-  private disarmSayPhraseExpiry(): void {
+  private disarmSayPhraseExpiry(ownerGen?: number): void {
+    if (ownerGen !== undefined && ownerGen !== this.sayExpiryTimerGeneration) return;
     this.sayExpiryGeneration += 1;
+    this.sayExpiryTimerGeneration += 1;
     this.clearSayExpiryTimer();
     this.sayExpiryPayment = null;
     this.sayExpiryDeadline = null;
@@ -4447,8 +4462,8 @@ export class P2PHostAdapter implements EngineAdapter {
    * report never counts as a saying; the engine turns it into the unpaid
    * unless-branch (CR 118.12a).
    */
-  private async expireSayPhrase(paymentId: number): Promise<void> {
-    if (this.disposed || !this.ownsAuthority()) return;
+  private async expireSayPhrase(paymentId: number, timerGen = this.sayExpiryTimerGeneration): Promise<void> {
+    if (this.disposed || !this.ownsAuthority() || timerGen !== this.sayExpiryTimerGeneration) return;
     let state: GameState;
     try {
       state = this.nativeBridge
@@ -4457,6 +4472,7 @@ export class P2PHostAdapter implements EngineAdapter {
     } catch {
       return;
     }
+    if (this.disposed || !this.ownsAuthority() || timerGen !== this.sayExpiryTimerGeneration) return;
     const payment = state.say_payment;
     const payer =
       state.waiting_for.type === "UnlessPayment" ? state.waiting_for.data.player : null;
@@ -4466,7 +4482,9 @@ export class P2PHostAdapter implements EngineAdapter {
       || payment.deadline_ms === undefined
       || payer === null
     ) {
-      this.disarmSayPhraseExpiry();
+      if (timerGen === this.sayExpiryTimerGeneration) {
+        this.disarmSayPhraseExpiry(timerGen);
+      }
       return;
     }
     // Order received sayings before expiry: drain any in-flight frames from the payer's session
@@ -4475,6 +4493,7 @@ export class P2PHostAdapter implements EngineAdapter {
       const payerSession = this.guestSessions.get(payer);
       if (payerSession) {
         await payerSession.drain();
+        if (this.disposed || !this.ownsAuthority() || timerGen !== this.sayExpiryTimerGeneration) return;
         try {
           state = this.nativeBridge
             ? await this.nativeBridge.getState()
@@ -4482,13 +4501,16 @@ export class P2PHostAdapter implements EngineAdapter {
         } catch {
           return;
         }
+        if (this.disposed || !this.ownsAuthority() || timerGen !== this.sayExpiryTimerGeneration) return;
         const updatedPayment = state.say_payment;
         if (
           !updatedPayment
           || updatedPayment.id !== paymentId
           || updatedPayment.deadline_ms === undefined
         ) {
-          this.disarmSayPhraseExpiry();
+          if (timerGen === this.sayExpiryTimerGeneration) {
+            this.disarmSayPhraseExpiry(timerGen);
+          }
           return;
         }
         payment.deadline_ms = updatedPayment.deadline_ms;
@@ -4498,9 +4520,11 @@ export class P2PHostAdapter implements EngineAdapter {
     if (now <= payment.deadline_ms) {
       // A saying landed while this timer was in flight; re-arm against the
       // deadline the engine retained (the engine clock never runs backwards).
-      this.sayExpiryPayment = null;
-      this.sayExpiryDeadline = null;
-      this.scheduleSayPhraseExpiry();
+      if (timerGen === this.sayExpiryTimerGeneration) {
+        this.sayExpiryPayment = null;
+        this.sayExpiryDeadline = null;
+        this.scheduleSayPhraseExpiry();
+      }
       return;
     }
     const action: GameAction = {
@@ -4521,18 +4545,26 @@ export class P2PHostAdapter implements EngineAdapter {
       // Refused — e.g. while a takeback vote is pending. The payment stays
       // live, so report again after a pause instead of spinning on it.
       console.warn("[P2PHost] authority expiry report failed:", err);
+      if (timerGen === this.sayExpiryTimerGeneration) {
+        this.sayExpiryPayment = null;
+        this.sayExpiryDeadline = null;
+        this.clearSayExpiryTimer();
+        this.sayExpiryTimer = setTimeout(() => {
+          this.sayExpiryTimer = null;
+          this.scheduleSayPhraseExpiry();
+        }, SAY_EXPIRY_RETRY_MS);
+      }
+      return;
+    } finally {
+      if (payer !== null && this.disconnectedSeats?.has(payer)) {
+        this.nativeBridge?.suspendGuest(payer);
+      }
+    }
+    if (timerGen === this.sayExpiryTimerGeneration) {
       this.sayExpiryPayment = null;
       this.sayExpiryDeadline = null;
-      this.clearSayExpiryTimer();
-      this.sayExpiryTimer = setTimeout(() => {
-        this.sayExpiryTimer = null;
-        this.scheduleSayPhraseExpiry();
-      }, SAY_EXPIRY_RETRY_MS);
-      return;
+      this.scheduleSayPhraseExpiry();
     }
-    this.sayExpiryPayment = null;
-    this.sayExpiryDeadline = null;
-    this.scheduleSayPhraseExpiry();
   }
 
   private async publishHostSnapshotInner(result: SubmitResult): Promise<boolean> {
