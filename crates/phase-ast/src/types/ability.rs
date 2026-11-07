@@ -24516,11 +24516,13 @@ pub enum Effect {
     /// `recipient_scope`.
     PreventDamage {
         amount: PreventionAmount,
-        /// CR 615.11 + CR 107.3i: When present, overrides `amount` at effect
-        /// resolution — the dynamic quantity is resolved to a concrete count and
-        /// the prevention shield is created as a static `Next(n)` depletion shield.
-        /// Set by "prevent X … where X is <quantity>" clauses. `None` for the
-        /// common fixed/All forms.
+        /// CR 615.7 + CR 107.3a + CR 107.3c: when present, overrides `amount` at
+        /// effect resolution — the quantity is resolved to a concrete count and
+        /// the shield is created as a static `Next(n)` depletion shield (CR 615.7).
+        /// Set by the announced `{X}` of a counted prevention clause ('prevent the
+        /// next X damage …', CR 107.3a) or by a trailing 'where X is <quantity>'
+        /// binder (CR 107.3c), which overwrites the announced-X reading. `None`
+        /// for the fixed/All forms.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         amount_dynamic: Option<QuantityExpr>,
         #[serde(default = "default_target_filter_any")]
