@@ -397,6 +397,16 @@ fn rejects_debug_counter_gain_count_above_engine_ceiling() {
 }
 
 #[test]
+fn accepts_debug_discard_object_only_payload() {
+    assert!(
+        guard_game_action_payload(&GameAction::Debug(DebugAction::Discard {
+            object_id: ObjectId(1),
+        }))
+        .is_ok()
+    );
+}
+
+#[test]
 fn rejects_oversized_debug_token_keyword_ast_payload() {
     let action = GameAction::Debug(DebugAction::CreateToken {
         request: DebugTokenRequest::Custom {

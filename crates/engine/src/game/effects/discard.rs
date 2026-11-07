@@ -79,6 +79,7 @@ pub(crate) fn complete_discard_to_graveyard(
         enter_as_copy: None,
         enter_with_choices: None,
         discard_frame,
+        library_placement: None,
         performed_by: None,
         applied,
     };
@@ -92,7 +93,8 @@ pub(crate) fn complete_discard_to_graveyard(
                 None,
                 false,
                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                // Discard delivers to the graveyard — no library placement.
+                // The caller has no placement; a redirecting replacement's own
+                // placement (Library of Leng) rides the event (CR 614.6).
                 None,
                 events,
             );

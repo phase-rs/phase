@@ -13,6 +13,7 @@
 //! force the full export. [`shared_card_export_json`] still loads the full export
 //! for the few drift-guard tests that must inspect every card.
 
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -21,8 +22,10 @@ use std::sync::{Arc, OnceLock};
 use engine::database::card_db::CardDatabase;
 use engine::game::triggers::trigger_source_context_for_latch;
 use engine::types::card::CardFace;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, NamedChoiceSource, NamedChoiceSourceBinding};
 use engine::types::identifiers::ObjectId;
+use engine::types::player::PlayerId;
 use flate2::read::GzDecoder;
 use serde_json::{Map, Value};
 
@@ -131,4 +134,114 @@ pub fn shared_card_export_json() -> Option<&'static Map<String, Value>> {
         }
     })
     .as_ref()
+}
+
+/// Every serialized key under which a `GameEvent` (or log segment) can carry an
+/// object id: each `GameEvent` field whose type holds `ObjectId`, `TargetRef`,
+/// `ObjectIncarnationRef`, `EventObjectSnapshot`, `ObjectIdentityBinding`,
+/// `ZoneChangeRecord`, `TriggerSourceContext` or `CardId`, plus `Object` (the
+/// externally tagged `TargetRef::Object` key) and the
+/// `LogSegment::CardName` key `object_id` (already in the list).
+///
+/// Regenerate the type-derived part with:
+///
+/// ```text
+/// awk '/^pub enum GameEvent/,/^}/' crates/engine/src/types/events.rs | grep -E "^\s+[a-z_]+: .*(ObjectId|TargetRef|ObjectIncarnationRef|EventObjectSnapshot|ObjectIdentityBinding|ZoneChangeRecord|TriggerSourceContext|CardId)" | sed -E 's/^\s+([a-z_]+):.*/\1/' | sort -u
+/// ```
+///
+/// `card_id` is counted as the same handle: a real card's `CardId` comes from the
+/// same counter as its `ObjectId` (`create_object_from_card_face`), and
+/// `filter_events_for_viewer` already treats it as identifying.
+const IDENTIFYING_ID_KEYS: &[&str] = &[
+    "Object",
+    "assignments",
+    "attachment_id",
+    "attacker",
+    "attacker_ids",
+    "attacks",
+    "attraction_id",
+    "augmenting_id",
+    "blocker",
+    "card_id",
+    "card_ids",
+    "caused_by",
+    "chosen_bearer",
+    "contraption_id",
+    "countered_by",
+    "creature_id",
+    "creatures",
+    "dropped",
+    "exploiter",
+    "from",
+    "involved",
+    "merged_id",
+    "merging_id",
+    "mount_id",
+    "object_id",
+    "old_target",
+    "original_id",
+    "partner_id",
+    "plane_id",
+    "record",
+    "returns",
+    "sacrificed",
+    "saga",
+    "scheme_id",
+    "source",
+    "source_amounts",
+    "source_id",
+    "source_incarnations",
+    "spacecraft_id",
+    "stack_entry",
+    "subject",
+    "tapped",
+    "target",
+    "to",
+    "vehicle_id",
+];
+
+fn collect_numbers(value: &Value, out: &mut BTreeSet<u64>) {
+    match value {
+        Value::Number(n) => out.extend(n.as_u64()),
+        Value::Array(items) => items.iter().for_each(|item| collect_numbers(item, out)),
+        Value::Object(map) => map.values().for_each(|item| collect_numbers(item, out)),
+        Value::Null | Value::Bool(_) | Value::String(_) => {}
+    }
+}
+
+/// Every number found anywhere under an `IDENTIFYING_ID_KEYS` key of `value`, at any
+/// depth (so the tuple-vector keys `assignments`, `attacks` and `source_amounts`,
+/// which hold arrays of arrays, are covered). `ObjectId` is `#[serde(transparent)]`
+/// over `u64`. A collision between a probed card id and a small non-id number under a
+/// walked key can only make a negative check fail, never hide a leak.
+pub fn identifying_object_ids(value: &Value) -> BTreeSet<u64> {
+    let mut ids = BTreeSet::new();
+    walk_identifying(value, &mut ids);
+    ids
+}
+
+fn walk_identifying(value: &Value, ids: &mut BTreeSet<u64>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                if IDENTIFYING_ID_KEYS.contains(&key.as_str()) {
+                    collect_numbers(child, ids);
+                } else {
+                    walk_identifying(child, ids);
+                }
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| walk_identifying(item, ids)),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+/// The identifying object ids that survive `filter_events_for_viewer` for `viewer`.
+pub fn viewer_event_ids(
+    events: &[GameEvent],
+    state: &GameState,
+    viewer: PlayerId,
+) -> BTreeSet<u64> {
+    let filtered = engine::game::visibility::filter_events_for_viewer(events, state, viewer);
+    identifying_object_ids(&serde_json::to_value(filtered).expect("serialize filtered events"))
 }

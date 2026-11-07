@@ -144,6 +144,10 @@ pub fn apply_debug_action(
             }
         }
 
+        DebugAction::Discard { object_id } => {
+            apply_debug_discard(state, object_id, events)?;
+        }
+
         DebugAction::DrawCards { player_id, count } => {
             validate_player(state, player_id)?;
             // CR 121.6b + CR 614.6 + CR 614.11 + CR 704.3: route through
@@ -941,6 +945,72 @@ fn apply_debug_counter_gain(
     Ok(())
 }
 
+/// Validates that `object_id` is a hand card whose owner is still in the game and
+/// returns that owner. Single authority for both `apply_debug_discard` and the
+/// viewer-projected discard availability.
+pub(crate) fn validate_debug_discard(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Result<PlayerId, EngineError> {
+    validate_object(state, object_id)?;
+    // The discard authority reports silent success for a card that is not in
+    // a hand, so reject it here before any proposal is made.
+    let (zone, owner) = {
+        let obj = &state.objects[&object_id];
+        (obj.zone, obj.owner)
+    };
+    if zone != Zone::Hand {
+        return Err(EngineError::InvalidAction(
+            "Debug: object is not in a hand".into(),
+        ));
+    }
+    if !super::players::is_alive(state, owner) {
+        return Err(EngineError::InvalidAction(format!(
+            "Debug: player {} is no longer in the game",
+            owner.0
+        )));
+    }
+    Ok(owner)
+}
+
+/// CR 701.9a: Discard one card from its owner's hand through the single
+/// discard authority, as an effect-caused discard with no source object.
+/// The discarding player is the card's owner, not the submitting seat.
+fn apply_debug_discard(
+    state: &mut GameState,
+    object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let owner = validate_debug_discard(state, object_id)?;
+    let event_start = events.len();
+    match super::effects::discard::discard_caused_by_effect_with_source(
+        state, object_id, owner, None, events,
+    ) {
+        super::effects::discard::DiscardOutcome::Complete => {
+            // CR 603.2 + CR 603.3 + CR 704.3: scan this discard's events for
+            // triggers, run SBAs, and scan the SBA events, through the
+            // reducer's single settlement authority, over this arm's slice.
+            let default_wf = state.waiting_for.clone();
+            let waiting_for = super::engine_priority::run_post_action_pipeline_from(
+                state,
+                events,
+                event_start,
+                &default_wf,
+                false,
+                false,
+            )?;
+            state.waiting_for = waiting_for;
+        }
+        super::effects::discard::DiscardOutcome::NeedsReplacementChoice(chooser) => {
+            // CR 616.1: the parked choice owns the rest of the discard; the
+            // replacement-choice resume and the reducer's post-action
+            // pipeline own its triggers and state-based actions.
+            state.waiting_for = super::replacement::replacement_choice_waiting_for(chooser, state);
+        }
+    }
+    Ok(())
+}
+
 /// CR 122.1: Apply a final debug-selected player-counter delta through the
 /// same scalar authority as ordinary rules actions.
 fn apply_player_counter_delta(
@@ -1142,6 +1212,7 @@ fn enter_battlefield_with_etb(
         enter_as_copy: None,
         enter_with_choices: None,
         discard_frame: None,
+        library_placement: None,
         performed_by: None,
         applied: HashSet::new(),
     };

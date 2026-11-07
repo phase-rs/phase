@@ -10,10 +10,11 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, CastingPermission, ChoiceType, ChosenAttribute, CoinFlipRun,
     CombatDamageScope, ControllerRef, DamageModification, DamageRedirectTarget, DamageTargetFilter,
     DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope,
-    EntryAttackDestination, ManaSpendPermission, PermissionGrantee, PostReplacementContinuation,
-    PreventionAmount, PreventionFormula, QuantityExpr, QuantityModification, RedirectionLifetime,
-    ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ResolvedAbility, RoundingMode, ShieldKind, TapStateChange, TargetFilter, TargetRef,
+    EntryAttackDestination, LibraryPosition, ManaSpendPermission, PermissionGrantee,
+    PostReplacementContinuation, PreventionAmount, PreventionFormula, QuantityExpr,
+    QuantityModification, RedirectionLifetime, ReplacementChoiceAuthority, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, ResolvedAbility, RoundingMode, ShieldKind,
+    TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::actions::ReplacementAutoChoice;
 use crate::types::card_type::CoreType;
@@ -2167,6 +2168,9 @@ fn discard_applier(
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
+    // CR 701.9a: the discard lowers to the hand-to-graveyard move on either branch;
+    // branch outcomes (Madness exile, Leng library top) are applied by the redirect
+    // block in `apply_single_replacement`, not here.
     match event {
         ProposedEvent::Discard {
             object_id,
@@ -2190,6 +2194,7 @@ fn discard_applier(
             enter_as_copy: None,
             enter_with_choices: None,
             discard_frame,
+            library_placement: None,
             performed_by: None,
             applied,
         }),
@@ -9760,12 +9765,21 @@ fn extract_etb_counters_from_effect(
 pub(super) struct EventModifiers {
     etb_tap_state: EtbTapState,
     etb_counters: Vec<(CounterType, u32)>,
-    redirect_zone: Option<Zone>,
+    redirect: Option<ZoneRedirect>,
     /// CR 110.2a: Controller override for a self-ETB replacement
     /// (`ReplacementDefinition::enters_under`). Carried as an unresolved
     /// `ControllerRef`; resolved to a concrete `PlayerId` and written onto the
     /// `ZoneChange`'s `controller_override` when the replacement is applied.
     controller_override: Option<ControllerRef>,
+}
+
+/// CR 614.6: a replacement branch's destination redirect. The zone and the
+/// library position the redirect carries stay together: a library-top redirect
+/// ("put it on top of your library instead") is one modification, not two.
+#[derive(Debug, Clone)]
+struct ZoneRedirect {
+    zone: Zone,
+    library_placement: Option<LibraryPosition>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -9798,6 +9812,14 @@ impl EventModifiers {
                 count,
                 ..
             } => !count.references_cost_paid_object(),
+            // CR 614.6 + CR 701.9c: "put it on top of your library instead" redirects
+            // the event's own card; the replaced graveyard move never happens.
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                position,
+                arranger: None,
+            } => library_position_is_static(position),
             _ => false,
         }
     }
@@ -9837,6 +9859,16 @@ impl EventModifiers {
     }
 }
 
+/// True when a library position needs no ability context to resolve, so it can ride
+/// a `ProposedEvent::ZoneChange` as delivery metadata.
+fn library_position_is_static(position: &LibraryPosition) -> bool {
+    match position {
+        LibraryPosition::Top | LibraryPosition::Bottom | LibraryPosition::NthFromTop { .. } => true,
+        LibraryPosition::BeneathTop { depth } => matches!(depth, QuantityExpr::Fixed { .. }),
+        LibraryPosition::RandomWithinTop { .. } => false,
+    }
+}
+
 /// CR 614.1c: Compute the ProposedEvent modifications an ability would introduce.
 /// Walks the sub_ability chain so composed replacements (e.g., Tap { SelfRef } →
 /// BecomeCopy for Vesuva's "enter tapped as a copy") accumulate all modifier
@@ -9871,9 +9903,22 @@ fn event_modifiers_for_ability(
             };
         }
         if redirect.is_none() {
-            if let Effect::ChangeZone { destination, .. } = &*def.effect {
-                redirect = Some(*destination);
-            }
+            redirect = match &*def.effect {
+                Effect::ChangeZone { destination, .. } => Some(ZoneRedirect {
+                    zone: *destination,
+                    library_placement: None,
+                }),
+                // CR 614.6: a library-top/bottom redirect carries its position.
+                Effect::PutAtLibraryPosition { position, .. }
+                    if EventModifiers::is_event_modifier_effect(&def.effect) =>
+                {
+                    Some(ZoneRedirect {
+                        zone: Zone::Library,
+                        library_placement: Some(position.clone()),
+                    })
+                }
+                _ => None,
+            };
         }
         if !EventModifiers::is_event_modifier_effect(&def.effect) {
             break;
@@ -9884,7 +9929,7 @@ fn event_modifiers_for_ability(
     EventModifiers {
         etb_tap_state,
         etb_counters: counters,
-        redirect_zone: redirect,
+        redirect,
         controller_override: None,
     }
 }
@@ -10149,7 +10194,7 @@ fn optional_decline_is_noop(
     });
     // Redirect: a redirect-bearing decline always has work to do, so it is never a
     // no-op regardless of the current `to` zone.
-    let redirect_noop = mods.redirect_zone.is_none();
+    let redirect_noop = mods.redirect.is_none();
 
     tap_already && counters_already && redirect_noop
 }
@@ -10828,15 +10873,19 @@ fn apply_single_replacement(
                         }
                     }
                 }
-                // CR 614.6: Apply zone redirect (e.g., graveyard → exile for Rest in Peace).
-                if let Some(zone) = modifiers.redirect_zone {
+                // CR 614.6: Apply zone redirect (e.g., graveyard → exile for Rest in Peace,
+                // hand → library top for Library of Leng). The redirect's placement
+                // replaces any earlier one: last redirect wins.
+                if let Some(redirect) = modifiers.redirect.as_ref() {
                     if let ProposedEvent::ZoneChange {
                         ref mut to,
                         ref mut cause,
+                        ref mut library_placement,
                         ..
                     } = new_event
                     {
-                        *to = zone;
+                        *to = redirect.zone;
+                        *library_placement = redirect.library_placement.clone().map(Box::new);
                         // CR 607.2b: the redirecting replacement's own source is
                         // the "exiled with [this object]" linked-ability
                         // authority for whatever this event ultimately
@@ -15889,6 +15938,7 @@ mod tests {
             enter_as_copy: None,
             enter_with_choices: None,
             discard_frame: None,
+            library_placement: None,
             performed_by: None,
             applied: HashSet::new(),
             face_down_profile: None,
@@ -19944,6 +19994,7 @@ mod tests {
             enter_as_copy: None,
             enter_with_choices: None,
             discard_frame: None,
+            library_placement: None,
             performed_by: None,
             applied: HashSet::new(),
             face_down_profile: None,
@@ -21419,6 +21470,7 @@ mod tests {
             enter_as_copy: None,
             enter_with_choices: None,
             discard_frame: None,
+            library_placement: None,
             performed_by: None,
             applied: HashSet::new(),
             face_down_profile: None,
@@ -24831,6 +24883,7 @@ mod tests {
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
+            library_placement: None,
             performed_by: None,
             applied: HashSet::new(),
         };
@@ -24883,6 +24936,7 @@ mod tests {
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
+            library_placement: None,
             performed_by: None,
             applied: HashSet::new(),
         };

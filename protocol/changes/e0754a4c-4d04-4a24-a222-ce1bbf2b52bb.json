@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Sandbox DebugAction gains the Discard tag (CR 701.9a discard through the effect-caused discard authority). A previous peer cannot deserialize the new action tag, so full and wire peers move in lockstep. The client derived view also gains the optional debug_discardable_hand_cards list (viewer-scoped engine-projected discard availability); a previous peer ignores the unknown key but would not render the engine decision."
+}

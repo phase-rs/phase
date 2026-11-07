@@ -48,7 +48,19 @@ pub fn resolve_log_entries(
                 && !is_player_leave_move(events, index, &batch)
                 && !is_concealed_move(events, index, &batch, after))
             .then(|| {
-                let mut segments = format_segments(event, after);
+                let mut segments = match event {
+                    GameEvent::Discarded {
+                        player_id,
+                        object_id,
+                        ..
+                    } => discard_segments(
+                        after,
+                        *player_id,
+                        *object_id,
+                        discard_disclosure(*object_id, index, &batch, after),
+                    ),
+                    _ => format_segments(event, after),
+                };
                 name_ability_entries_by_source(&mut segments, before, after);
                 name_at_event_time(&mut segments, &batch, index + 1);
                 (!segments.is_empty()).then(|| GameLogEntry {
@@ -206,6 +218,75 @@ impl<'a> BatchIndex<'a> {
     fn next_move(&self, object_id: ObjectId, from_index: usize) -> Option<&BatchMove<'a>> {
         let moves = self.moves.get(&object_id)?;
         moves.get(moves.partition_point(|&(position, ..)| position < from_index))
+    }
+
+    /// The object's last move before `before_index` that left `origin`.
+    fn last_move_before(
+        &self,
+        object_id: ObjectId,
+        before_index: usize,
+        origin: Zone,
+    ) -> Option<&BatchMove<'a>> {
+        let moves = self.moves.get(&object_id)?;
+        let end = moves.partition_point(|&(position, ..)| position < before_index);
+        moves[..end]
+            .iter()
+            .rev()
+            .find(|&&(_, from, _)| from == Some(origin))
+    }
+}
+
+/// How the global log presents a `Discarded` card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscardDisclosure {
+    /// The card went to a public zone: the log names it.
+    Public,
+    /// The card went to a hidden zone: the log says only that a card was discarded.
+    Concealed,
+}
+
+/// CR 400.2 + CR 701.9c: a card discarded into a hidden zone is not identified in the global
+/// log, whatever any viewer already knew; authorized viewers keep the identity through the
+/// filtered `ZoneChanged` record. Presentation only: no event is suppressed. The destination is
+/// that of the card's last hand departure before the `Discarded` event (falling back to its zone
+/// after the batch); a face-down arrival counts as hidden, as in `is_concealed_move`.
+fn discard_disclosure(
+    object_id: ObjectId,
+    index: usize,
+    batch: &BatchIndex,
+    after: &GameState,
+) -> DiscardDisclosure {
+    let destination_is_public = match batch.last_move_before(object_id, index, Zone::Hand) {
+        Some(&(position, _, record)) => {
+            record.to_zone.is_public() && !arrived_face_down(batch, object_id, position, after)
+        }
+        None => after
+            .objects
+            .get(&object_id)
+            .is_none_or(|obj| obj.zone.is_public() && !obj.face_down),
+    };
+    if destination_is_public {
+        DiscardDisclosure::Public
+    } else {
+        DiscardDisclosure::Concealed
+    }
+}
+
+fn discard_segments(
+    state: &GameState,
+    player_id: PlayerId,
+    object_id: ObjectId,
+    disclosure: DiscardDisclosure,
+) -> Vec<LogSegment> {
+    match disclosure {
+        DiscardDisclosure::Public => vec![
+            player_seg(state, player_id),
+            text(" discards "),
+            card_seg(state, object_id),
+        ],
+        DiscardDisclosure::Concealed => {
+            vec![player_seg(state, player_id), text(" discards a card")]
+        }
     }
 }
 
@@ -1354,11 +1435,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_id,
             object_id,
             ..
-        } => vec![
-            player_seg(state, *player_id),
-            text(" discards "),
-            card_seg(state, *object_id),
-        ],
+        } => discard_segments(state, *player_id, *object_id, DiscardDisclosure::Public),
 
         GameEvent::Cycled {
             player_id,
@@ -2701,6 +2778,97 @@ mod tests {
         assert!(entries.iter().all(|entry| entry.segments.iter().all(
             |segment| !matches!(segment, LogSegment::CardName { name, .. } if name == "Secret Mulligan Card")
         )));
+    }
+
+    /// Segments of every log entry for a hand departure followed by `Discarded` (L1 rows).
+    fn discard_log_segments(
+        state: &GameState,
+        object_id: ObjectId,
+        from: Zone,
+        to: Zone,
+    ) -> Vec<Vec<LogSegment>> {
+        let events = vec![
+            zone_move(object_id, from, to, PlayerId(0), 0),
+            GameEvent::Discarded {
+                player_id: PlayerId(0),
+                object_id,
+                source_id: None,
+            },
+        ];
+        resolve_log_entries(&events, state, state)
+            .into_iter()
+            .map(|entry| entry.segments)
+            .collect()
+    }
+
+    fn discard_line(card: ObjectId, named: bool) -> Vec<LogSegment> {
+        let mut line = vec![
+            LogSegment::PlayerName {
+                name: "Player 1".to_string(),
+                player_id: PlayerId(0),
+            },
+            text(if named {
+                " discards "
+            } else {
+                " discards a card"
+            }),
+        ];
+        if named {
+            line.push(LogSegment::CardName {
+                name: "Discarded Card".to_string(),
+                object_id: card,
+            });
+        }
+        line
+    }
+
+    /// L1 (CR 400.2 + CR 701.9c): a discard that lands in a hidden zone reads
+    /// "discards a card" and never names the card.
+    #[test]
+    fn discard_into_a_hidden_zone_is_concealed() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Discarded Card".to_string(),
+            Zone::Library,
+        );
+        let lines = discard_log_segments(&state, card, Zone::Hand, Zone::Library);
+        assert_eq!(lines, vec![discard_line(card, false)]);
+    }
+
+    /// L1 (iii) positive control: a public destination still names the card.
+    #[test]
+    fn discard_into_a_public_zone_names_the_card() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Discarded Card".to_string(),
+            Zone::Graveyard,
+        );
+        let lines = discard_log_segments(&state, card, Zone::Hand, Zone::Graveyard);
+        assert_eq!(lines.len(), 2, "move line and discard line: {lines:?}");
+        assert_eq!(lines.last(), Some(&discard_line(card, true)));
+    }
+
+    /// L1 (iv): a face-down arrival in exile is hidden, matching the
+    /// `arrived_face_down` predicate that conceals the paired `ZoneChanged` line.
+    #[test]
+    fn discard_into_face_down_exile_is_concealed() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Discarded Card".to_string(),
+            Zone::Exile,
+        );
+        set_face_down(&mut state, card, true);
+        let lines = discard_log_segments(&state, card, Zone::Hand, Zone::Exile);
+        assert_eq!(lines, vec![discard_line(card, false)]);
     }
 
     #[test]

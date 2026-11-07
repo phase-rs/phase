@@ -1284,6 +1284,7 @@ fn debug_action_rank(a: &DebugAction) -> u16 {
         DebugAction::RunStateBasedActions => 30,
         DebugAction::CreateToken { .. } => 31,
         DebugAction::CreateTokenCopy { .. } => 32,
+        DebugAction::Discard { .. } => 33,
     }
 }
 
@@ -1351,6 +1352,12 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
         }
         DebugAction::Sacrifice { object_id: a0 } => {
             let DebugAction::Sacrifice { object_id: b0 } = b else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+        }
+        DebugAction::Discard { object_id: a0 } => {
+            let DebugAction::Discard { object_id: b0 } = b else {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");
             };
             cmp_val(a0, b0)

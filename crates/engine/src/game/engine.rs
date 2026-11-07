@@ -17973,6 +17973,14 @@ fn apply_non_priority_pass_action(
     Ok(ActionResult::applied(events, waiting_for))
 }
 
+/// Whether `actor` may currently discard hand card `object_id` through
+/// `DebugAction::Discard`. Reuses the preflight and the discard validation, so
+/// the viewer-projected availability can never diverge from what `apply` accepts.
+pub fn debug_discard_available(state: &GameState, actor: PlayerId, object_id: ObjectId) -> bool {
+    preflight_debug_action(state, actor, &DebugAction::Discard { object_id }).is_ok()
+        && super::engine_debug::validate_debug_discard(state, object_id).is_ok()
+}
+
 /// Validate one debug action before any transport-specific lookup or engine
 /// mutation. Source-bound Create Card requests use this same authority again
 /// immediately before materialization.
@@ -17989,8 +17997,8 @@ pub fn preflight_debug_action(
         .validate_player_resource_amount()
         .map_err(EngineError::InvalidAction)?;
 
-    // CR 616.1: a sandbox life change or player-counter/energy gain is a real
-    // event whose replacements can park a replacement-order choice for the
+    // CR 616.1: a sandbox life change, player-counter/energy gain or discard
+    // is a real event whose replacements can park a replacement-order choice for the
     // affected player. Only a settled Priority boundary can own that choice;
     // admitting a second event under an open prompt would replace the
     // outstanding proposal before it resolves.
@@ -17998,7 +18006,7 @@ pub fn preflight_debug_action(
         && !matches!(state.waiting_for, WaitingFor::Priority { .. })
     {
         return Err(EngineError::InvalidAction(
-            "Debug::GainLife / Debug::LoseLife / Debug::GivePlayerCounters / Debug::GiveEnergy require a Priority window".into(),
+            "Debug::GainLife / Debug::LoseLife / Debug::GivePlayerCounters / Debug::GiveEnergy / Debug::Discard require a Priority window".into(),
         ));
     }
 

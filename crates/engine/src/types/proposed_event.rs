@@ -498,6 +498,13 @@ pub enum ProposedEvent {
         /// choices. Unrelated zone changes omit it from the wire.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
+        /// CR 614.6 + CR 701.24a: the library position a replacement redirect
+        /// placed this move at ("put it on top of your library instead"). It rides
+        /// the event so CR 616.1 pauses and later replacement passes keep it;
+        /// `deliver_replaced_zone_change` honours it over a caller's placement.
+        /// A placement is not a shuffle. `None` = the caller's (or zone default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library_placement: Option<Box<crate::types::ability::LibraryPosition>>,
         /// CR 608.2c: the player performing the instruction that moves this
         /// object ("that player exiles that card" names the drawer; a
         /// controller-worded instruction names the controller). Rides the
@@ -921,6 +928,7 @@ impl ProposedEvent {
             enter_as_copy: None,
             enter_with_choices: None,
             discard_frame: None,
+            library_placement: None,
             performed_by: None,
             applied: HashSet::new(),
         }
@@ -1958,5 +1966,49 @@ mod tests {
         };
         assert!(applied.contains(&AppliedReplacementKey::floating(2)));
         assert!(!applied.contains(&AppliedReplacementKey::step_end_mana(2)));
+    }
+
+    #[test]
+    fn zone_change_library_placement_is_backward_compatible() {
+        use crate::types::ability::LibraryPosition;
+        use crate::types::zones::Zone;
+
+        let plain = ProposedEvent::zone_change(ObjectId(1), Zone::Hand, Zone::Library, None);
+        let mut json = serde_json::to_value(&plain).expect("serializes");
+        let body = json
+            .get("ZoneChange")
+            .expect("externally tagged ZoneChange");
+        assert!(
+            body.get("library_placement").is_none(),
+            "None is omitted on serialize: {json}"
+        );
+        let back: ProposedEvent = serde_json::from_value(json.clone()).expect("reads without key");
+        assert!(matches!(
+            back,
+            ProposedEvent::ZoneChange {
+                library_placement: None,
+                ..
+            }
+        ));
+
+        let placed = match plain {
+            ProposedEvent::ZoneChange { .. } => {
+                json["ZoneChange"]["library_placement"] =
+                    serde_json::to_value(LibraryPosition::Top).expect("serializes");
+                serde_json::from_value::<ProposedEvent>(json).expect("reads with key")
+            }
+            _ => unreachable!("zone_change builds a ZoneChange"),
+        };
+        assert!(matches!(
+            &placed,
+            ProposedEvent::ZoneChange {
+                library_placement: Some(position),
+                ..
+            } if **position == LibraryPosition::Top
+        ));
+        let round = serde_json::to_value(&placed).expect("serializes");
+        assert!(round["ZoneChange"].get("library_placement").is_some());
+        let again: ProposedEvent = serde_json::from_value(round).expect("round-trips");
+        assert_eq!(again, placed);
     }
 }

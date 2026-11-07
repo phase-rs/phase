@@ -3346,6 +3346,7 @@ export type DebugAction =
     }
   | { type: "RemoveObject"; data: { object_id: ObjectId } }
   | { type: "Sacrifice"; data: { object_id: ObjectId } }
+  | { type: "Discard"; data: { object_id: ObjectId } }
   | { type: "DrawCards"; data: { player_id: PlayerId; count: number } }
   | { type: "Mill"; data: { player_id: PlayerId; count: number } }
   | { type: "Reveal"; data: { player_id: PlayerId; count: number } }
@@ -4296,6 +4297,11 @@ export interface DerivedViews {
    * browser consumes this separately authorized projection.
    */
   debug_library_cards?: DebugLibraryCardView[];
+  /**
+   * Debug-only, viewer-scoped: hand-card ids the engine would currently accept
+   * for a `Discard` debug action. Ids are already in the viewer's projection.
+   */
+  debug_discardable_hand_cards?: ObjectId[];
   /**
    * Mirrors `engine::game::derived_views::SharedPilesView`. Present only for a
    * format that shares a library or graveyard; a missing key means that zone is

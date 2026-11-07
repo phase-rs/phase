@@ -264,6 +264,7 @@ mod legacy_deferred_spell_delivery_restore;
 mod legend_rule_scope;
 mod level_up_keywords;
 mod leyline_taps_for_mana_repro;
+mod library_of_leng_hidden_destination;
 mod library_size_and_empty_hand_conditions;
 mod lictor_opponent_entered_this_turn;
 mod life_and_limb_sylvan_advocate;
