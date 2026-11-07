@@ -737,6 +737,9 @@ class NativeP2PBridge {
         // The clear arrives as the seat's next delivered view, which already crosses the barrier.
         const playerId = client.playerId;
         if (!event.withheld || playerId === null || event.withheld.revision <= this.deliveredRevision) return;
+        // The submitting seat alone learns its reply was a saying; mark the
+        // revision before any seat can complete it, so the fan-out carries it.
+        if (event.saying) this.sayingRevisions.add(event.withheld.revision);
         this.withheldNotices.set(playerId, event.withheld);
         this.recordSeatReport(playerId, event.withheld.revision, { kind: "withheld", notice: event.withheld });
         return;

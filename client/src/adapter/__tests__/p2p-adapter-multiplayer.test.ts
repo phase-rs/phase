@@ -8602,6 +8602,44 @@ describe("P2PHostAdapter — native withheld delivery", () => {
     }
   });
 
+  it("carries a saying's ownership from the submitting seat's withheld reply into the fan-out", async () => {
+    const { adapter, guests: [conn], seats } = await startMockedNativeGame(2);
+    const real = await realGuest();
+    try {
+      await real.feed(await gameFrames(conn));
+      await real.guest.initializeGame();
+
+      // An unrelated ordinary submission is parked behind the guest's saying.
+      const parked = track(real.guest.submitAction({ type: "PassPriority" }, 1));
+
+      // Only the submitting seat's client matched the saying's command, so only
+      // its withheld notice is marked; the host seat's view of the same
+      // revision is an ordinary-looking publication.
+      seats[0](viewReport(2, "host view"));
+      seats[1]({ type: "stateDelivery", withheld: notice(2), saying: true });
+      await vi.waitFor(async () => expect((await gameFrames(conn)).slice(-1)[0])
+        .toMatchObject({ type: "state_withheld", revision: 2 }));
+      const sayingFrame = (await gameFrames(conn)).slice(-1)[0];
+      expect(sayingFrame).toMatchObject({ saying: true });
+      await real.feed([sayingFrame]);
+      await flushPromises();
+      expect(parked.settled).toBe(false);
+
+      // The parked submission's own (unmarked) reply still settles it.
+      for (const seat of seats) seat(withheldReport(3));
+      await vi.waitFor(async () => expect((await gameFrames(conn)).slice(-1)[0])
+        .toMatchObject({ type: "state_withheld", revision: 3 }));
+      const ownFrame = (await gameFrames(conn)).slice(-1)[0];
+      expect(ownFrame).not.toHaveProperty("saying");
+      await real.feed([ownFrame]);
+      await flushPromises();
+      expect(parked).toEqual({ settled: true, value: { events: [], log_entries: [] } });
+    } finally {
+      real.guest.dispose();
+      adapter.dispose();
+    }
+  });
+
   it("delivers the host's view while the guest's is withheld at the same revision", async () => {
     const { adapter, hostEvents, guests: [conn], seats } = await startMockedNativeGame(2);
     try {

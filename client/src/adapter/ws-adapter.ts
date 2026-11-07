@@ -1538,8 +1538,10 @@ export type WsAdapterEvent =
        *  `[]` means "the server published none", never "unknown". */
       rewindTargets?: RewindOption[];
       saying?: boolean }
-  /** The server applied a state it could not send; `null` once a state arrives again. */
-  | { type: "stateDelivery"; withheld: StateWithheldNotice | null }
+  /** The server applied a state it could not send; `null` once a state arrives again.
+   *  `saying` marks a notice that answered this client's own spoken observation,
+   *  so a relaying host can keep it off an unrelated submission's reply. */
+  | { type: "stateDelivery"; withheld: StateWithheldNotice | null; saying?: boolean }
   | { type: "sessionAttached"; attachment: NativeSessionAttachment }
   | { type: "emoteReceived"; fromPlayer: PlayerId; emote: string }
   | { type: "contestProgress"; contest: number; clicks: [PlayerId, number][] }
@@ -3095,7 +3097,10 @@ export class WebSocketAdapter implements EngineAdapter {
           }
         }
         const pending = this.submission.take(msg.command_id);
-        const resolvedAction = pending !== null;
+        // A correlated saying's promise already carries these events to its
+        // caller, which commits them; emitting them again would present the
+        // saying twice. A native bridge still needs the view to fan it out.
+        const resolvedAction = pending !== null || isSaying;
         if (pending) {
           pending.resolve({ events: data.events, log_entries: data.log_entries });
           this.emit({ type: "actionPendingChanged", pending: false });
@@ -3188,6 +3193,7 @@ export class WebSocketAdapter implements EngineAdapter {
           break;
         }
         if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
+        let withheldSaying = false;
         if (data.withheld.type === "GameStarted") {
           this.emit({ type: "bootstrapDelivered" });
           if (this.reconnectInFlight) this.completeReconnect(true);
@@ -3197,6 +3203,7 @@ export class WebSocketAdapter implements EngineAdapter {
             if (sayingPending) {
               this.pendingSayingCommands.delete(msg.command_id);
               sayingPending.resolve({ events: [], log_entries: [] });
+              withheldSaying = true;
             }
           }
           const pending = this.submission.take(msg.command_id);
@@ -3208,7 +3215,11 @@ export class WebSocketAdapter implements EngineAdapter {
         // A stale notice still answers its command but must not report a newer board as withheld.
         if (this.cachedStateRevision !== null && data.state_revision < this.cachedStateRevision) break;
         this.withheldState = { revision: data.state_revision, reason: data.reason };
-        this.emit({ type: "stateDelivery", withheld: this.withheldState });
+        this.emit({
+          type: "stateDelivery",
+          withheld: this.withheldState,
+          ...(withheldSaying ? { saying: true } : {}),
+        });
         break;
       }
 
