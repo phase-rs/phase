@@ -25,7 +25,11 @@ export function getCombinedColorIdentity(
 }
 
 function isInColorIdentity(card: ScryfallCard, identity: string[]): boolean {
-  if (identity.length === 0) return true;
+  // A card is legal iff every color in its identity is within the commander's.
+  // For a colorless commander (`identity` empty), only colorless cards pass —
+  // `[].every(...)` is `true`, a colored card's `.every(...)` is `false` — which
+  // is exactly CR 903.5c. (Callers must only invoke this once commander data is
+  // loaded; an empty identity from a cache miss would otherwise flag everything.)
   const identitySet = new Set(identity);
   return card.color_identity.every((c) => identitySet.has(c));
 }
@@ -36,6 +40,9 @@ export function getColorIdentityViolations(
   cardDataCache: Map<string, ScryfallCard>,
 ): string[] {
   if (commanders.length === 0) return [];
+  // Don't compute violations until every commander's data has loaded — a cache
+  // miss yields an empty identity that would wrongly flag every colored card.
+  if (!commanders.every((name) => cardDataCache.has(name))) return [];
   const identity = getCombinedColorIdentity(commanders, cardDataCache);
   const violations: string[] = [];
   for (const entry of deck) {
