@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { P2PGuestAdapter, P2PHostAdapter } from "../p2p-adapter.ts";
 import {
+  AdapterError,
   AdapterErrorCode,
   type GameAction,
   type SubmitResult,
@@ -19,6 +20,7 @@ type PendingSaying = {
   resolve: (result: SubmitResult) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  sent: boolean;
 };
 
 /**
@@ -163,5 +165,57 @@ describe("P2P saying reply lane", () => {
 
     guest.settlePendingSubmission({ kind: "resolve", result: EMPTY });
     expect(ordinaryResolve).toHaveBeenCalledWith(EMPTY);
+  });
+
+  it("does not settle a parked Stay Quiet submission when a saying's state_update broadcast arrives", () => {
+    const guest = makeGuest(true);
+    const ordinaryResolve = vi.fn();
+    const ordinaryReject = vi.fn();
+    guest.parkPendingSubmission(ordinaryResolve, ordinaryReject);
+
+    // In guest adapter's handleMessage for "state_update", msg.saying bypasses settlePendingSubmission.
+    const msg = {
+      type: "state_update" as const,
+      saying: true,
+      events: [],
+      logEntries: [],
+    };
+    const settled = msg.saying
+      ? false
+      : guest.settlePendingSubmission({
+          kind: "resolve",
+          result: { events: msg.events, log_entries: msg.logEntries },
+        });
+
+    expect(settled).toBe(false);
+    expect(ordinaryResolve).not.toHaveBeenCalled();
+    expect(guest.pendingResolve).toBe(ordinaryResolve);
+  });
+
+  it("forwards a native rejection through host to guest as a failed saying_result", () => {
+    const host = Object.create(P2PHostAdapter.prototype) as any;
+    const sentMessages: unknown[] = [];
+    host.send = vi.fn((_session: unknown, msg: unknown) => {
+      sentMessages.push(msg);
+      return Promise.resolve(true);
+    });
+    const session = {};
+    const rejection = new AdapterError(
+      AdapterErrorCode.ACTION_REJECTED,
+      "Payment already expired",
+      false,
+    );
+
+    host.sendSayingFailure(session, saying(1), rejection);
+
+    expect(sentMessages).toEqual([
+      {
+        type: "saying_result",
+        payment: 7,
+        seq: 1,
+        accepted: false,
+        message: "Payment already expired",
+      },
+    ]);
   });
 });

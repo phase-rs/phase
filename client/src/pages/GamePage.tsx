@@ -3972,9 +3972,15 @@ function SayPhrasePanel({
     seq.current = sayPayment?.last_seq ?? 0;
     lastSaidAt.current = null;
     setInFlight(new Map());
-    setQuietReported(0);
+    setQuietReported(said);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paymentId]);
+
+  useEffect(() => {
+    if (quickWindowMs === undefined) {
+      setQuietReported((current) => Math.max(current, said));
+    }
+  }, [quickWindowMs, said]);
 
   // Drop attempts the engine has accepted. Until this runs, the local suffix
   // keeps a rapid click from over-reporting past the payment's requirement.
@@ -4141,8 +4147,14 @@ function SayPhrasePanel({
     // requires (a rapid double click must not over-report).
     if (reported >= total) return;
     if (quickWindowMs === undefined) {
+      const attemptPayment = paymentId;
       setQuietReported((current) => current + 1);
-      void dispatch({ type: "PayUnlessCost", data: { pay: true } });
+      void dispatch({ type: "PayUnlessCost", data: { pay: true } }).catch((err) => {
+        if (paymentIdRef.current !== attemptPayment) return;
+        if (err instanceof AdapterError && err.code === AdapterErrorCode.ACTION_NOT_SENT) {
+          setQuietReported((current) => Math.max(said, current - 1));
+        }
+      });
       return;
     }
     const at = sayPhraseHostClockMs();

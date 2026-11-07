@@ -26,6 +26,8 @@ export interface PeerSession {
   ): () => void;
   onDisconnect(handler: (reason: string) => void): () => void;
   close(reason?: string): void;
+  /** Drain all currently decoding and queued inbound frames through message handlers. */
+  drain(): Promise<void>;
 }
 
 /** Why an inbound frame could not be delivered to `onMessage` handlers. */
@@ -203,7 +205,9 @@ export function createPeerSession(
         return true;
       } catch (err) {
         console.warn("[PeerSession] send failed:", err);
-        handleDisconnect("Channel send failed", "send-error");
+        queueMicrotask(() => {
+          handleDisconnect("Channel send failed", "send-error");
+        });
         return false;
       }
     });
@@ -473,6 +477,10 @@ export function createPeerSession(
       if (conn.open) trySend({ type: "disconnect", reason });
       markDisconnected(reason, "local-close");
       sendQueue = sendQueue.then(() => { disposeChannel(); });
+    },
+    async drain() {
+      await recvQueue;
+      await dispatchQueue;
     },
   };
 }

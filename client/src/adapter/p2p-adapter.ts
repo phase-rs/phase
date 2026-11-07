@@ -3907,13 +3907,15 @@ export class P2PHostAdapter implements EngineAdapter {
   private async broadcastStateUpdate(
     transition: BrowserTransition,
     terminalReason?: string,
+    saying?: boolean,
   ): Promise<void> {
-    return this.enqueueDelivery(() => this.broadcastStateUpdateInner(transition, terminalReason));
+    return this.enqueueDelivery(() => this.broadcastStateUpdateInner(transition, terminalReason, saying));
   }
 
   private async broadcastStateUpdateInner(
     transition: BrowserTransition,
     terminalReason?: string,
+    saying?: boolean,
   ): Promise<void> {
     if (!this.ownsAuthority()) return;
     if (this.nativeBridge) return;
@@ -3933,6 +3935,7 @@ export class P2PHostAdapter implements EngineAdapter {
           state: projected.snapshot.state,
           events: projected.events,
           logEntries: projected.fresh ? transition.result.log_entries : undefined,
+          ...(saying ? { saying: true } : {}),
           ...legalActionsToWire(projected.snapshot),
         }));
       } catch (err) {
@@ -4375,6 +4378,31 @@ export class P2PHostAdapter implements EngineAdapter {
       this.disarmSayPhraseExpiry();
       return;
     }
+    // Order received sayings before expiry: drain any in-flight frames from the payer's session
+    // so a timely saying waiting behind an earlier delivery is delivered and applied first.
+    if (payer !== 0) {
+      const payerSession = this.guestSessions.get(payer);
+      if (payerSession) {
+        await payerSession.drain();
+        try {
+          state = this.nativeBridge
+            ? await this.nativeBridge.getState()
+            : await this.wasm.getState();
+        } catch {
+          return;
+        }
+        const updatedPayment = state.say_payment;
+        if (
+          !updatedPayment
+          || updatedPayment.id !== paymentId
+          || updatedPayment.deadline_ms === undefined
+        ) {
+          this.disarmSayPhraseExpiry();
+          return;
+        }
+        payment.deadline_ms = updatedPayment.deadline_ms;
+      }
+    }
     const now = sayPhraseHostClockMs();
     if (now <= payment.deadline_ms) {
       // A saying landed while this timer was in flight; re-arm against the
@@ -4395,7 +4423,7 @@ export class P2PHostAdapter implements EngineAdapter {
           : this.wasm.submitAction(action, payer),
       );
       await this.publishHostSnapshot(transition.result);
-      await this.broadcastStateUpdate(transition);
+      await this.broadcastStateUpdate(transition, undefined, true);
       await this.runAiLoop();
       void this.persistAuthoritativeState();
     } catch (err) {
@@ -5076,7 +5104,7 @@ export class P2PHostAdapter implements EngineAdapter {
           }
           // Host screen first, then the guests (see `publishHostSnapshot`).
           await this.publishHostSnapshot(transition.result);
-          await this.broadcastStateUpdate(transition);
+          await this.broadcastStateUpdate(transition, undefined, appliedAction?.type === "SayPhrase");
           // Wake the AI loop. After a guest's action lands, priority may have
           // shifted to an AI seat — without this, the AI never gets a turn
           // and the game stalls (same pattern as concedePlayer/host submit).
@@ -6029,6 +6057,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       resolve: (result: SubmitResult) => void;
       reject: (error: Error) => void;
       timer: ReturnType<typeof setTimeout>;
+      sent: boolean;
     }
   >();
   private nextManaPaymentPreviewRequestId = 1;
@@ -6270,13 +6299,17 @@ export class P2PGuestAdapter implements EngineAdapter {
           ),
         );
       }, SUBMISSION_TIMEOUT_MS);
-      this.pendingSayings.set(key, { resolve, reject, timer });
+      this.pendingSayings.set(key, { resolve, reject, timer, sent: false });
     });
     const sent = await this.send({
       type: "action",
       senderPlayerId: this.assignedPlayerId!,
       action,
     });
+    const pending = this.pendingSayings.get(key);
+    if (pending) {
+      pending.sent = sent;
+    }
     if (!sent) {
       this.rejectSaying(
         key,
@@ -6316,7 +6349,10 @@ export class P2PGuestAdapter implements EngineAdapter {
     for (const [key, pending] of [...this.pendingSayings]) {
       this.pendingSayings.delete(key);
       clearTimeout(pending.timer);
-      pending.reject(error);
+      const err = pending.sent
+        ? error
+        : new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send saying", true);
+      pending.reject(err);
     }
   }
 
@@ -6761,10 +6797,12 @@ export class P2PGuestAdapter implements EngineAdapter {
         const updateSnapshot = this.cacheSnapshot(msg.state, legalActionsFromWire(msg));
         this.sendStateAck();
         this.settleWithheld();
-        const settled = this.settlePendingSubmission({
-          kind: "resolve",
-          result: { events: msg.events, log_entries: msg.logEntries },
-        });
+        const settled = msg.saying
+          ? false
+          : this.settlePendingSubmission({
+              kind: "resolve",
+              result: { events: msg.events, log_entries: msg.logEntries },
+            });
         if (!settled) {
           this.emit({
             type: "stateChanged",
@@ -6785,8 +6823,10 @@ export class P2PGuestAdapter implements EngineAdapter {
         this.sendStateAck();
         this.withheldState = { revision: msg.revision, reason: i18n.t("multiplayer:p2pStateWithheld") };
         this.emit({ type: "stateDelivery", withheld: this.withheldState });
-        // Withheld means applied: the parked action committed.
-        this.settlePendingSubmission({ kind: "resolve", result: { events: [], log_entries: [] } });
+        // Withheld means applied: the parked action committed. A saying does not settle ordinary submissions.
+        if (!msg.saying) {
+          this.settlePendingSubmission({ kind: "resolve", result: { events: [], log_entries: [] } });
+        }
         break;
       }
       case "action_rejected": {

@@ -599,4 +599,63 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     // the closing update, which must not count as a saying.
     expect(sayingCalls().length).toBe(3);
   });
+
+  it("retries an untimed saying after an ACTION_NOT_SENT rejection", async () => {
+    const ROD_PHRASE = "Thank you, sir. May I have another?";
+    const state = gameStateFactory
+      .withPlayers(0, 1)
+      .waitingFor({
+        type: "UnlessPayment",
+        data: {
+          player: 0,
+          cost: {
+            type: "SayPhrase",
+            phrase: ROD_PHRASE,
+            repetitions: 1,
+          },
+          pending_effect: {},
+          effect_description: "Untap Rod of Spanking",
+        },
+      })
+      .build();
+    state.say_payment = null;
+    act(() => {
+      useGameStore.setState({
+        gameId: "say-phrase",
+        gameMode: "online",
+        gameState: state,
+        waitingFor: state.waiting_for,
+      });
+      useMultiplayerStore.setState({ activePlayerId: 0, isSpectator: false });
+    });
+
+    // First attempt rejects with definite no-send.
+    dispatchMock.mockRejectedValueOnce(
+      new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Send failed", true),
+    );
+    // Second attempt resolves.
+    dispatchMock.mockResolvedValueOnce({ events: [], log_entries: [] });
+
+    render(gamePageTree());
+
+    const button = await screen.findByRole("button", { name: new RegExp(ROD_PHRASE) });
+    expect(button).toBeInTheDocument();
+
+    // First click: send fails.
+    fireEvent.click(button);
+    await waitFor(() => expect(dispatchMock).toHaveBeenCalledTimes(1));
+    expect(dispatchMock).toHaveBeenLastCalledWith({
+      type: "PayUnlessCost",
+      data: { pay: true },
+    });
+
+    // Button remains available (not permanently locked by quietReported)
+    // Second click: retry succeeds.
+    fireEvent.click(button);
+    await waitFor(() => expect(dispatchMock).toHaveBeenCalledTimes(2));
+    expect(dispatchMock).toHaveBeenLastCalledWith({
+      type: "PayUnlessCost",
+      data: { pay: true },
+    });
+  });
 });
