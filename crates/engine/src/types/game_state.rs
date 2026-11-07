@@ -11064,7 +11064,7 @@ pub struct PendingManaAbility {
     /// file for the immediately preceding `PayCostKind::TapCreatures::mode`
     /// retype, a deliberate break backed by `lobby_broker::PROTOCOL_VERSION` /
     /// `WIRE_PROTOCOL_VERSION` under the convention entry 23
-    /// (`PayableResource::ManaGeneric`) established, whose test proves that break
+    /// (`PayableResource::Mana`) established, whose test proves that break
     /// is a clean, non-silent deserialize failure. That decision is now TAKEN,
     /// the same way: `lobby_broker::PROTOCOL_VERSION` moved to 68 and
     /// `WIRE_PROTOCOL_VERSION` to 51 (#8698), and this field intentionally
@@ -11126,7 +11126,7 @@ pub struct PendingManaAbility {
     ///   `set_chosen_x_recursive`;
     /// * an `{X}` mana cost leg (Wizard's Rockets' `{X}, {T}, Sacrifice this
     ///   artifact: Add X mana in any combination of colors`), announced through
-    ///   `PayableResource::ManaGeneric` before cost payment; the activation pays
+    ///   `PayableResource::Mana` before cost payment; the activation pays
     ///   the leg with X concretized and the produced-mana count reads the same
     ///   value;
     /// * a literal `Remove X counters` cost (Saltcrusted Steppe class), where
@@ -19870,7 +19870,7 @@ impl DistributionScope {
 /// CR 107.14 + CR 118.8: Quantity named in a "pay any amount of X" prompt.
 /// Typed so the same `WaitingFor::PayAmountChoice` variant generalizes to future
 /// classes without re-introducing boolean flags. Most variants deduct a real
-/// resource (energy, life, generic mana, counters); `LoopCollapse` is the one
+/// resource (energy, life, X-concretized or per-unit mana, counters); `LoopCollapse` is the one
 /// non-payment member — its N is the finite count an accepted CR 732.2a
 /// object-growth loop collapses into, deducting nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19878,14 +19878,25 @@ impl DistributionScope {
 pub enum PayableResource {
     /// CR 107.14: Pay any amount of `{E}` — removes N energy counters from the player.
     Energy,
-    /// CR 107.3f + CR 118.1 + CR 118.12: Pay a chosen X as part of a
-    /// resolution-time mana cost. `base_cost` is the UNCONCRETIZED cost
-    /// (still carrying `ManaCostShard::X` plus any colored/generic pips
-    /// alongside it, e.g. `{X}{W}{U}{B}`); the submit handler concretizes X
-    /// into it (`ManaCost::concretize_x`) and pays the resulting cost through
-    /// the standard mana-payment authority, so colored requirements are
-    /// enforced exactly like any other mana cost — never dropped in favor of
-    /// a generic-only payment (Elenda and Azor, #6410).
+    /// Pay a chosen amount as part of a resolution-time mana cost; `composition`
+    /// says how the chosen amount becomes the concrete cost.
+    ///
+    /// - `ManaAmountComposition::ConcretizeX` (CR 107.3f + CR 118.1 +
+    ///   CR 118.12): `base_cost` is the UNCONCRETIZED cost (still carrying
+    ///   `ManaCostShard::X` plus any colored/generic pips alongside it, e.g.
+    ///   `{X}{W}{U}{B}`); the submit handler concretizes X into it
+    ///   (`ManaCost::concretize_x`) and pays the resulting cost through the
+    ///   standard mana-payment authority, so colored requirements are enforced
+    ///   exactly like any other mana cost — never dropped in favor of a
+    ///   generic-only payment (Elenda and Azor, #6410).
+    /// - `ManaAmountComposition::PerUnit` (CR 107.1c + CR 118.1): `base_cost`
+    ///   is one unit (e.g. `{R}` for "pay any amount of {R}", Leyline Tyrant);
+    ///   the submit handler pays it repeated the chosen number of times
+    ///   (`ManaCost::scaled`) through the same authority.
+    ///
+    /// The wire tag stays `ManaGeneric` (legacy-frozen): it names only that
+    /// the prompt is a mana payment, so a reader must consult `composition`
+    /// rather than infer `ConcretizeX` from the tag.
     ///
     /// `base_cost` intentionally carries NO `#[serde(default)]`: a serialized
     /// prompt missing this field must fail deserialization rather than
@@ -19898,7 +19909,12 @@ pub enum PayableResource {
     /// cost leg (Wizard's Rockets). The submit only binds
     /// `PendingManaAbility::chosen_x`; the activation then pays the
     /// concretized leg through its own cost cursor.
-    ManaGeneric { base_cost: ManaCost },
+    #[serde(rename = "ManaGeneric")] // wire tag legacy-frozen, see protocol record
+    Mana {
+        base_cost: ManaCost,
+        #[serde(default)]
+        composition: ManaAmountComposition,
+    },
     /// CR 107.1c + CR 122.1: Choose how many counters to remove.
     Counters,
     /// CR 119.4: Pay any amount of life — N is deducted as life loss via
@@ -19930,6 +19946,22 @@ pub enum PayableResource {
     /// correct growth axis (tokens / counters / life / mixed); resolution ignores it
     /// and reads the typed `PersistentAxisMaterialization` stash directly.
     LoopCollapse { axis: LoopCollapseAxis },
+}
+
+/// CR 107.1c: How the amount chosen in a `PayableResource::Mana` prompt
+/// becomes a concrete mana cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManaAmountComposition {
+    /// CR 107.3f + CR 118.1: the chosen amount is the value of X in the base
+    /// cost — `{X}{W}` with N chosen pays `{N}{W}` (Elenda and Azor). The
+    /// serde default, so payloads that predate `composition` keep today's
+    /// behavior.
+    #[default]
+    ConcretizeX,
+    /// CR 107.1c + CR 118.1: the base cost is one unit, repeated the chosen
+    /// number of times — `{R}` with N chosen pays `{R}` × N ("pay any amount
+    /// of {R}", Leyline Tyrant).
+    PerUnit,
 }
 
 /// CR 732.2a: which persistent-growth axis an accepted object-growth loop collapses
@@ -46317,7 +46349,7 @@ mod tests {
     /// This is a deliberate wire-compatibility break, backed by
     /// `lobby_broker::PROTOCOL_VERSION` 36 / `WIRE_PROTOCOL_VERSION` 27 (not a
     /// backward-compatible decode shim) — the same convention entry 23
-    /// (`PayableResource::ManaGeneric`) established. This test proves the break
+    /// (`PayableResource::Mana`) established. This test proves the break
     /// is a clean, non-silent deserialize failure through the actual production
     /// restore path (`PersistedGameState`, the same type `server-core::session::
     /// PersistedSession.state` uses), for BOTH prior `TapCreatures` shapes: the
@@ -46391,7 +46423,7 @@ mod tests {
     /// wire-compatibility break,
     /// backed by `lobby_broker::PROTOCOL_VERSION` 68 / `WIRE_PROTOCOL_VERSION`
     /// 51 (not a backward-compatible decode shim) — the same convention entry
-    /// 23 (`PayableResource::ManaGeneric`) established and
+    /// 23 (`PayableResource::Mana`) established and
     /// `tap_creatures_pre_mode_wire_shape_is_rejected` above pins for the
     /// sibling `PayCostKind::TapCreatures::mode` retype.
     ///
@@ -46507,7 +46539,7 @@ mod tests {
     /// instead of collapsing them into one scalar. The field intentionally
     /// carries NO `#[serde(default)]` and no `skip_serializing_if`, backed by
     /// `lobby_broker::PROTOCOL_VERSION` 91 / `WIRE_PROTOCOL_VERSION` 73 — the
-    /// same convention entry 23 (`PayableResource::ManaGeneric`) established
+    /// same convention entry 23 (`PayableResource::Mana`) established
     /// and `chosen_tappers_pre_option_wire_shape_is_rejected` above pins for
     /// the sibling `chosen_tappers` retype.
     ///
@@ -53726,7 +53758,7 @@ mod tests {
         );
     }
 
-    /// #6410 review follow-up: `PayableResource::ManaGeneric::base_cost`
+    /// #6410 review follow-up: `PayableResource::Mana::base_cost`
     /// deliberately carries NO `#[serde(default)]`. A prior revision of this
     /// fix defaulted the missing field to `ManaCost::zero()`, which would
     /// have concretized a legacy/incomplete serialized prompt into a FREE
@@ -53749,6 +53781,52 @@ mod tests {
             serde_json::from_str::<PayableResource>(legacy_per_x_shape).is_err(),
             "the pre-fix per_x-only wire shape has no base_cost and must be rejected too"
         );
+    }
+
+    /// CR 107.3f: a `ManaGeneric` payload that predates `composition` (an
+    /// `{X}{W}` resolution-time prompt) still parses, and as `ConcretizeX` —
+    /// today's X semantics. `base_cost` keeps its no-default invariant (the
+    /// paired negative is `pay_amount_choice_mana_generic_missing_base_cost_is_rejected`).
+    #[test]
+    fn pay_amount_choice_mana_legacy_wire_shape_defaults_to_concretize_x() {
+        use crate::types::mana::{ManaCost, ManaCostShard};
+        let base_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::White],
+            generic: 0,
+        };
+        let legacy = serde_json::json!({
+            "type": "ManaGeneric",
+            "data": { "base_cost": serde_json::to_value(&base_cost).unwrap() },
+        });
+        let parsed: PayableResource = serde_json::from_value(legacy)
+            .expect("a pre-composition ManaGeneric payload must still deserialize");
+        assert_eq!(
+            parsed,
+            PayableResource::Mana {
+                base_cost,
+                composition: ManaAmountComposition::ConcretizeX,
+            }
+        );
+    }
+
+    /// CR 107.1c: a per-unit prompt ("pay any amount of {R}") serializes under
+    /// the legacy-frozen `ManaGeneric` tag with an explicit `composition`, and
+    /// round-trips.
+    #[test]
+    fn pay_amount_choice_mana_per_unit_serializes_under_frozen_wire_tag() {
+        use crate::types::mana::{ManaCost, ManaCostShard};
+        let resource = PayableResource::Mana {
+            base_cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            },
+            composition: ManaAmountComposition::PerUnit,
+        };
+        let value = serde_json::to_value(&resource).unwrap();
+        assert_eq!(value["type"], "ManaGeneric");
+        assert_eq!(value["data"]["composition"], "PerUnit");
+        let back: PayableResource = serde_json::from_value(value).unwrap();
+        assert_eq!(back, resource);
     }
 
     #[test]
