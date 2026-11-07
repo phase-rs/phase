@@ -70024,12 +70024,12 @@ fn filter_has_chosen_color(f: &TargetFilter) -> bool {
 ///
 /// EXHAUSTIVE for the same reason as [`filter_has_chosen_color`]: reading only a
 /// `TypedFilter`'s top-level `properties` was the hole this closes. `Targets`,
-/// `TargetsOnly`, `DistinctFrom`, `DifferentNameFrom`, `SharesQuality` and
-/// `CanEnchant` each box a whole `TargetFilter`, `ControllerMatches` boxes a
-/// `PlayerFilter`, and `AnyOf` / `Not` recurse into `FilterProp` itself — so a
-/// stamped prop can sit arbitrarily deep, and a `_ => false` here would answer
-/// "no" at every one of those depths. The 90 leaf variants in the final arm
-/// carry no nested filter at all.
+/// `TargetsOnly`, `DistinctFrom`, `DifferentNameFrom`, `SharesQuality`,
+/// `ManaSpentFromSource` and `CanEnchant` each box a whole `TargetFilter`,
+/// `ControllerMatches` boxes a `PlayerFilter`, and `AnyOf` / `Not` recurse into
+/// `FilterProp` itself — so a stamped prop can sit arbitrarily deep, and a
+/// `_ => false` here would answer "no" at every one of those depths. The leaf
+/// variants in the final arm carry no nested filter at all.
 fn prop_has_chosen_color(p: &FilterProp) -> bool {
     match p {
         // THE BASE CASE.
@@ -70046,6 +70046,9 @@ fn prop_has_chosen_color(p: &FilterProp) -> bool {
         }
         FilterProp::TargetsOnly { filter } => filter_has_chosen_color(filter),
         FilterProp::Targets { filter } => filter_has_chosen_color(filter),
+        // CR 106.3 + CR 601.2h: the paid mana source phrase boxes a whole
+        // `TargetFilter`, so a stamped prop can sit inside it.
+        FilterProp::ManaSpentFromSource { source_filter } => filter_has_chosen_color(source_filter),
         // CR 701.3a: the filter-matched host axis boxes a whole `TargetFilter`,
         // so a stamped prop can sit inside it.
         FilterProp::AttachedTo {

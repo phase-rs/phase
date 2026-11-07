@@ -15,8 +15,11 @@ fn load_state() -> GameState {
     )
     .read_to_string(&mut json)
     .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    let envelope: serde_json::Value =
+    let mut envelope: serde_json::Value =
         serde_json::from_str(&json).expect("game-state envelope parses as JSON");
+    // The committed capture predates the cast-history provenance fields; the shared
+    // test-only migration admits its records so production admission stays strict.
+    engine::types::game_state::record_captured_onsets(&mut envelope);
     serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
         .expect("gameState deserializes through the production decoder")
         .into_game_state()

@@ -19948,7 +19948,12 @@ fn continue_with_prepared(
                 // CR 601.2c + CR 603.2: stage announcement triggers for the Aura before
                 // payment, so automatic mana payment (e.g. sacrificing Blood Pet) does not
                 // move the target before triggers match.
-                let pending = pending_cast_from_prepared(&prepared, resolved.clone());
+                let mut pending = pending_cast_from_prepared(&prepared, resolved.clone());
+                // CR 115.1 + CR 601.2c + CR 400.7: the Aura's enchant target was just
+                // announced on this automatic branch, which does not pass the
+                // interactive declaration boundary — latch it here and carry it to
+                // payment.
+                let lock = latch_and_lock_declared_targets(state, &resolved, &mut pending);
                 super::announcement_triggers::stage_with_pending_owner(
                     state,
                     &pending,
@@ -19968,6 +19973,7 @@ fn continue_with_prepared(
                     prepared.cast_timing_permission,
                     prepared.origin_zone,
                     prepared.payment_mode,
+                    lock,
                     events,
                 );
             } else {
@@ -20031,7 +20037,10 @@ fn continue_with_prepared(
             // CR 601.2c + CR 603.2: stage announcement triggers for the mutating creature spell
             // before payment, so automatic mana payment (e.g. sacrificing Blood Pet) does not
             // move the target before triggers match.
-            let pending = pending_cast_from_prepared(&prepared, resolved.clone());
+            let mut pending = pending_cast_from_prepared(&prepared, resolved.clone());
+            // CR 115.1 + CR 601.2c + CR 400.7: the mutate target was just announced on
+            // this automatic branch, so latch it before any cost can move it.
+            let lock = latch_and_lock_declared_targets(state, &resolved, &mut pending);
             super::announcement_triggers::stage_with_pending_owner(
                 state,
                 &pending,
@@ -20051,6 +20060,7 @@ fn continue_with_prepared(
                 prepared.cast_timing_permission,
                 prepared.origin_zone,
                 prepared.payment_mode,
+                lock,
                 events,
             );
         } else {
@@ -20423,7 +20433,14 @@ fn continue_with_prepared(
             // CR 601.2c + CR 603.2: stage announcement triggers for the spell before
             // payment, so automatic mana payment (e.g. sacrificing Blood Pet) does not
             // move the target before triggers match.
-            let pending = pending_cast_from_prepared(&prepared, resolved.clone());
+            let mut pending = pending_cast_from_prepared(&prepared, resolved.clone());
+            // CR 115.1 + CR 601.2c + CR 400.7: this branch announced the spell's targets
+            // itself and goes straight to cost payment, so it never reaches the
+            // interactive `finish_pending_cast_cost_or_pay` boundary that latches them.
+            // Latch here, while the targets are still the announced objects, and carry
+            // the facts to payment so the CR 601.2i write does not re-read the storage
+            // id after CR 601.2h moved the returned land (Devour in Flames).
+            let lock = latch_and_lock_declared_targets(state, &resolved, &mut pending);
             super::announcement_triggers::stage_with_pending_owner(
                 state,
                 &pending,
@@ -20443,6 +20460,7 @@ fn continue_with_prepared(
                 prepared.cast_timing_permission,
                 prepared.origin_zone,
                 prepared.payment_mode,
+                lock,
                 events,
             );
         }
@@ -20465,6 +20483,8 @@ fn continue_with_prepared(
     }
 
     // 6. Check additional cost, then pay mana cost
+    // CR 601.2c: this cast declared no targets (it reached here without target
+    // slots), so there is nothing to latch.
     check_additional_cost_or_pay(
         state,
         player,
@@ -20478,6 +20498,7 @@ fn continue_with_prepared(
         prepared.cast_timing_permission,
         prepared.origin_zone,
         prepared.payment_mode,
+        casting_costs::CostLockInput::default(),
         events,
     )
 }
@@ -20597,6 +20618,8 @@ fn continue_with_no_ability(
             events,
         );
     }
+    // CR 601.2c: a permanent spell with no spell ability declares no targets, so
+    // there is nothing to latch.
     check_additional_cost_or_pay(
         state,
         player,
@@ -20610,6 +20633,7 @@ fn continue_with_no_ability(
         prepared.cast_timing_permission,
         prepared.origin_zone,
         prepared.payment_mode,
+        casting_costs::CostLockInput::default(),
         events,
     )
 }
@@ -31849,6 +31873,92 @@ pub(crate) fn record_activation_announcement(
     }
 }
 
+/// CR 115.1 + CR 601.2c + CR 400.7: snapshot one committed target list into the
+/// repo's typed "one committed target, as it was when committed" vocabulary. A
+/// player fact needs no snapshot; an object fact carries the target's public
+/// characteristics as they were at commitment. An id absent from `state.objects`
+/// (a target that has ceased — only reachable for a token) is dropped: a fact
+/// that cannot be snapshotted is not invented. CR 115.9b's "a departed target is
+/// ignored" rule belongs to the live reader in
+/// `filter::stack_entry_targets_satisfy`, not to this capture.
+pub(crate) fn capture_target_facts(
+    state: &GameState,
+    targets: &[TargetRef],
+) -> Vec<ActivationTargetFact> {
+    targets
+        .iter()
+        .filter_map(|target| match target {
+            TargetRef::Player(player) => Some(ActivationTargetFact::Player(*player)),
+            TargetRef::Object(id) => {
+                state
+                    .objects
+                    .get(id)
+                    .map(|obj| ActivationTargetFact::Object {
+                        id: *id,
+                        lki: Box::new(obj.snapshot_public_characteristics()),
+                    })
+            }
+        })
+        .collect()
+}
+
+/// CR 115.1 + CR 601.2c + CR 400.7: latch the spell's just-declared targets onto
+/// its own `PendingCast`, at the shared target-declaration→payment boundary —
+/// the last moment before CR 601.2h moves anything. The latch is the cast's
+/// answer for the CR 601.2i history write; every later reader prefers it over a
+/// fresh raw-id capture, because a cost that moves a target (the ordinary
+/// return-to-hand additional cost, Bone Splinters' sacrifice) makes the same
+/// storage id a different object whose printed baseline CR 400.7 restores on the
+/// zone change. First capture wins: a spell declares its targets once, and a
+/// continuation that re-enters the boundary must not restate them from the
+/// moved object.
+///
+/// Deliberate scope of the frozen facts (CR 601.2c): this is the
+/// announcement-time reading, so a cost that mutates a target *in place* rather
+/// than moving it — tapping it for convoke or an "as an additional cost, tap"
+/// clause, putting counters on it, pumping it — is now recorded as it was when
+/// announced, where an earlier capture point taken after such a cost recorded the
+/// mutated value. That is the reading the cost-axis predicates are defined over
+/// (CR 601.2f evaluates them before the total cost is paid); the in-place
+/// alternative would make the record depend on how the caster chose to pay.
+pub(crate) fn latch_committed_target_facts(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    pending: &mut PendingCast,
+) {
+    if pending.committed_target_facts.is_none() {
+        pending.committed_target_facts = Some(capture_target_facts(
+            state,
+            &declared_targets_in_chain(ability),
+        ));
+    }
+}
+
+/// CR 115.1 + CR 601.2c + CR 400.7: the automatic-announcement counterpart of
+/// [`latch_committed_target_facts`]'s interactive boundary.
+///
+/// The engine announces the targets itself when exactly one assignment is legal
+/// (CR 601.2c — the announcement is the caster's either way) and hands the cast
+/// straight to `check_additional_cost_or_pay`, never passing
+/// `finish_pending_cast_cost_or_pay`, the boundary that latches on the
+/// interactive path. Without this, the latch stays `None` through cost payment
+/// and the CR 601.2i history write falls back to a raw-id capture taken after
+/// CR 601.2h has already moved the cost's objects — which records the returned
+/// card's printed baseline instead of the announced target (CR 400.7).
+///
+/// Latch now, while the targets are still the announced objects, and hand the
+/// facts to payment through the pipeline's existing [`casting_costs::CostLockInput`]
+/// carrier — the same field every rebuild site already preserves — rather than
+/// introducing a second path for the facts to travel.
+pub(super) fn latch_and_lock_declared_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    pending: &mut PendingCast,
+) -> casting_costs::CostLockInput {
+    latch_committed_target_facts(state, ability, pending);
+    casting_costs::CostLockInput::from_pending(pending)
+}
+
 /// [`capture_activation_record`] from an ability definition and its committed
 /// targets.
 pub(crate) fn capture_activation_record_from(
@@ -31863,21 +31973,7 @@ pub(crate) fn capture_activation_record_from(
     let source = state.objects.get(&source_id)?;
     let source_lki = source.snapshot_public_characteristics();
     let source_zone = source.zone;
-    let targets = targets
-        .iter()
-        .filter_map(|target| match target {
-            TargetRef::Player(player) => Some(ActivationTargetFact::Player(*player)),
-            TargetRef::Object(id) => {
-                state
-                    .objects
-                    .get(id)
-                    .map(|obj| ActivationTargetFact::Object {
-                        id: *id,
-                        lki: Box::new(obj.snapshot_public_characteristics()),
-                    })
-            }
-        })
-        .collect();
+    let targets = capture_target_facts(state, targets);
     Some(AbilityActivationRecord {
         activator: player,
         source: source_id,
@@ -33199,7 +33295,12 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         | FilterProp::DifferentNameFrom { filter }
         | FilterProp::DistinctFrom { reference: filter }
         | FilterProp::TargetsOnly { filter }
-        | FilterProp::Targets { filter } => target_filter_reads_chosen_target(filter, read),
+        | FilterProp::Targets { filter }
+        // CR 106.3 + CR 601.2h: the paid mana source phrase is itself a
+        // `TargetFilter`, so a chosen-target read inside it must route.
+        | FilterProp::ManaSpentFromSource {
+            source_filter: filter,
+        } => target_filter_reads_chosen_target(filter, read),
         // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`, so
         // whether it reads a chosen target is exactly whether that filter does.
         FilterProp::AttachedTo {
@@ -34992,7 +35093,9 @@ fn reduce_ability_cost_non_target_gates_admit(
 }
 
 /// CR 601.2c + CR 115.1: whether any committed target of a recorded activation
-/// matched `filter` as it was when the ability was activated.
+/// matched `filter` as it was when the ability was activated. Delegates to
+/// `filter::declared_target_facts_match`, the single fold for this question
+/// (shared with the spell-cast record's `FilterProp::Targets` arm).
 fn recorded_targets_match_filter(
     state: &GameState,
     record: &AbilityActivationRecord,
@@ -35004,18 +35107,7 @@ fn recorded_targets_match_filter(
         static_source_id,
         static_controller,
     );
-    record.targets.iter().any(|fact| match fact {
-        ActivationTargetFact::Object { id, lki } => {
-            super::filter::matches_target_filter_on_lki_snapshot(state, *id, lki, filter, &ctx)
-        }
-        ActivationTargetFact::Player(player) => target_ref_matches_cost_filter(
-            state,
-            static_source_id,
-            static_controller,
-            &TargetRef::Player(*player),
-            filter,
-        ),
-    })
+    super::filter::declared_target_facts_match(state, &record.targets, filter, &ctx)
 }
 
 /// CR 611.3a + CR 602.2: "the first activated ability … you activate each
@@ -36260,6 +36352,15 @@ fn is_blocked_by_per_turn_cast_limit_for(
             // If a spell filter is set, first check if the spell being cast matches.
             // E.g., Deafening Silence only limits noncreature spells — creature spells
             // are unaffected regardless of how many noncreature spells were cast.
+            // CR 101.2 + CR 106.3: the prohibiting static's own source object is the
+            // only source in scope for a record read here. The live projection is
+            // PRE-payment by construction (CR 601.2f precedes CR 601.2h), so a
+            // `ManaSpentFromSource` in a `PerTurnCastLimit` filter answers false
+            // honestly; no printed card does this.
+            let filter_ctx = super::filter::FilterContext::from_source_with_controller(
+                bf_obj.id,
+                bf_obj.controller,
+            );
             if let Some(filter) = spell_filter {
                 // CR 202.3d + CR 702.102b: project the spell being cast through the
                 // shared cast-record authority so a fused split spell's mana value /
@@ -36277,7 +36378,8 @@ fn is_blocked_by_per_turn_cast_limit_for(
                     &current_record,
                     filter,
                     bf_obj.controller,
-                    &state.all_creature_types,
+                    state,
+                    &filter_ctx,
                 ) {
                     continue;
                 }
@@ -36298,7 +36400,8 @@ fn is_blocked_by_per_turn_cast_limit_for(
                                 r,
                                 filter,
                                 bf_obj.controller,
-                                &state.all_creature_types,
+                                state,
+                                &filter_ctx,
                             )
                         })
                         .count(),

@@ -51,6 +51,9 @@ fn spell_record(name: &str) -> SpellCastRecord {
         was_kicked: false,
         spell_object_id: None,
         prepared_copy_source: None,
+        mana_spent_source_snapshots: Some(Vec::new()),
+        // A hand-built case record carries no announced cast, so it declares no target.
+        targets: Some(Vec::new()),
     }
 }
 

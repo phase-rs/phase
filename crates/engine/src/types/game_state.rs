@@ -1362,6 +1362,11 @@ impl<'context, 'state> TriggerSourceRead<'context, 'state> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManaSpentSourceSnapshot {
     pub source_id: ObjectId,
+    /// The source's public characteristics as they were when it paid. Encoded
+    /// through [`crate::types::history_snapshot`]'s lossless compact projection:
+    /// the same `LKISnapshot` value, without the default-valued scaffolding that
+    /// would otherwise ride every `StateUpdate` frame.
+    #[serde(with = "crate::types::history_snapshot::compact_history_lki")]
     pub lki: LKISnapshot,
 }
 
@@ -1438,13 +1443,22 @@ fn is_battlefield_zone(zone: &Zone) -> bool {
     *zone == Zone::Battlefield
 }
 
-/// One committed target of an activation, as it was when the ability was
-/// activated.
+/// CR 115.1 + CR 400.7: one committed target of a spell or ability, as it was
+/// when the target was committed (CR 601.2c). Carried by
+/// `AbilityActivationRecord.targets` for an activated ability and by
+/// `SpellCastRecord.targets` for a cast spell.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ActivationTargetFact {
     Player(PlayerId),
-    Object { id: ObjectId, lki: Box<LKISnapshot> },
+    Object {
+        id: ObjectId,
+        /// The target's public characteristics as they were when it was
+        /// committed. Encoded through
+        /// [`crate::types::history_snapshot`]'s lossless compact projection.
+        #[serde(with = "crate::types::history_snapshot::compact_history_boxed_lki")]
+        lki: Box<LKISnapshot>,
+    },
 }
 
 /// Snapshot of a spell's characteristics at cast time for per-turn history queries.
@@ -1533,6 +1547,70 @@ pub struct SpellCastRecord {
     /// pre-cast probes and the recorded cast agree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepared_copy_source: Option<ObjectId>,
+    /// CR 106.3 + CR 601.2h + CR 400.7d: the per-mana-unit payment sources, as they
+    /// were when each unit was paid. Latched so a source-qualified cast predicate
+    /// survives the spell's resolution and the source's departure (CR 400.7).
+    ///
+    /// `Option` distinguishes **unknown** provenance (`None`, a record written
+    /// before this field existed) from **known-empty** (`Some(vec![])`, a cast
+    /// that provably paid no source-attributed mana). A history gate compares a
+    /// qualifying count with zero, so collapsing the two would let an unknown
+    /// record read as "did not qualify" and re-grant a once-per-turn benefit.
+    /// `PersistedGameState::prepare_for_restore` refuses a playable save that
+    /// still carries an unknown, which is the only honest outcome: the paying
+    /// objects are gone, so the provenance is not reconstructable.
+    ///
+    /// On the wire, known-empty is written as an explicit `[]` and an unknown is
+    /// the ABSENT field (`skip_serializing_if = "Option::is_none"`), which decodes
+    /// back to `None`. So a record this build wrote always states its answer, and
+    /// a payload written before the field existed says nothing — which is exactly
+    /// the distinction `PersistedRestoreError::UnknownCastHistoryProvenance`
+    /// acts on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_spent_source_snapshots: Option<Vec<ManaSpentSourceSnapshot>>,
+    /// CR 115.1 + CR 601.2c: the spell's declared targets as the cast committed
+    /// them — each object target's public characteristics snapshotted as they
+    /// were then — so a turn-history predicate such as "the first spell you cast
+    /// during each of your turns that targets a creature" can be counted after
+    /// the spell has left the stack (CR 400.7). Answered under CR 115.9's
+    /// selection-time reading; CR 115.9b's current-state reading governs the
+    /// live per-spell reader instead.
+    ///
+    /// `Option` distinguishes **unknown** provenance (`None`, a record written
+    /// before this field existed) from **known-empty** (`Some(vec![])`, a cast
+    /// that provably declared no target). Every positive read treats an empty
+    /// list as "declared nothing", but a zero-count gate makes that unsafe for
+    /// an unknown: an unknown record would read as "did not qualify" and
+    /// re-grant a once-per-turn benefit. `PersistedGameState::prepare_for_restore`
+    /// therefore refuses a playable save that still carries an unknown — the
+    /// announced targets are gone and cannot be reconstructed.
+    ///
+    /// Absence is also produced outside legacy saves: the live projection passes
+    /// an empty slice deliberately (the live reader answers this property from the
+    /// stack entry instead, and that record is never persisted), and viewer
+    /// redaction blanks a hidden target's snapshot while keeping its slot. Both
+    /// spell that as `Some(vec![])` — "stated empty" — so `None` keeps meaning
+    /// only "this payload predates the field".
+    ///
+    /// Wire encoding matches [`Self::mana_spent_source_snapshots`]: known-empty is
+    /// written as `[]`, and an unknown is the absent field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targets: Option<Vec<ActivationTargetFact>>,
+}
+
+impl SpellCastRecord {
+    /// The declared-target facts this record proves, or `&[]` when it proves
+    /// none. Callers that must tell "declared nothing" apart from "cannot prove
+    /// what it declared" read [`Self::targets`] directly.
+    pub fn declared_targets(&self) -> &[ActivationTargetFact] {
+        self.targets.as_deref().unwrap_or(&[])
+    }
+
+    /// The payment-source facts this record proves, or `&[]` when it proves
+    /// none. See [`Self::declared_targets`] for the unknown/known-empty split.
+    pub fn mana_source_snapshots(&self) -> &[ManaSpentSourceSnapshot] {
+        self.mana_spent_source_snapshots.as_deref().unwrap_or(&[])
+    }
 }
 
 /// Snapshot of a land play's cast-capable origin for per-turn history queries.
@@ -1568,6 +1646,10 @@ impl Default for SpellCastRecord {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            // A hand-built record describes no real cast, so it provably
+            // declared nothing and paid nothing: known-empty, never unknown.
+            mana_spent_source_snapshots: Some(Vec::new()),
+            targets: Some(Vec::new()),
         }
     }
 }
@@ -8894,6 +8976,12 @@ pub struct PendingCast {
     pub pending_loyalty_activation_player: Option<PlayerId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_constraints: Vec<TargetSelectionConstraint>,
+    /// CR 115.1 + CR 601.2c + CR 400.7: the announced target facts, latched at the
+    /// first pre-payment moment and parked here so a payment root that rebuilds
+    /// `FinalizePrePaymentChecks` from scratch still reaches the CR 601.2i write
+    /// with selection-time facts. `None` on a cast that has not latched them yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_target_facts: Option<Vec<ActivationTargetFact>>,
     /// CR 700.13 + CR 601.2c: Whether this action's announced target set was
     /// a crime at target-declaration time. It is committed only once stack
     /// placement succeeds, so failed casts and activations leave no record.
@@ -9200,6 +9288,14 @@ pub enum PendingCostMoveCompletion {
         cascade_cast_transformed: bool,
         resolution_success_waiting_for: Option<Box<WaitingFor>>,
         prepaid_actual_mana_spent: Option<u32>,
+        /// CR 115.1 + CR 601.2c + CR 400.7: the announced target facts, carried
+        /// from the pre-payment checks across the parked Sneak/Web-slinging
+        /// returned-creature cost move so the CR 601.2i history write records the
+        /// selection-time characteristics rather than a later incarnation's.
+        /// `None` is a legacy park whose targets are unreconstructable; restore
+        /// admission refuses it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committed_target_facts: Option<Vec<ActivationTargetFact>>,
     },
     /// CR 601.2h + CR 702.66a: The cast's mana is already paid and `pending`
     /// carries that payment; once the Delve exiles settle, re-enter the inner
@@ -9234,6 +9330,22 @@ pub struct FinalizePrePaymentChecks {
         deserialize_with = "crate::types::ability::deserialize_enters_with_modifications_compat"
     )]
     pub cast_this_way_enters_mods: crate::types::ability::PendingEntersModifications,
+    /// CR 115.1 + CR 601.2c + CR 400.7: the spell's declared targets as they were
+    /// when they were committed, latched at the one moment before any cost is
+    /// paid and carried across every parked payment continuation. The CR 601.2i
+    /// history write must describe the announced targets, not whatever object
+    /// later shares their storage id: a spell whose additional cost sacrifices a
+    /// target it also targets (Bone Splinters) would otherwise re-read the raw
+    /// id after payment and record the graveyard incarnation's printed
+    /// characteristics instead of the selection-time ones (CR 115.9, CR 115.9b,
+    /// CR 400.7). `Some(vec![])` for a cast that declares no target.
+    ///
+    /// `Option` is deliberate: `None` is a parked cast written before this field
+    /// existed, whose announced targets are gone. Resuming it would write a
+    /// history record that falsely claims "declared nothing", so
+    /// `PersistedGameState::prepare_for_restore` refuses the save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_target_facts: Option<Vec<ActivationTargetFact>>,
 }
 
 /// CR 605.3b: Selects whether completing a mana-ability cost payment may ask
@@ -9869,6 +9981,7 @@ impl PendingCast {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -10277,12 +10390,29 @@ impl GameState {
     }
 
     /// Every typed owner currently holding a live [`PendingCast`], in custody
-    /// precedence order.
-    pub(crate) fn live_pending_cast_owners(&self) -> Vec<PendingCastOwner> {
-        let owners: Vec<PendingCastOwner> = PendingCastOwner::ALL
+    /// precedence order, **without** the single-announcement drift assertion.
+    ///
+    /// This is the enumeration itself. Live in-game callers use
+    /// [`Self::live_pending_cast_owners`], which adds the invariant check.
+    /// Restore admission reads untrusted state and must stay fallible, so it
+    /// enumerates here and refuses a disagreement
+    /// ([`Self::reject_conflicting_pending_cast_owners`]) instead of tripping the
+    /// `debug_assert!` at a library boundary.
+    pub(crate) fn pending_cast_owners(&self) -> Vec<PendingCastOwner> {
+        PendingCastOwner::ALL
             .into_iter()
             .filter(|owner| self.pending_cast_at(*owner).is_some())
-            .collect();
+            .collect()
+    }
+
+    /// Every typed owner currently holding a live [`PendingCast`], in custody
+    /// precedence order.
+    ///
+    /// Asserts the live-state invariant that one announcement is in flight at a
+    /// time. Do not call this on restored/untrusted state — use
+    /// [`Self::pending_cast_owners`] there.
+    pub(crate) fn live_pending_cast_owners(&self) -> Vec<PendingCastOwner> {
+        let owners = self.pending_cast_owners();
         // One announcement is in flight at a time (CR 601.2 / CR 602.2 do not
         // nest; mana abilities carry no `PendingCast`), so every owner that is
         // live names the same announcement.
@@ -16452,6 +16582,206 @@ impl GameState {
         });
     }
 
+    /// CR 601.2c + CR 115.1 + CR 106.3: refuse a playable save whose cast history
+    /// cannot prove what its spells declared or what paid for them.
+    ///
+    /// `SpellCastRecord` carries `Option` provenance precisely so that "this cast
+    /// declared nothing" (`Some(vec![])`) stays distinguishable from "this record
+    /// predates the field" (`None`). The distinction matters because a first-spell
+    /// gate is a zero-count comparison: treating an unknown as a non-qualifying
+    /// cast would let a later spell receive a once-per-turn benefit a second time.
+    /// The announced targets and the paying mana sources of a finished cast are
+    /// gone, so the provenance is not reconstructable — the honest outcome is to
+    /// refuse the load at the one chokepoint every production restore funnels
+    /// through, rather than to admit an unknown as a known-empty.
+    fn reject_unknown_cast_history_provenance(&self) -> Result<(), PersistedRestoreError> {
+        let unknown = self
+            .spells_cast_this_turn_by_player
+            .values()
+            .chain(self.spells_cast_this_game_by_player.values())
+            .flat_map(|records| records.iter())
+            .find(|record| {
+                record.targets.is_none() || record.mana_spent_source_snapshots.is_none()
+            });
+        match unknown {
+            Some(record) => Err(PersistedRestoreError::UnknownCastHistoryProvenance {
+                spell_object_id: record.spell_object_id,
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// CR 601.2 / CR 602.2: at most one announcement is in flight, so every live
+    /// `PendingCast` owner names the same cast.
+    ///
+    /// Live state asserts that in [`Self::live_pending_cast_owners`]. A persisted
+    /// save can violate it, and admitting it would move the failure to that
+    /// assertion — a process panic at a library boundary — or, in release builds,
+    /// silently keep two announcements. Refuse the save here instead.
+    fn reject_conflicting_pending_cast_owners(&self) -> Result<(), PersistedRestoreError> {
+        let mut live = self
+            .pending_cast_owners()
+            .into_iter()
+            .filter_map(|owner| self.pending_cast_at(owner));
+        let Some(first) = live.next() else {
+            return Ok(());
+        };
+        match live.find(|pending| {
+            pending.object_id != first.object_id
+                || pending.activation_ability_index != first.activation_ability_index
+        }) {
+            Some(second) => Err(PersistedRestoreError::ConflictingPendingCastOwners {
+                first: first.object_id,
+                first_ability_index: first.activation_ability_index,
+                second: second.object_id,
+                second_ability_index: second.activation_ability_index,
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// CR 601.2c + CR 115.1 + CR 400.7: refuse a playable save whose parked cast
+    /// cannot prove what it declared.
+    ///
+    /// Every carrier that resumes a cast re-enters `finalize_cast_*` with
+    /// `Some(pre_payment_checks)` and therefore skips reconstruction. A save
+    /// written before the latch existed carries `None` there, so resuming it would
+    /// write a CR 601.2i record that falsely claims the cast declared nothing —
+    /// and a zero-count first-spell gate would re-grant a benefit the cast had
+    /// already spent. The announced targets are gone, so the honest outcome is to
+    /// refuse the save at the shared chokepoint rather than resume it.
+    ///
+    /// The cast-carrier inspection reuses [`Self::pending_cast_owners`], the
+    /// single authority on inline `PendingCast` custody, rather than restating
+    /// that owner list. It takes the assertion-free enumeration because this runs
+    /// on untrusted restore input; the live-state drift check stays in
+    /// [`Self::live_pending_cast_owners`].
+    ///
+    /// `prepaid_finalization` is not the only shape that parks a cast whose
+    /// targets may already have moved. A cast that pauses on the ordinary manual
+    /// `ManaPayment` / `PayCost` prompts carries neither `prepaid_finalization`
+    /// nor `committed_target_facts`, so a save written before the latch is resumed
+    /// into the raw-id fallback in `finalize_cast_pre_payment_checks`. Whether
+    /// that is *lossy* is provable from the save itself, so the second refusal
+    /// axis is the CR 400.7 evidence rather than the mere absence of a latch:
+    ///
+    /// * [`declared_target_entries_in_chain`] is the same reader the latch
+    ///   captures from. A cast that has not declared yet (CR 601.2a–b), one that
+    ///   declared nothing at all (`None` and `Some(vec![])` describe the same
+    ///   facts), and every activation (whose CR 601.2i-equivalent record is its
+    ///   `activation_record`) contribute no entry, so all of them stay admitted.
+    /// * Each declared object target carries its announcement-time incarnation
+    ///   pin. A pin that no longer [`is_current`] means the target changed zones
+    ///   (CR 400.7), so the raw-id capture would describe a different object than
+    ///   the one the caster announced (CR 115.1) and the facts are gone. That is
+    ///   exactly the state a save taken before the latch cannot repair, so it is
+    ///   refused.
+    /// * A pin that is still current re-reads the same object, and live play
+    ///   itself reaches unlatched parks of that shape — an additional cost that is
+    ///   still owed (`deferred_hand_discard_cost`, `deferred_sacrificed_permanents`)
+    ///   keeps the cast at `ManaPayment` without the latch — so refusing it would
+    ///   reject saves the engine produces. A save that carries no pin at all
+    ///   cannot prove movement either way and is likewise admitted rather than
+    ///   guessed at. The residual gap this leaves is a still-current target that a
+    ///   *later* cost moves before finalization; the save cannot prove that future
+    ///   move, and a park of that shape is refused today only through
+    ///   `move_unknown` / `sacrifice_unknown` when its completion carries the
+    ///   checks.
+    ///
+    /// [`declared_target_entries_in_chain`]:
+    ///     crate::game::ability_utils::declared_target_entries_in_chain
+    /// [`is_current`]: crate::game::game_object::ObjectIncarnationRefExt::is_current
+    fn reject_unknown_pending_target_facts(&self) -> Result<(), PersistedRestoreError> {
+        fn checks_unknown(checks: &Option<Box<FinalizePrePaymentChecks>>) -> bool {
+            checks
+                .as_deref()
+                .is_some_and(|checks| checks.committed_target_facts.is_none())
+        }
+        fn prepared_unknown(prepared: &Option<Box<PrepaidSpellFinalization>>) -> bool {
+            prepared
+                .as_deref()
+                .is_some_and(|prepared| checks_unknown(&prepared.pre_payment_checks))
+        }
+        /// CR 400.7 + CR 601.2c + CR 115.1: an unlatched spell whose declared
+        /// object target has already moved zones, so no later read can recover the
+        /// characteristics it was announced with.
+        ///
+        /// `activation_ability_index.is_none()` is the same typed spell/activation
+        /// discriminator the latch uses (`finish_pending_cast_cost_or_pay`): an
+        /// activation never writes this latch, its announced targets reaching the
+        /// CR 601.2i-equivalent history through `activation_record` instead.
+        fn declared_target_moved(state: &GameState, pending: &PendingCast) -> bool {
+            pending.activation_ability_index.is_none()
+                && pending.committed_target_facts.is_none()
+                && crate::game::ability_utils::declared_target_entries_in_chain(&pending.ability)
+                    .iter()
+                    .any(|entry| entry.pin.is_some_and(|pin| !pin.is_current(state)))
+        }
+        fn cast_unknown(state: &GameState, pending: &PendingCast) -> bool {
+            prepared_unknown(&pending.prepaid_finalization) || declared_target_moved(state, pending)
+        }
+        fn move_unknown(completion: &PendingCostMoveCompletion) -> bool {
+            match completion {
+                PendingCostMoveCompletion::FinalizeCast {
+                    committed_target_facts,
+                    ..
+                } => committed_target_facts.is_none(),
+                PendingCostMoveCompletion::FinalizeDelvedCast {
+                    pre_payment_checks, ..
+                } => checks_unknown(pre_payment_checks),
+                _ => false,
+            }
+        }
+        fn sacrifice_unknown(completion: &PendingSacrificeCostCompletion) -> bool {
+            match completion {
+                PendingSacrificeCostCompletion::FinalizeSpell {
+                    pre_payment_checks, ..
+                } => pre_payment_checks.committed_target_facts.is_none(),
+                _ => false,
+            }
+        }
+
+        // CR 601.2c: the cast-custody walk is the single authority on which
+        // carriers hold an inline `PendingCast` (`PendingCastOwner::ALL` via
+        // `pending_cast_at`). Read it rather than restating the owner list here,
+        // so a carrier added to the walk is admitted-checked for free.
+        // `pending_cast_owners` is the assertion-free enumeration: this runs on
+        // untrusted restore input, where a crafted save must be refused, not
+        // panic on the live-state drift assertion. `cast_unknown` keeps the
+        // legitimate pre-declaration `None`: only a cast whose finalization has
+        // begun, or whose declared target provably moved before the latch could be
+        // read, but whose pre-payment checks never latched target facts is refused.
+        let custodial = self.pending_cast_owners().into_iter().find_map(|owner| {
+            let pending = self.pending_cast_at(owner)?;
+            cast_unknown(self, pending).then_some(Some(pending.object_id))
+        });
+
+        // CR 601.2h + CR 601.2i: these cost-move completion payloads are not
+        // pending-cast owners — `FinalizeCast` / `FinalizeDelvedCast` /
+        // `FinalizeSpell` carry their own pre-payment checks on the resume root,
+        // so the custody walk cannot reach them and they keep their own check.
+        let completion = match self.pending_cost_move_resume.as_ref() {
+            Some(PendingCostMoveResume::Cast {
+                pending,
+                completion,
+                ..
+            }) if move_unknown(completion) => Some(pending.as_ref().map(|p| p.object_id)),
+            Some(PendingCostMoveResume::SacrificeForCost {
+                pending,
+                completion,
+                ..
+            }) if sacrifice_unknown(completion) => Some(pending.as_ref().map(|p| p.object_id)),
+            _ => None,
+        };
+
+        match custodial.or(completion) {
+            Some(spell_object_id) => {
+                Err(PersistedRestoreError::UnknownPendingTargetFacts { spell_object_id })
+            }
+            None => Ok(()),
+        }
+    }
+
     /// A staged payment is a replay authority, not merely display data.  Keep
     /// its player references inside the restored game's seat set before any
     /// caller can finalize or replay it; otherwise a crafted raw snapshot can
@@ -16646,6 +16976,43 @@ pub enum PersistedRestoreError {
     /// never inferred, so the save is not resumable.
     #[error("persisted copy announcement for {copy_id:?} has targets before its announcing-opponent election and is not resumable")]
     UnelectedCopyAnnouncer { copy_id: ObjectId },
+    /// CR 601.2c + CR 115.1 + CR 106.3: a saved cast-history record predates the
+    /// declared-target and mana-source provenance fields. Its announced targets
+    /// and paying sources are gone, so the history is neither reconstructable nor
+    /// safe to read as "declared nothing": a zero-count first-spell gate would
+    /// re-grant a once-per-turn benefit. Restore refuses the state rather than
+    /// admitting an unknown as a known-empty.
+    #[error(
+        "persisted cast history carries unknown target/mana-source provenance for spell \
+         {spell_object_id:?} and cannot be restored"
+    )]
+    UnknownCastHistoryProvenance { spell_object_id: Option<ObjectId> },
+    /// CR 601.2c + CR 115.1 + CR 400.7: a cast is parked mid-payment and its
+    /// carrier holds no announced-target facts. The save predates the latch, so
+    /// what the spell declared is unreconstructable; resuming it would write a
+    /// CR 601.2i record that falsely claims the cast declared nothing, and a
+    /// first-spell gate would then re-grant a benefit the cast had already spent.
+    #[error(
+        "persisted pending cast carries unknown announced-target facts for spell \
+         {spell_object_id:?} and cannot be resumed"
+    )]
+    UnknownPendingTargetFacts { spell_object_id: Option<ObjectId> },
+    /// CR 601.2 / CR 602.2: at most one announcement is in flight, so every live
+    /// `PendingCast` owner names the same cast. A persisted save that parks two
+    /// different announcements is corrupt; admitting it would move the failure to
+    /// the live-state drift assertion (a library-boundary panic in debug builds)
+    /// instead of refusing it here.
+    #[error(
+        "persisted state parks two live pending casts naming different announcements \
+         ({first:?} at ability {first_ability_index:?} and {second:?} at ability \
+         {second_ability_index:?}) and cannot be restored"
+    )]
+    ConflictingPendingCastOwners {
+        first: ObjectId,
+        first_ability_index: Option<usize>,
+        second: ObjectId,
+        second_ability_index: Option<usize>,
+    },
 }
 
 impl PreparedPersistedGameState {
@@ -16857,6 +17224,9 @@ impl PersistedGameState {
         state
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
+        state.reject_unknown_cast_history_provenance()?;
+        state.reject_conflicting_pending_cast_owners()?;
+        state.reject_unknown_pending_target_facts()?;
         crate::game::effects::choose_from_zone::migrate_legacy_per_player_frame_on_restore(
             &mut state,
         )
@@ -23588,9 +23958,41 @@ pub fn record_captured_onsets(document: &mut serde_json::Value) {
     fn mark(root: &mut serde_json::Value) {
         let recorded = serde_json::to_value(AbilityOnsetRecord::Recorded)
             .expect("AbilityOnsetRecord serializes");
-        root.as_object_mut()
-            .expect("a committed capture's game-state root is a JSON object")
-            .insert(ABILITY_ONSET_RECORD_FIELD.to_string(), recorded);
+        let object = root
+            .as_object_mut()
+            .expect("a committed capture's game-state root is a JSON object");
+        object.insert(ABILITY_ONSET_RECORD_FIELD.to_string(), recorded);
+        // CR 601.2c + CR 106.3: every committed capture was taken before the
+        // cast-history provenance fields existed, so production admission rightly
+        // refuses it (`UnknownCastHistoryProvenance`). These captures are fixtures
+        // for tests that assert unrelated behaviour, so the test loader admits their
+        // cast records as known-empty. This is a FIXTURE-ONLY concession: it is
+        // `#[cfg(any(test, feature = "test-support"))]`, it never runs in a product
+        // build, and it does not weaken the production rule — a real save with
+        // unknown provenance is still refused.
+        for field in [
+            "spells_cast_this_turn_by_player",
+            "spells_cast_this_game_by_player",
+        ] {
+            let Some(by_player) = object.get_mut(field).and_then(|v| v.as_object_mut()) else {
+                continue;
+            };
+            for records in by_player.values_mut() {
+                let Some(records) = records.as_array_mut() else {
+                    continue;
+                };
+                for record in records {
+                    let Some(record) = record.as_object_mut() else {
+                        continue;
+                    };
+                    for provenance in ["targets", "mana_spent_source_snapshots"] {
+                        record
+                            .entry(provenance)
+                            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+                    }
+                }
+            }
+        }
     }
     let Some(object) = document.as_object_mut() else {
         return;
@@ -53014,6 +53416,7 @@ mod tests {
                 activation_ability_index: None,
                 pending_loyalty_activation_player: None,
                 target_constraints: vec![],
+                committed_target_facts: None,
                 crime_candidate: false,
                 casting_variant: CastingVariant::Normal,
                 casting_permission_index: None,
@@ -53566,6 +53969,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -54048,6 +54452,202 @@ mod tests {
             paused_at_index: 0,
         }));
         assert!(state.withholds_priority());
+    }
+
+    /// CR 601.2c + CR 601.2i: the three shapes a parked cast's target facts can
+    /// take, for the restore-guard unit tests below.
+    #[derive(Clone, Copy)]
+    enum ParkedFacts {
+        /// Pre-declaration (CR 601.2a–b): no `prepaid_finalization` at all.
+        PreDeclaration,
+        /// Finalization began but the pre-payment checks never latched facts.
+        Unknown,
+        /// A cast that declared no target (`Some(vec![])`).
+        Known,
+    }
+
+    fn parked_cast(object_id: ObjectId, facts: ParkedFacts) -> PendingCast {
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+            },
+            Vec::new(),
+            object_id,
+            PlayerId(0),
+        );
+        let mut pending =
+            PendingCast::new(object_id, CardId(object_id.0), ability, ManaCost::zero());
+        if !matches!(facts, ParkedFacts::PreDeclaration) {
+            pending.prepaid_finalization = Some(Box::new(PrepaidSpellFinalization {
+                phyrexian_choices: None,
+                pre_payment_checks: Some(Box::new(FinalizePrePaymentChecks {
+                    early_waiting_for: None,
+                    cascade_cast_transformed: false,
+                    resolution_success_waiting_for: None,
+                    cast_this_way_etb_counter: None,
+                    cast_this_way_enters_mods: Default::default(),
+                    committed_target_facts: matches!(facts, ParkedFacts::Known).then(Vec::new),
+                })),
+            }));
+        }
+        pending
+    }
+
+    fn discard_for_cost(state: &mut GameState, pending: PendingCast) {
+        state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume::Chosen {
+            player: PlayerId(0),
+            pending,
+            chosen: vec![ObjectId(3)],
+            paused_at_index: 0,
+        }));
+    }
+
+    /// CR 601.2 / CR 602.2: restore admission reads untrusted state, so the
+    /// cast-custody walk it reuses must be the assertion-free enumeration. A
+    /// crafted save that parks two different announcements is refused with the
+    /// ordinary error — not a `debug_assert!` panic at a library boundary. Both
+    /// carriers here carry KNOWN facts, so only the owner-agreement check can
+    /// catch it; reverting the walk to `live_pending_cast_owners` would panic.
+    #[test]
+    fn reject_conflicting_pending_cast_owners_refuses_two_announcements_without_panicking() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cast = Some(Box::new(parked_cast(ObjectId(2), ParkedFacts::Known)));
+        discard_for_cost(&mut state, parked_cast(ObjectId(9), ParkedFacts::Known));
+
+        let refused = state.reject_conflicting_pending_cast_owners();
+        assert!(
+            matches!(
+                refused,
+                Err(PersistedRestoreError::ConflictingPendingCastOwners {
+                    first: ObjectId(2),
+                    second: ObjectId(9),
+                    ..
+                })
+            ),
+            "two live announcements are refused, not panicked on: {refused:?}"
+        );
+
+        // Agreement is admitted: both owners name the same cast.
+        let mut agreeing = GameState::new_two_player(42);
+        agreeing.pending_cast = Some(Box::new(parked_cast(ObjectId(2), ParkedFacts::Known)));
+        discard_for_cost(&mut agreeing, parked_cast(ObjectId(2), ParkedFacts::Known));
+        assert!(agreeing.reject_conflicting_pending_cast_owners().is_ok());
+
+        // The diagnostic must describe an ability-index-only disagreement too,
+        // not collapse it to one object id.
+        let mut same_object = GameState::new_two_player(42);
+        let mut first = parked_cast(ObjectId(5), ParkedFacts::Known);
+        first.activation_ability_index = Some(0);
+        let mut second = parked_cast(ObjectId(5), ParkedFacts::Known);
+        second.activation_ability_index = Some(1);
+        same_object.pending_cast = Some(Box::new(first));
+        discard_for_cost(&mut same_object, second);
+        assert!(
+            matches!(
+                same_object.reject_conflicting_pending_cast_owners(),
+                Err(PersistedRestoreError::ConflictingPendingCastOwners {
+                    first: ObjectId(5),
+                    first_ability_index: Some(0),
+                    second: ObjectId(5),
+                    second_ability_index: Some(1),
+                })
+            ),
+            "an ability-index-only disagreement is described, not collapsed to one id"
+        );
+    }
+
+    /// The conflict guard must be wired into the production chokepoint, not just
+    /// callable. A persisted save that parks two different announcements is
+    /// refused by `PersistedGameState::into_game_state`, so deleting the
+    /// `prepare_for_restore` call fails this test.
+    #[test]
+    fn prepare_for_restore_refuses_two_announcements_on_the_persisted_path() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cast = Some(Box::new(parked_cast(ObjectId(2), ParkedFacts::Known)));
+        // A different announcement on the prompt — a shape only a crafted save
+        // can carry, since live play keeps one announcement in flight.
+        state.waiting_for = WaitingFor::PayCost {
+            player: PlayerId(0),
+            kind: PayCostKind::Sacrifice,
+            choices: Vec::new(),
+            count: 0,
+            min_count: 0,
+            resume: CostResume::Spell {
+                spell: Box::new(parked_cast(ObjectId(9), ParkedFacts::Known)),
+            },
+        };
+
+        let json =
+            serde_json::to_value(PersistedGameState::capture(state)).expect("the park serializes");
+        let refused = serde_json::from_value::<PersistedGameState>(json)
+            .expect("the park decodes")
+            .into_game_state();
+        assert!(
+            matches!(
+                refused,
+                Err(PersistedRestoreError::ConflictingPendingCastOwners {
+                    first: ObjectId(2),
+                    second: ObjectId(9),
+                    ..
+                })
+            ),
+            "the persisted path refuses two announcements: {refused:?}"
+        );
+    }
+
+    /// CR 601.2c + CR 601.2i + CR 602.2b: the walk covers a serialized carrier the
+    /// old hand-written list never inspected
+    /// (`PendingCostMoveResume::ActivationMillPayment`, an activation cost move).
+    /// The refusal is reached through the production `into_game_state` chokepoint,
+    /// so a regression that drops this carrier from the walk fails here.
+    #[test]
+    fn prepare_for_restore_checks_the_activation_mill_carrier() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::ActivationMillPayment {
+            player: PlayerId(0),
+            pending: Box::new(parked_cast(ObjectId(9), ParkedFacts::Unknown)),
+        });
+
+        let json =
+            serde_json::to_value(PersistedGameState::capture(state)).expect("the park serializes");
+        let refused = serde_json::from_value::<PersistedGameState>(json)
+            .expect("the park decodes")
+            .into_game_state();
+        assert!(
+            matches!(
+                refused,
+                Err(PersistedRestoreError::UnknownPendingTargetFacts {
+                    spell_object_id: Some(ObjectId(9)),
+                })
+            ),
+            "the ActivationMill carrier's unknown facts are refused: {refused:?}"
+        );
+    }
+
+    /// Function-level reach pin for the `DiscardForCost` arm. That field is
+    /// `#[serde(skip)]`, so a restored save cannot carry it; the serialized
+    /// carrier above is the restore-path witness. This still fails if the walk is
+    /// narrowed to `External` only, which is what it guards.
+    #[test]
+    fn reject_unknown_pending_target_facts_checks_the_discard_for_cost_owner() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cast = Some(Box::new(parked_cast(
+            ObjectId(2),
+            ParkedFacts::PreDeclaration,
+        )));
+        discard_for_cost(&mut state, parked_cast(ObjectId(9), ParkedFacts::Unknown));
+
+        let refused = state.reject_unknown_pending_target_facts();
+        assert!(
+            matches!(
+                refused,
+                Err(PersistedRestoreError::UnknownPendingTargetFacts {
+                    spell_object_id: Some(ObjectId(9)),
+                })
+            ),
+            "the DiscardForCost cast's unknown facts are refused: {refused:?}"
+        );
     }
 
     #[test]
@@ -56194,6 +56794,9 @@ mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            mana_spent_source_snapshots: Some(vec![]),
+            // A hand-built case record carries no announced cast, so it declares no target.
+            targets: Some(Vec::new()),
         };
         let json = serde_json::to_string(&original).unwrap();
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();
@@ -58875,6 +59478,7 @@ mod restored_exact_attack_authority_tests {
             resolution_success_waiting_for: None,
             cast_this_way_etb_counter: None,
             cast_this_way_enters_mods: Default::default(),
+            committed_target_facts: Some(Vec::new()),
         };
         let mut admitted = Vec::new();
         for carrier in 0..26 {
@@ -59198,6 +59802,7 @@ mod restored_exact_attack_authority_tests {
                                 },
                             )),
                             prepaid_actual_mana_spent: None,
+                            committed_target_facts: Some(Vec::new()),
                         },
                         deferred_cost_events: vec![],
                         departure_record_indices: vec![],
@@ -59268,6 +59873,7 @@ mod restored_exact_attack_authority_tests {
                                 cascade_cast_transformed: false,
                                 resolution_success_waiting_for: Some(Box::new(token_host())),
                                 prepaid_actual_mana_spent: None,
+                                committed_target_facts: Some(Vec::new()),
                             },
                         });
                     state.waiting_for.clone()

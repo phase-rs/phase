@@ -12,6 +12,7 @@ pub mod events;
 pub mod format;
 pub mod game_state;
 mod game_state_size;
+pub mod history_snapshot;
 pub mod identifiers;
 pub mod interaction;
 pub mod log;

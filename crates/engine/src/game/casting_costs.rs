@@ -121,6 +121,31 @@ pub(crate) fn commit_copy_cast(
     let origin = copy
         .cast_from_zone
         .unwrap_or(crate::types::zones::Zone::Exile);
+    // CR 707.12 + CR 601.2c: a cast copy's declared targets are the ones its
+    // announcement walk announced, and that walk's result is the copy's own
+    // stack entry — written by `finalize_copy_walk` / `open_copy_target_selection`
+    // before this call. No copy-cast caller holds the list directly; the entry
+    // is the only authority.
+    let entry = state
+        .stack
+        .iter()
+        .find(|entry| entry.id == copy_id)
+        .ok_or_else(|| {
+            EngineError::InvalidAction(format!("cast copy {copy_id:?} has no stack entry"))
+        })?;
+    // The empty below is provable, not a default: on this route the entry's ability is
+    // written from the copy's own spell ability (`effects::cast_copy_of_card::cast_one_copy`,
+    // and `finalize_copy_walk` for a walked announcement), so an entry whose `ability()` is
+    // `None` is a copy of a card with no spell ability — a cast that declared nothing,
+    // because the same ability is what a target walk reads a slot from. A *missing* entry is
+    // refused above, because no walk could have declared anything for it.
+    let committed_target_facts = crate::game::casting::capture_target_facts(
+        state,
+        &entry
+            .ability()
+            .map(declared_targets_in_chain)
+            .unwrap_or_default(),
+    );
     events.push(GameEvent::SpellCast {
         card_id: copy.card_id,
         controller,
@@ -133,6 +158,7 @@ pub(crate) fn commit_copy_cast(
         &copy,
         origin,
         crate::types::game_state::CastingVariant::Normal,
+        &committed_target_facts,
     )
     .map_err(finalized_spell_cast_ledger_error)?;
     // CR 707.12: a cast copy is a new object created for this cast, not the
@@ -3384,6 +3410,7 @@ fn finish_cost_object_moves(
             cascade_cast_transformed,
             resolution_success_waiting_for,
             prepaid_actual_mana_spent,
+            committed_target_facts,
         } => {
             let returned_creature = chosen
                 .first()
@@ -3417,6 +3444,7 @@ fn finish_cost_object_moves(
                     resolution_success_waiting_for: resolution_success_waiting_for.map(|wf| *wf),
                     cast_this_way_etb_counter: None,
                     cast_this_way_enters_mods: Default::default(),
+                    committed_target_facts,
                 }),
                 Some(actual_mana_spent),
                 ReturnedCreatureCostMove::Delivered,
@@ -4181,6 +4209,17 @@ pub(super) fn pay_delve_after_distribution(
     pending: &mut PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EngineError> {
+    // CR 601.2c + CR 400.7: the delve exile below moves cards out of the graveyard
+    // as part of the total cost (CR 601.2h). A declared target can BE one of those
+    // cards, so the facts are latched here — before the exile — on the cast's own
+    // carrier, because this root rebuilds `FinalizePrePaymentChecks` from scratch
+    // and would otherwise recapture by raw id after the move.
+    if pending.committed_target_facts.is_none() {
+        pending.committed_target_facts = Some(super::casting::capture_target_facts(
+            state,
+            &declared_targets_in_chain(&pending.ability),
+        ));
+    }
     let spent = recorded_mana_spent_to_cast(state, pending.object_id);
     let completion = PendingCostMoveCompletion::FinalizeDelvedCast {
         phyrexian_choices: None,
@@ -8416,6 +8455,13 @@ pub(super) fn push_ability_entry(
 ///
 /// This function sits between targeting and payment in the casting pipeline:
 /// `CastSpell → [ModeChoice] → [TargetSelection] → [AdditionalCostChoice] → pay_and_push_with_lock → Stack`
+///
+/// CR 115.1 + CR 601.2c + CR 400.7: `lock` is the caller's cost-determination
+/// state, and it is the only way a route that announced its targets without
+/// passing `finish_pending_cast_cost_or_pay` (the automatic-announcement
+/// branches in `casting`) can carry the announced-target latch to the CR 601.2i
+/// write. A caller that has not declared targets — or a spell with none —
+/// passes [`CostLockInput::default`].
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_additional_cost_or_pay(
     state: &mut GameState,
@@ -8430,6 +8476,7 @@ pub(super) fn check_additional_cost_or_pay(
     cast_timing_permission: Option<CastTimingPermission>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
+    lock: CostLockInput,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     check_additional_cost_or_pay_with_distribute(
@@ -8446,7 +8493,7 @@ pub(super) fn check_additional_cost_or_pay(
         None,
         origin_zone,
         payment_mode,
-        CostLockInput::default(),
+        lock,
         events,
     )
 }
@@ -8465,6 +8512,19 @@ pub(super) fn finish_pending_cast_cost_or_pay(
             &declared_targets_in_chain(&ability),
             player,
         );
+    }
+    // CR 115.1 + CR 601.2c + CR 400.7: this is the shared target-declaration →
+    // payment boundary — every route that finishes announcing targets for a spell
+    // funnels through here, and no cost has been paid yet (CR 601.2h). Latch what
+    // was announced now, while the targets are still the objects the caster
+    // chose: an additional cost that moves one of them (the ordinary
+    // return-to-hand cost returning the land it also targets) makes the same
+    // storage id a new object whose printed baseline the zone change restores,
+    // so a capture taken later would describe the moved card instead of the
+    // announced target. A cast whose targets are still deferred has not declared
+    // anything yet and latches on the pass that follows its declaration.
+    if pending.activation_ability_index.is_none() && !pending.deferred_target_selection {
+        super::casting::latch_committed_target_facts(state, &ability, &mut pending);
     }
     pending.ability = Box::new(ability);
     pending.cost = cost;
@@ -13022,6 +13082,13 @@ pub(super) fn can_pay_jumpstart_additional_cost(
 /// exploded parameters has to be carried here, or the probe silently drops its
 /// contribution from the locked total. Build it with
 /// [`CostLockInput::from_pending`] whenever a real `PendingCast` is in hand.
+///
+/// This is also the pipeline's one carrier for a `PendingCast` fact that the
+/// rebuild must not lose even though no total depends on it — see
+/// [`Self::committed_target_facts`]. Every rebuild site in the payment pipeline
+/// funnels through [`Self::apply_to`], so a fact placed here survives the whole
+/// exploded-parameter chain by construction rather than by remembering to add a
+/// parameter at each hop.
 #[derive(Debug, Clone, Default)]
 pub(super) struct CostLockInput {
     /// CR 601.2b + CR 601.2f: the mana components of additional costs already
@@ -13042,18 +13109,29 @@ pub(super) struct CostLockInput {
     /// re-analyze", which is what keeps the resume from prompting forever.
     pub election: Option<CostReductionElection>,
     pub alternative_cost_election: crate::types::game_state::SpellAlternativeCostElection,
+    /// CR 115.1 + CR 601.2c + CR 400.7: the announced-target latch
+    /// (`PendingCast::committed_target_facts`), captured at the shared
+    /// declaration→payment boundary and carried across every rebuild so the
+    /// CR 601.2i history write records the targets the caster announced rather
+    /// than the objects that later share their storage ids. It is `None` on a
+    /// cast that has not declared its targets yet (a deferred declaration pays
+    /// its costs first) and on the test-only `Default` carrier; the boundary
+    /// that declares them is what fills it.
+    pub committed_target_facts: Option<Vec<crate::types::game_state::ActivationTargetFact>>,
 }
 
 impl CostLockInput {
     /// Carry a live cast's cost-determination state into the seam. Use this in
     /// preference to building the struct field-by-field: it is the single place
-    /// a newly added `PendingCast` cost input has to be wired up.
+    /// a newly added `PendingCast` field this carrier must preserve has to be
+    /// wired up.
     pub(super) fn from_pending(pending: &PendingCast) -> Self {
         Self {
             declared_mana_additions: pending.declared_mana_additions.clone(),
             accepted: pending.accepted_cost_reductions.clone(),
             election: pending.cost_reduction_election.clone(),
             alternative_cost_election: pending.alternative_cost_election,
+            committed_target_facts: pending.committed_target_facts.clone(),
         }
     }
 
@@ -13061,7 +13139,8 @@ impl CostLockInput {
     /// builds from exploded fields, so the cast that is stashed in
     /// `state.pending_cast` can still recompute its own total (CR 601.2f) —
     /// the `{X}` re-derivation in `apply_post_x_cost_modifiers` reads exactly
-    /// these fields.
+    /// these fields — and still reach the CR 601.2i history write with the
+    /// targets it announced.
     fn apply_to(&self, pending: &mut PendingCast) {
         pending
             .declared_mana_additions
@@ -13069,6 +13148,9 @@ impl CostLockInput {
         pending.accepted_cost_reductions.clone_from(&self.accepted);
         pending.cost_reduction_election.clone_from(&self.election);
         pending.alternative_cost_election = self.alternative_cost_election;
+        pending
+            .committed_target_facts
+            .clone_from(&self.committed_target_facts);
     }
 }
 
@@ -13389,8 +13471,36 @@ fn finalize_cast_pre_payment_checks(
     casting_variant: CastingVariant,
     casting_permission_index: Option<CastingPermissionIndex>,
     cast_timing_permission: Option<CastTimingPermission>,
+    committed_target_facts: Option<Vec<crate::types::game_state::ActivationTargetFact>>,
     events: &mut Vec<GameEvent>,
 ) -> Result<FinalizePrePaymentChecks, EngineError> {
+    // CR 115.1 + CR 601.2c + CR 400.7: the declared-target facts for the CR 601.2i
+    // write. `committed_target_facts` is the latch the shared declaration→payment
+    // boundary already took (`finish_pending_cast_cost_or_pay`) and that the
+    // payment pipeline carried here — it is the authority whenever it exists, and
+    // it MUST be, because on a resumed continuation this frame runs after CR 601.2h
+    // has already moved the cost's objects. The capture below is only for a cast
+    // that reached payment without passing that boundary; it is the pre-payment
+    // moment for every route that takes it. `FinalizePrePaymentChecks` is then the
+    // carrier every parked payment continuation re-enters with, so the write reads
+    // announcement-time facts even when the cast suspends on an additional-cost
+    // move that removes a target (Bone Splinters sacrificing the creature it also
+    // targets). Re-reading by raw id after payment would describe the target's new
+    // incarnation under CR 400.7: the returned Dryad Arbor keeps its printed
+    // "Land Creature" type line in hand, while an animated Mishra's Factory
+    // returned the same way reverts to its printed "Land" and a sacrificed one is
+    // a graveyard Land — and a sacrificed Grizzly Bears stays a graveyard
+    // Creature. None of those later readings is the CR 601.2c announcement-time
+    // reading these records exist for: the cost-axis predicates are evaluated at
+    // CR 601.2f, before the total cost is paid. CR 115.9b is a different question
+    // with a different answer — a current-state read that ignores a target which
+    // has left the zone it was expected in — and it is answered by the live
+    // reader (`filter::stack_entry_targets_satisfy`) over a spell still on the
+    // stack, not by this record.
+    let committed_target_facts = Some(committed_target_facts.unwrap_or_else(|| {
+        super::casting::capture_target_facts(state, &declared_targets_in_chain(ability))
+    }));
+
     // CR 614.1c + CR 122.1 + CR 205.1b + CR 613.1d: Snapshot the exact
     // cast-this-way ETB riders before resulting-MV evaluation consumes the
     // during-resolution permission. Legacy pending casts without an index keep
@@ -13493,6 +13603,7 @@ fn finalize_cast_pre_payment_checks(
                     resolution_success_waiting_for: None,
                     cast_this_way_etb_counter,
                     cast_this_way_enters_mods,
+                    committed_target_facts,
                 });
             }
         };
@@ -13537,6 +13648,7 @@ fn finalize_cast_pre_payment_checks(
         resolution_success_waiting_for,
         cast_this_way_etb_counter,
         cast_this_way_enters_mods,
+        committed_target_facts,
     })
 }
 
@@ -13676,6 +13788,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
         resolution_success_waiting_for,
         cast_this_way_etb_counter,
         cast_this_way_enters_mods,
+        committed_target_facts,
     } = match pre_payment_checks {
         Some(checks) => checks,
         None => finalize_cast_pre_payment_checks(
@@ -13688,6 +13801,10 @@ fn finalize_cast_with_phyrexian_choices_inner(
             casting_variant,
             casting_permission_index,
             cast_timing_permission,
+            // CR 115.1 + CR 601.2c + CR 400.7: the resume root is where the
+            // announced-target latch lives on this path; hand it to the checks so
+            // they never re-derive the targets from a post-payment raw-id lookup.
+            deferred_life_resume_pending.and_then(|pending| pending.committed_target_facts.clone()),
             events,
         )?,
     };
@@ -13753,6 +13870,35 @@ fn finalize_cast_with_phyrexian_choices_inner(
     if let Some(obj) = state.objects.get_mut(&object_id) {
         obj.fused_split_spell = casting_variant == CastingVariant::Fuse;
     }
+
+    // CR 601.2c + CR 400.7: `committed_target_facts` was latched with the
+    // pre-payment checks above — once, before any cost was paid — and every
+    // parked payment continuation re-enters this function carrying it. A root
+    // that rebuilds the checks from scratch (`pay_delve_after_distribution`)
+    // parks the latch on the cast's own `PendingCast`, which wins here because it
+    // is the earlier capture. There is deliberately no capture at this point: it
+    // is after CR 601.2h on every resumed path, where a raw-id lookup would
+    // describe the target's new incarnation rather than the one the caster
+    // announced (CR 115.9, CR 115.9b).
+    // CR 601.2c + CR 400.7: the latch is an `Option` because a parked cast written
+    // before it existed has no answer. Restore admission refuses such a save
+    // (`UnknownPendingTargetFacts`), so a playable state always resolves here; a
+    // cast this build captured states `Some`, including `Some(vec![])` for one
+    // that declared nothing.
+    let committed_target_facts = deferred_life_resume_pending
+        .and_then(|pending| pending.committed_target_facts.clone())
+        .or(committed_target_facts)
+        .unwrap_or_else(|| {
+            // Unreachable in a playable state: `prepare_for_restore` refuses every
+            // parked carrier whose facts are unknown. Failing loudly here (debug and
+            // test builds) is what stops an uncovered carrier from silently writing a
+            // CR 601.2i record that claims the cast declared nothing.
+            debug_assert!(
+                false,
+                "a parked cast reached the history write without announced-target facts"
+            );
+            Vec::new()
+        });
 
     if prepaid_actual_mana_spent.is_none() {
         let resume_at_resolution_depth = state.resolution_stack.len();
@@ -13823,6 +13969,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
                     resolution_success_waiting_for,
                     cast_this_way_etb_counter,
                     cast_this_way_enters_mods,
+                    committed_target_facts: Some(committed_target_facts),
                 }),
             },
             None,
@@ -13845,6 +13992,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 resolution_success_waiting_for: resolution_success_waiting_for.clone(),
                 cast_this_way_etb_counter: cast_this_way_etb_counter.clone(),
                 cast_this_way_enters_mods: cast_this_way_enters_mods.clone(),
+                committed_target_facts: Some(committed_target_facts.clone()),
             })),
         };
         if let Some(waiting_for) = pay_delve_at_commit(
@@ -13889,6 +14037,9 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 cascade_cast_transformed,
                 resolution_success_waiting_for: resolution_success_waiting_for.map(Box::new),
                 prepaid_actual_mana_spent,
+                // The latch is a known answer here: this frame captured it (or
+                // carried it) before the Sneak/Web-slinging return move parked.
+                committed_target_facts: Some(committed_target_facts),
             },
             cost_event_start,
             false,
@@ -14645,6 +14796,12 @@ fn finalize_cast_with_phyrexian_choices_inner(
         &obj,
         source_zone,
         casting_variant,
+        // CR 115.1 + CR 601.2c: `committed_target_facts` was latched with the
+        // pre-payment checks and arrived here unchanged through every parked
+        // payment continuation; a placeholder cast (no ability) necessarily
+        // declares none, which is what `is_placeholder`'s
+        // `ability.targets.is_empty()` conjunct already encodes.
+        &committed_target_facts,
     )
     .map_err(finalized_spell_cast_ledger_error)?;
     stamp_cast_occurrence_on_stack_spell(state, object_id, occurrence, cast_card)?;
@@ -18052,6 +18209,11 @@ fn finalize_mana_payment_with_resume(
                 pending.casting_variant,
                 pending.casting_permission_index,
                 pending.cast_timing_permission,
+                // CR 115.1 + CR 601.2c + CR 400.7: the latch the declaration
+                // boundary already took rides this pending; reusing it is what
+                // keeps a cost that moves a target (the returned land) from
+                // rewriting the announced facts.
+                pending.committed_target_facts.clone(),
                 events,
             )?)
         };
@@ -18210,6 +18372,12 @@ fn finalize_mana_payment_with_resume(
             pending_resumed.origin_zone = pending.origin_zone;
             pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
             pending_resumed.delved_cards = pending.delved_cards.clone();
+            // CR 115.1 + CR 601.2c + CR 400.7: this rebuild is the last stop before
+            // the distribution resume reaches the CR 601.2i write, and it happens
+            // after the total cost was paid — so the announced-target latch must
+            // ride along here too, or a paid cost that moved a target would be
+            // re-read from the moved object.
+            pending_resumed.committed_target_facts = pending.committed_target_facts.clone();
 
             // CR 601.2d: "divided evenly, rounded down" — EvenSplitDamage bypasses
             // interactive distribution. Remainder is intentionally lost per Oracle text.
@@ -18510,6 +18678,11 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                 pending.casting_variant,
                 pending.casting_permission_index,
                 pending.cast_timing_permission,
+                // CR 115.1 + CR 601.2c + CR 400.7: the latch the declaration
+                // boundary already took rides this pending; reusing it is what
+                // keeps a cost that moves a target (the returned land) from
+                // rewriting the announced facts.
+                pending.committed_target_facts.clone(),
                 events,
             )?)
         };
@@ -18663,6 +18836,12 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             pending_resumed.origin_zone = pending.origin_zone;
             pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
             pending_resumed.delved_cards = pending.delved_cards.clone();
+            // CR 115.1 + CR 601.2c + CR 400.7: this rebuild is the last stop before
+            // the distribution resume reaches the CR 601.2i write, and it happens
+            // after the total cost was paid — so the announced-target latch must
+            // ride along here too, or a paid cost that moved a target would be
+            // re-read from the moved object.
+            pending_resumed.committed_target_facts = pending.committed_target_facts.clone();
 
             if unit == DistributionUnit::EvenSplitDamage && !targets.is_empty() {
                 let num = targets.len() as u32;
@@ -20650,6 +20829,7 @@ mod tests {
             activation_ability_index: Some(0),
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -27163,6 +27343,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -27311,6 +27492,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -27428,6 +27610,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -27534,6 +27717,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
@@ -27673,6 +27857,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            committed_target_facts: None,
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,

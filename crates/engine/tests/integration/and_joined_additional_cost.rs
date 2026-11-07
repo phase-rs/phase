@@ -10,7 +10,10 @@ use engine::types::ability::{
     ReplacementMode, TargetFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
+use engine::types::game_state::{
+    ActivationTargetFact, CastPaymentMode, GameState, PayCostKind, PersistedGameState,
+    PersistedRestoreError, SpellCastRecord, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -1080,6 +1083,139 @@ fn kaerveks_spite_owner_orders_the_sacrificed_permanents() {
         assert_eq!(runner.state().stack.back().map(|e| e.id), Some(spell));
         assert_eq!(p0_graveyard_order(&runner, &order), order);
     }
+}
+
+/// The recorded cast of `spell`, found by the stable id link.
+fn recorded_cast(state: &GameState, spell: ObjectId) -> &SpellCastRecord {
+    state
+        .spells_cast_this_turn_by_player
+        .values()
+        .flat_map(|records| records.iter())
+        .find(|record| record.spell_object_id == Some(spell))
+        .expect("reach: the committed cast is recorded in the turn history")
+}
+
+/// Recursively remove every `committed_target_facts` key, returning whether one
+/// was removed. This reproduces a save written before the target latch existed.
+fn strip_pending_facts(value: &mut serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut stripped = map.remove("committed_target_facts").is_some();
+            for nested in map.values_mut() {
+                stripped |= strip_pending_facts(nested);
+            }
+            stripped
+        }
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .fold(false, |acc, item| strip_pending_facts(item) | acc),
+        _ => false,
+    }
+}
+
+/// CR 601.2c + CR 115.1 + CR 601.2i + CR 404.3: a save parked on the production
+/// Kaervek's Spite arrangement prompt must keep the player it already announced.
+///
+/// The parking carrier is `WaitingFor::PayCost { resume: CostResume::Spell }` —
+/// the prompt the real cast reaches after announcing "target player loses 5 life"
+/// and then paying "sacrifice all permanents you control". Restoring that save
+/// admits it, and the resumed CR 601.2i record still names P1. The same save with
+/// the latch stripped cannot prove what the cast declared, so it is refused at the
+/// shared restore boundary rather than resumed into a falsely known-empty record.
+#[test]
+fn a_persisted_kaerveks_spite_arrangement_keeps_its_selected_player_target_or_is_refused() {
+    let (mut runner, spell, bears, giant) = kaerveks_spite_over_two_creatures(|_, _| {});
+    cast_at_p1(&mut runner, spell, CastPaymentMode::Auto);
+
+    // Reach guard: the production cast really parks on the CR 404.3 arrangement
+    // prompt, and the prompt's own cast already latched the selected player.
+    let WaitingFor::PayCost {
+        kind: PayCostKind::Sacrifice,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "reach guard: the arrangement prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let parked = runner
+        .state()
+        .waiting_for
+        .pending_cast_ref()
+        .expect("the arrangement prompt carries the cast")
+        .prepaid_finalization
+        .as_deref()
+        .and_then(|prepared| prepared.pre_payment_checks.as_deref())
+        .expect("reach guard: the payment commit latched its pre-payment checks");
+    assert_eq!(
+        parked.committed_target_facts.as_deref(),
+        Some(&[ActivationTargetFact::Player(P1)][..]),
+        "reach guard: the parked cast already recorded P1 as its announced target"
+    );
+
+    let persisted = PersistedGameState::capture(runner.state().clone());
+    let json = serde_json::to_value(&persisted).expect("the park serializes");
+
+    // (a) Known facts: admitted, and the selected player survives the restore.
+    let restored_state = serde_json::from_value::<PersistedGameState>(json.clone())
+        .expect("the park decodes")
+        .into_game_state()
+        .map_err(|error| {
+            format!("an arrangement carrying its announced target must be admitted: {error:?}")
+        })
+        .expect("admitted");
+
+    // (b) Missing facts: the pre-latch save is refused before it can resume.
+    let mut legacy = json.clone();
+    assert!(
+        strip_pending_facts(&mut legacy),
+        "reach: the fixture really carried a latch to strip"
+    );
+    let refused = serde_json::from_value::<PersistedGameState>(legacy)
+        .expect("the legacy park decodes")
+        .into_game_state();
+    assert!(
+        matches!(
+            refused,
+            Err(PersistedRestoreError::UnknownPendingTargetFacts { .. })
+        ),
+        "a park without announced targets is refused: {:?}",
+        refused.err()
+    );
+
+    // (c) The ADMITTED SAVE — not the in-memory park it was taken from — resumes
+    // to a record that names the selected player.
+    let mut restored = GameRunner::from_state(restored_state);
+    let order = arrange_sacrifices(&mut restored, None);
+    let mut sorted = order.clone();
+    sorted.sort();
+    let mut expected = vec![bears, giant];
+    expected.sort();
+    assert_eq!(
+        sorted, expected,
+        "reach guard: the restored save arranges both distinguishable permanents"
+    );
+    assert_eq!(
+        restored.state().stack.back().map(|entry| entry.id),
+        Some(spell),
+        "reach guard: paying the arrangement put the spell on the stack"
+    );
+    let record = recorded_cast(restored.state(), spell);
+    assert!(
+        record
+            .declared_targets()
+            .contains(&ActivationTargetFact::Player(P1)),
+        "the resumed save's CR 601.2i record keeps the selected player: {:?}",
+        record.declared_targets()
+    );
+    assert!(
+        !record
+            .declared_targets()
+            .contains(&ActivationTargetFact::Player(P0)),
+        "the record does not invent an unselected player: {:?}",
+        record.declared_targets()
+    );
 }
 
 /// CR 404.3 + CR 701.21a + CR 111.1: only the payer's own cards are arranged; the stolen

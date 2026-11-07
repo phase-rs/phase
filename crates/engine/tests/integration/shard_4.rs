@@ -319,6 +319,7 @@ mod mana_payment_class_rows;
 mod mana_payment_preview;
 mod mana_role_fixture_migration;
 mod mana_spent_independent_conjuncts;
+mod mana_spent_source_provenance;
 mod mana_target_recipient_and_count_source;
 mod mana_values_among_graveyard_condition;
 mod mandatory_reflexive_modal_parent;
