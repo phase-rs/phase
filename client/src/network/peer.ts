@@ -21,7 +21,9 @@ export interface PeerSession {
    * don't care about timing can ignore the promise.
    */
   send(msg: P2PMessage): Promise<boolean>;
-  onMessage(handler: (msg: P2PMessage) => void | Promise<void>): () => void;
+  onMessage(
+    handler: (msg: P2PMessage, receivedAtMs: number) => void | Promise<void>,
+  ): () => void;
   onDisconnect(handler: (reason: string) => void): () => void;
   close(reason?: string): void;
 }
@@ -60,12 +62,14 @@ export function createPeerSession(
   tracePeerSession("create-session", { connOpen: conn.open });
   const { onSessionEnd } = options;
   const diagnosticId = diagnosticIdFor(conn);
-  const messageHandlers = new Set<(msg: P2PMessage) => void | Promise<void>>();
+  const messageHandlers = new Set<
+    (msg: P2PMessage, receivedAtMs: number) => void | Promise<void>
+  >();
   const disconnectHandlers = new Set<(reason: string) => void>();
   let closed = false;
   let disconnectReason: string | null = null;
 
-  const pendingMessages: P2PMessage[] = [];
+  const pendingMessages: Array<{ msg: P2PMessage; receivedAtMs: number }> = [];
 
   // Probes measure latency only. A delayed pong is not evidence that a live
   // WebRTC channel should be destroyed (state traffic can still be arriving).
@@ -310,6 +314,10 @@ export function createPeerSession(
   // emitter) ignore it; the test fake uses it to deterministically await the
   // full inbound chain.
   const onData = (data: unknown): Promise<void> => {
+    // Capture the ingress instant before this frame waits behind earlier
+    // decodes or game work. A host judges a spoken observation at receipt, so
+    // a later serial handler must not make a timely frame look late.
+    const receivedAtMs = Date.now();
     let delivery: Promise<void> | undefined;
     pendingDecodes += 1;
     recvQueue = recvQueue.then(async () => {
@@ -372,18 +380,18 @@ export function createPeerSession(
         }
 
         if (messageHandlers.size === 0) {
-          pendingMessages.push(msg);
+          pendingMessages.push({ msg, receivedAtMs });
           return;
         }
 
         // Await each game handler to preserve action/state ordering. Catch
         // failures per handler so a rejection cannot poison later deliveries.
-        for (const message of [...pendingMessages.splice(0), msg]) {
+        for (const entry of [...pendingMessages.splice(0), { msg, receivedAtMs }]) {
           for (const handler of messageHandlers) {
             try {
-              await handler(message);
+              await handler(entry.msg, entry.receivedAtMs);
             } catch (e) {
-              console.warn("[PeerSession] message handler threw:", e, message.type);
+              console.warn("[PeerSession] message handler threw:", e, entry.msg.type);
             }
           }
         }
@@ -426,12 +434,16 @@ export function createPeerSession(
           .then(async () => {
             // Drain at execution time: an earlier queued delivery may already
             // have flushed these messages after this listener subscribed.
-            for (const msg of pendingMessages.splice(0)) {
+            for (const entry of pendingMessages.splice(0)) {
               if (closed) return;
               try {
-                await handler(msg);
+                await handler(entry.msg, entry.receivedAtMs);
               } catch (e) {
-                console.warn("[PeerSession] pending message handler threw:", e, msg.type);
+                console.warn(
+                  "[PeerSession] pending message handler threw:",
+                  e,
+                  entry.msg.type,
+                );
               }
             }
           });

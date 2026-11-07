@@ -1287,6 +1287,7 @@ fn fatal_startup(message: impl std::fmt::Display) -> ! {
 }
 
 /// Per-socket state tracking which game/player this connection belongs to.
+#[derive(Default)]
 struct SocketIdentity {
     game_code: Option<String>,
     player_id: Option<PlayerId>,
@@ -8935,7 +8936,11 @@ async fn handle_full_game_submission(
     game_db: &SharedGameDb,
     game_spectators: &SharedGameSpectators,
     identity: &SocketIdentity,
+    received_at: Instant,
 ) {
+    // Un-card (no CR entry): attribute the observation to the instant the
+    // socket read it, not to the moment its queued handler acquired the game.
+    let host_received_at_ms = epoch_ms_at_ingress(received_at);
     let reply = tx.for_completion(command_id);
     let kind = submission.kind();
     let is_zero_count_debug_create = submission.is_zero_count_debug_create();
@@ -9009,11 +9014,13 @@ async fn handle_full_game_submission(
     let (session, applied) = executor
         .with_session(session, move |session| {
             let HandledAction { result, takeback } = match submission {
-                GameSubmission::Action(action) => session.handle_action_with_card_db_outcome(
-                    &player_token,
-                    action,
-                    Some(card_db.as_ref()),
-                ),
+                GameSubmission::Action(action) => session
+                    .handle_action_with_card_db_outcome_at(
+                        &player_token,
+                        action,
+                        Some(card_db.as_ref()),
+                        host_received_at_ms,
+                    ),
                 GameSubmission::Interaction(submission) => session
                     .handle_interaction_with_rejection(&player_token, submission)
                     .map(|result| HandledAction {
@@ -9087,6 +9094,7 @@ async fn handle_full_game_submission(
             return;
         }
     };
+    let expiry = say_phrase_expiry_target(&session);
     let AppliedHumanSubmission {
         revision,
         unpublished,
@@ -9102,6 +9110,17 @@ async fn handle_full_game_submission(
         broadcast_ai_failure(connections, &game_code, ai.fault).await;
         info!(game = %game_code, kind, lock_ms = lock_start.elapsed().as_millis(), ai_actions = 0, "game submission processed (lock held)");
         drop(session);
+        schedule_say_phrase_expiry(
+            expiry,
+            executor,
+            state,
+            db,
+            draft_state,
+            connections,
+            game_db,
+            game_spectators,
+            &game_code,
+        );
         return;
     };
     finish_full_ai_continuation(
@@ -9117,11 +9136,22 @@ async fn handle_full_game_submission(
         draft_state,
         connections,
         game_db,
-        game_code,
+        game_code.clone(),
         kind,
         lock_start,
     )
     .await;
+    schedule_say_phrase_expiry(
+        expiry,
+        executor,
+        state,
+        db,
+        draft_state,
+        connections,
+        game_db,
+        game_spectators,
+        &game_code,
+    );
 }
 
 /// Runs the AI continuation of a human transition whose publication waited on
@@ -10032,6 +10062,130 @@ async fn handle_resync_state(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The epoch-millisecond instant of a server ingress observation.
+///
+/// `received_at` is monotonic; subtracting its age from the current wall clock
+/// recovers the receipt instant even after the command waited behind earlier
+/// work. No client-controlled timestamp enters this value.
+fn epoch_ms_at_ingress(received_at: Instant) -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    now.saturating_sub(received_at.elapsed().as_millis() as u64)
+}
+
+/// The live timed spoken payment the server must lapse on its own clock.
+///
+/// Un-card (no CR entry): Toy Boat's one-second gap is observed by the host.
+/// The client may report the lapse too, but it cannot be the only timer: a
+/// reloaded or skewed payer would otherwise hold the payment open forever.
+/// `(payer, payer token, payment id, deadline)` is read under the session lock.
+fn say_phrase_expiry_target(session: &GameSession) -> Option<(PlayerId, String, u64, u64)> {
+    let payment = session.state.say_payment.as_deref()?;
+    let deadline_ms = payment.deadline_ms?;
+    let engine::types::game_state::WaitingFor::UnlessPayment { player, .. } =
+        &session.state.waiting_for
+    else {
+        return None;
+    };
+    let token = session.player_tokens.get(player.0 as usize)?;
+    if token.is_empty() {
+        return None;
+    }
+    Some((*player, token.clone(), payment.id, deadline_ms))
+}
+
+/// Arm one server-clock lapse observation for a live spoken payment.
+///
+/// The task owns the payer's identity and re-enters the ordinary submission
+/// path, so the expiry gets the same authority gate, publication, persistence
+/// and AI continuation as any other action. It re-reads the live deadline
+/// before submitting: a saying accepted while the task slept advances the
+/// deadline, and an expiry frame from the old deadline must not be sent.
+#[allow(clippy::too_many_arguments)]
+fn schedule_say_phrase_expiry(
+    target: Option<(PlayerId, String, u64, u64)>,
+    executor: &game_executor::GameExecutor,
+    state: &SharedState,
+    db: &SharedDb,
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    game_db: &SharedGameDb,
+    game_spectators: &SharedGameSpectators,
+    game_code: &str,
+) {
+    let Some((payer, token, payment_id, deadline_ms)) = target else {
+        return;
+    };
+    let executor = executor.clone();
+    let state = state.clone();
+    let db = db.clone();
+    let draft_state = draft_state.clone();
+    let connections = connections.clone();
+    let game_db = game_db.clone();
+    let game_spectators = game_spectators.clone();
+    let game_code = game_code.to_string();
+    tokio::spawn(async move {
+        let mut sleep_for = Duration::from_millis(
+            deadline_ms.saturating_sub(epoch_ms_at_ingress(Instant::now())) + 1,
+        );
+        loop {
+            tokio::time::sleep(sleep_for).await;
+            let live = match lock_session(&state, &game_code).await {
+                Ok(session) => say_phrase_expiry_target(&session),
+                Err(_) => return,
+            };
+            match live {
+                Some((live_payer, _, live_payment, live_deadline))
+                    if live_payer == payer && live_payment == payment_id =>
+                {
+                    let now = epoch_ms_at_ingress(Instant::now());
+                    if live_deadline > now {
+                        sleep_for = Duration::from_millis(live_deadline.saturating_sub(now) + 1);
+                        continue;
+                    }
+                    break;
+                }
+                // The payment was answered, replaced, or this session retired.
+                _ => return,
+            }
+        }
+        let payer_tx = {
+            let routes = connections.lock().await;
+            routes
+                .get(&game_code)
+                .and_then(|seats| seats.get(&payer))
+                .cloned()
+        };
+        let Some(payer_tx) = payer_tx else {
+            return;
+        };
+        let mut identity = SocketIdentity::default();
+        identity.set_session(game_code.clone(), payer, token);
+        crate::handle_full_game_submission(
+            None,
+            GameSubmission::Action(GameAction::SayPhrase {
+                payment: payment_id,
+                seq: 0,
+                at_ms: 0,
+                report: engine::types::un_actions::SayPhraseReport::Expiry,
+            }),
+            &executor,
+            &state,
+            &db,
+            &draft_state,
+            &connections,
+            &payer_tx,
+            &game_db,
+            &game_spectators,
+            &identity,
+            Instant::now(),
+        )
+        .await;
+    });
+}
+
 async fn handle_client_message(
     client_msg: ClientMessage,
     resync: Option<socket_mailbox::ResyncPermit>,
@@ -10491,6 +10645,7 @@ async fn handle_client_message(
                 game_db,
                 game_spectators,
                 identity,
+                received_at,
             )
             .await;
             if let Some(game_code) = identity.game_code.as_deref() {
@@ -10522,6 +10677,7 @@ async fn handle_client_message(
                 game_db,
                 game_spectators,
                 identity,
+                received_at,
             )
             .await;
             if let Some(game_code) = identity.game_code.as_deref() {

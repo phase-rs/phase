@@ -1136,6 +1136,7 @@ mod tests {
                         &game_db,
                         &spectators,
                         &identity,
+                        std::time::Instant::now(),
                     )
                     .await;
                     messages.recv().await.unwrap()
@@ -1494,6 +1495,7 @@ mod tests {
                         &game_db,
                         &spectators,
                         &identity,
+                        std::time::Instant::now(),
                     )
                     .await;
                 }

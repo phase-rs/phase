@@ -801,6 +801,18 @@ export type P2PMessage = P2PAuthorityWire & (
   | { type: "state_withheld"; revision: number }
   | { type: "action_rejected"; rejection: ActionRejection }
   | { type: "action_failed"; message: string }
+  /** Host → guest: the outcome of one spoken-payment observation, correlated by
+   *  the engine-authored payment id and the observation's own sequence. A
+   *  saying is submitted without waiting for ordinary command completion, so
+   *  its reply travels on this dedicated lane instead of settling the pending
+   *  ordinary-command slot (which may already hold a Stay Quiet answer). */
+  | {
+      type: "saying_result";
+      payment: number;
+      seq: number;
+      accepted: boolean;
+      message?: string;
+    }
   | { type: "action_noop" }
   | { type: "mana_payment_preview"; requestId: number; sourceIds: ObjectId[] }
   | { type: "mana_payment_preview_rejected"; requestId: number; rejection: ActionRejection }

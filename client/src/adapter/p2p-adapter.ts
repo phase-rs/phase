@@ -114,6 +114,11 @@ import {
 import { NativeEngineSocket } from "../services/nativeEngineSocket";
 import i18n from "i18next";
 
+/** Correlates a spoken observation's dedicated reply with the attempt that sent it. */
+function sayingKey(payment: number, seq: number): string {
+  return `${payment}:${seq}`;
+}
+
 /**
  * Adapter-level events emitted to the UI. Wire-protocol messages are
  * snake_case (`player_kicked`); adapter events stay camelCase
@@ -1569,6 +1574,16 @@ export class P2PHostAdapter implements EngineAdapter {
   private hostSettlement: Promise<boolean> | null = null;
   /** Owned by the adapter, not by any overlay: armed whenever a publication fails. */
   private hostPublicationTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * The authority's own expiry timer for the live timed spoken payment. A
+   * guest's clock schedules only its UI; the host stamps the lapse it observes
+   * on its own clock, exactly as it stamps each received saying.
+   */
+  private sayExpiryTimer: ReturnType<typeof setTimeout> | null = null;
+  private sayExpiryPayment: number | null = null;
+  private sayExpiryDeadline: number | null = null;
+  /** Generation fences a stale async state read from re-arming an old payment. */
+  private sayExpiryGeneration = 0;
   private sessionLatencies = new WeakMap<PeerSession, number | null>();
   /**
    * A reconnecting transport has proved its token but is not a game session
@@ -2953,7 +2968,9 @@ export class P2PHostAdapter implements EngineAdapter {
       await this.refreshPregameSeatView();
       this.saveSession();
 
-      session.onMessage((msg) => this.handleGuestMessage(session, msg));
+      session.onMessage((msg, receivedAtMs) =>
+        this.handleGuestMessage(session, msg, receivedAtMs),
+      );
 
       this.broadcastSeatSnapshot();
       this.syncLobbyMetadata(reservationToken ? [reservationToken] : []);
@@ -4262,10 +4279,131 @@ export class P2PHostAdapter implements EngineAdapter {
    * No-op under `nativeBridge`, which publishes its own revisions.
    */
   private publishHostSnapshot(result: SubmitResult): Promise<boolean> {
+    // Every accepted host transition can surface or advance a timed spoken
+    // payment. Re-arm the authority's expiry observation on its own clock.
+    this.scheduleSayPhraseExpiry();
     if (this.nativeBridge) return Promise.resolve(true);
     const published = this.hostPublicationQueue.then(() => this.publishHostSnapshotInner(result));
     this.hostPublicationQueue = published.then(() => undefined);
     return published;
+  }
+
+  /**
+   * Re-arm the authority's lapse observation from the live published payment.
+   * The deadline and the instants compared against it are the host's own clock;
+   * a guest's skewed clock only schedules its redundant UI fallback.
+   */
+  private scheduleSayPhraseExpiry(): void {
+    const generation = ++this.sayExpiryGeneration;
+    void this.refreshSayPhraseExpiry(generation);
+  }
+
+  private async refreshSayPhraseExpiry(generation: number): Promise<void> {
+    if (this.disposed || !this.ownsAuthority()) return;
+    let state: GameState;
+    try {
+      state = this.nativeBridge
+        ? await this.nativeBridge.getState()
+        : await this.wasm.getState();
+    } catch {
+      return;
+    }
+    if (
+      generation !== this.sayExpiryGeneration
+      || this.disposed
+      || !this.ownsAuthority()
+    ) {
+      return;
+    }
+    const payment = state.say_payment;
+    if (!payment?.deadline_ms) {
+      this.disarmSayPhraseExpiry();
+      return;
+    }
+    if (
+      this.sayExpiryPayment === payment.id
+      && this.sayExpiryDeadline === payment.deadline_ms
+    ) {
+      return;
+    }
+    this.clearSayExpiryTimer();
+    this.sayExpiryPayment = payment.id;
+    this.sayExpiryDeadline = payment.deadline_ms;
+    const delay = Math.max(0, payment.deadline_ms - sayPhraseHostClockMs() + 1);
+    this.sayExpiryTimer = setTimeout(() => {
+      this.sayExpiryTimer = null;
+      void this.expireSayPhrase(payment.id);
+    }, delay);
+  }
+
+  private clearSayExpiryTimer(): void {
+    if (this.sayExpiryTimer !== null) clearTimeout(this.sayExpiryTimer);
+    this.sayExpiryTimer = null;
+  }
+
+  private disarmSayPhraseExpiry(): void {
+    this.sayExpiryGeneration += 1;
+    this.clearSayExpiryTimer();
+    this.sayExpiryPayment = null;
+    this.sayExpiryDeadline = null;
+  }
+
+  /**
+   * The host reports that its own clock passed the payment's deadline. The
+   * report never counts as a saying; the engine turns it into the unpaid
+   * unless-branch (CR 118.12a).
+   */
+  private async expireSayPhrase(paymentId: number): Promise<void> {
+    if (this.disposed || !this.ownsAuthority()) return;
+    let state: GameState;
+    try {
+      state = this.nativeBridge
+        ? await this.nativeBridge.getState()
+        : await this.wasm.getState();
+    } catch {
+      return;
+    }
+    const payment = state.say_payment;
+    const payer =
+      state.waiting_for.type === "UnlessPayment" ? state.waiting_for.data.player : null;
+    if (
+      !payment
+      || payment.id !== paymentId
+      || payment.deadline_ms === undefined
+      || payer === null
+    ) {
+      this.disarmSayPhraseExpiry();
+      return;
+    }
+    const now = sayPhraseHostClockMs();
+    if (now <= payment.deadline_ms) {
+      // A saying landed while this timer was in flight; re-arm against the
+      // deadline the engine retained (the engine clock never runs backwards).
+      this.sayExpiryPayment = null;
+      this.sayExpiryDeadline = null;
+      this.scheduleSayPhraseExpiry();
+      return;
+    }
+    const action: GameAction = {
+      type: "SayPhrase",
+      data: { payment: paymentId, seq: 0, at_ms: now, report: "Expiry" },
+    };
+    try {
+      const transition = await this.applyBrowserMutation(() =>
+        this.nativeBridge
+          ? this.nativeBridge.submitAction(action, payer)
+          : this.wasm.submitAction(action, payer),
+      );
+      await this.publishHostSnapshot(transition.result);
+      await this.broadcastStateUpdate(transition);
+      await this.runAiLoop();
+      void this.persistAuthoritativeState();
+    } catch (err) {
+      console.warn("[P2PHost] authority expiry report failed:", err);
+    }
+    this.sayExpiryPayment = null;
+    this.sayExpiryDeadline = null;
+    this.scheduleSayPhraseExpiry();
   }
 
   private async publishHostSnapshotInner(result: SubmitResult): Promise<boolean> {
@@ -4624,6 +4762,7 @@ export class P2PHostAdapter implements EngineAdapter {
     // Set first and synchronously: every in-flight init/start re-checks this
     // after each await, and callers that kept a reference must fail loud.
     this.disposed = true;
+    this.disarmSayPhraseExpiry();
     this.unsubscribeHostConnections();
     for (const { timer } of this.disconnectedSeats.values()) {
       if (timer !== null) clearTimeout(timer);
@@ -4795,9 +4934,33 @@ export class P2PHostAdapter implements EngineAdapter {
     if (pid !== null) this.recordGuestAck(pid, msg.revision);
   }
 
+  /**
+   * Answer a spoken observation on its own lane. An ordinary command keeps the
+   * generic `action_failed` path, so a saying can never settle a Stay Quiet
+   * answer that was parked at the same time.
+   */
+  private sendSayingFailure(
+    session: PeerSession,
+    action: GameAction,
+    message: string,
+  ): void {
+    if (action.type === "SayPhrase") {
+      void this.send(session, {
+        type: "saying_result",
+        payment: action.data.payment,
+        seq: action.data.seq,
+        accepted: false,
+        message,
+      });
+      return;
+    }
+    void this.send(session, { type: "action_failed", message });
+  }
+
   private async handleGuestMessage(
     sourceSession: PeerSession,
     msg: P2PMessage,
+    receivedAtMs: number,
   ): Promise<void> {
     if (this.handlePendingTerminalReconnectFrame(sourceSession, msg)) return;
     if (msg.type === "terminal_result_receipt") {
@@ -4824,10 +4987,11 @@ export class P2PHostAdapter implements EngineAdapter {
         if (msg.senderPlayerId !== pid) {
           const session = this.guestSessions.get(pid);
           if (session) {
-            void this.send(session, {
-              type: "action_failed",
-              message: `senderPlayerId mismatch (declared ${msg.senderPlayerId}, session owns ${pid})`,
-            });
+            this.sendSayingFailure(
+              session,
+              msg.action,
+              `senderPlayerId mismatch (declared ${msg.senderPlayerId}, session owns ${pid})`,
+            );
           }
           console.warn(
             `[P2PHost] rejected action from seat ${pid} with declared sender ${msg.senderPlayerId}`,
@@ -4840,24 +5004,23 @@ export class P2PHostAdapter implements EngineAdapter {
         if (this.eliminatedSeats.has(pid)) {
           const session = this.guestSessions.get(pid);
           if (session) {
-            void this.send(session, {
-              type: "action_failed",
-              message: "Player has conceded and can no longer act",
-            });
+            this.sendSayingFailure(
+              session,
+              msg.action,
+              "Player has conceded and can no longer act",
+            );
           }
           return;
         }
         if (this.gameRunState !== "running") {
           const session = this.guestSessions.get(pid);
           if (session) {
-            void this.send(session, {
-              type: "action_failed",
-              message: `Game ${this.gameRunState}`,
-            });
+            this.sendSayingFailure(session, msg.action, `Game ${this.gameRunState}`);
           }
           return;
         }
         let transition: BrowserTransition;
+        let appliedAction: GameAction | null = null;
         try {
           // CRITICAL: pass `pid` (the session-bound PlayerId), NEVER
           // `msg.senderPlayerId`. The envelope check above already guarantees
@@ -4871,7 +5034,8 @@ export class P2PHostAdapter implements EngineAdapter {
           // `at_ms` is replaced with this host's clock at receipt (exactly as
           // `contest_click` is stamped here). A guest cannot buy a pause by
           // repeating one claimed instant.
-          const action = stampSayPhraseAtHost(msg.action, sayPhraseHostClockMs());
+          const action = stampSayPhraseAtHost(msg.action, receivedAtMs);
+          appliedAction = action;
           transition = await this.applyBrowserMutation(() => this.nativeBridge
             ? this.nativeBridge.submitAction(action, pid)
             : this.wasm.submitAction(action, pid));
@@ -4879,7 +5043,13 @@ export class P2PHostAdapter implements EngineAdapter {
           // The engine refused the action: nothing applied, so this — and only
           // this — is an action failure the guest must hear about.
           const session = this.guestSessions.get(pid);
-          if (session) void this.send(session, actionFailureFrame(err));
+          if (session) {
+            this.sendSayingFailure(
+              session,
+              msg.action,
+              err instanceof Error ? err.message : String(err),
+            );
+          }
           break;
         }
         // Past here the action HAS applied. Everything left is delivery and
@@ -4902,6 +5072,16 @@ export class P2PHostAdapter implements EngineAdapter {
           void this.persistAuthoritativeState();
         } catch (err) {
           console.error("[P2PHost] delivery after an applied guest action failed:", err);
+        }
+        if (appliedAction?.type === "SayPhrase") {
+          // Sent after the state fan-out (FIFO), so the guest's authoritative
+          // progress is already in hand when its saying settles.
+          void this.send(session, {
+            type: "saying_result",
+            payment: appliedAction.data.payment,
+            seq: appliedAction.data.seq,
+            accepted: true,
+          });
         }
         break;
       }
@@ -5301,7 +5481,9 @@ export class P2PHostAdapter implements EngineAdapter {
         });
         // Keep the original pending-session consumer; this additional handler
         // admits only the matching final-state ACK until terminal completion.
-        session.onMessage((msg) => this.handleGuestMessage(session, msg));
+        session.onMessage((msg, receivedAtMs) =>
+        this.handleGuestMessage(session, msg, receivedAtMs),
+      );
       }
 
       const acknowledged = await this.send(session, {
@@ -5366,7 +5548,9 @@ export class P2PHostAdapter implements EngineAdapter {
       this.pendingReconnectSessions.delete(pid);
       this.disconnectedSeats.delete(pid);
       this.guestSessions.set(pid, session);
-      session.onMessage((msg) => this.handleGuestMessage(session, msg));
+      session.onMessage((msg, receivedAtMs) =>
+        this.handleGuestMessage(session, msg, receivedAtMs),
+      );
       this.publishPlayerLatencies();
 
       await this.tryAcknowledgeNativeTerminal();
@@ -5822,6 +6006,19 @@ export class P2PGuestAdapter implements EngineAdapter {
   /** Armed with the slot in `parkPendingSubmission`, cleared only by
    *  `settlePendingSubmission` — see `SUBMISSION_TIMEOUT_MS`. */
   private pendingSubmissionTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Spoken observations whose host reply is still in flight, keyed by payment
+   * and sequence. They settle through `saying_result` only, never through an
+   * ordinary command's reply slot (which Stay Quiet may already occupy).
+   */
+  private pendingSayings = new Map<
+    string,
+    {
+      resolve: (result: SubmitResult) => void;
+      reject: (error: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
   private nextManaPaymentPreviewRequestId = 1;
   private pendingManaPaymentPreviews = new Map<
     number,
@@ -5979,6 +6176,9 @@ export class P2PGuestAdapter implements EngineAdapter {
     this.rejectPendingSubmission(
       new AdapterError("P2P_ERROR", "Host disconnected while submitting an action", true),
     );
+    this.rejectAllPendingSayings(
+      new AdapterError("P2P_ERROR", "Host disconnected while submitting a saying", true),
+    );
     this.rejectPendingManaPaymentPreviews(
       new AdapterError("P2P_ERROR", "Host disconnected during mana-payment preview", true),
     );
@@ -6013,12 +6213,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     // action before touching the engine.
     this.requireAuthenticatedSession();
     if (action.type === "SayPhrase") {
-      this.send({
-        type: "action",
-        senderPlayerId: this.assignedPlayerId!,
-        action,
-      });
-      return { events: [], log_entries: [] };
+      return this.submitSaying(action);
     }
     return new Promise<SubmitResult>((resolve, reject) => {
       this.parkPendingSubmission(resolve, reject);
@@ -6028,6 +6223,89 @@ export class P2PGuestAdapter implements EngineAdapter {
         action,
       });
     });
+  }
+
+  /**
+   * Submit one host-stamped spoken observation. The guest does not wait for
+   * ordinary command completion: sayings are independent in time, and their
+   * replies are correlated by payment+sequence on `saying_result`. A definite
+   * send failure rejects immediately so the panel can retry the same saying
+   * instead of counting bytes that never left this host.
+   */
+  private async submitSaying(
+    action: Extract<GameAction, { type: "SayPhrase" }>,
+  ): Promise<SubmitResult> {
+    const key = sayingKey(action.data.payment, action.data.seq);
+    const reply = new Promise<SubmitResult>((resolve, reject) => {
+      const previous = this.pendingSayings.get(key);
+      if (previous) {
+        clearTimeout(previous.timer);
+        previous.reject(
+          new AdapterError(
+            "P2P_ERROR",
+            "Superseded by a later saying with the same sequence",
+            true,
+          ),
+        );
+      }
+      const timer = setTimeout(() => {
+        if (!this.pendingSayings.delete(key)) return;
+        reject(
+          new AdapterError(
+            "P2P_ERROR",
+            "The host did not answer this saying in time",
+            true,
+          ),
+        );
+      }, SUBMISSION_TIMEOUT_MS);
+      this.pendingSayings.set(key, { resolve, reject, timer });
+    });
+    const sent = await this.send({
+      type: "action",
+      senderPlayerId: this.assignedPlayerId!,
+      action,
+    });
+    if (!sent) {
+      this.rejectSaying(
+        key,
+        new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send saying", true),
+      );
+    }
+    return reply;
+  }
+
+  private rejectSaying(key: string, error: Error): void {
+    const pending = this.pendingSayings.get(key);
+    if (!pending) return;
+    this.pendingSayings.delete(key);
+    clearTimeout(pending.timer);
+    pending.reject(error);
+  }
+
+  private settleSaying(
+    result: Extract<P2PMessage, { type: "saying_result" }>,
+  ): void {
+    const key = sayingKey(result.payment, result.seq);
+    const pending = this.pendingSayings.get(key);
+    if (!pending) return;
+    if (!result.accepted) {
+      this.rejectSaying(
+        key,
+        new AdapterError("P2P_ERROR", result.message ?? "The host rejected this saying", true),
+      );
+      return;
+    }
+    this.pendingSayings.delete(key);
+    clearTimeout(pending.timer);
+    pending.resolve({ events: [], log_entries: [] });
+  }
+
+  private rejectAllPendingSayings(error: Error): void {
+    for (const [key, pending] of [...this.pendingSayings]) {
+      this.pendingSayings.delete(key);
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
   }
 
   async submitInteraction(
@@ -6331,6 +6609,9 @@ export class P2PGuestAdapter implements EngineAdapter {
     }
     if (!this.acceptsHostAuthority(msg)) return;
     switch (msg.type) {
+      case "saying_result":
+        this.settleSaying(msg);
+        break;
       case "player_latencies": {
         if (typeof msg.latencies !== "object" || msg.latencies === null || Array.isArray(msg.latencies)) return;
         const entries = Object.entries(msg.latencies);
@@ -6803,6 +7084,9 @@ export class P2PGuestAdapter implements EngineAdapter {
     if (session !== this.session) return;
     this.rejectPendingSubmission(
       new AdapterError("P2P_ERROR", "Host disconnected while submitting an action", true),
+    );
+    this.rejectAllPendingSayings(
+      new AdapterError("P2P_ERROR", "Host disconnected while submitting a saying", true),
     );
     this.rejectPendingManaPaymentPreviews(
       new AdapterError("P2P_ERROR", "Host disconnected during mana-payment preview", true),

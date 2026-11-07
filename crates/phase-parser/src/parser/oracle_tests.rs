@@ -18611,14 +18611,12 @@ fn tree_has_unimplemented(def: &AbilityDefinition) -> bool {
 }
 
 /// Un-card (no CR entry) + CR 115.1 (targets change only through an ability
-/// that explicitly says so): preserving the exact speech literal newly exposes
-/// a supported payoff. The quoted sentence is the cost of the saying
-/// ability, and the effect it introduces is the ordinary `ChangeTargets` that
-/// "Change the target ... that targets only you" already parses.
-/// CR 115.1 + CR 115.9c: I'm Rubber, You're Glue preserves its spoken cost while
-/// the restricted retarget activation ("Change the target of target spell or ability
-/// that targets only you") remains an honest Unsupported gap until stack-ability
-/// target restrictions are implemented in the engine.
+/// that explicitly says so): preserving the exact speech literal keeps the
+/// quoted sentence as the saying ability's spoken cost.
+/// CR 115.1 + CR 115.9c: the restricted retarget activation ("Change the
+/// target of target spell or ability that targets only you") is explicitly
+/// deferred — it stays an honest Unsupported gap until stack-ability target
+/// restrictions are implemented in the engine.
 #[test]
 fn parse_say_phrase_scope_im_rubber_exposes_spoken_cost_and_defers_retarget() {
     let r = parse(

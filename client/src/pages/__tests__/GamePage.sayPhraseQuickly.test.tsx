@@ -130,7 +130,9 @@ function toyBoatUnlessPayment(repetitions: number): WaitingFor {
 
 /** The engine-owned instance a freshly surfaced timed payment carries. */
 function paymentFor(owed: number, said = 0): SayPhrasePayment {
-  return { id: PAYMENT_ID, owed, said, clock_ms: 0 };
+  // The engine publishes the sequence of its last accepted observation; with no
+  // lost attempts, that is exactly `said`.
+  return { id: PAYMENT_ID, owed, said, clock_ms: 0, last_seq: said };
 }
 
 function phraseBox() {
@@ -170,7 +172,12 @@ function payUnlessCostCalls() {
     .map((action) => action.data?.pay);
 }
 
-function setPrompt(next: WaitingFor | null, said: number, owed: number) {
+function setPrompt(
+  next: WaitingFor | null,
+  said: number,
+  owed: number,
+  lastSeq = said,
+) {
   const state = useGameStore.getState().gameState;
   act(() => {
     useGameStore.setState({
@@ -178,7 +185,9 @@ function setPrompt(next: WaitingFor | null, said: number, owed: number) {
       gameState: state
         ? {
             ...state,
-            say_payment: next ? paymentFor(owed, said) : null,
+            say_payment: next
+              ? { ...paymentFor(owed, said), last_seq: lastSeq }
+              : null,
           }
         : state,
     });
@@ -221,7 +230,7 @@ function acknowledgeSayings({ lapseOnExpiry = true } = {}) {
               cost: { ...current.data.cost, repetitions: owed - said },
             },
           };
-    setPrompt(next, said, owed);
+    setPrompt(next, said, owed, action.data?.seq);
     return Promise.resolve();
   });
 }
@@ -503,7 +512,9 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     restorePayment({ deadline_ms: Date.now() + 60_000 });
     render(gamePageTree());
 
-    expect(await screen.findByText(PHRASE)).toBeInTheDocument();
+    expect(
+      await screen.findByText(PHRASE, {}, { timeout: 5_000 }),
+    ).toBeInTheDocument();
     fireEvent.click(phraseBox());
 
     const calls = sayPhraseCalls();
@@ -554,8 +565,14 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     expect(calls[1].seq).toBe(1);
   });
 
-  it("rolls back optimistic reported count when SayPhrase dispatch rejects with ACTION_NOT_SENT", async () => {
+  it("retries a saying whose bytes never left, then completes the payment", async () => {
+    // Keep the real-time 40 ms window from lapsing while the assertion waits
+    // for the accepted retry's rendered progress.
+    acknowledgeSayings({ lapseOnExpiry: false });
     setup(2);
+    // The first attempt is a DEFINITE no-send: the host never received it.
+    // The panel must retry the same spoken saying with a fresh sequence rather
+    // than counting a saying the engine never saw.
     dispatchMock.mockRejectedValueOnce(
       new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Network failed", true),
     );
@@ -563,9 +580,21 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
 
     expect(await screen.findByText("0 of 2 said")).toBeInTheDocument();
     fireEvent.click(phraseBox());
-    // Since dispatch failed with ACTION_NOT_SENT, the optimistic count rolls back to 0
-    await waitFor(() => {
-      expect(screen.getByText("0 of 2 said")).toBeInTheDocument();
-    });
+
+    // Two observations were submitted: the lost sequence 1 and its retry as
+    // sequence 2. The retry was accepted, so the engine's own count moved.
+    await waitFor(() => expect(sayingCalls()).toHaveLength(2));
+    expect(sayingCalls().map((call) => call.seq)).toEqual([1, 2]);
+    expect(await screen.findByText("1 of 2 said")).toBeInTheDocument();
+
+    // The local count is not stranded at the requirement: the next click still
+    // reaches the authority and finishes the payment.
+    fireEvent.click(phraseBox());
+    await waitFor(() => expect(sayingCalls()).toHaveLength(3));
+    expect(sayingCalls()[2].seq).toBe(3);
+    await waitFor(() => expect(screen.queryByText(PHRASE)).toBeNull());
+    // Three sayings reached the authority; a late expiry observation may follow
+    // the closing update, which must not count as a saying.
+    expect(sayingCalls().length).toBe(3);
   });
 });

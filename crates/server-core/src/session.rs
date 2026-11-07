@@ -1804,6 +1804,24 @@ impl GameSession {
         action: GameAction,
         card_db: Option<&CardDatabase>,
     ) -> Result<HandledAction, SessionActionError> {
+        self.handle_action_with_card_db_outcome_at(player_token, action, card_db, now_ms())
+    }
+
+    /// [`Self::handle_action_with_card_db_outcome`] with the host's ingress
+    /// instant supplied by the transport.
+    ///
+    /// Un-card (no CR entry): a spoken-payment observation is judged by the
+    /// instant the HOST received it, not by the time its queued handler finally
+    /// runs. The WebSocket ingress captures that instant before the application
+    /// queue, and passes it here so an earlier action's publication, broadcast
+    /// and AI work cannot make a timely saying look late.
+    pub fn handle_action_with_card_db_outcome_at(
+        &mut self,
+        player_token: &str,
+        action: GameAction,
+        card_db: Option<&CardDatabase>,
+        host_received_at_ms: u64,
+    ) -> Result<HandledAction, SessionActionError> {
         self.reject_if_ai_driver_faulted()?;
 
         let player = self
@@ -1814,7 +1832,7 @@ impl GameSession {
         // evidence the engine judges, so the server never trusts the one a
         // client claims — it stamps the observation at its own receipt, in the
         // epoch-millisecond domain every host uses (`GameAction::stamped_by_host`).
-        let action = action.stamped_by_host(now_ms());
+        let action = action.stamped_by_host(host_received_at_ms);
 
         // GH #1507: while a takeback request is awaiting approval, the
         // authoritative state must not move out from under it — a new
@@ -2928,6 +2946,7 @@ mod tests {
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
+    use engine::types::counter::CounterType;
     use engine::types::game_state::{
         AutoPassMode, CastPaymentMode, PersistedGameState, StackEntry, StackEntryKind,
         StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
@@ -4827,7 +4846,6 @@ mod tests {
     }
 
     fn toy_boat_at_upkeep_runner() -> GameRunner {
-        use engine::types::counter::CounterType;
         const TOY_BOAT_ORACLE: &str = "Cumulative upkeep\u{2014}Say \"Toy Boat\" quickly. (At the beginning of your upkeep, put an age counter on this creature, then sacrifice it unless you say \"Toy Boat\" once for each age counter on it\u{2014}without pausing between or fumbling it.)";
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::Untap);

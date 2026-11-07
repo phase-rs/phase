@@ -3951,18 +3951,48 @@ function SayPhrasePanel({
   // engine validates, so the window is armed from it rather than from an
   // acknowledgement (a slow round trip must not shorten the player's window).
   const lastSaidAt = useRef<number | null>(null);
-  // Clicks reported to the engine in this payment, including those still
-  // awaiting an acknowledgement.
-  const [reported, setReported] = useState(said);
+  // Sayings submitted by this panel that the engine has not accepted yet,
+  // keyed by the host sequence they carry. A definite no-send retracts exactly
+  // the attempt it settled, and the engine's accepted count below is the
+  // authority for progress.
+  const [inFlight, setInFlight] = useState<Map<number, number>>(() => new Map());
+  const inFlightRef = useRef(inFlight);
+  inFlightRef.current = inFlight;
+  const paymentIdRef = useRef(paymentId);
+  paymentIdRef.current = paymentId;
+  // A phrase paid at the payer's own pace has no host stamps: its clicks are
+  // counted locally until the engine's prompt closes.
+  const [quietReported, setQuietReported] = useState(said);
+  const reported =
+    quickWindowMs === undefined ? quietReported : said + inFlight.size;
 
   // A fresh engine instance is a fresh payment; local progress restarts from
   // it.
   useEffect(() => {
     seq.current = sayPayment?.last_seq ?? 0;
     lastSaidAt.current = null;
-    setReported(0);
+    setInFlight(new Map());
+    setQuietReported(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paymentId]);
+
+  // Drop attempts the engine has accepted. Until this runs, the local suffix
+  // keeps a rapid click from over-reporting past the payment's requirement.
+  // `last_seq` is the published sequence authority; `said` covers a state that
+  // predates it (or a stand-in engine that only publishes the count), where
+  // the accepted attempts are exactly the first `said` sequences.
+  const lastAcceptedSeq = Math.max(sayPayment?.last_seq ?? 0, said);
+  useEffect(() => {
+    setInFlight((current) => {
+      let next: Map<number, number> | null = null;
+      for (const attemptSeq of current.keys()) {
+        if (attemptSeq > lastAcceptedSeq) continue;
+        next ??= new Map(current);
+        next.delete(attemptSeq);
+      }
+      return next ?? current;
+    });
+  }, [lastAcceptedSeq]);
 
   // CR 118.12a: the pace is part of the payment. The window times the pause
   // *between* sayings, so it only starts once a saying has been made: a single
@@ -3987,7 +4017,7 @@ function SayPhrasePanel({
 
   // Compute the current deadline based on latest click or retained deadline.
   const computeDeadline = (): number | null => {
-    const hasLocalClick = reported > 0;
+    const hasLocalClick = lastSaidAt.current !== null;
     const hasRestoredDeadline = said > 0 && retainedDeadline !== undefined && retainedDeadline !== null;
     if (quickWindowMs === undefined || (!hasLocalClick && !hasRestoredDeadline)) return null;
     return lastSaidAt.current !== null ? lastSaidAt.current + quickWindowMs : retainedDeadline!;
@@ -4038,30 +4068,57 @@ function SayPhrasePanel({
     };
   }, [dispatch, paymentId, quickWindowMs, retainedDeadline, said]);
 
+  const submitSaying = (at: number, retriesLeft: number) => {
+    seq.current += 1;
+    const attemptSeq = seq.current;
+    const attemptPayment = paymentId;
+    setInFlight((current) => new Map(current).set(attemptSeq, at));
+    void dispatch({
+      type: "SayPhrase",
+      data: { payment: attemptPayment, seq: attemptSeq, at_ms: at, report: "Saying" },
+    }).catch((err) => {
+      // Fence the settlement by the payment and sequence that issued it: a
+      // rejection from an older payment must never decrement a replacement's
+      // count, and a stale attempt must not retract a newer one.
+      if (paymentIdRef.current !== attemptPayment) return;
+      setInFlight((current) => {
+        if (!current.has(attemptSeq)) return current;
+        const next = new Map(current);
+        next.delete(attemptSeq);
+        return next;
+      });
+      if (!(err instanceof AdapterError && err.code === AdapterErrorCode.ACTION_NOT_SENT)) {
+        return;
+      }
+      if (retriesLeft > 0) {
+        // Definite no-send: the bytes never left this host. Retry the SAME
+        // spoken instant as a fresh sequence. The engine requires a newer
+        // sequence, and an observation that never arrived cannot consume one
+        // of the sayings.
+        submitSaying(at, retriesLeft - 1);
+      } else if (inFlightRef.current.size <= 1) {
+        // Nothing reached the authority; reopen the click instead of leaving a
+        // local count that blocks the next saying forever.
+        lastSaidAt.current = null;
+      }
+    });
+  };
+
   const say = () => {
     // One click is one saying, and the engine accepts no more than the payment
     // requires (a rapid double click must not over-report).
     if (reported >= total) return;
     if (quickWindowMs === undefined) {
-      setReported((current) => current + 1);
+      setQuietReported((current) => current + 1);
       void dispatch({ type: "PayUnlessCost", data: { pay: true } });
       return;
     }
     const at = sayPhraseHostClockMs();
     lastSaidAt.current = at;
-    seq.current += 1;
-    setReported((current) => current + 1);
     // Update the deadline ref. The running timer will pick up the new deadline
     // on its next check without needing to be restarted.
-    deadlineRef.current = at + (quickWindowMs ?? 0);
-    void dispatch({
-      type: "SayPhrase",
-      data: { payment: paymentId, seq: seq.current, at_ms: at, report: "Saying" },
-    }).catch((err) => {
-      if (err instanceof AdapterError && err.code === AdapterErrorCode.ACTION_NOT_SENT) {
-        setReported((current) => Math.max(said, current - 1));
-      }
-    });
+    deadlineRef.current = at + quickWindowMs;
+    submitSaying(at, 2);
   };
 
   const required = total;
