@@ -459,10 +459,30 @@ fn galleon_attacking(response: Option<&str>) -> Option<(GameRunner, ObjectId)> {
 
     attack_with(&mut runner, &[galleon]);
     pass_until(&mut runner, |r| trigger_from_on_stack(r, galleon));
+    let delayed = runner.state().delayed_triggers.len();
     if let Some(shatter) = shatter {
         cast_in_response(&mut runner, shatter, galleon);
     }
     resolve_stack(&mut runner, Optional::Decline);
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        delayed + 1,
+        "reach: the attack trigger created its delayed exile"
+    );
+    // CR 603.7c: the delayed exile fires at end of combat, whether or not "it"
+    // can still be found then.
+    pass_until(&mut runner, |r| trigger_from_on_stack(r, galleon));
+    assert_eq!(
+        runner.state().phase,
+        Phase::EndCombat,
+        "reach: the delayed exile fires at end of combat"
+    );
+    resolve_stack(&mut runner, Optional::Decline);
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        delayed,
+        "reach: the delayed exile fired"
+    );
     pass_until(&mut runner, |r| r.state().phase == Phase::PostCombatMain);
     Some((runner, galleon))
 }
@@ -854,8 +874,20 @@ fn ivory_gargoyle_exiled_from_the_graveyard_in_response_does_not_return() {
         "reach: the dies trigger created its delayed return"
     );
 
-    pass_until(&mut runner, |r| r.state().phase == Phase::End);
+    // CR 603.7c: the delayed return fires at the beginning of the next end
+    // step, whether or not "it" can still be found then.
+    pass_until(&mut runner, |r| trigger_from_on_stack(r, gargoyle));
+    assert_eq!(
+        runner.state().phase,
+        Phase::End,
+        "reach: the delayed return fires at the end step"
+    );
     resolve_stack(&mut runner, Optional::Decline);
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        delayed,
+        "reach: the delayed return fired"
+    );
     // CR 400.7 + CR 603.7c: the exiled card is a new object, not the card the
     // dies trigger could find, so "return it" returns nothing.
     assert_eq!(zone(&runner, gargoyle), Zone::Exile);

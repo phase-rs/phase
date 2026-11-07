@@ -28169,6 +28169,52 @@ fn trigger_last_typed_counter_removed_sets_zero_threshold() {
     }
 }
 
+// CR 611.2c: a counter-removal trigger whose body broadcasts a rules-modifying
+// static mode over a population ("creatures can't be blocked this turn") must
+// keep that population live, which the engine does not yet do; the header
+// still parses, and the body is an explicit gap naming the whole printed line.
+// The positive sibling (a token body) and a non-counter-removal trigger with
+// the same body shape are untouched.
+#[test]
+fn counter_removed_broadcast_static_mode_is_an_honest_gap() {
+    let oddity_line = "When the last time counter is removed from this card while it's exiled, creatures can't be blocked this turn.";
+    let oddity = parse_trigger_line(oddity_line, "Veiling Oddity");
+    assert_eq!(oddity.mode, TriggerMode::CounterRemoved, "reach: header");
+    assert_eq!(
+        oddity.counter_filter,
+        last_counter_filter(CounterType::Time)
+    );
+    assert_eq!(oddity.trigger_zones, vec![Zone::Exile]);
+    let body = &*oddity.execute.as_ref().expect("Oddity body").effect;
+    assert!(
+        matches!(body, Effect::Unimplemented { name, .. } if name == "broadcast_static_mode_live_set"),
+        "Veiling Oddity's body is an explicit gap: {body:?}"
+    );
+    assert_eq!(body.unimplemented_description(), Some(oddity_line));
+
+    let knight = parse_trigger_line(
+        "When the last time counter is removed from this card while it's exiled, create a 2/2 black Knight creature token with flanking, protection from white, and haste.",
+        "Riftmarked Knight",
+    );
+    assert_eq!(knight.mode, TriggerMode::CounterRemoved);
+    let knight_body = &*knight.execute.as_ref().expect("Knight body").effect;
+    assert!(
+        matches!(knight_body, Effect::Token { .. }),
+        "Riftmarked Knight keeps its token body: {knight_body:?}"
+    );
+
+    let locksmith = parse_trigger_line(
+        "Whenever this creature attacks, creatures with defender can't block this turn.",
+        "Goblin Locksmith",
+    );
+    assert_ne!(locksmith.mode, TriggerMode::CounterRemoved);
+    let locksmith_body = &*locksmith.execute.as_ref().expect("Locksmith body").effect;
+    assert!(
+        matches!(locksmith_body, Effect::GenericEffect { .. }),
+        "the gate is scoped to counter-removal triggers: {locksmith_body:?}"
+    );
+}
+
 // CR 122.1: the "the last" grammar requires a counter kind, a singular noun,
 // and a fully consumed subject; each malformed form declines.
 #[test]

@@ -4512,13 +4512,15 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // The match stays EXHAUSTIVE over `OracleNodeIr` (no `_` arm): it is now the
     // single place a new node variant must declare whether it consumes a printed
     // slot, an obligation `finish()` used to carry.
-    // CR 115.10a + CR 303.4b + CR 301.5f: candidates for a lone "enchanted/
-    // equipped X" instruction that names its host without targeting it. Only the
-    // card's own spell/activated items and parsed effect-chain triggers are
-    // candidates; each records its printed-clause evidence here, and the
-    // conversion itself runs after every document relation has composed the
-    // final abilities (`convert_terminal_attachment_host_references` below), so a
-    // candidate that composition gives a follower, or folds into another
+    // CR 115.10a + CR 303.4b + CR 301.5f: candidates for an "enchanted/
+    // equipped X" instruction that names its host without targeting it, alone
+    // or followed only by instructions on that host ("it", "that land's
+    // controller"). Only the card's own spell/activated items and parsed
+    // effect-chain triggers are candidates; each records its printed-clause
+    // evidence here, and the conversion itself runs after every document
+    // relation has composed the final abilities
+    // (`convert_terminal_attachment_host_references` below), so a candidate
+    // that composition gives any other follower, or folds into another
     // ability, keeps its target.
     //
     // CR 700.2: conservatively, a document that carries a modal choice
@@ -4802,7 +4804,7 @@ struct HostReferenceCandidates {
 /// resolved through its own category's id track only: one that a relation
 /// folded into another ability (a CR 614.15 self-replacement override) or moved
 /// elsewhere is no longer there and keeps its target, and one that composition
-/// gave a follower is refused by the converter.
+/// gave a follower other than a host anaphor is refused by the converter.
 fn convert_terminal_attachment_host_references(
     result: &mut ParsedAbilities,
     candidates: &HostReferenceCandidates,

@@ -2459,6 +2459,74 @@ fn filter_uses_departure_attachment_prop(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 611.2c: whether a counter-removal trigger's body installs a static mode
+/// over a population named by its characteristics (see the gate in
+/// `lower_trigger_ir`).
+fn trigger_broadcasts_static_mode_population(
+    def: &TriggerDefinition,
+    execute: Option<&AbilityDefinition>,
+) -> bool {
+    matches!(def.mode, TriggerMode::CounterRemoved)
+        && execute.is_some_and(chain_broadcasts_static_mode_population)
+}
+
+fn chain_broadcasts_static_mode_population(ability: &AbilityDefinition) -> bool {
+    effect_broadcasts_static_mode_population(&ability.effect)
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(chain_broadcasts_static_mode_population)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_broadcasts_static_mode_population)
+        || ability
+            .mode_abilities
+            .iter()
+            .any(chain_broadcasts_static_mode_population)
+}
+
+/// A non-targeted `GenericEffect` with a static that adds a static mode
+/// (`ContinuousModification::AddStaticMode`) to the objects its application
+/// filter (`generic_effect_application_filter`) names by characteristics.
+fn effect_broadcasts_static_mode_population(effect: &Effect) -> bool {
+    let Effect::GenericEffect {
+        static_abilities,
+        target: None,
+        ..
+    } = effect
+    else {
+        return false;
+    };
+    static_abilities.iter().any(|static_def| {
+        static_def.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                crate::types::ability::ContinuousModification::AddStaticMode { .. }
+            )
+        }) && crate::types::ability::generic_effect_application_filter(
+            None,
+            static_def.affected.as_ref(),
+        )
+        .is_some_and(filter_is_characteristic_population)
+    })
+}
+
+/// CR 611.2c: a "set of objects" named by type ("creatures"): a `Typed` filter
+/// with type words, or a combination with one. Context references, inherited
+/// targets, the source, a tracked set ("those creatures", a fixed referent),
+/// the last created objects and a bare player filter are not populations.
+fn filter_is_characteristic_population(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => !typed.type_filters.is_empty(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_is_characteristic_population)
+        }
+        TargetFilter::Not { filter } => filter_is_characteristic_population(filter),
+        _ => false,
+    }
+}
+
 /// CR 603.12: a reflexive triggered ability keyed on an event — created as the
 /// parent's next instruction, it triggers only on that event having occurred
 /// earlier during the same resolution.
@@ -2780,6 +2848,21 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 "departure_attachment_relation",
                 def.description.clone().unwrap_or_default(),
             ),
+        )));
+    }
+    // CR 611.2c: a rules-modifying continuous effect from a resolved ability
+    // "can affect objects that weren't affected when that continuous effect
+    // began". The broadcast install binds a characteristic-defined population
+    // once, at resolution, and no authority yet decides per part which
+    // `AddStaticMode` broadcasts need a live set. On the counter-removal grammar
+    // this parser admits, keep such a body an honest gap instead of a supported
+    // frozen set (Veiling Oddity: "creatures can't be blocked this turn").
+    if trigger_broadcasts_static_mode_population(&def, execute.as_deref()) {
+        execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            // The trigger's whole printed line (`def.description` is set
+            // from it only further below).
+            Effect::unimplemented("broadcast_static_mode_live_set", ir.source_text.clone()),
         )));
     }
     def.execute = execute;

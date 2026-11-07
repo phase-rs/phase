@@ -2384,25 +2384,32 @@ impl PrintedTargetWord {
 /// (`targeting::bind_resolution_attachment_hosts`).
 ///
 /// Applied to the card's own fully composed ability (after every document
-/// relation), and only when the host instruction is the whole ability — one
-/// node, nothing before or after it (a later sentence that only modifies it,
-/// "That creature can't be regenerated.", folds into the same node). Without a
-/// provable host it then does nothing, exactly as the targeted form did when its
-/// only target was illegal (CR 608.2b). Instructions that precede or follow it
-/// read or depend on that host in ways the targeted form settled by fizzling
-/// the whole ability, so such chains keep their stack-time target (the
-/// followers of a host reference are follow-up work). Donor shapes ("becomes a
-/// copy of", "gains all activated abilities of" the host) also keep theirs.
+/// relation), when the host instruction heads the ability and every
+/// instruction after it is a host follower (`is_parent_anaphor_follower`):
+/// one that acts on that host or its controller or owner through "it", "that
+/// permanent" or "that land's controller", and through nothing else (a later
+/// sentence that only modifies the head, "That creature can't be
+/// regenerated.", folds into the same node). CR 608.2c: those followers read
+/// the host the head bound. Without a live host the head does nothing; CR
+/// 608.2h: followers that read only the host's controller or owner read its
+/// last known information, and followers that need the host itself do nothing
+/// (`effects::resolve_chain_body`). A chain with any other follower, one that
+/// acts on its own subject or reads the host some other way (as a damage
+/// source or a count), keeps its stack-time target, as do donor shapes
+/// ("becomes a copy of", "gains all activated abilities of" the host).
 pub(crate) fn convert_terminal_attachment_host_reference(
     def: &mut AbilityDefinition,
     printed: PrintedTargetWord,
 ) {
-    if def.sub_ability.is_some()
-        || def.else_ability.is_some()
+    if def.else_ability.is_some()
         || def.modal.is_some()
         || !def.mode_abilities.is_empty()
         || def.target_choice_timing != TargetChoiceTiming::Stack
         || def.effect.attachment_host_slot() != crate::types::ability::AttachmentHostSlot::Operand
+        || !std::iter::successors(def.sub_ability.as_deref(), |node| {
+            node.sub_ability.as_deref()
+        })
+        .all(is_parent_anaphor_follower)
     {
         return;
     }
@@ -2414,6 +2421,31 @@ pub(crate) fn convert_terminal_attachment_host_reference(
     {
         def.target_choice_timing = TargetChoiceTiming::Resolution;
     }
+}
+
+/// CR 608.2c: a node after a host instruction that announces no choice of its
+/// own and names exactly the host — "it" / "that permanent" (`ParentTarget`),
+/// "its controller" / "that land's controller" (`ParentTargetController`) or
+/// "its owner" (`ParentTargetOwner`) — in its operand slot and in every other
+/// object slot it carries.
+fn is_parent_anaphor_follower(node: &AbilityDefinition) -> bool {
+    node.else_ability.is_none()
+        && node.modal.is_none()
+        && node.mode_abilities.is_empty()
+        && node.target_choice_timing == TargetChoiceTiming::Stack
+        && node.effect.target_filter().is_some_and(is_host_anaphor)
+        && crate::types::ability::effect_parent_ref_slots(&node.effect)
+            .into_iter()
+            .all(is_host_anaphor)
+}
+
+fn is_host_anaphor(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+    )
 }
 
 /// CR 115.10a + CR 608.2d: the timing of one node of the clause's own sub chain

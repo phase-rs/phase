@@ -5,7 +5,8 @@ use crate::game::game_object::ObjectIncarnationRefExt;
 pub(crate) use crate::types::ability::{
     effect_owns_resolution_zone_choice, effect_refs_parent_target,
     effect_requires_parent_target_object, filter_refs_parent_or_event_subject,
-    mass_population_target, mass_population_target_mut, EVENT_SUBJECT_ANAPHORS,
+    filter_requires_parent_target_object, mass_population_target, mass_population_target_mut,
+    EVENT_SUBJECT_ANAPHORS,
 };
 use crate::types::ability::{
     effect_parent_ref_slots, effect_target_filter, filter_refs_event_subject,
@@ -3728,7 +3729,7 @@ fn revealed_object_context_from_events(
     revealed.next().is_none().then_some(snapshot)
 }
 
-fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) -> LKISnapshot {
+pub(crate) fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) -> LKISnapshot {
     LKISnapshot {
         name: record.name.clone(),
         token_image_ref: None,
@@ -16660,6 +16661,16 @@ fn optional_pay_cost_affordability_is_decidable(cost: &AbilityCost) -> bool {
 /// linked-exile referent ("the exiled card") with no card in exile. Suppressing
 /// the prompt lets the effect resolve as its defined no-op instead.
 fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
+    // CR 603.5 + CR 608.2d: an optional instruction on the source's
+    // "enchanted/equipped X" is decided as it resolves; with no live host to
+    // act on ("you may have that player gain control of equipped creature" on
+    // an unattached Equipment) the option is impossible.
+    match crate::game::targeting::bind_resolution_attachment_hosts(state, ability) {
+        crate::game::targeting::ResolutionHostBinding::NotApplicable
+        | crate::game::targeting::ResolutionHostBinding::Bound(_) => {}
+        crate::game::targeting::ResolutionHostBinding::Absent
+        | crate::game::targeting::ResolutionHostBinding::Departed(_) => return true,
+    }
     match &ability.effect {
         Effect::PutSticker { .. } => stickers::optional_is_infeasible(state, ability),
         Effect::PutChosenCounter {
@@ -21938,20 +21949,43 @@ fn resolve_chain_body(
     // recipient is bound to the source's host as this instruction begins to
     // resolve, before its conditions and effect read it. With no provable host
     // the instruction itself does nothing (`host_effect_impossible`).
+    //
+    // CR 608.2c + CR 608.2h: the instructions after it read that host through
+    // "it" / "that land's controller". With no live host they must never fall
+    // back to the ability's source or to any other object, so the chain is
+    // pruned before anything dispatches: with no information about the host,
+    // every instruction that depends on it goes; with only its last known
+    // information (`Departed`), the ones that need the object itself go and
+    // the ones that read only its controller or owner stay, reading that
+    // snapshot (`departed_host_context`).
     let host_binding = crate::game::targeting::bind_resolution_attachment_hosts(state, ability);
     let host_effect_impossible = match &host_binding {
-        crate::game::targeting::ResolutionHostBinding::Absent => true,
+        crate::game::targeting::ResolutionHostBinding::Absent
+        | crate::game::targeting::ResolutionHostBinding::Departed(_) => true,
         crate::game::targeting::ResolutionHostBinding::NotApplicable
         | crate::game::targeting::ResolutionHostBinding::Bound(_) => false,
     };
     let host_bound;
+    let mut departed_host_context = None;
     let ability = match host_binding {
         crate::game::targeting::ResolutionHostBinding::Bound(bound) => {
             host_bound = *bound;
             &host_bound
         }
-        crate::game::targeting::ResolutionHostBinding::NotApplicable
-        | crate::game::targeting::ResolutionHostBinding::Absent => ability,
+        crate::game::targeting::ResolutionHostBinding::NotApplicable => ability,
+        crate::game::targeting::ResolutionHostBinding::Absent => {
+            host_bound = without_unavailable_host_followers(
+                ability,
+                MissingParentReferent::HostObjectAndMetadata,
+            );
+            &host_bound
+        }
+        crate::game::targeting::ResolutionHostBinding::Departed(snapshot) => {
+            departed_host_context = Some(*snapshot);
+            host_bound =
+                without_unavailable_host_followers(ability, MissingParentReferent::HostObject);
+            &host_bound
+        }
     };
     // CR 608.2c: Snapshot the `pending_continuation` *value* at chain-body
     // entry so the sub_ability guard further down can compare by IDENTITY, not
@@ -23122,7 +23156,10 @@ fn resolve_chain_body(
             // eligible)`) and run the "If you do" rider on a cost never paid in full.
             | Effect::Discard { .. }
     );
-    if optional_is_infeasible && auto_decline_infeasible_optional {
+    // CR 608.2d + CR 603.5: an optional instruction on a source's host with no
+    // live host is likewise a declined option ("you may have that player gain
+    // control of equipped creature. If you do, untap it." — no rider runs).
+    if optional_is_infeasible && (auto_decline_infeasible_optional || host_effect_impossible) {
         return resolve_optional_effect_decision_step(
             state,
             ability.clone(),
@@ -24577,8 +24614,8 @@ fn resolve_chain_body(
     // CR 608.2c + CR 608.2h: a later instruction may read a public-to-hidden
     // move's last-known controller/owner metadata, without treating the hidden
     // object itself as an available parent referent.
-    let effect_context_object =
-        parent_referent_context_from_events(state, effect_events).or_else(|| {
+    let effect_context_object = parent_referent_context_from_events(state, effect_events)
+        .or_else(|| {
             ability
                 .sub_ability
                 .as_deref()
@@ -24588,7 +24625,10 @@ fn resolve_chain_body(
                 })
                 .then(|| library_move_metadata_context_from_events(state, effect_events))
                 .flatten()
-        });
+        })
+        // CR 608.2h: a departed host's last known information, for the
+        // metadata-only instructions its pruned chain kept.
+        .or(departed_host_context);
     let amassed_army_object = amassed_army_context_from_events(state, &events[events_before..]);
 
     // CR 610.3a / CR 610.3b + CR 118.12: a bounded zone move refused because its "until"
@@ -27022,10 +27062,12 @@ fn bound_result_is_empty(ability: &ResolvedAbility) -> bool {
 /// their ParentTarget walk, but a SelfRef GenericEffect nested inside one still
 /// names the creating source rather than the forwarded object.
 fn ability_chain_depends_on_missing_forward_result(ability: &ResolvedAbility) -> bool {
-    effect_chain_depends_on_missing_forward_result(&ability.effect)
-        || ability
-            .child_links()
-            .any(|(_, child)| ability_chain_depends_on_missing_forward_result(child))
+    effect_chain_depends_on_missing_forward_result(
+        &ability.effect,
+        MissingParentReferent::ForwardResult,
+    ) || ability
+        .child_links()
+        .any(|(_, child)| ability_chain_depends_on_missing_forward_result(child))
 }
 
 fn ability_definition_chain_refs_parent_target(definition: &AbilityDefinition) -> bool {
@@ -27053,7 +27095,29 @@ fn effect_chain_refs_parent_target(effect: &Effect) -> bool {
     references_parent
 }
 
-fn effect_chain_depends_on_missing_forward_result(effect: &Effect) -> bool {
+/// CR 608.2c + CR 608.2h: which part of a parent referent a chain is missing,
+/// so [`without_missing_parent_referent_dependencies`] prunes exactly the
+/// instructions that cannot be performed without it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MissingParentReferent {
+    /// A forward-result producer completed with no object: instructions on the
+    /// forwarded object or its controller/owner go, and a `ParentTarget`
+    /// grant stays (it binds nothing at install time).
+    ForwardResult,
+    /// CR 608.2h: a resolution-bound "enchanted/equipped X" host with no last
+    /// known information: every instruction that reads the host goes, its
+    /// controller and owner included, and so does a grant to it.
+    HostObjectAndMetadata,
+    /// CR 608.2h: a departed host whose last known information names its
+    /// controller and owner: only the instructions that need the object itself
+    /// go, a grant to it included.
+    HostObject,
+}
+
+fn effect_chain_depends_on_missing_forward_result(
+    effect: &Effect,
+    missing: MissingParentReferent,
+) -> bool {
     // CR 608.2c: A `GenericEffect`'s dependency is decided PER STATIC by
     // `generic_effect_depends_on_missing_forward_result`, which routes through
     // `generic_effect_application_filter`. Consulting the raw outer `target`
@@ -27064,9 +27128,15 @@ fn effect_chain_depends_on_missing_forward_result(effect: &Effect) -> bool {
     // discard the whole node — including the static
     // `without_missing_forward_result_dependencies` just deliberately retained.
     if matches!(effect, Effect::GenericEffect { .. }) {
-        return generic_effect_depends_on_missing_forward_result(effect);
+        return generic_effect_depends_on_missing_forward_result(effect, missing);
     }
-    effect_refs_parent_target(effect)
+    let direct = match missing {
+        MissingParentReferent::ForwardResult | MissingParentReferent::HostObjectAndMetadata => {
+            effect_refs_parent_target(effect)
+        }
+        MissingParentReferent::HostObject => effect_requires_parent_target_object(effect),
+    };
+    direct
         || matches!(
             effect,
             Effect::CreateDelayedTrigger { effect: definition, .. }
@@ -27089,15 +27159,30 @@ fn effect_chain_depends_on_missing_forward_result(effect: &Effect) -> bool {
 /// the ability source (see the dedicated arms in
 /// `effect.rs::resolve_generic_static`). Pruning those would silently drop
 /// grants the game still owes.
+///
+/// On a host path the missing object IS the parent target, so a grant to it
+/// goes; a `SelfRef` grant there names the Aura or Equipment, not the host, and
+/// stays.
 fn generic_static_depends_on_missing_forward_result(
     target: Option<&TargetFilter>,
     static_def: &StaticDefinition,
+    missing: MissingParentReferent,
 ) -> bool {
-    match effect::generic_effect_application_filter(target, static_def.affected.as_ref()) {
-        Some(TargetFilter::SelfRef) => false,
-        Some(TargetFilter::ParentTargetSlot { .. }) => true,
-        Some(filter) => filter_requires_missing_forward_result(filter),
-        None => false,
+    let application =
+        effect::generic_effect_application_filter(target, static_def.affected.as_ref());
+    match missing {
+        MissingParentReferent::ForwardResult => match application {
+            Some(TargetFilter::SelfRef) => false,
+            Some(TargetFilter::ParentTargetSlot { .. }) => true,
+            Some(filter) => filter_requires_missing_forward_result(filter),
+            None => false,
+        },
+        MissingParentReferent::HostObjectAndMetadata => {
+            application.is_some_and(filter_refs_parent_target)
+        }
+        MissingParentReferent::HostObject => {
+            application.is_some_and(filter_requires_parent_target_object)
+        }
     }
 }
 
@@ -27115,10 +27200,19 @@ fn generic_static_depends_on_missing_forward_result(
 /// only when the node already announced its own target, leaving the
 /// non-declaring path byte-identical to the established
 /// [`effect_chain_depends_on_missing_forward_result`] contract.
-fn declaring_node_role_refs_missing_forward_result(effect: &Effect) -> bool {
+fn declaring_node_role_refs_missing_forward_result(
+    effect: &Effect,
+    missing: MissingParentReferent,
+) -> bool {
+    let names_missing = |filter: &TargetFilter| match missing {
+        MissingParentReferent::ForwardResult | MissingParentReferent::HostObjectAndMetadata => {
+            filter_refs_parent_target(filter)
+        }
+        MissingParentReferent::HostObject => filter_requires_parent_target_object(filter),
+    };
     match effect {
-        Effect::Fight { subject, .. } => filter_refs_parent_target(subject),
-        Effect::MoveCounters { source, .. } => filter_refs_parent_target(source),
+        Effect::Fight { subject, .. } => names_missing(subject),
+        Effect::MoveCounters { source, .. } => names_missing(source),
         _ => false,
     }
 }
@@ -27151,7 +27245,10 @@ fn filter_requires_missing_forward_result(filter: &TargetFilter) -> bool {
 /// A GenericEffect depends on the forwarded object when ANY static it installs
 /// does — that gates entry into `without_missing_forward_result_dependencies`,
 /// which then prunes exactly the dependent statics and keeps the rest.
-fn generic_effect_depends_on_missing_forward_result(effect: &Effect) -> bool {
+fn generic_effect_depends_on_missing_forward_result(
+    effect: &Effect,
+    missing: MissingParentReferent,
+) -> bool {
     let Effect::GenericEffect {
         static_abilities,
         target,
@@ -27162,7 +27259,7 @@ fn generic_effect_depends_on_missing_forward_result(effect: &Effect) -> bool {
     };
 
     static_abilities.iter().any(|static_def| {
-        generic_static_depends_on_missing_forward_result(target.as_ref(), static_def)
+        generic_static_depends_on_missing_forward_result(target.as_ref(), static_def, missing)
     })
 }
 
@@ -27174,6 +27271,38 @@ fn generic_effect_depends_on_missing_forward_result(effect: &Effect) -> bool {
 fn without_missing_forward_result_dependencies(
     ability: &ResolvedAbility,
 ) -> Option<ResolvedAbility> {
+    without_missing_parent_referent_dependencies(ability, MissingParentReferent::ForwardResult)
+}
+
+/// CR 608.2c + CR 608.2h: a resolution-bound host instruction with no live host
+/// (`ResolutionHostBinding::Absent` / `Departed`): the same node with every
+/// instruction after it that depends on what is `missing` pruned, so none can
+/// fall back to the ability's source or to another object.
+fn without_unavailable_host_followers(
+    ability: &ResolvedAbility,
+    missing: MissingParentReferent,
+) -> ResolvedAbility {
+    let mut pruned = ability.clone();
+    pruned.sub_ability = ability
+        .sub_ability
+        .as_deref()
+        .and_then(|sub| without_missing_parent_referent_dependencies(sub, missing))
+        .map(Box::new);
+    pruned.else_ability = ability
+        .else_ability
+        .as_deref()
+        .and_then(|other| without_missing_parent_referent_dependencies(other, missing))
+        .map(Box::new);
+    pruned
+}
+
+/// The parameterized authority behind [`without_missing_forward_result_dependencies`]
+/// and [`without_unavailable_host_followers`]: `missing` says which part of the
+/// parent referent is absent ([`MissingParentReferent`]).
+fn without_missing_parent_referent_dependencies(
+    ability: &ResolvedAbility,
+    missing: MissingParentReferent,
+) -> Option<ResolvedAbility> {
     // CR 601.2c + CR 608.2c: an independent announcement starts a new
     // reference scope. Its riders name its own target, not the earlier empty
     // producer. The same boundary applies to a new resolution-time chooser.
@@ -27183,10 +27312,13 @@ fn without_missing_forward_result_dependencies(
     {
         // CR 608.2c: an announced recipient does not supply a missing
         // subject, attachment, or counter source used by this effect itself.
-        if effect_chain_depends_on_missing_forward_result(&ability.effect)
-            || declaring_node_role_refs_missing_forward_result(&ability.effect)
+        if effect_chain_depends_on_missing_forward_result(&ability.effect, missing)
+            || declaring_node_role_refs_missing_forward_result(&ability.effect, missing)
         {
-            return first_independent_forward_result_sibling(ability.sub_ability.as_deref());
+            return first_independent_forward_result_sibling(
+                ability.sub_ability.as_deref(),
+                missing,
+            );
         }
         return Some(ability.clone());
     }
@@ -27198,26 +27330,29 @@ fn without_missing_forward_result_dependencies(
     } = &mut remaining.effect
     {
         static_abilities.retain(|static_def| {
-            !generic_static_depends_on_missing_forward_result(target.as_ref(), static_def)
+            !generic_static_depends_on_missing_forward_result(target.as_ref(), static_def, missing)
         });
         if static_abilities.is_empty() {
-            return first_independent_forward_result_sibling(ability.sub_ability.as_deref());
+            return first_independent_forward_result_sibling(
+                ability.sub_ability.as_deref(),
+                missing,
+            );
         }
     }
 
-    if effect_chain_depends_on_missing_forward_result(&remaining.effect) {
-        return first_independent_forward_result_sibling(ability.sub_ability.as_deref());
+    if effect_chain_depends_on_missing_forward_result(&remaining.effect, missing) {
+        return first_independent_forward_result_sibling(ability.sub_ability.as_deref(), missing);
     }
 
     remaining.sub_ability = ability
         .sub_ability
         .as_deref()
-        .and_then(without_missing_forward_result_dependencies)
+        .and_then(|sub| without_missing_parent_referent_dependencies(sub, missing))
         .map(Box::new);
     remaining.else_ability = ability
         .else_ability
         .as_deref()
-        .and_then(without_missing_forward_result_dependencies)
+        .and_then(|other| without_missing_parent_referent_dependencies(other, missing))
         .map(Box::new);
     // CR 608.2c: keep pristine coin outcomes here. The selected branch is pruned
     // at run_flip_branch entry using this node's completed-empty incoming result;
@@ -27227,8 +27362,10 @@ fn without_missing_forward_result_dependencies(
 
 fn first_independent_forward_result_sibling(
     ability: Option<&ResolvedAbility>,
+    missing: MissingParentReferent,
 ) -> Option<ResolvedAbility> {
-    next_independent_instruction(ability).and_then(without_missing_forward_result_dependencies)
+    next_independent_instruction(ability)
+        .and_then(|node| without_missing_parent_referent_dependencies(node, missing))
 }
 
 /// CR 608.2c: the first node at or below `node`, in printed order, that starts

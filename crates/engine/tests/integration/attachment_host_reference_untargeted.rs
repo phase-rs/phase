@@ -57,6 +57,28 @@ const STAMINA: &str = "Enchant creature\nEnchanted creature has vigilance.\nSacr
 const EPHARAS_ENLIGHTENMENT: &str = "Enchant creature\nWhen this Aura enters, put a +1/+1 counter on enchanted creature.\nEnchanted creature has flying.\nWhenever a creature you control enters, you may return this Aura to its owner's hand.";
 const HELM_OF_THE_HOST: &str = "At the beginning of combat on your turn, create a token that's a copy of equipped creature, except the token isn't legendary. That token gains haste.\nEquip {5}";
 const FALL_FROM_FAVOR: &str = "Enchant creature\nWhen this Aura enters, tap enchanted creature and you become the monarch.\nEnchanted creature doesn't untap during its controller's untap step unless that player is the monarch.";
+const ORCISH_MINE: &str = "Enchant land\nThis Aura enters with three ore counters on it.\nAt the beginning of your upkeep and whenever enchanted land becomes tapped, remove an ore counter from this Aura.\nWhen the last ore counter is removed from this Aura, destroy enchanted land and this Aura deals 2 damage to that land's controller.";
+const ENCHANTED_RIVERS_GRASP: &str = "Enchant creature\nWhen this Aura enters, tap enchanted creature and remove all counters from it.\nEnchanted creature loses all abilities and doesn't untap during its controller's untap step.";
+const HONEST_WORK: &str = "Enchant creature an opponent controls\nWhen this Aura enters, tap enchanted creature and remove all counters from it.\nEnchanted creature loses all abilities and is a Citizen with base power and toughness 1/1 and \"{T}: Add {C}\" named Humble Merchant. (It loses all other creature types and names.)";
+const STUNNING_STRIKE: &str = "Flash\nEnchant creature\nWhen this Aura enters, tap enchanted creature and remove it from combat.\nAs long as enchanted creature isn't legendary, it doesn't untap during its controller's untap step.";
+const VENARIAN_GOLD: &str = "Enchant creature\nWhen this Aura enters, tap enchanted creature and put X sleep counters on it.\nEnchanted creature doesn't untap during its controller's untap step if it has a sleep counter on it.\nAt the beginning of the upkeep of enchanted creature's controller, remove a sleep counter from that creature.";
+const INFINITE_COURSEWORK: &str = "Enchant creature\nWhen this Aura enters, tap enchanted creature. It becomes unprepared.\nEnchanted creature loses all abilities and doesn't untap during its controller's untap step.";
+const KITNAP: &str = "Gift a card (You may promise an opponent a gift as you cast this spell. If you do, when it enters, they draw a card.)\nEnchant creature\nWhen this Aura enters, tap enchanted creature. If the gift wasn't promised, put three stun counters on it.\nYou control enchanted creature.";
+const WELLSPRING: &str = "Enchant land\nWhen this Aura enters, gain control of enchanted land until end of turn.\nAt the beginning of your upkeep, untap enchanted land. You gain control of that land until end of turn.";
+const AIRTIGHT_ALIBI: &str = "Flash\nEnchant creature\nWhen this Aura enters, untap enchanted creature. It gains hexproof until end of turn. If it's suspected, it's no longer suspected.\nEnchanted creature gets +2/+2 and can't become suspected.";
+const COCOON: &str = "Enchant creature you control\nWhen this Aura enters, tap enchanted creature and put three pupa counters on this Aura.\nEnchanted creature doesn't untap during your untap step if this Aura has a pupa counter on it.\nAt the beginning of your upkeep, remove a pupa counter from this Aura. If you can't, sacrifice it, put a +1/+1 counter on enchanted creature, and that creature gains flying.";
+const DISAPPEAR: &str =
+    "Enchant creature\n{U}: Return enchanted creature and this Aura to their owners' hands.";
+const HOLD_FOR_QUESTIONING: &str = "Enchant creature or planeswalker\nWhen this Aura enters, tap enchanted permanent and investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")\nEnchanted permanent doesn't untap during its controller's untap step and its activated abilities can't be activated.";
+const MESMERIZING_DOSE: &str = "Enchant creature\nWhen this Aura enters, tap enchanted creature, then proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)\nEnchanted creature doesn't untap during its controller's untap step.";
+const SLEEP_WITH_THE_FISHES: &str = "Enchant creature\nWhen this Aura enters, tap enchanted creature and you create a 1/1 blue Fish creature token with \"This token can't be blocked.\"\nEnchanted creature doesn't untap during its controller's untap step.";
+const SO_SHINY: &str = "Enchant creature\nWhen this Aura enters, if you control a token, tap enchanted creature, then scry 2.\nEnchanted creature doesn't untap during its controller's untap step.";
+const MECHANIZED_PRODUCTION: &str = "Enchant artifact you control\nAt the beginning of your upkeep, create a token that's a copy of enchanted artifact. Then if you control eight or more artifacts with the same name as one another, you win the game.";
+const MARK_OF_EVICTION: &str = "Enchant creature\nAt the beginning of your upkeep, return enchanted creature and all Auras attached to that creature to their owners' hands.";
+const TAMIYOS_COMPLEATION: &str = "Flash\nEnchant artifact, creature, or planeswalker\nWhen this Aura enters, tap enchanted permanent. If it's an Equipment, unattach it.\nEnchanted permanent loses all abilities and doesn't untap during its controller's untap step.";
+const SNAKESKIN_VEIL: &str = "Put a +1/+1 counter on target creature you control. It gains hexproof until end of turn. (It can't be the target of spells or abilities your opponents control.)";
+const SLIP_OUT_THE_BACK: &str = "Put a +1/+1 counter on target creature. It phases out. (Treat it and anything attached to it as though they don't exist until its controller's next turn.)";
+const LIGHTNING_GREAVES: &str = "Equipped creature has haste and shroud. (It can't be the target of spells or abilities.)\nEquip {0}";
 
 fn free_cost() -> ManaCost {
     ManaCost::Cost {
@@ -1850,12 +1872,15 @@ fn host_reference_timings(runner: &GameRunner, source: ObjectId) -> Vec<TargetCh
     timings
 }
 
-/// SHAPE (scope): only a host instruction that is the whole ability stops
-/// targeting its host. A chain where other instructions precede or follow it,
-/// and a donor shape, keep base's stack-time target; an instruction that was
-/// already untargeted at base keeps that.
+/// SHAPE (scope): a host instruction stops targeting its host when it is the
+/// whole ability, or when every instruction after it acts on that host or its
+/// controller through "it" / "that permanent" / "that land's controller"
+/// (CR 115.10a + CR 608.2c). A chain with an instruction that acts on its own
+/// subject, reads the host some other way (as a damage source or a count), or
+/// is a choice or a gap, and a donor shape, keep base's stack-time target; an
+/// instruction that was already untargeted at base keeps that.
 #[test]
-fn only_a_lone_host_instruction_stops_targeting() {
+fn host_instructions_with_parent_anaphor_followers_stop_targeting() {
     let lone = [
         ("Malfunction", MALFUNCTION, SourceKind::Aura),
         ("Claustrophobia", CLAUSTROPHOBIA, SourceKind::Aura),
@@ -1872,16 +1897,55 @@ fn only_a_lone_host_instruction_stops_targeting() {
             SourceKind::Equipment,
         ),
     ];
+    let followed_by_host_anaphors = [
+        ("Orcish Mine", ORCISH_MINE, SourceKind::Aura),
+        ("Assault Suit", ASSAULT_SUIT, SourceKind::Equipment),
+        (
+            "Enchanted River's Grasp",
+            ENCHANTED_RIVERS_GRASP,
+            SourceKind::Aura,
+        ),
+        ("Honest Work", HONEST_WORK, SourceKind::Aura),
+        ("Stunning Strike", STUNNING_STRIKE, SourceKind::Aura),
+        ("Venarian Gold", VENARIAN_GOLD, SourceKind::Aura),
+        ("Infinite Coursework", INFINITE_COURSEWORK, SourceKind::Aura),
+        ("Kitnap", KITNAP, SourceKind::Aura),
+        ("Wellspring", WELLSPRING, SourceKind::Aura),
+        ("Frenzied Fugue", FRENZIED_FUGUE, SourceKind::Aura),
+        ("Airtight Alibi", AIRTIGHT_ALIBI, SourceKind::Aura),
+    ];
     let kept = [
         ("Bind the Monster", BIND_THE_MONSTER, SourceKind::Aura),
-        ("Frenzied Fugue", FRENZIED_FUGUE, SourceKind::Aura),
-        ("Marooned", MAROONED, SourceKind::Aura),
         ("Observed Stasis", OBSERVED_STASIS, SourceKind::Aura),
-        ("Captivating Glance", CAPTIVATING_GLANCE, SourceKind::Aura),
+        ("Disappear", DISAPPEAR, SourceKind::Aura),
         ("Fall from Favor", FALL_FROM_FAVOR, SourceKind::Aura),
-        ("Assault Suit", ASSAULT_SUIT, SourceKind::Equipment),
-        ("Sword of the Paruns", SWORD_OF_THE_PARUNS, SourceKind::Equipment),
+        (
+            "Hold for Questioning",
+            HOLD_FOR_QUESTIONING,
+            SourceKind::Aura,
+        ),
+        ("Mesmerizing Dose", MESMERIZING_DOSE, SourceKind::Aura),
+        (
+            "Sleep with the Fishes",
+            SLEEP_WITH_THE_FISHES,
+            SourceKind::Aura,
+        ),
+        ("So Shiny", SO_SHINY, SourceKind::Aura),
+        (
+            "Mechanized Production",
+            MECHANIZED_PRODUCTION,
+            SourceKind::Aura,
+        ),
         ("Helm of the Host", HELM_OF_THE_HOST, SourceKind::Equipment),
+        ("Mark of Eviction", MARK_OF_EVICTION, SourceKind::Aura),
+        (
+            "Tamiyo's Compleation",
+            TAMIYOS_COMPLEATION,
+            SourceKind::Aura,
+        ),
+        ("Sword of the Paruns", SWORD_OF_THE_PARUNS, SourceKind::Equipment),
+        ("Marooned", MAROONED, SourceKind::Aura),
+        ("Captivating Glance", CAPTIVATING_GLANCE, SourceKind::Aura),
         (
             "Copy Rig",
             "{1}: This Equipment becomes a copy of equipped creature until end of turn.\nEquip {1}",
@@ -1898,8 +1962,15 @@ fn only_a_lone_host_instruction_stops_targeting() {
         EPHARAS_ENLIGHTENMENT,
         SourceKind::Aura,
     )];
+    // Cocoon's enters trigger ("tap enchanted creature and put three pupa
+    // counters on this Aura") keeps its target: the follower acts on the Aura.
+    // Its upkeep "put a +1/+1 counter on enchanted creature" was already
+    // untargeted at base.
+    let mixed = [("Cocoon", COCOON, SourceKind::Aura)];
     let mut sc = GameScenario::new();
     let lone = add_sources(&mut sc, &lone);
+    let followed_by_host_anaphors = add_sources(&mut sc, &followed_by_host_anaphors);
+    let mixed = add_sources(&mut sc, &mixed);
     let kept = add_sources(&mut sc, &kept);
     let base_untargeted = add_sources(&mut sc, &base_untargeted);
     let runner = sc.build();
@@ -1914,8 +1985,18 @@ fn only_a_lone_host_instruction_stops_targeting() {
         }
     };
     expect(&lone, TargetChoiceTiming::Resolution);
+    expect(&followed_by_host_anaphors, TargetChoiceTiming::Resolution);
     expect(&kept, TargetChoiceTiming::Stack);
     expect(&base_untargeted, TargetChoiceTiming::Resolution);
+    for (name, id) in &mixed {
+        let mut timings = host_reference_timings(&runner, *id);
+        timings.sort_by_key(|t| matches!(t, TargetChoiceTiming::Resolution));
+        assert_eq!(
+            timings,
+            vec![TargetChoiceTiming::Stack, TargetChoiceTiming::Resolution],
+            "{name}: the enters trigger keeps its target"
+        );
+    }
 }
 
 /// The target-choice timing of every node in `value` (parsed abilities as JSON)
@@ -1963,12 +2044,7 @@ fn wellspring_gains_control_of_its_land() {
     let mut sc = GameScenario::new();
     sc.at_phase(Phase::PreCombatMain);
     let land = sc.add_basic_land(P1, engine::types::mana::ManaColor::Green);
-    let aura = aura_in_hand(
-        &mut sc,
-        P0,
-        "Wellspring",
-        "Enchant land\nWhen this Aura enters, gain control of enchanted land until end of turn.\nAt the beginning of your upkeep, untap enchanted land. You gain control of that land until end of turn.",
-    );
+    let aura = aura_in_hand(&mut sc, P0, "Wellspring", WELLSPRING);
     let mut runner = sc.build();
     runner.cast(aura).target_object(land).commit();
     runner.act(GameAction::PassPriority).expect("pass");
@@ -2364,4 +2440,340 @@ fn base_untargeted_counter_then_treasure_with_its_host_blinked_counters_nothing(
     );
     assert_eq!(outcome.counters, 0, "the returned creature gets no counter");
     assert_eq!(outcome.treasures, 1, "the Treasure is created, as at base");
+}
+
+// --- Host instructions followed by host anaphors (CR 115.10a + CR 608.2c) ---
+
+/// Whether `source` has a triggered ability on the stack.
+fn trigger_on_stack(state: &GameState, source: ObjectId) -> bool {
+    state.stack.iter().any(|e| {
+        matches!(&e.kind, StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == source)
+    })
+}
+
+/// What a no-choice drive saw while it ran.
+#[derive(Debug, Default)]
+struct Watched {
+    /// "You may" prompts offered (and answered as the drive was told).
+    optional_prompts: usize,
+    /// Whether a triggered ability of the watched source was ever on the stack.
+    trigger_seen: bool,
+}
+
+/// Answer prompts the way a player with no further choices would — pass
+/// priority, identity trigger order, no attackers, no blockers — until `done`,
+/// answering "you may" with `accept`. CR 115.10a: nothing on these boards
+/// asks for a target after the casts, so a target prompt is a failure.
+fn drive_until(
+    runner: &mut GameRunner,
+    watch: ObjectId,
+    accept: bool,
+    done: impl Fn(&GameRunner) -> bool,
+) -> Watched {
+    let mut watched = Watched::default();
+    for _ in 0..600 {
+        watched.trigger_seen |= trigger_on_stack(runner.state(), watch);
+        if done(runner) {
+            return watched;
+        }
+        let action = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::OptionalEffectChoice { .. } => {
+                watched.optional_prompts += 1;
+                GameAction::DecideOptionalEffect { accept }
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
+                order: (0..triggers.len()).collect(),
+            },
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            other => panic!("unexpected prompt: {other:?}"),
+        };
+        runner.act(action).expect("the no-choice answer is legal");
+    }
+    panic!(
+        "never reached the awaited state; turn {} phase {:?} waiting {:?}",
+        runner.state().turn_number,
+        runner.state().phase,
+        runner.state().waiting_for
+    );
+}
+
+fn stack_settled(runner: &GameRunner) -> bool {
+    runner.state().stack.is_empty()
+        && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+}
+
+/// Cast the Aura `aura` at `host` and resolve only the Aura spell, leaving its
+/// enters trigger waiting on the stack; then P0 passes so P1 may respond.
+fn aura_etb_awaiting_response(runner: &mut GameRunner, aura: ObjectId, host: ObjectId, x: u32) {
+    let cast = runner.cast(aura).target_object(host);
+    let cast = if x > 0 { cast.x(x) } else { cast };
+    let _ = cast.commit();
+    for _ in 0..8 {
+        if trigger_on_stack(runner.state(), aura) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass");
+    }
+    assert!(
+        trigger_on_stack(runner.state(), aura),
+        "reach: the enters trigger is on the stack"
+    );
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(host)),
+        "reach: the Aura is attached to the host"
+    );
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1),
+        "reach: P1 holds priority with the enters trigger on the stack"
+    );
+}
+
+/// Cast P1's instant `spell` at `target` and resolve it alone (the enters
+/// trigger below it stays on the stack).
+fn p1_responds(runner: &mut GameRunner, spell: ObjectId, target: ObjectId) {
+    let _ = runner.cast(spell).target_object(target).commit();
+    for _ in 0..8 {
+        if runner.state().objects[&spell].zone != Zone::Stack {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass");
+    }
+    assert_ne!(
+        runner.state().objects[&spell].zone,
+        Zone::Stack,
+        "reach: the response resolved"
+    );
+}
+
+fn counter_count(state: &GameState, id: ObjectId, kind: &CounterType) -> u32 {
+    state.objects[&id].counters.get(kind).copied().unwrap_or(0)
+}
+
+/// CR 702.26b + CR 608.2h: Venarian Gold's enters trigger waits on the stack and
+/// P1 phases the enchanted creature out with Slip Out the Back (the Aura phases
+/// out with it, indirectly). A phased-out creature is treated as though it
+/// doesn't exist, so "tap enchanted creature" does nothing, and neither does
+/// "put X sleep counters on it": the counters go nowhere — not on the Aura, not
+/// on the creature once it phases back in.
+#[test]
+fn venarian_gold_with_its_host_phased_out_puts_sleep_counters_on_nothing() {
+    let sleep = engine::types::counter::parse_counter_type("sleep");
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    sc.with_library_top(P0, &["Card A", "Card B", "Card C"]);
+    sc.with_library_top(P1, &["Card D", "Card E", "Card F"]);
+    let host = sc.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let gold = sc
+        .add_spell_to_hand(P0, "Venarian Gold", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![
+                engine::types::mana::ManaCostShard::X,
+                engine::types::mana::ManaCostShard::Blue,
+                engine::types::mana::ManaCostShard::Blue,
+            ],
+            generic: 0,
+        })
+        .from_oracle_text_with_keywords(&["enchant"], VENARIAN_GOLD)
+        .id();
+    let slip = sc
+        .add_spell_to_hand_from_oracle(P1, "Slip Out the Back", true, SLIP_OUT_THE_BACK)
+        .with_mana_cost(free_cost())
+        .id();
+    sc.with_mana_pool(P0, pool(2, 2));
+    let mut runner = sc.build();
+
+    aura_etb_awaiting_response(&mut runner, gold, host, 2);
+    p1_responds(&mut runner, slip, host);
+    let s = runner.state();
+    assert!(
+        !s.objects[&host].is_phased_in(),
+        "reach: the host phased out"
+    );
+    assert!(
+        !s.objects[&gold].is_phased_in(),
+        "reach: the Aura phased out with it (indirect phasing)"
+    );
+    assert_eq!(
+        counter_count(s, host, &CounterType::Plus1Plus1),
+        1,
+        "reach: Slip Out the Back's counter is on the host"
+    );
+
+    drive_until(&mut runner, gold, false, stack_settled);
+    let s = runner.state();
+    assert!(
+        s.objects[&gold].counters.values().all(|n| *n == 0),
+        "the Aura gets no counters: {:?}",
+        s.objects[&gold].counters
+    );
+    assert_eq!(counter_count(s, host, &sleep), 0, "no sleep counters");
+    assert_eq!(
+        counter_count(s, host, &CounterType::Plus1Plus1),
+        1,
+        "only Slip Out the Back's counter"
+    );
+
+    // CR 502.1: P1's next untap step phases the creature back in.
+    drive_until(&mut runner, gold, false, |r| {
+        r.state().active_player == P1 && r.state().phase == Phase::PreCombatMain && stack_settled(r)
+    });
+    let s = runner.state();
+    assert!(s.objects[&host].is_phased_in(), "reach: phased back in");
+    assert_eq!(counter_count(s, host, &sleep), 0, "still no sleep counters");
+}
+
+/// CR 115.10a + CR 702.11b: Honest Work's enters trigger waits on the stack and
+/// P1 gives the enchanted creature hexproof with Snakeskin Veil. The trigger
+/// never targeted it, so it still taps the creature and removes all its
+/// counters — the Veil's +1/+1 counter included.
+#[test]
+fn honest_work_taps_and_clears_a_host_given_hexproof_in_response() {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let host = sc.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let work = aura_in_hand(&mut sc, P0, "Honest Work", HONEST_WORK);
+    let veil = sc
+        .add_spell_to_hand_from_oracle(P1, "Snakeskin Veil", true, SNAKESKIN_VEIL)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = sc.build();
+
+    aura_etb_awaiting_response(&mut runner, work, host, 0);
+    p1_responds(&mut runner, veil, host);
+    let s = runner.state();
+    assert!(
+        s.objects[&host].has_keyword(&Keyword::Hexproof),
+        "reach: the Veil gave the host hexproof"
+    );
+    assert_eq!(counter_count(s, host, &CounterType::Plus1Plus1), 1);
+
+    drive_until(&mut runner, work, false, stack_settled);
+    let s = runner.state();
+    assert!(s.objects[&host].tapped, "the enchanted creature is tapped");
+    assert!(
+        s.objects[&host].counters.values().all(|n| *n == 0),
+        "all its counters are removed: {:?}",
+        s.objects[&host].counters
+    );
+}
+
+/// From P0's end step into P1's upkeep.
+fn enter_p1_upkeep(runner: &mut GameRunner) {
+    {
+        let state = runner.state_mut();
+        state.phase = Phase::End;
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+    runner.advance_to_phase(Phase::Upkeep);
+    assert_eq!(runner.state().phase, Phase::Upkeep, "reach: P1's upkeep");
+    assert_eq!(runner.state().active_player, P1, "reach: P1's turn");
+}
+
+fn equipment_on_battlefield(sc: &mut GameScenario, name: &str, text: &str) -> ObjectId {
+    sc.add_creature(P0, name, 0, 0)
+        .as_artifact()
+        .with_subtypes(vec!["Equipment"])
+        .from_oracle_text(text)
+        .id()
+}
+
+/// Equip `equipment` to `creature` through its Equip ability.
+fn equip_to(runner: &mut GameRunner, equipment: ObjectId, creature: ObjectId) {
+    let index = ability_index(runner, equipment, |e| matches!(e, Effect::Attach { .. }));
+    runner
+        .activate(equipment, index)
+        .target_object(creature)
+        .resolve();
+    assert_eq!(
+        runner.state().objects[&equipment].attached_to,
+        Some(AttachTarget::Object(creature)),
+        "reach: equipped"
+    );
+}
+
+/// CR 115.10a + CR 702.18a + CR 603.5: P0's tapped creature wears Assault Suit
+/// and then Lightning Greaves (each Equip targeted it before it had shroud,
+/// CR 702.6a). At P1's upkeep the Suit's "you may" is offered, and accepting
+/// gives P1 the shrouded creature and untaps it; control returns at end of
+/// turn.
+#[test]
+fn assault_suit_hands_over_its_shrouded_creature() {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    sc.with_library_top(P0, &["Card A", "Card B", "Card C"]);
+    sc.with_library_top(P1, &["Card D", "Card E", "Card F"]);
+    let creature = sc.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let suit = equipment_on_battlefield(&mut sc, "Assault Suit", ASSAULT_SUIT);
+    let greaves = equipment_on_battlefield(&mut sc, "Lightning Greaves", LIGHTNING_GREAVES);
+    sc.with_mana_pool(P0, pool(0, 3));
+    let mut runner = sc.build();
+    equip_to(&mut runner, suit, creature);
+    equip_to(&mut runner, greaves, creature);
+    set_tapped(&mut runner, creature, true);
+    assert!(
+        runner.state().objects[&creature].has_keyword(&Keyword::Shroud),
+        "reach: the creature has shroud"
+    );
+
+    enter_p1_upkeep(&mut runner);
+    let watched = drive_until(&mut runner, suit, true, stack_settled);
+    assert!(
+        watched.trigger_seen,
+        "reach: the Suit's trigger was on the stack"
+    );
+    assert_eq!(watched.optional_prompts, 1, "the \"you may\" is offered");
+    let s = runner.state();
+    assert_eq!(s.objects[&creature].controller, P1, "P1 gains control");
+    assert!(!s.objects[&creature].tapped, "and untaps it");
+
+    let turn = runner.state().turn_number;
+    drive_until(&mut runner, suit, true, |r| {
+        r.state().turn_number > turn && stack_settled(r)
+    });
+    assert_eq!(
+        runner.state().objects[&creature].controller,
+        P0,
+        "control returns at end of turn"
+    );
+}
+
+/// CR 608.2d + CR 603.5: an unattached Assault Suit's trigger still goes on the
+/// stack (P1's upkeep), but with no equipped creature its "you may" is an
+/// impossible option, so it is not offered, and its "If you do, untap it" never
+/// runs — the tapped Suit stays tapped and nothing changes control.
+#[test]
+fn unattached_assault_suit_offers_no_impossible_choice() {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    sc.with_library_top(P0, &["Card A", "Card B", "Card C"]);
+    sc.with_library_top(P1, &["Card D", "Card E", "Card F"]);
+    let creature = sc.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let suit = equipment_on_battlefield(&mut sc, "Assault Suit", ASSAULT_SUIT);
+    let mut runner = sc.build();
+    set_tapped(&mut runner, suit, true);
+
+    enter_p1_upkeep(&mut runner);
+    let watched = drive_until(&mut runner, suit, true, stack_settled);
+    assert!(
+        watched.trigger_seen,
+        "reach: the Suit's trigger was on the stack"
+    );
+    assert_eq!(watched.optional_prompts, 0, "no impossible \"you may\"");
+    let s = runner.state();
+    assert!(s.objects[&suit].tapped, "the Suit stays tapped");
+    assert_eq!(s.objects[&suit].controller, P0);
+    assert_eq!(s.objects[&creature].controller, P0, "no control change");
 }

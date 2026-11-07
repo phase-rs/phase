@@ -8,13 +8,13 @@
 use engine::ai_support::legal_actions;
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::{parse_counter_type, CounterType};
 use engine::types::game_state::{CastPaymentMode, GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaColor, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -24,6 +24,14 @@ const RIFTMARKED_KNIGHT: &str = "Protection from black; flanking (Whenever a cre
 
 const VAMPIRE_HEXMAGE: &str =
     "First strike\nSacrifice this creature: Remove all counters from target permanent.";
+
+const LOTUS_FIELD: &str = "Hexproof\nThis land enters tapped.\nWhen this land enters, sacrifice two lands.\n{T}: Add three mana of any one color.";
+
+const DISENCHANT: &str = "Destroy target artifact or enchantment.";
+
+const STRIP_MINE: &str = "{T}: Add {C}.\n{T}, Sacrifice this land: Destroy target land.";
+
+const GHOSTLY_FLICKER: &str = "Exile two target artifacts, creatures, and/or lands you control, then return those cards to the battlefield under your control.";
 
 fn counters(state: &GameState, id: ObjectId, kind: &CounterType) -> u32 {
     state.objects[&id].counters.get(kind).copied().unwrap_or(0)
@@ -47,9 +55,8 @@ fn attach(runner: &mut GameRunner, attachment: ObjectId, host: ObjectId) {
     runner.state_mut().layers_dirty.mark_full();
 }
 
-/// From P1's end step into P0's upkeep, then resolve everything that
-/// triggered there, choosing the first legal target for any target prompt.
-fn run_p0_upkeep(runner: &mut GameRunner) {
+/// From P1's end step into P0's upkeep.
+fn enter_p0_upkeep(runner: &mut GameRunner) {
     {
         let state = runner.state_mut();
         state.phase = Phase::End;
@@ -60,16 +67,17 @@ fn run_p0_upkeep(runner: &mut GameRunner) {
     runner.advance_to_phase(Phase::Upkeep);
     assert_eq!(runner.state().phase, Phase::Upkeep, "reach: P0's upkeep");
     assert_eq!(runner.state().active_player, P0, "reach: P0's turn");
+}
+
+/// Resolve the whole stack. CR 115.10a: nothing on these boards asks for a
+/// target once the stack is resolving — Orcish Mine's "enchanted land" is
+/// affected, not targeted — so any target prompt is a failure.
+fn settle(runner: &mut GameRunner) {
     for _ in 0..64 {
         match &runner.state().waiting_for {
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
             WaitingFor::Priority { .. } => {
                 runner.act(GameAction::PassPriority).expect("pass priority");
-            }
-            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
-                runner
-                    .choose_first_legal_target()
-                    .expect("choose the only legal target");
             }
             WaitingFor::OrderTriggers { triggers, .. } => {
                 let order = (0..triggers.len()).collect();
@@ -80,7 +88,58 @@ fn run_p0_upkeep(runner: &mut GameRunner) {
             other => panic!("unexpected prompt: {other:?}"),
         }
     }
-    panic!("the upkeep stack did not resolve");
+    panic!("the stack did not resolve");
+}
+
+/// From P1's end step into P0's upkeep, then resolve everything that
+/// triggered there.
+fn run_p0_upkeep(runner: &mut GameRunner) {
+    enter_p0_upkeep(runner);
+    settle(runner);
+}
+
+/// From P1's end step into P0's upkeep, then pass priority until Orcish
+/// Mine's last-counter trigger waits on the stack (its upkeep removal took the
+/// last ore counter) with P0 holding priority.
+fn mine_last_counter_trigger_on_stack(runner: &mut GameRunner, mine: ObjectId) {
+    let ore = parse_counter_type("ore");
+    enter_p0_upkeep(runner);
+    for _ in 0..64 {
+        let state = runner.state();
+        if counters(state, mine, &ore) == 0
+            && stack_triggers_from(state, mine) == 1
+            && matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+        {
+            return;
+        }
+        assert!(
+            !(state.stack.is_empty() && counters(state, mine, &ore) == 0),
+            "the last-counter trigger never reached the stack"
+        );
+        match &state.waiting_for {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    panic!("the last-counter trigger did not reach the stack");
+}
+
+/// P0 passes with Orcish Mine's last-counter trigger on the stack, so P1 may
+/// respond.
+fn p1_gets_priority(runner: &mut GameRunner) {
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1),
+        "reach: P1 holds priority with the trigger on the stack"
+    );
 }
 
 /// CR 122.1: Orcish Mine's last-counter trigger waits for the removal that
@@ -135,8 +194,219 @@ fn orcish_mine_destroys_land_and_damages_controller_on_last_ore_counter() {
     assert_eq!(runner.state().objects[&mine].zone, Zone::Graveyard);
 }
 
-/// Answer only trigger-placement prompts (identity order, first legal target);
-/// never pass priority.
+fn free_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![],
+        generic: 0,
+    }
+}
+
+/// Orcish Mine with one ore counter left, attached to `land`, so P0's next
+/// upkeep removal takes the last one.
+fn mine_on(sc: &mut GameScenario) -> ObjectId {
+    let mine = sc
+        .add_creature(P0, "Orcish Mine", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text_with_keywords(&["enchant"], ORCISH_MINE)
+        .id();
+    // The enters-with-three-counters replacement is not under test.
+    sc.with_counter(mine, parse_counter_type("ore"), 1);
+    sc.with_library_top(P0, &["Card A", "Card B", "Card C"]);
+    sc.with_library_top(P1, &["Card D", "Card E", "Card F"]);
+    mine
+}
+
+/// CR 115.10a + CR 303.4f: Orcish Mine put onto an opponent's hexproof Lotus
+/// Field (an Aura put onto the battlefield other than by resolving targets
+/// nothing). "Destroy enchanted land" names the land without targeting it, so
+/// hexproof (CR 702.11b) can't stop the trigger: no target prompt, the land is
+/// destroyed, and its controller is dealt 2 damage.
+#[test]
+fn orcish_mine_destroys_an_opponents_hexproof_land_without_targeting_it() {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let land = sc.add_land_from_oracle(P1, "Lotus Field", LOTUS_FIELD).id();
+    let mine = mine_on(&mut sc);
+    let mut runner = sc.build();
+    attach(&mut runner, mine, land);
+    assert!(
+        runner.state().objects[&land].has_keyword(&Keyword::Hexproof),
+        "reach: Lotus Field has hexproof"
+    );
+
+    // Reach: the upkeep removal took the last ore counter and the Mine's
+    // trigger went on the stack without asking for a target.
+    mine_last_counter_trigger_on_stack(&mut runner, mine);
+    settle(&mut runner);
+    assert_eq!(
+        runner.state().objects[&land].zone,
+        Zone::Graveyard,
+        "the hexproof enchanted land is destroyed"
+    );
+    assert_eq!(life(runner.state(), P1), 18, "2 damage to its controller");
+    assert_eq!(life(runner.state(), P0), 20);
+}
+
+/// CR 608.2h: Orcish Mine is disenchanted with its trigger on the stack. Its
+/// own last known information says which land it enchanted, and that land
+/// hasn't moved, so the land is still destroyed and its controller damaged.
+#[test]
+fn orcish_mine_disenchanted_in_response_still_destroys_its_land() {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let land = sc.add_basic_land(P1, ManaColor::Red);
+    let mine = mine_on(&mut sc);
+    let disenchant = sc
+        .add_spell_to_hand_from_oracle(P1, "Disenchant", true, DISENCHANT)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = sc.build();
+    attach(&mut runner, mine, land);
+
+    mine_last_counter_trigger_on_stack(&mut runner, mine);
+    p1_gets_priority(&mut runner);
+    let _ = runner.cast(disenchant).target_object(mine).commit();
+    settle(&mut runner);
+    assert_eq!(
+        runner.state().objects[&mine].zone,
+        Zone::Graveyard,
+        "reach: Disenchant destroyed the Mine"
+    );
+    assert_eq!(
+        runner.state().objects[&land].zone,
+        Zone::Graveyard,
+        "the land it last enchanted is destroyed"
+    );
+    assert_eq!(life(runner.state(), P1), 18);
+}
+
+/// Who controls the enchanted land when Strip Mine destroys it.
+#[derive(Clone, Copy)]
+enum LandController {
+    Owner,
+    /// P1 owns the land and P0 controls it.
+    Opponent,
+}
+
+/// CR 608.2h + CR 704.5m: with the trigger on the stack, P1 sacrifices Strip
+/// Mine to destroy the enchanted land; the unattached Mine then goes to the
+/// graveyard. "Destroy enchanted land" does nothing (the land is gone), but
+/// "that land's controller" is read from the land's last known information.
+/// Returns (P0 life, P1 life).
+fn orcish_mine_land_strip_mined(controller: LandController) -> (i32, i32) {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let land = sc.add_basic_land(P1, ManaColor::Red);
+    let bystander = sc.add_basic_land(P0, ManaColor::Green);
+    let strip = sc.add_land_from_oracle(P1, "Strip Mine", STRIP_MINE).id();
+    let mine = mine_on(&mut sc);
+    let mut runner = sc.build();
+    if let LandController::Opponent = controller {
+        let object = runner.state_mut().objects.get_mut(&land).unwrap();
+        object.base_controller = Some(P0);
+        object.controller = P0;
+        runner.state_mut().layers_dirty.mark_full();
+    }
+    attach(&mut runner, mine, land);
+    let destroy = runner.state().objects[&strip]
+        .abilities
+        .iter()
+        .position(|a| matches!(*a.effect, Effect::Destroy { .. }))
+        .expect("Strip Mine's destroy ability");
+
+    mine_last_counter_trigger_on_stack(&mut runner, mine);
+    p1_gets_priority(&mut runner);
+    runner
+        .activate(strip, destroy)
+        .target_object(land)
+        .resolve();
+    settle(&mut runner);
+    let s = runner.state();
+    assert_eq!(s.objects[&land].zone, Zone::Graveyard, "reach: land gone");
+    assert_eq!(s.objects[&mine].zone, Zone::Graveyard, "reach: CR 704.5m");
+    assert!(
+        s.zone_changes_this_turn
+            .iter()
+            .any(|r| r.object_id == mine && r.attached_to.is_none()),
+        "reach: the Mine left attached to nothing"
+    );
+    assert!(
+        s.zone_changes_this_turn
+            .iter()
+            .any(|r| r.object_id == land && r.attachments.iter().any(|a| a.object_id == mine)),
+        "reach: the land's departure lists the Mine"
+    );
+    assert_eq!(
+        s.objects[&bystander].zone,
+        Zone::Battlefield,
+        "no other land is destroyed"
+    );
+    (life(s, P0), life(s, P1))
+}
+
+#[test]
+fn orcish_mine_land_strip_mined_in_response_damages_its_last_controller() {
+    assert_eq!(
+        orcish_mine_land_strip_mined(LandController::Owner),
+        (20, 18)
+    );
+}
+
+/// CR 608.2h: the damage follows the land's controller as it last existed on
+/// the battlefield (P0), not its owner.
+#[test]
+fn orcish_mine_stolen_land_strip_mined_damages_the_controller_not_the_owner() {
+    assert_eq!(
+        orcish_mine_land_strip_mined(LandController::Opponent),
+        (18, 20)
+    );
+}
+
+/// CR 400.7 + CR 608.2h: P1 flickers the enchanted land in response. The land
+/// that returns is a new object the Mine never enchanted, so it is not
+/// destroyed; the damage goes to the controller of the land the Mine last
+/// enchanted.
+#[test]
+fn orcish_mine_land_flickered_in_response_destroys_nothing() {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let land = sc.add_basic_land(P1, ManaColor::Red);
+    let second = sc.add_basic_land(P1, ManaColor::Green);
+    let mine = mine_on(&mut sc);
+    let flicker = sc
+        .add_spell_to_hand_from_oracle(P1, "Ghostly Flicker", true, GHOSTLY_FLICKER)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = sc.build();
+    attach(&mut runner, mine, land);
+    let incarnation = runner.state().objects[&land].incarnation;
+
+    mine_last_counter_trigger_on_stack(&mut runner, mine);
+    p1_gets_priority(&mut runner);
+    let _ = runner
+        .cast(flicker)
+        .target_objects(&[land, second])
+        .commit();
+    settle(&mut runner);
+    let s = runner.state();
+    assert_ne!(
+        s.objects[&land].incarnation, incarnation,
+        "reach: the land returned as a new object"
+    );
+    assert_eq!(s.objects[&mine].zone, Zone::Graveyard, "reach: CR 704.5m");
+    assert_eq!(
+        s.objects[&land].zone,
+        Zone::Battlefield,
+        "the returned land is not the enchanted land"
+    );
+    assert_eq!(life(s, P1), 18, "2 damage to the last controller");
+    assert_eq!(life(s, P0), 20);
+}
+
+/// Answer only trigger-ordering prompts (identity order); never pass priority.
+/// CR 115.10a: Orcish Mine's trigger targets nothing, so it asks for no target
+/// as it is put on the stack.
 fn place_pending_triggers(runner: &mut GameRunner) {
     for _ in 0..16 {
         match runner.state().waiting_for.clone() {
@@ -146,11 +416,6 @@ fn place_pending_triggers(runner: &mut GameRunner) {
                         order: (0..triggers.len()).collect(),
                     })
                     .expect("order triggers");
-            }
-            WaitingFor::TriggerTargetSelection { .. } => {
-                runner
-                    .choose_first_legal_target()
-                    .expect("choose the first legal trigger target");
             }
             _ => return,
         }
@@ -231,7 +496,7 @@ fn last_counter_trigger_fires_once_when_several_counters_leave_at_once() {
             WaitingFor::Priority { .. } => {
                 runner.act(GameAction::PassPriority).expect("pass priority");
             }
-            WaitingFor::OrderTriggers { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+            WaitingFor::OrderTriggers { .. } => {
                 place_pending_triggers(&mut runner);
             }
             other => panic!("unexpected prompt: {other:?}"),
@@ -260,7 +525,7 @@ fn last_counter_trigger_fires_once_when_several_counters_leave_at_once() {
             WaitingFor::Priority { .. } => {
                 runner.act(GameAction::PassPriority).expect("pass priority");
             }
-            WaitingFor::OrderTriggers { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+            WaitingFor::OrderTriggers { .. } => {
                 place_pending_triggers(&mut runner);
             }
             other => panic!("unexpected prompt: {other:?}"),

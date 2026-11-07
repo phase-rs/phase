@@ -2088,60 +2088,133 @@ fn captured_source_ref(
     }
 }
 
-/// CR 303.4b + CR 303.4m + CR 301.5a + CR 301.5f + CR 400.7: the single
-/// authority for which object the source's "enchanted/equipped X" names. The
-/// host is admitted only when it is provably the very object the source is, or
-/// was, attached to; anything else is `None` and the instruction does nothing
-/// (fail closed; exact departed-host provenance is follow-up work).
+/// What the source's attachment relationship provably says about the object
+/// its "enchanted/equipped X" names ([`source_attachment_host_provenance`]).
+pub(crate) enum HostProvenance {
+    /// The host, live on the battlefield as the very object the source is, or
+    /// was as it left, attached to.
+    Live(ObjectIncarnationRef),
+    /// CR 608.2h: the source has left the battlefield, and so has the host it
+    /// was last attached to; `record` indexes that host's departure in
+    /// `zone_changes_this_turn`, its last known information.
+    Departed { host: ObjectId, record: usize },
+    /// No provable host.
+    Unknown,
+}
+
+impl HostProvenance {
+    fn live(self) -> Option<ObjectIncarnationRef> {
+        match self {
+            HostProvenance::Live(host) => Some(host),
+            HostProvenance::Departed { .. } | HostProvenance::Unknown => None,
+        }
+    }
+}
+
+/// CR 303.4b + CR 303.4m + CR 301.5a + CR 301.5f + CR 400.7 + CR 608.2h: the
+/// single authority for which object the source's "enchanted/equipped X"
+/// names. The host is admitted only when it is provably the very object the
+/// source is, or was, attached to; anything else is `Unknown` and the
+/// instruction does nothing (fail closed).
 ///
 /// - The captured source incarnation is on the battlefield: the battlefield
 ///   object its own live attachment edge points at. Either end leaving the
 ///   battlefield severs that edge (`zones::sever_battlefield_attachment_graph_on_exit`),
 ///   so an edge that still names a battlefield object was made to that object,
 ///   never to an earlier incarnation under the same storage id; transforming
-///   or turning either object face up or down leaves it untouched.
+///   or turning either object face up or down leaves it untouched. A live
+///   source attached to nothing names nothing: CR 608.2h, its current
+///   information governs.
 /// - The captured source incarnation has left the battlefield: CR 608.2h, the
 ///   source's own information is its last known information, so its exact
-///   departure record says what it was attached to. An explicit "attached to
-///   nothing" there wins. The named host is admitted, as a live object, only
+///   departure record says what it was attached to. The named host is `Live`
 ///   while it has had no zone change since that departure — then its current
-///   incarnation is the one the source was attached to. No information about
-///   the host itself is ever read from last known information.
+///   incarnation is the one the source was attached to. When the host left
+///   later, its first departure after the source's is the host's last known
+///   information (`Departed`). When the source left attached to nothing
+///   because the host left first (CR 704.5m), the host is the latest
+///   battlefield departure whose attachment snapshot lists this exact source
+///   incarnation (CR 400.7: a record without an incarnation never matches).
+///   An explicit attachment to a player names no object.
+pub(crate) fn source_attachment_host_provenance(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> HostProvenance {
+    let Some(source) = captured_source_ref(state, ability) else {
+        return HostProvenance::Unknown;
+    };
+    let live_source = state.objects.get(&source.object_id).filter(|object| {
+        object.zone == Zone::Battlefield && ObjectIncarnationRef::from_object(object) == source
+    });
+    if let Some(object) = live_source {
+        return object
+            .attached_to
+            .and_then(|target| target.as_object())
+            .and_then(|host| live_battlefield_object(state, host))
+            .map_or(HostProvenance::Unknown, HostProvenance::Live);
+    }
+    let records = &state.zone_changes_this_turn;
+    let Some(departure) = records.iter().rposition(|record| {
+        record.object_id == source.object_id
+            && record.from_zone == Some(Zone::Battlefield)
+            && record
+                .trigger_source_context()
+                .is_some_and(|context| context.identity.reference == source)
+    }) else {
+        return HostProvenance::Unknown;
+    };
+    if let Some(attached) = records[departure].attached_to {
+        let Some(host) = attached.as_object() else {
+            return HostProvenance::Unknown;
+        };
+        match records
+            .iter()
+            .enumerate()
+            .skip(departure + 1)
+            .find(|(_, record)| record.object_id == host)
+        {
+            None => {
+                if let Some(live) = live_battlefield_object(state, host) {
+                    return HostProvenance::Live(live);
+                }
+            }
+            Some((record, change)) if change.from_zone == Some(Zone::Battlefield) => {
+                return HostProvenance::Departed { host, record };
+            }
+            Some(_) => return HostProvenance::Unknown,
+        }
+    }
+    // The host left first (or in the same event) with the source still
+    // attached: its departure snapshot lists the exact source incarnation.
+    records
+        .iter()
+        .rposition(|record| {
+            record.from_zone == Some(Zone::Battlefield)
+                && record
+                    .attachments
+                    .iter()
+                    .any(|attachment| attachment.identity == Some(source))
+        })
+        .map_or(HostProvenance::Unknown, |record| HostProvenance::Departed {
+            host: records[record].object_id,
+            record,
+        })
+}
+
+fn live_battlefield_object(state: &GameState, id: ObjectId) -> Option<ObjectIncarnationRef> {
+    state
+        .objects
+        .get(&id)
+        .filter(|object| object.zone == Zone::Battlefield)
+        .map(ObjectIncarnationRef::from_object)
+}
+
+/// The live host [`source_attachment_host_provenance`] proves, if any.
 pub(crate) fn source_attachment_host(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Option<ObjectIncarnationRef> {
-    let source = captured_source_ref(state, ability)?;
-    let live_source = state.objects.get(&source.object_id).filter(|object| {
-        object.zone == Zone::Battlefield && ObjectIncarnationRef::from_object(object) == source
-    });
-    let host = match live_source {
-        Some(object) => object.attached_to?.as_object()?,
-        None => {
-            let records = &state.zone_changes_this_turn;
-            let departure = records.iter().rposition(|record| {
-                record.object_id == source.object_id
-                    && record.from_zone == Some(Zone::Battlefield)
-                    && record
-                        .trigger_source_context()
-                        .is_some_and(|context| context.identity.reference == source)
-            })?;
-            let host = records[departure].attached_to?.as_object()?;
-            if records
-                .iter()
-                .skip(departure + 1)
-                .any(|record| record.object_id == host)
-            {
-                return None;
-            }
-            host
-        }
-    };
-    state
-        .objects
-        .get(&host)
-        .filter(|object| object.zone == Zone::Battlefield)
-        .map(ObjectIncarnationRef::from_object)
+    source_attachment_host_provenance(state, ability).live()
 }
 
 /// CR 301.5a + CR 301.5f + CR 303.4b + CR 115.10a: an untargeted "equipped
@@ -2203,12 +2276,20 @@ pub(crate) enum ResolutionHostBinding {
     /// The live host, bound (pinned to its incarnation) into the node's targets.
     Bound(Box<ResolvedAbility>),
     /// CR 115.10a + CR 303.4b + CR 301.5f + CR 400.7: the node names its
-    /// source's host, but there is no provable host — the host has left or
-    /// changed zones, the source is (or was, as it left) attached to nothing,
-    /// or the host no longer meets the description. The instruction does nothing; it must
+    /// source's host, but there is no provable live host and no last known
+    /// one — the source is attached to nothing, the host no longer meets the
+    /// description or is phased out, or nothing records what the source was
+    /// attached to. The instruction does nothing; it must
     /// never fall back to a filter scan ("any creature with an Aura attached")
     /// or to an object reusing a departed host's storage id.
     Absent,
+    /// CR 608.2h + CR 400.7: the source and the host it was last attached to
+    /// have both left the battlefield. The instruction does nothing, exactly as
+    /// `Absent`; the snapshot is the host's last known information, pinned to
+    /// the incarnation that left (so it names no current object), for the
+    /// instructions after it that read only its controller or owner ("that
+    /// land's controller").
+    Departed(Box<crate::types::ability::CostPaidObjectSnapshot>),
 }
 
 /// CR 115.10a + CR 608.2c: binds the host of a resolution-timed "enchanted /
@@ -2229,15 +2310,29 @@ pub(crate) fn bind_resolution_attachment_hosts(
     else {
         return ResolutionHostBinding::NotApplicable;
     };
-    match source_attachment_host(state, ability)
-        .filter(|host| live_host_meets_recipient(state, ability, recipient, host.object_id))
-    {
-        Some(host) => {
+    match source_attachment_host_provenance(state, ability) {
+        HostProvenance::Live(host)
+            if live_host_meets_recipient(state, ability, recipient, host.object_id) =>
+        {
             let mut bound = ability.clone();
             bound.replace_target_occurrences(vec![(TargetRef::Object(host.object_id), Some(host))]);
             ResolutionHostBinding::Bound(Box::new(bound))
         }
-        None => ResolutionHostBinding::Absent,
+        HostProvenance::Live(_) | HostProvenance::Unknown => ResolutionHostBinding::Absent,
+        HostProvenance::Departed { host, record } => {
+            let record = &state.zone_changes_this_turn[record];
+            ResolutionHostBinding::Departed(Box::new(
+                crate::types::ability::CostPaidObjectSnapshot {
+                    object_id: host,
+                    lki: crate::game::effects::lki_snapshot_from_zone_change_record(record),
+                    incarnation: record
+                        .trigger_source_context()
+                        .map_or(crate::types::identifiers::LEGACY_INCARNATION, |context| {
+                            context.identity.reference.incarnation
+                        }),
+                },
+            ))
+        }
     }
 }
 
