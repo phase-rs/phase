@@ -1854,6 +1854,15 @@ fn quantity_expr_is_source_context_previewable(
         QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
         } => target_filter_is_source_context_free(filter),
+        // CR 119: the source's controller's current life total is bound by
+        // the source alone. Other players' totals need a recipient or an
+        // iteration the preview doesn't have.
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+        } => true,
         QuantityExpr::Ref { .. } => false,
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
@@ -2430,6 +2439,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -2774,6 +2784,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -3097,6 +3108,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         // CR 701.16a: sacrifice-time characteristics.
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -3378,6 +3390,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -6353,6 +6366,11 @@ fn resolve_ref(
         QuantityRef::CrimesCommittedThisTurn => {
             player.map_or(0, |p| u32_to_i32_saturating(p.crimes_committed_this_turn))
         }
+        // CR 107.14 + CR 122.1: Energy counters paid or lost this turn — uses
+        // the tracked counter on the player.
+        QuantityRef::EnergyPaidOrLostThisTurn => player.map_or(0, |p| {
+            u32_to_i32_saturating(p.energy_paid_or_lost_this_turn)
+        }),
         // CR 701.65b/701.66b/701.67c/702.189b: distinct bend types the controller
         // performed this turn — reads the tracked `HashSet<BendingType>` cardinality.
         QuantityRef::BendTypesThisTurn => player.map_or(0, |p| {
@@ -28221,8 +28239,13 @@ mod tests {
             source_id: spell,
             controller: root.controller,
             flipper: root.controller,
-            targets: Vec::new(),
-            win_effect: Some(Box::new(win_effect)),
+            win_effect: Some(Box::new(
+                crate::game::ability_utils::build_resolved_from_def(
+                    &win_effect,
+                    spell,
+                    root.controller,
+                ),
+            )),
             lose_effect: None,
             kind: crate::types::resolution::PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: root.context.chain_root_targets.clone(),
