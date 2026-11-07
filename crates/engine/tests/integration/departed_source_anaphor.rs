@@ -14,6 +14,7 @@ use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::types::ability::Effect;
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -26,7 +27,6 @@ use crate::support::shared_card_db;
 const PERSISTENT_NIGHTMARE: &str = "Skulk (This creature can't be blocked by creatures with greater power.)\nWhen this creature deals combat damage to a player, return it to its owner's hand.";
 const SAPRAZZAN_RAIDER: &str = "When this creature becomes blocked, return it to its owner's hand.";
 const SLOGURK: &str = "Trample\nWhenever a land card is put into your graveyard from anywhere, put a +1/+1 counter on Slogurk.\nRemove three +1/+1 counters from Slogurk: Return it to its owner's hand.\nWhen Slogurk leaves the battlefield, return up to three target land cards from your graveyard to your hand.";
-const JECHT: &str = "Menace\nWhenever Jecht deals combat damage to a player, you may exile it, then return it to the battlefield transformed under its owner's control.";
 const GRAZILAXX: &str = "Whenever a creature you control becomes blocked, you may return it to its owner's hand.\nWhenever one or more creatures you control deal combat damage to a player, draw a card.";
 const ACADEMY_RECTOR: &str = "When this creature dies, you may exile it. If you do, search your library for an enchantment card, put that card onto the battlefield, then shuffle.";
 const NACATL_WAR_PRIDE: &str = "This creature must be blocked by exactly one creature if able.\nWhenever this creature attacks, create X tokens that are copies of it and that are tapped and attacking, where X is the number of creatures defending player controls. Exile the tokens at the beginning of the next end step.";
@@ -38,6 +38,7 @@ const SHATTER: &str = "Destroy target artifact.";
 const CLOUDSHIFT: &str =
     "Exile target creature you control, then return that card to the battlefield under your control.";
 const COFFIN_PURGE: &str = "Exile target card from a graveyard.\nFlashback {B} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+const IVORY_GARGOYLE: &str = "Flying\nWhen this creature dies, return it to the battlefield under its owner's control at the beginning of the next end step and you skip your next draw step.\n{4}{W}: Exile this creature.";
 
 fn scenario() -> GameScenario {
     let mut scenario = GameScenario::new();
@@ -557,13 +558,20 @@ fn nacatl_war_pride_destroyed_in_response_still_makes_copies() {
 
 // --- Jecht, Reluctant Guardian: optional move feasibility (A10) ---
 
-fn jecht_damage_trigger_on_stack(respond: bool) -> (GameRunner, ObjectId, ObjectId) {
+/// The real Jecht, Reluctant Guardian (with its Braska's Final Aeon back face),
+/// attacking unblocked with its combat-damage trigger on the stack, and Murder
+/// cast on it in response when `respond`.
+fn jecht_attacking(respond: bool) -> Option<(GameRunner, ObjectId)> {
+    let db = shared_card_db()?;
     let mut scenario = scenario();
-    let jecht = scenario
-        .add_creature_from_oracle(P0, "Jecht, Reluctant Guardian", 4, 3, JECHT)
-        .id();
+    let jecht = scenario.add_real_card(P0, "Jecht, Reluctant Guardian", Zone::Battlefield, db);
     let murder = add_murder(&mut scenario);
     let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    assert!(
+        runner.state().objects[&jecht].back_face.is_some(),
+        "reach: the real card carries its back face"
+    );
 
     attack_with(&mut runner, &[jecht]);
     pass_until(&mut runner, |r| trigger_from_on_stack(r, jecht));
@@ -571,21 +579,32 @@ fn jecht_damage_trigger_on_stack(respond: bool) -> (GameRunner, ObjectId, Object
     if respond {
         cast_in_response(&mut runner, murder, jecht);
     }
-    (runner, jecht, murder)
+    Some((runner, jecht))
 }
 
 #[test]
-fn jecht_exiles_itself_when_accepted() {
-    let (mut runner, jecht, _) = jecht_damage_trigger_on_stack(false);
+fn jecht_exiles_and_returns_transformed() {
+    let Some((mut runner, jecht)) = jecht_attacking(false) else {
+        return;
+    };
     let before = incarnation(&runner, jecht);
     let offered = resolve_stack(&mut runner, Optional::Accept);
     assert_eq!(offered, 1, "the optional exile is offered");
     assert_ne!(incarnation(&runner, jecht), before, "Jecht was exiled");
+    // CR 400.7j: "return it" finds the card the exile moved, and it enters
+    // transformed; as a Saga it enters with a lore counter (CR 714.3a).
+    let aeon = &runner.state().objects[&jecht];
+    assert_eq!(aeon.zone, Zone::Battlefield);
+    assert!(aeon.transformed, "it returns with its back face up");
+    assert_eq!(aeon.name, "Braska's Final Aeon");
+    assert_eq!(aeon.counters.get(&CounterType::Lore).copied(), Some(1));
 }
 
 #[test]
 fn jecht_declined_stays_on_the_battlefield() {
-    let (mut runner, jecht, _) = jecht_damage_trigger_on_stack(false);
+    let Some((mut runner, jecht)) = jecht_attacking(false) else {
+        return;
+    };
     let before = incarnation(&runner, jecht);
     let offered = resolve_stack(&mut runner, Optional::Decline);
     assert_eq!(offered, 1, "the optional exile is offered");
@@ -595,7 +614,9 @@ fn jecht_declined_stays_on_the_battlefield() {
 
 #[test]
 fn jecht_destroyed_in_response_offers_no_exile() {
-    let (mut runner, jecht, _) = jecht_damage_trigger_on_stack(true);
+    let Some((mut runner, jecht)) = jecht_attacking(true) else {
+        return;
+    };
     let offered = resolve_stack(&mut runner, Optional::Accept);
     // CR 608.2d + CR 400.7: "you may exile it" is impossible, so it is not offered.
     assert_eq!(offered, 0);
@@ -793,6 +814,49 @@ fn obzedat_moved_out_of_exile_and_back_does_not_return() {
     // CR 400.7 + CR 603.7c: the card in exile is not the one the ability exiled.
     assert_eq!(zone(&runner, obzedat), Zone::Exile);
     assert_eq!(life(&runner, P1), 20);
+}
+
+// --- Ivory Gargoyle: dies-trigger own-source referent that became a new object (A15) ---
+
+#[test]
+fn ivory_gargoyle_exiled_from_the_graveyard_in_response_does_not_return() {
+    let mut scenario = scenario();
+    let gargoyle = scenario
+        .add_creature_from_oracle(P0, "Ivory Gargoyle", 2, 2, IVORY_GARGOYLE)
+        .id();
+    let murder = add_murder(&mut scenario);
+    scenario.add_basic_land(P0, ManaColor::Black);
+    let purge = add_spell(
+        &mut scenario,
+        "Coffin Purge",
+        COFFIN_PURGE,
+        vec![ManaCostShard::Black],
+        0,
+    );
+    let mut runner = scenario.build();
+
+    cast_in_response(&mut runner, murder, gargoyle);
+    pass_until(&mut runner, |r| trigger_from_on_stack(r, gargoyle));
+    assert_eq!(zone(&runner, gargoyle), Zone::Graveyard, "reach: it died");
+    let delayed = runner.state().delayed_triggers.len();
+    cast_in_response(&mut runner, purge, gargoyle);
+    resolve_stack(&mut runner, Optional::Decline);
+    assert_eq!(
+        zone(&runner, gargoyle),
+        Zone::Exile,
+        "reach: exiled by Purge"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        delayed + 1,
+        "reach: the dies trigger created its delayed return"
+    );
+
+    pass_until(&mut runner, |r| r.state().phase == Phase::End);
+    resolve_stack(&mut runner, Optional::Decline);
+    // CR 400.7 + CR 603.7c: the exiled card is a new object, not the card the
+    // dies trigger could find, so "return it" returns nothing.
+    assert_eq!(zone(&runner, gargoyle), Zone::Exile);
 }
 
 // --- Champions from Beyond: attack-batch pin for non-source attackers (A14) ---
