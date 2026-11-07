@@ -70648,10 +70648,10 @@ fn tree_has_is_chosen_color(def: &AbilityDefinition) -> bool {
 /// (`of the chosen color` / `of that color`) parse exactly as they do today:
 /// the printed-form arm must NOT widen to the anaphor forms.
 ///
-/// The negatives (zero `IsChosenColor`, zero `Unimplemented`) are each paired
-/// with a positive reach-guard on the surface that ACTUALLY carries the chain —
-/// for Dromar that is `triggers`, not `abilities` (its `abilities` is empty, so
-/// an `abilities`-only assertion would pass vacuously).
+/// The zero-`IsChosenColor` negative and the per-card `Unimplemented` counts are
+/// paired with a positive reach-guard on the surface that ACTUALLY carries the chain
+/// — for Dromar that is `triggers`, not `abilities` (its `abilities` is empty, so an
+/// `abilities`-only assertion would pass vacuously).
 #[test]
 fn anaphor_color_cards_are_unchanged_by_the_printed_qualifier_arm() {
     // Sudden Demise {X}{R} — verbatim.
@@ -70691,10 +70691,10 @@ fn anaphor_color_cards_are_unchanged_by_the_printed_qualifier_arm() {
         dromar.triggers.len()
     );
 
-    for (name, parsed) in [
-        ("Sudden Demise", &sudden_demise),
-        ("Persecute", &persecute),
-        ("Dromar, the Banisher", &dromar),
+    for (name, parsed, expected_gaps) in [
+        ("Sudden Demise", &sudden_demise, 0),
+        ("Persecute", &persecute, 1),
+        ("Dromar, the Banisher", &dromar, 0),
     ] {
         let nodes = all_card_defs(parsed);
         // POSITIVE REACH-GUARD: the card's own `Choose a color.` is present on
@@ -70725,13 +70725,21 @@ fn anaphor_color_cards_are_unchanged_by_the_printed_qualifier_arm() {
                 .any(|d| effect_filter_has_chosen_color(&d.effect)),
             "{name}: the anaphor form must NOT be consumed by the printed-qualifier arm"
         );
-        // NEGATIVE 2: no new coverage regression.
+        // Per-card gap count. Persecute's mass discard has no grammar yet, so its one
+        // gap is honest rather than a silently dropped conjunct.
         assert_eq!(
             nodes.iter().filter(|d| is_unimplemented_def(d)).count(),
-            0,
-            "{name}: no clause may lower to Unimplemented"
+            expected_gaps,
+            "{name}: unexpected number of Unimplemented clauses"
         );
     }
+
+    // The Persecute gap is exactly the discard conjunct of the reveal.
+    let persecute_gaps: Vec<_> = all_card_defs(&persecute)
+        .into_iter()
+        .filter_map(|d| d.effect.unimplemented_description())
+        .collect();
+    assert_eq!(persecute_gaps, vec!["discard all cards of that color"]);
 }
 
 /// V-UNIMPL (SHAPE) — the `Effect::Unimplemented` guard is applied to the
@@ -97166,4 +97174,410 @@ fn fused_subject_look_exile_preserves_or_rejects_the_complete_instruction() {
         }),
         "the public chain must retain the honest gap, not fall back to Dig: {unsupported:?}"
     );
+}
+
+/// The definitions down the `sub_ability` spine of a chain, in order.
+fn reveal_conjunct_spine(root: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    let mut spine = vec![root];
+    let mut next = root.sub_ability.as_deref();
+    while let Some(def) = next {
+        spine.push(def);
+        next = def.sub_ability.as_deref();
+    }
+    spine
+}
+
+fn same_name_zone_exile_filter(zones: Vec<Zone>) -> TargetFilter {
+    TargetFilter::Typed(TypedFilter {
+        type_filters: vec![],
+        controller: Some(ControllerRef::ParentTargetController),
+        properties: vec![
+            FilterProp::InAnyZone { zones },
+            FilterProp::SameNameAsParentTarget,
+        ],
+    })
+}
+
+fn sorcery_defs(name: &str, text: &str) -> crate::parser::oracle::ParsedAbilities {
+    parse_oracle_text(text, name, &[], &["Sorcery".to_string()], &[])
+}
+
+/// P1 (SHAPE). CR 201.2a + CR 400.1 + CR 608.2c: Legion's End's mass exile is the
+/// fourth node, after the reveal, and reaches that player's hand and graveyard, not
+/// their library.
+#[test]
+fn legions_end_chain_exiles_from_hand_and_graveyard_after_the_reveal() {
+    let parsed = sorcery_defs(
+        "Legion's End",
+        "Exile target creature an opponent controls with mana value 2 or less and all other creatures that player controls with the same name as that creature. Then that player reveals their hand and exiles all cards with that name from their hand and graveyard.",
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    let spine = reveal_conjunct_spine(&parsed.abilities[0]);
+    assert_eq!(spine.len(), 4, "{spine:#?}");
+    assert!(!spine.iter().any(|d| is_unimplemented_def(d)), "{spine:#?}");
+    assert!(matches!(&*spine[0].effect, Effect::ChangeZone { .. }));
+    assert!(matches!(&*spine[1].effect, Effect::ChangeZoneAll { .. }));
+    assert!(
+        matches!(
+            &*spine[2].effect,
+            Effect::RevealHand {
+                target: TargetFilter::ParentTargetController,
+                ..
+            }
+        ),
+        "{:?}",
+        spine[2].effect
+    );
+    let Effect::ChangeZoneAll {
+        target,
+        destination,
+        ..
+    } = &*spine[3].effect
+    else {
+        panic!("fourth node must be the mass exile: {:?}", spine[3].effect);
+    };
+    assert_eq!(*destination, Zone::Exile);
+    assert_eq!(
+        *target,
+        same_name_zone_exile_filter(vec![Zone::Hand, Zone::Graveyard])
+    );
+}
+
+/// P1 (SHAPE). CR 608.2c: Hour of Glory's exile reaches the revealed hand only and
+/// continues the God-gated reveal, so a false condition stops it too.
+#[test]
+fn hour_of_glory_chain_gates_the_hand_exile_on_the_reveal() {
+    let parsed = sorcery_defs(
+        "Hour of Glory",
+        "Exile target creature. If that creature was a God, its controller reveals their hand and exiles all cards from it with the same name as that creature.",
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    let spine = reveal_conjunct_spine(&parsed.abilities[0]);
+    assert_eq!(spine.len(), 3, "{spine:#?}");
+    assert!(!spine.iter().any(|d| is_unimplemented_def(d)), "{spine:#?}");
+    assert!(
+        matches!(&*spine[1].effect, Effect::RevealHand { .. }) && spine[1].condition.is_some(),
+        "the reveal carries the God gate: {:?}",
+        spine[1]
+    );
+    let Effect::ChangeZoneAll { target, .. } = &*spine[2].effect else {
+        panic!("third node must be the mass exile: {:?}", spine[2].effect);
+    };
+    assert_eq!(*target, same_name_zone_exile_filter(vec![Zone::Hand]));
+    assert_eq!(spine[2].sub_link, SubAbilityLink::ContinuationStep);
+}
+
+/// P2 (SHAPE). CR 608.2c: a conjugated conjunct after an own-hand reveal with no
+/// grammar yet is an explicit gap on the node right after the reveal, never a silent
+/// drop, so these cards stay honestly red. Semantics remain unsupported.
+#[test]
+fn reveal_hand_conjunct_without_grammar_is_an_explicit_gap() {
+    let cases: &[(&str, &str, &[&str], &[&str])] = &[
+        (
+            "Amnesia",
+            "Target player reveals their hand and discards all nonland cards.",
+            &[],
+            &["discard all nonland cards"],
+        ),
+        (
+            "Trapfinder's Trick",
+            "Target player reveals their hand and discards all Trap cards.",
+            &[],
+            &["discard all Trap cards"],
+        ),
+        (
+            "Shatter Assumptions",
+            "Choose one —\n• Target opponent reveals their hand and discards all colorless nonland cards.\n• Target opponent reveals their hand and discards all multicolored cards.",
+            &[],
+            &[
+                "discard all colorless nonland cards",
+                "discard all multicolored cards",
+            ],
+        ),
+        (
+            "Cabal Therapy",
+            "Choose a nonland card name. Target player reveals their hand and discards all cards with that name.\nFlashback—Sacrifice a creature. (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
+            &["Flashback"],
+            &["discard all cards with that name"],
+        ),
+        (
+            "Cabal Therapist",
+            "Menace\nAt the beginning of your first main phase, you may sacrifice a creature. When you do, choose a nonland card name, then target player reveals their hand and discards all cards with that name.",
+            &["Menace"],
+            &["discard all cards with that name"],
+        ),
+        (
+            "Persecute",
+            "Choose a color. Target player reveals their hand and discards all cards of that color.",
+            &[],
+            &["discard all cards of that color"],
+        ),
+        (
+            "Crosis, the Purger",
+            "Flying\nWhenever Crosis deals combat damage to a player, you may pay {2}{B}. If you do, choose a color, then that player reveals their hand and discards all cards of that color.",
+            &["Flying"],
+            &["discard all cards of that color"],
+        ),
+        (
+            "Tsabo's Decree",
+            "Choose a creature type. Target player reveals their hand and discards all creature cards of that type. Then destroy all creatures of that type that player controls. They can't be regenerated.",
+            &[],
+            &["discard all creature cards of that type"],
+        ),
+        (
+            "Mind Extraction",
+            "As an additional cost to cast this spell, sacrifice a creature.\nTarget player reveals their hand and discards all cards of each of the sacrificed creature's colors.",
+            &[],
+            &["discard all cards of each of the sacrificed creature's colors"],
+        ),
+        (
+            "Persecute Artist",
+            "Choose an artist other than Rebecca Guay. Target player reveals their hand and discards all nonland cards with art by the chosen artist.",
+            &[],
+            &["discard all nonland cards with art by the chosen artist"],
+        ),
+        (
+            "Rare-B-Gone",
+            "Each player sacrifices all permanents that are rare or mythic rare, then each player reveals their hand and discards all cards that are rare or mythic rare.",
+            &[],
+            &["discard all cards that are rare or mythic rare"],
+        ),
+        (
+            "Infernal Kirin",
+            "Flying\nWhenever you cast a Spirit or Arcane spell, target player reveals their hand and discards all cards with that spell's mana value.",
+            &["Flying"],
+            &["discard all cards with that spell's mana value"],
+        ),
+        (
+            "Void",
+            "Choose a number. Destroy all artifacts and creatures with mana value equal to that number. Then target player reveals their hand and discards all nonland cards with mana value equal to the number.",
+            &[],
+            &["discard all nonland cards with mana value equal to the number"],
+        ),
+        (
+            "Rakdos Augermage",
+            "First strike\n{T}: Reveal your hand and discard a card of target opponent's choice. Then that player reveals their hand and discards a card of your choice. Activate only as a sorcery.",
+            &["First strike"],
+            &[
+                "discard a card of target opponent's choice",
+                "discard a card of your choice",
+            ],
+        ),
+    ];
+    for (name, text, keywords, expected) in cases {
+        let keywords: Vec<String> = keywords.iter().map(|k| k.to_string()).collect();
+        let parsed = parse_oracle_text(text, name, &keywords, &["Sorcery".to_string()], &[]);
+        // Each reveal node's immediate child is the gap; the walk covers every
+        // ability, trigger and mode surface.
+        let gaps: Vec<&str> = all_card_defs(&parsed)
+            .into_iter()
+            .filter(|d| matches!(&*d.effect, Effect::RevealHand { .. }))
+            .map(|reveal| {
+                let child = reveal
+                    .sub_ability
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("{name}: reveal must have a next node"));
+                child.effect.unimplemented_description().unwrap_or_else(|| {
+                    panic!(
+                        "{name}: reveal's next node must be a gap: {:?}",
+                        child.effect
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(gaps, *expected, "{name}");
+    }
+}
+
+/// P2 (SHAPE). CR 701.9b: Rag Man's conjunct parses to a real random discard by the
+/// declared opponent, and stays bound to that opponent. Its runtime row is
+/// `rag_man_opponent_discards_a_creature_card_at_random`.
+#[test]
+fn rag_man_reveal_conjunct_is_a_real_random_discard() {
+    let parsed = parse_oracle_text(
+        "{B}{B}{B}, {T}: Target opponent reveals their hand and discards a creature card at random. Activate only during your turn.",
+        "Rag Man",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Cleric".to_string()],
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    let spine = reveal_conjunct_spine(&parsed.abilities[0]);
+    assert_eq!(spine.len(), 2, "{spine:#?}");
+    assert!(matches!(&*spine[0].effect, Effect::RevealHand { .. }));
+    assert!(
+        matches!(
+            &*spine[1].effect,
+            Effect::Discard {
+                selection: CardSelectionMode::Random,
+                target: TargetFilter::DeclaredPlayer { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        spine[1].effect
+    );
+}
+
+/// P3 (SHAPE). CR 608.2c: an explicit gap names no player the parser knows of, so
+/// Tsabo's Decree's "that player" reaches past the gap to the declared target player
+/// rather than falling back to the caster.
+#[test]
+fn tsabos_decree_that_player_reads_through_the_discard_gap() {
+    let parsed = sorcery_defs(
+        "Tsabo's Decree",
+        "Choose a creature type. Target player reveals their hand and discards all creature cards of that type. Then destroy all creatures of that type that player controls. They can't be regenerated.",
+    );
+    let nodes = all_card_defs(&parsed);
+    assert!(nodes
+        .iter()
+        .any(|d| matches!(&*d.effect, Effect::Choose { .. })));
+    assert!(nodes
+        .iter()
+        .any(|d| matches!(&*d.effect, Effect::RevealHand { .. })));
+    let destroy = nodes
+        .iter()
+        .find_map(|d| match &*d.effect {
+            Effect::DestroyAll { target, .. } => Some(target),
+            _ => None,
+        })
+        .expect("the later instruction must parse");
+    assert!(
+        matches!(
+            target_filter_controller_ref(destroy),
+            Some(ControllerRef::DeclaredPlayer { .. })
+        ),
+        "{destroy:?}"
+    );
+}
+
+/// P4 (SHAPE). CR 608.2c: adjacent reveal grammar keeps its chain. A new subject and a
+/// bare noun conjunct are not conjugated continuations, and a bare imperative after
+/// "reveal your hand" is not the split's own-hand head, so none gains a node. The
+/// nodes that exist at base are pinned so a change in either direction shows.
+#[test]
+fn adjacent_reveal_grammar_gains_no_node() {
+    let parse = |text: &str, name: &str, keywords: &[&str], card_type: &str| {
+        let keywords: Vec<String> = keywords.iter().map(|k| k.to_string()).collect();
+        parse_oracle_text(text, name, &keywords, &[card_type.to_string()], &[])
+    };
+    let ninja = parse(
+        "Ninjutsu {2}{B}\nThis creature enters with a menace counter on it.\nWhenever this creature deals combat damage to a player, you may remove a menace counter from it. When you do, that player reveals their hand and you choose a nonland card from it. Exile that card.",
+        "Biting-Palm Ninja",
+        &["Ninjutsu"],
+        "Creature",
+    );
+    let ninja_nodes: Vec<&AbilityDefinition> = ninja
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_deref())
+        .flat_map(reveal_conjunct_spine)
+        .collect();
+    assert_eq!(ninja_nodes.len(), 3, "{ninja_nodes:#?}");
+    assert!(matches!(
+        &*ninja_nodes[1].effect,
+        Effect::RevealHand {
+            card_filter: TargetFilter::Typed(_),
+            ..
+        }
+    ));
+    assert!(matches!(&*ninja_nodes[2].effect, Effect::ChangeZone { .. }));
+
+    let episode = parse(
+        "Target player reveals their hand and the top card of their library. You choose a card revealed this way. That player puts the chosen card on the bottom of their library.\nMadness {1}{B} (If you discard this card, discard it into exile. When you do, cast it for its madness cost or put it into your graveyard.)",
+        "Psychotic Episode",
+        &["Madness"],
+        "Sorcery",
+    );
+    let episode_spine = reveal_conjunct_spine(&episode.abilities[0]);
+    assert_eq!(episode_spine.len(), 3, "{episode_spine:#?}");
+    assert!(matches!(
+        &*episode_spine[0].effect,
+        Effect::RevealTop { .. }
+    ));
+
+    let manabond = parse(
+        "At the beginning of your end step, you may reveal your hand and put all land cards from it onto the battlefield. If you do, discard your hand.",
+        "Manabond",
+        &[],
+        "Enchantment",
+    );
+    let manabond_nodes: Vec<&AbilityDefinition> = manabond
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_deref())
+        .flat_map(reveal_conjunct_spine)
+        .collect();
+    assert!(
+        matches!(&*manabond_nodes[0].effect, Effect::RevealHand { .. }),
+        "{manabond_nodes:#?}"
+    );
+    assert_eq!(manabond_nodes.len(), 3, "{manabond_nodes:#?}");
+    assert!(!manabond_nodes.iter().any(|d| is_unimplemented_def(d)));
+
+    let darigaaz = parse(
+        "Flying\nWhenever Darigaaz deals combat damage to a player, you may pay {2}{R}. If you do, choose a color, then that player reveals their hand and Darigaaz deals damage to the player equal to the number of cards of that color revealed this way.",
+        "Darigaaz, the Igniter",
+        &["Flying"],
+        "Creature",
+    );
+    let darigaaz_nodes: Vec<&AbilityDefinition> = darigaaz
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_deref())
+        .flat_map(reveal_conjunct_spine)
+        .collect();
+    assert!(
+        darigaaz_nodes
+            .iter()
+            .any(|d| matches!(&*d.effect, Effect::RevealHand { .. })),
+        "{darigaaz_nodes:#?}"
+    );
+    assert_eq!(darigaaz_nodes.len(), 4, "{darigaaz_nodes:#?}");
+}
+
+/// P7 (SHAPE). CR 400.1: the no-name zone unions stay with the multi-zone player exile,
+/// keeping `TargetPlayer` and no name axis. Runtime rows:
+/// `identity_crisis_multi_zone_exile`, `thought_distortion`.
+#[test]
+fn no_name_zone_exile_keeps_its_target_player_route() {
+    for (name, text, keep_chain_index) in [
+        (
+            "Identity Crisis",
+            "Exile all cards from target player's hand and graveyard.",
+            0,
+        ),
+        (
+            "Thought Distortion",
+            "This spell can't be countered.\nTarget opponent reveals their hand. Exile all noncreature, nonland cards from that player's hand and graveyard.",
+            1,
+        ),
+    ] {
+        let parsed = sorcery_defs(name, text);
+        let root = parsed
+            .abilities
+            .iter()
+            .find(|a| {
+                reveal_conjunct_spine(a)
+                    .iter()
+                    .any(|d| matches!(&*d.effect, Effect::ChangeZoneAll { .. }))
+            })
+            .unwrap_or_else(|| panic!("{name}: the mass exile must parse"));
+        let spine = reveal_conjunct_spine(root);
+        let Effect::ChangeZoneAll {
+            target: TargetFilter::Typed(filter),
+            ..
+        } = &*spine[keep_chain_index].effect
+        else {
+            panic!("{name}: {:?}", spine[keep_chain_index].effect);
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::TargetPlayer), "{name}");
+        assert_eq!(
+            filter.properties,
+            vec![FilterProp::InAnyZone {
+                zones: vec![Zone::Hand, Zone::Graveyard]
+            }],
+            "{name}"
+        );
+    }
 }

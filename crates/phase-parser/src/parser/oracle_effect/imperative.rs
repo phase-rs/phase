@@ -3179,23 +3179,7 @@ pub(super) fn try_parse_multi_zone_same_name_exile(
     ) -> Result<(&str, (ControllerRef, MultiZoneExileQuantifier)), nom::Err<OracleError<'_>>> {
         // search <possessive> graveyard, hand, and library
         let (input, _) = tag::<_, _, OracleError<'_>>("search ").parse(input)?;
-        let (input, owner) = alt((
-            value(
-                ControllerRef::ParentTargetOwner,
-                tag::<_, _, OracleError<'_>>("its owner's "),
-            ),
-            value(
-                ControllerRef::ParentTargetController,
-                tag("its controller's "),
-            ),
-            value(ControllerRef::TargetPlayer, tag("their ")),
-            value(ControllerRef::TargetPlayer, tag("that player's ")),
-            value(ControllerRef::TargetPlayer, tag("target player's ")),
-            value(ControllerRef::Opponent, tag("target opponent's ")),
-            value(ControllerRef::Opponent, tag("an opponent's ")),
-            value(ControllerRef::You, tag("your ")),
-        ))
-        .parse(input)?;
+        let (input, owner) = parse_zone_owner_possessive(input)?;
         let (input, _) = alt((
             tag::<_, _, OracleError<'_>>("graveyard, hand, and library"),
             tag("graveyard, hand and library"),
@@ -3239,40 +3223,97 @@ pub(super) fn try_parse_multi_zone_same_name_exile(
                 )))
             }
         }
-        // Match the trailing same-name suffix. The name source is either a
-        // previously-named card ("with that name", Lost Legacy / Deadly Cover-Up)
-        // or the spell's exiled/countered target referenced by its card type
-        // ("with the same name as that card/creature/land/spell/…", Surgical
-        // Extraction / Eradicate / Crumble to Dust / Counterbore / Deicide). The
-        // card-type is composed as one `alt` axis rather than enumerated as full
-        // strings; all forms lower to the same `SameNameAsParentTarget` effect.
-        let (input, _) = alt((
-            value(
-                (),
-                tag::<_, _, OracleError<'_>>(" with that name and exile them"),
-            ),
-            value(
-                (),
-                (
-                    tag::<_, _, OracleError<'_>>(" with the same name as that "),
-                    alt((
-                        tag("creature"),
-                        tag("permanent"),
-                        tag("planeswalker"),
-                        tag("artifact"),
-                        tag("enchantment"),
-                        tag("land"),
-                        tag("spell"),
-                        tag("card"),
-                    )),
-                    tag(" and exile them"),
-                ),
-            ),
-        ))
-        .parse(input)?;
+        // Match the trailing same-name suffix; all forms lower to the same
+        // `SameNameAsParentTarget` effect.
+        let (input, _) = (
+            tag::<_, _, OracleError<'_>>(" "),
+            parse_same_name_reference,
+            tag(" and exile them"),
+        )
+            .parse(input)?;
         Ok((input, (owner, quantifier)))
     }
     run(lower).ok().map(|(_, result)| result)
+}
+
+/// CR 201.2a: the same-name reference that closes a same-name card population.
+/// The name source is either a previously named card ("with that name", Lost
+/// Legacy / Deadly Cover-Up / Legion's End) or the spell's exiled/countered target
+/// referenced by its card type ("with the same name as that
+/// card/creature/land/spell/…", Surgical Extraction / Eradicate / Crumble to Dust /
+/// Counterbore / Deicide / Hour of Glory). The card type is composed as one `alt`
+/// axis rather than enumerated as full strings.
+pub(super) fn parse_same_name_reference(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), tag::<_, _, OracleError<'_>>("with that name")),
+        value(
+            (),
+            (
+                tag::<_, _, OracleError<'_>>("with the same name as that "),
+                alt((
+                    tag("creature"),
+                    tag("permanent"),
+                    tag("planeswalker"),
+                    tag("artifact"),
+                    tag("enchantment"),
+                    tag("land"),
+                    tag("spell"),
+                    tag("card"),
+                )),
+            ),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 400.1 + CR 108.3: the possessive naming whose zones a mass exile reaches,
+/// as the owner axis its filter carries. Shared by the multi-zone recognizers.
+fn parse_zone_owner_possessive(input: &str) -> OracleResult<'_, ControllerRef> {
+    alt((
+        value(
+            ControllerRef::ParentTargetOwner,
+            tag::<_, _, OracleError<'_>>("its owner's "),
+        ),
+        value(
+            ControllerRef::ParentTargetController,
+            tag("its controller's "),
+        ),
+        value(ControllerRef::TargetPlayer, tag("their ")),
+        value(ControllerRef::TargetPlayer, tag("that player's ")),
+        value(ControllerRef::TargetPlayer, tag("target player's ")),
+        value(ControllerRef::Opponent, tag("target opponent's ")),
+        value(ControllerRef::Opponent, tag("an opponent's ")),
+        value(ControllerRef::You, tag("your ")),
+    ))
+    .parse(input)
+}
+
+/// CR 400.1 + CR 402.1 + CR 404.1: "<possessive> <zone>[ and <zone>…]" — one
+/// player's zones, deduped, in written order. Additional zones join by " and " /
+/// ", and " / ", " (oxford comma). The caller decides how many zones it accepts
+/// and what may follow.
+fn parse_possessive_zone_union(input: &str) -> OracleResult<'_, (ControllerRef, Vec<Zone>)> {
+    let (input, owner) = parse_zone_owner_possessive(input)?;
+    let (mut input, first) = parse_zone_word(input)?;
+    let mut zones = vec![first];
+    loop {
+        let Ok((after_sep, _)) = alt((
+            tag::<_, _, OracleError<'_>>(" and "),
+            tag(", and "),
+            tag(", "),
+        ))
+        .parse(input) else {
+            break;
+        };
+        let Ok((after_zone, zone)) = parse_zone_word(after_sep) else {
+            break;
+        };
+        if !zones.contains(&zone) {
+            zones.push(zone);
+        }
+        input = after_zone;
+    }
+    Ok((input, (owner, zones)))
 }
 
 /// CR 400.1 + CR 401.1 + CR 402.1 + CR 404.1 + CR 406.2: map a single zone word to
@@ -3411,43 +3452,7 @@ pub(super) fn try_parse_multi_zone_player_exile(
             let (input, _) = tag::<_, _, OracleError<'_>>(" from ").parse(after_head)?;
             (input, tf.type_filters)
         };
-        let (input, owner) = alt((
-            value(
-                ControllerRef::ParentTargetOwner,
-                tag::<_, _, OracleError<'_>>("its owner's "),
-            ),
-            value(
-                ControllerRef::ParentTargetController,
-                tag("its controller's "),
-            ),
-            value(ControllerRef::TargetPlayer, tag("their ")),
-            value(ControllerRef::TargetPlayer, tag("that player's ")),
-            value(ControllerRef::TargetPlayer, tag("target player's ")),
-            value(ControllerRef::Opponent, tag("target opponent's ")),
-            value(ControllerRef::Opponent, tag("an opponent's ")),
-            value(ControllerRef::You, tag("your ")),
-        ))
-        .parse(input)?;
-        let (mut input, first) = parse_zone_word(input)?;
-        let mut zones = vec![first];
-        // Additional zones joined by " and " / ", and " / ", " (oxford comma).
-        loop {
-            let Ok((after_sep, _)) = alt((
-                tag::<_, _, OracleError<'_>>(" and "),
-                tag(", and "),
-                tag(", "),
-            ))
-            .parse(input) else {
-                break;
-            };
-            let Ok((after_zone, zone)) = parse_zone_word(after_sep) else {
-                break;
-            };
-            if !zones.contains(&zone) {
-                zones.push(zone);
-            }
-            input = after_zone;
-        }
+        let (input, (owner, zones)) = parse_possessive_zone_union(input)?;
         Ok((input, (type_filters, owner, zones)))
     }
     let (rem, (type_filters, owner, zones)) = run(rest_lower).ok()?;
@@ -3461,6 +3466,61 @@ pub(super) fn try_parse_multi_zone_player_exile(
         return None;
     }
     Some((type_filters, owner, zones))
+}
+
+/// CR 201.2a + CR 400.1 + CR 701.13a + CR 608.2c: "exile all cards `<same-name
+/// reference>` from `<zone source>`", in either word order — the cards a player
+/// owns in the named zones that share a name with the instruction's target. Legion's
+/// End writes "cards with that name from their hand and graveyard"; Hour of Glory
+/// writes "cards from it with the same name as that creature".
+///
+/// A bare "it" names the hand revealed earlier in the same chain (CR 608.2c), so it
+/// declines without that antecedent. Unlike [`try_parse_multi_zone_player_exile`]
+/// this accepts a single zone, because the same-name axis (not a zone union)
+/// distinguishes it from the generic single-origin path. Returns the owner axis and
+/// the origin zones; declines on any trailing fragment so nothing is silently
+/// dropped.
+pub(super) fn try_parse_same_name_zone_exile(
+    rest_lower: &str,
+    ctx: &ParseContext,
+) -> Option<(ControllerRef, Vec<Zone>)> {
+    let source = |input| parse_same_name_exile_source(input, ctx);
+    let (rest, (owner, zones)) = preceded(
+        tag::<_, _, OracleError<'_>>("cards "),
+        alt((
+            preceded((parse_same_name_reference, tag(" from ")), source),
+            preceded(
+                tag("from "),
+                terminated(source, (tag(" "), parse_same_name_reference)),
+            ),
+        )),
+    )
+    .parse(rest_lower)
+    .ok()?;
+    all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+        .parse(rest.trim())
+        .ok()?;
+    Some((owner, zones))
+}
+
+/// The zones a same-name mass exile reaches: a possessive zone union, or "it" for
+/// the hand an earlier clause of this chain revealed. `TargetPlayer` for "it" is the
+/// subject-relative owner `inject_subject_target` rebinds to a carried subject,
+/// exactly as for the "their" possessive. The union is tried first so "its owner's
+/// hand" never stops at "it".
+fn parse_same_name_exile_source<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, (ControllerRef, Vec<Zone>)> {
+    alt((
+        parse_possessive_zone_union,
+        map_opt(tag("it"), |_| {
+            ctx.chain_prior_hand_reveal_target
+                .as_ref()
+                .map(|_| (ControllerRef::TargetPlayer, vec![Zone::Hand]))
+        }),
+    ))
+    .parse(input)
 }
 
 /// CR 406.2 + CR 404.1 + CR 108.2 + CR 608.2f: "exile all `<permanent types>` and
@@ -4484,7 +4544,7 @@ fn parse_counted_hand_reveal(
 /// with no subject of its own that is the acting player (Controller), which a
 /// per-player scope rebinds to the iterating player and `inject_subject_target`
 /// rebinds to a declared subject.
-fn parse_subject_hand_owner(input: &str) -> OracleResult<'_, TargetFilter> {
+pub(super) fn parse_subject_hand_owner(input: &str) -> OracleResult<'_, TargetFilter> {
     value(
         TargetFilter::Controller,
         alt((tag("their hand"), tag("his or her hand"))),
@@ -11919,6 +11979,27 @@ pub(super) fn parse_exile_ast(
         value((), alt((tag("exile all "), tag("exile each ")))).parse(input)
     }) {
         let rest_lower = &lower[lower.len() - rest.len()..];
+        // CR 201.2a + CR 400.1 + CR 701.13a + CR 608.2c: "exile all cards with that
+        // name from <possessive> <zone>[ and <zone>]" (Legion's End) or "exile all
+        // cards from it with the same name as that creature" (Hour of Glory). Lowers
+        // like the `MultiZoneSameNameExile` mass arm: the zones ride on the filter via
+        // `InAnyZone` and `origin: None` defers to it.
+        if let Some((owner, zones)) = try_parse_same_name_zone_exile(rest_lower, ctx) {
+            return Some(ZoneCounterImperativeAst::Exile {
+                origin: None,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![],
+                    controller: Some(owner),
+                    properties: vec![
+                        FilterProp::InAnyZone { zones },
+                        FilterProp::SameNameAsParentTarget,
+                    ],
+                }),
+                all: true,
+                enter_with_counters: vec![],
+                multi_target: None,
+            });
+        }
         // CR 400.3 + CR 404.1 + CR 406.2 + CR 108.2: "exile all cards from <possessive> <zone>
         // and <zone>" (Identity Crisis) — a *union* of origin zones. Recognized
         // before the generic single-origin path below, whose `infer_origin_zone`
@@ -27757,6 +27838,99 @@ mod tests {
                 try_parse_multi_zone_same_name_exile(text).is_none(),
                 "expected no match for: {text}"
             );
+        }
+    }
+
+    /// CR 201.2a + CR 400.1 + CR 608.2c: both word orders of the same-name zone exile,
+    /// across the owner and zone axes. "from it" needs a prior hand reveal, and the
+    /// same text with an explicit possessive proves that decline is that guard alone.
+    #[test]
+    fn same_name_zone_exile_reads_both_word_orders_and_declines_the_rest() {
+        let with_reveal = ParseContext {
+            chain_prior_hand_reveal_target: Some(TargetFilter::Player),
+            ..ParseContext::default()
+        };
+        let without_reveal = ParseContext::default();
+
+        for (text, owner, zones) in [
+            (
+                "cards with that name from their hand and graveyard",
+                ControllerRef::TargetPlayer,
+                vec![Zone::Hand, Zone::Graveyard],
+            ),
+            (
+                "cards with that name from their hand and graveyard.",
+                ControllerRef::TargetPlayer,
+                vec![Zone::Hand, Zone::Graveyard],
+            ),
+            (
+                "cards with the same name as that creature from its controller's graveyard, hand, and library",
+                ControllerRef::ParentTargetController,
+                vec![Zone::Graveyard, Zone::Hand, Zone::Library],
+            ),
+            (
+                "cards from its owner's graveyard with that name",
+                ControllerRef::ParentTargetOwner,
+                vec![Zone::Graveyard],
+            ),
+        ] {
+            let expected = Some((owner, zones));
+            assert_eq!(
+                try_parse_same_name_zone_exile(text, &with_reveal),
+                expected,
+                "{text}"
+            );
+            assert_eq!(
+                try_parse_same_name_zone_exile(text, &without_reveal),
+                expected,
+                "a possessive needs no antecedent: {text}"
+            );
+        }
+
+        let from_it = "cards from it with the same name as that creature";
+        assert_eq!(
+            try_parse_same_name_zone_exile(from_it, &with_reveal),
+            Some((ControllerRef::TargetPlayer, vec![Zone::Hand]))
+        );
+        assert_eq!(
+            try_parse_same_name_zone_exile(from_it, &without_reveal),
+            None
+        );
+
+        for text in [
+            // No name clause: the multi-zone player exile's class.
+            "cards from their hand and graveyard",
+            // A trailing fragment must not be silently dropped.
+            "cards with that name from their hand and graveyard and shuffle",
+            "cards with that name from their hand, then draw a card",
+            // Not a bare "cards" head.
+            "creature cards with that name from their hand",
+        ] {
+            assert_eq!(
+                try_parse_same_name_zone_exile(text, &with_reveal),
+                None,
+                "{text}"
+            );
+        }
+    }
+
+    /// CR 400.1: the possessive-zone recognizer keeps its no-name class, which the
+    /// same-name recognizer in front of it declines.
+    #[test]
+    fn multi_zone_player_exile_keeps_the_no_name_class() {
+        let ctx = ParseContext {
+            chain_prior_hand_reveal_target: Some(TargetFilter::Player),
+            ..ParseContext::default()
+        };
+        for text in [
+            "cards from target player's hand and graveyard",
+            "noncreature, nonland cards from that player's hand and graveyard",
+        ] {
+            assert_eq!(try_parse_same_name_zone_exile(text, &ctx), None, "{text}");
+            let (_, owner, zones) = try_parse_multi_zone_player_exile(text)
+                .unwrap_or_else(|| panic!("multi-zone player exile must claim: {text}"));
+            assert_eq!(owner, ControllerRef::TargetPlayer, "{text}");
+            assert_eq!(zones, vec![Zone::Hand, Zone::Graveyard], "{text}");
         }
     }
 

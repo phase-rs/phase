@@ -29,6 +29,7 @@ mod restricted_mana_mv_or_x;
 mod restricted_mana_not_from_zone;
 mod restricted_mana_x_cost_only;
 mod retarget_prompt_softlock;
+mod reveal_hand_trailing_conjunct;
 mod reveal_this_way_single_execution;
 mod reveal_until_routed_damage_count;
 mod reveal_until_simultaneous_kept_delivery;

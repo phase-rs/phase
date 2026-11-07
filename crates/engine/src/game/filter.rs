@@ -9422,6 +9422,12 @@ fn source_chosen_player(source: &SourceContext<'_>) -> Option<PlayerId> {
 /// copy's copied name reverts once it leaves the battlefield, so the live read
 /// would report the printed name instead.
 ///
+/// CR 400.7 + CR 608.2h: an intervening instruction that yields a single referent
+/// overwrites that snapshot (Legion's End's mass exile or reveal), and the target
+/// has still left as the object it was. When the target occurrence's pinned
+/// incarnation is no longer current, its exit last-known information answers. An
+/// unpinned target or one with no exit record falls through to the live read.
+///
 /// Returns `None` when no ability is in scope, when the ability has no object
 /// targets, or when the referenced object has no record in either `state.objects`
 /// or `state.lki_cache`.
@@ -9434,6 +9440,16 @@ fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> O
         .filter(|snapshot| snapshot.object_id == id && snapshot.is_current(state))
     {
         return Some(snapshot.lki.name.clone());
+    }
+    if let Some(lki) = ability
+        .targets
+        .iter()
+        .position(|target| *target == TargetRef::Object(id))
+        .and_then(|index| ability.target_pin_at(index))
+        .filter(|pin| !pin.is_current(state))
+        .and_then(|pin| exit_lki_for_incarnation(state, id, pin.incarnation))
+    {
+        return Some(lki.name.clone());
     }
     if let Some(obj) = state.objects.get(&id) {
         return Some(obj.name.clone());

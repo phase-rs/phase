@@ -29855,7 +29855,8 @@ fn chain_has_prior_player_target_referent(clauses: &[ClauseIr]) -> bool {
 /// reader filters this walk by its own referent kind: a bare "they" also takes
 /// objects just created, so it refuses a declaration that an object-creating
 /// clause follows; "that player" and "<object> that player controls" take
-/// players only and read the walk as is.
+/// players only and read the walk as is. An unparsed gap clause names no player
+/// the parser knows of, so the walk passes through it too (CR 608.2c).
 fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
     for prev in clauses.iter().rev() {
         if prev.condition.is_some() {
@@ -29886,6 +29887,7 @@ fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
                     | TargetFilter::Controller
             )
         ) || has_typed_target_widened(&prev.parsed.effect)
+            || matches!(prev.parsed.effect, Effect::Unimplemented { .. })
         {
             continue;
         }
@@ -32832,6 +32834,21 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
             if *target == TargetFilter::Any || *target == TargetFilter::Controller =>
         {
             *target = subject_filter;
+        }
+        // CR 608.2c: "that player reveals their hand and exiles all cards …" — a
+        // zone owner that names the clause's subject ("their", "from it") binds a
+        // carried, non-announced subject (the parent target's controller for Legion's
+        // End and Hour of Glory). A declared subject keeps `TargetPlayer`, which
+        // already reads its announcement.
+        Effect::ChangeZoneAll { target, .. }
+            if target_filter_controller_ref(target) == Some(ControllerRef::TargetPlayer)
+                && subject.target.is_none()
+                && !subject.inherits_parent
+                && player_filter_as_controller_ref(&subject_filter).is_some() =>
+        {
+            if let Some(ctrl) = player_filter_as_controller_ref(&subject_filter) {
+                force_controller(target, ctrl);
+            }
         }
         Effect::Shuffle { ref mut target }
             if *target == TargetFilter::Any || *target == TargetFilter::Controller =>
