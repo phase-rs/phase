@@ -52,6 +52,7 @@ import {
   type NativeAiSeat,
   type NativeSessionAttachment,
 } from "./ws-adapter";
+import { sayPhraseHostClockMs, stampSayPhraseAtHost } from "../game/sayPhraseClock";
 import { dialPeer, RECONNECT_DIAL_TIMEOUT_MS } from "../network/connection";
 import { ContestClickBuffer, isContestSequence } from "../network/contestClickBuffer";
 import { createPeerSession, type PeerSession } from "../network/peer";
@@ -4864,9 +4865,16 @@ export class P2PHostAdapter implements EngineAdapter {
           // tag with the authenticated session identity — the wire payload
           // is untrusted. This is the defense-in-depth that makes the engine
           // guard meaningful for P2P.
+          //
+          // The same distrust applies to time: a spoken-payment observation's
+          // instant is evidence the engine judges, so a guest's claimed
+          // `at_ms` is replaced with this host's clock at receipt (exactly as
+          // `contest_click` is stamped here). A guest cannot buy a pause by
+          // repeating one claimed instant.
+          const action = stampSayPhraseAtHost(msg.action, sayPhraseHostClockMs());
           transition = await this.applyBrowserMutation(() => this.nativeBridge
-            ? this.nativeBridge.submitAction(msg.action, pid)
-            : this.wasm.submitAction(msg.action, pid));
+            ? this.nativeBridge.submitAction(action, pid)
+            : this.wasm.submitAction(action, pid));
         } catch (err) {
           // The engine refused the action: nothing applied, so this — and only
           // this — is an action failure the guest must hear about.

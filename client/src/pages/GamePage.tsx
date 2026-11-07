@@ -175,6 +175,7 @@ import { P2PHostAdapter, type P2PAdapterEvent } from "../adapter/p2p-adapter.ts"
 import { WebSocketAdapter } from "../adapter/ws-adapter.ts";
 import type { WsAdapterEvent } from "../adapter/ws-adapter.ts";
 import { MANA_PAYMENT_WAITING_FOR_TYPES } from "../game/waitingForRegistry.ts";
+import { sayPhraseHostClockMs } from "../game/sayPhraseClock.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
@@ -3902,6 +3903,10 @@ function formatUnlessCost(
   }
 }
 
+/** How often a closed spoken-payment window is re-reported while the engine,
+ *  judging on its own clock, has not yet lapsed it. */
+const SAY_PHRASE_EXPIRY_RETRY_MS = 250;
+
 /**
  * The say-it prompt for a `SayPhrase` unless-cost. Answering "pay" says the
  * phrase. Toy Boat's cumulative upkeep asks for the phrase once per age counter
@@ -3964,32 +3969,39 @@ function SayPhrasePanel({
   // required saying has no pause to measure and must never expire before it is
   // made. It is armed from the host instant of the player's own click, so only
   // an actual pause can lapse it, and a saying still awaiting an
-  // acknowledgement holds it (the engine already has that answer). A lapsed
-  // window is reported to the engine as a stamped observation; the engine's
-  // stored deadline decides that it is a pause and produces the sacrifice.
+  // acknowledgement holds it (the engine already has that answer). A payment
+  // restored after a reload or reconnect has no click from this panel, so it is
+  // armed from the deadline the engine retained (same epoch-millisecond domain).
+  //
+  // A closed window is reported as an EXPIRY, never as a saying: the engine
+  // lapses the payment only once its clock is past the deadline, and an expiry
+  // never counts toward the payment. The report is sent strictly after the
+  // deadline and repeated until the engine closes the prompt, because the
+  // engine judges it on its own (possibly server) clock.
+  const retainedDeadline = sayPayment?.deadline_ms;
   useEffect(() => {
     if (quickWindowMs === undefined || said === 0 || awaitingAck > 0) return;
-    if (lastSaidAt.current === null) return;
-    const remaining = Math.max(
-      0,
-      lastSaidAt.current + quickWindowMs - performance.now(),
-    );
-    const timer = setTimeout(() => {
-      // The host observes the lapse and reports it as an observation stamped
-      // past the engine's deadline; the engine then applies the unpaid branch
-      // (CR 118.12a). The client never decides the outcome itself.
-      seq.current += 1;
+    const deadline =
+      lastSaidAt.current !== null
+        ? lastSaidAt.current + quickWindowMs
+        : retainedDeadline;
+    if (deadline === undefined || deadline === null) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const check = () => {
+      const now = sayPhraseHostClockMs();
+      if (now <= deadline) {
+        timer = setTimeout(check, deadline - now + 1);
+        return;
+      }
       void dispatch({
         type: "SayPhrase",
-        data: {
-          payment: paymentId,
-          seq: seq.current,
-          at_ms: performance.now(),
-        },
+        data: { payment: paymentId, seq: 0, at_ms: now, report: "Expiry" },
       });
-    }, remaining);
+      timer = setTimeout(check, SAY_PHRASE_EXPIRY_RETRY_MS);
+    };
+    timer = setTimeout(check, Math.max(0, deadline - sayPhraseHostClockMs() + 1));
     return () => clearTimeout(timer);
-  }, [awaitingAck, dispatch, quickWindowMs, said]);
+  }, [awaitingAck, dispatch, paymentId, quickWindowMs, retainedDeadline, said]);
 
   const say = () => {
     // One click is one saying, and the engine accepts no more than the payment
@@ -4000,7 +4012,7 @@ function SayPhrasePanel({
       void dispatch({ type: "PayUnlessCost", data: { pay: true } });
       return;
     }
-    const at = performance.now();
+    const at = sayPhraseHostClockMs();
     lastSaidAt.current = at;
     seq.current += 1;
     setReported((current) => current + 1);
@@ -4008,7 +4020,7 @@ function SayPhrasePanel({
     // acknowledgement the engine's own id is rendered from `sayPayment`.
     void dispatch({
       type: "SayPhrase",
-      data: { payment: paymentId, seq: seq.current, at_ms: at },
+      data: { payment: paymentId, seq: seq.current, at_ms: at, report: "Saying" },
     });
   };
 

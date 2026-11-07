@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
 
@@ -142,6 +142,7 @@ type SayPhraseAttempt = {
     payment?: number;
     seq?: number;
     at_ms?: number;
+    report?: "Saying" | "Expiry";
   };
 };
 
@@ -150,6 +151,14 @@ function sayPhraseCalls() {
     .map(([action]) => action as SayPhraseAttempt)
     .filter((action) => action.type === "SayPhrase")
     .map((action) => action.data ?? {});
+}
+
+function sayingCalls() {
+  return sayPhraseCalls().filter((call) => call.report !== "Expiry");
+}
+
+function expiryCalls() {
+  return sayPhraseCalls().filter((call) => call.report === "Expiry");
 }
 
 function payUnlessCostCalls() {
@@ -174,12 +183,12 @@ function setPrompt(next: WaitingFor | null, said: number, owed: number) {
   });
 }
 
-/** Stands in for the engine's spoken-payment bookkeeping: each `SayPhrase` is
- *  one accepted saying, the engine's `said` grows, the sayings still owed
- *  shrink, and the last one closes the prompt. `PayUnlessCost` is the explicit
- *  decline path a player chooses; a lapsed window arrives as a `SayPhrase`
- *  stamped past the engine's deadline. */
-function acknowledgeSayings() {
+/** Stands in for the engine's spoken-payment bookkeeping: each saying is one
+ *  accepted saying, the engine's `said` grows, the sayings still owed shrink,
+ *  and the last one closes the prompt. `PayUnlessCost` is the explicit decline
+ *  path a player chooses; a lapsed window arrives as an `Expiry` report, which
+ *  never counts as a saying and closes the prompt unpaid. */
+function acknowledgeSayings({ lapseOnExpiry = true } = {}) {
   dispatchMock.mockImplementation((action: SayPhraseAttempt) => {
     const current = useGameStore.getState().waitingFor;
     if (
@@ -193,6 +202,10 @@ function acknowledgeSayings() {
       return Promise.resolve();
     }
     if (action.type !== "SayPhrase") return Promise.resolve();
+    if (action.data?.report === "Expiry") {
+      if (lapseOnExpiry) setPrompt(null, 0, 1);
+      return Promise.resolve();
+    }
     const payment = useGameStore.getState().gameState?.say_payment;
     const owed = payment?.owed ?? 1;
     const said = (payment?.said ?? 0) + 1;
@@ -216,7 +229,9 @@ function acknowledgeSayings() {
 function deferAcknowledgements() {
   const pending: Array<() => void> = [];
   dispatchMock.mockImplementation((action: SayPhraseAttempt) => {
-    if (action.type !== "SayPhrase") return Promise.resolve();
+    if (action.type !== "SayPhrase" || action.data?.report === "Expiry") {
+      return Promise.resolve();
+    }
     pending.push(() => {
       const current = useGameStore.getState().waitingFor;
       if (
@@ -247,6 +262,26 @@ function deferAcknowledgements() {
     if (!acknowledge) throw new Error("no saying is awaiting acknowledgement");
     acknowledge();
   };
+}
+
+/** Restore a two-saying payment the engine has accepted one saying of, as a
+ *  reload or reconnect delivers it: published `last_seq` and retained deadline. */
+function restorePayment(overrides: Partial<SayPhrasePayment>) {
+  const state = useGameStore.getState().gameState!;
+  act(() => {
+    useGameStore.setState({
+      waitingFor: toyBoatUnlessPayment(1),
+      gameState: {
+        ...state,
+        say_payment: {
+          ...paymentFor(2, 1),
+          last_seq: 1,
+          last_said_ms: (overrides.deadline_ms ?? 0) - GAP_MS,
+          ...overrides,
+        },
+      },
+    });
+  });
 }
 
 function advance(ms: number) {
@@ -336,8 +371,11 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     expect(calls.map((call) => call.seq)).toEqual([1, 2]);
     expect(calls[0].payment).toBe(PAYMENT_ID);
     expect(calls[1].payment).toBe(PAYMENT_ID);
-    // Each observation carries the host's own monotonic instant.
-    expect(calls[0].at_ms).toBeTypeOf("number");
+    // Each observation is a saying carrying the host's own epoch instant, in
+    // whole milliseconds (the integer wire contract of `SayPhrase.at_ms`).
+    expect(calls.map((call) => call.report)).toEqual(["Saying", "Saying"]);
+    expect(Number.isSafeInteger(calls[0].at_ms)).toBe(true);
+    expect(Number.isSafeInteger(calls[1].at_ms)).toBe(true);
     expect(calls[1].at_ms).toBeGreaterThanOrEqual(calls[0].at_ms as number);
     expect(screen.queryByText(PHRASE)).toBeNull();
   });
@@ -360,7 +398,7 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     expect(new Set(calls.map((call) => call.seq)).size).toBe(2);
   });
 
-  it("reports a lapsed window as a stamped observation for the engine", async () => {
+  it("reports a lapsed window as an expiry, strictly after the deadline", async () => {
     setup(2);
     render(gamePageTree());
 
@@ -369,14 +407,60 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     fireEvent.click(phraseBox());
     expect(sayPhraseCalls()).toHaveLength(1);
 
-    advance(GAP_MS * 4);
-    // The client observes the lapse; the engine's stored deadline decides that
-    // it is a pause and applies the sacrifice. The client does not decline the
-    // payment itself.
+    // At the deadline itself a saying is still in time, so nothing is reported.
+    advance(GAP_MS);
+    expect(expiryCalls()).toEqual([]);
+
+    advance(GAP_MS * 3);
+    // The client observes the lapse as an EXPIRY — never as another saying, so
+    // it cannot complete the payment — and the engine's stored deadline decides
+    // that it is a pause. The client does not decline the payment itself.
     expect(payUnlessCostCalls()).toEqual([]);
-    const calls = sayPhraseCalls();
-    expect(calls).toHaveLength(2);
-    expect(calls[1].seq).toBe(2);
+    expect(sayingCalls()).toHaveLength(1);
+    const [expiry] = expiryCalls();
+    expect(expiry.payment).toBe(PAYMENT_ID);
+    expect(expiry.at_ms).toBeGreaterThan((sayingCalls()[0].at_ms as number) + GAP_MS);
+  });
+
+  it("repeats the expiry until the engine closes the window", async () => {
+    // A server judges the expiry on its own clock; until it agrees the window
+    // has closed, the prompt stays up and the panel reports again.
+    dispatchMock.mockImplementation(() => Promise.resolve());
+    setup(2);
+    restorePayment({ deadline_ms: Date.now() - 1 });
+    render(gamePageTree());
+
+    await waitFor(() => expect(expiryCalls().length).toBeGreaterThanOrEqual(2), {
+      timeout: 3_000,
+    });
+    expect(sayingCalls()).toEqual([]);
+  });
+
+  it("re-arms a restored payment from the engine's retained deadline", async () => {
+    // A reload restores a payment already in progress: this panel never saw
+    // the first click, so the lapse is armed from the deadline the engine kept,
+    // in the same epoch-millisecond domain the panel stamps.
+    setup(2);
+    const deadline = Date.now() + GAP_MS * 3;
+    restorePayment({ deadline_ms: deadline });
+    render(gamePageTree());
+
+    await waitFor(() => expect(expiryCalls()).toHaveLength(1), { timeout: 3_000 });
+    const [expiry] = expiryCalls();
+    expect(expiry.at_ms).toBeGreaterThan(deadline);
+    expect(expiry.payment).toBe(PAYMENT_ID);
+    expect(sayingCalls()).toEqual([]);
+  });
+
+  it("reports an already-expired restored payment at once", async () => {
+    setup(2);
+    restorePayment({ deadline_ms: Date.now() - 5_000 });
+    render(gamePageTree());
+
+    await waitFor(() => expect(expiryCalls()).toHaveLength(1), { timeout: 3_000 });
+    expect(sayingCalls()).toEqual([]);
+    // The stand-in engine lapsed it: the prompt is gone.
+    await waitFor(() => expect(screen.queryByText(PHRASE)).toBeNull());
   });
 
   it("arms the window from the click, not from the acknowledgement", async () => {
@@ -404,9 +488,9 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     acknowledgeNextSaying();
     advance(GAP_MS * 4);
     expect(payUnlessCostCalls()).toEqual([]);
-    const calls = sayPhraseCalls();
-    expect(calls).toHaveLength(3);
-    expect(calls[2].seq).toBe(3);
+    expect(sayingCalls()).toHaveLength(2);
+    const [expiry] = expiryCalls();
+    expect(expiry.at_ms).toBeGreaterThan((sayingCalls()[1].at_ms as number) + GAP_MS);
   });
 
   it("continues the host sequence after a reconnect", async () => {
@@ -414,21 +498,7 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     // Mount into a payment already in progress: the engine accepted saying 1 and
     // publishes `last_seq`, so the reconnected panel must continue at 2 rather
     // than replay 1 (which the engine rejects as a duplicate).
-    const state = useGameStore.getState().gameState!;
-    act(() => {
-      useGameStore.setState({
-        waitingFor: toyBoatUnlessPayment(1),
-        gameState: {
-          ...state,
-          say_payment: {
-            ...paymentFor(2, 1),
-            last_seq: 1,
-            last_said_ms: 1_000,
-            deadline_ms: 2_000,
-          },
-        },
-      });
-    });
+    restorePayment({ deadline_ms: Date.now() + 60_000 });
     render(gamePageTree());
 
     expect(await screen.findByText(PHRASE)).toBeInTheDocument();
@@ -441,6 +511,9 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
   });
 
   it("renders the engine's own saying progress", async () => {
+    // The real-time window is far shorter than these waits; keep the prompt up
+    // so the rendered progress, not the lapse, is what is observed.
+    acknowledgeSayings({ lapseOnExpiry: false });
     setup(2);
     render(gamePageTree());
 

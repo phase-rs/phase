@@ -1277,6 +1277,10 @@ export interface SayPhrasePayment {
   deadline_ms?: number;
 }
 
+/// Mirrors `engine::types::un_actions::SayPhraseReport`: whether a host
+/// observation of a timed spoken payment is a saying or only the host's clock.
+export type SayPhraseReport = "Saying" | "Expiry";
+
 export type UnlessCost =
   | {
       type: "SayPhrase";
@@ -3536,11 +3540,15 @@ export type GameAction =
   | { type: "ChooseResolutionOptionalPaymentBranch"; data: { choice: ResolutionOptionalPaymentChoice } }
   | { type: "DecideOptionalEffectAndRemember"; data: { choice: AutoMayChoice; scope?: MayTriggerAutoChoiceScope } }
   | { type: "PayUnlessCost"; data: { pay: boolean } }
-  /// Un-card (no CR entry): one host-stamped saying of a timed spoken
-  /// unless-cost. The host stamps the human's monotonic instant; the engine
+  /// Un-card (no CR entry): one host-stamped observation of a timed spoken
+  /// unless-cost. The host stamps its own epoch-millisecond clock; the engine
   /// validates it against the stored window. `payment: 0` means "the instance
-  /// this prompt advertises".
-  | { type: "SayPhrase"; data: { payment: number; seq: number; at_ms: number } }
+  /// this prompt advertises". `report: "Expiry"` says the host's clock passed
+  /// the window with no saying: it can lapse the payment but never pay it.
+  | {
+      type: "SayPhrase";
+      data: { payment: number; seq: number; at_ms: number; report?: SayPhraseReport };
+    }
   // CR 118.12a: Choose a branch of a disjunctive unless-cost. The
   // discriminant is `Decline` (effect happens) or `Pay { index }` (the
   // selected sub-cost re-enters the standard unless-payment flow).
