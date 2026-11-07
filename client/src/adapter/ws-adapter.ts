@@ -27,6 +27,7 @@ import type {
   TakebackEvent,
   TakebackResolution,
   WithheldFrame,
+  SayPhraseExpiryTarget,
 } from "./types";
 import type {
   InteractionPreview,
@@ -1626,6 +1627,11 @@ export class WebSocketAdapter implements EngineAdapter {
     number,
     { resolve: (sourceIds: ObjectId[]) => void; reject: (error: Error) => void }
   >();
+  private nextSayPhraseExpiryRequestId = 1;
+  private readonly pendingSayPhraseExpiries = new Map<
+    number,
+    { resolve: (target: SayPhraseExpiryTarget | null) => void; reject: (error: Error) => void }
+  >();
   private pendingAuthoritativeStateExport: {
     resolve: (state: string) => void;
     reject: (error: Error) => void;
@@ -2072,6 +2078,9 @@ export class WebSocketAdapter implements EngineAdapter {
       this.rejectPendingSayingCommands(
         new AdapterError("WS_CLOSED", "Connection closed during saying submission", true),
       );
+      this.rejectPendingSayPhraseExpiries(
+        new AdapterError("WS_CLOSED", "Connection closed during spoken-payment expiry", true),
+      );
       this.rejectAuthoritativeStateExport(
         new AdapterError("WS_CLOSED", "Connection closed during authoritative-state export", true),
       );
@@ -2221,6 +2230,30 @@ export class WebSocketAdapter implements EngineAdapter {
       if (!this.send({ type: "PreviewManaPayment", data: { request_id: requestId, action } })) {
         this.pendingManaPaymentPreviews.delete(requestId);
         reject(new AdapterError("WS_CLOSED", "Failed to send mana-payment preview", true));
+      }
+    });
+  }
+
+  /**
+   * Un-card (no CR entry): the native P2P host's bounded expiry authority for a
+   * live timed spoken payment. Reads the payment the engine holds right now —
+   * independent of this seat's (possibly withheld) state delivery — after
+   * asking the server to lapse `lapse` first when it is past its deadline on
+   * the server's clock. The lapse is applied under the payer's own authority,
+   * so no seat is attached or detached by it. Requests are correlated, so
+   * overlapping reads each settle with the state their own request saw.
+   */
+  async sayPhraseExpiry(lapse?: number): Promise<SayPhraseExpiryTarget | null> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+    const requestId = this.nextSayPhraseExpiryRequestId++;
+    return new Promise<SayPhraseExpiryTarget | null>((resolve, reject) => {
+      this.pendingSayPhraseExpiries.set(requestId, { resolve, reject });
+      const data = lapse === undefined ? { request_id: requestId } : { request_id: requestId, lapse };
+      if (!this.send({ type: "SayPhraseExpiry", data })) {
+        this.pendingSayPhraseExpiries.delete(requestId);
+        reject(new AdapterError("WS_CLOSED", "Failed to request spoken-payment expiry", true));
       }
     });
   }
@@ -2428,6 +2461,9 @@ export class WebSocketAdapter implements EngineAdapter {
     );
     this.rejectPendingSayingCommands(
       new AdapterError("WS_CLOSED", "Adapter disposed during saying submission", true),
+    );
+    this.rejectPendingSayPhraseExpiries(
+      new AdapterError("WS_CLOSED", "Adapter disposed during spoken-payment expiry", true),
     );
     this.rejectAuthoritativeStateExport(
       new AdapterError("WS_CLOSED", "Adapter disposed during authoritative-state export", true),
@@ -2772,6 +2808,11 @@ export class WebSocketAdapter implements EngineAdapter {
       reject(error);
     }
     this.pendingManaPaymentPreviews.clear();
+  }
+
+  private rejectPendingSayPhraseExpiries(error: Error): void {
+    for (const { reject } of this.pendingSayPhraseExpiries.values()) reject(error);
+    this.pendingSayPhraseExpiries.clear();
   }
 
   private rejectAuthoritativeStateExport(error: Error): void {
@@ -3300,6 +3341,26 @@ export class WebSocketAdapter implements EngineAdapter {
         if (pending) {
           this.pendingInteractionPreviews.delete(data.preview.requestId);
           pending.resolve(data.preview);
+        }
+        break;
+      }
+
+      case "SayPhraseExpiry": {
+        const data = msg.data as { request_id: number; target?: SayPhraseExpiryTarget | null };
+        const pending = this.pendingSayPhraseExpiries.get(data.request_id);
+        if (pending) {
+          this.pendingSayPhraseExpiries.delete(data.request_id);
+          pending.resolve(data.target ?? null);
+        }
+        break;
+      }
+
+      case "SayPhraseExpiryFailed": {
+        const data = msg.data as { request_id: number; message: string };
+        const pending = this.pendingSayPhraseExpiries.get(data.request_id);
+        if (pending) {
+          this.pendingSayPhraseExpiries.delete(data.request_id);
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
         }
         break;
       }

@@ -11,6 +11,7 @@ import type {
   GameEvent,
   GameLogEntry,
   GameState,
+  SayPhraseExpiryTarget,
   LegalActionsResult,
   MatchConfig,
   ObjectId,
@@ -276,7 +277,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => Error)
  * loopback socket for every human P2P seat; the server authenticates each
  * action from that socket while PeerJS remains the guest-facing transport.
  */
-class NativeP2PBridge {
+export class NativeP2PBridge {
   private readonly clients = new Map<PlayerId, WebSocketAdapter>();
   private readonly playerTokens = new Map<PlayerId, string>();
   private readonly latestViews = new Map<PlayerId, NativeViewerUpdate>();
@@ -503,16 +504,18 @@ class NativeP2PBridge {
     return this.clientFor(playerId).previewInteraction(request, playerId);
   }
 
+  /**
+   * Un-card (no CR entry): the host seat's bounded expiry authority for a live
+   * timed spoken payment ([`WebSocketAdapter.sayPhraseExpiry`]). It travels on
+   * the host's own socket whatever the payer's presence: a suspended payer is
+   * never reattached to have its payment lapse, and the read does not depend
+   * on any seat's (possibly withheld) projected view.
+   */
+  async sayPhraseExpiry(lapse?: number): Promise<SayPhraseExpiryTarget | null> {
+    return this.clientFor(0).sayPhraseExpiry(lapse);
+  }
+
   async getState(): Promise<GameState> {
-    if (this.withheldNotices.has(0)) {
-      try {
-        const raw = await this.clientFor(0).exportPersistenceState();
-        const parsed = JSON.parse(raw);
-        return (parsed && typeof parsed === "object" && "state" in parsed ? parsed.state : parsed) as GameState;
-      } catch (err) {
-        console.warn("[NativeP2PBridge] failed to export authoritative state for withheld host:", err);
-      }
-    }
     return this.clients.get(0)?.getState()
       ?? this.latestViews.get(0)?.snapshot.state
       ?? Promise.reject(new AdapterError("P2P_ERROR", "Native host state is unavailable", true));
@@ -3462,6 +3465,14 @@ export class P2PHostAdapter implements EngineAdapter {
     await this.broadcastStateUpdate(transition, undefined, action.type === "SayPhrase");
     await this.runAiLoop();
     void this.persistAuthoritativeState();
+    if (this.nativeBridge && action.type === "SayPhrase") {
+      // The sidecar's correlated reply to a saying also releases the host seat's
+      // view through the native revision barrier (`handleNativeRevision`),
+      // which presents its events and log to the host and fans the revision out
+      // to the guests. That barrier is the saying's one presenter: returning the
+      // same events here would commit them to the host's history twice.
+      return { events: [], log_entries: [] };
+    }
     return transition.result;
   }
 
@@ -4406,11 +4417,9 @@ export class P2PHostAdapter implements EngineAdapter {
 
   private async refreshSayPhraseExpiry(generation: number): Promise<void> {
     if (this.disposed || !this.ownsAuthority()) return;
-    let state: GameState;
+    let target: SayPhraseExpiryTarget | null;
     try {
-      state = this.nativeBridge
-        ? await this.nativeBridge.getState()
-        : await this.wasm.getState();
+      target = await this.readSayPhraseExpiry();
     } catch {
       return;
     }
@@ -4421,25 +4430,47 @@ export class P2PHostAdapter implements EngineAdapter {
     ) {
       return;
     }
+    this.armSayPhraseExpiry(target);
+  }
+
+  /**
+   * The live timed spoken payment the authority must time. A native host asks
+   * the sidecar's bounded expiry authority, which answers from the engine's
+   * own state rather than the host seat's projected (possibly withheld or
+   * oversized) view, so a read issued later always reflects a later state.
+   * The browser host reads its own trusted WASM state.
+   */
+  private async readSayPhraseExpiry(): Promise<SayPhraseExpiryTarget | null> {
+    if (this.nativeBridge) return this.nativeBridge.sayPhraseExpiry();
+    const state = await this.wasm.getState();
     const payment = state.say_payment;
-    if (!payment?.deadline_ms) {
+    if (payment?.deadline_ms === undefined || state.waiting_for.type !== "UnlessPayment") {
+      return null;
+    }
+    return { payer: state.waiting_for.data.player, payment: payment.id, deadline_ms: payment.deadline_ms };
+  }
+
+  /** Time `target` on the host's clock, or disarm when nothing is timed. */
+  private armSayPhraseExpiry(target: SayPhraseExpiryTarget | null): void {
+    if (!target) {
       this.disarmSayPhraseExpiry();
       return;
     }
+    // Already timed (or its report is in flight): one owner per deadline.
     if (
-      this.sayExpiryPayment === payment.id
-      && this.sayExpiryDeadline === payment.deadline_ms
+      this.sayExpiryPayment === target.payment
+      && this.sayExpiryDeadline === target.deadline_ms
     ) {
       return;
     }
     this.clearSayExpiryTimer();
     const timerGen = ++this.sayExpiryTimerGeneration;
-    this.sayExpiryPayment = payment.id;
-    this.sayExpiryDeadline = payment.deadline_ms;
-    const delay = Math.max(0, payment.deadline_ms - sayPhraseHostClockMs() + 1);
+    this.sayExpiryPayment = target.payment;
+    this.sayExpiryDeadline = target.deadline_ms;
+    const delay = Math.max(0, target.deadline_ms - sayPhraseHostClockMs() + 1);
     this.sayExpiryTimer = setTimeout(() => {
       this.sayExpiryTimer = null;
-      void this.expireSayPhrase(payment.id, timerGen);
+      void this.expireSayPhrase(target.payment, timerGen);
     }, delay);
   }
 
@@ -4457,74 +4488,76 @@ export class P2PHostAdapter implements EngineAdapter {
     this.sayExpiryDeadline = null;
   }
 
+  /** Whether the expiry timer of generation `timerGen` still owns the lapse. */
+  private ownsSayExpiry(timerGen: number): boolean {
+    return !this.disposed && this.ownsAuthority() && timerGen === this.sayExpiryTimerGeneration;
+  }
+
+  /** The payment stays live after a refused or premature report: try again after a pause. */
+  private retrySayPhraseExpiry(timerGen: number): void {
+    if (timerGen !== this.sayExpiryTimerGeneration) return;
+    this.sayExpiryPayment = null;
+    this.sayExpiryDeadline = null;
+    this.clearSayExpiryTimer();
+    this.sayExpiryTimer = setTimeout(() => {
+      this.sayExpiryTimer = null;
+      this.scheduleSayPhraseExpiry();
+    }, SAY_EXPIRY_RETRY_MS);
+  }
+
+  /** Re-read the live payment after this timer's report settled. */
+  private rearmSayPhraseExpiry(timerGen: number): void {
+    if (timerGen !== this.sayExpiryTimerGeneration) return;
+    this.sayExpiryPayment = null;
+    this.sayExpiryDeadline = null;
+    this.scheduleSayPhraseExpiry();
+  }
+
   /**
    * The host reports that its own clock passed the payment's deadline. The
    * report never counts as a saying; the engine turns it into the unpaid
    * unless-branch (CR 118.12a).
    */
   private async expireSayPhrase(paymentId: number, timerGen = this.sayExpiryTimerGeneration): Promise<void> {
-    if (this.disposed || !this.ownsAuthority() || timerGen !== this.sayExpiryTimerGeneration) return;
-    let state: GameState;
+    if (!this.ownsSayExpiry(timerGen)) return;
+    if (this.nativeBridge) {
+      await this.expireNativeSayPhrase(this.nativeBridge, paymentId, timerGen);
+      return;
+    }
+    let target: SayPhraseExpiryTarget | null;
     try {
-      state = this.nativeBridge
-        ? await this.nativeBridge.getState()
-        : await this.wasm.getState();
+      target = await this.readSayPhraseExpiry();
     } catch {
       return;
     }
-    if (this.disposed || !this.ownsAuthority() || timerGen !== this.sayExpiryTimerGeneration) return;
-    const payment = state.say_payment;
-    const payer =
-      state.waiting_for.type === "UnlessPayment" ? state.waiting_for.data.player : null;
-    if (
-      !payment
-      || payment.id !== paymentId
-      || payment.deadline_ms === undefined
-      || payer === null
-    ) {
-      if (timerGen === this.sayExpiryTimerGeneration) {
-        this.disarmSayPhraseExpiry(timerGen);
-      }
+    if (!this.ownsSayExpiry(timerGen)) return;
+    if (!target || target.payment !== paymentId) {
+      this.disarmSayPhraseExpiry(timerGen);
       return;
     }
     // Order received sayings before expiry: drain any in-flight frames from the payer's session
     // so a timely saying waiting behind an earlier delivery is delivered and applied first.
-    if (payer !== 0) {
-      const payerSession = this.guestSessions.get(payer);
-      if (payerSession) {
-        await payerSession.drain();
-        if (this.disposed || !this.ownsAuthority() || timerGen !== this.sayExpiryTimerGeneration) return;
-        try {
-          state = this.nativeBridge
-            ? await this.nativeBridge.getState()
-            : await this.wasm.getState();
-        } catch {
-          return;
-        }
-        if (this.disposed || !this.ownsAuthority() || timerGen !== this.sayExpiryTimerGeneration) return;
-        const updatedPayment = state.say_payment;
-        if (
-          !updatedPayment
-          || updatedPayment.id !== paymentId
-          || updatedPayment.deadline_ms === undefined
-        ) {
-          if (timerGen === this.sayExpiryTimerGeneration) {
-            this.disarmSayPhraseExpiry(timerGen);
-          }
-          return;
-        }
-        payment.deadline_ms = updatedPayment.deadline_ms;
+    const payer = target.payer;
+    const payerSession = payer !== 0 ? this.guestSessions.get(payer) : undefined;
+    if (payerSession) {
+      await payerSession.drain();
+      if (!this.ownsSayExpiry(timerGen)) return;
+      try {
+        target = await this.readSayPhraseExpiry();
+      } catch {
+        return;
+      }
+      if (!this.ownsSayExpiry(timerGen)) return;
+      if (!target || target.payment !== paymentId) {
+        this.disarmSayPhraseExpiry(timerGen);
+        return;
       }
     }
     const now = sayPhraseHostClockMs();
-    if (now <= payment.deadline_ms) {
+    if (now <= target.deadline_ms) {
       // A saying landed while this timer was in flight; re-arm against the
       // deadline the engine retained (the engine clock never runs backwards).
-      if (timerGen === this.sayExpiryTimerGeneration) {
-        this.sayExpiryPayment = null;
-        this.sayExpiryDeadline = null;
-        this.scheduleSayPhraseExpiry();
-      }
+      this.rearmSayPhraseExpiry(timerGen);
       return;
     }
     const action: GameAction = {
@@ -4532,11 +4565,7 @@ export class P2PHostAdapter implements EngineAdapter {
       data: { payment: paymentId, seq: 0, at_ms: now, report: "Expiry" },
     };
     try {
-      const transition = await this.applyBrowserMutation(() =>
-        this.nativeBridge
-          ? this.nativeBridge.submitAction(action, payer)
-          : this.wasm.submitAction(action, payer),
-      );
+      const transition = await this.applyBrowserMutation(() => this.wasm.submitAction(action, payer));
       await this.publishHostSnapshot(transition.result);
       await this.broadcastStateUpdate(transition, undefined, true);
       await this.runAiLoop();
@@ -4545,26 +4574,66 @@ export class P2PHostAdapter implements EngineAdapter {
       // Refused — e.g. while a takeback vote is pending. The payment stays
       // live, so report again after a pause instead of spinning on it.
       console.warn("[P2PHost] authority expiry report failed:", err);
-      if (timerGen === this.sayExpiryTimerGeneration) {
+      this.retrySayPhraseExpiry(timerGen);
+      return;
+    }
+    this.rearmSayPhraseExpiry(timerGen);
+  }
+
+  /**
+   * A native host's lapse report. The sidecar's engine owns the payment, so
+   * the host neither reads a seat's projected view nor submits on the payer's
+   * socket: it orders the payer's WebRTC ingress ahead of the report, then
+   * asks the sidecar's host-only expiry authority to lapse the payment under
+   * the payer's own authority. A suspended payer therefore stays absent; the
+   * sidecar publishes the result through the ordinary native revision barrier.
+   */
+  private async expireNativeSayPhrase(
+    bridge: NativeP2PBridge,
+    paymentId: number,
+    timerGen: number,
+  ): Promise<void> {
+    let target: SayPhraseExpiryTarget | null;
+    try {
+      target = await bridge.sayPhraseExpiry();
+      if (!this.ownsSayExpiry(timerGen)) return;
+      if (!target || target.payment !== paymentId) {
+        this.disarmSayPhraseExpiry(timerGen);
+        this.armSayPhraseExpiry(target);
+        return;
+      }
+      if (sayPhraseHostClockMs() <= target.deadline_ms) {
+        // A saying moved the deadline while this timer was in flight.
         this.sayExpiryPayment = null;
         this.sayExpiryDeadline = null;
-        this.clearSayExpiryTimer();
-        this.sayExpiryTimer = setTimeout(() => {
-          this.sayExpiryTimer = null;
-          this.scheduleSayPhraseExpiry();
-        }, SAY_EXPIRY_RETRY_MS);
+        this.armSayPhraseExpiry(target);
+        return;
       }
+      // A timely saying still crossing the payer's WebRTC channel reaches the
+      // sidecar first; the sidecar drains the payer's own loopback ingress.
+      const payerSession = target.payer !== 0 ? this.guestSessions.get(target.payer) : undefined;
+      if (payerSession) {
+        await payerSession.drain();
+        if (!this.ownsSayExpiry(timerGen)) return;
+      }
+      target = await bridge.sayPhraseExpiry(paymentId);
+    } catch (err) {
+      console.warn("[P2PHost] native authority expiry report failed:", err);
+      if (this.ownsSayExpiry(timerGen)) this.retrySayPhraseExpiry(timerGen);
       return;
-    } finally {
-      if (payer !== null && this.disconnectedSeats?.has(payer)) {
-        this.nativeBridge?.suspendGuest(payer);
-      }
     }
-    if (timerGen === this.sayExpiryTimerGeneration) {
-      this.sayExpiryPayment = null;
-      this.sayExpiryDeadline = null;
-      this.scheduleSayPhraseExpiry();
+    if (!this.ownsSayExpiry(timerGen)) return;
+    if (target?.payment === paymentId && target.deadline_ms < sayPhraseHostClockMs()) {
+      // Still live past its deadline: the sidecar refused the report (a
+      // pending takeback vote) or its clock had not yet passed the deadline.
+      // Report again after a pause.
+      this.retrySayPhraseExpiry(timerGen);
+      return;
     }
+    // Lapsed, or a saying moved the deadline: time whatever is live now.
+    this.sayExpiryPayment = null;
+    this.sayExpiryDeadline = null;
+    this.armSayPhraseExpiry(target);
   }
 
   private async publishHostSnapshotInner(result: SubmitResult): Promise<boolean> {

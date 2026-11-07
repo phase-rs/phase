@@ -11,6 +11,7 @@ import {
   type GameAction,
   type GameEvent,
   type GameState,
+  type SayPhraseExpiryTarget,
   type SubmitResult,
 } from "../types.ts";
 
@@ -59,8 +60,7 @@ type HostInternals = {
   disposed: boolean;
   ownsAuthority: () => boolean;
   nativeBridge: {
-    getState: () => Promise<unknown>;
-    submitAction: (action: SayingAction, player: number) => Promise<{ result: SubmitResult }>;
+    sayPhraseExpiry: (lapse?: number) => Promise<SayPhraseExpiryTarget | null>;
   };
   applyBrowserMutation: <T>(run: () => Promise<T>) => Promise<T>;
   publishHostSnapshot: (result: SubmitResult) => Promise<boolean>;
@@ -92,26 +92,6 @@ type HostGuestMessageInternals = {
     receivedAtMs: number,
   ) => Promise<void>;
 };
-
-function makeHost(submitAction: HostInternals["nativeBridge"]["submitAction"]) {
-  const host = Object.create(P2PHostAdapter.prototype) as unknown as HostInternals;
-  host.disposed = false;
-  host.ownsAuthority = () => true;
-  host.nativeBridge = {
-    getState: async () => ({
-      say_payment: { id: 7, deadline_ms: Date.now() - 1 },
-      waiting_for: { type: "UnlessPayment", data: { player: 0 } },
-    }),
-    submitAction,
-  };
-  host.applyBrowserMutation = (run) => run();
-  host.publishHostSnapshot = vi.fn(async () => true);
-  host.broadcastStateUpdate = vi.fn(async () => {});
-  host.runAiLoop = vi.fn(async () => {});
-  host.persistAuthoritativeState = vi.fn();
-  host.scheduleSayPhraseExpiry = vi.fn();
-  return host;
-}
 
 function makeGuest(sendAccepted: boolean): GuestInternals {
   const adapter = Object.create(
@@ -197,50 +177,6 @@ describe("P2P saying reply lane", () => {
       code: AdapterErrorCode.ACTION_NOT_SENT,
     });
     expect(guest.pendingSayings.size).toBe(0);
-  });
-
-  it("submits the host's own lapse report when the payment deadline passes", async () => {
-    const submitAction = vi.fn(async () => ({ result: EMPTY }));
-    const host = makeHost(submitAction);
-
-    await host.expireSayPhrase(7);
-
-    expect(submitAction).toHaveBeenCalledTimes(1);
-    expect(submitAction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "SayPhrase",
-        data: expect.objectContaining({
-          payment: 7,
-          seq: 0,
-          report: "Expiry",
-        }),
-      }),
-      0,
-    );
-    expect(host.publishHostSnapshot).toHaveBeenCalledWith(EMPTY);
-    expect(host.runAiLoop).toHaveBeenCalledTimes(1);
-  });
-
-  it("re-reports a refused lapse after a pause instead of spinning on it", async () => {
-    vi.useFakeTimers();
-    try {
-      // A pending takeback vote refuses the authority's expiry report; the
-      // payment stays live, so the lapse must be observed again later.
-      const submitAction = vi.fn(async () => {
-        throw new AdapterError(AdapterErrorCode.ACTION_REJECTED, "A takeback vote is pending", true);
-      });
-      const host = makeHost(submitAction);
-
-      await host.expireSayPhrase(7);
-      expect(submitAction).toHaveBeenCalledTimes(1);
-      expect(host.publishHostSnapshot).not.toHaveBeenCalled();
-      expect(host.scheduleSayPhraseExpiry).not.toHaveBeenCalled();
-
-      await vi.advanceTimersByTimeAsync(250);
-      expect(host.scheduleSayPhraseExpiry).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it("settles a saying without consuming a parked ordinary command", async () => {
@@ -622,96 +558,6 @@ describe("P2P saying reply lane", () => {
     guest.dispose();
   });
 
-  it("reads authoritative state when host view is genuinely withheld and leaves disconnected payer absent after expiry", async () => {
-    // 1. Authoritative state read independently of withheld host view:
-    const host = Object.create(P2PHostAdapter.prototype) as unknown as HostInternals & {
-      sayExpiryGeneration: number;
-      sayExpiryPayment: number | null;
-      sayExpiryDeadline: number | null;
-      sayExpiryTimer: ReturnType<typeof setTimeout> | null;
-      refreshSayPhraseExpiry: (gen: number) => Promise<void>;
-      clearSayExpiryTimer: () => void;
-      disarmSayPhraseExpiry: (ownerGen?: number) => void;
-      disconnectedSeats: Map<number, unknown>;
-      guestSessions: Map<number, unknown>;
-      concedingSeats: Set<number>;
-      sayExpiryTimerGeneration: number;
-      listeners: Set<unknown>;
-    };
-    host.disposed = false;
-    host.ownsAuthority = () => true;
-    host.sayExpiryGeneration = 1;
-    host.sayExpiryTimerGeneration = 0;
-    host.sayExpiryPayment = null;
-    host.sayExpiryDeadline = null;
-    host.sayExpiryTimer = null;
-    host.listeners = new Set();
-    host.clearSayExpiryTimer = P2PHostAdapter.prototype["clearSayExpiryTimer"];
-    host.disarmSayPhraseExpiry = P2PHostAdapter.prototype["disarmSayPhraseExpiry"];
-    host.refreshSayPhraseExpiry = P2PHostAdapter.prototype["refreshSayPhraseExpiry"];
-    host.disconnectedSeats = new Map();
-    host.guestSessions = new Map();
-
-    const exportPersistenceState = vi.fn(async () =>
-      JSON.stringify({
-        state: {
-          say_payment: { id: 7, deadline_ms: Date.now() + 5000 },
-          waiting_for: { type: "UnlessPayment", data: { player: 0 } },
-        },
-      }),
-    );
-    const nativeBridge = {
-      withheldNotices: new Map([[0, { revision: 5, reason: "size limit" }]]),
-      clientFor: () => ({ exportPersistenceState }),
-      exportPersistenceState,
-      getState: async function (this: {
-        withheldNotices: Map<number, unknown>;
-        exportPersistenceState: () => Promise<string>;
-      }) {
-        if (this.withheldNotices.has(0)) {
-          const raw = await this.exportPersistenceState();
-          const parsed = JSON.parse(raw);
-          return (parsed && typeof parsed === "object" && "state" in parsed
-            ? parsed.state
-            : parsed) as GameState;
-        }
-        throw new Error("seat 0 state unavailable");
-      },
-      submitAction: vi.fn(async () => ({ result: EMPTY })),
-      suspendGuest: vi.fn(),
-    };
-    host.nativeBridge = nativeBridge as unknown as HostInternals["nativeBridge"];
-
-    // Refresh reads withheld seat 0 via authoritative export, scheduling expiry rather than disarming:
-    await host.refreshSayPhraseExpiry(1);
-    expect(exportPersistenceState).toHaveBeenCalledTimes(1);
-    expect(host.sayExpiryPayment).toBe(7);
-    expect(host.sayExpiryDeadline).toBeGreaterThan(Date.now());
-    host.clearSayExpiryTimer();
-
-    // 2. Expiry for a disconnected payer leaves them absent (suspended):
-    host.disconnectedSeats.set(1, { disconnectedAt: Date.now(), timer: null });
-    host.nativeBridge.getState = async () =>
-      ({
-        say_payment: { id: 7, deadline_ms: Date.now() - 1 },
-        waiting_for: { type: "UnlessPayment", data: { player: 1 } },
-      }) as unknown as GameState;
-    host.applyBrowserMutation = (run) => run();
-    host.publishHostSnapshot = vi.fn(async () => true);
-    host.broadcastStateUpdate = vi.fn(async () => {});
-    host.runAiLoop = vi.fn(async () => {});
-    host.persistAuthoritativeState = vi.fn();
-    host.scheduleSayPhraseExpiry = vi.fn();
-
-    await (host as unknown as { expireSayPhrase: (id: number) => Promise<void> }).expireSayPhrase(7);
-
-    expect(nativeBridge.submitAction).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "SayPhrase" }),
-      1,
-    );
-    expect(nativeBridge.suspendGuest).toHaveBeenCalledWith(1);
-  });
-
   it("prevents an older expiry callback from clearing a newer payment's timer or state", async () => {
     vi.useFakeTimers();
     try {
@@ -738,14 +584,12 @@ describe("P2P saying reply lane", () => {
       host.expireSayPhrase = P2PHostAdapter.prototype["expireSayPhrase"];
       host.applyBrowserMutation = (run) => run();
 
-      let resolveStateRead: (value: GameState) => void;
-      const statePromise = new Promise<GameState>((resolve) => {
-        resolveStateRead = resolve;
+      let resolveRead: (value: SayPhraseExpiryTarget | null) => void;
+      const readPromise = new Promise<SayPhraseExpiryTarget | null>((resolve) => {
+        resolveRead = resolve;
       });
-      host.nativeBridge = {
-        getState: vi.fn(() => statePromise),
-        submitAction: vi.fn(async () => ({ result: EMPTY })),
-      };
+      const lapse = vi.fn(() => readPromise);
+      host.nativeBridge = { sayPhraseExpiry: lapse };
 
       // Call expireSayPhrase with generation 1 (Payment 7):
       const expiryPromise = host.expireSayPhrase(7, 1);
@@ -757,13 +601,12 @@ describe("P2P saying reply lane", () => {
       const newerTimer = setTimeout(() => {}, 1000);
       host.sayExpiryTimer = newerTimer;
 
-      // Now resolve the old state read with the newer payment in state:
-      resolveStateRead!({
-        say_payment: { id: 8, deadline_ms: Date.now() + 1000 },
-        waiting_for: { type: "UnlessPayment", data: { player: 0 } },
-      } as unknown as GameState);
+      // Now resolve the old authority read with the newer payment live:
+      resolveRead!({ payer: 0, payment: 8, deadline_ms: Date.now() + 1000 });
 
       await expiryPromise;
+      // The superseded owner never asked the authority to lapse anything.
+      expect(lapse.mock.calls).toEqual([[]]);
 
       // The older callback saw payment.id (8) !== paymentId (7).
       // Because timerGen (1) !== sayExpiryTimerGeneration (2), it MUST NOT disarm or clear the new timer:
@@ -776,94 +619,4 @@ describe("P2P saying reply lane", () => {
     }
   });
 
-  it("relays correlated StateWithheld through the native bridge to a guest with an unrelated submission pending without settling it", async () => {
-    const conn = new FakeDataConnection();
-    const guest = await authenticatedGuest(conn);
-
-    // Park an unrelated guest submission:
-    const ordinary = guest.submitAction({ type: "PassPriority" }, 1);
-    let ordinarySettled = false;
-    void ordinary.then(
-      () => {
-        ordinarySettled = true;
-      },
-      () => {
-        ordinarySettled = true;
-      },
-    );
-
-    const hostSession = {
-      guestSessions: new Map([[1, {}]]),
-      disconnectedSeats: new Set<number>(),
-      send: vi.fn(async (_session, msg) => {
-        await conn.simulateData(msg as P2PMessage);
-        return true;
-      }),
-    };
-
-    const bridge = {
-      deliveredRevision: 0,
-      sayingRevisions: new Set<number>(),
-      withheldNotices: new Map<number, unknown>(),
-      pendingViews: new Map<number, Map<number, unknown>>(),
-      onRevision: async (
-        revision: number,
-        reports: Map<number, unknown>,
-        isSaying?: boolean,
-      ) => {
-        for (const [pid, session] of hostSession.guestSessions) {
-          if (hostSession.disconnectedSeats.has(pid)) continue;
-          const report = reports.get(pid) as { kind: string } | undefined;
-          if (report?.kind === "withheld") {
-            await hostSession.send(session, {
-              type: "state_withheld",
-              revision,
-              ...(isSaying ? { saying: true } : {}),
-            });
-          }
-        }
-      },
-    };
-
-    // The event consumer pattern at p2p-adapter.ts:736-745:
-    const handleStateDelivery = (event: {
-      type: string;
-      withheld?: { revision: number; reason: string };
-      saying?: boolean;
-    }) => {
-      if (event.type === "stateDelivery") {
-        const playerId = 0;
-        if (!event.withheld || event.withheld.revision <= bridge.deliveredRevision) return;
-        if (event.saying) bridge.sayingRevisions.add(event.withheld.revision);
-        bridge.withheldNotices.set(playerId, event.withheld);
-        const reports = new Map([[0, { kind: "withheld", notice: event.withheld }], [1, { kind: "withheld", notice: event.withheld }]]);
-        bridge.pendingViews.set(event.withheld.revision, reports);
-        const isSaying = bridge.sayingRevisions.has(event.withheld.revision);
-        void bridge.onRevision(event.withheld.revision, reports, isSaying);
-      }
-    };
-
-    // Drive a correlated stateDelivery through the native bridge's event consumer:
-    handleStateDelivery({
-      type: "stateDelivery",
-      withheld: { revision: 3, reason: "payload over bound" },
-      saying: true,
-    });
-
-    await vi.waitFor(() => {
-      expect(hostSession.send).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({
-          type: "state_withheld",
-          revision: 3,
-          saying: true,
-        }),
-      );
-    });
-
-    // The guest received state_withheld with saying: true, so the unrelated submission is NOT settled:
-    expect(ordinarySettled).toBe(false);
-
-    guest.dispose();
-  });
 });
