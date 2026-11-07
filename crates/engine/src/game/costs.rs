@@ -1308,7 +1308,7 @@ fn pay_ability_cost_inner(
         // the payment records exactly the sayings that were reported.
         AbilityCost::SayPhrase {
             phrase,
-            repetitions: _repetitions,
+            repetitions,
             ..
         } => {
             if !super::un_actions::player_can_say_phrases(state, player) {
@@ -1317,21 +1317,19 @@ fn pay_ability_cost_inner(
                 ));
             }
             if !dry_run {
-                // Each SayPhrase payment action corresponds to exactly one saying.
-                // The interactive prompt (engine_payment_choices.rs::handle_say_phrase)
-                // re-prompts for remaining sayings until repetitions are satisfied.
-                // CR 702.24a: cumulative upkeep requires one payment per age counter.
-                events.push(GameEvent::PhraseSaid {
-                    player,
-                    phrase: phrase.clone(),
-                });
-                super::un_actions::record_tell(
-                    state,
-                    player,
-                    &crate::types::un_actions::UnTell::Said {
-                        text: phrase.clone(),
-                    },
-                );
+                for _ in 0..(*repetitions).max(1) {
+                    events.push(GameEvent::PhraseSaid {
+                        player,
+                        phrase: phrase.clone(),
+                    });
+                    super::un_actions::record_tell(
+                        state,
+                        player,
+                        &crate::types::un_actions::UnTell::Said {
+                            text: phrase.clone(),
+                        },
+                    );
+                }
             }
         }
         AbilityCost::Tap => {
