@@ -6977,6 +6977,9 @@ fn take_route(
     if proposal.period.is_empty() {
         return TakeRoute::Ring;
     }
+    // CR 732.2c: a net-decreasing resource bounds the counting replay and is performed here.
+    // Refunded payments can instead leave the reserve unchanged while advancing its paid
+    // journal, so an unbounded certificate still needs the observed-cost check below.
     if n == 0
         || proposal.shortened_by.is_some()
         || !state.stack.is_empty()
@@ -6989,6 +6992,17 @@ fn take_route(
     let driven = drive_one_period_frames(state, &proposal.period, proposal.proposer);
     let frames = driven.as_ref().map(|cycle| &cycle.frames);
     if adds_restricted_mana(frames, proposal.proposer) || marks_damage(frames) {
+        return TakeRoute::Replay;
+    }
+    // CR 601.2f + CR 107.14 + CR 732.2c: the mark materializes token/counter/life growth but
+    // advances no per-turn journal, so a period that MOVES a journal a live cost modifier
+    // prices on (Blaster Hulk's `EnergyPaidOrLostThisTurn`) would leave a later cast reading a
+    // cost the period already paid for. Perform the period instead. The authority is the same
+    // period-tied one the recurrence gate uses, so a journal NO live modifier reads stays free
+    // to mark — a drain loop's `life_gained_this_turn` is not a cost input on most boards.
+    if frames.as_ref().is_some_and(|(before, after)| {
+        crate::analysis::resource::cost_modifier_reads_changed_projected_resource(before, after)
+    }) {
         return TakeRoute::Replay;
     }
     let growth = PeriodGrowth::derive(driven.as_ref(), proposal.proposer);
@@ -12553,6 +12567,7 @@ fn apply_action(
             }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::DigBottomOrder { .. }
     ) && !ripple_resolution_cast_in_flight(state)
     {
         state.revealed_cards.clear();

@@ -74,7 +74,7 @@ use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_re
 use super::oracle_dispatch::{dispatch_line_nom, NomDispatchIr};
 use super::oracle_effect::gap_diagnosis;
 use super::oracle_effect::imperative::{
-    PREVENT_DEALT_BY_TARGET_GAP, PREVENT_RECIPIENT_TARGET_ROLE_GAP,
+    PREVENT_DEALT_BY_TARGET_GAP, PREVENT_RECIPIENT_TARGET_ROLE_GAP, PREVENT_UNCONSUMED_QUANTITY_GAP,
 };
 use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
@@ -86,7 +86,7 @@ use super::oracle_effect::{
     try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::ast::parsed_clause;
-use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::context::{ParseContext, SpellAnaphorBinding};
 use super::oracle_ir::diagnostic::ClauseGapKind;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{
@@ -643,7 +643,15 @@ fn try_parse_opening_hand_reveal_delayed_trigger(
         Ok((input, condition))
     })?;
 
-    let effect = parse_effect_chain(rest, AbilityKind::Spell);
+    // CR 603.7 + CR 608.2k: delayed body, no announced parent target. Keep the
+    // Standalone lowering mode this builder already used.
+    let effect = crate::parser::oracle_effect::lower_ability_ir(
+        &crate::parser::oracle_effect::parse_ability_ir_standalone_with_spell_anaphor(
+            rest,
+            AbilityKind::Spell,
+            SpellAnaphorBinding::EventSource,
+        ),
+    );
     if has_unimplemented(&effect) {
         return None;
     }
@@ -1994,6 +2002,7 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -5792,7 +5801,14 @@ fn attach_trigger_die_result_branches(
         return start_line;
     }
 
-    let (branches, next_line) = parse_die_result_branches_ir(lines, start_line, AbilityKind::Spell);
+    // CR 608.2c + CR 608.2k: a trigger-owned results table is part of the
+    // triggered ability, so its rows keep the event-source anaphor binding.
+    let (branches, next_line) = parse_die_result_branches_ir(
+        lines,
+        start_line,
+        AbilityKind::Spell,
+        SpellAnaphorBinding::EventSource,
+    );
     for trigger in triggers
         .iter_mut()
         .filter(|trigger| trigger.has_terminal_roll_die())
@@ -5821,7 +5837,12 @@ fn attach_following_die_result_table(
         return start_line;
     }
 
-    let (branches, next_line) = parse_die_result_branches_ir(lines, start_line, AbilityKind::Spell);
+    let (branches, next_line) = parse_die_result_branches_ir(
+        lines,
+        start_line,
+        AbilityKind::Spell,
+        SpellAnaphorBinding::ParentTarget,
+    );
     if branches.is_empty() {
         return start_line;
     }
@@ -7241,9 +7262,20 @@ fn parse_normalized_oracle_ir(
                 );
                 // B7: Attach ability-word condition as fallback when extract_if_condition
                 // doesn't recognize the intervening-if pattern.
+                //
+                // CR 207.2c + CR 608.2c: the fallback is a POSITIVE trigger gate. An
+                // "unless" in the text spells the ability word's condition as a
+                // NEGATIVE gate on its own instruction (Shoreline Looter: "draw a
+                // card. Then discard a card unless there are seven or more cards in
+                // your graveyard"), so the positive fallback would invert the card.
+                let printed_unless_gate = scan_at_word_boundaries(&effect_lower, |i| {
+                    tag::<_, _, OracleError<'_>>("unless ").parse(i)
+                })
+                .is_some();
                 for trigger in &mut triggers {
                     if trigger.partial_def.condition.is_none()
                         && trigger.modifiers.intervening_if.is_none()
+                        && !printed_unless_gate
                     {
                         trigger.partial_def.condition = ability_word_to_trigger_condition(&aw_name);
                     }
@@ -7990,11 +8022,14 @@ fn parse_normalized_oracle_ir(
             // performing two different ones.
             let ir = parse_ability_ir_with_context(&line, AbilityKind::Spell, &mut ctx);
             let lowered = lower_ability_ir(&ir);
-            // A prevention with a target role this route cannot bind faithfully
-            // stays here as its gap: falling through would let Priority 8 read it
-            // as a blanket, card-wide prevention replacement.
+            // A prevention with a target role or a dynamic quantity this route
+            // cannot bind faithfully stays here as its gap: falling through would
+            // let Priority 8 read it as a blanket, card-wide prevention
+            // replacement (with an unconsumed X read as 0).
             let is_held_prevent_gap = any_unimplemented(&lowered, &|name| {
-                name == PREVENT_DEALT_BY_TARGET_GAP || name == PREVENT_RECIPIENT_TARGET_ROLE_GAP
+                name == PREVENT_DEALT_BY_TARGET_GAP
+                    || name == PREVENT_RECIPIENT_TARGET_ROLE_GAP
+                    || name == PREVENT_UNCONSUMED_QUANTITY_GAP
             });
             if !has_unimplemented(&lowered) || is_held_prevent_gap {
                 emitter.ability_ir_at(item_line, ir);
@@ -14369,12 +14404,13 @@ mod following_die_result_table_attach_tests {
 /// The `has_unimplemented` tests elsewhere in this file hand-build a `RollDie`
 /// AST, which proves the gate can SEE such a marker but not that the row
 /// collector ever PRODUCES one. This module drives the real collector
-/// (`parse_die_result_branches_ir` → `parse_ability_ir_standalone`), so the
+/// (`parse_die_result_branches_ir` → `parse_ability_ir` in `Standalone` mode), so the
 /// marker path is actually exercised end to end.
 #[cfg(test)]
 mod die_result_row_failure_marker_tests {
     use super::has_unimplemented;
     use crate::parser::oracle_effect::lower_ability_ir;
+    use crate::parser::oracle_ir::context::SpellAnaphorBinding;
     use crate::parser::oracle_special::parse_die_result_branches_ir;
     use crate::types::ability::{AbilityKind, Effect};
 
@@ -14388,7 +14424,12 @@ mod die_result_row_failure_marker_tests {
 
     #[test]
     fn an_unparseable_row_body_surfaces_a_marker_instead_of_vanishing() {
-        let (branches, next_line) = parse_die_result_branches_ir(&LINES, 0, AbilityKind::Spell);
+        let (branches, next_line) = parse_die_result_branches_ir(
+            &LINES,
+            0,
+            AbilityKind::Spell,
+            SpellAnaphorBinding::ParentTarget,
+        );
         // A row that VANISHES is worse than a row that fails: the table would
         // silently shrink and the printed instruction would be unrecoverable.
         assert_eq!(branches.len(), 2, "both printed rows must be collected");
@@ -14416,7 +14457,12 @@ mod die_result_row_failure_marker_tests {
     /// the assertion above while being completely inert.
     #[test]
     fn the_sibling_row_in_the_same_table_still_carries_a_real_effect() {
-        let (branches, _) = parse_die_result_branches_ir(&LINES, 0, AbilityKind::Spell);
+        let (branches, _) = parse_die_result_branches_ir(
+            &LINES,
+            0,
+            AbilityKind::Spell,
+            SpellAnaphorBinding::ParentTarget,
+        );
         let parseable = lower_ability_ir(&branches[0].effect);
         assert!(
             matches!(parseable.effect.as_ref(), Effect::Draw { .. }),
@@ -14424,5 +14470,59 @@ mod die_result_row_failure_marker_tests {
             parseable.effect
         );
         assert!(!has_unimplemented(&parseable));
+    }
+}
+
+/// CR 706.3b + CR 608.2k: the spell-anaphor binding handed to
+/// `parse_die_result_branches_ir` is honored by a row's bare "that spell"
+/// consumer. A resolving die-roll spell's table names its own announced spell
+/// (`ParentTarget`); a trigger-owned table names the event's spell
+/// (`EventSource` -> `TriggeringSource`).
+///
+/// No printed card has a bare "that spell" Counter row in any results table
+/// (checked against AtomicCards). The nearest printed card is Mathise, Surge
+/// Channeler ("20 | Copy that spell. You may choose new targets for the
+/// copy."), whose CopySpell row cannot tell the bindings apart because the
+/// copy consumer keeps the event-source default. This table therefore uses the
+/// Counter consumer, which does read the binding, as a regression guard for the
+/// hand-off rather than a coverage change.
+#[cfg(test)]
+mod die_result_row_spell_anaphor_tests {
+    use crate::parser::oracle_effect::lower_ability_ir;
+    use crate::parser::oracle_ir::context::SpellAnaphorBinding;
+    use crate::parser::oracle_special::parse_die_result_branches_ir;
+    use crate::types::ability::{AbilityKind, Effect, TargetFilter};
+
+    const LINES: [&str; 2] = ["1—19 | Draw a card.", "20 | Counter that spell."];
+
+    #[test]
+    fn die_result_row_counter_anaphor_follows_the_handed_down_binding() {
+        for (binding, expected) in [
+            (
+                SpellAnaphorBinding::ParentTarget,
+                TargetFilter::ParentTarget,
+            ),
+            (
+                SpellAnaphorBinding::EventSource,
+                TargetFilter::TriggeringSource,
+            ),
+        ] {
+            let (branches, _) =
+                parse_die_result_branches_ir(&LINES, 0, AbilityKind::Spell, binding);
+            // Reach guard: both rows were collected, so row 20 is the Counter row.
+            assert_eq!(
+                branches.len(),
+                2,
+                "{binding:?}: both rows must be collected"
+            );
+            let row = lower_ability_ir(&branches[1].effect);
+            match row.effect.as_ref() {
+                Effect::Counter { target, .. } => assert_eq!(
+                    *target, expected,
+                    "{binding:?}: the row's bare 'that spell' must follow the binding"
+                ),
+                other => panic!("{binding:?}: row 20 must lower to Counter, got {other:?}"),
+            }
+        }
     }
 }

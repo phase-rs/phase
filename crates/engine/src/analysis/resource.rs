@@ -25,7 +25,7 @@ use crate::analysis::decision_template::{
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityUseTally, ActivationRestriction, CastingPermission,
-    DamageModification, TargetRef,
+    DamageModification, QuantityRef, TargetRef,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -856,7 +856,9 @@ mod map_key_pairs {
 /// it finds here, the second asks whether the period charges this point's slot — and each binds
 /// the magnitude to `_`. The **magnitude** is read by
 /// [`PeriodicDelta::declared_seat_life_charges`], which charges a seat every slot a declaration
-/// may newly land on it (the AI's bounded-declare veto is its production caller). It is also the
+/// may newly land on it (in production, the engine's `PeriodicDelta::seat_crossing` and the AI's
+/// bounded-declare veto both read those charges through
+/// [`PeriodicDelta::declared_seat_life_crossing`]). It is also the
 /// wire witness of the mint's magnitude derivation, the only place
 /// [`ResourceVector::worst_seat_life_loss`]' output is observable off the certificate, and the
 /// accepted row pinning that derivation asserts against it. Narrowing the shape to a slot list
@@ -1224,12 +1226,12 @@ impl PeriodicDelta {
     /// inside `k` reaches `remaining_life`: CR 704.3 checks CR 704.5a whenever a player would get
     /// priority, including the beats INSIDE a repetition, so a repetition that nets nothing can
     /// still take a total to zero on the way — which is why the two terms are not one number.
-    /// There is no division on this axis and therefore no net-versus-dip divisor to choose.
     ///
     /// TAKES THE CHARGE STREAM, NOT ITS INGREDIENTS, and holds no receiver: the charges are
     /// [`PeriodicDelta::declared_seat_life_charges`]' answer and are never re-derived here, so the
-    /// two authorities cannot disagree about what one repetition costs while this one owns when it
-    /// becomes lethal.
+    /// two authorities cannot disagree about what one repetition costs while this one, and
+    /// `first_life_crossing_by_stretch` (its stretch-at-a-time reading, held equal to it by
+    /// `a_life_crossing_read_by_stretch_is_the_stepping_walks`), own when it becomes lethal.
     ///
     /// `horizon` IS MANDATORY, AND IT IS A TERMINATION REQUIREMENT rather than a convenience.
     /// That producer returns a LAZY, UNBOUNDED iterator, and a seat the declaration never charges
@@ -1376,6 +1378,33 @@ impl PeriodicDelta {
         bound: ChargeBound,
         lead: AnnouncedLead<'a>,
     ) -> impl Iterator<Item = DeclaredLifeCharge> + 'a {
+        (0..).map(self.declared_seat_life_charge_at(
+            seat,
+            declaration,
+            observed,
+            points,
+            state,
+            bound,
+            lead,
+        ))
+    }
+
+    /// The charge of [`Self::declared_seat_life_charges`] at one iteration index: repetition
+    /// `index + 1`'s. A function of the index alone, so a caller may read any repetition's charge
+    /// without walking to it.
+    // Each parameter is a separate authority the caller states, for the reason
+    // `PeriodicDelta::seat_crossing` gives.
+    #[allow(clippy::too_many_arguments)]
+    fn declared_seat_life_charge_at<'a>(
+        &'a self,
+        seat: PlayerId,
+        declaration: Option<&'a DecisionTemplate>,
+        observed: Option<&'a DecisionTemplate>,
+        points: &'a [DecisionPoint],
+        state: &'a GameState,
+        bound: ChargeBound,
+        lead: AnnouncedLead<'a>,
+    ) -> impl Fn(IterationIndex) -> DeclaredLifeCharge + 'a {
         let charge_on_seat = |charges: &[(PlayerId, i64)]| {
             charges
                 .iter()
@@ -1408,7 +1437,9 @@ impl PeriodicDelta {
         // leads by nothing, one index behind for a slot that leads.
         let resolves_own = !one_template && slots.iter().any(|&(.., leads)| leads == 0);
         let resolves_behind = slots.iter().any(|&(.., leads)| leads > 0);
-        (0..).map(move |iteration: IterationIndex| {
+        move |iteration: IterationIndex| {
+            #[cfg(feature = "test-support")]
+            crate::game::perf_counters::record_declared_life_charge_read();
             // With no charged slot there is no pin to read and every repetition is alike.
             let resolve_at = |template: Option<&DecisionTemplate>, index: IterationIndex| {
                 template
@@ -1516,7 +1547,131 @@ impl PeriodicDelta {
                     }
                 }
             }
-        })
+        }
+    }
+
+    /// CR 704.3 + CR 704.5a: [`Self::first_life_crossing`] over
+    /// [`Self::declared_seat_life_charges`], the same answer for every input, computed without
+    /// stepping through repetitions whose charge cannot differ from the one before.
+    ///
+    /// On one board a repetition's charge depends on its index only through the two templates'
+    /// resolutions and, for a slot that leads, the latched aim its first repetition reads and the
+    /// declaration it reads one index behind (CR 603.3d + CR 601.2c); a resolution changes only at
+    /// a pre-declared switch point (`DecisionTemplate::resolution_change_points`). Between two
+    /// such points every repetition carries one charge, so `Self::first_life_crossing_by_stretch`
+    /// reads one charge per stretch where the stepping walk reads one per repetition up to
+    /// `horizon`. A seat the declaration never charges, on a board whose horizon is a life total in
+    /// the billions, is read once per stretch instead of once per point of that total.
+    ///
+    /// A template with no finite list of switch points (a round robin of two or more) is walked
+    /// repetition by repetition, as [`Self::first_life_crossing`] walks any stream. That is a
+    /// stated limit: no engine producer builds such a schedule, and it arrives only in input the
+    /// engine did not write: a hand-written `DeclareShortcut`, a remote client's included (the
+    /// server's payload guard bounds the schedule's length and passes it through), or a restored
+    /// save, whose offer declaration and proposal template deserialize their pins verbatim.
+    ///
+    /// `pub` so `phase-ai`'s proposer veto (`cycles_to_proposer_elimination`) asks this reader as
+    /// `PeriodicDelta::seat_crossing` does, rather than stepping through the charges itself: the
+    /// veto and the cascade's life axis are one reduction.
+    // Each parameter is a separate authority the caller states, for the reason
+    // `PeriodicDelta::seat_crossing` gives.
+    #[allow(clippy::too_many_arguments)]
+    pub fn declared_seat_life_crossing(
+        &self,
+        seat: PlayerId,
+        declaration: Option<&DecisionTemplate>,
+        observed: Option<&DecisionTemplate>,
+        points: &[DecisionPoint],
+        state: &GameState,
+        bound: ChargeBound,
+        lead: AnnouncedLead<'_>,
+        remaining_life: i64,
+        horizon: u32,
+    ) -> Option<u32> {
+        let charge_at = self.declared_seat_life_charge_at(
+            seat,
+            declaration,
+            observed,
+            points,
+            state,
+            bound,
+            lead,
+        );
+        // With no charged slot no template is read, so the stream never changes.
+        let mut changes: BTreeSet<IterationIndex> = BTreeSet::new();
+        if !self.victim_slot.is_empty() {
+            for template in [declaration, observed].into_iter().flatten() {
+                let Some(switches) = template.resolution_change_points() else {
+                    return Self::first_life_crossing(
+                        (0..).map(charge_at),
+                        remaining_life,
+                        horizon,
+                    );
+                };
+                for switch in switches {
+                    // A leading slot reads the declaration one index behind, so its change
+                    // lands one index later. A point too many only splits a stretch in two.
+                    changes.insert(switch);
+                    changes.insert(switch.saturating_add(AnnouncedLead::LEADING));
+                }
+            }
+            // The latched aims answer only the leading repetition.
+            changes.insert(AnnouncedLead::LEADING);
+        }
+        Self::first_life_crossing_by_stretch(charge_at, &changes, remaining_life, horizon)
+    }
+
+    /// CR 704.3 + CR 704.5a: [`Self::first_life_crossing`]'s answer for a stream given by
+    /// `charge_at` (the charge of the repetition after `index` earlier ones) that changes only
+    /// at the indices in `changes`, read one charge per stretch.
+    ///
+    /// Within a stretch that starts after `netted` life is gone, repetition `j` of the stretch
+    /// (from 0) is fatal when `netted + j * net + dip` reaches `remaining_life`. So it is the
+    /// first repetition of the stretch when its dip alone reaches, otherwise the least `j` with
+    /// `j * net >= remaining_life - netted - dip` when the stretch nets anything, and no
+    /// repetition of the stretch otherwise. `changes` may hold indices at which nothing changes:
+    /// a stretch split in two gives the same answer.
+    fn first_life_crossing_by_stretch(
+        charge_at: impl Fn(IterationIndex) -> DeclaredLifeCharge,
+        changes: &BTreeSet<IterationIndex>,
+        remaining_life: i64,
+        horizon: u32,
+    ) -> Option<u32> {
+        let mut netted = 0i64;
+        // The index of the stretch's first repetition, which is also how many came before it.
+        let mut start: IterationIndex = 0;
+        let ends = changes
+            .iter()
+            .copied()
+            .filter(|point| *point > 0)
+            .map(Some)
+            .chain([None]);
+        for end in ends {
+            // Indices `start..end` are repetitions `start + 1 ..= end`.
+            let last = end.map_or(horizon, |end| end.min(horizon));
+            if last <= start {
+                continue;
+            }
+            let charge = charge_at(start);
+            let run = i64::from(last - start);
+            let short = remaining_life
+                .saturating_sub(netted)
+                .saturating_sub(charge.dip);
+            let steps = if short <= 0 {
+                Some(0)
+            } else if charge.net > 0 {
+                // Rounded up: the least `j` with `j * net >= short`.
+                Some((short + charge.net - 1) / charge.net)
+            } else {
+                None
+            };
+            if let Some(steps) = steps.filter(|steps| *steps < run) {
+                return u32::try_from(i64::from(start) + 1 + steps).ok();
+            }
+            netted = netted.saturating_add(run.saturating_mul(charge.net));
+            start = last;
+        }
+        None
     }
 
     /// CR 119.3: the one domain seat whose observed loss is wholly the period's single charged
@@ -1575,25 +1730,31 @@ impl PeriodicDelta {
     ///
     /// # The arithmetic is the existing arithmetic, per seat, over its own charge stream
     ///
-    /// The life axis has no divisor (there is nothing to divide): the crossing comes from
-    /// [`PeriodicDelta::first_life_crossing`] over
-    /// [`PeriodicDelta::declared_seat_life_charges`], whose `net`/`dip` pair is what CR 704.3's
+    /// The life crossing is [`PeriodicDelta::first_life_crossing`]'s answer over
+    /// [`PeriodicDelta::declared_seat_life_charges`], read by `declared_seat_life_crossing` one
+    /// charge per stretch between the declarations' switch points, with one rounded-up division
+    /// inside the stretch that crosses. The charges' `net`/`dip` pair is what CR 704.3's
     /// per-priority-beat sweep requires. The poison and library axes have a constant per-period
     /// magnitude, so their crossing is [`ResourceVector::narrowed_repetitions`]' strict answer
     /// plus one — the least count PAST the threshold. The seat's crossing is the minimum of the
     /// three.
     ///
-    /// ONE PASS PER SEAT OVER THE WHOLE STREAM, and that IS the per-departure walk rather than a
-    /// short cut around it. `declared_seat_life_charges` resolves the declaration's pin ONCE PER
-    /// REPETITION, at that repetition's index less the lead its caller states for each slot, so a
-    /// declaration that re-aims at a later repetition — the witness below is exactly that shape —
-    /// already charges each seat what that repetition charges it. Spending
-    /// a segment's repetitions out of a seat's headroom and re-dividing the remainder would
-    /// restate the same accumulation with a second rounding step, and the horizon is the seat's
-    /// own remaining headroom for the reason D4 gives: `net` and `dip` are non-negative, so a
-    /// repetition that does not advance the accumulation never brings the crossing nearer. That
-    /// premise survives both [`ChargeBound`]s because the attributable direction clamps its net
-    /// term rather than letting an over-estimated magnitude carry a negative into this walk.
+    /// ONE READING PER SEAT, A STRETCH AT A TIME, and that IS the per-departure walk rather than a
+    /// short cut around it. `declared_seat_life_charges` resolves the declaration's pin at each
+    /// repetition's index less the lead its caller states for each slot, so a declaration that
+    /// re-aims at a later repetition — the witness below is exactly that shape — already charges
+    /// each seat what that repetition charges it. A resolution changes only at a pre-declared
+    /// switch point ([`DecisionTemplate::resolution_change_points`]), so
+    /// `declared_seat_life_crossing` reads one charge per stretch between two of them, carries the
+    /// life netted so far across each switch point exactly as the stepping walk does, and rounds
+    /// only inside the stretch that crosses: one division there, never a second rounding step on a
+    /// remainder. The horizon is the walk's, [`cascade_horizon`]'s sum of the living seats'
+    /// headrooms, not each seat's own: a declaration may defer a seat's charge to a later segment,
+    /// so a seat's own headroom is not an upper bound on the repetition its crossing lands on.
+    /// Both `net` and `dip` are non-negative, so a repetition that does not advance the
+    /// accumulation never brings the crossing nearer. That premise survives both [`ChargeBound`]s
+    /// because the attributable direction clamps its net term rather than letting an
+    /// over-estimated magnitude carry a negative into this walk.
     ///
     /// # The magnitude-constancy premise, stated rather than claimed
     ///
@@ -1712,16 +1873,14 @@ impl PeriodicDelta {
         // non-negativity holds under both `ChargeBound`s, and under `Attributable` it is the
         // producer's clamp that keeps it.
         let remaining_life = i64::from(p.life);
-        let life = Self::first_life_crossing(
-            self.declared_seat_life_charges(
-                p.id,
-                declaration,
-                observed,
-                points,
-                state,
-                bound,
-                lead,
-            ),
+        let life = self.declared_seat_life_crossing(
+            p.id,
+            declaration,
+            observed,
+            points,
+            state,
+            bound,
+            lead,
             remaining_life,
             horizon,
         );
@@ -3576,10 +3735,14 @@ fn cover_projection(state: &GameState) -> GameState {
 /// colour, card types and abilities.
 ///
 /// INHERITED EXTRAPOLATION ASSUMPTION: this constant-depth path extrapolates the per-cycle
-/// delta over unboundedly many cycles with NO syntactic guard on either fire-time read
-/// surface. A dormant intervening-if / static / replacement reading a projected resource
-/// could arm mid-extrapolation; the shipped 2p drain detection depends on this behaviour
-/// and is regression-pinned. [`loop_states_cover_modulo_growth`] closes both surfaces by
+/// delta over unboundedly many cycles and does not guard every fire-time read surface. The
+/// cost-CONSTANCY half is closed structurally: a live cost modifier whose `dynamic_count`
+/// reads a projected journal that MOVED between the compared frames vetoes the comparison
+/// ([`cost_modifier_reads_changed_projected_resource`]), because such a modifier prices the
+/// next repeat differently from the one it extrapolates. The remaining assumption is a dormant
+/// intervening-if / static / replacement CONDITION reading a projected resource, which could
+/// arm mid-extrapolation; the shipped 2p drain detection depends on this behaviour and is
+/// regression-pinned. [`loop_states_cover_modulo_growth`] closes both surfaces by
 /// construction rather than inheriting the assumption.
 pub fn loop_states_equal_modulo_resources(a: &GameState, b: &GameState) -> bool {
     loop_states_equal_modulo_resources_side(a, b)
@@ -3597,6 +3760,15 @@ pub(crate) fn loop_states_equal_modulo_resources_side<'a, C: CurrentSide<'a>>(
     b: C,
 ) -> bool {
     bump_loop_detect_cost(|cost| cost.compares_equal_modulo_resources += 1);
+    // CR 601.2f + CR 732.2a: a live cost modifier that reads a projected journal (Blaster
+    // Hulk's `EnergyPaidOrLostThisTurn`) prices the next repeat differently even when the
+    // projected-out reserve is restored, so the recurrence is not constant. Reject before
+    // projecting. Check BOTH the prior state and the current state, because a cost modifier
+    // (e.g., a spell on the stack) may only be live in the current state at the priority
+    // window sample point, not in the prior state.
+    if cost_modifier_reads_changed_projected_resource(a, b.state()) {
+        return false;
+    }
     let pa = project_out_resources(a);
     let pb = b.projected();
     // CR 606.3: the per-object loyalty-activation count (and the per-permanent
@@ -3627,6 +3799,240 @@ fn loyalty_activation_counts_match(a: &GameState, b: &GameState) -> bool {
                 && oa.extra_loyalty_activations_this_turn == ob.extra_loyalty_activations_this_turn
         })
     })
+}
+
+/// CR 601.2f + CR 732.2a: does a LIVE cost modifier's projected-journal multiplier observe a
+/// DIFFERENT value on the two compared frames?
+///
+/// [`project_out_resources`] zeroes the per-turn journals on BOTH compared frames, so a pair
+/// whose journal moved compares equal and would certify a recurrence whose price is not
+/// constant. This veto is that missing conjunct — but it is a claim about the PERIOD, not about
+/// the modifier's presence in the state: a projected-reading modifier prices the next repeat
+/// differently only when the journal it reads actually MOVED across the compared period.
+///
+/// Presence is not a dependency. CR 601.2f prices the spell actually cast, and CR 732.2a's
+/// "predictable results" are untouched by a value that does not move — so a modifier that
+/// prices an unmoved journal permits the recurrence. That matters because a self-spell
+/// reduction functions OFF the stack as well as on it (CR 113.6; Blaster Hulk's
+/// `self_spell_cost_mod_active_zones` opts into hand and library precisely so the card can
+/// price its own cast): a Hulk nobody casts, sitting in hand with the journal at zero on both
+/// frames, must not refuse to certify an unrelated, energy-free drain recurrence.
+///
+/// The same question covers a BATTLEFIELD reducer that prices ANOTHER spell ("Instant and
+/// sorcery spells you cast cost {1} less …"). No "only its own source's cast counts"
+/// carve-out is applied — and none would be correct for a board-wide reducer — because the
+/// period tie is the journal's observed value, not the source's role.
+///
+/// Fail-closed: a modifier whose source exists on only one frame cannot be priced on both, so
+/// it vetoes.
+pub(crate) fn cost_modifier_reads_changed_projected_resource(
+    prior: &GameState,
+    current: &GameState,
+) -> bool {
+    prior
+        .objects
+        .keys()
+        .chain(current.objects.keys())
+        .any(|id| {
+            let multipliers = projected_cost_multipliers(*id, prior, current);
+            if multipliers.is_empty() {
+                return false;
+            }
+            let (Some(before), Some(after)) = (prior.objects.get(id), current.objects.get(id))
+            else {
+                return true;
+            };
+            multipliers.into_iter().any(|qty| {
+                resolve_cost_multiplier(prior, before.controller, *id, qty)
+                    != resolve_cost_multiplier(current, after.controller, *id, qty)
+            })
+        })
+}
+
+/// CR 601.2f + CR 113.6: the projected-journal multipliers of the LIVE cost-modifier statics
+/// `id` carries on EITHER compared frame. `object_content_eq` omits static definitions, so a
+/// modifier installed only on the current frame is invisible to a prior-only scan while the
+/// journal it reads still moves.
+fn projected_cost_multipliers<'a>(
+    id: ObjectId,
+    prior: &'a GameState,
+    current: &'a GameState,
+) -> Vec<&'a QuantityRef> {
+    let mut multipliers = Vec::new();
+    for state in [prior, current] {
+        let Some(object) = state.objects.get(&id) else {
+            continue;
+        };
+        multipliers.extend(object.static_definitions.iter_all().filter_map(|def| {
+            // CR 113.6: a static that does not function in its source's zone modifies no
+            // cost, so an inert copy (a graveyard it does not function from) is not a live
+            // cost dependency.
+            crate::game::functioning_abilities::static_functions_in_zone(object, def)
+                .then(|| static_mode_projected_count(&def.mode))
+                .flatten()
+        }));
+    }
+    multipliers
+}
+
+/// CR 601.2f: one cost modifier's multiplier, priced on `state` exactly as cost determination
+/// prices it — the source's controller is the payer whose journal the multiplier reads.
+fn resolve_cost_multiplier(
+    state: &GameState,
+    controller: PlayerId,
+    source: ObjectId,
+    qty: &QuantityRef,
+) -> i32 {
+    use crate::game::quantity::{resolve_quantity_with_ctx, QuantityContext};
+    resolve_quantity_with_ctx(
+        state,
+        &crate::types::ability::QuantityExpr::Ref { qty: qty.clone() },
+        controller,
+        QuantityContext::new(source),
+    )
+}
+
+/// CR 601.2f: EXHAUSTIVE projection (no `_` arm) of a `StaticMode`'s cost multiplier — the
+/// `dynamic_count` of `ModifyCost` / `ReduceAbilityCost` when it reads a projected per-turn
+/// journal (e.g. `EnergyPaidOrLostThisTurn`), else `None`. Every non-modifier variant binds
+/// read-free, so a new variant must be classified here before it compiles.
+///
+/// ONE authority for this axis, read by the period-tied veto
+/// ([`cost_modifier_reads_changed_projected_resource`]) at every consumer that extrapolates a
+/// recurrence: the constant-depth equality, the stack-growth cover, the object-growth cover,
+/// and `game::engine::take_route`.
+fn static_mode_projected_count(mode: &crate::types::statics::StaticMode) -> Option<&QuantityRef> {
+    use crate::game::ability_scan::quantity_ref_references_projected_resource as reads_projected;
+    use crate::types::statics::StaticMode;
+    match mode {
+        StaticMode::ModifyCost { dynamic_count, .. }
+        | StaticMode::ReduceAbilityCost { dynamic_count, .. } => dynamic_count
+            .as_ref()
+            .filter(|dynamic_count| reads_projected(dynamic_count)),
+        // All other variants do not carry a projected-resource-reading dynamic_count.
+        StaticMode::ImposeAdditionalCost { .. }
+        | StaticMode::AlternativeKeywordCost { .. }
+        | StaticMode::CastWithAlternativeCost { .. }
+        | StaticMode::TopOfLibraryCastPermission { .. }
+        | StaticMode::GraveyardCastPermission { .. }
+        | StaticMode::ExileCastPermission { .. }
+        | StaticMode::CastWithKeyword { .. }
+        | StaticMode::MustAttackDefender { .. }
+        | StaticMode::Continuous
+        | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::CantAttack
+        | StaticMode::CantBlock
+        | StaticMode::CantAttackOrBlock
+        | StaticMode::CantBecomeSuspected
+        | StaticMode::MaxAttackersEachCombat { .. }
+        | StaticMode::MaxBlockersEachCombat { .. }
+        | StaticMode::CantBeTargeted
+        | StaticMode::CantBeCast { .. }
+        | StaticMode::CantBeActivated { .. }
+        | StaticMode::CantSearchLibrary { .. }
+        | StaticMode::RestrictLibrarySearchToTop { .. }
+        | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
+        | StaticMode::CantCauseSacrificeOrExile { .. }
+        | StaticMode::CantCauseForcedAction { .. }
+        | StaticMode::CastWithFlash
+        | StaticMode::GrantsExtraVote
+        | StaticMode::GrantsExtraVillainousChoice
+        | StaticMode::ReduceActionCost { .. }
+        | StaticMode::ModifyActivationLimit { .. }
+        | StaticMode::ActivateAsInstant { .. }
+        | StaticMode::CantPayCost { .. }
+        | StaticMode::CantGainLife
+        | StaticMode::CantLoseLife
+        | StaticMode::PlayerProtection(..)
+        | StaticMode::MustAttack
+        | StaticMode::MustBlock
+        | StaticMode::MustBlockAttacker { .. }
+        | StaticMode::CantDraw { .. }
+        | StaticMode::DrawFromBottom { .. }
+        | StaticMode::DoubleTriggers { .. }
+        | StaticMode::IgnoreHexproof
+        | StaticMode::ExtraBlockers { .. }
+        | StaticMode::RevealTopOfLibrary { .. }
+        | StaticMode::RevealHand { .. }
+        | StaticMode::TopOfLibraryHasPlot
+        | StaticMode::TopOfLibraryPlotPermission
+        | StaticMode::CastFromHandFree { .. }
+        | StaticMode::LinkedCollectionCounterPlayPermission
+        | StaticMode::CountersPersistAcrossZones { .. }
+        | StaticMode::CountersCantBeRemoved { .. }
+        | StaticMode::CantBeCountered
+        | StaticMode::CantBeCopied
+        | StaticMode::CantEnterBattlefieldFrom
+        | StaticMode::CantCastFrom { .. }
+        | StaticMode::CantCastDuring { .. }
+        | StaticMode::CantActivateDuring { .. }
+        | StaticMode::PerTurnCastLimit { .. }
+        | StaticMode::PerTurnDrawLimit { .. }
+        | StaticMode::SuppressTriggers { .. }
+        | StaticMode::CantBeBlocked
+        | StaticMode::CantBeBlockedExceptBy { .. }
+        | StaticMode::CantBeBlockedBy { .. }
+        | StaticMode::CantBeBlockedByMoreThan { .. }
+        | StaticMode::CantBeBlockedUnlessAllBlock
+        | StaticMode::AttachmentRestriction { .. }
+        | StaticMode::Protection
+        | StaticMode::Indestructible
+        | StaticMode::CantBeDestroyed
+        | StaticMode::CantBeRegenerated
+        | StaticMode::FlashBack
+        | StaticMode::Shroud
+        | StaticMode::Hexproof
+        | StaticMode::Vigilance
+        | StaticMode::Menace
+        | StaticMode::Reach
+        | StaticMode::Flying
+        | StaticMode::Trample
+        | StaticMode::Deathtouch
+        | StaticMode::Lifelink
+        | StaticMode::CantTap
+        | StaticMode::CantUntap
+        | StaticMode::MustBeBlocked { .. }
+        | StaticMode::MustBeBlockedByAll { .. }
+        | StaticMode::Goaded
+        | StaticMode::MustAttackAwayFromSource
+        | StaticMode::CombatAlone { .. }
+        | StaticMode::CantCrew
+        | StaticMode::CantPhaseIn
+        | StaticMode::CrewContribution { .. }
+        | StaticMode::MayLookAtTopOfLibrary
+        | StaticMode::MayLookAtFaceDown
+        | StaticMode::CantBeTurnedFaceUp
+        | StaticMode::MayChooseNotToUntap
+        | StaticMode::AdditionalLandDrop { .. }
+        | StaticMode::EmblemStatic
+        | StaticMode::BlockRestriction { .. }
+        | StaticMode::NoMaximumHandSize
+        | StaticMode::MaximumHandSize { .. }
+        | StaticMode::MayPlayAdditionalLand
+        | StaticMode::CantHaveKeyword { .. }
+        | StaticMode::CantWinTheGame
+        | StaticMode::CantLoseTheGame
+        | StaticMode::LegendRuleDoesntApply
+        | StaticMode::SpeedCanIncreaseBeyondFour
+        | StaticMode::DefilerCostReduction { .. }
+        | StaticMode::SkipStep { .. }
+        | StaticMode::SpendManaAsAnyColor { .. }
+        | StaticMode::PayLifeAsColoredMana { .. }
+        | StaticMode::StepEndUnspentMana { .. }
+        | StaticMode::UnspentManaLossCausesLifeLoss
+        | StaticMode::WinFirstCoinFlipSetEachTurn
+        | StaticMode::CanAttackWithDefender
+        | StaticMode::AttackOnlyNeighbor
+        | StaticMode::IgnoreLandwalkForBlocking { .. }
+        | StaticMode::CanActivateAbilitiesAsThoughHaste
+        | StaticMode::CanBlockShadow
+        | StaticMode::AssignNoCombatDamage
+        | StaticMode::UntapsDuringEachOtherPlayersUntapStep
+        | StaticMode::MaxUntapPerType { .. }
+        | StaticMode::EntersWithAdditionalCounters { .. }
+        | StaticMode::CountsAsNamed { .. }
+        | StaticMode::Other(..) => None,
+    }
 }
 
 /// CR 110.1: a permanent is a card or token on the battlefield — this captures one such
@@ -4460,7 +4866,11 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a, C: CurrentSide<'a>>(
     pa.stack_trigger_firings.clear();
     if !(loop_states_equal(&pa, &pb)
         && loyalty_activation_counts_match(&pa, &pb)
-        && object_resource_axes_match(prior, current))
+        && object_resource_axes_match(prior, current)
+        // CR 601.2f + CR 732.2a: a live cost modifier whose projected journal MOVED between
+        // these frames makes the next repeat cost something else, so the covered recurrence is
+        // not constant.
+        && !cost_modifier_reads_changed_projected_resource(prior, current))
     {
         return false;
     }
@@ -4636,7 +5046,10 @@ fn flush_clone(state: &GameState) -> GameState {
 ///     covers ([`eq_except_growable`]);
 /// 2″. every grown object is churn-inert ([`grown_objects_are_inert`]);
 /// 4″. no cost surface references the growing class (CR 732.2a — the EXHAUSTIVE cost scan
-///     plus the cost-keyword keystone rejectors).
+///     plus the cost-keyword keystone rejectors). A cost modifier pricing a PROJECTED per-turn
+///     journal is the one cost surface this scan does not answer: it is period-tied, not
+///     presence-tied, and gate 1″ vetoes it only when the journal actually moved
+///     ([`cost_modifier_reads_changed_projected_resource`]).
 pub(crate) fn loop_states_cover_modulo_object_growth(
     prior: &GameState,
     current: &GameState,
@@ -4670,6 +5083,12 @@ pub(crate) fn loop_states_cover_modulo_object_growth(
     if !(board_covers(&pa, &pb, &grown_ids)
         && object_resource_axes_match(prior, current)
         && loyalty_activation_counts_match(&pa, &pb)
+        // CR 601.2f + CR 732.2a: a live cost modifier whose projected journal MOVED between
+        // the compared frames prices the next repeat differently, so the covered recurrence is
+        // not constant. Period-tied, not presence-tied — the same authority the constant-depth
+        // equality and the stack-growth cover use, and the reason
+        // `static_mode_references_growing_class` no longer vetoes the projected read alone.
+        && !cost_modifier_reads_changed_projected_resource(prior, current)
         && eq_except_growable(&pa, &pb, &grown_ids))
     {
         return false;
@@ -7059,8 +7478,10 @@ fn stack_entry_reads_growing_class(entry: &StackEntry) -> bool {
     }
 }
 
-/// CR 601.2f + CR 732.2a: does ANY cost surface reference the growing class? ONE predicate
-/// over EVERY cost surface on the FLUSHED current:
+/// CR 601.2f + CR 732.2a: does ANY cost surface reference the growing class — a board
+/// aggregate or a projected per-turn journal (both halves of
+/// [`crate::game::ability_scan`]'s `reads_growing_class`)? ONE predicate over EVERY cost
+/// surface on the FLUSHED current:
 /// (1) the cost-KEYWORD family — a board/graveyard-referencing cost reducer or
 /// tap/sacrifice aggregate (Affinity/Convoke/Crew/Delve/Emerge/…) on ANY object (a
 /// recast loop's keyword rides an off-battlefield card), printed or granted;
@@ -7153,10 +7574,20 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         // BOTH directions: `Raise`+`ObjectCount` is the false-positive-∞ case, and
         // `Reduce` is the keystone-REJECT case. `amount` (a fixed `ManaCost`) and
         // every other field are read-free.
+        //
+        // A PROJECTED read (a per-turn journal such as Blaster Hulk's
+        // `EnergyPaidOrLostThisTurn`) is deliberately NOT vetoed here: presence is not a
+        // dependency. `project_out_resources` zeroes the journal on BOTH compared frames, so
+        // the only period in which the next repeat costs something else is one where the
+        // journal MOVED. That period-tied question is asked once, by
+        // [`cost_modifier_reads_changed_projected_resource`], at the cover's own gate. Vetoing
+        // on presence would refuse an unrelated, energy-free recurrence merely because an
+        // uncast Blaster Hulk sits in hand, where its self-spell reduction is live (CR 113.6)
+        // but prices nothing.
         StaticMode::ModifyCost { dynamic_count, .. }
-        | StaticMode::ReduceAbilityCost { dynamic_count, .. } => {
-            dynamic_count.as_ref().is_some_and(qty_reads)
-        }
+        | StaticMode::ReduceAbilityCost { dynamic_count, .. } => dynamic_count
+            .as_ref()
+            .is_some_and(qty_reads),
         // CR 118.8 / CR 118.9 / CR 601.2f: variants carrying an `AbilityCost` payment
         // — the additional/alternative cast cost — route it through the exhaustive
         // `AbilityCost` scanner (a `PayLife`/`ManaDynamic`/… reading `ObjectCount`
@@ -8427,6 +8858,7 @@ fn project_out_player_consumables(p: &mut Player) {
         player_counters,
         life_gained_this_turn,
         life_lost_this_turn,
+        energy_paid_or_lost_this_turn,
         cards_drawn_this_turn,
         cards_drawn_this_step,
         cards_drawn_last_turn,
@@ -8474,6 +8906,7 @@ fn project_out_player_consumables(p: &mut Player) {
     // loop but do not change the board configuration.
     *life_gained_this_turn = 0;
     *life_lost_this_turn = 0;
+    *energy_paid_or_lost_this_turn = 0;
     *cards_drawn_this_turn = 0;
     *cards_drawn_this_step = 0;
     // The last-turn draw count is the window-shifted this-turn count: at a
@@ -8749,6 +9182,7 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         energy,
         life_gained_this_turn,
         life_lost_this_turn,
+        energy_paid_or_lost_this_turn,
         cards_drawn_this_turn,
         cards_drawn_this_step,
         life: _,
@@ -8788,6 +9222,7 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         *energy as i64,
         *life_gained_this_turn as i64,
         *life_lost_this_turn as i64,
+        *energy_paid_or_lost_this_turn as i64,
         *cards_drawn_this_turn as i64,
         *cards_drawn_this_step as i64,
     ]
@@ -8812,6 +9247,7 @@ fn projected_player_maps(
         energy: _,
         life_gained_this_turn: _,
         life_lost_this_turn: _,
+        energy_paid_or_lost_this_turn: _,
         cards_drawn_this_turn: _,
         cards_drawn_this_step: _,
         id: _,
@@ -9064,6 +9500,116 @@ mod tests {
     use crate::game::game_object::ObjectIncarnationRefExt;
     use std::sync::Arc;
 
+    /// CR 704.3 + CR 704.5a: reading a charge stream one stretch at a time gives the answer of
+    /// stepping through it one repetition at a time
+    /// (`PeriodicDelta::first_life_crossing_by_stretch` against
+    /// `PeriodicDelta::first_life_crossing`), for every stream below, `i64::MIN` and life totals
+    /// from -2 to 45, and every horizon up to 60, with the stream's own change points and with spare points
+    /// at which nothing changes. The streams: a seat never charged, a constant charge, a dip
+    /// above its net, a dip that nets nothing, a charge that starts late, one that stops, and
+    /// two that change three times. The stretch reading reads at most one charge per stretch.
+    /// With a life total and a horizon in the billions, which the stepping walk cannot be asked,
+    /// a seat never charged crosses nowhere and a seat charged 1 a repetition crosses at the
+    /// repetition equal to its life.
+    #[test]
+    fn a_life_crossing_read_by_stretch_is_the_stepping_walks() {
+        use super::{DeclaredLifeCharge, PeriodicDelta};
+        use crate::analysis::decision_template::IterationIndex;
+        use std::cell::Cell;
+        use std::collections::BTreeSet;
+
+        // Each stream as its stretches: (first index, net, dip), the first at index 0.
+        let streams: &[&[(IterationIndex, i64, i64)]] = &[
+            &[(0, 0, 0)],
+            &[(0, 1, 1)],
+            &[(0, 2, 2)],
+            &[(0, 3, 5)],
+            &[(0, 0, 4)],
+            &[(0, 0, 0), (3, 2, 2)],
+            &[(0, 2, 2), (4, 0, 0)],
+            &[(0, 1, 3), (1, 0, 0), (5, 2, 2), (9, 0, 6)],
+            &[(0, 5, 5), (2, 1, 1), (7, 0, 0), (8, 3, 4)],
+        ];
+        let charge_of = |stretches: &[(IterationIndex, i64, i64)], index: IterationIndex| {
+            let &(_, net, dip) = stretches
+                .iter()
+                .rev()
+                .find(|(first, ..)| *first <= index)
+                .expect("index 0 starts a stretch");
+            DeclaredLifeCharge { net, dip }
+        };
+        let (mut crossed, mut survived, mut crossed_after_a_change) = (0, 0, 0);
+        for stretches in streams {
+            let own: BTreeSet<IterationIndex> =
+                stretches.iter().map(|(first, ..)| *first).collect();
+            let spare: BTreeSet<IterationIndex> = own.iter().copied().chain([1, 6, 40]).collect();
+            for remaining_life in (-2..=45).chain([i64::MIN]) {
+                for horizon in 0..=60u32 {
+                    let stepped = PeriodicDelta::first_life_crossing(
+                        (0..).map(|index| charge_of(stretches, index)),
+                        remaining_life,
+                        horizon,
+                    );
+                    for changes in [&own, &spare] {
+                        let reads = Cell::new(0usize);
+                        let by_stretch = PeriodicDelta::first_life_crossing_by_stretch(
+                            |index| {
+                                reads.set(reads.get() + 1);
+                                charge_of(stretches, index)
+                            },
+                            changes,
+                            remaining_life,
+                            horizon,
+                        );
+                        assert_eq!(
+                            by_stretch, stepped,
+                            "stream {stretches:?}, life {remaining_life}, horizon {horizon}, \
+                             change points {changes:?}"
+                        );
+                        assert!(
+                            reads.get() <= changes.len() + 1,
+                            "one read per stretch at most: {} reads over {changes:?}",
+                            reads.get()
+                        );
+                    }
+                    match stepped {
+                        Some(repetition) => {
+                            crossed += 1;
+                            if own.iter().any(|first| *first > 0 && *first < repetition) {
+                                crossed_after_a_change += 1;
+                            }
+                        }
+                        None => survived += 1,
+                    }
+                }
+            }
+        }
+        assert!(
+            crossed > 1000 && survived > 1000 && crossed_after_a_change > 100,
+            "REACH-GUARD: the table holds crossings ({crossed}), survivals ({survived}) and \
+             crossings past a change point ({crossed_after_a_change})"
+        );
+
+        // A horizon the stepping walk cannot be asked: one read answers.
+        let life = i64::from(i32::MAX);
+        let never = |_| DeclaredLifeCharge { net: 0, dip: 0 };
+        let one = |_| DeclaredLifeCharge { net: 1, dip: 1 };
+        let none = BTreeSet::new();
+        assert_eq!(
+            PeriodicDelta::first_life_crossing_by_stretch(never, &none, life, u32::MAX),
+            None
+        );
+        assert_eq!(
+            PeriodicDelta::first_life_crossing_by_stretch(one, &none, life, u32::MAX),
+            Some(i32::MAX as u32)
+        );
+        assert_eq!(
+            PeriodicDelta::first_life_crossing_by_stretch(one, &none, life, i32::MAX as u32 - 1),
+            None,
+            "a crossing one repetition past the horizon is not found"
+        );
+    }
+
     /// CR 508.1d + CR 604.1: only a LIVE required-defender class is a growing-class
     /// read. `Fixed`/`Permanent` are frozen ids and stay read-free; `Matching`
     /// carries a `PlayerFilter` that
@@ -9111,7 +9657,7 @@ mod tests {
     use super::*;
     use crate::analysis::decision_template::ChoicePoint;
     use crate::game::game_object::GameObject;
-    use crate::types::ability::TriggerDefinitionRef;
+    use crate::types::ability::{AggregateFunction, TriggerDefinitionRef};
     use crate::types::actions::ReplacementAutoChoice;
     use crate::types::game_state::{
         ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
@@ -9120,6 +9666,8 @@ mod tests {
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ExtraPhaseId,
     };
+    use crate::types::mana::ManaCost;
+    use crate::types::statics::CostModifyMode;
     use crate::types::zones::Zone;
 
     fn pid(n: u8) -> PlayerId {
@@ -14822,6 +15370,62 @@ mod tests {
         );
     }
 
+    /// A `ModifyCost { dynamic_count: Some(<projected per-turn journal>) }` static on
+    /// a STABLE object over a growing board is PERIOD-TIED, exactly as the constant-depth
+    /// equality is: `project_out_resources` zeroes `EnergyPaidOrLostThisTurn` (Blaster Hulk's
+    /// multiplier) on BOTH frames, so the cover must reject only when the journal actually
+    /// MOVED between them — that is the one period in which the next repeat costs something
+    /// else. Non-vacuous in BOTH directions on the SAME board and the SAME static: held journal
+    /// ⇒ COVER, moved journal ⇒ REJECT. The fixed control (`dynamic_count: None`) covers with
+    /// the journal moved, proving the dynamic-multiplier read is the differentiator rather than
+    /// the journal delta alone. Reverting to the presence scan flips the first assertion (an
+    /// uncast Hulk in hand would refuse an energy-free recurrence, CR 113.6).
+    #[test]
+    fn object_growth_r_e2_modifycost_projected_dynamic_is_period_tied() {
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+        let modify = |dynamic_count| StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::default(),
+            spell_filter: None,
+            dynamic_count,
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+        };
+        // `cover_with_static_on_stable`'s board with the period's energy journal as the only
+        // variable: the source stays put, one inert fodder token is minted, and the CURRENT
+        // frame carries the journal one repeat's payment left behind.
+        let cover_with_journal = |mode: StaticMode, energy_paid: u32| -> bool {
+            let mut prior = GameState::new_two_player(7);
+            let sid = inert_token(&mut prior, 600, 0, "StaticSource");
+            inert_token(&mut prior, 700, 0, "Saproling");
+            inert_token(&mut prior, 701, 0, "Saproling");
+            prior
+                .objects
+                .get_mut(&sid)
+                .unwrap()
+                .static_definitions
+                .push(StaticDefinition::new(mode));
+            let mut current = prior.clone();
+            inert_token(&mut current, 702, 0, "Saproling");
+            current.players[0].energy_paid_or_lost_this_turn = energy_paid;
+            cover(&prior, &current)
+        };
+        let projected = || modify(Some(QuantityRef::EnergyPaidOrLostThisTurn));
+        assert!(
+            cover_with_journal(projected(), 0),
+            "R-e2-projected: an UNMOVED journal prices both frames the same ⇒ COVER"
+        );
+        assert!(
+            !cover_with_journal(projected(), 2),
+            "R-e2-projected: a MOVED journal changes the reduction every repeat ⇒ REJECT"
+        );
+        assert!(
+            cover_with_journal(modify(None), 2),
+            "R-e2-projected control: a fixed (dynamic_count = None) reduction covers \
+             regardless of the journal"
+        );
+    }
+
     /// An `ImposeAdditionalCost` whose
     /// `AbilityCost` reads `ObjectCount(|G|)` (a `PayLife` scaling with the board)
     /// REJECTs; the same static with a FIXED `PayLife` COVERS.
@@ -14871,6 +15475,266 @@ mod tests {
         assert!(
             cover_with_static_on_stable(reduce(None)),
             "R-e2-reduceability control: a fixed ReduceAbilityCost must COVER"
+        );
+    }
+
+    /// A cost modifier reading a PROJECTED journal (`EnergyPaidOrLostThisTurn`) REJECTs the
+    /// constant-depth recurrence: the loop can pay {E} and restore the same reserve while the
+    /// cumulative journal grows, and the projection zeroes the journal out of both frames, so
+    /// without the veto the pair certifies a recurrence whose reduction changes every repeat.
+    /// Non-vacuous: the SAME static with `dynamic_count: None` (a fixed reduction) leaves the
+    /// pair EQUAL, proving the dynamic-multiplier scan — not the mere presence of a cost
+    /// static — is the differentiator.
+    #[test]
+    fn constant_depth_projected_cost_modifier_rejects() {
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+        let board = |dynamic_count| {
+            let mut state = GameState::new_two_player(7);
+            let sid = inert_token(&mut state, 600, 0, "StaticSource");
+            state
+                .objects
+                .get_mut(&sid)
+                .unwrap()
+                .static_definitions
+                .push(StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::default(),
+                    spell_filter: None,
+                    dynamic_count,
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+                }));
+            state
+        };
+        // One cycle's payment: the journal grows, the reserve is what the projection zeroes.
+        let paid_two = |state: &GameState| {
+            let mut next = state.clone();
+            next.players[0].energy_paid_or_lost_this_turn = 2;
+            next
+        };
+        let fixed = board(None);
+        assert!(
+            loop_states_equal_modulo_resources(&fixed, &paid_two(&fixed)),
+            "control: with no journal reader the per-turn journal is pure history ⇒ EQUAL"
+        );
+        let projected = board(Some(QuantityRef::EnergyPaidOrLostThisTurn));
+        assert!(
+            !loop_states_equal_modulo_resources(&projected, &paid_two(&projected)),
+            "a cost modifier reading the projected journal changes price every repeat ⇒ REJECT"
+        );
+    }
+
+    /// CR 113.6: the veto reads only a cost modifier that FUNCTIONS in its source's zone. The
+    /// SAME projected-journal `ModifyCost` on a hand card — `StaticDefinition::new` leaves
+    /// `active_zones` empty, i.e. "battlefield only" — prices nothing, so it must not veto a
+    /// recurrence it cannot price. Precision control for
+    /// `constant_depth_projected_cost_modifier_rejects`, which pins the battlefield half: both
+    /// halves carry the identical static and the identical journal delta.
+    #[test]
+    fn constant_depth_inert_projected_cost_modifier_does_not_reject() {
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+        let board = |zone: Zone| {
+            let oid = ObjectId(600);
+            let mut object =
+                GameObject::new(oid, CardId(600), PlayerId(0), "StaticSource".into(), zone);
+            object
+                .static_definitions
+                .push(StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::default(),
+                    spell_filter: None,
+                    dynamic_count: Some(QuantityRef::EnergyPaidOrLostThisTurn),
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+                }));
+            let mut state = GameState::new_two_player(7);
+            state.objects.insert(oid, object);
+            if zone == Zone::Battlefield {
+                state.battlefield.push_back(oid);
+            }
+            state
+        };
+        let paid_two = |state: &GameState| {
+            let mut next = state.clone();
+            next.players[0].energy_paid_or_lost_this_turn = 2;
+            next
+        };
+        let hand = board(Zone::Hand);
+        assert!(
+            loop_states_equal_modulo_resources(&hand, &paid_two(&hand)),
+            "an inert modifier prices nothing ⇒ the projected journal stays pure history"
+        );
+        // Reach guard: the identical static on the battlefield IS live and vetoes.
+        let battlefield = board(Zone::Battlefield);
+        assert!(
+            !loop_states_equal_modulo_resources(&battlefield, &paid_two(&battlefield)),
+            "reach guard: a live modifier reading the projected journal ⇒ REJECT"
+        );
+    }
+
+    /// CR 601.2f + CR 732.2a: the veto inspects BOTH compared frames. `object_content_eq`
+    /// OMITS static definitions, so a projected-reading cost modifier installed only on the
+    /// CURRENT frame — the shape a modifier that lands on the settled board after the prior
+    /// sample takes — is invisible to a prior-only scan while the cumulative journal still
+    /// grows. The fixed control proves the static's presence is not what rejects: only the
+    /// projected read is.
+    #[test]
+    fn constant_depth_projected_cost_modifier_only_in_current_rejects() {
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+        let prior = || {
+            let mut state = GameState::new_two_player(7);
+            inert_token(&mut state, 600, 0, "StaticSource");
+            state
+        };
+        // One cycle's payment: the reserve is identical in both frames (the projection
+        // zeroes it), while the cumulative journal advances.
+        let current = |dynamic_count| {
+            let mut state = prior();
+            state
+                .objects
+                .get_mut(&ObjectId(600))
+                .unwrap()
+                .static_definitions
+                .push(StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::default(),
+                    spell_filter: None,
+                    dynamic_count,
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+                }));
+            state.players[0].energy_paid_or_lost_this_turn = 2;
+            state
+        };
+        assert!(
+            !loop_states_equal_modulo_resources(
+                &prior(),
+                &current(Some(QuantityRef::EnergyPaidOrLostThisTurn))
+            ),
+            "a modifier reading the projected journal only in the current frame ⇒ REJECT"
+        );
+        assert!(
+            loop_states_equal_modulo_resources(&prior(), &current(None)),
+            "control: a fixed reduction present only in the current frame ⇒ EQUAL"
+        );
+    }
+
+    /// CR 601.2f + CR 732.2a: the veto is the OBSERVED journal value, not the modifier's
+    /// presence. A real Blaster Hulk's self-spell reduction opts into Hand and Library
+    /// (`self_spell_cost_mod_active_zones`), so it FUNCTIONS while its card sits uncast in hand
+    /// (CR 113.6). A period that pays no energy reads the same journal on both frames, so its
+    /// price cannot differ between repeats and the recurrence IS certified. Reverting to a
+    /// presence scan (the shape this replaced) flips the first assertion: an unrelated,
+    /// energy-free loop would be refused because of a Hulk nobody casts.
+    #[test]
+    fn constant_depth_projected_cost_modifier_is_period_tied() {
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+        use crate::types::TargetFilter;
+        let hand = || {
+            let oid = ObjectId(600);
+            let mut object = GameObject::new(
+                oid,
+                CardId(600),
+                PlayerId(0),
+                "Blaster Hulk".into(),
+                Zone::Hand,
+            );
+            // CR 601.2f: the printed card's shape — a SELF-SPELL reduction whose zone opt-in
+            // keeps it live from hand/library, exactly as the production parser emits it.
+            let mut def = StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::default(),
+                spell_filter: None,
+                dynamic_count: Some(QuantityRef::EnergyPaidOrLostThisTurn),
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+            })
+            .affected(TargetFilter::SelfRef);
+            def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
+            object.static_definitions.push(def);
+            let mut state = GameState::new_two_player(7);
+            state.objects.insert(oid, object);
+            state
+        };
+        let before = hand();
+        // Reach guard: the hand-resident self-spell modifier IS live, so the veto's scan
+        // reaches it — the assertion below is not vacuous.
+        {
+            let object = &before.objects[&ObjectId(600)];
+            let def = object.static_definitions.iter_all().next().unwrap();
+            assert!(
+                crate::game::functioning_abilities::static_functions_in_zone(object, def),
+                "CR 113.6: the self-spell reduction functions from hand"
+            );
+        }
+        // Control: a period that moves only projected HISTORY (life gained) and pays no energy
+        // ⇒ the journal the modifier prices on is identical on both frames ⇒ EQUAL.
+        let mut no_energy_paid = before.clone();
+        no_energy_paid.players[0].life_gained_this_turn = 1;
+        assert!(
+            loop_states_equal_modulo_resources(&before, &no_energy_paid),
+            "CR 601.2f: an uncast hand Hulk whose journal did not move prices both frames the \
+             same ⇒ an energy-free recurrence is certified"
+        );
+        // Reject: one cycle pays {E}{E} ⇒ the live modifier prices the next repeat lower.
+        let mut energy_paid = before.clone();
+        energy_paid.players[0].energy_paid_or_lost_this_turn = 2;
+        assert!(
+            !loop_states_equal_modulo_resources(&before, &energy_paid),
+            "CR 107.14 + CR 601.2f: the journal the live modifier reads MOVED ⇒ REJECT"
+        );
+    }
+
+    /// CR 601.2f + CR 732.2a: the period tie is NOT a "the source must cast itself" carve-out.
+    /// Rakdos, Lord of Riots — "Creature spells you cast cost {1} less to cast for each 1 life
+    /// your opponents have lost this turn." — is a PRINTED battlefield reducer that prices
+    /// ANOTHER spell off a projected per-turn journal (`LifeLostThisTurn { Opponent, Sum }`,
+    /// the same `projected` axis class as the Hulk's energy journal). It is asked the same
+    /// question: an unmoved journal certifies, a moved one rejects. This is the half a
+    /// self-spell-only exclusion would lose. The static below is Rakdos's printed shape —
+    /// `{1}` generic, creature spells you cast, summed opponent life lost — asserted through
+    /// the production parser by `life_changed_this_turn_quantity::rakdos_reduces_creature_spells_by_the_opponents_life_loss`.
+    #[test]
+    fn constant_depth_board_wide_projected_cost_modifier_is_period_tied() {
+        let board = || {
+            let mut state = GameState::new_two_player(7);
+            let sid = inert_token(&mut state, 600, 0, "Rakdos, Lord of Riots");
+            state
+                .objects
+                .get_mut(&sid)
+                .unwrap()
+                .static_definitions
+                .push(StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::Cost {
+                        shards: Vec::new(),
+                        generic: 1,
+                    },
+                    spell_filter: Some(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    )),
+                    dynamic_count: Some(QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Sum,
+                        },
+                    }),
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+                }));
+            state
+        };
+        let before = board();
+        assert!(
+            loop_states_equal_modulo_resources(&before, &before.clone()),
+            "control: an unmoved journal prices both frames the same ⇒ EQUAL"
+        );
+        // One cycle in which an opponent loses 2 life ⇒ the printed reducer prices the next
+        // creature spell 2 less than the one it extrapolates.
+        let mut life_lost = before.clone();
+        life_lost.players[1].life_lost_this_turn = 2;
+        assert!(
+            !loop_states_equal_modulo_resources(&before, &life_lost),
+            "CR 601.2f: a board-wide reducer pricing another spell still vetoes once the \
+             journal it reads moves"
         );
     }
 
@@ -15834,12 +16698,12 @@ mod tests {
     }
 
     /// `_projected_player_axes_is_total` (compiler-total guard): `Player::default()`
-    /// has empty `player_counters` ⇒ 6 scalar axes. Breaks if a projected scalar is
+    /// has empty `player_counters` ⇒ 7 scalar axes. Breaks if a projected scalar is
     /// added to `project_out_player_consumables` without a matching `vec![]` entry.
     /// Mirror of `_gamestate_partition_is_total`'s convention.
     #[test]
     fn _projected_player_axes_is_total() {
-        assert_eq!(projected_player_axes(&Player::default()).len(), 6);
+        assert_eq!(projected_player_axes(&Player::default()).len(), 7);
     }
 
     /// carry a (`_projected_player_maps_is_total`, compiler-total guard): `Player::default()`
@@ -18167,6 +19031,201 @@ mod tests {
             )
             .nth(iteration)
             .expect("the per-repetition charges are unbounded")
+    }
+
+    /// CR 704.3 + CR 704.5a: [`PeriodicDelta::declared_seat_life_crossing`] answers as the
+    /// stepping walk does over the same stream ([`PeriodicDelta::first_life_crossing`] over
+    /// [`PeriodicDelta::declared_seat_life_charges`]), for both seats, both [`ChargeBound`]s,
+    /// every life total from 0 to 24 and every horizon up to 30. One board, one slot: P0's
+    /// trigger announces a player-target slot that may name P0 or P1, and the period was observed
+    /// draining P1 by 2. The declarations keep that aim, move it to P0, switch between the two
+    /// seats at one and at two pre-declared points, and alternate them in a round robin, which
+    /// has no finite list of change points and is stepped. Each is read with no leading
+    /// repetition and with the slot's first repetition latched onto either seat (CR 603.3d), and
+    /// under two observations: the observed aim on P1, and one that switches from P1 to P0 at
+    /// index 3, which on a declaration that changes nowhere is the only pre-declared switch point.
+    ///
+    /// REVERT-PROBES: drop the change points a leading slot adds (the latched first repetition,
+    /// and each switch point read one index behind) ⇒ a latched row answers differently from the
+    /// stepping walk ⇒ FAILS. Read a round robin as changing nowhere ⇒ its rows FAIL. Gather the
+    /// change points from the declaration alone ⇒ a row under the switching observation on a
+    /// declaration that changes nowhere answers differently from the stepping walk ⇒ FAILS.
+    #[test]
+    fn a_declared_life_crossing_is_the_stepping_walks_across_switch_points_and_a_lead() {
+        use crate::analysis::decision_template::{
+            AnnouncementSubject, ConcreteTarget, DecisionGroupKey, DecisionKind, IterationCount,
+            PinnedDecision, Ranking, ReplayMode, TargetPin, TargetSchedule,
+        };
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let mut board = bound_board(&[18, 20]);
+        let slot = announced_target_slot(&mut board, 500);
+        let charges = vec![SlotCharge {
+            slot: slot.clone(),
+            magnitude: 2,
+            reaches: vec![p0, p1],
+            aimed_at: Some(p1),
+        }];
+        let delta = life_loss_delta(&[(1, 2)]);
+        let published = delta.seat_life_charges(&charges);
+        let period = PeriodicDelta {
+            frames_per_period: 1,
+            delta,
+            victim_slot: vec![(slot.clone(), 2)],
+            declarable_victims: SlotCharge::declarable_victims(&charges),
+            seat_life_charge: published,
+            cleanup: None,
+        };
+        let points = [seat_point(&slot, &[0, 1])];
+        let observed = seat_schedule_declaration(&[(&slot, &[1])]);
+        let piecewise = |steps: &[(u32, u8)]| DecisionTemplate {
+            owner: p0,
+            decisions: vec![PinnedDecision::Targets {
+                slot: slot.clone(),
+                targets: vec![TargetPin::Scheduled(TargetSchedule::Piecewise(
+                    steps
+                        .iter()
+                        .map(|&(start, seat)| {
+                            (
+                                start,
+                                Ranking::one(AnnouncementSubject::Seat(PlayerId(seat))),
+                            )
+                        })
+                        .collect(),
+                ))],
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(9),
+            },
+            key: DecisionGroupKey::from_sources(
+                std::slice::from_ref(&slot.source),
+                DecisionKind::LoopChoice,
+            ),
+        };
+        let observations = [
+            ("observed on P1", observed.clone()),
+            (
+                "observed on P1, then on P0 from index 3",
+                piecewise(&[(0, 1), (3, 0)]),
+            ),
+        ];
+        let declarations = [
+            ("aimed at P1", observed),
+            ("aimed at P0", seat_schedule_declaration(&[(&slot, &[0])])),
+            ("P1, then P0 from index 3", piecewise(&[(0, 1), (3, 0)])),
+            ("P0, then P1 from index 4", piecewise(&[(0, 0), (4, 1)])),
+            (
+                "P1, P0 from index 2, P1 from index 6",
+                piecewise(&[(0, 1), (2, 0), (6, 1)]),
+            ),
+            (
+                "a round robin of P0 and P1",
+                seat_schedule_declaration(&[(&slot, &[0, 1])]),
+            ),
+        ];
+        let latched = |seat: PlayerId| {
+            vec![ConcreteDecision::Targets {
+                slot: slot.clone(),
+                targets: vec![ConcreteTarget::Player(seat)],
+            }]
+        };
+        let (onto_p0, onto_p1) = (latched(p0), latched(p1));
+        let leads = [
+            ("no lead", AnnouncedLead::None),
+            (
+                "latched onto P0",
+                AnnouncedLead::LeadingRepetition(&onto_p0),
+            ),
+            (
+                "latched onto P1",
+                AnnouncedLead::LeadingRepetition(&onto_p1),
+            ),
+        ];
+        let (mut crossed_past_a_switch, mut moved_by_the_lead) = (0, 0);
+        let mut moved_by_the_observed_switch = 0;
+        for (name, declaration) in &declarations {
+            let switches = declaration.resolution_change_points();
+            let changes_nowhere = switches
+                .as_ref()
+                .is_some_and(|switches| switches.is_empty());
+            for seat in [p0, p1] {
+                for bound in [ChargeBound::Ceiling, ChargeBound::Attributable] {
+                    for remaining_life in 0..=24i64 {
+                        for horizon in 0..=30u32 {
+                            let mut unled = None;
+                            for (lead_name, lead) in leads {
+                                // The stepping walk's answer under each observation, held equal
+                                // to the stretch reading's under the same one.
+                                let [stepped, switched] =
+                                    observations.each_ref().map(|(seen_name, seen)| {
+                                        let stepped = PeriodicDelta::first_life_crossing(
+                                            period.declared_seat_life_charges(
+                                                seat,
+                                                Some(declaration),
+                                                Some(seen),
+                                                &points,
+                                                &board,
+                                                bound,
+                                                lead,
+                                            ),
+                                            remaining_life,
+                                            horizon,
+                                        );
+                                        assert_eq!(
+                                            period.declared_seat_life_crossing(
+                                                seat,
+                                                Some(declaration),
+                                                Some(seen),
+                                                &points,
+                                                &board,
+                                                bound,
+                                                lead,
+                                                remaining_life,
+                                                horizon,
+                                            ),
+                                            stepped,
+                                            "{name}, {seen_name}, {lead_name}, {seat:?}, \
+                                             {bound:?}, life {remaining_life}, horizon {horizon}"
+                                        );
+                                        stepped
+                                    });
+                                // The two observations resolve alike before index 3, so an answer
+                                // they disagree on is one the observation's switch moved.
+                                if changes_nowhere && switched != stepped {
+                                    moved_by_the_observed_switch += 1;
+                                }
+                                if matches!(lead, AnnouncedLead::None) {
+                                    unled = stepped;
+                                } else if stepped != unled {
+                                    moved_by_the_lead += 1;
+                                }
+                                let past_a_switch = switches.as_ref().is_some_and(|switches| {
+                                    stepped.is_some_and(|repetition| {
+                                        switches.iter().any(|at| *at > 0 && *at < repetition)
+                                    })
+                                });
+                                if past_a_switch {
+                                    crossed_past_a_switch += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            declarations[5].1.resolution_change_points().is_none(),
+            "REACH-GUARD: the round robin row has no finite list of change points"
+        );
+        assert!(
+            crossed_past_a_switch > 100 && moved_by_the_lead > 100,
+            "REACH-GUARD: crossings past a switch point ({crossed_past_a_switch}) and answers \
+             the latched repetition moves ({moved_by_the_lead})"
+        );
+        assert!(
+            moved_by_the_observed_switch > 100,
+            "REACH-GUARD: answers on a declaration that changes nowhere that the observation's \
+             switch at index 3 moves ({moved_by_the_observed_switch})"
+        );
     }
 
     /// CR 119.3 + CR 704.5a: **a declaration charges a seat a slot only where its pin moves
