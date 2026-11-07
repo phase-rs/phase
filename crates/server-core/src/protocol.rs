@@ -920,6 +920,9 @@ pub enum ServerMessage {
         /// Empty for every deployment except a `SingleUser` sidecar.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         rewind_targets: Vec<RewindOption>,
+        /// Whether this state revision resulted from a spoken payment or lapse.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        saying: bool,
     },
     ActionRejected {
         rejection: ActionRejection,
@@ -947,6 +950,9 @@ pub enum ServerMessage {
         state_revision: u64,
         withheld: WithheldFrame,
         reason: String,
+        /// Whether this withheld revision resulted from a spoken payment or lapse.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        saying: bool,
     },
     /// Acknowledges a host-authorized permanent game cleanup.
     GameAbandoned {
@@ -4156,6 +4162,7 @@ mod tests {
             derived: Default::default(),
             viewer_interaction: viewer_interaction.clone(),
             rewind_targets,
+            saying: false,
         };
 
         let populated = build(vec![RewindOption {
@@ -4226,6 +4233,7 @@ mod tests {
             state_revision: 6,
             withheld: WithheldFrame::StateUpdate,
             reason: "too large".to_string(),
+            saying: false,
         };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(
@@ -4245,6 +4253,24 @@ mod tests {
                 full_key: None,
                 state_revision: 6,
                 withheld: WithheldFrame::StateUpdate,
+                saying: false,
+                ..
+            }
+        ));
+        let saying_msg = ServerMessage::StateWithheld {
+            full_key: None,
+            state_revision: 7,
+            withheld: WithheldFrame::StateUpdate,
+            reason: "too large".to_string(),
+            saying: true,
+        };
+        let saying_json = serde_json::to_value(&saying_msg).unwrap();
+        assert_eq!(saying_json["data"]["saying"], true);
+        assert!(matches!(
+            serde_json::from_value::<ServerMessage>(saying_json).unwrap(),
+            ServerMessage::StateWithheld {
+                state_revision: 7,
+                saying: true,
                 ..
             }
         ));
@@ -4255,6 +4281,7 @@ mod tests {
                 your_player: PlayerId(1),
             },
             reason: String::new(),
+            saying: false,
         })
         .unwrap();
         assert_eq!(

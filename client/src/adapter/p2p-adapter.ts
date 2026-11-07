@@ -4421,6 +4421,15 @@ export class P2PHostAdapter implements EngineAdapter {
     try {
       target = await this.readSayPhraseExpiry();
     } catch {
+      if (
+        generation === this.sayExpiryGeneration
+        && !this.disposed
+        && this.ownsAuthority()
+      ) {
+        this.sayExpiryPayment = null;
+        this.sayExpiryDeadline = null;
+        this.retrySayPhraseExpiry(this.sayExpiryTimerGeneration);
+      }
       return;
     }
     if (

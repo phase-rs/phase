@@ -2249,9 +2249,33 @@ export class WebSocketAdapter implements EngineAdapter {
     }
     const requestId = this.nextSayPhraseExpiryRequestId++;
     return new Promise<SayPhraseExpiryTarget | null>((resolve, reject) => {
-      this.pendingSayPhraseExpiries.set(requestId, { resolve, reject });
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const onTimeout = () => {
+        this.pendingSayPhraseExpiries.delete(requestId);
+        reject(
+          new AdapterError(
+            AdapterErrorCode.REQUEST_FAILED,
+            "Spoken-payment expiry request timed out",
+            true,
+          ),
+        );
+      };
+      timer = setTimeout(onTimeout, 5000);
+      const wrappedResolve = (target: SayPhraseExpiryTarget | null) => {
+        if (timer !== null) clearTimeout(timer);
+        resolve(target);
+      };
+      const wrappedReject = (error: Error) => {
+        if (timer !== null) clearTimeout(timer);
+        reject(error);
+      };
+      this.pendingSayPhraseExpiries.set(requestId, {
+        resolve: wrappedResolve,
+        reject: wrappedReject,
+      });
       const data = lapse === undefined ? { request_id: requestId } : { request_id: requestId, lapse };
       if (!this.send({ type: "SayPhraseExpiry", data })) {
+        if (timer !== null) clearTimeout(timer);
         this.pendingSayPhraseExpiries.delete(requestId);
         reject(new AdapterError("WS_CLOSED", "Failed to request spoken-payment expiry", true));
       }
@@ -3128,20 +3152,22 @@ export class WebSocketAdapter implements EngineAdapter {
         );
         this.cachedStateRevision = data.state_revision ?? this.cachedStateRevision;
         this.settleWithheld();
-        let isSaying = false;
+        let isSaying = Boolean((data as { saying?: boolean }).saying);
+        let sayingPendingResolved = false;
         if (typeof msg.command_id === "number") {
           const sayingPending = this.pendingSayingCommands.get(msg.command_id);
           if (sayingPending) {
             this.pendingSayingCommands.delete(msg.command_id);
             sayingPending.resolve({ events: data.events, log_entries: data.log_entries });
             isSaying = true;
+            sayingPendingResolved = true;
           }
         }
-        const pending = this.submission.take(msg.command_id);
+        const pending = isSaying ? null : this.submission.take(msg.command_id);
         // A correlated saying's promise already carries these events to its
         // caller, which commits them; emitting them again would present the
         // saying twice. A native bridge still needs the view to fan it out.
-        const resolvedAction = pending !== null || isSaying;
+        const resolvedAction = pending !== null || sayingPendingResolved;
         if (pending) {
           pending.resolve({ events: data.events, log_entries: data.log_entries });
           this.emit({ type: "actionPendingChanged", pending: false });
@@ -3234,7 +3260,7 @@ export class WebSocketAdapter implements EngineAdapter {
           break;
         }
         if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
-        let withheldSaying = false;
+        let withheldSaying = Boolean((data as { saying?: boolean }).saying);
         if (data.withheld.type === "GameStarted") {
           this.emit({ type: "bootstrapDelivered" });
           if (this.reconnectInFlight) this.completeReconnect(true);
@@ -3247,7 +3273,7 @@ export class WebSocketAdapter implements EngineAdapter {
               withheldSaying = true;
             }
           }
-          const pending = this.submission.take(msg.command_id);
+          const pending = withheldSaying ? null : this.submission.take(msg.command_id);
           if (pending) {
             pending.resolve({ events: [], log_entries: [] });
             this.emit({ type: "actionPendingChanged", pending: false });

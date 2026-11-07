@@ -159,7 +159,7 @@ impl Envelope {
             quota_refusal: _,
             state_encoding,
         } = self;
-        let withheld = |full_key: &mut Option<_>, state_revision: u64, frame| {
+        let withheld = |full_key: &mut Option<_>, state_revision: u64, frame, saying: bool| {
             Some(ServerMessage::StateWithheld {
                 full_key: full_key.take(),
                 state_revision,
@@ -169,6 +169,7 @@ impl Envelope {
                     WithheldFrame::StateUpdate => STATE_UPDATE_WITHHELD,
                 }
                 .to_string(),
+                saying,
             })
         };
         let replacement = match &mut message {
@@ -184,8 +185,14 @@ impl Envelope {
             ServerMessage::StateUpdate {
                 full_key,
                 state_revision,
+                saying,
                 ..
-            } => withheld(full_key, *state_revision, WithheldFrame::StateUpdate),
+            } => withheld(
+                full_key,
+                *state_revision,
+                WithheldFrame::StateUpdate,
+                *saying,
+            ),
             ServerMessage::GameStarted {
                 full_key,
                 state_revision,
@@ -197,6 +204,7 @@ impl Envelope {
                 WithheldFrame::GameStarted {
                     your_player: *your_player,
                 },
+                false,
             ),
             ServerMessage::TerminalResult {
                 delivery: Some(delivery),
@@ -581,6 +589,7 @@ mod tests {
                 state: &state,
                 events: &events,
                 log_entries: &log,
+                saying: false,
                 decision: None,
             },
             &server_core::FullSessionKey {
@@ -667,6 +676,7 @@ mod tests {
             state_revision,
             withheld,
             reason,
+            saying,
         } = notice.message
         else {
             panic!("{:?}", notice.message);
@@ -675,6 +685,7 @@ mod tests {
         assert_eq!(state_revision, 6);
         assert_eq!(withheld, WithheldFrame::StateUpdate);
         assert_eq!(reason, STATE_UPDATE_WITHHELD);
+        assert!(!saying);
 
         let again = envelope(state_update(0), None).over_bound("r".to_string());
         assert!(matches!(
@@ -728,6 +739,7 @@ mod tests {
                     your_player: engine::types::player::PlayerId(1)
                 },
                 ref reason,
+                ..
             } if reason == GAME_STARTED_WITHHELD
         ));
     }
@@ -801,6 +813,7 @@ mod tests {
                 state_revision: 1,
                 withheld: WithheldFrame::StateUpdate,
                 reason: STATE_UPDATE_WITHHELD.to_string(),
+                saying: false,
             },
         ] {
             assert!(matches!(

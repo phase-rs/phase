@@ -609,6 +609,7 @@ fn state_update_reference(session: &GameSession, viewer: Option<PlayerId>) -> se
                 state: &session.state,
                 events: &[],
                 log_entries: &[],
+                saying: false,
                 decision: decision.as_ref().map(Into::into),
             };
             source.admissible().unwrap();
@@ -3327,6 +3328,7 @@ async fn lifecycle_publication(
                 state: &session.state,
                 events: &[],
                 log_entries: &[],
+                saying: false,
                 decision: Some((&decision).into()),
             };
             source.admissible().unwrap();
@@ -3842,6 +3844,7 @@ fn codec_lifecycle_ai_burst_preserves_every_revision() {
                 state: &session.state,
                 events: &events,
                 log_entries: &logs,
+                saying: false,
                 decision: Some((&decision).into()),
             };
             let expected = crate::build_state_update_message(
@@ -4096,6 +4099,7 @@ async fn lifecycle_action(
                 state: &session.state,
                 events: &events,
                 log_entries: &logs,
+                saying: false,
                 decision: Some((&decision).into()),
             };
             let mut references = Vec::new();
@@ -4395,6 +4399,7 @@ fn codec_lifecycle_spectator_switch_discards_captured_publication() {
                         state: &session.state,
                         events: &[],
                         log_entries: &[],
+                        saying: false,
                         decision: Some((&decision).into()),
                     };
                     publisher.publish(&source);
@@ -4983,6 +4988,7 @@ async fn run_complete_socket_game(
                 state: &session.state,
                 events: &result.events,
                 log_entries: &result.log_entries,
+                saying: false,
                 decision: Some((&decision).into()),
             };
             let mut projected = Vec::with_capacity(peers.len());
@@ -7460,16 +7466,14 @@ mod oversized_publication {
 
                     request_takeback(&mut p0).await;
                     assert_requested(&mut p1, P0).await;
-                    // Let the window close under the pending vote: the
-                    // server's expiry report is refused.
+                    // Queue the vote decline BEFORE the window closes or during the expiry report
+                    // so the decline arrives while expiry claim is held / when vote is pending.
                     let now = crate::epoch_ms_at_ingress(std::time::Instant::now());
-                    tokio::time::sleep(Duration::from_millis(deadline.saturating_sub(now) + 300))
-                        .await;
-                    assert!(
-                        session_read(&table, |session| session.state.say_payment.is_some()).await,
-                        "the pending vote refused the expiry"
-                    );
-
+                    let remaining = deadline.saturating_sub(now);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(remaining + 10)).await;
+                    });
+                    tokio::time::sleep(Duration::from_millis(remaining + 20)).await;
                     send_test_message(
                         &mut p1,
                         &ClientMessage::RespondTakeback { approve: false },
@@ -7737,6 +7741,56 @@ mod oversized_publication {
                     "the unpaid cumulative upkeep sacrificed Toy Boat"
                 );
                 assert!(!opponent_routed, "the lapse attached no absent seat");
+            });
+        }
+
+        /// A superseded host socket cannot lapse a payment after replacement during
+        /// guest drain, while the current replacement host socket can.
+        #[test]
+        fn superseded_native_host_cannot_lapse_after_replacement() {
+            run_async_test(|| async {
+                let table = NativeTable::duel().await;
+                let now = crate::epoch_ms_at_ingress(std::time::Instant::now());
+                let (state, payment_id) = toy_boat_state(Some(now + 100));
+                install(&table, state, &[]).await;
+                let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                    .await
+                    .unwrap();
+                let (lease, ()) = table
+                    .app
+                    .context
+                    .game_executor
+                    .with_session(session, |session| {
+                        session.set_hosting(server_core::session::HostingMode::SingleUser);
+                    })
+                    .await;
+                drop(lease);
+
+                let mut old_host = table.connect(P0).await;
+                tokio::time::sleep(Duration::from_millis(150)).await;
+
+                // Reconnect / replace the host socket
+                let mut new_host = table.connect(P0).await;
+
+                let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                    // Stale host attempting to lapse is rejected
+                    let stale = request_say_phrase_expiry(&mut old_host, 1, Some(payment_id)).await;
+                    assert_eq!(stale["type"], "SayPhraseExpiryFailed", "{stale}");
+
+                    // Current replacement host can lapse
+                    let lapsed =
+                        request_say_phrase_expiry(&mut new_host, 2, Some(payment_id)).await;
+                    assert_eq!(lapsed["type"], "SayPhraseExpiry", "{lapsed}");
+                    assert!(lapsed["data"]["target"].is_null(), "{lapsed}");
+                })
+                .await;
+
+                let state = session_read(&table, |s| s.state.clone()).await;
+                table.server.abort();
+                outcome.expect(
+                    "expiry request on current host succeeded while superseded host failed",
+                );
+                assert!(state.say_payment.is_none(), "the payment lapsed");
             });
         }
 

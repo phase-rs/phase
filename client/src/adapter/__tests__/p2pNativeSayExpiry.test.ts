@@ -283,10 +283,20 @@ describe("native P2P spoken-payment expiry", () => {
     vi.useFakeTimers();
     const host = makeHost();
     const hostSeat = new FakeSeatClient(0, viewState("host"));
-    await makeBridge(host, [hostSeat]);
+    const payerSeat = new FakeSeatClient(1, viewState("payer", 1));
+    const bridge = await makeBridge(host, [hostSeat, payerSeat]);
+    // The payer's channel dropped: the bridge suspended its loopback socket.
+    bridge.suspendGuest(1);
+    host.disconnectedSeats.set(1, { disconnectedAt: NOW(), timer: null });
+    expect(bridge.isGuestAttached(1)).toBe(false);
+
+    const drain = vi.fn(async () => {});
+    host.guestSessions.set(1, { drain });
+
     // A pending takeback vote refuses the lapse; the payment stays live.
+    // The socket is open and payer is absent (payer === 1).
     hostSeat.sayPhraseExpiry.mockImplementation(async () => ({
-      payer: 0,
+      payer: 1,
       payment: 7,
       deadline_ms: NOW() - 1,
     }));
@@ -297,10 +307,13 @@ describe("native P2P spoken-payment expiry", () => {
 
     await host.expireSayPhrase(7, 1);
     expect(hostSeat.sayPhraseExpiry.mock.calls).toEqual([[undefined], [7]]);
+    expect(drain).toHaveBeenCalled();
+    expect(bridge.isGuestAttached(1)).toBe(false);
     expect(schedule).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(250);
     expect(schedule).toHaveBeenCalledTimes(1);
+    expect(bridge.isGuestAttached(1)).toBe(false);
   });
 
   it("relays a withheld saying revision to a guest without settling its unrelated submission, keeping the expiry armed", async () => {
@@ -338,6 +351,41 @@ describe("native P2P spoken-payment expiry", () => {
     await vi.waitFor(() => expect(host.sayExpiryPayment).toBe(7));
     expect(host.sayExpiryDeadline).toBe(deadline);
     expect(ordinarySettled).toBe(false);
+
+    // Now test delivered revision (state_update with saying: true): ordinary command still does not settle
+    hostSeat.emit({
+      type: "stateChanged",
+      serverRevision: 4,
+      snapshot: { state: viewState("host"), legalResult: EMPTY_LEGAL_ACTIONS },
+      events: [],
+      logEntries: [],
+      saying: true,
+    });
+    guestSeat.emit({
+      type: "stateChanged",
+      serverRevision: 4,
+      snapshot: { state: viewState("guest", 1), legalResult: EMPTY_LEGAL_ACTIONS },
+      events: [],
+      logEntries: [],
+    });
+
+    await vi.waitFor(() =>
+      expect(sent).toContainEqual(expect.objectContaining({ type: "state_update", revision: 4, saying: true })),
+    );
+    expect(ordinarySettled).toBe(false);
+
+    // The ordinary command settles on its own reply
+    await conn.simulateData({
+      type: "state_update",
+      revision: 5,
+      state: viewState("guest", 1),
+      events: [],
+      logEntries: [],
+      ...EMPTY_LEGAL_ACTIONS,
+    } as unknown as P2PMessage);
+
+    await vi.waitFor(() => expect(ordinarySettled).toBe(true));
+
     host.clearSayExpiryTimer();
     guest.dispose();
   });

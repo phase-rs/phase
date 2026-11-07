@@ -354,6 +354,7 @@ pub(crate) struct StateUpdateSource<'a> {
     pub(crate) events: &'a [GameEvent],
     pub(crate) log_entries: &'a [GameLogEntry],
     pub(crate) decision: Option<DecisionInputs<'a>>,
+    pub(crate) saying: bool,
 }
 
 impl<'a> StateUpdateSource<'a> {
@@ -368,7 +369,13 @@ impl<'a> StateUpdateSource<'a> {
                 spell_costs: &result.5,
                 by_object: &result.6,
             }),
+            saying: false,
         }
+    }
+
+    pub(crate) fn saying(mut self, saying: bool) -> Self {
+        self.saying = saying;
+        self
     }
 
     pub(crate) fn from_transition(transition: &'a AiTransition) -> Self {
@@ -378,6 +385,7 @@ impl<'a> StateUpdateSource<'a> {
             events: &transition.events,
             log_entries: &transition.log_entries,
             decision: transition.decision.as_ref().map(DecisionInputs::from),
+            saying: false,
         }
     }
 

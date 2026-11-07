@@ -2083,6 +2083,7 @@ mod codec_tests {
                 state_revision: 101,
                 withheld: server_core::protocol::WithheldFrame::StateUpdate,
                 reason: crate::socket_mailbox::STATE_UPDATE_WITHHELD.into(),
+                saying: false,
             },
             None,
         );
@@ -2146,6 +2147,7 @@ mod codec_tests {
                     your_player: PlayerId(0),
                 },
                 reason: crate::socket_mailbox::GAME_STARTED_WITHHELD.into(),
+                saying: false,
             },
             None,
         );
@@ -2323,6 +2325,7 @@ mod codec_tests {
                 state_revision: 101,
                 withheld: server_core::protocol::WithheldFrame::StateUpdate,
                 reason: crate::socket_mailbox::STATE_UPDATE_WITHHELD.into(),
+                saying: false,
             },
             None,
         );

@@ -1018,6 +1018,7 @@ fn build_state_update_message(
         derived,
         viewer_interaction,
         rewind_targets,
+        saying: source.saying,
     }
 }
 
@@ -1106,6 +1107,7 @@ fn build_spectator_state_update_message(
         // takes a raw state rather than a session, so `rewind_options()` is
         // not even in scope here.
         rewind_targets: Vec::new(),
+        saying: false,
     })
 }
 
@@ -8452,6 +8454,7 @@ async fn broadcast_takeback_approved(
                 state: &state,
                 events: &[],
                 log_entries: &[],
+                saying: false,
                 decision: Some(game_executor::DecisionInputs {
                     legal_actions: &legal_actions,
                     spell_costs: &spell_costs,
@@ -8932,6 +8935,7 @@ async fn handle_full_concession(
                 game_code,
                 "concede",
                 lock_start,
+                false,
             )
             .await;
             return;
@@ -9139,6 +9143,18 @@ async fn apply_and_publish_full_submission(
     let persistence_executor = executor.clone();
     let code = game_code.clone();
     let player_token = player_token.to_string();
+    let is_saying = matches!(
+        &submission,
+        GameSubmission::Action(GameAction::SayPhrase { .. })
+    );
+    let expiry_payment_to_release = match &submission {
+        GameSubmission::Action(GameAction::SayPhrase {
+            report: engine::types::un_actions::SayPhraseReport::Expiry,
+            payment,
+            ..
+        }) => Some(*payment),
+        _ => None,
+    };
     // The owned game guard spans admission waits, AI continuations and all
     // publication. Other games can use the CPU between these work units.
     let (mut session, applied) = executor
@@ -9176,6 +9192,7 @@ async fn apply_and_publish_full_submission(
                 // unit; an unrelated AI sequence cannot queue between them.
                 persist_full_session_async(&persistence_executor, &persistence, session);
                 let source = game_executor::StateUpdateSource::from_result(&result, revision)
+                    .saying(is_saying)
                     .guarded(&code)
                     .map_err(|reason| {
                         warn!(
@@ -9210,11 +9227,17 @@ async fn apply_and_publish_full_submission(
     let applied = match applied {
         Ok(Some(applied)) => applied,
         Ok(None) => {
+            if let Some(payment) = expiry_payment_to_release {
+                session.release_say_phrase_expiry(payment);
+            }
             let _ = reply.send(ServerMessage::ActionNoOp);
             return;
         }
 
         Err(error) => {
+            if let Some(payment) = expiry_payment_to_release {
+                session.release_say_phrase_expiry(payment);
+            }
             let message = match error {
                 SessionActionError::Operational(message) => ServerMessage::ActionFailed { message },
                 error => session_action_error_message(error),
@@ -9223,6 +9246,9 @@ async fn apply_and_publish_full_submission(
             return;
         }
     };
+    if let Some(payment) = expiry_payment_to_release {
+        session.release_say_phrase_expiry(payment);
+    }
     let expiry = claim_say_phrase_expiry(&mut session);
     let AppliedHumanSubmission {
         revision,
@@ -9268,6 +9294,7 @@ async fn apply_and_publish_full_submission(
         game_code.clone(),
         kind,
         lock_start,
+        is_saying,
     )
     .await;
     schedule_say_phrase_expiry(
@@ -9303,6 +9330,7 @@ async fn finish_full_ai_continuation(
     game_code: String,
     kind: &'static str,
     lock_start: Instant,
+    is_saying: bool,
 ) {
     let (session, ai) = match ai {
         std::ops::ControlFlow::Break(outcome) => (session, outcome),
@@ -9332,7 +9360,8 @@ async fn finish_full_ai_continuation(
                 session.state.eliminated_players.clone(),
                 session.rewind_options(),
             );
-            let source = game_executor::StateUpdateSource::from_result(&human_result, revision);
+            let source = game_executor::StateUpdateSource::from_result(&human_result, revision)
+                .saying(is_saying);
             let guarded = if has_followup {
                 source.without_decision()
             } else {
@@ -9370,7 +9399,8 @@ async fn finish_full_ai_continuation(
     let code = game_code.clone();
     publisher = executor
         .run(move || {
-            let source = game_executor::StateUpdateSource::from_result(&human_result, revision);
+            let source = game_executor::StateUpdateSource::from_result(&human_result, revision)
+                .saying(is_saying);
             let source = if has_followup {
                 source.without_decision()
             } else {
@@ -9908,6 +9938,7 @@ async fn seat_guest_and_start(
                                 eliminated_players: Vec::new(),
                                 log_entries: Vec::new(),
                                 spell_costs: HashMap::new(),
+                                saying: false,
                                 legal_actions_by_object: HashMap::new(),
                                 // CR 117.1b: before the game, no player has
                                 // priority to activate an ability.
@@ -10053,6 +10084,7 @@ fn build_resync_state_message(
                 state: &session.state,
                 events: &[],
                 log_entries: &[],
+                saying: false,
                 decision: decision.as_ref().map(Into::into),
             };
             source.admissible()?;
@@ -10348,21 +10380,22 @@ pub(crate) fn schedule_say_phrase_expiry(
             let now = epoch_ms_at_ingress(Instant::now());
             tokio::time::sleep(Duration::from_millis(deadline_ms.saturating_sub(now) + 1)).await;
             // Only the owner drains: a task whose claim ended retires first.
-            let owned = match lock_session(&state, &game_code).await {
-                Ok(session) => owned_say_phrase_deadline(&session, &claim),
+            let mut session = match lock_session(&state, &game_code).await {
+                Ok(session) => session,
                 Err(_) => return,
             };
-            if owned.is_none() {
-                retire_say_phrase_expiry(&state, &game_code, claim.payment_id).await;
+            if owned_say_phrase_deadline(&session, &claim).is_none() {
+                session.release_say_phrase_expiry(claim.payment_id);
                 return;
             }
+            drop(session);
             drain_say_phrase_payer(&connections, &game_code, claim.payer, claim.payment_id).await;
-            let Ok(session) = lock_session(&state, &game_code).await else {
-                return;
+            let mut session = match lock_session(&state, &game_code).await {
+                Ok(session) => session,
+                Err(_) => return,
             };
             let Some(live_deadline) = owned_say_phrase_deadline(&session, &claim) else {
-                drop(session);
-                retire_say_phrase_expiry(&state, &game_code, claim.payment_id).await;
+                session.release_say_phrase_expiry(claim.payment_id);
                 return;
             };
             let received_at = Instant::now();
@@ -10388,18 +10421,9 @@ pub(crate) fn schedule_say_phrase_expiry(
                 &game_spectators,
             )
             .await;
-            retire_say_phrase_expiry(&state, &game_code, claim.payment_id).await;
             return;
         }
     });
-}
-
-/// Release `payment_id`'s claim if it is still the session's owner; a newer
-/// payment's claim is left alone.
-async fn retire_say_phrase_expiry(state: &SharedState, game_code: &str, payment_id: u64) {
-    if let Ok(mut session) = lock_session(state, game_code).await {
-        session.release_say_phrase_expiry(payment_id);
-    }
 }
 
 /// Submit the host-observed lapse of `payment_id` for the engine-owned payer.
@@ -10465,6 +10489,7 @@ async fn handle_native_say_phrase_expiry(
     request_id: u64,
     lapse: Option<u64>,
     identity: &SocketIdentity,
+    tx: &crate::socket_mailbox::Sender,
     executor: &game_executor::GameExecutor,
     state: &SharedState,
     db: &SharedDb,
@@ -10494,6 +10519,9 @@ async fn handle_native_say_phrase_expiry(
     let Ok(session) = lock_session(state, game_code).await else {
         return failed("Game session is no longer available");
     };
+    if !full_socket_is_current_while_state_locked(&session, connections, identity, tx).await {
+        return failed(FULL_SOCKET_AUTHORITY_REJECTION);
+    }
     if session.hosting() != server_core::session::HostingMode::SingleUser {
         return failed("Spoken payments are timed by this server, not a local host");
     }
@@ -10521,6 +10549,9 @@ async fn handle_native_say_phrase_expiry(
     let Ok(session) = lock_session(state, game_code).await else {
         return failed("Game session is no longer available");
     };
+    if !full_socket_is_current_while_state_locked(&session, connections, identity, tx).await {
+        return failed(FULL_SOCKET_AUTHORITY_REJECTION);
+    }
     let received_at = Instant::now();
     let lapsed =
         live_say_phrase_payment(&session).is_some_and(|(live_payer, _, live, deadline)| {
@@ -10547,10 +10578,16 @@ async fn handle_native_say_phrase_expiry(
         drop(session);
     }
     match lock_session(state, game_code).await {
-        Ok(session) => ServerMessage::SayPhraseExpiry {
-            request_id,
-            target: read(&session),
-        },
+        Ok(session) => {
+            if !full_socket_is_current_while_state_locked(&session, connections, identity, tx).await
+            {
+                return failed(FULL_SOCKET_AUTHORITY_REJECTION);
+            }
+            ServerMessage::SayPhraseExpiry {
+                request_id,
+                target: read(&session),
+            }
+        }
         Err(_) => failed("Game session is no longer available"),
     }
 }
@@ -10995,6 +11032,7 @@ async fn handle_client_message(
                 request_id,
                 lapse,
                 identity,
+                tx,
                 &context.game_executor,
                 state,
                 db,
