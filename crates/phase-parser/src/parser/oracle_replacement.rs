@@ -14946,9 +14946,10 @@ fn parse_damage_prevention_replacement(
     let damage_source_filter = match parse_damage_source_scope_active(working_lower) {
         // CR 615.1a: a subject that swallowed an earlier clause (Desperate
         // Gambit's "if you win the flip, the next time that source would deal
-        // damage") is not a source phrase at all, so whatever filter it happens
-        // to yield is meaningless: fail closed instead of installing a shield
-        // keyed on the debris.
+        // damage") is not a source phrase at all, so a typed or unreadable scope
+        // it yields is meaningless: fail closed instead of installing a shield
+        // keyed on the debris (an `AnySource` reading after the `if`-clause strip
+        // still means any source and takes the passive reader below).
         Some(DamageSourceScope::Scoped(_) | DamageSourceScope::Unrecognized)
             if active_damage_source_subject_spans_clauses(working_lower) =>
         {

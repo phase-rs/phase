@@ -7227,9 +7227,10 @@ mod w3_library_placement_tests {
         }
     }
 
-    /// CR 616.1: an explicit current placement is authoritative over the legacy
-    /// carrier mirror, and the exact owner copy is filled from the boundary the
-    /// proposal itself records, not from that mirror.
+    /// CR 616.1 (parked replacement choice) + save compatibility: an explicit
+    /// current placement is authoritative over the legacy carrier mirror, and the
+    /// exact owner copy is filled from the boundary the proposal itself records,
+    /// not from that mirror.
     #[test]
     fn legacy_positioned_batch_current_placement_wins_over_mirror() {
         let (state, first, _, _) = positioned_batch_fixture();
@@ -7285,8 +7286,9 @@ mod w3_library_placement_tests {
         );
     }
 
-    /// CR 616.1: one identified owner cannot be normalized from two different
-    /// exact copies; the save boundary rejects instead of silently choosing.
+    /// CR 616.1 (parked replacement choice) + save compatibility: one identified
+    /// owner cannot be normalized from two different exact copies; the save
+    /// boundary rejects instead of silently choosing.
     #[test]
     fn legacy_positioned_batch_rejects_conflicting_owner_copies() {
         let (state, first, _, _) = positioned_batch_fixture();

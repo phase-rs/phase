@@ -2920,7 +2920,8 @@ fn starts_turn_face_up_down_clause(s: &str) -> bool {
     .is_ok()
 }
 
-/// Inner implementation operating on pre-lowercased input.
+/// `shuffle` as a whole imperative word (end of text, whitespace or punctuation
+/// follows).
 fn shuffle_imperative_token(input: &str) -> OracleResult<'_, ()> {
     value(
         (),

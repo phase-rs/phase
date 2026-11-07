@@ -420,6 +420,9 @@ mod tests {
     /// phases out; the all-context union `Or[SelfRef, ParentTarget]` still
     /// collects the source as well. Removing the `phase_out_filter_is_context_union`
     /// gate in `collect_object_targets` adds the source to the mixed result.
+    /// No printed card has the mixed shape today; the nearest printed phase-out
+    /// declarations are Reality Ripple's single `Or` typed target and
+    /// U.S.S. Defiant's context union.
     #[test]
     fn mixed_target_declaration_union_phases_out_only_the_announced_target() {
         use crate::game::game_object::PhaseStatus;
