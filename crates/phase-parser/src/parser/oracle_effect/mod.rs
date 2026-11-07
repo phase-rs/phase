@@ -196,12 +196,12 @@ use self::subject::{
     try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life,
 };
 use crate::parser::oracle_ir::ast::*;
-use crate::parser::oracle_ir::context::BodyScope;
 pub(crate) use crate::parser::oracle_ir::context::{
     BareCardAggregateBinding, ChosenColorQualifierScope, DeclaredSlotEntry, DeclaredSlotRegistry,
     HeadWindowProbe, ParseContext, PriorZoneChoicePartition, SpellAnaphorBinding, TokenPtFollowup,
     TriggerConditionScope,
 };
+use crate::parser::oracle_ir::context::{BodyScope, PendingTrackedSet, TrackedSetProducer};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseId,
     ClauseIr, ClauseIrBuilder, ClausePlacement, DieResultBranchIr, EffectChainIr,
@@ -13806,7 +13806,7 @@ fn parse_perpetual_self_subject<'a>(
         //  2. An earlier SAME-CHAIN typed/chosen referent -- a prior "choose a
         //     card in your hand" clause (`ctx.parent_target_available`) or an
         //     immediately preceding `Effect::ChooseFromZone`
-        //     (`ctx.pending_tracked_set_origin`) -- mirrors
+        //     (`ctx.chosen_tracked_set_pending()`) -- mirrors
         //     `parse_bound_it_perpetual_gain_cost_subject`'s own gate exactly,
         //     since this is the identical same-chain-referent question the
         //     cost-grant sibling arm already answers correctly.
@@ -13831,7 +13831,7 @@ fn parse_perpetual_self_subject<'a>(
         // rather than a wrong install.
         let target = match counter::counter_anaphor_created_token_binding("it", ctx) {
             Some(target) => target,
-            None if ctx.parent_target_available || ctx.pending_tracked_set_origin.is_some() => {
+            None if ctx.parent_target_available || ctx.chosen_tracked_set_pending() => {
                 TargetFilter::ParentTarget
             }
             None => {
@@ -13869,14 +13869,14 @@ fn parse_perpetual_self_subject<'a>(
         //  2. An earlier SAME-CHAIN typed/chosen referent (Racketeer Boss's
         //     "choose up to two ... cards in your hand") --
         //     `ctx.parent_target_available` /
-        //     `ctx.pending_tracked_set_origin`.
+        //     `ctx.chosen_tracked_set_pending()`.
         //
         // The "it" arm's third antecedent (the trigger's own non-self subject)
         // has NO plural mirror -- no card needs it -- so a "they" with neither
         // of the two above fails the clause closed.
         let target = if ctx.token_created_in_chain {
             TargetFilter::LastCreated
-        } else if ctx.parent_target_available || ctx.pending_tracked_set_origin.is_some() {
+        } else if ctx.parent_target_available || ctx.chosen_tracked_set_pending() {
             TargetFilter::ParentTarget
         } else {
             return None;
@@ -13923,7 +13923,7 @@ fn parse_bound_it_perpetual_gain_cost_subject<'a>(
     lower: &'a str,
     ctx: &ParseContext,
 ) -> Option<&'a str> {
-    if !(ctx.parent_target_available || ctx.pending_tracked_set_origin.is_some()) {
+    if !(ctx.parent_target_available || ctx.chosen_tracked_set_pending()) {
         return None;
     }
 
@@ -14106,7 +14106,7 @@ fn try_parse_perpetual_modify_cost(tp: TextPair, ctx: &ParseContext) -> Option<E
         // CREATED an object (Conjure/Token/CopyTokenOf/Manifest/Cloak), "it"
         // binds to that just-created object, not the legacy chosen/tracked
         // antecedent `parse_bound_it_perpetual_gain_cost_subject`'s own gate
-        // (`ctx.parent_target_available || ctx.pending_tracked_set_origin`)
+        // (`ctx.parent_target_available || ctx.chosen_tracked_set_pending()`)
         // was written for. Checked first so a genuine chain-created referent
         // always wins; falls through to the existing ParentTarget binding
         // otherwise, leaving every currently-passing case unchanged.
@@ -28529,13 +28529,14 @@ fn chain_declared_object_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
 /// (Craterous Stomp: "… target creature an opponent controls. Each other
 /// creature that player controls …").
 fn declared_object_target_controller_antecedent(clauses: &[ClauseIr]) -> Option<ControllerRef> {
-    match chain_declared_object_target(clauses)? {
-        TargetFilter::Typed(TypedFilter {
-            controller: Some(ControllerRef::Opponent),
-            ..
-        }) => Some(ControllerRef::ParentTargetController),
-        _ => None,
-    }
+    let TargetFilter::Typed(TypedFilter {
+        controller: Some(ControllerRef::Opponent),
+        ..
+    }) = chain_declared_object_target(clauses)?
+    else {
+        return None;
+    };
+    Some(ControllerRef::ParentTargetController)
 }
 
 /// CR 601.2c + CR 115.1: the single target filter a chain node announces as
@@ -45574,8 +45575,8 @@ fn parse_effect_chain_ir_body(
     let full_text = text; // bind AFTER the strip so diagnostics track the parsed chunks
     ctx.effect_chain_full_lower = Some(full_text.to_ascii_lowercase());
     // CR 608.2c: A tracked-set source-zone binding is scoped to the chain that
-    // publishes it. The per-chunk `chunk_ctx` re-seeds `pending_tracked_set_origin`
-    // from the `chain_pending_tracked_set_origin` loop-local (initialized to
+    // publishes it. The per-chunk `chunk_ctx` re-seeds `pending_tracked_set`
+    // from the `chain_pending_tracked_set` loop-local (initialized to
     // None) each iteration, so a binding from one chain can never leak into the
     // next; the outer `ctx` field is left untouched here.
     // CR 701.42a: The meld effect clause "exile them, then meld them into
@@ -45635,7 +45636,7 @@ fn parse_effect_chain_ir_body(
     // CR 611.2a + CR 608.2c: expand any chunk whose leading duration governs conjuncts the
     // single-clause parse discarded. The expanded conjuncts become ORDINARY chunks of THIS
     // chain, which is the only construction under which chain-level anaphor state
-    // (`ctx.subject`, `carried_player`, `chain_pending_tracked_set_origin`,
+    // (`ctx.subject`, `carried_player`, `chain_pending_tracked_set`,
     // `chain_declared_target_slots`) is available to them at all — a NESTED
     // `parse_effect_chain_ir` restarts that state and binds `SelfRef` unconditionally
     // (measured on Opportunistic Dragon). Availability is necessary, not sufficient:
@@ -45716,9 +45717,9 @@ fn parse_effect_chain_ir_body(
     // battlefield" consumer so the `TrackedSet` move scans the right zone
     // (Breach the Multiverse: graveyard, not the impulse-default exile). Like
     // the chosen-player locals, the per-chunk `chunk_ctx` is rebuilt fresh each
-    // iteration, so this loop-local seeds each `chunk_ctx.pending_tracked_set_origin`
+    // iteration, so this loop-local seeds each `chunk_ctx.pending_tracked_set`
     // and is refreshed from the finalized `ChooseFromZone` clause after parse.
-    let mut chain_pending_tracked_set_origin: Option<crate::types::zones::Zone> = None;
+    let mut chain_pending_tracked_set: Option<PendingTrackedSet> = None;
     // CR 608.2e + CR 109.5: Sticky across chunks of a "For each opponent who
     // doesn't, <body>" decline-consequence sentence. Set true on the chunk that
     // carries the "for each opponent who doesn't" prefix; every chunk while
@@ -48642,7 +48643,7 @@ fn parse_effect_chain_ir_body(
             // "choose card(s) in <zone>" producer so this chunk's "put those
             // cards onto the battlefield" anaphor binds its `TrackedSet` move to
             // that origin instead of the impulse-default exile.
-            pending_tracked_set_origin: chain_pending_tracked_set_origin,
+            pending_tracked_set: chain_pending_tracked_set,
             // CR 601.2c + CR 608.2c: seed the declared target-slot registry so a
             // later clause's definite anaphor ("that Equipment", "the chosen
             // creature") resolves to the slot the "Choose target X and target Y"
@@ -49422,8 +49423,11 @@ fn parse_effect_chain_ir_body(
         // cards" chain), never a single hardcoded card. Any chunk that is not
         // itself such a producer clears it, so the binding never leaks past the
         // immediately-following consumer.
-        chain_pending_tracked_set_origin = match &clause.effect {
-            Effect::ChooseFromZone { zone, .. } => Some(*zone),
+        chain_pending_tracked_set = match &clause.effect {
+            Effect::ChooseFromZone { zone, .. } => Some(PendingTrackedSet {
+                zone: *zone,
+                producer: TrackedSetProducer::Chosen,
+            }),
             // CR 701.20b: revealed cards stay in the library they were revealed
             // from, so "put those cards …" reads them out of the library. A bare
             // reveal is still a reveal `Dig` with no kept-card destination here;
@@ -49437,7 +49441,10 @@ fn parse_effect_chain_ir_body(
                 destination: None,
                 keep_count: None,
                 ..
-            } => Some(Zone::Library),
+            } => Some(PendingTrackedSet {
+                zone: Zone::Library,
+                producer: TrackedSetProducer::Revealed,
+            }),
             _ => None,
         };
         // CR 608.2d + CR 115.7d: The chunk loop intentionally keeps the full
