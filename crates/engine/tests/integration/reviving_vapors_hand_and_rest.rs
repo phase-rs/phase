@@ -8,7 +8,9 @@
 //! * the chosen card must actually reach its owner's hand and the life total
 //!   must rise by THAT card's mana value (the Demonstrative "that card" is the
 //!   settled kept card, never one of the cards moved to the graveyard);
-//! * the other revealed cards — and only those — go to the graveyard.
+//! * the remainder is recognized as its own instruction, but simultaneous
+//!   graveyard entry requires owner ordering under CR 404.3, kept as an honest
+//!   unsupported gap.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::actions::GameAction;
@@ -184,23 +186,23 @@ fn reviving_vapors_puts_the_kept_card_in_hand_and_gains_its_mana_value() {
         (tiny, "third revealed card"),
     ] {
         assert!(
-            graveyard_ids(&runner).contains(&id),
-            "the {label} must be in the graveyard: {:?}",
-            graveyard_ids(&runner)
-        );
-        assert_eq!(
-            runner.state().objects[&id].zone,
-            Zone::Graveyard,
-            "the {label}'s zone"
-        );
-        assert!(
             !hand_ids(&runner).contains(&id),
             "the {label} must not be put into the hand"
+        );
+        // CR 404.3: moving multiple cards into the same graveyard simultaneously
+        // requires an owner-ordering choice that the engine does not provide for
+        // this mass remainder move. Rather than delivering in arbitrary engine
+        // order, the remainder is an honest unsupported gap; the unselected
+        // cards remain in the library.
+        assert_eq!(
+            runner.state().objects[&id].zone,
+            Zone::Library,
+            "the {label} remains in library because the graveyard remainder is an honest gap"
         );
     }
     assert!(
         !graveyard_ids(&runner).contains(&big),
-        "the kept card must not be swept into the remainder: {:?}",
+        "the kept card must not be swept into the graveyard: {:?}",
         graveyard_ids(&runner)
     );
     assert_eq!(
@@ -336,14 +338,14 @@ fn reviving_vapors_life_gain_ignores_a_single_remainder_card() {
     let runner = cast_and_keep(scenario, &[big, small], big);
 
     assert!(hand_ids(&runner).contains(&big), "kept card in hand");
-    assert!(
-        graveyard_ids(&runner).contains(&small),
-        "the only other revealed card is the remainder: {:?}",
-        graveyard_ids(&runner)
+    assert_eq!(
+        runner.state().objects[&small].zone,
+        Zone::Library,
+        "the unselected card remains in the library because graveyard remainder is an honest gap"
     );
     assert_eq!(
         life(&runner),
         23,
-        "life must be the kept card's mana value, not the graveyard card's"
+        "life must be the kept card's mana value, not the unselected card's"
     );
 }

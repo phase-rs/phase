@@ -96459,35 +96459,22 @@ fn reviving_vapors_keeps_one_in_hand_and_puts_the_rest_into_the_graveyard() {
         ),
         other => panic!("expected GainLife after the Dig, got {other:#?}"),
     }
-    // CR 701.20a + CR 608.2c: the remainder instruction follows the life gain
-    // in written order, so it stays a separate step. It names its population by
-    // provenance — the cards this reveal revealed that are still in the library
-    // — never by the shape of a later tracked-set move, so a reveal that routes
-    // its SELECTED cards by type (Zimone's Experiment) keeps them.
+    // CR 404.3: moving multiple cards into the same graveyard simultaneously
+    // requires an owner-ordering choice that the engine does not provide for
+    // this mass remainder move. Rather than silently delivering in collection
+    // order, the remainder survives after the life gain as an honest gap.
     let rest = gain
         .sub_ability
         .as_deref()
         .expect("the remainder instruction follows the life gain");
-    match &*rest.effect {
-        Effect::ChangeZoneAll {
-            origin,
-            destination,
-            target: crate::types::ability::TargetFilter::LastRevealed,
-            random_order,
-            ..
-        } => {
-            assert_eq!(
-                *origin,
-                Some(crate::types::zones::Zone::Library),
-                "the remainder is scoped to revealed cards still in the library"
-            );
-            assert_eq!(*destination, crate::types::zones::Zone::Graveyard);
-            assert!(!random_order, "a graveyard remainder has no ordering");
-        }
-        other => panic!(
-            "expected the explicit reveal-remainder move after the life gain, got {other:#?}"
+    assert!(
+        matches!(
+            &*rest.effect,
+            Effect::Unimplemented { name, .. } if name == "revealed_remainder_graveyard_order"
         ),
-    }
+        "the CR 404.3 graveyard remainder must survive as an honest gap, got {:#?}",
+        rest.effect
+    );
 }
 
 /// CR 701.20a + CR 608.2c: "revealed this way" names a PUBLIC reveal's
@@ -96506,9 +96493,13 @@ fn revealed_remainder_is_not_absorbed_into_a_private_look_across_a_draw() {
         Effect::Dig {
             reveal,
             rest_destination,
+            keep_count,
+            destination,
             ..
         } => {
             assert!(!reveal, "the look is private: {:#?}", def.effect);
+            assert_eq!(*keep_count, Some(1));
+            assert_eq!(*destination, Some(crate::types::zones::Zone::Hand));
             assert_eq!(
                 *rest_destination, None,
                 "the private look must not absorb the later remainder clause: {:#?}",
@@ -96537,8 +96528,9 @@ fn revealed_remainder_is_not_absorbed_into_a_private_look_across_a_draw() {
     );
     assert!(
         matches!(
-            chain.get(2).map(|node| &*node.effect),
-            Some(Effect::Unimplemented { .. })
+            chain.last().map(|node| &*node.effect),
+            Some(Effect::Unimplemented { name, .. })
+                if name == "revealed_remainder_without_public_reveal"
         ),
         "the refused remainder must survive after the draw as an honest gap: {:#?}",
         chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
@@ -96599,7 +96591,7 @@ fn revealed_remainder_is_refused_across_an_intervening_reveal_writer() {
     // THIS reason (an unrelated parse miss would not be evidence).
     assert!(
         matches!(
-            chain.get(2).map(|node| &*node.effect),
+            chain.last().map(|node| &*node.effect),
             Some(Effect::Unimplemented { name, .. })
                 if name == "revealed_remainder_after_intervening_clause"
         ),
@@ -96616,10 +96608,153 @@ fn revealed_remainder_is_refused_across_an_intervening_reveal_writer() {
     );
 }
 
+/// CR 701.20a + CR 608.2c: a "revealed this way" remainder names ONE public
+/// reveal's population. An intervening compound instruction whose own resolution
+/// contains a reveal writer (e.g. TargetOnly -> RevealTop -> GainLife) overwrites
+/// the reveal population. Lookback must prove the ENTIRE crossed clause reveal-free
+/// (using visit_ability_def_scoped under OwnResolutionOnly), not just its deepest
+/// effect (GainLife), refusing to bind across the compound writer.
+#[test]
+fn revealed_remainder_is_refused_across_an_intervening_compound_reveal_writer() {
+    let def = parse_effect_chain(
+        "Reveal the top three cards of your library and put one of them into your hand. \
+         You and target opponent each reveal the top card of your library and gain 1 life. \
+         Put all other cards revealed this way into exile.",
+        AbilityKind::Spell,
+    );
+
+    let mut chain: Vec<&AbilityDefinition> = Vec::new();
+    let mut cursor = Some(&def);
+    while let Some(node) = cursor {
+        chain.push(node);
+        cursor = node.sub_ability.as_deref();
+    }
+
+    // Reach guard 1: head is the public Dig
+    assert!(
+        matches!(
+            chain.first().map(|node| &*node.effect),
+            Some(Effect::Dig { reveal: true, .. })
+        ),
+        "head must be the public reveal Dig: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+
+    // Reach guard 2: intervening clause parsed as TargetOnly wrapping RevealTop and GainLife
+    let intervening = chain.get(1).expect("expected intervening clause");
+    assert!(
+        matches!(&*intervening.effect, Effect::TargetOnly { .. }),
+        "intervening clause head must be TargetOnly: {:#?}",
+        intervening.effect
+    );
+    let mut has_reveal_top = false;
+    let mut has_gain_life = false;
+    let _ = crate::types::ability_visit::visit_ability_def_scoped(
+        intervening,
+        crate::types::ability_visit::ResolutionScope::OwnResolutionOnly,
+        &mut |effect| {
+            if matches!(effect, Effect::RevealTop { .. }) {
+                has_reveal_top = true;
+            }
+            if matches!(effect, Effect::GainLife { .. }) {
+                has_gain_life = true;
+            }
+            std::ops::ControlFlow::Continue(())
+        },
+    );
+    assert!(has_reveal_top, "intervening clause must contain RevealTop");
+    assert!(has_gain_life, "intervening clause must contain GainLife");
+
+    // The refusal: the remainder survives at its written position as an honest gap
+    assert!(
+        matches!(
+            chain.last().map(|node| &*node.effect),
+            Some(Effect::Unimplemented { name, .. })
+                if name == "revealed_remainder_after_intervening_clause"
+        ),
+        "the remainder must be refused after the compound reveal writer: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+
+    // Nothing anywhere moves the remainder
+    assert!(
+        chain
+            .iter()
+            .all(|node| !matches!(&*node.effect, Effect::ChangeZoneAll { .. })),
+        "nothing may move the remainder as a revealed-set move: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+}
+
+/// CR 701.20a + CR 608.2c: a "revealed this way" remainder lowers to
+/// `TargetFilter::LastRevealed` scoped to `origin: Library`. But when a public
+/// Dig uses a reveal-only choice (`destination: None`, e.g. Zimone's Experiment),
+/// the selected cards remain in the library. LastRevealed still includes the
+/// entire revealed population, so a library remainder cannot be inferred from
+/// LastRevealed without including the selected cards. The continuation must be
+/// refused unless selected departure from the library is proved.
+#[test]
+fn revealed_remainder_is_refused_when_dig_selection_does_not_depart_library() {
+    let def = parse_effect_chain(
+        "Reveal the top five cards of your library. You may reveal up to two \
+         creature and/or land cards from among them, then put the rest on the bottom of your library in a random order. \
+         Put all other cards revealed this way into exile.",
+        AbilityKind::Spell,
+    );
+
+    let mut chain: Vec<&AbilityDefinition> = Vec::new();
+    let mut cursor = Some(&def);
+    while let Some(node) = cursor {
+        chain.push(node);
+        cursor = node.sub_ability.as_deref();
+    }
+
+    // Reach guard 1: head is the public reveal Dig
+    match chain.first().map(|node| &*node.effect) {
+        Some(Effect::Dig {
+            reveal,
+            destination,
+            ..
+        }) => {
+            assert!(*reveal, "reveal must be true");
+            // Reach guard 2: destination is None (selection does not depart library)
+            assert_eq!(
+                *destination,
+                None,
+                "destination must be None for reveal-only Dig: {:#?}",
+                chain.first()
+            );
+        }
+        other => panic!("expected Effect::Dig at head, got {other:#?}"),
+    }
+
+    // Refusal assertion: the remainder survives at its written position as an honest gap
+    assert!(
+        matches!(
+            chain.get(1).map(|node| &*node.effect),
+            Some(Effect::Unimplemented { name, .. })
+                if name == "revealed_remainder_without_reveal"
+        ),
+        "remainder must be refused when selected cards do not depart library: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+
+    // Nothing anywhere moves the remainder
+    assert!(
+        chain
+            .iter()
+            .all(|node| !matches!(&*node.effect, Effect::ChangeZoneAll { .. })),
+        "nothing may move the remainder as a revealed-set move: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+}
+
 /// CR 701.20a + CR 608.2c: the rest-pile clause of a reveal instruction claims
 /// only destinations it fully understands, and only an explicitly randomized
-/// library remainder (CR 401.4). Everything else is refused, not defaulted to a
-/// library move.
+/// library remainder (CR 401.4). An owner-ordered library remainder (CR 401.4)
+/// or graveyard remainder (CR 404.3) requires an arrangement prompt this
+/// instruction does not own, so it is refused rather than silently delivered in
+/// collection order.
 
 #[test]
 fn revealed_remainder_destinations_are_explicit_or_refused() {

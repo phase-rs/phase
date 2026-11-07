@@ -528,12 +528,16 @@ pub(crate) enum ContinuationAst {
     /// CR 702.143d: "It/that card/they become foretold" after an exile effect.
     BecomesForetold,
     /// CR 701.20a + CR 701.20e + CR 608.2c: "Put all other cards revealed this
-    /// way into your graveyard" (Reviving Vapors) — the complement of a REVEAL
-    /// instruction's selection, named separately from that instruction because
-    /// an intervening clause uses the revealed card first ("You gain life equal
-    /// to that card's mana value"). Bound only to a PROVED public reveal
-    /// (`Dig { reveal: true, .. }`): a private "look at" never publishes a
-    /// revealed population, so it cannot absorb this clause.
+    /// way into exile" (or hand / randomized library) — the complement of a
+    /// REVEAL instruction's selection, named separately from that instruction
+    /// because an intervening clause uses the revealed card first ("You gain
+    /// life equal to that card's mana value"). Bound only to a PROVED public
+    /// reveal (`Dig { reveal: true, destination: Some(dest) }` where
+    /// `dest != Library`) whose selection departs the library: a private "look
+    /// at" never publishes a revealed population, and a selection remaining in
+    /// the library cannot be partitioned via `LastRevealed`. An owner-ordered
+    /// library (CR 401.4) or graveyard (CR 404.3) remainder is refused because
+    /// this instruction does not own an ordering prompt.
     ///
     /// Lowers to an explicit `ChangeZoneAll { origin: Library, target:
     /// LastRevealed }`: "the cards the preceding reveal revealed that are still
@@ -546,9 +550,10 @@ pub(crate) enum ContinuationAst {
     /// were selected.
     RevealedRemainder {
         destination: Zone,
-        /// CR 401.4 + CR 400.5: only an explicitly randomized library remainder
-        /// is accepted; an owner-ordered one has no prompt on this path and is
-        /// refused at parse time rather than silently kept in place.
+        /// CR 401.4 + CR 400.5 + CR 404.3: only an explicitly randomized library
+        /// remainder (or non-ordered zones like exile/hand) is accepted; an
+        /// owner-ordered remainder has no prompt on this path and is refused at
+        /// parse time rather than silently kept in place.
         #[serde(default, skip_serializing_if = "DigRestOrder::is_preserve")]
         rest_order: DigRestOrder,
     },

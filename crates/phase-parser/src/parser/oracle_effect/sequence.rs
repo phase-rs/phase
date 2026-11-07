@@ -827,6 +827,10 @@ pub(super) fn clause_preserves_reveal_population(effect: &Effect) -> bool {
 /// randomization instruction. An owner-ordered remainder needs an ordering
 /// prompt this instruction does not own, so it stays refused (the caller sees a
 /// parse miss) rather than silently kept in place.
+///
+/// CR 404.3: an owner-ordered graveyard remainder also needs an ordering prompt
+/// this instruction does not own, so it stays refused rather than silently
+/// delivered in collection order.
 fn parse_revealed_remainder_destination(input: &str) -> OracleResult<'_, (Zone, DigRestOrder)> {
     let (input, destination) = parse_choice_partition_destination(input)?;
     if destination != Zone::Library {
@@ -5925,15 +5929,12 @@ pub(super) fn apply_clause_continuation(
             destination,
             rest_order,
         } => {
-            // CR 701.20a: the clause says "revealed this way", so it names the
-            // population of a PUBLIC reveal instruction. The binding step admits
-            // this continuation only for `Dig { reveal: true, .. }`, so a
-            // private "look at" can never absorb it — the clause keeps its
-            // written position instead of being folded in ahead of an
-            // intervening instruction (CR 608.2c). This arm re-checks the bound
-            // node against that contract and fails closed with an explicit gap
-            // rather than dropping the instruction or patching a look's rest
-            // destination.
+            // CR 701.20a + CR 608.2c: the clause says "revealed this way", so
+            // it names the population of a PUBLIC reveal instruction. The
+            // complement is only defined from `LastRevealed` in the library
+            // if the selected cards departed the library (`destination: Some(dest)`
+            // where `dest != Library`). A private look or a reveal-only Dig
+            // whose selected cards remain in the library cannot absorb it.
             let public_reveal = env
                 .resolve(
                     defs,
@@ -5944,7 +5945,14 @@ pub(super) fn apply_clause_continuation(
                     super::assembly::OnMiss::Ignore,
                 )
                 .is_some_and(|index| {
-                    matches!(&*defs[index].effect, Effect::Dig { reveal: true, .. })
+                    matches!(
+                        &*defs[index].effect,
+                        Effect::Dig {
+                            reveal: true,
+                            destination: Some(dest),
+                            ..
+                        } if *dest != Zone::Library
+                    )
                 });
             if !public_reveal {
                 defs.push(AbilityDefinition::new(
@@ -5952,6 +5960,19 @@ pub(super) fn apply_clause_continuation(
                     Effect::unimplemented(
                         "revealed_remainder_without_reveal",
                         "all other cards revealed this way",
+                    ),
+                ));
+                return;
+            }
+            // CR 404.3: an owner-ordered graveyard remainder needs an ordering
+            // prompt this instruction does not own; rather than delivering in
+            // arbitrary engine order, keep this shape honest as an unsupported gap.
+            if destination == Zone::Graveyard {
+                defs.push(AbilityDefinition::new(
+                    kind,
+                    Effect::unimplemented(
+                        "revealed_remainder_graveyard_order",
+                        "all other cards revealed this way into graveyard",
                     ),
                 ));
                 return;

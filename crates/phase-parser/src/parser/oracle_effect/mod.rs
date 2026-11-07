@@ -50543,18 +50543,15 @@ fn parse_effect_chain_ir_body(
                     let remainder_clause =
                         sequence::parse_revealed_remainder_clause(normalized_text);
                     let mut crossed_span_preserves_reveal = true;
-                    for deeper in non_absorbed
-                        .iter()
-                        .filter(|c| {
-                            !matches!(
-                                c.disposition,
-                                ClauseDisposition::ReplaceMeaning {
-                                    kind: ReplaceMeaningKind::Instead(_)
-                                }
-                            )
-                        })
-                        .map(|c| effective_effect_of(c))
-                    {
+                    for prior_clause in non_absorbed.iter().filter(|c| {
+                        !matches!(
+                            c.disposition,
+                            ClauseDisposition::ReplaceMeaning {
+                                kind: ReplaceMeaningKind::Instead(_)
+                            }
+                        )
+                    }) {
+                        let deeper = effective_effect_of(prior_clause);
                         // An unrecognized instruction may itself select or
                         // re-bind the referent, so it ends the scan (and was
                         // never a candidate).
@@ -50623,9 +50620,29 @@ fn parse_effect_chain_ir_body(
                             return bound;
                         }
                         // CR 701.20a + CR 608.2c: record whether this clause may be
-                        // crossed on the way to an earlier `Dig`.
-                        crossed_span_preserves_reveal &=
-                            sequence::clause_preserves_reveal_population(&deeper);
+                        // crossed on the way to an earlier `Dig`. Prove its entire
+                        // own-resolution definition is reveal-free using the scoped
+                        // traversal, refusing any intrinsic continuation or
+                        // compound/wrapped writer (e.g. TargetOnly -> RevealTop -> GainLife).
+                        let mut clause_preserves = prior_clause.disposition.intrinsic().is_none();
+                        if clause_preserves {
+                            let mut clause_def =
+                                AbilityDefinition::new(kind, prior_clause.parsed.effect.clone());
+                            clause_def.sub_ability = prior_clause.parsed.sub_ability.clone();
+                            let _ = crate::types::ability_visit::visit_ability_def_scoped(
+                                &clause_def,
+                                crate::types::ability_visit::ResolutionScope::OwnResolutionOnly,
+                                &mut |effect| {
+                                    if !sequence::clause_preserves_reveal_population(effect) {
+                                        clause_preserves = false;
+                                        std::ops::ControlFlow::Break(())
+                                    } else {
+                                        std::ops::ControlFlow::Continue(())
+                                    }
+                                },
+                            );
+                        }
+                        crossed_span_preserves_reveal &= clause_preserves;
                     }
                     None
                 })
