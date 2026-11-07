@@ -9014,13 +9014,12 @@ async fn handle_full_game_submission(
     let (session, applied) = executor
         .with_session(session, move |session| {
             let HandledAction { result, takeback } = match submission {
-                GameSubmission::Action(action) => session
-                    .handle_action_with_card_db_outcome_at(
-                        &player_token,
-                        action,
-                        Some(card_db.as_ref()),
-                        host_received_at_ms,
-                    ),
+                GameSubmission::Action(action) => session.handle_action_with_card_db_outcome_at(
+                    &player_token,
+                    action,
+                    Some(card_db.as_ref()),
+                    host_received_at_ms,
+                ),
                 GameSubmission::Interaction(submission) => session
                     .handle_interaction_with_rejection(&player_token, submission)
                     .map(|result| HandledAction {
@@ -10186,6 +10185,7 @@ fn schedule_say_phrase_expiry(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_client_message(
     client_msg: ClientMessage,
     resync: Option<socket_mailbox::ResyncPermit>,
