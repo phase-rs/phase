@@ -352,6 +352,7 @@ mod issue_1018_manifest_dread_choice;
 mod issue_1019_heraldic_banner_chosen_color;
 mod issue_1021_recurring_nightmare;
 mod issue_1022_savai_triome_cycling;
+mod issue_10234_player_protection_hexproof_from;
 mod issue_1023_oversold_cemetery;
 mod issue_1025_rishkars_expertise;
 mod issue_10315_one_ring_attackable;
