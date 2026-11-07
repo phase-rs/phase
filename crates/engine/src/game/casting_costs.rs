@@ -29,7 +29,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{GiftKind, Keyword};
-use crate::types::mana::{ManaCost, ManaCostShard, ManaType, PaymentContext};
+use crate::types::mana::{ManaCost, ManaCostShard, ManaSupertype, ManaType, PaymentContext};
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::resolution::OptionalEffectFrame;
@@ -15245,12 +15245,15 @@ fn handle_resolution_cast_rejection(
     Ok(WaitingFor::Priority { player })
 }
 
-/// Count distinct source objects that can produce any of the `acceptable` colors.
+/// CR 106.3 + CR 107.4h: count distinct sources whose units satisfy the
+/// acceptable mana types and any required snow provenance.
 fn count_available_sources(
     available: &[ManaSourceOption],
     used: &HashSet<ObjectId>,
     acceptable: &[ManaType],
     requires_two_or_more_color_source: bool,
+    required_supertype: Option<ManaSupertype>,
+    snow_output: Option<&AutoTapSnowOutput>,
     payment_context: Option<&PaymentContext<'_>>,
 ) -> usize {
     let mut seen = HashSet::new();
@@ -15262,6 +15265,8 @@ fn count_available_sources(
                 opt,
                 acceptable,
                 requires_two_or_more_color_source,
+                required_supertype,
+                snow_output,
                 payment_context,
             )
         {
@@ -15271,13 +15276,16 @@ fn count_available_sources(
     seen.len()
 }
 
-/// True iff this source option can contribute any of the acceptable colors.
+/// CR 107.4h: a source option must supply the required snow provenance as
+/// well as an acceptable mana type.
 /// For single-color rows, checks `mana_type` directly; for combination rows,
 /// checks whether any color in the combination is acceptable.
 fn option_satisfies(
     opt: &ManaSourceOption,
     acceptable: &[ManaType],
     requires_two_or_more_color_source: bool,
+    required_supertype: Option<ManaSupertype>,
+    snow_output: Option<&AutoTapSnowOutput>,
     payment_context: Option<&PaymentContext<'_>>,
 ) -> bool {
     if !option_allowed_for_context(opt, payment_context) {
@@ -15286,12 +15294,21 @@ fn option_satisfies(
     if requires_two_or_more_color_source && !opt.source_could_produce_two_or_more_colors {
         return false;
     }
-    if acceptable.is_empty() {
+    // CR 106.6: even a type-agnostic shard needs an actual unit permitted by
+    // the activation's color rider. Only context-free rows can skip that gate.
+    if acceptable.is_empty()
+        && required_supertype.is_none()
+        && snow_output.is_none()
+        && payment_context.is_none()
+    {
         return true;
     }
-    option_mana_types_for_context(opt, payment_context)
+    option_units_for_context(opt, payment_context, snow_output)
         .iter()
-        .any(|mana_type| acceptable.contains(mana_type))
+        .any(|(mana_type, supertype)| {
+            (acceptable.is_empty() || acceptable.contains(mana_type))
+                && required_supertype.is_none_or(|required| *supertype == Some(required))
+        })
 }
 
 /// Mana this source may contribute to the pending payment. An activation
@@ -15312,6 +15329,40 @@ fn option_mana_types_for_context(
         .collect()
 }
 
+/// CR 107.4h: retain per-unit snow provenance while respecting the planning
+/// row's width (a scalar funding fallback must not expand back to a bundle).
+fn option_units_for_context(
+    option: &ManaSourceOption,
+    payment_context: Option<&PaymentContext<'_>>,
+    snow_output: Option<&AutoTapSnowOutput>,
+) -> Vec<AutoTapUnit> {
+    match snow_output {
+        Some(output) => output
+            .iter()
+            .find(|(row, _)| row == option)
+            .map(|(_, units)| units.clone())
+            .unwrap_or_default(),
+        None => option_mana_types_for_context(option, payment_context)
+            .into_iter()
+            .map(|mana| (mana, None))
+            .collect(),
+    }
+}
+
+/// CR 107.4h: ordinary colored payment should use an interchangeable non-snow
+/// unit before consuming the only unit eligible for a pending snow symbol.
+fn auto_tap_matching_unit(units: &[AutoTapUnit], need: &AutoTapNeed) -> Option<usize> {
+    units
+        .iter()
+        .enumerate()
+        .filter(|(_, (mana, supertype))| {
+            (need.0.is_empty() || need.0.contains(mana))
+                && need.4.is_none_or(|required| *supertype == Some(required))
+        })
+        .min_by_key(|(_, unit)| unit.1.is_some())
+        .map(|(index, _)| index)
+}
+
 fn option_allowed_for_context(
     opt: &ManaSourceOption,
     payment_context: Option<&PaymentContext<'_>>,
@@ -15324,17 +15375,25 @@ fn option_allowed_for_context(
         .all(|restriction| restriction.allows(ctx))
 }
 
-/// Pick the source with the fewest alternative color options (LCV heuristic).
-/// Among ties, the tier-sort order of `available` acts as tiebreaker (pure lands
-/// before dorks before land-creatures before sacrifice sources).
+/// Preserve the sacrifice-last bucket and the selected whole-plan preference.
+/// The ordinary pass uses LCV; the fallback prefers covered pips before LCV.
+/// A surplus-only bundle has no advantage for a one-pip requirement. Ties use
+/// the existing sorted order of `available`: card/deprioritized tier precedes
+/// within-tier penalties. Do not promote those penalties above the card tier.
+#[allow(clippy::too_many_arguments)]
 fn find_least_flexible_source(
     available: &[ManaSourceOption],
     used: &HashSet<ObjectId>,
     generic_reservations: &HashSet<ObjectId>,
-    acceptable: &[ManaType],
-    requires_two_or_more_color_source: bool,
+    needs: &[AutoTapNeed],
+    assigned: &[bool],
+    need_idx: usize,
     payment_context: Option<&PaymentContext<'_>>,
+    source_order: AutoTapSourceOrder,
+    snow_output: Option<&AutoTapSnowOutput>,
 ) -> Option<ManaSourceOption> {
+    let (acceptable, _, requires_two_or_more_color_source, _, required_supertype) =
+        &needs[need_idx];
     for exclude_reserved in [true, false] {
         let least_flexible = available
             .iter()
@@ -15344,15 +15403,27 @@ fn find_least_flexible_source(
                     && option_satisfies(
                         opt,
                         acceptable,
-                        requires_two_or_more_color_source,
+                        *requires_two_or_more_color_source,
+                        *required_supertype,
+                        snow_output,
                         payment_context,
                     )
             })
             .min_by_key(|opt| {
-                available
+                let flexibility = available
                     .iter()
                     .filter(|other| other.object_id == opt.object_id)
-                    .count()
+                    .count();
+                let units = option_units_for_context(opt, payment_context, snow_output);
+                let (covered, _) = score_combination(&units, needs, assigned);
+                (
+                    opt.penalty.tier_byte(),
+                    std::cmp::Reverse(match source_order {
+                        AutoTapSourceOrder::LeastFlexible => 0,
+                        AutoTapSourceOrder::FullOutput => covered,
+                    }),
+                    flexibility,
+                )
             })
             .cloned();
         if least_flexible.is_some() {
@@ -16016,6 +16087,7 @@ fn auto_tap_mana_sources_inner(
         AutoTapPlan {
             mut to_tap,
             used_sources,
+            activation_order,
             ..
         },
         nested_row_policy,
@@ -16033,15 +16105,15 @@ fn auto_tap_mana_sources_inner(
     //
     // CR 601.2g permits mana-ability activation; CR 605.3b resolves it
     // immediately; CR 605.3c prevents reactivation. Those rules do not prescribe
-    // this ordering. Engine scheduling policy: with every row, selected sources
+    // this ordering. Engine scheduling policy: by default, selected sources
     // without a mana sub-cost resolve first, stably, so their mana is available to
-    // pay a later cost. A drawback-free plan selects at most one row with a mana
+    // pay a later cost. A verified plan selects at most one row with a mana
     // sub-cost at each payment level, and only when the pool was empty
     // (`planned_mana_sub_costs_fundable`); that row resolves first, so its
     // sub-cost is planned against the same empty pool and unused sources the
     // check planned it against, before any of this plan's mana floats.
     // This preserves the plan and `used_sources` reservation; it changes only order.
-    let sub_cost_rows_first = nested_row_policy == AutoTapRowPolicy::WithoutAvoidableDrawbacks;
+    let sub_cost_rows_first = activation_order == AutoTapActivationOrder::ManaCostsFirst;
     to_tap.sort_by_key(|option| {
         let has_sub_cost = option.ability_index.is_some_and(|ability_index| {
             state
@@ -16250,8 +16322,42 @@ fn auto_tap_mana_sources_inner(
 /// One colored-shard requirement of an auto-tap plan: the acceptable mana
 /// types (empty = any), whether an unmet shard falls back to two generic
 /// (CR 107.4e), whether it needs a source that could produce two or more
-/// colors, and whether it is Phyrexian (CR 107.4f).
-type AutoTapNeed = (Vec<ManaType>, bool, bool, bool);
+/// colors, whether it is Phyrexian (CR 107.4f), and any required mana
+/// supertype (CR 107.4h).
+type AutoTapNeed = (Vec<ManaType>, bool, bool, bool, Option<ManaSupertype>);
+
+type AutoTapUnit = (ManaType, Option<ManaSupertype>);
+type AutoTapSnowOutput = Vec<(ManaSourceOption, Vec<AutoTapUnit>)>;
+
+/// Use the same scarcity order for the first unit and its bundle leftovers.
+/// CR 107.4f: Non-Phyrexian needs precede life-payable ones; narrower requirements win
+/// ties so an earlier hybrid cannot consume a strict pip's only mana.
+fn auto_tap_need_priority(
+    available: &[ManaSourceOption],
+    used: &HashSet<ObjectId>,
+    need: &AutoTapNeed,
+    snow_output: Option<&AutoTapSnowOutput>,
+    payment_context: Option<&PaymentContext<'_>>,
+) -> (bool, usize, usize) {
+    let (acceptable, _, requires_two_or_more_color_source, is_phyrexian, required_supertype) = need;
+    (
+        *is_phyrexian,
+        count_available_sources(
+            available,
+            used,
+            acceptable,
+            *requires_two_or_more_color_source,
+            *required_supertype,
+            snow_output,
+            payment_context,
+        ),
+        if acceptable.is_empty() {
+            usize::MAX
+        } else {
+            acceptable.len()
+        },
+    )
+}
 
 /// Translate a cost's shards into auto-tap requirements. Returns the colored
 /// requirements and the number of shards deferred to generic payment.
@@ -16276,7 +16382,7 @@ fn auto_tap_needs(
                 } else {
                     vec![color]
                 };
-                needs.push((acceptable, false, false, false));
+                needs.push((acceptable, false, false, false, None));
             }
             ShardRequirement::Phyrexian(color) => {
                 // CR 107.4f: Mark as phyrexian (4th field = true) so MCV deprioritizes it
@@ -16289,7 +16395,7 @@ fn auto_tap_needs(
                 } else {
                     vec![color]
                 };
-                needs.push((acceptable, false, false, true));
+                needs.push((acceptable, false, false, true, None));
             }
             ShardRequirement::Hybrid(a, b) => {
                 let acceptable = if mana_spend_permission.is_some_and(|permission| {
@@ -16299,7 +16405,7 @@ fn auto_tap_needs(
                 } else {
                     vec![a, b]
                 };
-                needs.push((acceptable, false, false, false));
+                needs.push((acceptable, false, false, false, None));
             }
             ShardRequirement::HybridPhyrexian(a, b) => {
                 // CR 107.4f: Hybrid Phyrexian also allows life payment, so deprioritize.
@@ -16310,7 +16416,7 @@ fn auto_tap_needs(
                 } else {
                     vec![a, b]
                 };
-                needs.push((acceptable, false, false, true));
+                needs.push((acceptable, false, false, true, None));
             }
             ShardRequirement::TwoGenericHybrid(color) => {
                 let acceptable = if mana_spend_permission
@@ -16320,7 +16426,7 @@ fn auto_tap_needs(
                 } else {
                     vec![color]
                 };
-                needs.push((acceptable, true, false, false));
+                needs.push((acceptable, true, false, false, None));
             }
             // CR 107.4f: K'rrik promotion never reaches the auto-tap
             // planner (`shard_to_mana_type` never emits this variant),
@@ -16335,7 +16441,7 @@ fn auto_tap_needs(
                 } else {
                     vec![color]
                 };
-                needs.push((acceptable, true, false, true));
+                needs.push((acceptable, true, false, true, None));
             }
             ShardRequirement::ColorlessHybrid(color) => {
                 let acceptable = if mana_spend_permission
@@ -16345,12 +16451,16 @@ fn auto_tap_needs(
                 } else {
                     vec![ManaType::Colorless, color]
                 };
-                needs.push((acceptable, false, false, false));
+                needs.push((acceptable, false, false, false, None));
             }
             ShardRequirement::TwoOrMoreColorSource => {
-                needs.push((Vec::new(), false, true, false));
+                needs.push((Vec::new(), false, true, false, None));
             }
-            ShardRequirement::Snow | ShardRequirement::X => {
+            // CR 107.4h: snow is a provenance requirement, never generic.
+            ShardRequirement::Snow => {
+                needs.push((Vec::new(), false, false, false, Some(ManaSupertype::Snow)));
+            }
+            ShardRequirement::X => {
                 deferred_generic += 1;
             }
         }
@@ -16364,39 +16474,178 @@ fn auto_tap_needs(
 struct AutoTapPlan {
     to_tap: Vec<ManaSourceOption>,
     used_sources: HashSet<ObjectId>,
+    activation_order: AutoTapActivationOrder,
     /// Every colored requirement and every generic unit has a planned source.
     /// Mana sub-costs of the planned rows are not included; see
     /// [`planned_mana_sub_costs_fundable`].
     covers_cost: bool,
 }
 
-/// Plan which of `available` (sorted by `collect_sorted_auto_tap_source_options`)
-/// pay `needs` plus `generic_units` generic mana.
+/// Execution order belongs to this proven plan, not to the allowed-row policy.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AutoTapActivationOrder {
+    FreeSourcesFirst,
+    ManaCostsFirst,
+}
+
+/// Only a plan whose activation costs have independent funding may spend all
+/// its produced units on the outer payment (CR 118.10).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AutoTapFunding {
+    Conservative,
+    IndependentSubCosts,
+}
+
+/// Source ordering is a pure planning choice, not a persisted payment policy.
+#[derive(Clone, Copy)]
+enum AutoTapSourceOrder {
+    LeastFlexible,
+    FullOutput,
+}
+
+/// CR 106.3: classify the counted single-color bundles whose newly visible
+/// width must not displace a complete ordinary-source payment.
+fn counted_single_color_bundle(state: &GameState, option: &ManaSourceOption) -> bool {
+    option.atomic_combination.is_some()
+        && option
+            .ability_index
+            .and_then(|index| state.objects.get(&option.object_id)?.abilities.get(index))
+            .is_some_and(|ability| {
+                matches!(&*ability.effect, Effect::Mana { produced, .. }
+                    if mana_sources::single_color_production_count(produced).is_some())
+            })
+}
+
+/// CR 118.1 + CR 118.10: output used to pay this activation cannot also
+/// pay the outer spell. Inspect the existing cost cursor's flattened components
+/// so nested and multiple mana costs retain the same conservative treatment.
+fn mana_source_has_mana_sub_cost(state: &GameState, option: &ManaSourceOption) -> bool {
+    option.ability_index.is_some_and(|index| {
+        state
+            .objects
+            .get(&option.object_id)
+            .and_then(|object| object.abilities.get(index))
+            .is_none_or(|ability| {
+                ability.cost.as_ref().is_some_and(|cost| {
+                    mana_abilities::mana_ability_cost_components(cost)
+                        .iter()
+                        .any(|component| matches!(component, AbilityCost::Mana { .. }))
+                })
+            })
+    })
+}
+
+/// CR 601.2g + CR 106.4: retain ordinary source order when it pays the whole
+/// cost without a counted bundle. A partial ordinary plan must not consume
+/// sources before a required bundle (or its activation cost) is selected.
+/// Both attempts use the same planner. Accept only plans with no mana
+/// sub-costs here: row-policy verification owns their funding/order separately.
 fn plan_auto_tap_rows(
     state: &GameState,
     available: &[ManaSourceOption],
     needs: &[AutoTapNeed],
     generic_units: usize,
     payment_context: Option<&PaymentContext<'_>>,
+    funding: AutoTapFunding,
 ) -> AutoTapPlan {
+    if available
+        .iter()
+        .any(|option| counted_single_color_bundle(state, option))
+    {
+        let ordinary = plan_auto_tap_rows_in_order(
+            state,
+            available,
+            needs,
+            generic_units,
+            payment_context,
+            AutoTapSourceOrder::LeastFlexible,
+            funding,
+        );
+        if ordinary.covers_cost
+            && !ordinary
+                .to_tap
+                .iter()
+                .any(|option| counted_single_color_bundle(state, option))
+            && !ordinary
+                .to_tap
+                .iter()
+                .any(|option| mana_source_has_mana_sub_cost(state, option))
+        {
+            return ordinary;
+        }
+    }
+    plan_auto_tap_rows_in_order(
+        state,
+        available,
+        needs,
+        generic_units,
+        payment_context,
+        AutoTapSourceOrder::FullOutput,
+        funding,
+    )
+}
+
+/// Plan which of `available` (sorted by `collect_sorted_auto_tap_source_options`)
+/// pay `needs` plus `generic_units` generic mana. CR 107.4h: snow stays a
+/// separate provenance requirement even when a bundle has unused units.
+fn plan_auto_tap_rows_in_order(
+    state: &GameState,
+    available: &[ManaSourceOption],
+    needs: &[AutoTapNeed],
+    generic_units: usize,
+    payment_context: Option<&PaymentContext<'_>>,
+    source_order: AutoTapSourceOrder,
+    funding: AutoTapFunding,
+) -> AutoTapPlan {
+    // CR 106.3 + CR 107.4h: project each producing ability's provenance only
+    // for snow payments. Ordinary costs retain their cheap row-only path.
+    let snow_output = needs.iter().any(|need| need.4.is_some()).then(|| {
+        available
+            .iter()
+            .map(|option| {
+                let player = state.objects[&option.object_id].controller;
+                let mut live = mana_sources::live_mana_output_for_option(state, player, option);
+                let units = option
+                    .atomic_combination
+                    .as_deref()
+                    .unwrap_or(std::slice::from_ref(&option.mana_type))
+                    .iter()
+                    .filter_map(|mana| {
+                        let index = live.iter().position(|unit| unit.mana_type == *mana)?;
+                        let unit = live.remove(index);
+                        (payment_context.is_none_or(|ctx| {
+                            ctx.permits_actual_mana_type(unit.mana_type)
+                                && unit
+                                    .restrictions
+                                    .iter()
+                                    .all(|restriction| restriction.allows(ctx))
+                        }))
+                        .then_some((unit.mana_type, unit.supertype))
+                    })
+                    .collect();
+                (option.clone(), units)
+            })
+            .collect::<AutoTapSnowOutput>()
+    });
+    let snow_output = snow_output.as_ref();
     let mut to_tap: Vec<ManaSourceOption> = Vec::new();
     let mut used_sources: HashSet<ObjectId> = HashSet::new();
     let mut assigned = vec![false; needs.len()];
     let mut unfilled_shards = 0usize;
     let mut remaining_generic = generic_units;
 
-    // Phase 0 (combo pre-pass): CR 605.3b + CR 106.1a — filter-land rows
-    // produce a full multi-mana combination atomically. A naive per-shard
-    // loop can't see that tapping one filter land satisfies two colored
-    // requirements. Pre-allocate combination sources against pairs of
-    // still-unfilled shards before falling through to the single-color loop.
-    assign_combination_sources(
+    // Phase 0: preserve the fixed-output/filter-land pre-pass. Any-one-color
+    // rows use Phase 1's scarcity/source ranking: Lotus must supply green
+    // when an Island can supply the other blue pip.
+    let mut combination_surplus = assign_combination_sources(
+        state,
         available,
         needs,
         &mut assigned,
         &mut used_sources,
         &mut to_tap,
         payment_context,
+        snow_output,
     );
 
     // Preserve a free, colorless source for each generic slot when another
@@ -16426,7 +16675,7 @@ fn plan_auto_tap_rows(
         }
     }
 
-    // Phase 1: Assign remaining single-color sources to shards using MCV/LCV.
+    // Phase 1: Assign remaining sources to shards using MCV/LCV.
     // The naive greedy approach (tap first matching source per shard) fails when
     // a flexible source (dual land, multi-color dork) gets consumed for a color
     // that a single-purpose source could have provided, leaving no source for
@@ -16436,43 +16685,69 @@ fn plan_auto_tap_rows(
     // Phyrexian shards are deprioritized since they can be paid with life.
     // LCV: for each shard, prefer the least flexible source (fewest color options).
     for _ in 0..needs.len() {
-        let mut best_idx = None;
-        let mut min_sources = usize::MAX;
-        let mut best_priority = 1u8; // 0 = strict color (prioritized), 1 = phyrexian (deprioritized)
-        for (i, (acceptable, _, requires_two_or_more_color_source, is_phyrexian)) in
-            needs.iter().enumerate()
-        {
-            if assigned[i] {
-                continue;
-            }
-            let count = count_available_sources(
+        let best_idx = (0..needs.len()).filter(|&i| !assigned[i]).min_by_key(|&i| {
+            auto_tap_need_priority(
                 available,
                 &used_sources,
-                acceptable,
-                *requires_two_or_more_color_source,
+                &needs[i],
+                snow_output,
                 payment_context,
-            );
-            let priority = if *is_phyrexian { 1u8 } else { 0u8 };
-            // CR 107.4f: Prioritize strict colored shards (priority 0) over Phyrexian
-            // shards (priority 1). Within the same priority tier, use MCV (fewest sources).
-            if priority < best_priority || (priority == best_priority && count < min_sources) {
-                min_sources = count;
-                best_priority = priority;
-                best_idx = Some(i);
-            }
-        }
+            )
+        });
         let Some(idx) = best_idx else { break };
-        let (ref acceptable, two_generic_fallback, requires_two_or_more_color_source, _) =
-            &needs[idx];
+        let (_, two_generic_fallback, _, _, _) = &needs[idx];
         if let Some(option) = find_least_flexible_source(
             available,
             &used_sources,
             &generic_reservations,
-            acceptable,
-            *requires_two_or_more_color_source,
+            needs,
+            &assigned,
+            idx,
             payment_context,
+            source_order,
+            snow_output,
         ) {
+            // CR 106.3 + CR 106.4: consume one unit for the selected scarce shard,
+            // then allocate the rest of this activation exactly once. Reserve
+            // the selected shard first so an earlier hybrid cannot steal it.
+            let mut units = option_units_for_context(&option, payment_context, snow_output);
+            let Some(unit) = auto_tap_matching_unit(&units, &needs[idx]) else {
+                // CR 601.2h: a plan cannot credit a source without a payable
+                // unit. Preserve the normal fallback without activating it.
+                if *two_generic_fallback {
+                    remaining_generic += 2;
+                } else {
+                    unfilled_shards += 1;
+                }
+                assigned[idx] = true;
+                continue;
+            };
+            assigned[idx] = true;
+            units.remove(unit);
             used_sources.insert(option.object_id);
+            let mut remaining: Vec<_> = (0..needs.len()).filter(|&i| !assigned[i]).collect();
+            remaining.sort_by_key(|&i| {
+                auto_tap_need_priority(
+                    available,
+                    &used_sources,
+                    &needs[i],
+                    snow_output,
+                    payment_context,
+                )
+            });
+            for index in remaining {
+                let (_, _, requires_two_or_more_color_source, _, _) = &needs[index];
+                if *requires_two_or_more_color_source
+                    && !option.source_could_produce_two_or_more_colors
+                {
+                    continue;
+                }
+                if let Some(unit) = auto_tap_matching_unit(&units, &needs[index]) {
+                    units.remove(unit);
+                    assigned[index] = true;
+                }
+            }
+            combination_surplus += units.len();
             to_tap.push(option);
         } else if *two_generic_fallback {
             remaining_generic += 2;
@@ -16481,6 +16756,22 @@ fn plan_auto_tap_rows(
         }
         assigned[idx] = true;
     }
+
+    // CR 107.4b + CR 118.10: spare units can fund generic demand only if
+    // no selected activation can consume them. This is a whole-plan property:
+    // even a free Lotus's surplus can be spent on a different source's cost.
+    // Unverified costed plans retain the prior conservative funding allowance;
+    // independently funded plans are accepted only after the sub-cost proof.
+    let mut credited_surplus = if funding == AutoTapFunding::Conservative
+        && to_tap
+            .iter()
+            .any(|option| mana_source_has_mana_sub_cost(state, option))
+    {
+        0
+    } else {
+        remaining_generic.min(combination_surplus)
+    };
+    remaining_generic -= credited_surplus;
 
     // Phase 2: satisfy generic cost + deferred shards. CR 107.4b: generic mana
     // in costs can be paid with any type of mana — including colorless — so a
@@ -16558,6 +16849,15 @@ fn plan_auto_tap_rows(
                 continue;
             }
             if used_sources.insert(option.object_id) {
+                // CR 118.10: a costed source selected for generic demand can
+                // also consume earlier surplus. Revoke that credit before
+                // continuing the same ordered scan for the missing funding.
+                if funding == AutoTapFunding::Conservative
+                    && mana_source_has_mana_sub_cost(state, option)
+                {
+                    remaining_generic += credited_surplus;
+                    credited_surplus = 0;
+                }
                 to_tap.push(option.clone());
                 remaining_generic = remaining_generic.saturating_sub(eligible_width);
             }
@@ -16567,6 +16867,7 @@ fn plan_auto_tap_rows(
     AutoTapPlan {
         to_tap,
         used_sources,
+        activation_order: AutoTapActivationOrder::FreeSourcesFirst,
         covers_cost: unfilled_shards == 0 && remaining_generic == 0,
     }
 }
@@ -16608,9 +16909,11 @@ pub(crate) enum AutoTapRowPolicy {
 /// spends another source's mana, so none of them should be made when nothing
 /// needs them.
 ///
-/// For the outermost payment (`Choose`) the planner first withholds the drawback
-/// combination rows of every source that also has a drawback-free row. It uses
-/// that plan when it pays the whole cost and every mana sub-cost of the rows it
+/// For the outermost payment (`Choose`) the planner first withholds drawback
+/// combination rows of sources with a drawback-free row, plus costly counted
+/// single-color bundles. The latter must not outrank ordinary sources merely
+/// because their full output is now visible (for example, Loot's exhaust mana).
+/// It uses that plan when it pays the whole cost and every mana sub-cost of the rows it
 /// selects, planned the way Phase 3 will pay them: under the same withholding,
 /// from the sources still unused, against an empty pool. That last condition is
 /// enforced, not assumed (`planned_mana_sub_costs_fundable`). Otherwise the whole
@@ -16621,8 +16924,11 @@ pub(crate) enum AutoTapRowPolicy {
 ///
 /// Single-mana rows are never withheld: the source sort already ranks them by
 /// penalty, and withholding them would change choices between different sources
-/// (a painland's colored row vs. a mana creature). A source with no drawback-free
-/// row (a Signet, Darkwater Catacombs) keeps all its rows.
+/// (a painland's colored row vs. a mana creature). Fixed/filter sources with no
+/// drawback-free row (a Signet, Darkwater Catacombs) keep their existing policy.
+/// A required counted single-color bundle returns through the all-rows fallback,
+/// preserving unused sources for its activation cost instead of consuming them
+/// as partial payment before selecting the bundle.
 fn choose_auto_tap_plan(
     state: &GameState,
     available: &[ManaSourceOption],
@@ -16634,7 +16940,14 @@ fn choose_auto_tap_plan(
 ) -> (AutoTapPlan, AutoTapRowPolicy) {
     let all_rows = || {
         (
-            plan_auto_tap_rows(state, available, needs, generic_units, payment_context),
+            plan_all_auto_tap_rows(
+                state,
+                available,
+                needs,
+                generic_units,
+                payment_context,
+                floating_mana,
+            ),
             AutoTapRowPolicy::AllRows,
         )
     };
@@ -16644,7 +16957,14 @@ fn choose_auto_tap_plan(
             let Some(rows) = rows_without_avoidable_drawback_combinations(state, available) else {
                 return all_rows();
             };
-            let plan = plan_auto_tap_rows(state, &rows, needs, generic_units, payment_context);
+            let mut plan = plan_auto_tap_rows(
+                state,
+                &rows,
+                needs,
+                generic_units,
+                payment_context,
+                AutoTapFunding::Conservative,
+            );
             if plan.covers_cost
                 && planned_mana_sub_costs_fundable(
                     state,
@@ -16652,8 +16972,10 @@ fn choose_auto_tap_plan(
                     &plan,
                     &mut plan.used_sources.clone(),
                     floating_mana,
+                    AutoTapRowPolicy::WithoutAvoidableDrawbacks,
                 )
             {
+                plan.activation_order = AutoTapActivationOrder::ManaCostsFirst;
                 (plan, AutoTapRowPolicy::WithoutAvoidableDrawbacks)
             } else {
                 all_rows()
@@ -16665,14 +16987,16 @@ fn choose_auto_tap_plan(
         // every row is the last resort rather than leaving the cost unpaid.
         AutoTapRowPolicy::WithoutAvoidableDrawbacks => {
             let rows = rows_without_avoidable_drawback_combinations(state, available);
-            let plan = plan_auto_tap_rows(
+            let mut plan = plan_auto_tap_rows(
                 state,
                 rows.as_deref().unwrap_or(available),
                 needs,
                 generic_units,
                 payment_context,
+                AutoTapFunding::Conservative,
             );
             if plan.covers_cost {
+                plan.activation_order = AutoTapActivationOrder::ManaCostsFirst;
                 (plan, AutoTapRowPolicy::WithoutAvoidableDrawbacks)
             } else {
                 all_rows()
@@ -16681,9 +17005,97 @@ fn choose_auto_tap_plan(
     }
 }
 
-/// `available` without the drawback combination rows (`atomic_combination`) of
-/// every source that also has a drawback-free row in `available`. `None` when no
-/// row is withheld.
+/// CR 106.3 + CR 118.10: expanded counted output cannot displace the mana
+/// needed to activate any selected source. Count the full output only when
+/// unused sources fund all sub-costs, and execute that proven payment first.
+/// Otherwise use the former scalar estimate for counted rows in every phase;
+/// the resolver still produces their live full output. Fixed/filter-only plans
+/// retain their existing accounting and activation order.
+fn plan_all_auto_tap_rows(
+    state: &GameState,
+    available: &[ManaSourceOption],
+    needs: &[AutoTapNeed],
+    generic_units: usize,
+    payment_context: Option<&PaymentContext<'_>>,
+    floating_mana: bool,
+) -> AutoTapPlan {
+    let plan = plan_auto_tap_rows(
+        state,
+        available,
+        needs,
+        generic_units,
+        payment_context,
+        AutoTapFunding::Conservative,
+    );
+    if !plan
+        .to_tap
+        .iter()
+        .any(|option| counted_single_color_bundle(state, option))
+        || !plan
+            .to_tap
+            .iter()
+            .any(|option| mana_source_has_mana_sub_cost(state, option))
+    {
+        return plan;
+    }
+    let mut expanded = plan_auto_tap_rows(
+        state,
+        available,
+        needs,
+        generic_units,
+        payment_context,
+        AutoTapFunding::IndependentSubCosts,
+    );
+    if expanded.covers_cost
+        && planned_mana_sub_costs_fundable(
+            state,
+            available,
+            &expanded,
+            &mut expanded.used_sources.clone(),
+            floating_mana,
+            AutoTapRowPolicy::AllRows,
+        )
+    {
+        expanded.activation_order = AutoTapActivationOrder::ManaCostsFirst;
+        return expanded;
+    }
+
+    let scalar_rows: Vec<_> = available
+        .iter()
+        .map(|option| {
+            let mut scalar = option.clone();
+            if counted_single_color_bundle(state, option) {
+                scalar.atomic_combination = None;
+            }
+            scalar
+        })
+        .collect();
+    let mut scalar = plan_auto_tap_rows(
+        state,
+        &scalar_rows,
+        needs,
+        generic_units,
+        payment_context,
+        AutoTapFunding::Conservative,
+    );
+    // Restore the exact selected rows, including aura overrides and spend
+    // restrictions. Only the planner's width estimate was changed.
+    for selected in &mut scalar.to_tap {
+        let index = scalar_rows
+            .iter()
+            .position(|row| row == selected)
+            .expect("a selected row comes from the planning input");
+        *selected = available[index].clone();
+    }
+    scalar
+}
+
+/// CR 106.3 + CR 118.1: a counted mana output does not erase activation costs.
+/// Withhold drawback combinations with a free sibling row, and counted
+/// single-color bundles with drawbacks even without such a sibling. The caller
+/// accepts this preference only if the whole payment remains fundable.
+/// Single rows and the existing fixed/filter policy are unchanged. `None` means
+/// no row is withheld.
 fn rows_without_avoidable_drawback_combinations(
     state: &GameState,
     available: &[ManaSourceOption],
@@ -16712,8 +17124,11 @@ fn rows_without_avoidable_drawback_combinations(
         .iter()
         .zip(&drawbacks)
         .filter(|(option, has_drawback)| {
-            !withheld_candidate(option, **has_drawback)
-                || !sources_with_free_row.contains(&option.object_id)
+            if !withheld_candidate(option, **has_drawback) {
+                return true;
+            }
+            !sources_with_free_row.contains(&option.object_id)
+                && !counted_single_color_bundle(state, option)
         })
         .map(|(option, _)| option.clone())
         .collect();
@@ -16742,19 +17157,21 @@ fn rows_without_avoidable_drawback_combinations(
 ///   mana goes to the pool);
 /// - when one does, `floating_mana` (the pool held mana when this plan was
 ///   made) rejects the plan, so no sub-cost can take mana that was floating;
-/// - Phase 3 resolves that one row first under this policy, before any other
+/// - Phase 3 resolves that one row first in the verified plan, before any other
 ///   selected source adds mana, and its own nested payment meets the same
 ///   empty pool, so the rule recurses with `floating_mana = false`.
 ///
-/// A sub-cost shape the planner cannot read counts as unfundable. A wrong
-/// `false` only makes [`choose_auto_tap_plan`] use every row for the whole
-/// payment.
+/// Under `AllRows`, nested payments must independently obtain the same proven
+/// activation order; fixed/filter-only nested payments keep their existing
+/// free-first order and cannot support this proof. A shape the planner cannot
+/// prove falls back to all rows with conservative counted-output estimates.
 fn planned_mana_sub_costs_fundable(
     state: &GameState,
     rows: &[ManaSourceOption],
     plan: &AutoTapPlan,
     consumed: &mut HashSet<ObjectId>,
     floating_mana: bool,
+    policy: AutoTapRowPolicy,
 ) -> bool {
     let mut sub_cost_rows = 0usize;
     for option in &plan.to_tap {
@@ -16816,18 +17233,41 @@ fn planned_mana_sub_costs_fundable(
             Some(ability_index),
         );
         let activation_ctx = activation_context.as_payment_context();
-        let nested = plan_auto_tap_rows(
-            state,
-            &remaining,
-            &needs,
-            generic as usize + deferred_generic,
-            Some(&activation_ctx),
-        );
+        let nested = match policy {
+            AutoTapRowPolicy::AllRows => plan_all_auto_tap_rows(
+                state,
+                &remaining,
+                &needs,
+                generic as usize + deferred_generic,
+                Some(&activation_ctx),
+                false,
+            ),
+            AutoTapRowPolicy::WithoutAvoidableDrawbacks => plan_auto_tap_rows(
+                state,
+                &remaining,
+                &needs,
+                generic as usize + deferred_generic,
+                Some(&activation_ctx),
+                AutoTapFunding::Conservative,
+            ),
+            AutoTapRowPolicy::Choose => unreachable!("funding uses a selected row policy"),
+        };
         if !nested.covers_cost {
             return false;
         }
+        // A fixed/filter-only AllRows payment retains free-first execution.
+        // Do not claim the empty-pool proof for such a nested mana sub-cost.
+        if policy == AutoTapRowPolicy::AllRows
+            && nested.activation_order != AutoTapActivationOrder::ManaCostsFirst
+            && nested
+                .to_tap
+                .iter()
+                .any(|option| mana_source_has_mana_sub_cost(state, option))
+        {
+            return false;
+        }
         consumed.extend(nested.used_sources.iter().copied());
-        if !planned_mana_sub_costs_fundable(state, rows, &nested, consumed, false) {
+        if !planned_mana_sub_costs_fundable(state, rows, &nested, consumed, false, policy) {
             return false;
         }
     }
@@ -16838,6 +17278,16 @@ pub(crate) fn production_override_for_option(
     ability_def: &crate::types::ability::AbilityDefinition,
     option: &ManaSourceOption,
 ) -> Option<crate::types::game_state::ProductionOverride> {
+    // CR 106.3: a same-color bundle is only a planning estimate. Replay the
+    // chosen color while the mana resolver evaluates the live output amount.
+    if matches!(&*ability_def.effect, Effect::Mana { produced, .. }
+        if mana_sources::single_color_production_count(produced).is_some())
+    {
+        return Some(crate::types::game_state::ProductionOverride::SingleColor(
+            option.mana_type,
+        ));
+    }
+
     // When `taps_for_mana_overrides` is non-empty, `atomic_combination` includes
     // the aura bonus types appended by `land_mana_options`. Cap to the land's own
     // portion so the land's ability does not over-produce — the aura bonus is
@@ -16914,19 +17364,29 @@ pub(crate) fn production_override_for_option(
 /// an `atomic_combination`-bearing identity, but only one such row can be
 /// selected per object — when a combo is picked the object is inserted into
 /// `used_sources`, blocking further rows of every combination variant.
+#[allow(clippy::too_many_arguments)]
 fn assign_combination_sources(
+    state: &GameState,
     available: &[ManaSourceOption],
-    needs: &[(Vec<ManaType>, bool, bool, bool)],
+    needs: &[AutoTapNeed],
     assigned: &mut [bool],
     used_sources: &mut HashSet<ObjectId>,
     to_tap: &mut Vec<ManaSourceOption>,
     payment_context: Option<&PaymentContext<'_>>,
-) {
+    snow_output: Option<&AutoTapSnowOutput>,
+) -> usize {
+    let mut surplus = 0;
+    // Keep fixed output and filter combinations in their existing pre-pass.
+    // Only a choice of one repeated color moves to the scarce-shard loop;
+    // amount alone does not distinguish it from a fixed-output sacrifice.
+    let prepass_combination = |option: &ManaSourceOption| {
+        option.atomic_combination.is_some() && !counted_single_color_bundle(state, option)
+    };
     // Build per-object candidate list: for each object that has any
     // `atomic_combination`-bearing rows, collect all of its combination rows.
     let mut combo_objects: Vec<ObjectId> = Vec::new();
     for opt in available {
-        if opt.atomic_combination.is_some()
+        if prepass_combination(opt)
             && !combo_objects.contains(&opt.object_id)
             && !used_sources.contains(&opt.object_id)
             && option_allowed_for_context(opt, payment_context)
@@ -16944,7 +17404,7 @@ fn assign_combination_sources(
             .iter()
             .filter(|o| {
                 o.object_id == oid
-                    && o.atomic_combination.is_some()
+                    && prepass_combination(o)
                     && option_allowed_for_context(o, payment_context)
             })
             .collect();
@@ -16958,7 +17418,7 @@ fn assign_combination_sources(
         let mut best_score = 0usize;
         let mut best_combo: Option<(&ManaSourceOption, Vec<usize>)> = None;
         for cand in &candidates {
-            let combo = option_mana_types_for_context(cand, payment_context);
+            let combo = option_units_for_context(cand, payment_context, snow_output);
             if combo.is_empty() {
                 continue;
             }
@@ -16969,11 +17429,14 @@ fn assign_combination_sources(
             }
         }
 
-        // Only commit the combo if it covers at least one colored shard. A
-        // combo that covers no colored shards would waste its second mana on
-        // generic — Phase 2 picks single-color sources for generic more
-        // efficiently.
+        // Only commit the combo if it covers at least one non-generic shard.
+        // Leave purely generic demand to Phase 2's existing source ranking.
         if let Some((chosen, covered_indices)) = best_combo {
+            // CR 106.4 + CR 107.4b: collect unused units once. The caller
+            // checks the whole plan's activation costs before crediting them
+            // toward generic demand (CR 118.10).
+            surplus += option_units_for_context(chosen, payment_context, snow_output).len()
+                - covered_indices.len();
             used_sources.insert(chosen.object_id);
             to_tap.push((*chosen).clone());
             for idx in covered_indices {
@@ -16981,6 +17444,7 @@ fn assign_combination_sources(
             }
         }
     }
+    surplus
 }
 
 /// Simulate applying a combination's mana to still-unfilled shard needs.
@@ -16990,21 +17454,32 @@ fn assign_combination_sources(
 /// grain (Phase 1 already re-orders per-shard scarcity, so here a naive
 /// first-fit is sufficient for the filter-land class).
 fn score_combination(
-    combo: &[ManaType],
-    needs: &[(Vec<ManaType>, bool, bool, bool)],
+    combo: &[AutoTapUnit],
+    needs: &[AutoTapNeed],
     assigned: &[bool],
 ) -> (usize, Vec<usize>) {
     let mut locally_consumed: Vec<bool> = assigned.to_vec();
     let mut covered = Vec::new();
-    for mana in combo {
-        for (i, (acceptable, _, requires_two_or_more_color_source, _)) in needs.iter().enumerate() {
+    // CR 107.4h: spend non-snow units first so a same-color snow unit remains
+    // available for a later snow requirement, including separate Aura output.
+    let mut units = std::borrow::Cow::Borrowed(combo);
+    if combo.iter().any(|unit| unit.1.is_some()) {
+        units.to_mut().sort_by_key(|unit| unit.1.is_some());
+    }
+    for (mana, supertype) in units.iter() {
+        for (i, (acceptable, _, requires_two_or_more_color_source, _, required_supertype)) in
+            needs.iter().enumerate()
+        {
             if locally_consumed[i] {
                 continue;
             }
             if *requires_two_or_more_color_source {
                 continue;
             }
-            if acceptable.contains(mana) {
+            if (acceptable.contains(mana)
+                || (required_supertype.is_some() && acceptable.is_empty()))
+                && required_supertype.is_none_or(|required| *supertype == Some(required))
+            {
                 locally_consumed[i] = true;
                 covered.push(i);
                 break;

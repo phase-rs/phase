@@ -310,6 +310,7 @@ mod magus_of_the_abyss_scoped_chooser;
 mod majestic_duo_named_intervening_if;
 mod make_an_example_pile_separation;
 mod make_your_move_pt_suffix_binds_creature_leg;
+mod mana_any_one_color_quantity;
 mod mana_autotap_drawback_free_rows;
 mod mana_autotap_preference;
 mod mana_cost_reducers_issue_141;
